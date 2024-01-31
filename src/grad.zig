@@ -368,7 +368,7 @@ pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback:
     };
 }
 
-fn loss_mse(allocator: *const std.mem.Allocator, preds: []*Value, targets: []*Value) !*Value {
+pub fn loss_mse(allocator: *const std.mem.Allocator, preds: []*Value, targets: []*Value) !*Value {
     // comp graph deinit should prevent leak later (but this looks like it leaks I know)
     var loss = try Value.init(allocator, 0.0, null);
     for (preds, targets) |yh, y| {
