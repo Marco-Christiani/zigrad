@@ -33,14 +33,14 @@ pub const Value = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        var values = topologicalSort(self.alloc, self) catch {
+        const values = topologicalSort(self.alloc, self) catch {
             @panic("Bad things happened");
         };
 
         // reverse order
         var i = values.len - 1;
         while (i > 0) : (i -= 1) {
-            var curr = values[i];
+            const curr = values[i];
             std.log.debug("destroying {?s} {}/{}", .{ curr.label, i + 1, values.len });
             if (curr.children) |children| {
                 self.alloc.free(children);
@@ -86,7 +86,7 @@ pub const Value = struct {
         if (self.children) |children| {
             for (children) |elem| {
                 std.debug.print("{?s}<-{?s}", .{ self.label, elem.label });
-                var symbol = switch (self.op.?) {
+                const symbol = switch (self.op.?) {
                     Op.ADD => ": +",
                     Op.SUB => ": -",
                     Op.MUL => ": x",
@@ -112,7 +112,7 @@ pub const Value = struct {
             @panic("Gradient of first value was nonzero, why?");
         }
         for (values) |v| {
-            var curr = @constCast(v);
+            const curr = @constCast(v);
             if (curr._backward) |func| {
                 func(curr);
                 // clip gradients
@@ -126,7 +126,7 @@ pub const Value = struct {
     }
 
     pub fn zero_grad(self: *Self) !void {
-        var values = try topologicalSort(self.alloc, self);
+        const values = try topologicalSort(self.alloc, self);
         defer self.alloc.free(values);
         self.grad = 0;
 
@@ -217,8 +217,8 @@ pub fn div(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) !*Value 
 
 pub fn div_backward(v: *Value) void {
     if (v.children) |_| {
-        var a: *Value = v.children.?[0];
-        var b: *Value = v.children.?[1];
+        const a: *Value = v.children.?[0];
+        const b: *Value = v.children.?[1];
         v.children.?[0].grad += (1 / b.value) * v.grad;
         v.children.?[1].grad += (-a.value / (b.value * b.value)) * v.grad;
     } else {
@@ -297,8 +297,8 @@ pub fn dfs(allocator: *const std.mem.Allocator, v: *const Value) ![]*const Value
         }
     }
     // gotta return copy
-    var keys = visited.keys();
-    var result = try allocator.alloc(*const Value, keys.len);
+    const keys = visited.keys();
+    const result = try allocator.alloc(*const Value, keys.len);
     @memcpy(result, keys);
     return result;
 }
@@ -336,9 +336,9 @@ pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback:
             var row_iter = std.mem.tokenizeScalar(u8, line, ',');
             const x = try std.fmt.parseFloat(f64, row_iter.next().?);
             const y = try std.fmt.parseFloat(f64, row_iter.next().?);
-            var vx = try Value.init(allocator, x, null);
-            var vy = try Value.init(allocator, y, null);
-            var temp = try mul(allocator, vx, wv);
+            const vx = try Value.init(allocator, x, null);
+            const vy = try Value.init(allocator, y, null);
+            const temp = try mul(allocator, vx, wv);
             const pred = try add(allocator, temp, bv);
 
             batchy[i] = vy;
@@ -372,8 +372,8 @@ fn loss_mse(allocator: *const std.mem.Allocator, preds: []*Value, targets: []*Va
     // comp graph deinit should prevent leak later (but this looks like it leaks I know)
     var loss = try Value.init(allocator, 0.0, null);
     for (preds, targets) |yh, y| {
-        var diff = try sub(allocator, yh, y);
-        var sq = try pow(allocator, diff, try Value.init(allocator, 2.0, null));
+        const diff = try sub(allocator, yh, y);
+        const sq = try pow(allocator, diff, try Value.init(allocator, 2.0, null));
         loss = try add(allocator, loss, sq);
     }
     loss = try div(allocator, loss, try Value.init(allocator, @floatFromInt(preds.len), null));
@@ -450,12 +450,12 @@ pub fn serializeValueToJson(allocator: std.mem.Allocator, value: *const Value) !
 // -----------------------------------------------------------------------------
 
 test "test dfs" {
-    var allocator = &std.heap.page_allocator;
-    var a = try Value.init(allocator, 2.0, "a");
-    var b = try Value.init(allocator, -3.0, "b");
-    var e = try mul(allocator, a, b);
+    const allocator = &std.heap.page_allocator;
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, -3.0, "b");
+    const e = try mul(allocator, a, b);
     e.label = "e";
-    var order = try dfs(allocator, e);
+    const order = try dfs(allocator, e);
 
     std.debug.print("\n", .{});
     for (order) |item| {
@@ -480,14 +480,14 @@ test "test single back" {
 
 test "test graph" {
     const allocator = &std.testing.allocator;
-    var a = try Value.init(allocator, 2.0, "a");
-    var b = try Value.init(allocator, -3.0, "b");
-    var c = try Value.init(allocator, 10, "c");
-    var e = try mul(allocator, a, b);
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, -3.0, "b");
+    const c = try Value.init(allocator, 10, "c");
+    const e = try mul(allocator, a, b);
     e.label = "e";
     var d = try add(allocator, e, c);
     d.label = "d";
-    var f = try Value.init(allocator, -2.0, "f");
+    const f = try Value.init(allocator, -2.0, "f");
     var L = try mul(allocator, d, f);
     L.label = "L";
     L.print();
@@ -505,9 +505,9 @@ test "test graph" {
 
 test "test mul" {
     const allocator = &std.heap.page_allocator;
-    var a = try Value.init(allocator, 2.0, "a");
-    var b = try Value.init(allocator, -3.0, "b");
-    var c = try mul(allocator, a, b);
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, -3.0, "b");
+    const c = try mul(allocator, a, b);
     c.label = "c";
     c.print();
 
@@ -520,9 +520,9 @@ test "test mul" {
 
 test "test add" {
     const allocator = &std.heap.page_allocator;
-    var a = try Value.init(allocator, 2.0, "a");
-    var b = try Value.init(allocator, -3.0, "b");
-    var c = try add(allocator, a, b);
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, -3.0, "b");
+    const c = try add(allocator, a, b);
     c.label = "c";
     c.print();
 
@@ -537,8 +537,8 @@ test "test topo" {
     var allocator = &std.heap.page_allocator;
 
     // Create nodes
-    var a = try Value.init(allocator, 2.0, "a");
-    var b = try Value.init(allocator, 3.0, "b");
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, 3.0, "b");
     var c = try add(allocator, a, b);
     c.label = "c";
     var d = try Value.init(allocator, 2.0, "d");
@@ -548,7 +548,7 @@ test "test topo" {
     var f = try mul(allocator, d, e);
     f.label = "f";
 
-    var order = try topologicalSort(allocator, f);
+    const order = try topologicalSort(allocator, f);
     // var order = try dfs(allocator, e);
     defer allocator.free(order);
     for (order, 0..) |value, i| {
@@ -592,16 +592,16 @@ test "test backprop" {
 }
 
 test "test lm" {
-    var allocator = &std.testing.allocator;
-    _ = try linearModel(allocator);
+    const allocator = &std.testing.allocator;
+    _ = try linearModel(allocator, null);
 }
 
 test "test print" {
     const allocator = &std.heap.page_allocator;
-    var w = try Value.init(allocator, 1.0, "w");
-    var b = try Value.init(allocator, 1.0, "b");
-    var x = try Value.init(allocator, 2.0, "x");
-    var y = try Value.init(allocator, -3.0, "y");
+    const w = try Value.init(allocator, 1.0, "w");
+    const b = try Value.init(allocator, 1.0, "b");
+    const x = try Value.init(allocator, 2.0, "x");
+    const y = try Value.init(allocator, -3.0, "y");
     var temp = try mul(allocator, x, w);
     temp.label = "t";
     var pred = try add(allocator, temp, b);
