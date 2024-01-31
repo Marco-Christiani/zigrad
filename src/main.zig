@@ -20,7 +20,11 @@ fn epoch_callback(value: *const zigrad.Value, epoch_i: usize) anyerror!void {
     const graphJson = try zigrad.serializeValueToJson(allocator, value);
     const filename = try std.fmt.allocPrint(allocator, "outputs/graph_epoch_{}.json", .{epoch_i});
     defer allocator.free(filename);
-    try std.fs.cwd().makeDir("outputs");
+    std.fs.cwd().makeDir("outputs") catch |err| switch (err) {
+        error.PathAlreadyExists => std.debug.print("output/ already exists\n", .{}),
+        else => |e| return e,
+    };
+
     const file = try std.fs.cwd().createFile(filename, .{});
     defer file.close();
     const fileWriter = file.writer();
