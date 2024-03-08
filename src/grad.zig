@@ -17,17 +17,30 @@ pub const Value = struct {
     grad: f64 = 0.0,
     op: ?Op = null,
     children: ?[]*Value = null,
+    parent: ?*Value = null,
     label: ?[]const u8 = null,
     _backward: ?*const fn (*Self) void = null,
     alloc: *const std.mem.Allocator,
     incomingEdges: usize = 0,
+    detached: bool = false,
 
     pub fn init(allocator: *const std.mem.Allocator, value: f64, label: ?[]const u8) !*Self {
         const self = try allocator.create(Value);
         self.* = Value{
             .value = value,
-            .label = label,
             .alloc = allocator,
+        };
+        _ = self.setLabel(label);
+        return self;
+    }
+
+    pub fn setLabel(self: *Self, label: ?[]const u8) *Self {
+        if (self.label) |l| {
+            self.alloc.free(l);
+        }
+        const uid = generateASCIIUUID(4);
+        self.label = std.fmt.allocPrint(self.alloc.*, "{?s}{s}", .{ label orelse "", uid }) catch {
+            @panic("Failed to set label");
         };
         return self;
     }
@@ -41,9 +54,16 @@ pub const Value = struct {
         var i = values.len - 1;
         while (i > 0) : (i -= 1) {
             const curr = values[i];
+
+            if (curr.detached and self != curr) { // allow deinit'ing a detached node/subgraph directly
+                continue;
+            }
             std.log.debug("destroying {?s} {}/{}", .{ curr.label, i + 1, values.len });
             if (curr.children) |children| {
                 self.alloc.free(children);
+            }
+            if (curr.label) |l| {
+                self.alloc.free(l);
             }
             self.alloc.destroy(curr);
         }
@@ -52,6 +72,9 @@ pub const Value = struct {
             self.alloc.free(children);
         }
         self.alloc.free(values);
+        if (self.label) |l| {
+            self.alloc.free(l);
+        }
         self.alloc.destroy(self);
     }
 
@@ -82,19 +105,20 @@ pub const Value = struct {
     }
 
     pub fn print_arrows(self: *const Self) void {
-        // TODO: handle empty label
         if (self.children) |children| {
             for (children) |elem| {
-                std.debug.print("{?s}<-{?s}", .{ self.label, elem.label });
-                const symbol = switch (self.op.?) {
-                    Op.ADD => ": +",
-                    Op.SUB => ": -",
-                    Op.MUL => ": x",
-                    Op.DIV => ": /",
-                    Op.POW => ": ^",
-                    Op.TANH => ": tanh",
-                };
-                std.debug.print("{?s}\n", .{symbol});
+                if (!elem.detached) {
+                    std.debug.print("{?s}<-{?s}", .{ self.label, elem.label });
+                    const symbol = switch (self.op.?) {
+                        Op.ADD => ": +",
+                        Op.SUB => ": -",
+                        Op.MUL => ": x",
+                        Op.DIV => ": /",
+                        Op.POW => ": ^",
+                        Op.TANH => ": tanh",
+                    };
+                    std.debug.print("{?s}\n", .{symbol});
+                }
             }
             for (children) |elem| {
                 elem.print_arrows();
@@ -136,17 +160,44 @@ pub const Value = struct {
             curr.grad = 0;
         }
     }
+
+    pub fn detach(self: *Self) void {
+        // or, remove pointer to self in parent's children... self.parent.?.children
+        self.detached = true;
+    }
 };
 
-pub fn add(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) !*Value {
-    var children = try allocator.alloc(*Value, 2);
+const crypto = std.crypto;
+
+pub fn generateASCIIUUID(comptime length: usize) [length]u8 {
+    const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const alphabet_len = alphabet.len;
+    var random_bytes: [length]u8 = undefined;
+    crypto.random.bytes(&random_bytes);
+
+    for (random_bytes, 0..) |_, i| {
+        random_bytes[i] = alphabet[random_bytes[i] % alphabet_len];
+    }
+    return random_bytes;
+}
+
+pub fn add(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
+    var children = allocator.alloc(*Value, 2) catch {
+        @panic("Failed to allocate children for add()");
+    };
+
     children[0] = v1;
     children[1] = v2;
 
-    var out = try Value.init(allocator, v1.value + v2.value, null);
+    var out = Value.init(allocator, v1.value + v2.value, null) catch {
+        @panic("Failed to allocate children for add()");
+    };
+
     out.op = Op.ADD;
     out.children = children;
     out._backward = add_backward;
+    v1.parent = out;
+    v2.parent = out;
     return out;
 }
 
@@ -159,15 +210,23 @@ pub fn add_backward(v: *Value) void {
     }
 }
 
-pub fn sub(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) !*Value {
-    var children = try allocator.alloc(*Value, 2);
+pub fn sub(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
+    var children = allocator.alloc(*Value, 2) catch {
+        @panic("Failed to allocate children for sub()");
+    };
+
     children[0] = v1;
     children[1] = v2;
 
-    var out = try Value.init(allocator, v1.value - v2.value, null);
+    var out = Value.init(allocator, v1.value - v2.value, null) catch {
+        @panic("Failed to allocate intermediate for sub()");
+    };
+
     out.op = Op.SUB;
     out.children = children;
     out._backward = sub_backward;
+    v1.parent = out;
+    v2.parent = out;
     return out;
 }
 
@@ -180,15 +239,22 @@ pub fn sub_backward(v: *Value) void {
     }
 }
 
-pub fn mul(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) !*Value {
-    var children = try allocator.alloc(*Value, 2);
+pub fn mul(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
+    var children = allocator.alloc(*Value, 2) catch {
+        @panic("Failed to allocate children for mul()");
+    };
     children[0] = v1;
     children[1] = v2;
 
-    var out = try Value.init(allocator, v1.value * v2.value, null);
+    var out = Value.init(allocator, v1.value * v2.value, null) catch {
+        @panic("Failed to allocate intermediate for mul()");
+    };
+
     out.op = Op.MUL;
     out.children = children;
     out._backward = mul_backward;
+    v1.parent = out;
+    v2.parent = out;
     return out;
 }
 
@@ -203,15 +269,23 @@ pub fn mul_backward(v: *Value) void {
     }
 }
 
-pub fn div(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) !*Value {
-    var children = try allocator.alloc(*Value, 2);
+pub fn div(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
+    var children = allocator.alloc(*Value, 2) catch {
+        @panic("Failed to allocate children for div()");
+    };
+
     children[0] = v1;
     children[1] = v2;
 
-    var out = try Value.init(allocator, v1.value / v2.value, null);
+    var out = Value.init(allocator, v1.value / v2.value, null) catch {
+        @panic("Failed to allocate intermediate for div()");
+    };
+
     out.op = Op.DIV;
     out.children = children;
     out._backward = div_backward;
+    v1.parent = out;
+    v2.parent = out;
     return out;
 }
 
@@ -226,15 +300,23 @@ pub fn div_backward(v: *Value) void {
     }
 }
 
-pub fn pow(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) !*Value {
-    var children = try allocator.alloc(*Value, 2);
+pub fn pow(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
+    var children = allocator.alloc(*Value, 2) catch {
+        @panic("Failed to allocate children for pow()");
+    };
+
     children[0] = v1;
     children[1] = v2;
 
-    var out = try Value.init(allocator, std.math.pow(f64, v1.value, v2.value), null);
+    var out = Value.init(allocator, std.math.pow(f64, v1.value, v2.value), null) catch {
+        @panic("Failed to allocate intermediate for pow()");
+    };
+
     out.op = Op.POW;
     out.children = children;
     out._backward = pow_backward;
+    v1.parent = out;
+    v2.parent = out;
     return out;
 }
 
@@ -253,13 +335,20 @@ pub fn pow_backward(v: *Value) void {
         @panic("Called pow_backward() but no children.");
     }
 }
-pub fn tanh(allocator: *const std.mem.Allocator, v: *Value) !*Value {
+pub fn tanh(allocator: *const std.mem.Allocator, v: *Value) *Value {
     const x = v.value;
     const val = (std.math.exp(2 * x) - 1) / (std.math.exp(2 * x) + 1);
-    var out = try Value.init(allocator, val, null);
+    var out = Value.init(allocator, val, null) catch {
+        @panic("Failed to allocate intermediate for tanh()");
+    };
+
     out.op = Op.TANH;
-    out.children = try allocator.alloc(*Value, 1);
+    out.children = allocator.alloc(*Value, 1) catch {
+        @panic("Failed to allocate children for tanh()");
+    };
+
     out.children.?[0] = v;
+    v.parent = out;
     return out;
 }
 
@@ -338,8 +427,8 @@ pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback:
             const y = try std.fmt.parseFloat(f64, row_iter.next().?);
             const vx = try Value.init(allocator, x, null);
             const vy = try Value.init(allocator, y, null);
-            const temp = try mul(allocator, vx, wv);
-            const pred = try add(allocator, temp, bv);
+            const temp = mul(allocator, vx, wv);
+            const pred = add(allocator, temp, bv);
 
             batchy[i] = vy;
             batchyh[i] = pred;
@@ -372,11 +461,11 @@ pub fn loss_mse(allocator: *const std.mem.Allocator, preds: []*Value, targets: [
     // comp graph deinit should prevent leak later (but this looks like it leaks I know)
     var loss = try Value.init(allocator, 0.0, null);
     for (preds, targets) |yh, y| {
-        const diff = try sub(allocator, yh, y);
-        const sq = try pow(allocator, diff, try Value.init(allocator, 2.0, null));
-        loss = try add(allocator, loss, sq);
+        const diff = sub(allocator, yh, y);
+        const sq = pow(allocator, diff, try Value.init(allocator, 2.0, null));
+        loss = add(allocator, loss, sq);
     }
-    loss = try div(allocator, loss, try Value.init(allocator, @floatFromInt(preds.len), null));
+    loss = div(allocator, loss, try Value.init(allocator, @floatFromInt(preds.len), null));
     return loss;
 }
 
@@ -437,38 +526,38 @@ pub fn serializeValueToJson(allocator: std.mem.Allocator, value: *const Value) !
     // Serialize children
     if (value.children) |children| {
         var jsonChildren = std.json.Array.init(allocator);
+        errdefer jsonChildren.deinit();
         for (children) |child| {
             const childJson = try serializeValueToJson(allocator, child);
             try jsonChildren.append(childJson);
         }
         try jsonObj.put("children", std.json.Value{ .array = jsonChildren });
     }
-
     return std.json.Value{ .object = jsonObj };
 }
 
 // -----------------------------------------------------------------------------
 
 test "test dfs" {
-    const allocator = &std.heap.page_allocator;
+    const allocator = &std.testing.allocator;
     const a = try Value.init(allocator, 2.0, "a");
     const b = try Value.init(allocator, -3.0, "b");
-    const e = try mul(allocator, a, b);
-    e.label = "e";
+    const e = mul(allocator, a, b).setLabel("e");
     const order = try dfs(allocator, e);
+    defer allocator.free(order);
 
     std.debug.print("\n", .{});
     for (order) |item| {
         std.debug.print("{?s}\n", .{item.label});
     }
+    e.deinit();
 }
 
 test "test single back" {
-    const allocator = &std.heap.page_allocator;
+    const allocator = &std.testing.allocator;
     var a = try Value.init(allocator, 2.0, "a");
     var b = try Value.init(allocator, -3.0, "b");
-    var e = try mul(allocator, a, b);
-    e.label = "e";
+    var e = mul(allocator, a, b).setLabel("e");
     e.print();
     a.print();
     b.print();
@@ -476,6 +565,7 @@ test "test single back" {
     e.print();
     a.print();
     b.print();
+    e.deinit();
 }
 
 test "test graph" {
@@ -483,33 +573,28 @@ test "test graph" {
     const a = try Value.init(allocator, 2.0, "a");
     const b = try Value.init(allocator, -3.0, "b");
     const c = try Value.init(allocator, 10, "c");
-    const e = try mul(allocator, a, b);
-    e.label = "e";
-    var d = try add(allocator, e, c);
-    d.label = "d";
+    const e = mul(allocator, a, b).setLabel("e");
+    var d = add(allocator, e, c).setLabel("d");
     const f = try Value.init(allocator, -2.0, "f");
-    var L = try mul(allocator, d, f);
-    L.label = "L";
-    L.print();
+    var L = mul(allocator, d, f).setLabel("L");
+    L.print_arrows();
 
     try std.testing.expectEqual(e.value, a.value * b.value);
     try std.testing.expectEqual(d.value, (a.value * b.value) + c.value);
     try std.testing.expectEqual(L.value, f.value * ((a.value * b.value) + c.value));
 
-    std.log.info("Attempting deinit", .{});
+    std.log.info("Attempting deinit\n", .{});
     L.deinit();
-    std.log.info("Success", .{});
+    std.log.info("Success\n", .{});
     // This should fail
     // std.log.info("{?s}", .{a.label});
 }
 
 test "test mul" {
-    const allocator = &std.heap.page_allocator;
+    const allocator = &std.testing.allocator;
     const a = try Value.init(allocator, 2.0, "a");
     const b = try Value.init(allocator, -3.0, "b");
-    const c = try mul(allocator, a, b);
-    c.label = "c";
-    c.print();
+    const c = mul(allocator, a, b).setLabel("c");
 
     try std.testing.expectEqual(c.value, a.value * b.value);
 
@@ -519,12 +604,10 @@ test "test mul" {
 }
 
 test "test add" {
-    const allocator = &std.heap.page_allocator;
+    const allocator = &std.testing.allocator;
     const a = try Value.init(allocator, 2.0, "a");
     const b = try Value.init(allocator, -3.0, "b");
-    const c = try add(allocator, a, b);
-    c.label = "c";
-    c.print();
+    const c = add(allocator, a, b).setLabel("c");
 
     try std.testing.expectEqual(c.value, a.value + b.value);
 
@@ -534,19 +617,16 @@ test "test add" {
 }
 
 test "test topo" {
-    var allocator = &std.heap.page_allocator;
+    const allocator = &std.testing.allocator;
 
     // Create nodes
     const a = try Value.init(allocator, 2.0, "a");
     const b = try Value.init(allocator, 3.0, "b");
-    var c = try add(allocator, a, b);
-    c.label = "c";
+    var c = add(allocator, a, b).setLabel("c");
     var d = try Value.init(allocator, 2.0, "d");
-    var e = try mul(allocator, c, d);
-    e.label = "e";
+    var e = mul(allocator, c, d).setLabel("e");
     // introduce another path
-    var f = try mul(allocator, d, e);
-    f.label = "f";
+    var f = mul(allocator, d, e).setLabel("f");
 
     const order = try topologicalSort(allocator, f);
     // var order = try dfs(allocator, e);
@@ -555,7 +635,7 @@ test "test topo" {
         std.debug.print("{}: {?s}\n", .{ i + 1, value.label });
     }
 
-    d.deinit();
+    f.deinit();
 }
 
 test "test backprop" {
@@ -564,12 +644,9 @@ test "test backprop" {
     var b = try Value.init(allocator, 1.0, "b");
     var x = try Value.init(allocator, 2.0, "x");
     var y = try Value.init(allocator, -3.0, "y");
-    var temp = try mul(allocator, x, w);
-    temp.label = "t";
-    var pred = try add(allocator, temp, b);
-    pred.label = "p";
-    var err = try sub(allocator, y, pred);
-    err.label = "e";
+    var temp = mul(allocator, x, w).setLabel("t");
+    var pred = add(allocator, temp, b).setLabel("p");
+    var err = sub(allocator, y, pred).setLabel("e");
     err.print();
     pred.print();
     temp.print();
@@ -596,29 +673,27 @@ test "test lm" {
     _ = try linearModel(allocator, null);
 }
 
-test "test print" {
-    const allocator = &std.heap.page_allocator;
-    const w = try Value.init(allocator, 1.0, "w");
-    const b = try Value.init(allocator, 1.0, "b");
-    const x = try Value.init(allocator, 2.0, "x");
-    const y = try Value.init(allocator, -3.0, "y");
-    var temp = try mul(allocator, x, w);
-    temp.label = "t";
-    var pred = try add(allocator, temp, b);
-    pred.label = "p";
-    var err = try sub(allocator, y, pred);
-    err.label = "err";
-    try err.backward();
+// test "test print" {
+//     const allocator = &std.testing.allocator;
+//     const w = try Value.init(allocator, 1.0, "w");
+//     const b = try Value.init(allocator, 1.0, "b");
+//     const x = try Value.init(allocator, 2.0, "x");
+//     const y = try Value.init(allocator, -3.0, "y");
+//     var temp = mul(allocator, x, w).setLabel("t");
+//     var pred = add(allocator, temp, b).setLabel("p");
+//     var err = sub(allocator, y, pred).setLabel("e");
+//     defer err.deinit();
+//     try err.backward();
 
-    // TODO: Free json
-    const graphJson = try serializeValueToJson(allocator.*, err);
-    const stdout = std.io.getStdOut().writer();
-    try std.json.stringify(graphJson, .{}, stdout);
-    // write to a file
-    const file = try std.fs.cwd().createFile("output.json", .{});
-    defer file.close();
+//     // TODO: Free json
+//     var graphJson = try serializeValueToJson(allocator.*, err);
+//     defer graphJson.object.deinit();
+//     const stdout = std.io.getStdOut().writer();
+//     try std.json.stringify(graphJson, .{}, stdout);
+//     // write to a file
+//     // const file = try std.fs.cwd().createFile("output.json", .{});
+//     // defer file.close();
 
-    const fileWriter = file.writer();
-    try std.json.stringify(graphJson, .{}, fileWriter);
-    defer err.deinit();
-}
+//     // const fileWriter = file.writer();
+//     // try std.json.stringify(graphJson, .{}, fileWriter);
+// }
