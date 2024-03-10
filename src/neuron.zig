@@ -89,17 +89,6 @@ pub const Neuron = struct {
         }
         self.bias.value -= lr * self.bias.grad;
     }
-
-    pub fn backward(self: *Self, loss: *Value, lr: f64) void {
-        loss.backward() catch {
-            @panic("loss.backward() failed.");
-        };
-        self.update(lr);
-        loss.zero_grad();
-        self.detach();
-        loss.deinit();
-        self.attach();
-    }
 };
 
 pub fn toValues(allocator: *const std.mem.Allocator, arr: []const f64) []*Value {
@@ -114,7 +103,7 @@ pub fn toValues(allocator: *const std.mem.Allocator, arr: []const f64) []*Value 
     return result;
 }
 
-test "neuron 5->1 backward()" {
+test "neuron/5->1" {
     const allocator = std.testing.allocator;
     const input_size = 5;
     const learning_rate = 0.01;
@@ -137,17 +126,22 @@ test "neuron 5->1 backward()" {
     var preds = [_]*Value{output};
     const loss = try grad.loss_mse(&allocator, &preds, &targets);
     std.debug.print("loss: {}\n", .{loss.value});
-    neuron.backward(loss, learning_rate);
+    try loss.backward();
+    neuron.update(learning_rate);
+    neuron.detach();
+    loss.deinit();
+    neuron.attach();
     neuron.deinit();
     // since the input values are a part of the computation graph, they will be free'd by now
     // thus, only have to free the inputs array here
     allocator.free(inputs);
 }
 
-test "neuron 5->1 x3" {
+test "neuron/3x5->1 xEpochs" {
     const allocator = std.testing.allocator;
     const input_size = 5;
-    const learning_rate = 0.01;
+    const learning_rate = 0.001;
+    const epochs = 10;
 
     var neuron = try Neuron.init(&allocator, input_size, 42, ACTIVATION.NONE);
     var allInputs = [_][input_size]f64{
@@ -160,17 +154,24 @@ test "neuron 5->1 x3" {
     for (0..allTargets.len) |i| {
         allTargets[i] = 35.0;
     }
-    for (allInputs, allTargets, 0..) |currInput, currTarget, inputI| {
-        var inputs: []*Value = toValues(&allocator, &currInput);
-        var targets = [_]*Value{try Value.init(&allocator, currTarget, "target-")};
-        const output = try neuron.forward(&allocator, inputs);
-        var preds = [_]*Value{output};
-        const loss = try grad.loss_mse(&allocator, &preds, &targets);
-        std.debug.print("i: {} loss: {}\n", .{ inputI, loss.value });
-        neuron.backward(loss, learning_rate);
-        // since the input values are a part of the computation graph, they will be free'd by now
-        // thus, only have to free the inputs array here
-        allocator.free(inputs);
+    for (0..epochs) |_| {
+        for (allInputs, allTargets, 0..) |currInput, currTarget, inputI| {
+            var inputs: []*Value = toValues(&allocator, &currInput);
+            var targets = [_]*Value{try Value.init(&allocator, currTarget, "target-")};
+            const output = try neuron.forward(&allocator, inputs);
+            var preds = [_]*Value{output};
+            const loss = try grad.loss_mse(&allocator, &preds, &targets);
+            std.debug.print("i: {} loss: {}\n", .{ inputI, loss.value });
+            loss.zero_grad();
+            try loss.backward();
+            neuron.update(learning_rate);
+            neuron.detach();
+            loss.deinit();
+            neuron.attach();
+            // since the input values are a part of the computation graph, they will be free'd by now
+            // thus, only have to free the inputs array here
+            allocator.free(inputs);
+        }
     }
     neuron.deinit();
 }
