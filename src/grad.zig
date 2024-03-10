@@ -46,10 +46,7 @@ pub const Value = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        const values = topologicalSort(self.alloc, self) catch {
-            @panic("Bad things happened");
-        };
-
+        const values = topologicalSort(self.alloc, self);
         // reverse order
         var i = values.len - 1;
         while (i > 0) : (i -= 1) {
@@ -129,7 +126,7 @@ pub const Value = struct {
     }
 
     pub fn backward(self: *Self) !void {
-        var values = try topologicalSort(self.alloc, self);
+        var values = topologicalSort(self.alloc, self);
         if (values[0].grad == 0) {
             values[0].grad = 1;
         } else {
@@ -149,8 +146,8 @@ pub const Value = struct {
         self.alloc.free(values);
     }
 
-    pub fn zero_grad(self: *Self) !void {
-        const values = try topologicalSort(self.alloc, self);
+    pub fn zero_grad(self: *Self) void {
+        const values = topologicalSort(self.alloc, self);
         defer self.alloc.free(values);
         self.grad = 0;
 
@@ -189,7 +186,7 @@ pub fn add(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value + v2.value, null) catch {
+    var out = Value.init(allocator, v1.value + v2.value, "add-") catch {
         @panic("Failed to allocate children for add()");
     };
 
@@ -218,7 +215,7 @@ pub fn sub(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value - v2.value, null) catch {
+    var out = Value.init(allocator, v1.value - v2.value, "sub-") catch {
         @panic("Failed to allocate intermediate for sub()");
     };
 
@@ -246,7 +243,7 @@ pub fn mul(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value * v2.value, null) catch {
+    var out = Value.init(allocator, v1.value * v2.value, "mul-") catch {
         @panic("Failed to allocate intermediate for mul()");
     };
 
@@ -277,7 +274,7 @@ pub fn div(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value / v2.value, null) catch {
+    var out = Value.init(allocator, v1.value / v2.value, "div-") catch {
         @panic("Failed to allocate intermediate for div()");
     };
 
@@ -308,7 +305,7 @@ pub fn pow(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, std.math.pow(f64, v1.value, v2.value), null) catch {
+    var out = Value.init(allocator, std.math.pow(f64, v1.value, v2.value), "pow-") catch {
         @panic("Failed to allocate intermediate for pow()");
     };
 
@@ -338,7 +335,7 @@ pub fn pow_backward(v: *Value) void {
 pub fn tanh(allocator: *const std.mem.Allocator, v: *Value) *Value {
     const x = v.value;
     const val = (std.math.exp(2 * x) - 1) / (std.math.exp(2 * x) + 1);
-    var out = Value.init(allocator, val, null) catch {
+    var out = Value.init(allocator, val, "tanh-") catch {
         @panic("Failed to allocate intermediate for tanh()");
     };
 
@@ -444,7 +441,7 @@ pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback:
                     try epoch_callback.?(loss, e);
                 }
 
-                try loss.zero_grad();
+                loss.zero_grad();
                 i = 0;
                 break;
             }
@@ -469,52 +466,56 @@ pub fn loss_mse(allocator: *const std.mem.Allocator, preds: []*Value, targets: [
     return loss;
 }
 
-fn initializeIncomingEdges(root: *Value, allocator: *const std.mem.Allocator) !void {
+fn initializeIncomingEdges(root: *Value, allocator: *const std.mem.Allocator) void {
     var to_visit = std.ArrayList(*Value).init(@constCast(allocator).*);
     defer to_visit.deinit();
     var visited = std.AutoArrayHashMap(*Value, bool).init(@constCast(allocator).*);
     defer visited.deinit();
 
-    try to_visit.append(root);
+    to_visit.append(root) catch {
+        @panic("initializeIncomingEdges() failed to append root node.");
+    };
     while (to_visit.items.len > 0) {
         const current = to_visit.pop();
         if (visited.contains(current)) continue;
-        try visited.put(current, true);
+        visited.put(current, true) catch unreachable;
 
         if (current.children) |children| {
             for (children) |child| {
                 child.incomingEdges += 1;
-                try to_visit.append(child);
+                to_visit.append(child) catch {
+                    @panic("initializeIncomingEdges() failed to append node.");
+                };
             }
         }
     }
 }
 
-fn topologicalSort(allocator: *const std.mem.Allocator, root: *Value) ![]*Value {
-    try initializeIncomingEdges(root, allocator);
+fn topologicalSort(allocator: *const std.mem.Allocator, root: *Value) []*Value {
+    initializeIncomingEdges(root, allocator);
 
     var queue = std.ArrayList(*Value).init(@constCast(allocator).*);
     defer queue.deinit();
     var result = std.ArrayList(*Value).init(@constCast(allocator).*);
     defer result.deinit();
 
-    if (root.incomingEdges == 0) try queue.append(root);
+    if (root.incomingEdges == 0) queue.append(root) catch unreachable;
 
     while (queue.items.len > 0) {
         const current = queue.pop();
 
-        try result.append(current);
+        result.append(current) catch unreachable;
         if (current.children) |children| {
             for (children) |child| {
                 child.incomingEdges -= 1;
                 if (child.incomingEdges == 0) {
-                    try queue.append(child);
+                    queue.append(child) catch unreachable;
                 }
             }
         }
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice() catch unreachable;
 }
 
 pub fn serializeValueToJson(allocator: std.mem.Allocator, value: *const Value) !std.json.Value {
@@ -628,7 +629,7 @@ test "test topo" {
     // introduce another path
     var f = mul(allocator, d, e).setLabel("f");
 
-    const order = try topologicalSort(allocator, f);
+    const order = topologicalSort(allocator, f);
     // var order = try dfs(allocator, e);
     defer allocator.free(order);
     for (order, 0..) |value, i| {
