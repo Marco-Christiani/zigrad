@@ -95,9 +95,9 @@ test "nn/layer/forward" {
     layer.attach(); // reattaching is not strictly necessary since zigrad knows you want to destroy this subgraph directly
     layer.deinit();
 
-    alloc.free(outputs);
-    alloc.free(inputs);
-    alloc.free(targets);
+    alloc.free(outputs); // outputs already deinit'd
+    alloc.free(inputs); // inputs already deinit'd
+    alloc.free(targets); // targets already deinit'd
 }
 
 test "nn/layer/backward" {
@@ -117,7 +117,66 @@ test "nn/layer/backward" {
     layer.attach(); // reattaching is not strictly necessary since zigrad knows you want to destroy this subgraph directly
     layer.deinit();
 
-    alloc.free(outputs);
-    alloc.free(inputs);
-    alloc.free(targets);
+    alloc.free(outputs); // outputs already deinit'd
+    alloc.free(inputs); // inputs already deinit'd
+    alloc.free(targets); // targets already deinit'd
+}
+
+pub fn trainLayer(alloc: *const std.mem.Allocator) !void {
+    const data = @embedFile("data.csv");
+    std.debug.print("{s}\n", .{data[0..16]});
+
+    const lr: f64 = 1e-2;
+    const batchsize = 70;
+    const n_epochs = 100;
+    const seed: u64 = 321;
+
+    var layer = try Layer.init(alloc, 1, 1, seed, ACTIVATION.NONE);
+
+    var nSteps: usize = 0;
+    for (0..n_epochs) |e| {
+        var batchy = try alloc.alloc(*Value, batchsize);
+        defer alloc.free(batchy);
+        var batchyh = try alloc.alloc(*Value, batchsize);
+        defer alloc.free(batchyh);
+
+        var data_iter = std.mem.tokenizeScalar(u8, data, '\n');
+        var i: usize = 0;
+
+        var currLoss: f64 = undefined;
+        while (data_iter.next()) |line| : (i += 1) {
+            nSteps += 1;
+            var row_iter = std.mem.tokenizeScalar(u8, line, ',');
+            const x = try std.fmt.parseFloat(f64, row_iter.next().?);
+            const y = try std.fmt.parseFloat(f64, row_iter.next().?);
+            const vx = n.toValues(alloc, &[_]f64{x});
+            const vy = n.toValues(alloc, &[_]f64{y});
+            defer alloc.free(vx);
+            defer alloc.free(vy);
+
+            const pred = try layer.forward(alloc, vx);
+            defer alloc.free(pred);
+            batchy[i] = vy[0];
+            batchyh[i] = pred[0];
+            if (i >= batchsize - 1) {
+                const loss = try loss_mse(alloc, batchyh, batchy);
+                currLoss = loss.value;
+                loss.zero_grad();
+                try loss.backward();
+                layer.update(lr);
+                layer.detach();
+                loss.deinit();
+                layer.attach();
+                i = 0;
+                break;
+            }
+        }
+        std.debug.print("({}) loss={d:.3}\n", .{ e, currLoss });
+    }
+    std.debug.print("nSteps={}\n", .{nSteps});
+    layer.deinit();
+}
+
+test "nn/trainLayer" {
+    try trainLayer(&std.testing.allocator);
 }

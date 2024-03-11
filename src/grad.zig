@@ -55,7 +55,7 @@ pub const Value = struct {
             if (curr.detached and self != curr) { // allow deinit'ing a detached node/subgraph directly
                 continue;
             }
-            std.log.debug("destroying {?s} {}/{}", .{ curr.label, i + 1, values.len });
+            // std.log.debug("destroying {?s} {}/{}", .{ curr.label, i + 1, values.len });
             if (curr.children) |children| {
                 self.alloc.free(children);
             }
@@ -64,7 +64,7 @@ pub const Value = struct {
             }
             self.alloc.destroy(curr);
         }
-        std.log.debug("destroying self: {?s}", .{self.label});
+        // std.log.debug("destroying self: {?s}", .{self.label});
         if (self.children) |children| {
             self.alloc.free(children);
         }
@@ -256,9 +256,7 @@ pub fn mul(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
 }
 
 pub fn mul_backward(v: *Value) void {
-    std.log.info("mul_backward(): Entered", .{});
     if (v.children) |_| {
-        std.log.info("mul_backward(): Got children", .{});
         v.children.?[0].grad += v.children.?[1].value * v.grad;
         v.children.?[1].grad += v.children.?[0].value * v.grad;
     } else {
