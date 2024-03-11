@@ -1,5 +1,6 @@
 const std = @import("std");
 const zigrad = @import("grad.zig");
+const nn = @import("nn.zig");
 
 pub fn main() !void {
     std.debug.print("This is a debug message.", .{});
@@ -9,7 +10,11 @@ pub fn main() !void {
     const stdout = bw.writer();
 
     try stdout.print("Running...\n", .{});
-    _ = try zigrad.linearModel(&std.heap.page_allocator, epoch_callback);
+    // _ = try zigrad.linearModel(&std.heap.page_allocator, epoch_callback);
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
+    // try nn.trainLayer(&std.heap.page_allocator);
+    try nn.trainLayer(&std.heap.c_allocator);
     try stdout.print("Done.\n", .{});
 
     try bw.flush(); // don't forget to flush!
