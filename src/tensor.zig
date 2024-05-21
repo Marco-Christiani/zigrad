@@ -153,8 +153,8 @@ pub fn Operation(comptime T: type) type {
         pub fn execute(self: Self) void {
             self.output.* = self.forward(self.inputs[0].*, self.inputs[1].*);
             // @memcpy(self.output, self.forward(self.inputs[0].*, self.inputs[1].*));
-            var result = self.forward(self.inputs[0].*, self.inputs[1].*);
-            _ = result;
+            // var result = self.forward(self.inputs[0].*, self.inputs[1].*);
+            // _ = result;
             // self.output.data = result.data;
             // self.output.size = result.size;
             // self.output.children = result.children;
