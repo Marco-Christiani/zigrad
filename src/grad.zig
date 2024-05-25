@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Op = enum {
+pub const Op = enum {
     ADD,
     SUB,
     MUL,
@@ -38,10 +38,16 @@ pub const Value = struct {
         if (self.label) |l| {
             self.alloc.free(l);
         }
-        const uid = generateASCIIUUID(4);
-        self.label = std.fmt.allocPrint(self.alloc.*, "{?s}{s}", .{ label orelse "", uid }) catch {
-            @panic("Failed to set label");
-        };
+        if (label) |lab| {
+            self.label = std.fmt.allocPrint(self.alloc.*, "{s}", .{lab}) catch {
+                @panic("Failed to set label");
+            };
+        } else {
+            const uid = generateASCIIUUID(4);
+            self.label = std.fmt.allocPrint(self.alloc.*, "{s}", .{uid}) catch {
+                @panic("Failed to set label");
+            };
+        }
         return self;
     }
 
@@ -165,12 +171,15 @@ pub const Value = struct {
 };
 
 const crypto = std.crypto;
+const seed = 123;
+var prng = std.rand.DefaultPrng.init(seed);
 
 pub fn generateASCIIUUID(comptime length: usize) [length]u8 {
     const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const alphabet_len = alphabet.len;
     var random_bytes: [length]u8 = undefined;
-    crypto.random.bytes(&random_bytes);
+    // crypto.random.bytes(&random_bytes);
+    prng.random().bytes(&random_bytes);
 
     for (random_bytes, 0..) |_, i| {
         random_bytes[i] = alphabet[random_bytes[i] % alphabet_len];
@@ -573,7 +582,7 @@ test "test graph" {
     const b = try Value.init(allocator, -3.0, "b");
     const c = try Value.init(allocator, 10, "c");
     const e = mul(allocator, a, b).setLabel("e");
-    var d = add(allocator, e, c).setLabel("d");
+    const d = add(allocator, e, c).setLabel("d");
     const f = try Value.init(allocator, -2.0, "f");
     var L = mul(allocator, d, f).setLabel("L");
     L.print_arrows();
@@ -621,9 +630,9 @@ test "test topo" {
     // Create nodes
     const a = try Value.init(allocator, 2.0, "a");
     const b = try Value.init(allocator, 3.0, "b");
-    var c = add(allocator, a, b).setLabel("c");
-    var d = try Value.init(allocator, 2.0, "d");
-    var e = mul(allocator, c, d).setLabel("e");
+    const c = add(allocator, a, b).setLabel("c");
+    const d = try Value.init(allocator, 2.0, "d");
+    const e = mul(allocator, c, d).setLabel("e");
     // introduce another path
     var f = mul(allocator, d, e).setLabel("f");
 
