@@ -1,10 +1,58 @@
 const std = @import("std");
-
-var peakgflops: f64 = 0;
+const c = @cImport(@cInclude("Accelerate/Accelerate.h"));
+// pub fn main() !void {
+//     const gemmT = gemm(f32);
+//     const n = 4;
+//
+//     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+//     const alloc = arena.allocator();
+//     defer arena.deinit();
+//     const A = try gemmT.generate(n, &sequential, alloc);
+//     const B = try gemmT.generate(n, &rsequential, alloc);
+//     const C0 = try gemmT.generate(n, &zeroes, alloc);
+//     const C1 = try gemmT.generate(n, &zeroes, alloc);
+//     const C2 = try gemmT.generate(n, &zeroes, alloc);
+//     var C3 = try gemmT.generate(n, &zeroes, alloc);
+//     gemmT.display(n, A);
+//     gemmT.display(n, B);
+//     gemmT.display(n, C0);
+//
+//     const Cref = try gemmT.generate(n, &zeroes, alloc);
+//     gemmT.agemm(n, A, B, @constCast(Cref));
+//     std.debug.print("Ref:\n", .{});
+//     gemmT.display(n, Cref);
+//
+//     var t0 = std.time.nanoTimestamp();
+//     gemmT.naive0(n, A, B, @constCast(C0));
+//     std.debug.print("\nnaive0 {:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
+//     gemmT.display(n, C0);
+//     std.debug.print("{}\n", .{arrayEqual(f32, Cref, C0)});
+//
+//     t0 = std.time.nanoTimestamp();
+//     gemmT.naive1(n, A, B, @constCast(C1));
+//     std.debug.print("naive1 {:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
+//     gemmT.display(n, C1);
+//
+//     t0 = std.time.nanoTimestamp();
+//     gemmT.inlineManual(n, A, B, @constCast(C2));
+//     std.debug.print("inlineManual {:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
+//     gemmT.display(n, C2);
+//
+//     inline for (2..5) |q| {
+//         const inline_n = 2 << q;
+//         t0 = std.time.nanoTimestamp();
+//         // gemmT.inlineFor2(n, A, B, @constCast(C3), inline_n);
+//         // gemmT.simd(n, A, B, @constCast(C3), inline_n);
+//         gemmT.tiled_simd(n, A, B, @constCast(C3), inline_n, 4);
+//         std.debug.print("tiled_simd {:<7} {:<10} {:<10} {}\n", .{ n, n * n, std.time.nanoTimestamp() - t0, inline_n });
+//         gemmT.display(n, C3);
+//         C3 = try gemmT.generate(n, &zeroes, alloc);
+//     }
+// }
 
 pub fn main() !void {
-    const minBits: u16 = 16;
-    const maxBits: u16 = 64;
+    const minBits: u16 = 32;
+    const maxBits: u16 = 32;
     const len = comptime blk: {
         const len: u16 = @as(u16, @intFromFloat(@log2(@as(f16, @floatFromInt(maxBits))))) - @as(u16, @intFromFloat(@log2(@as(f16, @floatFromInt(minBits))))) + 1;
         break :blk len;
@@ -24,75 +72,62 @@ pub fn main() !void {
     const alloc = arena.allocator();
     defer arena.deinit();
     const minArrSize: f32 = 512;
-    const maxArrSize: f32 = 4096;
+    const maxArrSize: f32 = 512;
     const minK: usize = @intFromFloat(@log2(minArrSize) - 1);
     const maxK: usize = @intFromFloat(@log2(maxArrSize));
-    std.debug.print("\n{s:<5} {s:<7} {s:<10} {s:<20} {s:<20} {s:<6.4}\n", .{ "type", "n", "N", "fn", "ms", "GFLOPS" });
+    var tracker: *BenchmarkTracker = @constCast(&BenchmarkTracker.init());
+    std.debug.print("\n{s:<5} {s:<5} {s:<7} {s:<10} {s:<20} {s:<20} {s:<6.4}\n", .{ "i", "type", "n", "N", "fn", "ms", "GFLOPS" });
+
     @setEvalBranchQuota(1000000);
     inline for (0..types.len) |i| {
         inline for (minK..maxK) |k| {
             const n: u64 = 2 << k;
+            std.debug.print("n={}\n", .{n});
             const gemmT = gemm(types[i]);
             const A = try gemmT.generate(n, &sequential, alloc);
             const B = try gemmT.generate(n, &rsequential, alloc);
             const C = try gemmT.generate(n, &zeroes, alloc);
+            const Cref = try gemmT.generate(n, &zeroes, alloc);
 
-            const t0 = std.time.nanoTimestamp();
-            gemmT.naive0(n, A, B, @constCast(C));
-            const t1: i64 = @intCast(std.time.nanoTimestamp());
-            const duration0 = @as(u64, @intCast(t1 - t0));
+            tracker.run(types[i], n, "agemm", gemmT.agemm, .{ n, A, B, @constCast(Cref) });
 
-            gemmT.naive1(n, A, B, @constCast(C));
-            const t2 = std.time.nanoTimestamp();
-            const duration1 = @as(u64, @intCast(t2 - t1));
+            tracker.run(types[i], n, "naive0", gemmT.naive0, .{ n, A, B, @constCast(C) });
+            std.debug.print("{}\n", .{arrayEqual(types[i], Cref, C)});
+            zero(types[i], C);
 
-            gemmT.inlineManual(n, A, B, @constCast(C));
-            const t3 = std.time.nanoTimestamp();
-            const duration2 = @as(u64, @intCast(t3 - t2));
+            tracker.run(types[i], n, "naive1", gemmT.naive1, .{ n, A, B, @constCast(C) });
+            std.debug.print("{}\n", .{arrayEqual(types[i], Cref, C)});
+            zero(types[i], C);
 
-            gemmT.inlineFor(n, A, B, @constCast(C));
-            const t4 = std.time.nanoTimestamp();
-            const duration3 = @as(u64, @intCast(t4 - t3));
+            tracker.run(types[i], n, "inlineManual", gemmT.inlineManual, .{ n, A, B, @constCast(C) });
+            std.debug.print("{}\n", .{arrayEqual(types[i], Cref, C)});
+            zero(types[i], C);
 
-            format(types[i], n, "naive0", duration0);
-            format(types[i], n, "naive1", duration1);
-            format(types[i], n, "inlineManual", duration2);
-            format(types[i], n, "inlineFor", duration3);
+            tracker.run(types[i], n, "inlineFor", gemmT.inlineFor, .{ n, A, B, @constCast(C) });
+            std.debug.print("{}\n", .{arrayEqual(types[i], Cref, C)});
+            zero(types[i], C);
 
             inline for (1..4) |q| {
                 const vec_n = 1 << q;
-
-                var simd_t0 = std.time.nanoTimestamp();
-                gemmT.simd(n, A, B, @constCast(C), vec_n);
-                var simd_duration = @as(u64, @intCast(std.time.nanoTimestamp() - simd_t0));
                 var nameBuf: [20]u8 = undefined;
-                var name = try std.fmt.bufPrint(&nameBuf, "tiled-{d}", .{vec_n});
-                // std.debug.print("{:<5} {:<7} {:<10} {s}-{:<10} {:<10} {:<6}\n", .{ types[i], n, n * n, "simd", inline_n, simd_duration, calcGflops(n, simd_duration) });
-                format(types[i], n, "simd", simd_duration);
+                var name = try std.fmt.bufPrint(&nameBuf, "simd-{d}", .{vec_n});
+                tracker.run(types[i], n, name, gemmT.simd, .{ n, A, B, @constCast(C), vec_n });
+                std.debug.print("{}\n", .{arrayEqual(types[i], Cref, C)});
+                // gemmT.display(n, C);
+                // gemmT.display(n, Cref);
+                zero(types[i], C);
+
                 inline for (q..8) |b| {
                     const block_size = 1 << b;
-                    simd_t0 = std.time.nanoTimestamp();
-                    gemmT.tiled_simd(n, A, B, @constCast(C), vec_n, block_size);
-                    simd_duration = @as(u64, @intCast(std.time.nanoTimestamp() - simd_t0));
                     name = try std.fmt.bufPrint(&nameBuf, "tiled_simd-{d}-{d}", .{ vec_n, block_size });
-                    format(types[i], n, name, simd_duration);
+                    tracker.run(types[i], n, name, gemmT.tiled_simd, .{ n, A, B, @constCast(C), vec_n, block_size });
+                    std.debug.print("{}\n", .{arrayEqual(types[i], Cref, C)});
+                    zero(types[i], C);
                 }
             }
         }
     }
-
-    std.debug.print("Peak Gflops {d}\n", .{peakgflops});
-}
-
-fn format(
-    T: type,
-    n: u64,
-    name: []const u8,
-    duration_ns: u64,
-) void {
-    const currgflops = calcGflops(n, duration_ns);
-    std.debug.print("{:<5} {:<7} {:<10} {s:<20} {:<20} {d:<6.4}\n", .{ T, n, n * n, name, duration_ns / std.time.ns_per_ms, currgflops });
-    if (currgflops > peakgflops) peakgflops = currgflops;
+    tracker.end();
 }
 
 fn calcGflops(n: u64, duration_ns: u64) f64 {
@@ -103,6 +138,60 @@ fn calcGflops(n: u64, duration_ns: u64) f64 {
     const den: f64 = @floatFromInt(duration_ns);
     return num / den;
 }
+
+pub fn zero(comptime T: type, A: []T) void {
+    for (A) |*a| {
+        a.* = 0;
+    }
+}
+
+pub fn arrayEqual(comptime T: type, A: []T, B: []T) bool {
+    if (A.len != B.len) return false;
+    for (A, B) |a, b| {
+        if (a != b) return false;
+    }
+    return true;
+}
+
+const BenchmarkTracker = struct {
+    const Self = @This();
+    timer: *std.time.Timer,
+    count: usize,
+    best_run: usize,
+    peak_gflops: f64,
+    print: bool,
+
+    pub fn init() Self {
+        const timer = std.time.Timer.start() catch @panic("Failed to start timer");
+        return Self{ .timer = @constCast(&timer), .count = 0, .best_run = 0, .peak_gflops = 0, .print = true };
+    }
+
+    fn run(
+        self: *Self,
+        T: type,
+        n: u64,
+        name: []const u8,
+        comptime func: anytype,
+        args: anytype,
+    ) void {
+        self.count += 1;
+        self.timer.reset();
+        @call(.auto, func, args);
+        const duration_ns = self.timer.read();
+        const currgflops = calcGflops(n, duration_ns);
+        if (self.print) {
+            std.debug.print("{:<5} {:<5} {:<7} {:<10} {s:<20} {:<20} {d:<6.4}\n", .{ self.count, T, n, n * n, name, duration_ns / std.time.ns_per_ms, currgflops });
+        }
+        if (currgflops > self.peak_gflops) {
+            self.best_run = self.count;
+            self.peak_gflops = currgflops;
+        }
+    }
+
+    fn end(self: Self) void {
+        if (self.print) std.debug.print("Peak Gflops {d}\n", .{self.peak_gflops});
+    }
+};
 
 /// Multiply n x n matrices
 pub fn gemm(comptime T: type) type {
@@ -200,24 +289,24 @@ pub fn gemm(comptime T: type) type {
         }
 
         pub fn simd(comptime n: usize, A: []const T, B: []const T, C: []T, comptime vec_n: usize) void {
+            _ = vec_n;
+            var alloc = std.heap.page_allocator;
+            var Bt = alloc.alignedAlloc(T, null, n * n) catch unreachable;
+            defer alloc.free(Bt);
+            for (0..n) |i| {
+                for (0..n) |j| {
+                    Bt[j * n + i] = B[i * n + j];
+                }
+            }
             var in: usize = 0;
             var ij: usize = 0;
-            var r: usize = 0;
-            const rem = n % vec_n;
             for (0..n) |i| {
                 in = i * n;
                 for (0..n) |j| {
+                    const nj = n * j;
                     ij = in + j;
-                    r = 0;
-                    while (r < (n - rem)) {
-                        C[ij] += @reduce(.Add, @as(@Vector(vec_n, T), A[(in + r)..][0..vec_n].*) * @as(@Vector(vec_n, T), B[(r * n + j)..][0..vec_n].*));
-                        r += vec_n;
-                    }
-
-                    inline for (0..rem) |_| {
-                        C[ij] += A[in + r] * B[r * n + j];
-                        r += 1;
-                    }
+                    // std.debug.print("a={d} b={d}\n", .{ A[in..(in + n)], Bt[nj..(nj + n)] });
+                    C[ij] += @reduce(.Add, @as(@Vector(n, T), A[in..][0..n].*) * @as(@Vector(n, T), Bt[nj..][0..n].*));
                 }
             }
         }
@@ -228,7 +317,7 @@ pub fn gemm(comptime T: type) type {
             // if (block_size == 0) return; // Prevent zero-sized blocks
             // const n_blocks: usize = block_size * (n - 1) / (block_size - 1);
             const n_blocks_per_dim: usize = @intFromFloat(@as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(block_size)));
-            const n_blocks = n_blocks_per_dim * n_blocks_per_dim;
+            const n_blocks = n_blocks_per_dim; // * n_blocks_per_dim;
             // std.debug.print("n={d} block_size={d} n_blocks={d}\n", .{ n, block_size, n_blocks });
 
             var start_i: usize = 0;
@@ -239,33 +328,60 @@ pub fn gemm(comptime T: type) type {
             var end_k: usize = 0;
             var sum: T = 0;
             var r: usize = 0;
+
+            const VT = @Vector(vec_n, T);
+
             for (0..n_blocks) |block_i| {
                 start_i = block_i * block_size;
                 if (start_i >= n) break; // Prevent processing non-existent rows
                 end_i = @min(start_i + block_size, n);
 
-                for (0..n_blocks) |block_j| {
-                    start_j = block_j * block_size;
-                    if (start_j >= n) break; // Prevent processing non-existent columns
-                    end_j = @min(start_j + block_size, n);
+                for (0..n_blocks) |block_k| {
+                    start_k = block_k * block_size;
+                    if (start_k >= n) break; // Prevent processing non-existent depths
+                    end_k = @min(start_k + block_size, n);
+                    for (0..n_blocks) |block_j| {
+                        start_j = block_j * block_size;
+                        if (start_j >= n) break; // Prevent processing non-existent columns
+                        end_j = @min(start_j + block_size, n);
 
-                    for (0..n_blocks) |block_k| {
-                        start_k = block_k * block_size;
-                        if (start_k >= n) break; // Prevent processing non-existent depths
-                        end_k = @min(start_k + block_size, n);
-
-                        for (start_i..end_i) |i| {
-                            for (start_j..end_j) |j| {
+                        // pack(end_k - start_k, A[start_i * n + start_k ..], n, packedA[0..]);
+                        // pack(end_k - start_k, B[start_k * n + start_j ..], n, packedB[0..]);
+                        // for (start_i..end_i) |i| {
+                        //     for (start_j..end_j) |j| {
+                        //         sum = C[i * n + j];
+                        //         r = 0;
+                        //
+                        //         while (r + vec_n <= end_k - start_k) {
+                        //             sum += @reduce(.Add, @as(@Vector(vec_n, f64), packedA[r * block_size ..][0..vec_n].*) * @as(@Vector(vec_n, f64), packedB[r * block_size ..][0..vec_n].*));
+                        //             r += vec_n;
+                        //         }
+                        //
+                        //         while (r < end_k - start_k) {
+                        //             sum += packedA[r] * packedB[r];
+                        //             r += 1;
+                        //         }
+                        //
+                        //         C[i * n + j] = sum;
+                        //     }
+                        // }
+                        for (start_j..end_j) |j| {
+                            for (start_i..end_i) |i| {
                                 sum = C[i * n + j];
                                 r = start_k;
+                                const rem = (end_k - start_k) % vec_n;
 
-                                while (r + vec_n <= end_k) {
-                                    sum += @reduce(.Add, @as(@Vector(vec_n, T), A[(i * n + r)..][0..vec_n].*) * @as(@Vector(vec_n, T), B[(r * n + j)..][0..vec_n].*));
+                                // while (r + vec_n <= end_k) {
+                                while (r < (end_k - rem)) {
+                                    sum += @reduce(.Add, @as(VT, A[(i * n + r)..][0..vec_n].*) * @as(VT, B[(r * n + j)..][0..vec_n].*));
+                                    // sum += @reduce(.Add, @as(VT, packedA[r..][0..vec_n].*) * @as(VT, packedB[r..][0..vec_n].*));
                                     r += vec_n;
                                 }
 
-                                while (r < end_k) {
+                                // while (r < end_k) {
+                                for (0..rem) |_| {
                                     sum += A[i * n + r] * B[r * n + j];
+                                    // sum += packedA[r] * packedB[r];
                                     r += 1;
                                 }
 
@@ -315,6 +431,25 @@ pub fn gemm(comptime T: type) type {
             }
         }
 
+        pub fn agemm(n: usize, A: []const T, B: []const T, C: []T) void {
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasNoTrans,
+                @intCast(n),
+                @intCast(n),
+                @intCast(n),
+                1.0,
+                A.ptr,
+                @intCast(n),
+                B.ptr,
+                @intCast(n),
+                1.0,
+                C.ptr,
+                @intCast(n),
+            );
+        }
+
         pub fn generate(comptime n: usize, func: *const fn (type, usize, usize) T, allocator: std.mem.Allocator) ![]T {
             var result = try allocator.alignedAlloc(T, null, n * n);
             // var result = try allocator.alloc(T, n * n);
@@ -359,7 +494,7 @@ fn zeroes(T: type, i: usize, size: usize) T {
 }
 
 test "gemm/display" {
-    const gemmT = gemm(f64);
+    const gemmT = gemm(f32);
     const n = 4;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -375,19 +510,24 @@ test "gemm/display" {
     gemmT.display(n, B);
     gemmT.display(n, C0);
 
+    // const Cref = try gemmT.generate(n, &zeroes, alloc);
+    // gemmT.agemm(n, A, B, @constCast(Cref));
+    // std.debug.print("Ref:\n", .{});
+    // gemmT.display(n, Cref);
+
     var t0 = std.time.nanoTimestamp();
     gemmT.naive0(n, A, B, @constCast(C0));
-    std.debug.print("\n{:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
+    std.debug.print("\nnaive0 {:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
     gemmT.display(n, C0);
 
     t0 = std.time.nanoTimestamp();
     gemmT.naive1(n, A, B, @constCast(C1));
-    std.debug.print("{:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
+    std.debug.print("naive1 {:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
     gemmT.display(n, C1);
 
     t0 = std.time.nanoTimestamp();
     gemmT.inlineManual(n, A, B, @constCast(C2));
-    std.debug.print("{:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
+    std.debug.print("inlineManual {:<7} {:<10} {:<10}\n", .{ n, n * n, std.time.nanoTimestamp() - t0 });
     gemmT.display(n, C2);
 
     inline for (2..5) |q| {
@@ -396,7 +536,7 @@ test "gemm/display" {
         // gemmT.inlineFor2(n, A, B, @constCast(C3), inline_n);
         // gemmT.simd(n, A, B, @constCast(C3), inline_n);
         gemmT.tiled_simd(n, A, B, @constCast(C3), inline_n, 4);
-        std.debug.print("{:<7} {:<10} {:<10} {}\n", .{ n, n * n, std.time.nanoTimestamp() - t0, inline_n });
+        std.debug.print("tiled_simd {:<7} {:<10} {:<10} {}\n", .{ n, n * n, std.time.nanoTimestamp() - t0, inline_n });
         gemmT.display(n, C3);
         C3 = try gemmT.generate(n, &zeroes, alloc);
     }
