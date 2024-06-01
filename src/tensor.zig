@@ -4,6 +4,7 @@
 const std = @import("std");
 const Op = @import("grad.zig").Op;
 const generateASCIIUUID = @import("grad.zig").generateASCIIUUID;
+const c = @cImport(@cInclude("Accelerate/Accelerate.h"));
 
 const root = @import("root");
 
@@ -62,7 +63,7 @@ pub fn NDArray(comptime T: type, comptime size: usize) type {
     return struct {
         const Self = @This();
         shape: []const usize,
-        data: @Vector(size, T),
+        data: [size]T,
 
         pub fn init(values: [size]T, shape: ?[]const usize, allocator: std.mem.Allocator) NDArrayError!*Self {
             if (shape) |s| {
@@ -170,50 +171,122 @@ pub fn NDArray(comptime T: type, comptime size: usize) type {
         }
 
         pub fn add(self: *const Self, other: *const Self) Self {
-            return Self{
-                .shape = self.shape,
-                .data = self.data + other.data,
-            };
+            _ = other;
+            // return Self{
+            //     .shape = self.shape,
+            //     .data = self.data + other.data,
+            // };
+            return self.*;
         }
 
         pub fn _add(self: *Self, other: *const Self) *Self {
-            self.data = self.data + other.data;
+            _ = other;
+            // self.data = self.data + other.data;
             return self;
         }
 
         pub fn sub(self: *const Self, other: *const Self) Self {
-            return Self{
-                .shape = self.shape,
-                .data = self.data - other.data,
-            };
-        }
-
-        pub fn _sub(self: *Self, other: *const Self) *Self {
-            self.data = self.data - other.data;
+            _ = other;
+            // return Self{
+            //     .shape = self.shape,
+            //     .data = self.data - other.data,
+            // };
             return self;
         }
 
-        pub fn mul(self: *const Self, other: *const Self) Self {
-            return Self{
-                .shape = self.shape,
-                .data = self.data * other.data,
+        pub fn _sub(self: *Self, other: *const Self) *Self {
+            _ = other;
+            // self.data = self.data - other.data;
+            return self;
+        }
+
+        /// Vec-vec: Dot product
+        /// Mat-vec: 2D x 1D
+        /// (...)-Mat-Mat: ND x KD (N,K>2) and broadcastable
+        /// Simple dim rules: (M, K) x (K, N) = (M, N)
+        pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) *Self {
+            var M: usize = 0;
+            if (self.shape.len > 1) M = self.shape[0]; // rows in self
+            if (self.shape.len > 2) {
+                M = self.shape[(self.shape.len - 2 % self.shape.len)]; // rows in self
+            }
+            var N: usize = other.shape[1]; // cols in other
+            var K: usize = other.shape[0]; // rows in other, cols in self
+            if (other.shape.len > 2) {
+                N = other.shape[(other.shape.len - 1) % other.shape.len]; // cols in other
+                K = other.shape[(other.shape.len - 2) % other.shape.len]; // rows in other, cols in self
+            }
+
+            std.debug.print("(M={}, K={}) x (K={}, N={}) = (M={}, N={}) [M*N={}]\n", .{ M, K, K, N, M, N, M * N });
+            const output = allocator.alignedAlloc(T, null, M * N) catch {
+                std.debug.panic("slice allocation failed.\n", .{});
             };
+
+            // if (M < K) {
+            //     std.debug.panic("Incompatible dimensions for matrix multiplication.\n", .{});
+            // }
+            // var a = @as([size]T, self.data);
+            // var b = @as([size]T, other.data);
+            std.debug.print("a.shape={d} b.shape={d}\n", .{ self.shape, other.shape });
+            const lda = K;
+            const ldb = N;
+            const ldc = N;
+            switch (T) {
+                f32 => {
+                    c.cblas_sgemm(
+                        c.CblasRowMajor,
+                        c.CblasNoTrans,
+                        c.CblasNoTrans,
+                        @intCast(M),
+                        @intCast(N),
+                        @intCast(K),
+                        1.0,
+                        &self.data, // A
+                        @intCast(lda), // lda
+                        &other.data, // B
+                        @intCast(ldb), // ldb
+                        1.0,
+                        output.ptr,
+                        @intCast(ldc), // ldc
+                    );
+                },
+                else => @panic("Unsupported type" ++ @typeName(T)),
+            }
+            const result = allocator.create(Self) catch {
+                std.debug.panic("NDTensor allocation failed.\n", .{});
+            };
+            const shape = allocator.alloc(usize, 2) catch {
+                @panic("failed to allocate shape slice.\n");
+            };
+            shape[0] = M;
+            shape[1] = N;
+            result.* = .{
+                .shape = shape,
+                .data = output.*, // cant coerce slice to array. refactor time, knew it was coming anyways. data needs to be a slice.
+            };
+            return result;
         }
 
         pub fn _mul(self: *Self, other: *const Self) *Self {
-            self.data = self.data * other.data;
+            // self.data = self.data * other.data;
+            // return self;
+            _ = other;
             return self;
         }
 
         pub fn div(self: *const Self, other: *const Self) Self {
-            return Self{
-                .shape = self.shape,
-                .data = self.data / other.data,
-            };
+            // return Self{
+            //     .shape = self.shape,
+            //     .data = self.data / other.data,
+            // };
+            _ = other;
+            return self.*;
         }
 
         pub fn _div(self: *Self, other: *const Self) *Self {
-            self.data = self.data / other.data;
+            // self.data = self.data / other.data;
+            // return self;
+            _ = other;
             return self;
         }
     };
@@ -236,6 +309,18 @@ pub fn NDTensor(comptime variant: DeviceTag, comptime T: type, size: usize) type
             };
             result.* = Self{
                 .data = dtype.init(values.*, &[_]usize{values.len}, allocator) catch unreachable,
+                .grad = if (requires_grad) dtype.initFill(0, null, allocator) catch unreachable else null,
+                .requires_grad = requires_grad,
+            };
+            return result;
+        }
+
+        pub fn fromZarray(values: *dtype, requires_grad: bool, allocator: std.mem.Allocator) *Self {
+            const result = allocator.create(Self) catch {
+                std.debug.panic("NDTensor allocation failed.\n", .{});
+            };
+            result.* = Self{
+                .data = values,
                 .grad = if (requires_grad) dtype.initFill(0, null, allocator) catch unreachable else null,
                 .requires_grad = requires_grad,
             };
@@ -310,10 +395,10 @@ pub fn NDTensor(comptime variant: DeviceTag, comptime T: type, size: usize) type
         }
 
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) *Self {
-            var result = Self.init(@constCast(&self.data.mul(other.data).data), self.requires_grad, allocator);
+            var result = Self.fromZarray(self.data.mul(other.data, allocator), self.requires_grad, allocator);
             if (self.requires_grad) result.op = .MUL;
             result.children = .{ self, other };
-            return result.reshape(self.data.shape) catch unreachable;
+            return result;
         }
 
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) *Self {
@@ -328,40 +413,42 @@ pub fn NDTensor(comptime variant: DeviceTag, comptime T: type, size: usize) type
             if (self.op) |op| {
                 switch (op) {
                     .ADD => {
-                        if (self.children) |c| {
-                            _ = c[0].grad.?._add(self.grad.?);
-                            _ = c[1].grad.?._add(self.grad.?);
+                        if (self.children) |children| {
+                            _ = children[0].grad.?._add(self.grad.?);
+                            _ = children[1].grad.?._add(self.grad.?);
                         }
                     },
                     .SUB => {
-                        if (self.children) |c| {
-                            _ = c[0].grad.?._add(self.grad.?);
-                            _ = c[1].grad.?._sub(self.grad.?);
+                        if (self.children) |children| {
+                            _ = children[0].grad.?._add(self.grad.?);
+                            _ = children[1].grad.?._sub(self.grad.?);
                         }
                     },
                     .MUL => {
-                        if (self.children) |c| {
-                            _ = c[0].grad.?._add(self.grad.?)._mul(c[1].data);
-                            _ = c[1].grad.?._add(self.grad.?)._mul(c[0].data);
+                        if (self.children) |children| {
+                            _ = children[0].grad.?._add(self.grad.?)._mul(children[1].data);
+                            _ = children[1].grad.?._add(self.grad.?)._mul(children[0].data);
                         }
                     },
-                    .DIV => {
-                        if (self.children) |c| {
-                            var a = c[0].data;
-                            var b = c[1].data;
-                            // g/b
-                            var temp = self.grad.?.div(b); // copies
-                            _ = c[0].grad.?._add(&temp);
-                            // a / b^2
-                            const temp2 = @constCast(&(a.div(&b.mul(b))))._mul(self.grad.?); // copies
-                            // += -(a/b^2) ==> -= a/b^2
-                            _ = c[1].grad.?._sub(temp2);
-                        }
-                    },
+                    // .DIV => {
+                    //     if (self.children) |children| {
+                    //         var a = children[0].data;
+                    //         var b = children[1].data;
+                    //         // g/b
+                    //         var temp = self.grad.?.div(b); // copies
+                    //         _ = children[0].grad.?._add(&temp);
+                    //         // a / b^2
+                    //         const temp2 = @constCast(&(a.div(&b.mul(b))))._mul(self.grad.?); // copies
+                    //         // += -(a/b^2) ==> -= a/b^2
+                    //         _ = children[1].grad.?._sub(temp2);
+                    //     }
+                    // },
                     else => @panic("Not yet implemented."),
                 }
             }
         }
+
+        // pub fn matmul(self: *const Self, other: *const Self) *Self {}
     };
 }
 
@@ -563,4 +650,55 @@ test "tensor/GraphManager/moreback" {
     try std.testing.expectEqual(x.data.data, w.grad.?.data);
     try std.testing.expectEqual(ones.data, b.grad.?.data);
     h.print();
+}
+
+pub fn main() !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const alloc = arena.allocator();
+    defer arena.deinit();
+    const shape1 = &[_]usize{ 2, 3 };
+    const shape2 = &[_]usize{ 3, 2 };
+    const Tensor = NDTensor(.cpu, f32, 6);
+
+    // var A = try Tensor.init(@constCast(&[_]f32{ 3, 1, 1, 2 }), true, alloc).reshape(shape);
+    // const B = try Tensor.init(@constCast(&[_]f32{ 1, 1, 1, 1 }), true, alloc).reshape(shape);
+    // var C = A.mul(B, alloc);
+    //
+    // var gm = Loss(Tensor).init(arena.allocator());
+    // defer gm.deinit();
+    // C.print();
+    // multiply a 2x3 and a 3x2 to get a 2x2
+    var A = try Tensor.init(@constCast(&[_]f32{ 1, 2, 3, 4, 5, 6 }), true, alloc).reshape(shape1);
+    const B = try Tensor.init(@constCast(&[_]f32{ 1, 0, 0, 1, 0, 0 }), true, alloc).reshape(shape2);
+    var C = A.mul(B, alloc);
+    C.print();
+
+    // var gm = Loss(Tensor).init(arena.allocator());
+    // defer gm.deinit();
+    // h.grad = try Tensor.dtype.initFill(1, shape, alloc);
+    // gm.backward(h);
+    // try std.testing.expectEqual(x.data.data, w.grad.?.data);
+    // const ones = try Tensor.dtype.initFill(1, shape, alloc);
+    // try std.testing.expectEqual(ones.data, b.grad.?.data);
+
+    // 2 x 1
+    // const shape2 = &[_]usize{ 2, 1 };
+    // w.grad.?.fill(0);
+    // b.grad.?.fill(0);
+    // x.grad.?.fill(0);
+    // _ = try w.reshape(shape2);
+    // _ = try b.reshape(shape2);
+    // _ = try x.reshape(shape2);
+    // h = w*x + b
+    // dh/dw = x, dh/db = 1
+    // temp = w.mul(x, alloc);
+    // h = temp.add(b, alloc);
+    //
+    // var gm2 = Loss(Tensor).init(arena.allocator());
+    // defer gm2.deinit();
+    // h.grad.?.fill(1);
+    // gm.backward(h);
+    // try std.testing.expectEqual(x.data.data, w.grad.?.data);
+    // try std.testing.expectEqual(ones.data, b.grad.?.data);
+    // h.print();
 }
