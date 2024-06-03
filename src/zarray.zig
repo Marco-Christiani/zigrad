@@ -5,7 +5,7 @@ const std = @import("std");
 const c = @cImport(@cInclude("Accelerate/Accelerate.h"));
 const root = @import("root");
 
-const ZarrayError = error{ InvalidShape, Unbroadcastable, InvalidIndex, ShapeOutOfBounds };
+pub const ZarrayError = error{ InvalidShape, Unbroadcastable, InvalidIndex, ShapeOutOfBounds, IncompatibleShapes };
 
 /// lib-wide options that can be overridden by the root file.
 pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigrad_settings else .{};
@@ -28,7 +28,7 @@ pub fn NDArray(comptime T: type) type {
                     const owned_shape = allocator.alloc(usize, s.len) catch {
                         std.debug.panic("NDArray allocation failed trying to own shape slice.\n", .{});
                     };
-                    for (owned_shape, 0..) |*e, i| e.* = s[i];
+                    @memcpy(owned_shape, s);
                     break :blk owned_shape;
                 } else {
                     const owned_shape = allocator.alloc(usize, 1) catch {
@@ -44,7 +44,7 @@ pub fn NDArray(comptime T: type) type {
             const owned_slice = allocator.alloc(T, values.len) catch {
                 std.debug.panic("NDArray allocation failed trying to own values slice.\n", .{});
             };
-            for (owned_slice, 0..) |*e, i| e.* = values[i];
+            @memcpy(owned_slice, values);
 
             result.* = Self{
                 .data = owned_slice,
@@ -53,16 +53,19 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        pub fn initFill(val: T, shape: ?[]const usize, allocator: std.mem.Allocator) ZarrayError!*Self {
-            if (shape) |s| {
-                if (s.len > settings.max_dim) return ZarrayError.InvalidShape;
-            }
-            var data: []T = undefined;
-            for (&data) |*elem| {
-                elem.* = val;
-            }
-            return Self.init(data, shape, allocator);
-        }
+        // pub fn initFill(val: T, shape: []const usize, allocator: std.mem.Allocator) ZarrayError!*Self {
+        //     if (shape.len > settings.max_dim) return ZarrayError.InvalidShape;
+        //     const size = blk: {
+        //         var size: usize = 1;
+        //         for (shape) |s| size *= s;
+        //         break :blk size;
+        //     };
+        //     const data: [size]T = undefined;
+        //     for (data) |*elem| {
+        //         elem.* = val;
+        //     }
+        //     return Self.init(data, shape, allocator);
+        // }
 
         pub fn fill(self: *Self, val: T) void {
             for (0..self.data.len) |i| {
@@ -101,7 +104,7 @@ pub fn NDArray(comptime T: type) type {
             self.data[index] = value;
         }
 
-        fn posToIndex(self: Self, indices: []const usize) usize {
+        pub fn posToIndex(self: Self, indices: []const usize) usize {
             std.debug.assert(indices.len == self.shape.len);
             var index: usize = 0;
             var stride: usize = 1;
@@ -118,12 +121,12 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// See flexSelectIndex
-        fn flexPosToIndex(self: Self, indices: []const usize) ZarrayError.InvalidIndex!usize {
+        pub fn flexPosToIndex(self: Self, indices: []const usize) ZarrayError.InvalidIndex!usize {
             return flexSelectIndex(self.shape, indices);
         }
 
-        fn indexToPos(self: Self, index: usize, allocator: std.mem.Allocator) []const usize {
-            const pos = allocator.alloc(T, self.len) catch std.debug.panic("Failed to allocate shape slice.\n", .{});
+        pub fn indexToPos(self: Self, index: usize, allocator: std.mem.Allocator) []const usize {
+            const pos = allocator.alloc(usize, self.data.len) catch std.debug.panic("Failed to allocate shape slice.\n", .{});
             var remainingIndex = index;
             var stride: usize = 1;
             for (0..self.shape.len) |i| {
@@ -155,12 +158,69 @@ pub fn NDArray(comptime T: type) type {
             std.debug.print("{d}", .{self.data});
         }
 
-        /// Vec-vec: Dot product
-        /// Mat-vec: 2D x 1D
+        /// Element-wise addition
+        pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            const values = try allocator.alloc(T, self.data.len);
+            for (0..values.len) |i| values[i] = self.data[i] + other.data[i];
+            return Self.init(values, self.shape, allocator);
+        }
+
+        /// In-place element-wise addition
+        pub fn _add(self: *Self, other: *const Self) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            for (0..self.data.len) |i| self.data[i] += other.data[i];
+            return self;
+        }
+
+        /// Element-wise subtraction
+        pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            const values = try allocator.alloc(T, self.data.len);
+            for (0..values.len) |i| values[i] = self.data[i] - other.data[i];
+            return Self.init(values, self.shape, allocator);
+        }
+
+        /// In-place element-wise subtraction
+        pub fn _sub(self: *Self, other: *const Self) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            for (0..self.data.len) |i| self.data[i] -= other.data[i];
+            return self;
+        }
+
+        /// Element-wise multiplication
+        pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            const values = try allocator.alloc(T, self.data.len);
+            for (0..values.len) |i| values[i] = self.data[i] * other.data[i];
+            return Self.init(values, self.shape, allocator);
+        }
+
+        /// In-place element-wise subtraction
+        pub fn _mul(self: *Self, other: *const Self) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            for (0..self.data.len) |i| self.data[i] *= other.data[i];
+            return self;
+        }
+
+        /// Element-wise division
+        pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            const values = try allocator.alloc(T, self.data.len);
+            for (0..values.len) |i| values[i] = self.data[i] / other.data[i];
+            return Self.init(values, self.shape, allocator);
+        }
+
+        /// In-place element-wise division
+        pub fn _div(self: *Self, other: *const Self) !*Self {
+            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            for (0..self.data.len) |i| self.data[i] /= other.data[i];
+            return self;
+        }
+
         /// (...)-Mat-Mat: ND x KD (N,K>2) and broadcastable
         /// Simple dim rules: (M, K) x (K, N) = (M, N)
-        /// Computes self*other without tranposing
-        pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator, trans_a: bool, trans_b: bool) !*Self {
             if (self.shape.len < 2 or other.shape.len < 2) {
                 std.debug.panic("Input tensors must have at least two dimensions.\n", .{});
             }
@@ -177,7 +237,7 @@ pub fn NDArray(comptime T: type) type {
                 std.debug.panic("Output array allocation failed.\n", .{});
             };
             errdefer allocator.free(output);
-            blas_matmul(T, self.data, other.data, output, M, N, K);
+            blas_matmul(T, self.data, other.data, output, M, N, K, trans_a, trans_b);
             return Self.init(output, &[_]usize{ M, N }, allocator);
         }
 
@@ -189,16 +249,27 @@ pub fn NDArray(comptime T: type) type {
             return Self.init(&[_]T{output}, null, allocator);
         }
 
-        pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn outer(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            // TODO: implement outer
             _ = self;
             _ = other;
             _ = allocator;
             @compileError("Not yet implemented.\n");
         }
+
+        pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            // TODO: shape checks for matvec
+            const output: []T = allocator.alignedAlloc(T, null, self.shape[1]) catch {
+                std.debug.panic("Output array allocation failed.\n", .{});
+            };
+            errdefer allocator.free(output);
+            blas_matvec(T, self.data, other.data, output, self.shape[0], self.shape[1], 1, 0);
+            return Self.init(output, null, allocator);
+        }
     };
 }
 
-/// Computes dot product assuming a stride of 1. (N,) x (N,) = (1,)
+/// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
 pub fn blas_dot(T: type, A: []T, B: []T) T {
     switch (T) {
         f32 => return c.cblas_sdot(@intCast(A.len), A.ptr, 1, B.ptr, 1),
@@ -207,48 +278,29 @@ pub fn blas_dot(T: type, A: []T, B: []T) T {
     }
 }
 
-/// (M, K) x (K, N) = (M, N)
-pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize) void {
+/// Computes mat-vec assuming a stride of 1 for the vec and row-major.
+/// a * (M, N) x (N,) + b * (N,) = (M,)
+/// Y = aAX + bY
+pub fn blas_matvec(T: type, A: []T, X: []T, Y: []T, M: usize, N: usize, alpha: T, beta: T) void {
+    const lda = N;
+    switch (T) {
+        f32 => c.cblas_sgemv(c.CblasRowMajor, c.CblasNoTrans, @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), X.ptr, 1, beta, Y.ptr, 1),
+        f64 => c.cblas_dgemv(c.CblasRowMajor, c.CblasNoTrans, @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), X.ptr, 1, beta, Y.ptr, 1),
+        else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+    }
+}
+
+///  Assumes row-major.
+///  (M, K) x (K, N) = (M, N)
+pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool) void {
     const lda = K;
     const ldb = N;
     const ldc = N;
+    const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
+    const tb = if (trans_b) c.CblasTrans else c.CblasNoTrans;
     switch (T) {
-        f32 => {
-            c.cblas_sgemm(
-                c.CblasRowMajor,
-                c.CblasNoTrans,
-                c.CblasNoTrans,
-                @intCast(M),
-                @intCast(N),
-                @intCast(K),
-                1.0,
-                A.ptr,
-                @intCast(lda),
-                B.ptr,
-                @intCast(ldb),
-                0.0,
-                C.ptr,
-                @intCast(ldc),
-            );
-        },
-        f64 => {
-            c.cblas_dgemm(
-                c.CblasRowMajor,
-                c.CblasNoTrans,
-                c.CblasNoTrans,
-                @intCast(M),
-                @intCast(N),
-                @intCast(K),
-                1.0,
-                A.ptr,
-                @intCast(lda),
-                B.ptr,
-                @intCast(ldb),
-                0.0,
-                C.ptr,
-                @intCast(ldc),
-            );
-        },
+        f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), 1.0, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), 0.0, C.ptr, @intCast(ldc)),
+        f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), 1.0, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), 0.0, C.ptr, @intCast(ldc)),
         else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
     }
 }
@@ -371,7 +423,7 @@ test "NDArray.matmul" {
     //  [0, 1]]    [1, 1]]    [1, 1]]
     const A1 = try Array.init(@constCast(&[_]T{ 1, 2, 0, 1 }), &[_]usize{ 2, 2 }, alloc);
     const B1 = try Array.init(@constCast(&[_]T{ 1, 1, 1, 1 }), &[_]usize{ 2, 2 }, alloc);
-    const C1 = try A1.matmul(B1, alloc);
+    const C1 = try A1.matmul(B1, alloc, false, false);
     const expected1 = Array.init(&[_]T{ 3, 3, 1, 1 }, &[_]usize{ 2, 2 }, alloc);
     try std.testing.expectEqualDeep(expected1, C1);
 
@@ -384,9 +436,26 @@ test "NDArray.matmul" {
     //                [0, 0]]
     var A2 = try Array.init(@constCast(&[_]T{ 1, 2, 3, 4, 5, 6 }), shape1, alloc);
     const B2 = try Array.init(@constCast(&[_]T{ 1, 0, 0, 1, 0, 0 }), shape2, alloc);
-    const C2 = try A2.matmul(B2, alloc);
+    const C2 = try A2.matmul(B2, alloc, false, false);
     const expected2 = Array.init(&[_]T{ 1, 2, 4, 5 }, &[_]usize{ 2, 2 }, alloc);
     try std.testing.expectEqualDeep(expected2, C2);
+}
+
+test "NDArray.matvec" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f64;
+    const Array = NDArray(T);
+
+    // multiply a 2x2 and a 2x to get a 2x
+    // [[1, 2]  * [[1]  = [[13]
+    //  [0, 1]]    [6]]    [6]]
+    const A1 = try Array.init(@constCast(&[_]T{ 1, 2, 0, 1 }), &[_]usize{ 2, 2 }, alloc);
+    const X1 = try Array.init(@constCast(&[_]T{ 1, 6 }), null, alloc);
+    const Y1 = try A1.matvec(X1, alloc);
+    const expected1 = Array.init(&[_]T{ 13, 6 }, null, alloc);
+    try std.testing.expectEqualDeep(expected1, Y1);
 }
 
 pub fn main() !void {
@@ -401,6 +470,6 @@ pub fn main() !void {
     // multiply a 2x3 and a 3x2 to get a 2x2
     var A = try Array.init(@constCast(&[_]T{ 1, 2, 3, 4, 5, 6 }), shape1, alloc);
     const B = try Array.init(@constCast(&[_]T{ 1, 0, 0, 1, 0, 0 }), shape2, alloc);
-    var C = try A.matmul(B, alloc);
+    var C = try A.matmul(B, alloc, false, false);
     C.print();
 }
