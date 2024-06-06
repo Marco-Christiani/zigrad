@@ -53,6 +53,12 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
+        pub fn deinit(self: *const Self, allocator: std.mem.Allocator) void {
+            allocator.free(self.data);
+            allocator.free(self.shape);
+            allocator.destroy(self);
+        }
+
         // pub fn initFill(val: T, shape: []const usize, allocator: std.mem.Allocator) ZarrayError!*Self {
         //     if (shape.len > settings.max_dim) return ZarrayError.InvalidShape;
         //     const size = blk: {
@@ -68,9 +74,7 @@ pub fn NDArray(comptime T: type) type {
         // }
 
         pub fn fill(self: *Self, val: T) void {
-            for (0..self.data.len) |i| {
-                self.data[i] = val;
-            }
+            @memset(self.data, val);
         }
 
         pub fn reshape(self: *Self, shape: []const usize) ZarrayError!void {
