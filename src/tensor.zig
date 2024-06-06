@@ -17,7 +17,7 @@ const Settings = struct {
     max_dim: usize = 4,
 };
 
-pub const Op = enum { ADD, SUB, MUL, DIV, POW, TANH, MATMUL, DOT, MATVEC };
+pub const Op = enum { ADD, SUB, MUL, DIV, POW, TANH, MATMUL, DOT, MATVEC, SUM };
 
 // pub fn ZarrayT(T: type) type {
 //     return struct {
@@ -51,6 +51,7 @@ pub fn NDTensor(comptime T: type) type {
         label: ?[]const u8 = null,
         grad: ?*dtype = null,
         requires_grad: bool,
+        acquired: bool = false,
 
         pub fn init(values: []const T, shape: ?[]const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
             const result = try allocator.create(Self);
@@ -64,13 +65,33 @@ pub fn NDTensor(comptime T: type) type {
             return result;
         }
 
-        pub fn fromZarray(values: *dtype, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
+        pub fn deinit(self: *const Self, allocator: std.mem.Allocator) void {
+            // TODO: tbd whether to recurse to children w new arch
+            if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
+            self.data.deinit(allocator);
+            if (self.grad) |g| g.deinit(allocator);
+        }
+
+        pub fn acquire(self: *Self) void {
+            self.acquired = true;
+        }
+
+        pub fn release(self: *Self) void {
+            self.acquired = false;
+        }
+
+        pub fn fromZarray(values: *dtype, requires_grad: bool, grad_shape: ?[]const usize, allocator: std.mem.Allocator) !*Self {
             const result = try allocator.create(Self);
-            const zeros = try allocator.alloc(T, values.data.len);
+            var grad_size = values.data.len;
+            if (grad_shape) |gs| {
+                grad_size = 1;
+                for (gs) |e| grad_size *= e;
+            }
+            const zeros = try allocator.alloc(T, grad_size);
             @memset(zeros, 0);
             result.* = Self{
                 .data = values,
-                .grad = if (requires_grad) try dtype.init(zeros, values.shape, allocator) else null,
+                .grad = if (requires_grad) try dtype.init(zeros, grad_shape, allocator) else null,
                 .requires_grad = requires_grad,
             };
             return result;
@@ -135,7 +156,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.add(other.data, allocator), self.requires_grad, allocator);
+            const grad_shape = if (self.requires_grad) self.grad.?.shape else null;
+            var result = try Self.fromZarray(try self.data.add(other.data, allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .ADD;
             result.children = .{ self, other };
             return result;
@@ -143,7 +165,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise subtraction
         pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.sub(other.data, allocator), self.requires_grad, allocator);
+            const grad_shape = if (self.requires_grad) self.grad.?.shape else null;
+            var result = try Self.fromZarray(try self.data.sub(other.data, allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .SUB;
             result.children = .{ self, other };
             return result.reshape(self.data.shape) catch unreachable;
@@ -151,7 +174,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise multiplication
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.mul(other.data, allocator), self.requires_grad, allocator);
+            const grad_shape = if (self.requires_grad) self.grad.?.shape else null;
+            var result = try Self.fromZarray(try self.data.mul(other.data, allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .MUL;
             result.children = .{ self, other };
             return result;
@@ -159,30 +183,61 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise division
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.div(other.data, allocator), self.requires_grad, allocator);
+            const grad_shape = if (self.requires_grad) self.grad.?.shape else null;
+            std.debug.print("grad_shape={?d}\n", .{grad_shape});
+            var result = try Self.fromZarray(try self.data.div(other.data, allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .DIV;
             result.children = .{ self, other };
             return result.reshape(self.data.shape) catch unreachable;
         }
 
         pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.matmul(other.data, false, false, allocator), self.requires_grad, allocator);
+            const grad_shape = if (self.requires_grad) self.grad.?.shape else null;
+            var result = try Self.fromZarray(try self.data.matmul(other.data, false, false, allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .MATMUL;
             result.children = .{ self, other };
             return result;
         }
 
+        // pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        //     var result = try Self.fromZarray(try self.data.dot(other.data, allocator), self.requires_grad, allocator);
+        //     if (self.requires_grad) result.op = .DOT;
+        //     result.children = .{ self, other };
+        //     return result;
+        // }
+
         pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.dot(other.data, allocator), self.requires_grad, allocator);
-            if (self.requires_grad) result.op = .DOT;
-            result.children = .{ self, other };
+            const dot_result = try self.data.dot(other.data, allocator);
+
+            // set the gradient dimensions to match the operands
+            const result = try allocator.create(Self);
+            const zeros = try allocator.alloc(T, self.data.data.len); // Match length of first operand
+            @memset(zeros, 0);
+            result.* = Self{
+                .data = dot_result,
+                .grad = if (self.requires_grad) try dtype.init(zeros, self.data.shape, allocator) else null,
+                .requires_grad = self.requires_grad,
+                .op = .DOT,
+                .children = .{ self, other },
+            };
             return result;
         }
 
         pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            var result = try Self.fromZarray(try self.data.matvec(other.data, false, allocator), self.requires_grad, allocator);
+            const grad_shape = if (self.requires_grad) other.grad.?.shape else null;
+            var result = try Self.fromZarray(try self.data.matvec(other.data, false, allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .MATVEC;
             result.children = .{ self, other };
+            return result;
+        }
+
+        pub fn sum(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            const ones = try allocator.alloc(T, self.data.data.len);
+            @memset(ones, 1);
+            const ones_tensor = try Self.init(ones, self.data.shape, self.requires_grad, allocator);
+            const result = try self.dot(ones_tensor, allocator);
+            // if (self.requires_grad) result.op = .SUM;
+            // result.children = .{ self, ones_tensor };
             return result;
         }
 
@@ -198,14 +253,18 @@ pub fn NDTensor(comptime T: type) type {
                     },
                     .SUB => {
                         if (self.children) |children| {
+                            std.debug.print("children[0].grad.?.shape={d} ", .{children[0].grad.?.shape});
+                            std.debug.print("self.grad.?.shape={d}\n", .{self.grad.?.shape});
                             _ = try children[0].grad.?._add(self.grad.?);
                             _ = try children[1].grad.?._sub(self.grad.?);
                         }
                     },
                     .MUL => {
                         if (self.children) |children| {
-                            _ = try (try children[0].grad.?._add(self.grad.?))._mul(children[1].data);
-                            _ = try (try children[1].grad.?._add(self.grad.?))._mul(children[0].data);
+                            // _ = try (try children[0].grad.?._add(self.grad.?))._mul(children[1].data);
+                            // _ = try (try children[1].grad.?._add(self.grad.?))._mul(children[0].data);
+                            _ = try children[0].grad.?._add(try self.grad.?.mul(children[1].data, allocator));
+                            _ = try children[1].grad.?._add(try self.grad.?.mul(children[0].data, allocator));
                         }
                     },
                     .DIV => {
@@ -248,17 +307,27 @@ pub fn NDTensor(comptime T: type) type {
                             _ = try children[1].grad.?._add(grad_B);
                         }
                     },
+                    // .DOT => {
+                    //     if (self.children) |children| {
+                    //         var a = children[0].data;
+                    //         var b = children[1].data;
+                    //         // Must be free'd, assumes owner uses an arena for bw and does not return handle
+                    //         const grad_a = try b.mul(self.grad.?, allocator);
+                    //         // Must be free'd, assumes owner uses an arena for bw and does not return handle
+                    //         const grad_b = try a.mul(self.grad.?, allocator);
+                    //         _ = try children[0].grad.?._add(grad_a);
+                    //         _ = try children[1].grad.?._add(grad_b);
+                    //     }
+                    // },
                     .DOT => {
                         if (self.children) |children| {
-                            var a = children[0].data;
-                            var b = children[1].data;
-                            std.debug.print("a.shape={d} b.shape={d} self.grad.?.shape={d}\n", .{ a.shape, b.shape, self.grad.?.shape });
-                            // Must be free'd, assumes owner uses an arena for bw and does not return handle
-                            const grad_a = try b.mul(self.grad.?, allocator);
-                            // Must be free'd, assumes owner uses an arena for bw and does not return handle
-                            const grad_b = try a.mul(self.grad.?, allocator);
-                            _ = try children[0].grad.?._add(grad_a);
-                            _ = try children[1].grad.?._add(grad_b);
+                            const child1 = children[0];
+                            const child2 = children[1];
+                            // Propagate the gradient back to the operands
+                            const grad_tensor1 = try NDTensor(T).init(self.grad.?.data, child1.data.shape, false, allocator);
+                            const grad_tensor2 = try NDTensor(T).init(self.grad.?.data, child2.data.shape, false, allocator);
+                            _ = try child1.grad.?._add(grad_tensor1.data);
+                            _ = try child2.grad.?._add(grad_tensor2.data);
                         }
                     },
                     .MATVEC => {
@@ -270,17 +339,13 @@ pub fn NDTensor(comptime T: type) type {
                             // Must be free'd, assumes owner uses an arena for bw and does not return handle
                             //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
                             const grad_A = try self.grad.?.outer(x, allocator);
-                            std.debug.print("self.grad.?.shape={d} x.shape={d} grad_A.shape={d} children[0].grad.?.shape={d} children[0].grad.?.shape={d} children[1].grad.?.shape={d}\n", .{ self.grad.?.shape, x.shape, grad_A.shape, children[0].grad.?.shape, children[0].grad.?.shape, children[1].grad.?.shape });
                             _ = try children[0].grad.?._add(grad_A);
-                            std.debug.print("Added grad_A={d} to children[0].grad={d}\n", .{ grad_A.data, children[0].grad.?.data });
 
                             // Gradient with respect to x
                             // Must be free'd, assumes owner uses an arena for bw and does not return handle
                             //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
-                            std.debug.print("A.shape={d}\n", .{A.shape});
                             const grad_x = try A.matvec(self.grad.?, true, allocator);
                             _ = try children[1].grad.?._add(grad_x);
-                            std.debug.print("Added grad_x={d} to children[1].grad={d}\n", .{ grad_x.data, children[1].grad.?.data });
                         }
                     },
                     // .MATVEC => {
@@ -297,9 +362,69 @@ pub fn NDTensor(comptime T: type) type {
                     //         _ = try children[1].grad.?._add(grad_x);
                     //     }
                     // },
+                    .SUM => {
+                        if (self.children) |children| {
+                            const child = children[0];
+                            _ = try child.grad.?._add(self.grad.?);
+                        }
+                        // if (self.children) |children| {
+                        //     const child = children[0];
+                        //     const grad_shape = child.data.shape;
+                        //     const grad_size = child.data.data.len;
+                        //     const grad_values = try allocator.alloc(T, grad_size);
+                        //     for (0..grad_size) |i| {
+                        //         grad_values[i] = self.grad.?.data[0];
+                        //     }
+                        //     const grad_tensor = try Self.init(grad_values, grad_shape, false, allocator);
+                        //     _ = try child.grad.?._add(grad_tensor.data);
+                        // }
+                    },
                     else => @panic("Not yet implemented."),
                 }
             }
+        }
+    };
+}
+
+pub fn NeuronLayer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        weights: *NDTensor(T),
+        biases: *NDTensor(T),
+        allocator: std.mem.Allocator,
+
+        pub fn init(allocator: std.mem.Allocator, input_size: usize, output_size: usize) !*Self {
+            // TODO: random init
+            const self = try allocator.create(Self);
+            const weights_shape = &[_]usize{ output_size, input_size };
+            const biases_shape = &[_]usize{output_size};
+            const weights = try NDTensor(T).init(try allocator.alloc(T, input_size * output_size), weights_shape, true, allocator);
+            const biases = try NDTensor(T).init(try allocator.alloc(T, output_size), biases_shape, true, allocator);
+            weights.acquire();
+            biases.acquire();
+            weights.fill(1);
+            biases.fill(1);
+
+            self.* = Self{
+                .weights = weights,
+                .biases = biases,
+                .allocator = allocator,
+            };
+
+            return self;
+        }
+
+        pub fn forward(self: *const Self, input: *NDTensor(T)) !*NDTensor(T) {
+            var result = try self.weights.matvec(input, self.allocator);
+            // std.debug.print("\tself.weights.matvec(input) = {d}\n", .{result.data.data});
+            result = try result.add(self.biases, self.allocator);
+            // std.debug.print("\tresult.add(self.biases) = {d}\n", .{result.data.data});
+            return result;
+        }
+
+        pub fn zeroGrad(self: *const Self) void {
+            self.weights.grad.?.fill(0);
+            self.biases.grad.?.fill(0);
         }
     };
 }
@@ -336,7 +461,7 @@ pub fn Loss(comptime T: type) type {
                     }
                 }
                 self.sortedNodes.append(node) catch unreachable;
-                node.print();
+                // node.print();
             }
         }
 
@@ -347,247 +472,566 @@ pub fn Loss(comptime T: type) type {
             self.topo(node);
             const nodes = self.sortedNodes.items;
             for (0..nodes.len) |i| {
-                try nodes[nodes.len - i - 1].backward(alloc);
+                const curr_node = nodes[nodes.len - i - 1];
+                curr_node.print();
+                try curr_node.backward(alloc);
+                // if (!curr_node.acquired) curr_node.deinit(alloc);
+            }
+        }
+    };
+}
+//
+// pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+//     var diff = try y_pred.sub(y, allocator);
+//     const sq_diff = try diff.mul(diff, allocator);
+//     // const loss = try sq_diff.mean(allocator);
+//     // const loss = (try sq_diff.sum(allocator))._div();
+//     const coef = try allocator.alloc(T, y.data.data.len);
+//     @memset(coef, 1.0 / @as(T, @floatFromInt(y.data.data.len)));
+//     const coef_tensor = try NDTensor(T).init(coef, null, true, allocator);
+//     const loss = coef_tensor.dot(sq_diff, allocator);
+//     // const num_elements = try NDTensor(T).init(&[_]T{@floatFromInt(y.data.data.len)}, null, false, allocator);
+//     // const mean_sq_diff = try sum_sq_diff.div(num_elements, allocator);
+//     return loss;
+// }
+
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    // std.debug.print("y_pred ", .{});
+    y_pred.print();
+    var diff = try y_pred.sub(y, allocator);
+    // std.debug.print("diff ", .{});
+    diff.print();
+    var sq_diff = try diff.mul(diff, allocator);
+    // std.debug.print("sq_diff ", .{});
+    sq_diff.print();
+    const sum_sq_diff = try sq_diff.sum(allocator);
+    // std.debug.print("sum_sq_diff ", .{});
+    sum_sq_diff.print();
+    const n = @as(T, @floatFromInt(y.data.data.len));
+    const num_elements = try NDTensor(T).init(&[_]T{n}, null, true, allocator);
+    const loss = try sum_sq_diff.div(num_elements, allocator);
+    // std.debug.print("loss ", .{});
+    // loss.print();
+    // loss.grad.?.fill(1.0);
+    return loss;
+}
+
+// pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+//     std.debug.print("y_pred ", .{});
+//     y_pred.print();
+//     var diff = try y_pred.sub(y, allocator);
+//     std.debug.print("diff ", .{});
+//     diff.print();
+//     var sq_diff = try diff.mul(diff, allocator);
+//     std.debug.print("sq_diff ", .{});
+//     sq_diff.print();
+//     var sum_sq_diff = try sq_diff.sum(allocator);
+//     std.debug.print("sum_sq_diff ", .{});
+//     sum_sq_diff.print();
+//     const n: T = @floatFromInt(y.data.data.len);
+//     const num_elements = try NDTensor(T).init(&[_]T{n}, null, false, allocator);
+//
+//     // const result = try allocator.create(NDTensor(T));
+//     const gradarr = try allocator.alloc(T, y.data.data.len);
+//     @memset(gradarr, 0);
+//     // result.* = NDTensor(T){
+//     //     .data = try NDTensor(T).dtype.init(&[_]T{n}, null, allocator),
+//     //     .grad = if (y_pred.requires_grad) try NDTensor(T).dtype.init(gradarr, null, allocator) else null,
+//     //     .requires_grad = y_pred.requires_grad,
+//     // };
+//
+//     // std.debug.print("num_elements ", .{});
+//     // num_elements.print();
+//     const mean_sq_diff = try sum_sq_diff.div(result, allocator);
+//     std.debug.print("mean_sq_diff ", .{});
+//     mean_sq_diff.print();
+//     return mean_sq_diff;
+// }
+
+// pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+//     var diff = try y_pred.sub(y, allocator);
+//     var sq_diff = try diff.mul(diff, allocator);
+//     var sum_sq_diff = try sq_diff.sum(allocator);
+//     const n = @as(T, @floatFromInt(y.data.data.len));
+//     const num_elements = try NDTensor(T).init(&[_]T{n}, null, true, allocator);
+//     const mean_sq_diff = try sum_sq_diff.div(num_elements, allocator);
+//
+//     // ensure gradient shape matches the input tensor shape
+//     if (mean_sq_diff.grad) |grad| {
+//         const ones = try allocator.alloc(T, y.data.data.len);
+//         @memset(ones, 1.0 / n);
+//         const ones_tensor = try NDTensor(T).init(ones, y.data.shape, true, allocator);
+//         grad.data = ones_tensor.data.data;
+//     }
+//
+//     return mean_sq_diff;
+// }
+
+pub fn SGD(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        lr: T,
+
+        pub fn step(self: Self, params: []const *NDTensor(T)) void {
+            // lol. go to bed.
+            for (params) |param| {
+                for (0..param.data.data.len) |j| {
+                    param.data.data[j] -= self.lr * param.grad.?.data[j];
+                }
             }
         }
     };
 }
 
-test "tensor/NDTensor index, add, div" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
-    const shape = &[_]usize{ 2, 3 };
-    const Tensor = NDTensor(f32);
+// pub fn train(
+//     layer: *NeuronLayer(f32),
+//     input: *NDTensor(f32),
+//     target: *NDTensor(f32),
+//     loss_manager: *Loss(NDTensor(f32)),
+//     optimizer: *SGD(f32),
+//     alloc: std.mem.Allocator,
+//     num_epochs: usize,
+// ) !void {
+//     for (0..num_epochs) |epoch| {
+//         const output = try layer.forward(input);
+//         const params = [_]*NDTensor(f32){ layer.weights, layer.biases };
+//
+//         const loss = try mse_loss(f32, output, target, alloc);
+//         loss.grad.?.fill(1.0);
+//         layer.zeroGrad();
+//         try loss_manager.backward(loss, alloc);
+//         optimizer.step(&params);
+//         std.debug.print("Epoch {d}, Loss: {d}\n", .{ epoch, loss.data.data });
+//         std.debug.print("Predictions: ", .{});
+//         output.print();
+//         std.debug.print("Params: ", .{});
+//         for (params) |p| p.print();
+//         std.debug.print("\n\n", .{});
+//     }
+// }
 
-    // 1 2 3
-    // 4 5 6
-    var t1 = try Tensor.init(@constCast(&[_]f32{ 1, 2, 3, 4, 5, 6 }), shape, false, alloc);
+pub fn train(
+    layer: *NeuronLayer(f32),
+    input: *NDTensor(f32),
+    target: *NDTensor(f32),
+    loss_manager: *Loss(NDTensor(f32)),
+    optimizer: *SGD(f32),
+    alloc: std.mem.Allocator,
+    num_epochs: usize,
+) !void {
+    std.debug.print("Initial Weights: ", .{});
+    layer.weights.print();
+    std.debug.print("Initial Biases: ", .{});
+    layer.biases.print();
+    for (0..num_epochs) |epoch| {
+        // Zero gradients
+        layer.zeroGrad();
+        target.grad.?.fill(0.0); // meh
+        input.grad.?.fill(0.0); // meh.
 
-    // 1 2 3
-    // 4 5 23
-    try t1.set(&[_]usize{ 1, 2 }, -5);
-    t1.print();
-    // std.debug.print("{d}\n", .{t1.get(&[_]usize{ 1, 2 })});
-    // std.debug.print("{d}\n", .{t1.indexToPos(5, alloc)});
+        // Forward pass
+        const output = try layer.forward(input);
+        defer output.deinit(layer.allocator);
+        const params = [_]*NDTensor(f32){ layer.weights, layer.biases };
 
-    const t2 = try Tensor.init(@constCast(&[_]f32{ 10, 20, 30, 40, 50, 60 }), shape, false, alloc);
-    t2.print();
-    const t3 = try t1.add(t2, alloc);
-    t3.print();
+        // Debug: Print predictions
+        std.debug.print("Epoch {d}\n", .{epoch});
+        std.debug.print("Predictions: ", .{});
+        output.print();
+        std.debug.print("Target: ", .{});
+        target.print();
 
-    std.debug.print("{d}\n", .{t3.data.data});
-    t3.print();
-    std.debug.print("{?any}\n", .{t3.children});
+        // Compute loss
+        const loss = try mse_loss(f32, output, target, alloc);
 
-    var t4 = try t3.div(t3, alloc);
-    t4.print();
+        // Debug: Print loss value
+        std.debug.print("Loss: {d}\n", .{loss.get(&[_]usize{0})});
+
+        std.debug.print("Gradients before backward pass (should be zeroed): Weights grad: ", .{});
+        layer.weights.grad.?.print();
+        std.debug.print("Biases grad: ", .{});
+        layer.biases.grad.?.print();
+
+        // Backward pass
+        loss.grad.?.fill(1.0);
+        try loss_manager.backward(loss, alloc);
+
+        // Update weights
+        optimizer.step(&params);
+
+        // Debug: Print updated parameters
+        std.debug.print("\nUpdated Params: \n", .{});
+        std.debug.print("Weights: ", .{});
+        layer.weights.print();
+        std.debug.print("Biases: ", .{});
+        layer.biases.print();
+
+        std.debug.print("\n", .{});
+    }
 }
 
-test "tensor/GraphManager/addback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
-    const shape = &[_]usize{1};
-    const T = f32;
-    const Tensor = NDTensor(T);
-
-    var t1 = try Tensor.init(@constCast(&[_]T{2}), shape, true, alloc);
-    const t2 = try Tensor.init(@constCast(&[_]T{3}), shape, true, alloc);
-    // t3 = t1 + t2;
-    // dt3/dt1 = 1, dt3/dt2 = 1
-    var t3 = try t1.add(t2, alloc);
-
-    var gm = Loss(Tensor).init(arena.allocator());
-    defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(@constCast(&[_]T{1}), shape, alloc);
-    try gm.backward(t3, alloc);
-    try std.testing.expectEqualDeep(&[_]T{1.0}, t1.grad.?.data);
-    try std.testing.expectEqualDeep(&[_]T{1.0}, t2.grad.?.data);
-}
-
-test "tensor/GraphManager/mulback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
-    const shape = &[_]usize{1};
-    const T = f32;
-    const Tensor = NDTensor(T);
-
-    var t1 = try Tensor.init(@constCast(&[_]T{2}), shape, true, alloc);
-    const t2 = try Tensor.init(@constCast(&[_]T{3}), shape, true, alloc);
-    // t3 = t1 * t2;
-    // dt3/dt1 = t2, dt3/dt2 = t1
-    var t3 = try t1.mul(t2, alloc);
-
-    var gm = Loss(Tensor).init(arena.allocator());
-    defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(@constCast(&[_]T{1}), shape, alloc);
-    try gm.backward(t3, alloc);
-    try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
-    try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
-}
-
-test "tensor/GraphManager/moreback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
-    const shape = &[_]usize{2};
-    const T = f32;
-    const Tensor = NDTensor(T);
-
-    var w = try Tensor.init(@constCast(&[_]f32{ 3, 2 }), shape, true, alloc);
-    const b = try Tensor.init(@constCast(&[_]f32{ 1, 1 }), shape, true, alloc);
-    const x = try Tensor.init(@constCast(&[_]f32{ 4, 4 }), shape, true, alloc);
-    // const y = try Tensor.init(@constCast(&[_]f32{12, 10}), true, alloc).reshape(shape);
-    // h = w*x + b
-    // dh/dw = x, dh/db = 1
-    var temp = try w.mul(x, alloc);
-    var h = try temp.add(b, alloc);
-
-    var backprop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const backprop_alloc = backprop_arena.allocator();
-    defer backprop_arena.deinit();
-
-    var gm = Loss(Tensor).init(arena.allocator());
-    defer gm.deinit();
-    h.grad = try Tensor.dtype.init(@constCast(&[_]T{ 1, 1 }), shape, alloc);
-    try gm.backward(h, backprop_alloc);
-    if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
-    try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
-    try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
-
-    // 2 x 1
-    const shape2 = &[_]usize{ 2, 1 };
-    w.grad.?.fill(0);
-    b.grad.?.fill(0);
-    x.grad.?.fill(0);
-    _ = try w.reshape(shape2);
-    _ = try b.reshape(shape2);
-    _ = try x.reshape(shape2);
-    // h = w*x + b
-    // dh/dw = x, dh/db = 1
-    temp = try w.mul(x, alloc);
-    h = try temp.add(b, alloc);
-
-    var gm2 = Loss(Tensor).init(arena.allocator());
-    defer gm2.deinit();
-    h.grad.?.fill(1);
-    try gm.backward(h, alloc);
-    if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
-    try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
-    try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
-    h.print();
-}
-
-test "NDTensor/div_backward" {
+test "NeuronLayer training" {
+    std.debug.print("{s} Layer train {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const T = f32;
-    const Tensor = NDTensor(T);
-    const shape = &[_]usize{2};
 
-    var t1 = try Tensor.init(@constCast(&[_]T{ 4, 9 }), shape, true, alloc);
-    const t2 = try Tensor.init(@constCast(&[_]T{ 2, 3 }), shape, true, alloc);
-    var t3 = try t1.div(t2, alloc);
+    const layer = try NeuronLayer(T).init(alloc, 2, 2);
 
-    var gm = Loss(Tensor).init(arena.allocator());
+    const input_shape = &[_]usize{2};
+    const input = try NDTensor(T).init(@constCast(&[_]T{ 1, 1 }), input_shape, true, alloc);
+    const target = try NDTensor(T).init(@constCast(&[_]T{ 10, 10 }), input_shape, true, alloc);
+    input.acquire();
+    target.acquire();
+
+    var gm = Loss(NDTensor(T)).init(alloc);
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(@constCast(&[_]T{ 1, 1 }), shape, alloc);
-    try gm.backward(t3, alloc);
+    var optimizer = SGD(T){ .lr = 0.01 };
 
-    // Expected gradients for t1 and t2
-    const expected_grad_t1 = &[_]T{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
-    const expected_grad_t2 = &[_]T{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
-
-    try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
-    try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+    try train(layer, input, target, gm, &optimizer, alloc, 10);
 }
 
-test "NDTensor/matmul_backward" {
+// test "NeuronLayer forward and backward" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const alloc = arena.allocator();
+//     const T = f32;
+//
+//     // input 2, output 2
+//     var layer = try NeuronLayer(T).init(alloc, 2, 2);
+//
+//     const input_shape = &[_]usize{2};
+//     const input = try NDTensor(T).init(@constCast(&[_]T{ 3, 3 }), input_shape, true, alloc);
+//
+//     const output = try layer.forward(input);
+//     @memset(output.grad.?.data, 1.0);
+//
+//     var gm = Loss(NDTensor(T)).init(alloc);
+//     defer gm.deinit();
+//     try gm.backward(output, alloc);
+//
+//     std.debug.print("Weights: ", .{});
+//     layer.weights.print();
+//     std.debug.print("Biases: ", .{});
+//     layer.biases.print();
+// }
+//
+
+test "MSE" {
+    std.debug.print("{s} MSE {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const T = f32;
     const Tensor = NDTensor(T);
-    const shape = &[_]usize{ 2, 2 };
 
-    var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3, 4 }), shape, true, alloc);
-    const t2 = try Tensor.init(@constCast(&[_]T{ 1, 0, 0, 1 }), shape, true, alloc);
-    var t3 = try t1.matmul(t2, alloc);
+    const y = try Tensor.init(&[_]T{1}, null, false, alloc);
+    const yh = try Tensor.init(&[_]T{1}, null, false, alloc);
+    var loss = try mse_loss(T, yh, y, alloc);
+    try std.testing.expectEqualSlices(T, &[_]T{0}, loss.data.data);
+    // (1-2)**2 == 1
+    try yh.set(&[_]usize{0}, 2);
+    loss = try mse_loss(T, yh, y, alloc);
+    try std.testing.expectEqualSlices(T, &[_]T{1}, loss.data.data);
 
+    // (1-3)**2 == 4
+    try yh.set(&[_]usize{0}, 3);
+    loss = try mse_loss(T, yh, y, alloc);
+    try std.testing.expectEqualSlices(T, &[_]T{4}, loss.data.data);
+
+    // (-1-10)**2 == 121
+    try y.set(&[_]usize{0}, -1);
+    try yh.set(&[_]usize{0}, 10);
+    loss = try mse_loss(T, yh, y, alloc);
+    try std.testing.expectEqualSlices(T, &[_]T{121}, loss.data.data);
+
+    // Arrays
+    const y_arr = try Tensor.init(&[_]T{ 1, 2, 3 }, null, true, alloc);
+    const yh_arr = try Tensor.init(&[_]T{ 1, 2, 3 }, null, true, alloc);
+    loss = try mse_loss(T, yh_arr, y_arr, alloc);
+    try std.testing.expectEqualSlices(T, &[_]T{0}, loss.data.data);
+
+    // ((1-2)^2 + (2-3)^2 + (3-4)^2) / 3 == (1 + 1 + 1) / 3 == 1
+    try yh_arr.set(&[_]usize{0}, 2);
+    try yh_arr.set(&[_]usize{1}, 3);
+    try yh_arr.set(&[_]usize{2}, 4);
+    loss = try mse_loss(T, yh_arr, y_arr, alloc);
+    try std.testing.expectEqualSlices(T, &[_]T{1}, loss.data.data);
+
+    // MSE backward
     var gm = Loss(Tensor).init(arena.allocator());
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(@constCast(&[_]T{ 1, 1, 1, 1 }), shape, alloc);
-    try gm.backward(t3, alloc);
-
-    const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
-    const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
-
-    try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
-    try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+    // loss.grad.?.fill(1.0);
+    loss.acquire();
+    try gm.backward(loss, alloc);
+    loss.print();
 }
 
-test "NDTensor/matvec_backward" {
+test "sum operation" {
+    std.debug.print("{s} sum {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const T = f32;
     const Tensor = NDTensor(T);
-    const shape_mat = &[_]usize{ 2, 2 };
-    const shape_vec = &[_]usize{2};
 
-    // [1, 2] [1]
-    // [3, 4] [1]
-    // grad = [1, 1]'
-    // dl/dA = grad * [1, 1] = [[2, 2], [2, 2]]
-    // dl/dx = A' * grad = [4, 6]'
-    var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3, 4 }), shape_mat, true, alloc);
-    const t2 = try Tensor.init(@constCast(&[_]T{ 1, 1 }), shape_vec, true, alloc);
-    var t3 = try t1.matvec(t2, alloc);
+    const input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, alloc);
+    var sum_result = try input.sum(alloc);
 
-    var gm = Loss(Tensor).init(arena.allocator());
+    try std.testing.expectEqualSlices(T, &[_]T{10}, sum_result.data.data);
+
+    // Backward pass
+    var gm = Loss(Tensor).init(alloc);
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(@constCast(&[_]T{ 1, 1 }), shape_vec, alloc);
-    try gm.backward(t3, alloc);
-    std.debug.print("t1: ", .{});
-    t1.print();
-    std.debug.print("t2: ", .{});
-    t2.print();
-    std.debug.print("t3: ", .{});
-    t3.print();
+    sum_result.grad.?.fill(1.0);
+    try gm.backward(sum_result, alloc);
 
-    const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
-    const expected_grad_t2 = &[_]T{ 4, 6 };
-
-    try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
-    try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+    const expected_grad = &[_]T{ 1, 1, 1, 1 };
+    try std.testing.expectEqualSlices(T, expected_grad, input.grad.?.data);
 }
 
-test "NDTensor/dot_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const T = f32;
-    const Tensor = NDTensor(T);
-    const shape = &[_]usize{3};
+// test "tensor/NDTensor index, add, div" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     const alloc = arena.allocator();
+//     defer arena.deinit();
+//     const shape = &[_]usize{ 2, 3 };
+//     const Tensor = NDTensor(f32);
+//
+//     // 1 2 3
+//     // 4 5 6
+//     var t1 = try Tensor.init(@constCast(&[_]f32{ 1, 2, 3, 4, 5, 6 }), shape, false, alloc);
+//
+//     // 1 2 3
+//     // 4 5 23
+//     try t1.set(&[_]usize{ 1, 2 }, -5);
+//     t1.print();
+//     // std.debug.print("{d}\n", .{t1.get(&[_]usize{ 1, 2 })});
+//     // std.debug.print("{d}\n", .{t1.indexToPos(5, alloc)});
+//
+//     const t2 = try Tensor.init(@constCast(&[_]f32{ 10, 20, 30, 40, 50, 60 }), shape, false, alloc);
+//     t2.print();
+//     const t3 = try t1.add(t2, alloc);
+//     t3.print();
+//
+//     std.debug.print("{d}\n", .{t3.data.data});
+//     t3.print();
+//     std.debug.print("{?any}\n", .{t3.children});
+//
+//     var t4 = try t3.div(t3, alloc);
+//     t4.print();
+// }
+//
+// test "tensor/GraphManager/addback" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     const alloc = arena.allocator();
+//     defer arena.deinit();
+//     const shape = &[_]usize{1};
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//
+//     var t1 = try Tensor.init(@constCast(&[_]T{2}), shape, true, alloc);
+//     const t2 = try Tensor.init(@constCast(&[_]T{3}), shape, true, alloc);
+//     // t3 = t1 + t2;
+//     // dt3/dt1 = 1, dt3/dt2 = 1
+//     var t3 = try t1.add(t2, alloc);
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     t3.grad = try Tensor.dtype.init(@constCast(&[_]T{1}), shape, alloc);
+//     try gm.backward(t3, alloc);
+//     try std.testing.expectEqualDeep(&[_]T{1.0}, t1.grad.?.data);
+//     try std.testing.expectEqualDeep(&[_]T{1.0}, t2.grad.?.data);
+// }
+//
+// test "tensor/GraphManager/mulback" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     const alloc = arena.allocator();
+//     defer arena.deinit();
+//     const shape = &[_]usize{1};
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//
+//     var t1 = try Tensor.init(@constCast(&[_]T{2}), shape, true, alloc);
+//     const t2 = try Tensor.init(@constCast(&[_]T{3}), shape, true, alloc);
+//     // t3 = t1 * t2;
+//     // dt3/dt1 = t2, dt3/dt2 = t1
+//     var t3 = try t1.mul(t2, alloc);
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     t3.grad = try Tensor.dtype.init(@constCast(&[_]T{1}), shape, alloc);
+//     try gm.backward(t3, alloc);
+//     try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
+//     try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
+// }
+//
+// test "tensor/GraphManager/moreback" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     const alloc = arena.allocator();
+//     defer arena.deinit();
+//     const shape = &[_]usize{2};
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//
+//     var w = try Tensor.init(@constCast(&[_]f32{ 3, 2 }), shape, true, alloc);
+//     const b = try Tensor.init(@constCast(&[_]f32{ 1, 1 }), shape, true, alloc);
+//     const x = try Tensor.init(@constCast(&[_]f32{ 4, 4 }), shape, true, alloc);
+//     // const y = try Tensor.init(@constCast(&[_]f32{12, 10}), true, alloc).reshape(shape);
+//     // h = w*x + b
+//     // dh/dw = x, dh/db = 1
+//     var temp = try w.mul(x, alloc);
+//     var h = try temp.add(b, alloc);
+//
+//     var backprop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     const backprop_alloc = backprop_arena.allocator();
+//     defer backprop_arena.deinit();
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     h.grad = try Tensor.dtype.init(@constCast(&[_]T{ 1, 1 }), shape, alloc);
+//     try gm.backward(h, backprop_alloc);
+//     if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
+//     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
+//     try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
+//
+//     // 2 x 1
+//     const shape2 = &[_]usize{ 2, 1 };
+//     w.grad.?.fill(0);
+//     b.grad.?.fill(0);
+//     x.grad.?.fill(0);
+//     _ = try w.reshape(shape2);
+//     _ = try b.reshape(shape2);
+//     _ = try x.reshape(shape2);
+//     // h = w*x + b
+//     // dh/dw = x, dh/db = 1
+//     temp = try w.mul(x, alloc);
+//     h = try temp.add(b, alloc);
+//
+//     var gm2 = Loss(Tensor).init(arena.allocator());
+//     defer gm2.deinit();
+//     h.grad.?.fill(1);
+//     try gm.backward(h, alloc);
+//     if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
+//     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
+//     try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
+//     h.print();
+// }
+//
+// test "NDTensor/div_backward" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const alloc = arena.allocator();
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//     const shape = &[_]usize{2};
+//
+//     var t1 = try Tensor.init(@constCast(&[_]T{ 4, 9 }), shape, true, alloc);
+//     const t2 = try Tensor.init(@constCast(&[_]T{ 2, 3 }), shape, true, alloc);
+//     var t3 = try t1.div(t2, alloc);
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     t3.grad = try Tensor.dtype.init(@constCast(&[_]T{ 1, 1 }), shape, alloc);
+//     try gm.backward(t3, alloc);
+//
+//     // Expected gradients for t1 and t2
+//     const expected_grad_t1 = &[_]T{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
+//     const expected_grad_t2 = &[_]T{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
+//
+//     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+//     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+// }
 
-    var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3 }), shape, true, alloc);
-    const t2 = try Tensor.init(@constCast(&[_]T{ 4, 5, 6 }), shape, true, alloc);
-    var t3 = try t1.dot(t2, alloc);
+// test "NDTensor/matmul_backward" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const alloc = arena.allocator();
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//     const shape = &[_]usize{ 2, 2 };
+//
+//     var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3, 4 }), shape, true, alloc);
+//     const t2 = try Tensor.init(@constCast(&[_]T{ 1, 0, 0, 1 }), shape, true, alloc);
+//     var t3 = try t1.matmul(t2, alloc);
+//     t1.acquire();
+//     t2.acquire();
+//     t3.acquire();
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     t3.grad.?.fill(1.0);
+//     try gm.backward(t3, alloc);
+//
+//     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
+//     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
+//
+//     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+//     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+// }
 
-    var gm = Loss(Tensor).init(arena.allocator());
-    defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(@constCast(&[_]T{1}), &[_]usize{1}, alloc);
-    try gm.backward(t3, alloc);
+// test "NDTensor/matvec_backward" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const alloc = arena.allocator();
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//     const shape_mat = &[_]usize{ 2, 2 };
+//     const shape_vec = &[_]usize{2};
+//
+//     // [1, 2] [1]
+//     // [3, 4] [1]
+//     // grad = [1, 1]'
+//     // dl/dA = grad * [1, 1] = [[2, 2], [2, 2]]
+//     // dl/dx = A' * grad = [4, 6]'
+//     var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3, 4 }), shape_mat, true, alloc);
+//     const t2 = try Tensor.init(@constCast(&[_]T{ 1, 1 }), shape_vec, true, alloc);
+//     var t3 = try t1.matvec(t2, alloc);
+//     t1.acquire();
+//     t2.acquire();
+//     t3.acquire();
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     t3.grad.?.fill(1.0);
+//     try gm.backward(t3, alloc);
+//     std.debug.print("t1: ", .{});
+//     t1.print();
+//     std.debug.print("t2: ", .{});
+//     t2.print();
+//     std.debug.print("t3: ", .{});
+//     t3.print();
+//
+//     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
+//     const expected_grad_t2 = &[_]T{ 4, 6 };
+//
+//     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+//     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+// }
 
-    const expected_grad_t1 = &[_]T{ 4, 5, 6 };
-    const expected_grad_t2 = &[_]T{ 1, 2, 3 };
-
-    try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
-    try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
-}
+// test "NDTensor/dot_backward" {
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const alloc = arena.allocator();
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//     const shape = &[_]usize{3};
+//
+//     var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3 }), shape, true, alloc);
+//     const t2 = try Tensor.init(@constCast(&[_]T{ 4, 5, 6 }), shape, true, alloc);
+//     var t3 = try t1.dot(t2, alloc);
+//
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//     t3.grad = try Tensor.dtype.init(@constCast(&[_]T{1}), &[_]usize{1}, alloc);
+//     try gm.backward(t3, alloc);
+//
+//     const expected_grad_t1 = &[_]T{ 4, 5, 6 };
+//     const expected_grad_t2 = &[_]T{ 1, 2, 3 };
+//
+//     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+//     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+// }
 // pub fn main() !void {
 //     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 //     const alloc = arena.allocator();
@@ -642,72 +1086,58 @@ test "NDTensor/dot_backward" {
 
 pub fn linear_regression_forward(T: type, W: *NDTensor(T), b: *NDTensor(T), X: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var Wx = try X.matvec(W, allocator);
-    std.debug.print("{d} {d} {d}\n", .{ X.data.shape, W.data.shape, Wx.data.shape });
     const y_pred = try Wx.add(b, allocator);
     return y_pred;
 }
 
-pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-    std.debug.print("{d} {d}\n", .{ y_pred.data.shape, y.data.shape });
-    var diff = try y_pred.sub(y, allocator);
-    var sq_diff = try diff.mul(diff, allocator);
-    // const loss = try sq_diff.mean(allocator);
-    // const loss = (try sq_diff.sum(allocator))._div();
-    const coef = try allocator.alloc(T, y.data.data.len);
-    @memset(coef, 1.0 / @as(T, @floatFromInt(y.data.data.len)));
-    const coef_tensor = try NDTensor(T).init(coef, null, true, allocator);
-    const loss = sq_diff.dot(coef_tensor, allocator);
-    return loss;
-}
-
-test "linear regression training" {
-    const T = f32;
-    const Tensor = NDTensor(T);
-    const X = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
-    const y = [_]f32{ 2.0, 4.0, 6.0, 8.0 }; // Assuming a simple y = 2x relationship
-
-    const shape_X = &[_]usize{ 4, 1 };
-    const shape_y = &[_]usize{ 4, 1 };
-    const shape_w = &[_]usize{1};
-    const shape_b = &[_]usize{1};
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const W = try Tensor.init(@constCast(&[_]T{0.0}), shape_w, true, alloc);
-    const b = try Tensor.init(@constCast(&[_]T{0.0}), shape_b, true, alloc);
-
-    const X_tensor = try Tensor.init(@constCast(&X), shape_X, false, alloc);
-    const y_tensor = try Tensor.init(@constCast(&y), shape_y, false, alloc);
-
-    const learning_rate: T = 0.01;
-    var gm = Loss(Tensor).init(arena.allocator());
-    defer gm.deinit();
-
-    for (0..1000) |epoch| {
-        for (0..y.len) |j| {
-            const Xj_tensor = try Tensor.init(@constCast(&[_]T{X[j]}), &[_]usize{ 1, 1 }, false, alloc);
-            const y_pred = try linear_regression_forward(T, W, b, Xj_tensor, alloc);
-
-            const loss = try mse_loss(T, y_pred, y_tensor, alloc);
-            @memset(loss.grad.?.data, 0.0);
-            try gm.backward(loss, alloc);
-
-            // update
-            for (0..W.data.data.len) |i| W.data.data[i] -= learning_rate * W.grad.?.data[i];
-            for (0..b.data.data.len) |i| b.data.data[i] -= learning_rate * b.grad.?.data[i];
-
-            if (epoch % 100 == 0) {
-                std.debug.print("Epoch {}, Loss: {}\n", .{ epoch, loss });
-            }
-        }
-    }
-
-    // Evaluation
-    const y_pred = try linear_regression_forward(T, W, b, X_tensor, alloc);
-    std.debug.print("Predictions:\n", .{});
-    y_pred.print();
-    std.debug.print("Actual:\n", .{});
-    y_tensor.print();
-}
+// test "linear regression training" {
+//     const T = f32;
+//     const Tensor = NDTensor(T);
+//     const X = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+//     const y = [_]f32{ 2.0, 4.0, 6.0, 8.0 }; // Assuming a simple y = 2x relationship
+//
+//     const shape_X = &[_]usize{ 4, 1 };
+//     const shape_y = &[_]usize{ 4, 1 };
+//     const shape_w = &[_]usize{1};
+//     const shape_b = &[_]usize{1};
+//
+//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//     defer arena.deinit();
+//     const alloc = arena.allocator();
+//
+//     const W = try Tensor.init(@constCast(&[_]T{0.0}), shape_w, true, alloc);
+//     const b = try Tensor.init(@constCast(&[_]T{0.0}), shape_b, true, alloc);
+//
+//     const X_tensor = try Tensor.init(@constCast(&X), shape_X, false, alloc);
+//     const y_tensor = try Tensor.init(@constCast(&y), shape_y, false, alloc);
+//
+//     const learning_rate: T = 0.01;
+//     var gm = Loss(Tensor).init(arena.allocator());
+//     defer gm.deinit();
+//
+//     for (0..1000) |epoch| {
+//         for (0..y.len) |j| {
+//             const Xj_tensor = try Tensor.init(@constCast(&[_]T{X[j]}), &[_]usize{ 1, 1 }, false, alloc);
+//             const y_pred = try linear_regression_forward(T, W, b, Xj_tensor, alloc);
+//
+//             const loss = try mse_loss(T, y_pred, y_tensor, alloc);
+//             @memset(loss.grad.?.data, 0.0);
+//             try gm.backward(loss, alloc);
+//
+//             // update
+//             for (0..W.data.data.len) |i| W.data.data[i] -= learning_rate * W.grad.?.data[i];
+//             for (0..b.data.data.len) |i| b.data.data[i] -= learning_rate * b.grad.?.data[i];
+//
+//             if (epoch % 100 == 0) {
+//                 std.debug.print("Epoch {}, Loss: {}\n", .{ epoch, loss });
+//             }
+//         }
+//     }
+//
+//     // Evaluation
+//     const y_pred = try linear_regression_forward(T, W, b, X_tensor, alloc);
+//     std.debug.print("Predictions:\n", .{});
+//     y_pred.print();
+//     std.debug.print("Actual:\n", .{});
+//     y_tensor.print();
+// }
