@@ -50,6 +50,7 @@ pub fn NDArray(comptime T: type) type {
                 .data = owned_slice,
                 .shape = owned_shape,
             };
+            try result.reshape(owned_shape); // shape check
             return result;
         }
 
