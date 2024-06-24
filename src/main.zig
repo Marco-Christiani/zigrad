@@ -11,27 +11,7 @@ pub fn main() !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
-
-    try stdout.print("Running...\n", .{});
-    const shape = &[_]u32{3};
-    const Tensor = NDTensor(f32, shape);
-    const t1 = comptime Tensor.init([_]f32{ 1, 2, 3 });
-    const t2 = comptime Tensor.init([_]f32{ 1, 1, 1 });
-    const t3 = comptime Tensor.init([_]f32{ 0, 0, 0 });
-
-    const GraphT = Graph(Tensor, 1);
-    const addOp = comptime Add(f32, shape);
-    const op1 = comptime addOp.init(&t1, &t2);
-    var output = op1.output;
-    const g = comptime &GraphT{
-        .operations = .{op1},
-    };
-    g.run();
-    t3.print();
-    output.?.print();
-
     try stdout.print("Done.\n", .{});
-
     try bw.flush(); // don't forget to flush!
 }
 

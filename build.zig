@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) !void {
         .name = "zigrad",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = .{ .path = tgt_file },
         .target = target,
         .optimize = optimize,
     });
@@ -30,6 +30,8 @@ pub fn build(b: *std.Build) !void {
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
+
+    exe.linkFramework("Accelerate");
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
