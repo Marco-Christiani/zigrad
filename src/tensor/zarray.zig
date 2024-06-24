@@ -1,5 +1,5 @@
-// TODO: support ND ops
-// TODO: original fn ptr design was superior imo
+// TODO:Scalar ops
+// TODO: support ND ops. finish broadcast integration
 const std = @import("std");
 const c = @cImport(@cInclude("Accelerate/Accelerate.h"));
 const root = @import("root");
@@ -21,18 +21,13 @@ pub fn NDArray(comptime T: type) type {
         data: []T,
 
         pub fn init(values: []const T, shape: ?[]const usize, allocator: std.mem.Allocator) !*Self {
-            const result = allocator.create(Self) catch {
-                std.debug.panic("NDArray allocation failed.", .{});
-            };
-            const owned_slice = allocator.dupe(T, values) catch {
-                std.debug.panic("NDArray allocation failed trying to own values slice.", .{});
-            };
+            const result = try allocator.create(Self);
 
             result.* = Self{
-                .data = owned_slice,
+                .data = try allocator.dupe(T, values),
                 .shape = try Shape.init(shape orelse &[_]usize{values.len}, allocator),
             };
-            if (result.shape.size() > result.data.len) return ZarrayError.InvalidShape;
+            if (result.shape.size() != result.data.len) return ZarrayError.InvalidShape;
             return result;
         }
 
@@ -57,25 +52,13 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn zerosLike(self: *const Self, allocator: std.mem.Allocator) !*Self {
             const result = try allocator.create(Self);
-            @memcpy(result.shape, self.shape);
-            result.data = allocator.alloc(T, self.shape.size());
+            result.* = .{
+                .data = try allocator.alloc(T, self.shape.size()),
+                .shape = try Shape.init(self.shape.shape, allocator),
+            };
             @memset(result.data, 0);
             return result;
         }
-
-        // pub fn initFill(val: T, shape: []const usize, allocator: std.mem.Allocator) ZarrayError!*Self {
-        //     if (shape.len > settings.max_dim) return ZarrayError.InvalidShape;
-        //     const size = blk: {
-        //         var size: usize = 1;
-        //         for (shape) |s| size *= s;
-        //         break :blk size;
-        //     };
-        //     const data: [size]T = undefined;
-        //     for (data) |*elem| {
-        //         elem.* = val;
-        //     }
-        //     return Self.init(data, shape, allocator);
-        // }
 
         pub fn fill(self: *Self, val: T) void {
             @memset(self.data, val);
@@ -170,11 +153,11 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise addition
         pub fn _add(self: *Self, other: *const Self) !*Self {
-            if (other.shape.len() == 1 and other.shape.get(0) == 1) { // scalar add
+            if (other.shape.len() == 1 and try other.shape.get(0) == 1) { // scalar add
                 for (0..self.data.len) |i| self.data[i] += other.data[0];
                 return self;
             }
-            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            if (!std.mem.eql(usize, self.shape.shape, other.shape.shape)) return ZarrayError.IncompatibleShapes;
             for (0..self.data.len) |i| self.data[i] += other.data[i];
             return self;
         }
@@ -189,66 +172,72 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise subtraction
         pub fn _sub(self: *Self, other: *const Self) !*Self {
-            if (other.shape.len() == 1 and other.shape.get(0) == 1) { // scalar sub
+            if (other.shape.len() == 1 and try other.shape.get(0) == 1) { // scalar sub
                 for (0..self.data.len) |i| self.data[i] -= other.data[0];
                 return self;
             }
-            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            if (!std.mem.eql(usize, self.shape.shape, other.shape.shape)) return ZarrayError.IncompatibleShapes;
             for (0..self.data.len) |i| self.data[i] -= other.data[i];
             return self;
         }
 
         /// Element-wise multiplication
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            if (other.shape.len() == 1 and other.shape.get(0) == 1) { // scalar multiplication
+            if (other.shape.len() == 1 and try other.shape.get(0) == 1) { // scalar multiplication
                 const values = try allocator.alloc(T, self.data.len);
                 for (0..values.len) |i| values[i] = self.data[i] * other.data[0];
-                return Self.init(values, self.shape, allocator);
+                return Self.init(values, self.shape.shape, allocator);
             }
-            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+
+            if (self.shape.len() == 1 and try self.shape.get(0) == 1) { // scalar multiplication
+                const values = try allocator.alloc(T, other.data.len);
+                for (0..values.len) |i| values[i] = other.data[i] * self.data[0];
+                return Self.init(values, other.shape.shape, allocator);
+            }
+            if (!std.mem.eql(usize, self.shape.shape, other.shape.shape)) return ZarrayError.IncompatibleShapes;
             const values = try allocator.alloc(T, self.data.len);
             for (0..values.len) |i| values[i] = self.data[i] * other.data[i];
-            return Self.init(values, self.shape, allocator);
+            return Self.init(values, self.shape.shape, allocator);
         }
 
         /// In-place element-wise multiplication
         pub fn _mul(self: *Self, other: *const Self) !*Self {
-            if (other.shape.len() == 1 and other.shape.get(0) == 1) { // scalar multiplication
+            if (other.shape.len() == 1 and try other.shape.get(0) == 1) { // scalar multiplication
                 for (0..self.data.len) |i| self.data[i] *= other.data[0];
                 return self;
             }
-            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            if (!std.mem.eql(usize, self.shape.shape, other.shape.shape)) return ZarrayError.IncompatibleShapes;
             for (0..self.data.len) |i| self.data[i] *= other.data[i];
             return self;
         }
 
         /// Element-wise division
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            if (other.shape.len() == 1 and other.shape.get(0) == 1) { // scalar div
+            if (other.shape.len() == 1 and try other.shape.get(0) == 1) { // scalar div
                 const values = try allocator.alloc(T, self.data.len);
                 for (0..values.len) |i| values[i] = self.data[i] / other.data[0];
-                return Self.init(values, self.shape, allocator);
+                return Self.init(values, self.shape.shape, allocator);
             }
-            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            if (!std.mem.eql(usize, self.shape.shape, other.shape.shape)) return ZarrayError.IncompatibleShapes;
             const values = try allocator.alloc(T, self.data.len);
             for (0..values.len) |i| values[i] = self.data[i] / other.data[i];
-            return Self.init(values, self.shape, allocator);
+            return Self.init(values, self.shape.shape, allocator);
         }
 
         /// In-place element-wise division
         pub fn _div(self: *Self, other: *const Self) !*Self {
-            if (other.shape.len() == 1 and other.shape.get(0) == 1) { // scalar div
+            if (other.shape.len() == 1 and try other.shape.get(0) == 1) { // scalar div
                 for (0..self.data.len) |i| self.data[i] /= other.data[0];
                 return self;
             }
-            if (!std.mem.eql(usize, self.shape, other.shape)) return ZarrayError.IncompatibleShapes;
+            if (!std.mem.eql(usize, self.shape.shape, other.shape.shape)) return ZarrayError.IncompatibleShapes;
             for (0..self.data.len) |i| self.data[i] /= other.data[i];
             return self;
         }
 
         /// In-place element-wise division
         pub fn sum(self: *Self, allocator: std.mem.Allocator) !*Self {
-            const s = 0;
+            var s: T = 0;
             for (self.data) |e| s += e;
             return Self.init(&[_]T{s}, null, allocator);
         }
@@ -300,8 +289,8 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn outer(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             if (self.shape.len() != 1 or other.shape.len() != 1) std.debug.panic("Outer product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
-            const M: usize = self.shape.get(0);
-            const N: usize = other.shape.get(0);
+            const M: usize = try self.shape.get(0);
+            const N: usize = try other.shape.get(0);
             const output: []T = try allocator.alignedAlloc(T, null, M * N);
             @memset(output, 0);
             errdefer allocator.free(output);
@@ -311,7 +300,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn matvec(self: *const Self, other: *const Self, trans_a: bool, allocator: std.mem.Allocator) !*Self {
             // TODO: shape checks for matvec
-            const output_size = if (trans_a) try self.shape.get(0) else try self.shape.get(1);
+            const output_size = if (trans_a) try self.shape.get(1) else try self.shape.get(0);
             const output: []T = try allocator.alignedAlloc(T, null, output_size);
             errdefer allocator.free(output);
             blas_matvec(T, self.data, other.data, output, try self.shape.get(0), try self.shape.get(1), 1, 0, trans_a);
@@ -367,7 +356,7 @@ pub fn blas_outer(T: type, x: []T, y: []T, A: []T, alpha: T) void {
     }
 }
 
-const Shape = struct {
+pub const Shape = struct {
     const Self = @This();
     shape: []usize,
     alloc: std.mem.Allocator,
