@@ -1,18 +1,8 @@
 const std = @import("std");
-const tensor = @import("tensor.zig");
-const NDTensor = tensor.NDTensor;
-const Graph = tensor.Graph;
-const Add = tensor.Add;
-// const zigrad_settings = .{ .gradEnabled = true };
+const layer = @import("tensor/layer.zig");
 
 pub fn main() !void {
-    std.debug.print("This is a debug message.", .{});
-
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-    try stdout.print("Done.\n", .{});
-    try bw.flush(); // don't forget to flush!
+    try layer.main();
 }
 
 // const zigrad = @import("grad.zig");
