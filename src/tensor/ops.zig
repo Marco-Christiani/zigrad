@@ -1,10 +1,14 @@
 const std = @import("std");
 const NDTensor = @import("tensor.zig").NDTensor;
+const NDArray = @import("zarray.zig").NDArray;
 const Loss = @import("tensor.zig").Loss;
 
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var diff = (try y_pred.sub(y, allocator)).setLabel("diff");
-    const sq_diff = (try diff.mul(diff, allocator)).setLabel("sq_diff");
+    const diff2 = try NDTensor(T).fromZarray(diff.data, true, diff.data.shape.*, allocator);
+    diff2.label = "diff2";
+    // const diff2 = (try y_pred.sub(y, allocator)).setLabel("diff2");
+    const sq_diff = (try diff.mul(diff2, allocator)).setLabel("sq_diff");
     const sum_sq_diff = (try sq_diff.sum(allocator)).setLabel("sum_sq_diff");
     const coef = @as(T, @floatFromInt(y.data.data.len));
     const coef_tensor = try NDTensor(T).init(&[_]T{coef}, null, true, allocator);
@@ -55,4 +59,27 @@ test "mse_loss" {
     loss.acquire();
     try gm.backward(loss, alloc);
     loss.print();
+}
+
+pub fn relu(comptime T: type, x: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    const result = try NDTensor(T).init(try allocator.alloc(T, x.data.data.len), x.data.shape.shape, true, allocator);
+
+    for (x.data.data, 0..) |value, i| {
+        result.data.data[i] = if (value > 0) value else 0;
+    }
+
+    result._backward_ctx = x.data; // dupe this
+    result._backward = struct {
+        fn backward(self: *NDTensor(T), grad: ?*NDArray(T), alloc: std.mem.Allocator) void {
+            _ = alloc;
+            const ctx = self._backward_ctx.?;
+            if (grad) |g| {
+                for (ctx.data, 0..) |value, i| {
+                    self.grad.?.data[i] += if (value > 0) g.data[i] else 0;
+                }
+            }
+        }
+    }.backward;
+
+    return result;
 }
