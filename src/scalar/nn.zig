@@ -82,10 +82,10 @@ test "nn/layer/init-deinit" {
 test "nn/layer/forward" {
     const alloc = std.testing.allocator;
     var layer = try Layer.init(&alloc, 2, 2, 44, ACTIVATION.TANH);
-    var inputs: []*Value = n.toValues(&alloc, &[_]f64{ 1, 2 });
-    var outputs = layer.forward(&alloc, inputs) catch unreachable;
+    const inputs: []*Value = n.toValues(&alloc, &[_]f64{ 1, 2 });
+    const outputs = layer.forward(&alloc, inputs) catch unreachable;
 
-    var targets: []*Value = n.toValues(&alloc, &[_]f64{ 1.0, 2.0 });
+    const targets: []*Value = n.toValues(&alloc, &[_]f64{ 1.0, 2.0 });
     std.debug.print("outputs.len={} targets.len={}\n", .{ outputs.len, targets.len });
     const loss = try loss_mse(&alloc, outputs, targets);
     std.debug.print("loss: {}\n", .{loss.value});
@@ -103,10 +103,10 @@ test "nn/layer/forward" {
 test "nn/layer/backward" {
     const alloc = std.testing.allocator;
     var layer = try Layer.init(&alloc, 2, 2, 44, ACTIVATION.TANH);
-    var inputs: []*Value = n.toValues(&alloc, &[_]f64{ 1, 2 });
-    var outputs = layer.forward(&alloc, inputs) catch unreachable;
+    const inputs: []*Value = n.toValues(&alloc, &[_]f64{ 1, 2 });
+    const outputs = layer.forward(&alloc, inputs) catch unreachable;
 
-    var targets: []*Value = n.toValues(&alloc, &[_]f64{ 1.0, 2.0 });
+    const targets: []*Value = n.toValues(&alloc, &[_]f64{ 1.0, 2.0 });
     std.debug.print("outputs.len={} targets.len={}\n", .{ outputs.len, targets.len });
     const loss = try loss_mse(&alloc, outputs, targets);
     std.debug.print("loss: {}\n", .{loss.value});
