@@ -21,8 +21,8 @@ pub fn NDTensor(comptime T: type) type {
         grad: ?*dtype = null,
         requires_grad: bool,
         acquired: bool = false,
-        _backward: ?*const fn (*Self, ?*dtype, std.mem.Allocator) void = null,
-        _backward_ctx: ?*dtype = null,
+        _backward: ?*const fn (*Self, std.mem.Allocator) anyerror!void = null,
+        _backward_ctx: ?*anyopaque = null,
 
         pub fn init(values: []const T, shape: ?[]const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
             const result = try allocator.create(Self);
@@ -44,6 +44,8 @@ pub fn NDTensor(comptime T: type) type {
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
             self.data.deinit(allocator);
             if (self.grad) |g| g.deinit(allocator);
+            // TODO: verify this is heap first, possibly by checking alignment, not sure.
+            // if (self.label) |l| allocator.free(l);
             allocator.destroy(self);
         }
 
@@ -292,10 +294,15 @@ pub fn NDTensor(comptime T: type) type {
             return result;
         }
 
+        pub fn setBackward(self: *Self, backward_fn: *const fn (*Self, std.mem.Allocator) anyerror!void, ctx: ?*anyopaque) void {
+            self._backward = backward_fn;
+            self._backward_ctx = ctx;
+        }
+
         pub fn backward(self: *Self, allocator: std.mem.Allocator) !void {
             if (!self.requires_grad) return;
             if (self._backward) |f| {
-                f(@constCast(self), self._backward_ctx, allocator);
+                try f(@constCast(self), allocator);
                 return;
             }
             if (self.op) |op| {
@@ -438,6 +445,7 @@ pub fn NDTensor(comptime T: type) type {
 pub fn Loss(comptime T: type) type {
     return struct {
         const Self = @This();
+        allocator: std.mem.Allocator,
         sorted_nodes: std.ArrayList(*const T),
         visited_nodes: std.AutoHashMap(*const T, void),
         eager_teardown: bool = false,
@@ -445,13 +453,22 @@ pub fn Loss(comptime T: type) type {
         grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
         grad_clip_delta: f32 = settings.grad_clip_delta,
 
-        pub fn init(alloc: std.mem.Allocator) *Self {
-            const self = alloc.create(Self) catch unreachable;
-            self.* = Self{
-                .sorted_nodes = std.ArrayList(*const T).init(alloc),
-                .visited_nodes = std.AutoHashMap(*const T, void).init(alloc),
+        pub const LossConfig = struct {
+            eager_teardown: bool = false,
+            grad_clip_enabled: bool = settings.grad_clip_enabled,
+            grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
+            grad_clip_delta: f32 = settings.grad_clip_delta,
+        };
+
+        pub fn init(allocator: std.mem.Allocator, opts: LossConfig) Self {
+            return Self{
+                .allocator = allocator,
+                .sorted_nodes = std.ArrayList(*const T).init(allocator),
+                .visited_nodes = std.AutoHashMap(*const T, void).init(allocator),
+                .grad_clip_enabled = opts.grad_clip_enabled,
+                .grad_clip_max_norm = opts.grad_clip_max_norm,
+                .grad_clip_delta = opts.grad_clip_delta,
             };
-            return self;
         }
 
         pub fn deinit(self: *Self) void {

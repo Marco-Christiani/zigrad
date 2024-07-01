@@ -34,6 +34,12 @@ pub fn Model(comptime T: type) type {
             for (self.layers.items, 0..) |layer, i| {
                 std.debug.print("Layer {}: Input shape: {any}\n", .{ i, output.data.shape.shape });
                 output = try layer.forward(output, self.allocator);
+                output.label = output.label orelse try std.fmt.allocPrint(self.allocator, "out-layer-{}", .{i + 1});
+                // output.label = output.label orelse blk: {
+                //     var buf: [16]u8 = undefined;
+                //     const label = try std.fmt.bufPrint(&buf, "layer-{}", .{i});
+                //     break :blk label;
+                // };
             }
             return output;
         }
@@ -41,9 +47,11 @@ pub fn Model(comptime T: type) type {
         pub fn getParameters(self: *Self) []*NDTensor(T) {
             var params = std.ArrayList(*NDTensor(T)).init(self.allocator);
             for (self.layers.items) |layer| {
-                const layer_params = layer.getParameters();
-                for (layer_params) |p| params.append(@constCast(p)) catch unreachable;
-                // params.appendSlice(layer_params) catch unreachable;
+                if (layer.getParameters()) |layer_params| {
+                    for (layer_params) |p| {
+                        params.append(@constCast(p)) catch unreachable;
+                    }
+                }
             }
             return params.toOwnedSlice() catch unreachable;
         }
