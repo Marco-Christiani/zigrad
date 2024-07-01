@@ -73,6 +73,10 @@ pub fn printD2(
                     else => "?",
                 };
                 try writer.print(": {s}\n", .{symbol});
+            } else if (@hasField(S, "_backward")) {
+                if (node._backward) |backward| {
+                    try writer.print(": {s}\n", .{@typeName(@TypeOf(backward))});
+                }
             } else {
                 try writer.print("\n", .{});
             }
