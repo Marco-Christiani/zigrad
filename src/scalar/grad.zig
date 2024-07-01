@@ -107,28 +107,30 @@ pub const Value = struct {
         std.debug.print("\n", .{});
     }
 
-    pub fn print_arrows(self: *const Self) void {
+    pub fn renderD2(self: Self, writer: anytype) void {
         if (self.children) |children| {
             for (children) |elem| {
                 if (!elem.detached) {
-                    std.debug.print("{?s}<-{?s}", .{ self.label, elem.label });
                     const symbol = switch (self.op.?) {
-                        Op.ADD => ": +",
-                        Op.SUB => ": -",
-                        Op.MUL => ": x",
-                        Op.DIV => ": /",
-                        Op.POW => ": ^",
-                        Op.TANH => ": tanh",
+                        Op.ADD => "+",
+                        Op.SUB => "-",
+                        Op.MUL => "x",
+                        Op.DIV => "/",
+                        Op.POW => "^",
+                        Op.TANH => "tanh",
                     };
-                    std.debug.print("{?s}\n", .{symbol});
+                    writer.print("{?s}<-{?s}: {s}\n", .{ self.label, elem.label, symbol }) catch @panic("writer print failed");
                 }
             }
             for (children) |elem| {
-                elem.print_arrows();
+                elem.renderD2(writer);
             }
         } else {
-            std.debug.print("{?s}\n", .{self.label});
+            writer.print("{?s}\n", .{self.label}) catch @panic("wrter print failed");
         }
+    }
+    pub fn print_arrows(self: *const Self) void {
+        self.renderD2(std.io.getStdOut().writer());
     }
 
     pub fn backward(self: *Self) !void {
@@ -195,7 +197,7 @@ pub fn add(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value + v2.value, "add-") catch {
+    var out = Value.init(allocator, v1.value + v2.value, null) catch {
         @panic("Failed to allocate children for add()");
     };
 
@@ -224,7 +226,7 @@ pub fn sub(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value - v2.value, "sub-") catch {
+    var out = Value.init(allocator, v1.value - v2.value, null) catch {
         @panic("Failed to allocate intermediate for sub()");
     };
 
@@ -252,7 +254,7 @@ pub fn mul(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value * v2.value, "mul-") catch {
+    var out = Value.init(allocator, v1.value * v2.value, null) catch {
         @panic("Failed to allocate intermediate for mul()");
     };
 
@@ -281,7 +283,7 @@ pub fn div(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, v1.value / v2.value, "div-") catch {
+    var out = Value.init(allocator, v1.value / v2.value, null) catch {
         @panic("Failed to allocate intermediate for div()");
     };
 
@@ -312,7 +314,7 @@ pub fn pow(allocator: *const std.mem.Allocator, v1: *Value, v2: *Value) *Value {
     children[0] = v1;
     children[1] = v2;
 
-    var out = Value.init(allocator, std.math.pow(f64, v1.value, v2.value), "pow-") catch {
+    var out = Value.init(allocator, std.math.pow(f64, v1.value, v2.value), null) catch {
         @panic("Failed to allocate intermediate for pow()");
     };
 
@@ -342,7 +344,7 @@ pub fn pow_backward(v: *Value) void {
 pub fn tanh(allocator: *const std.mem.Allocator, v: *Value) *Value {
     const x = v.value;
     const val = (std.math.exp(2 * x) - 1) / (std.math.exp(2 * x) + 1);
-    var out = Value.init(allocator, val, "tanh-") catch {
+    var out = Value.init(allocator, val, null) catch {
         @panic("Failed to allocate intermediate for tanh()");
     };
 
@@ -401,17 +403,18 @@ pub const Neuron = struct {
     b: *Value,
 };
 
-pub const EpochCallback = fn (value: *const Value, epoch_i: usize) anyerror!void;
+pub const BatchCallback = fn (value: *const Value, epoch_i: usize) anyerror!void;
 
-pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback: ?EpochCallback) !Neuron {
+pub fn linearModel(allocator: *const std.mem.Allocator, comptime batch_callback: ?BatchCallback) !Neuron {
     const data = @embedFile("data.csv");
     std.debug.print("{s}\n", .{data[0..16]});
+    const N = 10;
 
     const lr: f64 = 1e-2;
-    const batchsize = 50;
-    const n_epochs = 1;
-    var wv = try Value.init(allocator, 0.1, "w");
-    var bv = try Value.init(allocator, 0.0, "b");
+    const batchsize = 10;
+    const n_epochs = 5;
+    var wv = try Value.init(allocator, 0.1, null);
+    var bv = try Value.init(allocator, 0.0, null);
     var loss = try Value.init(allocator, 0.0, "l"); // placeholder
     defer loss.deinit(); // deallocate last result
     for (0..n_epochs) |e| {
@@ -423,9 +426,12 @@ pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback:
         var data_iter = std.mem.tokenizeScalar(u8, data, '\n');
         var i: usize = 0;
 
-        loss.deinit(); // Deallocate prev epoch loss
+        // loss.deinit(); // Deallocate prev epoch loss
 
+        var steps: usize = 0;
         while (data_iter.next()) |line| : (i += 1) {
+            if (steps >= N) break; // HACK: mocks smaller dataset size
+            steps += 1;
             var row_iter = std.mem.tokenizeScalar(u8, line, ',');
             const x = try std.fmt.parseFloat(f64, row_iter.next().?);
             const y = try std.fmt.parseFloat(f64, row_iter.next().?);
@@ -444,8 +450,14 @@ pub fn linearModel(allocator: *const std.mem.Allocator, comptime epoch_callback:
                 bv.value -= lr * bv.grad;
                 std.log.warn("w={d:.3} b={d:.3} wgrad={d:.3} bgrad={d:.3}", .{ wv.value, bv.value, wv.grad, bv.grad });
                 // TODO: Lazy, fix epoch callback scope stuff
-                if (epoch_callback != null) {
-                    try epoch_callback.?(loss, e);
+                if (batch_callback != null) {
+                    wv.label = try std.fmt.allocPrint(allocator.*, "w-e{d}", .{e});
+                    bv.label = try std.fmt.allocPrint(allocator.*, "b-e{d}", .{e});
+                    try batch_callback.?(loss, e);
+                    allocator.free(wv.label.?);
+                    allocator.free(bv.label.?);
+                    wv.label = null;
+                    bv.label = null;
                 }
 
                 loss.zero_grad();
@@ -530,6 +542,7 @@ pub fn serializeValueToJson(allocator: std.mem.Allocator, value: *const Value) !
     try jsonObj.put("label", std.json.Value{ .string = value.label orelse "" });
     try jsonObj.put("value", std.json.Value{ .float = value.value });
     try jsonObj.put("grad", std.json.Value{ .float = value.grad });
+    try jsonObj.put("op", std.json.Value{ .string = if (value.op) |op| @tagName(op) else "" });
 
     // Serialize children
     if (value.children) |children| {
@@ -586,6 +599,10 @@ test "test graph" {
     const f = try Value.init(allocator, -2.0, "f");
     var L = mul(allocator, d, f).setLabel("L");
     L.print_arrows();
+    var json = try serializeValueToJson(allocator.*, L);
+    defer json.object.deinit();
+    std.debug.print("json:\n", .{});
+    try std.json.stringify(json, .{}, std.io.getStdOut().writer());
 
     try std.testing.expectEqual(e.value, a.value * b.value);
     try std.testing.expectEqual(d.value, (a.value * b.value) + c.value);
