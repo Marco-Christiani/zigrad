@@ -1,50 +1,37 @@
 const std = @import("std");
+const scalar = @import("scalar/grad.zig");
+const scalarnn = @import("scalar/nn.zig");
 const layer = @import("tensor/layer.zig");
 
 pub fn main() !void {
+    // try runScalar();
     try layer.main();
 }
 
-// const zigrad = @import("grad.zig");
-// const nn = @import("nn.zig");
+fn runScalar() !void {
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
+    // try scalarnn.trainLayer(&std.heap.page_allocator);
+    // try scalarnn.trainLayer(&std.heap.c_allocator);
+    _ = try scalar.linearModel(&std.heap.page_allocator, epoch_callback);
+}
 
-// pub fn main() !void {
-//     std.debug.print("This is a debug message.", .{});
+fn epoch_callback(value: *const scalar.Value, epoch_i: usize) anyerror!void {
+    const allocator = std.heap.page_allocator;
+    std.fs.cwd().makeDir("outputs-2") catch |err| switch (err) {
+        error.PathAlreadyExists => std.debug.print("output/ already exists\n", .{}),
+        else => |e| return e,
+    };
+    const filename = try std.fmt.allocPrint(allocator, "outputs-2/graph_epoch_{}.json", .{epoch_i});
+    defer allocator.free(filename);
 
-//     const stdout_file = std.io.getStdOut().writer();
-//     var bw = std.io.bufferedWriter(stdout_file);
-//     const stdout = bw.writer();
+    const file = try std.fs.cwd().createFile(filename, .{});
+    defer file.close();
+    const graphJson = try scalar.serializeValueToJson(allocator, value);
+    try std.json.stringify(graphJson, .{}, file.writer());
 
-//     try stdout.print("Running...\n", .{});
-//     // _ = try zigrad.linearModel(&std.heap.page_allocator, epoch_callback);
-//     // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     // const allocator = gpa.allocator();
-//     // try nn.trainLayer(&std.heap.page_allocator);
-//     try nn.trainLayer(&std.heap.c_allocator);
-//     try stdout.print("Done.\n", .{});
-
-//     try bw.flush(); // don't forget to flush!
-// }
-
-// fn epoch_callback(value: *const zigrad.Value, epoch_i: usize) anyerror!void {
-//     var allocator = std.heap.page_allocator;
-//     const graphJson = try zigrad.serializeValueToJson(allocator, value);
-//     const filename = try std.fmt.allocPrint(allocator, "outputs/graph_epoch_{}.json", .{epoch_i});
-//     defer allocator.free(filename);
-//     std.fs.cwd().makeDir("outputs") catch |err| switch (err) {
-//         error.PathAlreadyExists => std.debug.print("output/ already exists\n", .{}),
-//         else => |e| return e,
-//     };
-
-//     const file = try std.fs.cwd().createFile(filename, .{});
-//     defer file.close();
-//     const fileWriter = file.writer();
-//     try std.json.stringify(graphJson, .{}, fileWriter);
-// }
-
-// test "simple test" {
-//     var list = std.ArrayList(i32).init(std.testing.allocator);
-//     defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-//     try list.append(42);
-//     try std.testing.expectEqual(@as(i32, 42), list.pop());
-// }
+    const d2filename = try std.fmt.allocPrint(allocator, "outputs-2/graph_epoch_{}.d2", .{epoch_i});
+    const d2file = try std.fs.cwd().createFile(d2filename, .{});
+    defer d2file.close();
+    value.renderD2(d2file.writer());
+}

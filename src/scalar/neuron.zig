@@ -111,7 +111,7 @@ test "neuron/5->1" {
     var neuron = try Neuron.init(&allocator, input_size, 42, ACTIVATION.NONE);
 
     // 1D array of Values, 1 input of dim 5
-    var inputs: []*Value = toValues(&allocator, &[input_size]f64{ 1, 2, 3, 4, 5 });
+    const inputs: []*Value = toValues(&allocator, &[input_size]f64{ 1, 2, 3, 4, 5 });
     for (inputs) |i| {
         _ = i.setLabel("input-");
     }
@@ -144,7 +144,7 @@ test "neuron/3x5->1 xEpochs" {
     const epochs = 10;
 
     var neuron = try Neuron.init(&allocator, input_size, 42, ACTIVATION.NONE);
-    var allInputs = [_][input_size]f64{
+    const allInputs = [_][input_size]f64{
         [input_size]f64{ 1, 2, 3, 4, 5 },
         [input_size]f64{ 1, 2, 3, 4, 5 },
         [input_size]f64{ 1, 2, 3, 4, 5 },
@@ -156,7 +156,7 @@ test "neuron/3x5->1 xEpochs" {
     }
     for (0..epochs) |_| {
         for (allInputs, allTargets, 0..) |currInput, currTarget, inputI| {
-            var inputs: []*Value = toValues(&allocator, &currInput);
+            const inputs: []*Value = toValues(&allocator, &currInput);
             var targets = [_]*Value{try Value.init(&allocator, currTarget, "target-")};
             const output = try neuron.forward(&allocator, inputs);
             var preds = [_]*Value{output};
