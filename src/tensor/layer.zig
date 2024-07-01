@@ -1,8 +1,93 @@
 const std = @import("std");
-const NDTensor = @import("tensor.zig").NDTensor;
-const Loss = @import("tensor.zig").Loss;
-const SGD = @import("tensor.zig").SGD;
+const conv_utils = @import("conv_utils.zig");
 const ops = @import("ops.zig");
+const Loss = @import("tensor.zig").Loss;
+const NDTensor = @import("tensor.zig").NDTensor;
+const NDArray = @import("zarray.zig").NDArray;
+const Shape = @import("zarray.zig").Shape;
+const SGD = @import("tensor.zig").SGD;
+const settings = @import("zigrad").settings;
+
+pub fn Layer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        vtable: *const VTable,
+        ptr: *anyopaque,
+
+        pub const VTable = struct {
+            forward: *const fn (ctx: *anyopaque, input: *NDTensor(T), allocator: std.mem.Allocator) anyerror!*NDTensor(T),
+            backward: *const fn (ctx: *anyopaque, grad_output: *NDTensor(T), allocator: std.mem.Allocator) anyerror!void,
+            getParameters: *const fn (ctx: *anyopaque) []*const NDTensor(T),
+            zeroGrad: *const fn (ctx: *anyopaque) void,
+            deinit: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) void,
+        };
+
+        pub fn init(pointer: anytype) Self {
+            const Ptr = @TypeOf(pointer);
+
+            const gen = struct {
+                fn forwardFn(ctx: *anyopaque, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+                    const self: Ptr = @ptrCast(@alignCast(ctx));
+                    return self.forward(input, allocator);
+                }
+
+                fn backwardFn(ctx: *anyopaque, grad_output: *NDTensor(T), allocator: std.mem.Allocator) !void {
+                    const self: Ptr = @ptrCast(@alignCast(ctx));
+                    return self.backward(grad_output, allocator);
+                }
+
+                fn getParametersFn(ctx: *anyopaque) []*const NDTensor(T) {
+                    const self: Ptr = @ptrCast(@alignCast(ctx));
+                    return self.getParameters();
+                }
+
+                fn zeroGradFn(ctx: *anyopaque) void {
+                    const self: Ptr = @ptrCast(@alignCast(ctx));
+                    self.zeroGrad();
+                }
+
+                fn deinitFn(ctx: *anyopaque, allocator: std.mem.Allocator) void {
+                    const self: Ptr = @ptrCast(@alignCast(ctx));
+                    self.deinit(allocator);
+                }
+
+                const vtable = VTable{
+                    .forward = forwardFn,
+                    .backward = backwardFn,
+                    .getParameters = getParametersFn,
+                    .zeroGrad = zeroGradFn,
+                    .deinit = deinitFn,
+                };
+            };
+
+            return .{
+                .vtable = &gen.vtable,
+                .ptr = pointer,
+            };
+        }
+
+        pub fn forward(self: Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+            return self.vtable.forward(self.ptr, input, allocator);
+        }
+
+        pub fn backward(self: Self, grad_output: *NDTensor(T), allocator: std.mem.Allocator) !void {
+            return self.vtable.backward(self.ptr, grad_output, allocator);
+        }
+
+        pub fn getParameters(self: Self) []*const NDTensor(T) {
+            return self.vtable.getParameters(self.ptr);
+        }
+
+        pub fn zeroGrad(self: Self) void {
+            self.vtable.zeroGrad(self.ptr);
+        }
+
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+            self.vtable.deinit(self.ptr, allocator);
+        }
+    };
+}
 
 pub fn LinearLayer(comptime T: type) type {
     return struct {
@@ -34,8 +119,18 @@ pub fn LinearLayer(comptime T: type) type {
         }
 
         pub fn forward(self: *const Self, input: *Tensor) !*Tensor {
-            const result = (try self.weights.matmul(input, self.allocator)).setLabel("fwd1w");
+            const result = (try self.weights.matmul(input, self.allocator, .{})).setLabel("fwd1w");
             return (try self.bias.add(result, self.allocator)).setLabel("fwd1b");
+        }
+        pub fn backward(self: *Self, grad_output: *NDTensor(T), allocator: std.mem.Allocator) !void {
+            // TODO: implement backward
+            _ = self;
+            _ = grad_output;
+            _ = allocator;
+        }
+
+        pub fn getParameters(self: *Self) []*const NDTensor(T) {
+            return &[_]*NDTensor(T){ self.weights, self.bias };
         }
 
         pub fn zeroGrad(self: *const Self) void {
@@ -50,7 +145,313 @@ pub fn LinearLayer(comptime T: type) type {
             self.bias.deinit(self.allocator);
             self.allocator.destroy(self);
         }
+
+        pub fn asLayer(self: *Self) Layer(T) {
+            return Layer(T).init(self);
+        }
     };
+}
+
+pub fn Conv2DLayer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        weights: *NDTensor(T),
+        bias: *NDTensor(T),
+        allocator: std.mem.Allocator,
+        input: ?*NDTensor(T),
+        input_shape: ?[]usize,
+
+        pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, stride: usize, padding: usize) !*Self {
+            const self = try allocator.create(Self);
+            const weights_shape = &[_]usize{ out_channels, in_channels * kernel_size * kernel_size };
+            const bias_shape = &[_]usize{out_channels};
+
+            self.* = .{
+                .in_channels = in_channels,
+                .out_channels = out_channels,
+                .kernel_size = kernel_size,
+                .stride = stride,
+                .padding = padding,
+                .weights = (try NDTensor(T).init(try allocator.alloc(T, out_channels * in_channels * kernel_size * kernel_size), weights_shape, true, allocator)).setLabel("conv_weights"),
+                .bias = (try NDTensor(T).init(try allocator.alloc(T, out_channels), bias_shape, true, allocator)).setLabel("conv_bias"),
+                .allocator = allocator,
+                .input = null,
+                .input_shape = null,
+            };
+
+            self.weights.acquire();
+            self.bias.acquire();
+            // Initialize weights and biases (you might want to use a better initialization strategy)
+            self.weights.fill(0.01);
+            self.bias.fill(0);
+
+            return self;
+        }
+        pub fn forward(self: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+            if (input.data.shape.shape.len < 4) {
+                std.debug.print("Invalid input shape: expected 4 dimensions, got {}\n", .{input.data.shape.shape.len});
+                return error.InvalidInputShape;
+            }
+
+            const batch_size = input.data.shape.shape[0];
+            const in_channels = input.data.shape.shape[1];
+            const in_height = input.data.shape.shape[2];
+            const in_width = input.data.shape.shape[3];
+
+            if (in_channels != self.in_channels) {
+                std.debug.print("Channel mismatch: expected {}, got {}\n", .{ self.in_channels, in_channels });
+                return error.ChannelMismatch;
+            }
+
+            const out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1;
+            const out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1;
+
+            // Store input shape for backward pass
+            self.input_shape = try allocator.dupe(usize, input.data.shape.shape);
+
+            // Perform im2col
+            const col = try conv_utils.im2col(T, input.data, self.kernel_size, self.stride, self.padding, allocator);
+
+            // Reshape weights
+            const weights_reshaped = try self.weights.reshape(&[_]usize{ self.out_channels, self.in_channels * self.kernel_size * self.kernel_size });
+
+            // Perform matrix multiplication
+            const output_matmul = try weights_reshaped.data.matmul(col, false, false, allocator);
+
+            // Reshape output to maintain 4D shape
+            const output_shape = &[_]usize{ batch_size, self.out_channels, out_height, out_width };
+            var output = try NDTensor(T).init(output_matmul.data, output_shape, true, allocator);
+
+            // Add bias
+            for (0..batch_size) |b| {
+                for (0..self.out_channels) |oc| {
+                    for (0..out_height) |oh| {
+                        for (0..out_width) |ow| {
+                            const index = b * self.out_channels * out_height * out_width + oc * out_height * out_width + oh * out_width + ow;
+                            output.data.data[index] += self.bias.data.data[oc];
+                        }
+                    }
+                }
+            }
+
+            return output;
+        }
+        // pub fn forward(self: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+        //     std.debug.print("Input shape: {any}\n", .{input.data.shape.shape});
+        //     std.debug.print("Self in_channels: {}, input channels: {}\n", .{ self.in_channels, input.data.shape.shape[1] });
+        //
+        //     if (input.data.shape.shape.len < 4) {
+        //         std.debug.print("Invalid input shape: expected 4 dimensions, got {}\n", .{input.data.shape.shape.len});
+        //         return error.InvalidInputShape;
+        //     }
+        //
+        //     const batch_size = input.data.shape.shape[0];
+        //     const in_channels = input.data.shape.shape[1];
+        //     const in_height = input.data.shape.shape[2];
+        //     const in_width = input.data.shape.shape[3];
+        //
+        //     if (in_channels != self.in_channels) {
+        //         std.debug.print("Channel mismatch: expected {}, got {}\n", .{ self.in_channels, in_channels });
+        //         return error.ChannelMismatch;
+        //     }
+        //
+        //     const out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1;
+        //     const out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1;
+        //
+        //     const input_dupe = try self.allocator.create(NDTensor(T));
+        //     input_dupe.* = NDTensor(T){
+        //         .data = try allocator.create(NDArray(T)),
+        //         .grad = try allocator.create(NDArray(T)),
+        //         .requires_grad = true,
+        //     };
+        //     input_dupe.data.data = try allocator.dupe(T, input.data.data);
+        //     const ids = try allocator.create(Shape);
+        //     ids.* = Shape{
+        //         .shape = try allocator.dupe(usize, input.data.shape.shape),
+        //         .alloc = input.data.shape.alloc,
+        //     };
+        //     input_dupe.data.shape = ids;
+        //     input_dupe.grad.?.data = try allocator.dupe(T, input.grad.?.data);
+        //     input_dupe.grad.?.shape = ids;
+        //     self.input = input_dupe;
+        //     self.input_shape = try allocator.dupe(usize, input.data.shape.shape);
+        //
+        //     // Perform im2col
+        //     const col = try conv_utils.im2col(T, input.data, self.kernel_size, self.stride, self.padding, allocator);
+        //     const weights_reshaped = try self.weights.reshape(&[_]usize{ self.out_channels, self.in_channels * self.kernel_size * self.kernel_size });
+        //
+        //     const output_matmul = try weights_reshaped.data.matmul(col, false, false, allocator);
+        //
+        //     // const output_shape = &[_]usize{ batch_size, self.out_channels, out_height, out_width };
+        //     var output = try allocator.create(NDTensor(T));
+        //     output.* = NDTensor(T){
+        //         .data = output_matmul,
+        //         .requires_grad = true,
+        //         .grad = try output_matmul.zerosLike(allocator),
+        //     };
+        //
+        //     // Add bias
+        //     for (0..batch_size) |b| {
+        //         for (0..self.out_channels) |oc| {
+        //             for (0..out_height) |oh| {
+        //                 for (0..out_width) |ow| {
+        //                     const index = b * self.out_channels * out_height * out_width + oc * out_height * out_width + oh * out_width + ow;
+        //                     output.data.data[index] += self.bias.data.data[oc];
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     return output;
+        // }
+
+        pub fn backward(self: *Self, grad_output: *NDTensor(T), allocator: std.mem.Allocator) !void {
+            if (self.input_shape == null) {
+                return error.NoInputShape;
+            }
+
+            const batch_size = self.input_shape.?[0];
+
+            const out_height = grad_output.data.shape.shape[2];
+            const out_width = grad_output.data.shape.shape[3];
+
+            const input_data = try allocator.alloc(T, self.input_shape.?[0] * self.input_shape.?[1] * self.input_shape.?[2] * self.input_shape.?[3]);
+            defer allocator.free(input_data);
+            const input_array = try NDArray(T).init(input_data, self.input_shape.?, allocator);
+            const col = try conv_utils.im2col(T, input_array, self.kernel_size, self.stride, self.padding, allocator);
+
+            // Compute gradient w.r.t. weights
+            const grad_output_reshaped = try grad_output.reshape(&[_]usize{ batch_size * self.out_channels, out_height * out_width });
+            // const col = try conv_utils.im2col(T, self.input_shape.?, self.kernel_size, self.stride, self.padding, allocator);
+            const grad_weights = try grad_output_reshaped.data.matmul(col, false, true, allocator);
+            _ = try self.weights.grad.?._add(grad_weights);
+
+            // Compute gradient w.r.t. bias
+            for (0..self.out_channels) |oc| {
+                var sum: T = 0;
+                for (0..batch_size) |b| {
+                    for (0..out_height) |oh| {
+                        for (0..out_width) |ow| {
+                            const index = b * self.out_channels * out_height * out_width + oc * out_height * out_width + oh * out_width + ow;
+                            sum += grad_output.data.data[index];
+                        }
+                    }
+                }
+                self.bias.grad.?.data[oc] += sum;
+            }
+
+            // Compute gradient w.r.t. input
+            const grad_col = try self.weights.data.matmul(grad_output_reshaped.data, true, false, allocator);
+            const grad_input = try conv_utils.col2im(T, grad_col, self.input_shape.?, self.kernel_size, self.stride, self.padding, allocator);
+
+            // Add to input gradient
+            if (self.input.?.grad) |input_grad| {
+                _ = try input_grad._add(grad_input);
+            } else {
+                self.input.?.grad = grad_input;
+            }
+        }
+
+        pub fn getParameters(self: *Self) []*const NDTensor(T) {
+            return @constCast(&[_]*NDTensor(T){ self.weights, self.bias });
+        }
+
+        pub fn zeroGrad(self: *Self) void {
+            self.weights.grad.?.fill(0);
+            self.bias.grad.?.fill(0);
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.weights.release();
+            self.bias.release();
+            self.weights.deinit(allocator);
+            self.bias.deinit(allocator);
+            if (self.input_shape) |shape| {
+                allocator.free(shape);
+            }
+            allocator.destroy(self);
+        }
+
+        pub fn asLayer(self: *Self) Layer(T) {
+            return Layer(T).init(self);
+        }
+    };
+}
+
+pub fn ReLULayer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        allocator: std.mem.Allocator,
+        input: ?*NDTensor(T), // Store input for backward pass
+
+        pub fn init(allocator: std.mem.Allocator) !*Self {
+            const self = try allocator.create(Self);
+            self.* = .{
+                .allocator = allocator,
+                .input = null,
+            };
+            return self;
+        }
+
+        pub fn forward(self: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+            self.input = input; // Store input for backward pass
+            const output = try NDTensor(T).init(try allocator.dupe(T, input.data.data), input.data.shape.shape, true, allocator);
+            for (output.data.data, 0..) |*value, i| {
+                value.* = if (input.data.data[i] > 0) input.data.data[i] else 0;
+            }
+            return output;
+        }
+
+        pub fn backward(self: *Self, grad_output: *NDTensor(T), allocator: std.mem.Allocator) !void {
+            if (self.input) |input| {
+                const grad_input = try NDTensor(T).init(try allocator.dupe(T, grad_output.data.data), grad_output.data.shape.shape, true, allocator);
+                for (grad_input.data.data, 0..) |*grad, i| {
+                    grad.* = if (input.data.data[i] > 0) grad_output.data.data[i] else 0;
+                }
+                if (input.grad) |grad| {
+                    _ = try grad._add(grad_input.data);
+                } else {
+                    input.grad = grad_input.data;
+                }
+            } else {
+                std.debug.print("Error: ReLU backward called without a stored input\n", .{});
+            }
+        }
+
+        pub fn getParameters(self: *Self) []*const NDTensor(T) {
+            _ = self; // autofix
+            return &[_]*NDTensor(T){};
+        }
+
+        pub fn zeroGrad(self: *Self) void {
+            _ = self; // autofix
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            allocator.destroy(self);
+        }
+
+        pub fn asLayer(self: *Self) Layer(T) {
+            return Layer(T).init(self);
+        }
+    };
+}
+
+pub fn heInitialization(comptime T: type, tensor: *NDTensor(f32)) void {
+    const fan_in: T = @floatCast(tensor.data.shape.shape[1]);
+    const std_dev = @sqrt(2.0 / fan_in);
+
+    var rng = std.rand.DefaultPrng.init(settings.seed);
+    const random = rng.random();
+
+    for (tensor.data.data) |*value| {
+        value.* = random.floatNorm(f32) * std_dev;
+    }
 }
 
 pub fn readCsv(comptime T: type, file_path: []const u8, alloc: std.mem.Allocator) ![][]T {

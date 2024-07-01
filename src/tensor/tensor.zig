@@ -233,8 +233,10 @@ pub fn NDTensor(comptime T: type) type {
             return result;
         }
 
-        pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const out = try self.data.matmul(other.data, false, false, allocator);
+        pub const MmOptions = struct { trans_a: bool = false, trans_b: bool = false };
+
+        pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
+            const out = try self.data.matmul(other.data, opts.trans_a, opts.trans_b, allocator);
             const grad_shape = if (self.requires_grad or other.requires_grad) out.shape.* else null;
             var result = try Self.fromZarray(out, self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .MATMUL;
@@ -710,7 +712,7 @@ test "tensor/GraphManager/matmul_backward" {
 
     var t1 = try Tensor.init(@constCast(&[_]T{ 1, 2, 3, 4 }), shape, true, alloc);
     const t2 = try Tensor.init(@constCast(&[_]T{ 1, 0, 0, 1 }), shape, true, alloc);
-    var t3 = try t1.matmul(t2, alloc);
+    var t3 = try t1.matmul(t2, alloc, .{});
     t1.acquire();
     t2.acquire();
     t3.acquire();
