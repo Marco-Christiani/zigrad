@@ -384,6 +384,7 @@ pub fn NDArray(comptime T: type) type {
                     idx += 1;
                 } else if (opts.keep_dims) {
                     output_shape[idx] = 1;
+                    idx += 1;
                 }
             }
             const output = try Self.empty(output_shape, allocator);
