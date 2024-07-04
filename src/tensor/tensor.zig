@@ -8,22 +8,26 @@ const NDArray = zarray.NDArray;
 const ZarrayError = zarray.ZarrayError;
 const settings = @import("zigrad").settings;
 
+const log = std.log.scoped(.zigrad_tensor);
+
 pub const Op = enum { ADD, SUB, MUL, DIV, POW, TANH, MATMUL, DOT, MATVEC, SUM };
 
 pub fn NDTensor(comptime T: type) type {
     return struct {
-        const dtype = NDArray(T);
+        pub const dtype = NDArray(T);
         const Self = @This();
         data: *dtype,
         op: ?Op = null,
-        children: ?[2]*const Self = null,
+        children: ?[]*const Self = null,
         label: ?[]const u8 = null,
         grad: ?*dtype = null,
         requires_grad: bool,
         acquired: bool = false,
+        allocator: std.mem.Allocator,
         _backward: ?*const fn (*Self, std.mem.Allocator) anyerror!void = null,
         _backward_ctx: ?*anyopaque = null,
 
+        /// Values are copied. COM.
         pub fn init(values: []const T, shape: ?[]const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
             const result = try allocator.create(Self);
             result.* = Self{
@@ -36,24 +40,38 @@ pub fn NDTensor(comptime T: type) type {
                     } else break :blk null;
                 },
                 .requires_grad = requires_grad,
+                .allocator = allocator,
             };
             return result;
         }
 
-        pub fn deinit(self: *const Self, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *const Self) void {
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-            self.data.deinit(allocator);
-            if (self.grad) |g| g.deinit(allocator);
+            log.debug("deinit().data {?s}", .{self.label});
+            self.data.deinit(self.allocator);
+            if (self.grad) |g| {
+                log.debug("deinit().grad {?s}", .{self.label});
+                g.deinit(self.allocator);
+            }
+
             // TODO: verify this is heap first, possibly by checking alignment, not sure.
             // if (self.label) |l| allocator.free(l);
-            allocator.destroy(self);
+
+            if (self.children) |c| self.allocator.free(c);
+            self.allocator.destroy(self);
         }
 
-        pub fn teardown(self: *const Self, allocator: std.mem.Allocator) void {
+        pub fn teardown(self: *const Self) void {
+            log.debug("teardown {?s}\n", .{self.label});
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-            if (self.children) |children| for (children) |c| if (!c.acquired) c.deinit(allocator);
-            self.data.deinit(allocator);
-            if (self.grad) |g| g.deinit(allocator);
+            if (self.children) |children| {
+                for (children) |c| {
+                    std.log.debug("accessing child", .{});
+                    if (!c.acquired) c.teardown() else log.debug("skipping acquired tensor in teardown label={?s}\n", .{c.label});
+                }
+            }
+            log.debug("teardown()->deinit() {?s}", .{self.label});
+            self.deinit();
         }
 
         pub fn acquire(self: *Self) void {
@@ -64,6 +82,7 @@ pub fn NDTensor(comptime T: type) type {
             self.acquired = false;
         }
 
+        /// Values are not copied. COM.
         pub fn fromZarray(values: *dtype, requires_grad: bool, grad_shape: ?Shape, allocator: std.mem.Allocator) !*Self {
             const result = try allocator.create(Self);
             const grad: ?*dtype = blk: {
@@ -83,7 +102,47 @@ pub fn NDTensor(comptime T: type) type {
                 .data = values,
                 .grad = grad,
                 .requires_grad = requires_grad,
+                .allocator = allocator,
             };
+            return result;
+        }
+
+        /// shape is copied. COM.
+        pub fn empty(shape: []const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
+            const result = try allocator.create(Self);
+            result.* = Self{
+                .data = try dtype.empty(shape, allocator),
+                .grad = blk: {
+                    if (requires_grad) {
+                        const g = try dtype.empty(shape, allocator);
+                        g.fill(0);
+                        break :blk g;
+                    } else break :blk null;
+                },
+                .requires_grad = requires_grad,
+                .allocator = allocator,
+            };
+            return result;
+        }
+
+        pub fn copy(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            const result = try allocator.create(Self);
+
+            result.data = try self.data.copy(allocator);
+
+            if (self.grad) |grad| {
+                result.grad = try grad.copy(allocator);
+            } else {
+                result.grad = null;
+            }
+
+            result.op = self.op;
+            result.children = self.children; // note: children pointers
+            result.label = if (self.label) |label| try allocator.dupe(u8, label) else null;
+            result.requires_grad = self.requires_grad;
+            result._backward = self._backward;
+            result._backward_ctx = self._backward_ctx;
+
             return result;
         }
 
@@ -120,21 +179,24 @@ pub fn NDTensor(comptime T: type) type {
             return self.data.flexPosToOffset(indices);
         }
 
+        /// COM
         fn indexToPos(self: Self, index: usize, allocator: std.mem.Allocator) []const usize {
             return self.data.offsetToPos(index, allocator);
         }
 
+        /// COM for container, values are a view into self.
         pub fn slice(self: *const Self, ranges: []const zarray.Range, allocator: std.mem.Allocator) !*Self {
             const sliced_data = try self.data.slice(ranges);
             const result = try allocator.create(Self);
             result.* = Self{
                 .data = sliced_data,
-                .grad = if (self.requires_grad) try dtype.empty(sliced_data.shape.shape, allocator) else null,
+                .grad = if (self.requires_grad) try dtype.empty(sliced_data.shape.shape, allocator) else null, // TODO: slice grad?
                 .requires_grad = self.requires_grad,
                 .op = null,
                 .children = null,
                 .label = null,
                 .acquired = false,
+                .allocator = allocator,
                 ._backward = null,
                 ._backward_ctx = null,
             };
@@ -154,6 +216,7 @@ pub fn NDTensor(comptime T: type) type {
                         _ = allocator;
                         if (grad) |g| {
                             if (tensor.children) |children| {
+                                std.debug.assert(children.len == 2);
                                 const original = children[0];
                                 const values_ = children[1];
 
@@ -163,7 +226,8 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     }
                 }.backward;
-                result.children = .{ self, values };
+
+                result.children = self.setChildren(&[_]*const Self{ self, values });
             } else {
                 // if not tracking gradients can just set the values directly
                 try self.data.setSlice(ranges, values.data.*);
@@ -194,55 +258,62 @@ pub fn NDTensor(comptime T: type) type {
             self.grad.?.clip_norm(opts.max_norm, opts.delta);
         }
 
-        /// Element-wise addition
+        pub fn setChildren(self: *Self, children: []*const Self) !void {
+            self.children = try self.allocator.dupe(*const Self, children);
+        }
+
+        /// Element-wise addition. COM.
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             const out = try self.data.add(other.data, allocator);
             // const grad_shape = if (self.requires_grad or other.requires_grad) (try Shape.init(out.shape.shape, allocator)).* else null;
             const grad_shape = if (self.requires_grad or other.requires_grad) out.shape.* else null;
             var result = try Self.fromZarray(out, self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .ADD;
-            result.children = .{ self, other };
+            // result.children = try self.allocator.alloc(*const Self, 2);
+            // result.children.? = .{ self, other };
+            try result.setChildren(@constCast(&[_]*const Self{ self, other }));
             return result;
         }
 
-        /// Element-wise subtraction
+        /// Element-wise subtraction. COM.
         pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             const out = try self.data.sub(other.data, allocator);
             const grad_shape = if (self.requires_grad or other.requires_grad) out.shape.* else null;
             var result = try Self.fromZarray(out, self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .SUB;
-            result.children = .{ self, other };
+            try result.setChildren(@constCast(&[_]*const Self{ self, other }));
             return result;
         }
 
-        /// Element-wise multiplication
+        /// Element-wise multiplication. COM.
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             const out = try self.data.mul(other.data, allocator);
             const grad_shape = if (self.requires_grad or other.requires_grad) out.shape.* else null;
             var result = try Self.fromZarray(out, self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .MUL;
-            result.children = .{ self, other };
+            try result.setChildren(@constCast(&[_]*const Self{ self, other }));
             return result;
         }
 
-        /// Element-wise division
+        /// Element-wise division. COM.
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             const out = try self.data.div(other.data, allocator);
             const grad_shape = if (self.requires_grad or other.requires_grad) out.shape.* else null;
             var result = try Self.fromZarray(out, self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .DIV;
-            result.children = .{ self, other };
+            try result.setChildren(@constCast(&[_]*const Self{ self, other }));
             return result;
         }
 
         pub const MmOptions = struct { trans_a: bool = false, trans_b: bool = false };
 
+        /// COM
         pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
             const out = try self.data.matmul(other.data, opts.trans_a, opts.trans_b, allocator);
             const grad_shape = if (self.requires_grad or other.requires_grad) out.shape.* else null;
             var result = try Self.fromZarray(out, self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .MATMUL;
-            result.children = .{ self, other };
+            try result.setChildren(@constCast(&[_]*const Self{ self, other }));
             return result;
         }
 
@@ -253,6 +324,7 @@ pub fn NDTensor(comptime T: type) type {
         //     return result;
         // }
 
+        /// COM
         pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             const dot_result = try self.data.dot(other.data, allocator);
 
@@ -263,34 +335,25 @@ pub fn NDTensor(comptime T: type) type {
                 .grad = if (self.requires_grad) try dtype.zerosLike(self.data, allocator) else null,
                 .requires_grad = self.requires_grad,
                 .op = .DOT,
-                .children = .{ self, other },
+                .children = try self.allocator.dupe(*const Self, @constCast(&[_]*const Self{ self, other })),
             };
             return result;
         }
 
+        /// COM
         pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             var result = try Self.fromZarray(try self.data.matvec(other.data, false, allocator), self.requires_grad, null, allocator);
             if (self.requires_grad) result.op = .MATVEC;
-            result.children = .{ self, other };
+            try result.setChildren(@constCast(&[_]*const Self{ self, other }));
             return result;
         }
 
+        /// COM
         pub fn sum(self: *const Self, allocator: std.mem.Allocator) !*Self {
             const grad_shape = if (self.requires_grad) self.grad.?.shape.* else null;
             const result = try Self.fromZarray(try self.data.sum(allocator), self.requires_grad, grad_shape, allocator);
             if (self.requires_grad) result.op = .SUM;
-
-            // HACK: yea... needs two children... go back to slice design or something like a tagged enum thing
-            const dummy = try allocator.create(Self);
-            dummy.* = Self{
-                .data = try Self.dtype.initNoAlloc(&[_]T{}, &[_]usize{}, allocator),
-                .grad = null,
-                .requires_grad = false,
-                .op = null,
-                .children = null,
-                .label = "dummy",
-            };
-            result.children = .{ self, dummy };
+            try result.setChildren(@constCast(&[_]*const Self{self}));
             return result;
         }
 
@@ -327,6 +390,11 @@ pub fn NDTensor(comptime T: type) type {
                             const a_grad = try self.grad.?.unbroadcast(a.grad.?.shape, allocator);
                             const b_grad = try self.grad.?.unbroadcast(b.grad.?.shape, allocator);
 
+                            defer { // TODO: unbroadcast memory management elsewhere as well
+                                if (a_grad != self.grad.?) a_grad.deinit(self.allocator);
+                                if (b_grad != self.grad.?) b_grad.deinit(self.allocator);
+                            }
+
                             _ = try a.grad.?._add(a_grad);
                             _ = try b.grad.?._sub(b_grad);
                         }
@@ -339,6 +407,9 @@ pub fn NDTensor(comptime T: type) type {
                             // (dL/dy) * (dy/da), (dL/dy) * (dy/db)
                             const a_grad_value = try b.data.mul(self.grad.?, allocator);
                             const b_grad_value = try a.data.mul(self.grad.?, allocator);
+
+                            defer a_grad_value.deinit(allocator);
+                            defer b_grad_value.deinit(allocator);
 
                             // const a_grad = try a.grad.?.unbroadcast(a_grad_value.shape, allocator);
                             // const b_grad = try b.grad.?.unbroadcast(b_grad_value.shape, allocator);
@@ -357,7 +428,15 @@ pub fn NDTensor(comptime T: type) type {
                             // Gradient for division: (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
                             const a_grad_value = try self.grad.?.div(b.data, allocator);
                             const b_grad_value = try self.grad.?.mul(a.data, allocator);
-                            const neg_b_grad_value = try b_grad_value.div(try b.data.mul(b.data, allocator), allocator);
+
+                            defer a_grad_value.deinit(allocator);
+                            defer b_grad_value.deinit(allocator);
+
+                            const bsq = try b.data.mul(b.data, allocator);
+                            const neg_b_grad_value = try b_grad_value.div(bsq, allocator);
+
+                            defer bsq.deinit(allocator);
+                            defer neg_b_grad_value.deinit(allocator);
 
                             const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, allocator);
                             const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, allocator);
@@ -371,8 +450,10 @@ pub fn NDTensor(comptime T: type) type {
                             var A = children[0].data;
                             const B = children[1].data;
                             const grad_A = try self.grad.?.matmul(B, false, true, allocator);
+                            defer grad_A.deinit(allocator);
                             _ = try children[0].grad.?._add(grad_A);
                             const grad_B = try A.matmul(self.grad.?, true, false, allocator);
+                            defer grad_B.deinit(allocator);
                             _ = try children[1].grad.?._add(grad_B);
                         }
                     },
@@ -505,7 +586,7 @@ pub fn Loss(comptime T: type) type {
                     }
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children
-                    if (!curr_node.acquired and self.eager_teardown) curr_node.deinit(alloc);
+                    if (!curr_node.acquired and self.eager_teardown) curr_node.deinit();
                 }
             }
         }
