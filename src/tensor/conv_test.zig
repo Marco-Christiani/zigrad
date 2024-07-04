@@ -1,66 +1,111 @@
 const testing = std.testing;
 const std = @import("std");
 const NDTensor = @import("tensor.zig").NDTensor;
+const Loss = @import("tensor.zig").Loss;
 const Conv2DLayer = @import("layer.zig").Conv2DLayer;
 const ReLULayer = @import("layer.zig").ReLULayer;
 const Model = @import("model.zig").Model;
 const Trainer = @import("trainer.zig").Trainer;
 const ops = @import("ops.zig");
+const root = @import("root");
+const zigrad = @import("zigrad");
+
+pub const std_options = .{
+    .log_level = std.log.Level.info,
+};
+
+pub const zigrad_settings = zigrad.Settings{
+    .grad_clip_enabled = false,
+};
 
 pub fn main() !void {
-    try testConvModel();
+    std.log.warn("zigrad.settings: {}", .{zigrad.settings});
+    try testModelFwdBwd();
 }
 
 fn testConvModel() !void {
     // const allocator = std.heap.page_allocator;
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer {
         if (gpa.deinit() == .leak) std.debug.print("Leak detected.", .{});
     }
-    // Create a simple 1x1x4x4 input (batch_size x channels x height x width)
+
+    // 1x1x4x4 input (b, c, h, w)
     const input_data = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     const input = try NDTensor(f32).init(&input_data, &[_]usize{ 1, 1, 4, 4 }, true, allocator);
     input.label = "input";
-    defer input.deinit(allocator);
-    std.debug.print("Input tensor shape: {any}\n", .{input.data.shape.shape});
+    input.acquire(); // so we can do fwd pass and then demo the trainer
+
+    const target = try NDTensor(f32).empty(&[_]usize{ 1, 1, 2, 2 }, true, allocator);
+    target.fill(100);
+    // const target = try NDTensor(f32).init(&[_]f32{100}, &[_]usize{ 1, 1, 1, 1 }, true, allocator);
+    target.label = "target";
+    target.acquire(); // so we can do fwd pass and then demo the trainer
 
     // Create a simple ConvNet: Conv2D -> ReLU -> Conv2D
     var model = try Model(f32).init(allocator);
     defer model.deinit();
 
-    var conv1 = try Conv2DLayer(f32).init(allocator, 1, 2, 2, 1, 0);
+    var conv1 = try Conv2DLayer(f32).init(allocator, 1, 2, 2, 1, 0, 1);
     var relu = try ReLULayer(f32).init(allocator);
-    var conv2 = try Conv2DLayer(f32).init(allocator, 2, 1, 2, 1, 0);
+    var conv2 = try Conv2DLayer(f32).init(allocator, 2, 1, 2, 1, 0, 1);
+
+    conv1.weights.fill(0.01);
+    conv1.bias.fill(0);
+    conv2.weights.fill(0.01);
+    conv2.bias.fill(0);
 
     try model.addLayer(conv1.asLayer());
     try model.addLayer(relu.asLayer());
     try model.addLayer(conv2.asLayer());
 
-    // Perform forward pass
+    // forward pass
     const output = try model.forward(input);
-    defer output.deinit(allocator);
+    std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
+    std.debug.print("Output: {d}\n", .{output.data.data});
 
-    // Create a simple loss and perform backward pass
-    const target = try NDTensor(f32).init(&[_]f32{100}, &[_]usize{ 1, 1, 1, 1 }, true, allocator);
-    target.label = "target";
-    defer target.deinit(allocator);
+    // train step with Trainer
 
-    const TrainerT = Trainer(f32);
-    var trainer = TrainerT.init(model, 0.01, allocator);
-    defer trainer.deinit();
+    var trainer = Trainer(f32).init(model, 0.01, allocator);
 
     const loss = try trainer.trainStep(input, target);
+    defer {
+        // destroy results from the manual forward pass, excluding input/target
+        output.teardown();
 
-    // Not checking specific values, just ensuring that the backward pass runs without errors
-    // and updates gradients
-    try testing.expect(loss > 0);
+        // now we can get ready to free these
+        input.release();
+        target.release();
+
+        // tear down the graph created in trainStep
+        loss.teardown();
+
+        trainer.deinit();
+    }
+
+    // TODO: control test against pytorch
+
+    // not checking specific values, testing the backward pass runs without errors grads change
+    // try testing.expect(loss > 0);
     try testing.expect(conv1.weights.grad != null);
     try testing.expect(conv1.bias.grad != null);
     try testing.expect(conv2.weights.grad != null);
     try testing.expect(conv2.bias.grad != null);
 
-    std.debug.print("{d}\n", .{output.data.data});
+    std.debug.print("output:\n", .{});
+    output.print();
+    std.debug.print("\nloss:\n", .{});
+    loss.print();
+    std.debug.print("\nconv1.weights:\n", .{});
+    conv1.weights.print();
+    std.debug.print("\nconv1.bias:\n", .{});
+    conv1.bias.print();
+    std.debug.print("\nconv2.weights:\n", .{});
+    conv2.weights.print();
+    std.debug.print("\nconv2.bias:\n", .{});
+    conv2.bias.print();
 }
 
 fn expectTensorApproxEql(expected: []const f32, actual: []const f32, tolerance: f32) !void {
@@ -70,16 +115,86 @@ fn expectTensorApproxEql(expected: []const f32, actual: []const f32, tolerance: 
     }
 }
 
+fn testModelFwdBwd() !void {
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
+    // defer {
+    //     if (gpa.deinit() == .leak) std.debug.print("Leak detected.", .{});
+    // }
+    const allocator = std.heap.page_allocator;
+    // 1x1x4x4 input (b, c, h, w)
+    const input_data = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    const input = try NDTensor(f32).init(&input_data, &[_]usize{ 1, 1, 4, 4 }, true, allocator);
+    input.label = "input";
+    input.acquire(); // so we can do fwd pass and then demo the trainer
+
+    const target = try NDTensor(f32).empty(&[_]usize{ 1, 1, 2, 2 }, true, allocator);
+    target.fill(100);
+    target.label = "target";
+    target.acquire(); // so we can do fwd pass and then demo the trainer
+
+    var model = try Model(f32).init(allocator);
+
+    var conv1 = try Conv2DLayer(f32).init(allocator, 1, 1, 3, 2, 1, 1);
+
+    conv1.weights.fill(0.01);
+    conv1.bias.fill(0);
+
+    try model.addLayer(conv1.asLayer());
+
+    std.debug.print("input:\n", .{});
+    input.print();
+    std.debug.print("\nconv1.weights:\n", .{});
+    conv1.weights.print();
+    std.debug.print("\nconv1.bias:\n", .{});
+    conv1.bias.print();
+
+    // forward pass
+    const output = try model.forward(input);
+    std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
+    const loss = try ops.mse_loss(f32, output, target, model.allocator);
+    std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
+    var gm = Loss(NDTensor(f32)).init(allocator, .{ .grad_clip_enabled = false });
+    model.zeroGrad();
+    loss.grad.?.fill(1);
+    try gm.backward(loss, allocator);
+    defer {
+        gm.deinit();
+        model.deinit();
+        input.release();
+        target.release();
+        loss.teardown();
+    }
+    std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
+    std.debug.print("Output: {d}\n", .{output.data.data});
+
+    // not checking specific values, testing the backward pass runs without errors grads change
+    // try testing.expect(loss > 0);
+    try testing.expect(conv1.weights.grad != null);
+    try testing.expect(conv1.bias.grad != null);
+
+    std.debug.print("input:\n", .{});
+    input.print();
+    std.debug.print("output:\n", .{});
+    output.print();
+    std.debug.print("\nloss:\n", .{});
+    loss.print();
+    std.debug.print("\nconv1.weights:\n", .{});
+    conv1.weights.print();
+    std.debug.print("\nconv1.bias:\n", .{});
+    conv1.bias.print();
+}
+
 fn testConvLayer() !void {
     const allocator = testing.allocator;
 
     // Create a simple 1x3x3 input
     const input_data = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const input = try NDTensor(f32).init(&input_data, &[_]usize{ 1, 1, 3, 3 }, true, allocator);
-    defer input.deinit(allocator);
+    defer input.deinit();
 
     // Create a Conv2DLayer with 1 input channel, 1 output channel, 2x2 kernel, stride 1, and no padding
-    var conv = try Conv2DLayer(f32).init(allocator, 1, 1, 2, 1, 0);
+    var conv = try Conv2DLayer(f32).init(allocator, 1, 1, 2, 1, 0, 1);
     defer conv.deinit(allocator);
 
     // Set weights to a 2x2 identity matrix and bias to 0
@@ -91,7 +206,7 @@ fn testConvLayer() !void {
 
     // Perform forward pass
     const output = try conv.forward(input, allocator);
-    defer output.deinit(allocator);
+    defer output.deinit();
 
     // Expected output: 2x2 matrix
     const expected_output = [_]f32{ 6, 8, 12, 14 };
@@ -105,14 +220,14 @@ fn testReluLayer() !void {
     // Create a simple 2x2 input
     const input_data = [_]f32{ -1, 2, 3, -4 };
     const input = try NDTensor(f32).init(&input_data, &[_]usize{ 1, 1, 2, 2 }, true, allocator);
-    defer input.deinit(allocator);
+    defer input.deinit();
 
     var relu = try ReLULayer(f32).init(allocator);
     defer relu.deinit(allocator);
 
     // Perform forward pass
     const output = try relu.forward(input, allocator);
-    defer output.deinit(allocator);
+    defer output.deinit();
 
     // Expected output: negative values replaced with 0
     const expected_output = [_]f32{ 0, 2, 3, 0 };
