@@ -3,9 +3,9 @@ const NDTensor = @import("tensor.zig").NDTensor;
 const NDArray = @import("zarray.zig").NDArray;
 const Loss = @import("tensor.zig").Loss;
 
-pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn simple_mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var diff = (try y_pred.sub(y, allocator)).setLabel("diff");
-    const diff2 = try NDTensor(T).fromZarray(diff.data, true, diff.data.shape.*, allocator);
+    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, allocator);
     diff2.label = "diff2";
     // const diff2 = (try y_pred.sub(y, allocator)).setLabel("diff2");
     const sq_diff = (try diff.mul(diff2, allocator)).setLabel("sq_diff");
@@ -13,6 +13,80 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.m
     const coef = @as(T, @floatFromInt(y.data.data.len));
     const coef_tensor = try NDTensor(T).init(&[_]T{coef}, null, true, allocator);
     return (try sum_sq_diff.div(coef_tensor.setLabel("coef"), allocator)).setLabel("mse");
+}
+
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    const n = @as(T, @floatFromInt(y.data.data.len));
+    var sum_sq_diff: T = 0;
+    for (y_pred.data.data, y.data.data) |pred, target| {
+        const diff = pred - target;
+        sum_sq_diff += diff * diff;
+    }
+    const mse = sum_sq_diff / n;
+
+    const result = try NDTensor(T).init(&[_]T{mse}, &[_]usize{1}, true, allocator);
+    result.label = "mse";
+
+    try result.setChildren(@constCast(&[_]*const NDTensor(T){ y_pred, y }));
+
+    result._backward = struct {
+        fn backward(tensor: *NDTensor(T), _allocator: std.mem.Allocator) !void {
+            _ = _allocator;
+            const self_children = tensor.children orelse return error.NoChildren;
+            const _y_pred = self_children[0];
+            const _y = self_children[1];
+
+            const _n = @as(T, @floatFromInt(_y.data.data.len));
+            const scale = @as(T, 2) / _n;
+
+            if (_y_pred.grad) |grad| {
+                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
+                    grad_val.* += scale * (pred_val - target_val);
+                }
+            }
+        }
+    }.backward;
+
+    return result;
+}
+
+pub fn cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    const n = @as(T, @floatFromInt(y.data.data.len));
+    var sum_loss: T = 0;
+
+    for (y_pred.data.data, y.data.data) |pred, target| {
+        // assuming y is one-hot encoded, target is 0 or 1, pred is the predicted probability
+        if (target == 1) {
+            sum_loss -= @log(pred);
+        }
+    }
+    const mean_loss = sum_loss / n;
+
+    const result = try NDTensor(T).init(&[_]T{mean_loss}, &[_]usize{1}, true, allocator);
+    result.label = "cross_entropy";
+
+    try result.setChildren(@constCast(&[_]*const NDTensor(T){ y_pred, y }));
+
+    result._backward = struct {
+        fn backward(tensor: *NDTensor(T), _allocator: std.mem.Allocator) !void {
+            _ = _allocator;
+            const self_children = tensor.children orelse return error.NoChildren;
+            const _y_pred = self_children[0];
+            const _y = self_children[1];
+
+            const _n = @as(T, @floatFromInt(_y.data.data.len));
+            const scale = @as(T, 1) / _n;
+
+            if (_y_pred.grad) |grad| {
+                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
+                    const grad_contrib = (pred_val - target_val) * scale;
+                    grad_val.* += grad_contrib;
+                }
+            }
+        }
+    }.backward;
+
+    return result;
 }
 
 test "mse_loss" {
@@ -24,22 +98,22 @@ test "mse_loss" {
 
     const y = try Tensor.init(&[_]T{1}, null, true, alloc);
     const yh = try Tensor.init(&[_]T{1}, null, true, alloc);
-    var loss = try mse_loss(T, yh, y, alloc);
+    var loss = try simple_mse_loss(T, yh, y, alloc);
     try std.testing.expectEqualSlices(T, &[_]T{0}, loss.data.data);
     // (1-2)**2 == 1
     try yh.set(&[_]usize{0}, 2);
-    loss = try mse_loss(T, yh, y, alloc);
+    loss = try simple_mse_loss(T, yh, y, alloc);
     try std.testing.expectEqualSlices(T, &[_]T{1}, loss.data.data);
 
     // (1-3)**2 == 4
     try yh.set(&[_]usize{0}, 3);
-    loss = try mse_loss(T, yh, y, alloc);
+    loss = try simple_mse_loss(T, yh, y, alloc);
     try std.testing.expectEqualSlices(T, &[_]T{4}, loss.data.data);
 
     // (-1-10)**2 == 121
     try y.set(&[_]usize{0}, -1);
     try yh.set(&[_]usize{0}, 10);
-    loss = try mse_loss(T, yh, y, alloc);
+    loss = try simple_mse_loss(T, yh, y, alloc);
     try std.testing.expectEqualSlices(T, &[_]T{121}, loss.data.data);
 
     // Arrays
@@ -49,7 +123,7 @@ test "mse_loss" {
     // const yh_arr = try Tensor.init(&[_]T{ 2, 3, 4 }, &[_]usize{3, 1}, true, alloc);
 
     // ((1-2)^2 + (2-3)^2 + (3-4)^2) / 3 == (1 + 1 + 1) / 3 == 1
-    loss = try mse_loss(T, yh_arr, y_arr, alloc);
+    loss = try simple_mse_loss(T, yh_arr, y_arr, alloc);
     try std.testing.expectEqualSlices(T, &[_]T{1}, loss.data.data);
 
     // MSE backward
@@ -59,27 +133,4 @@ test "mse_loss" {
     loss.acquire();
     try gm.backward(loss, alloc);
     loss.print();
-}
-
-pub fn relu(comptime T: type, x: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-    const result = try NDTensor(T).init(try allocator.alloc(T, x.data.data.len), x.data.shape.shape, true, allocator);
-
-    for (x.data.data, 0..) |value, i| {
-        result.data.data[i] = if (value > 0) value else 0;
-    }
-
-    result._backward_ctx = x.data; // dupe this
-    result._backward = struct {
-        fn backward(self: *NDTensor(T), grad: ?*NDArray(T), alloc: std.mem.Allocator) void {
-            _ = alloc;
-            const ctx = self._backward_ctx.?;
-            if (grad) |g| {
-                for (ctx.data, 0..) |value, i| {
-                    self.grad.?.data[i] += if (value > 0) g.data[i] else 0;
-                }
-            }
-        }
-    }.backward;
-
-    return result;
 }
