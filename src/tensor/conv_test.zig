@@ -20,6 +20,7 @@ pub const zigrad_settings = zigrad.Settings{
 
 pub fn main() !void {
     std.log.warn("zigrad.settings: {}", .{zigrad.settings});
+    // try testConvModel();
     try testModelFwdBwd();
 }
 
@@ -68,7 +69,7 @@ fn testConvModel() !void {
 
     // train step with Trainer
 
-    var trainer = Trainer(f32).init(model, 0.01, allocator);
+    var trainer = Trainer(f32, .mse).init(model, 0.01, .{}, allocator);
 
     const loss = try trainer.trainStep(input, target);
     defer {
@@ -151,6 +152,7 @@ fn testModelFwdBwd() !void {
 
     // forward pass
     const output = try model.forward(input);
+    std.debug.print("Output: {d}\n", .{output.data.data});
     std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
     const loss = try ops.mse_loss(f32, output, target, model.allocator);
     std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
@@ -166,7 +168,6 @@ fn testModelFwdBwd() !void {
         loss.teardown();
     }
     std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
-    std.debug.print("Output: {d}\n", .{output.data.data});
 
     // not checking specific values, testing the backward pass runs without errors grads change
     // try testing.expect(loss > 0);

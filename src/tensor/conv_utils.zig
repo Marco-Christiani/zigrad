@@ -7,15 +7,12 @@ pub fn im2col(comptime T: type, input: *NDArray(T), kernel_size: usize, stride: 
     const height = input.shape.shape[2];
     const width = input.shape.shape[3];
 
-    std.debug.print("im2col input shape: {any}\n", .{input.shape.shape});
-
     const output_height = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     const output_width = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     const col_height = channels * kernel_size * kernel_size;
     const col_width = output_height * output_width;
 
-    std.debug.print("im2col output dimensions: {d}x{d}\n", .{ col_height, col_width });
     var col = try NDArray(T).empty(&[_]usize{ batch_size, col_height, col_width }, allocator);
 
     for (0..batch_size) |b| {
@@ -41,7 +38,6 @@ pub fn im2col(comptime T: type, input: *NDArray(T), kernel_size: usize, stride: 
         }
     }
 
-    std.debug.print("im2col final output shape: {any}\n", .{col.shape.shape});
     return col;
 }
 
