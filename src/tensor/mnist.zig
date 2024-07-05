@@ -114,7 +114,7 @@ pub fn main() !void {
     // var allocator = std.heap.page_allocator;
     var allocator = std.heap.c_allocator;
     log.info("Loading data...", .{});
-    const batch_size = 8;
+    const batch_size = 32;
     const data = try loadMNIST(allocator, "/tmp/mnist_train.csv", batch_size);
 
     defer {
