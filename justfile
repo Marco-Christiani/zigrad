@@ -1,9 +1,5 @@
-default: (br "src/tensor/conv_test.zig")
-run_utils: (run_pattern "src/tensor/utils.zig")
+default: brm
 
-test_zarray: (btest "src/tensor/zarray.zig")
-test_tensor: (btest "src/tensor/tensor.zig")
-test_layer: (btest "src/tensor/layer.zig")
 
 btest file:
   zig build test -Dfile={{file}}
@@ -14,8 +10,23 @@ testf filter:
 test file:
   zig test {{file}} -freference-trace
 
-br file:
-  zig build run -Dfile={{file}}
+btz:
+  @just (btest "src/tensor/zarray.zig")
+
+btt:
+  @just (btest "src/tensor/tensor.zig")
+
+btl:
+  @just (btest "src/tensor/layer.zig")
+
+br file opts="":
+  zig build run -Dfile={{file}} {{opts}}
+
+brm:
+  @just br src/tensor/mnist.zig
+
+brc:
+  @just (br "src/tensor/conv_test.zig")
 
 pattern := 'error\(gpa\)*'
 run_pattern file:
@@ -23,3 +34,9 @@ run_pattern file:
    | rg --passthru --color always {{pattern}} 2>&1 \
    | tee /dev/tty \
    | rg --passthru --color always --count-matches {{pattern}}
+   # | rg --passthru --color always --count-matches {{pattern}} 2&1 \
+   # | .venv/bin/python tb.py
+
+
+brpu:
+  @just (run_pattern "src/tensor/utils.zig")
