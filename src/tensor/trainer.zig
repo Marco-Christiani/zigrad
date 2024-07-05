@@ -28,6 +28,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         pub fn init(
             model: *Model(T),
             learning_rate: T,
+            loss_config: Loss(T).LossConfig,
             allocator: std.mem.Allocator,
         ) Self {
             return .{
@@ -35,7 +36,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
                 .params = model.getParameters(),
                 .optimizer = .{ .lr = learning_rate },
                 .allocator = allocator,
-                .graph_manager = Loss(NDTensor(T)).init(allocator, .{}),
+                .graph_manager = Loss(NDTensor(T)).init(allocator, loss_config),
             };
         }
 
@@ -48,21 +49,25 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
 
         pub fn trainStep(self: *Self, input: *NDTensor(T), target: *NDTensor(T)) !*NDTensor(T) {
             const output = try self.model.forward(input);
-            std.log.info("calculating loss", .{});
+            log.debug("calculating loss", .{});
             const loss = try lossf(T, output, target, self.allocator);
-
-            // std.log.info("rendering", .{});
-            // try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.png");
-            // std.log.info("done", .{});
-            // try utils.sesame("/tmp/trainergraph.png", self.allocator);
 
             self.model.zeroGrad();
             loss.grad.?.fill(1);
-            std.log.info("running backward", .{});
+            log.debug("running backward", .{});
             try self.graph_manager.backward(loss, self.allocator);
 
-            std.log.info("updating", .{});
+            // std.log.info("rendering", .{});
+            // try utils.renderD2(NDTensor(T), loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.png");
+            // std.log.info("done", .{});
+            // try utils.sesame("/tmp/trainergraph.png", self.allocator);
+
+            log.debug("updating", .{});
             self.optimizer.step(self.params);
+            // for (self.model.getParameters()) |param| {
+            //     param.print();
+            //     std.debug.print("\n", .{});
+            // }
             return loss;
         }
 
