@@ -1,6 +1,7 @@
 const std = @import("std");
 const Layer = @import("layer.zig").Layer;
 const NDTensor = @import("tensor.zig").NDTensor;
+const ops = @import("ops.zig");
 
 const log = std.log.scoped(.zigrad_model);
 
@@ -21,7 +22,7 @@ pub fn Model(comptime T: type) type {
 
         pub fn deinit(self: *Self) void {
             for (self.layers.items, 0..) |layer, i| {
-                log.info("deinit layer {d}", .{i});
+                log.debug("deinit layer {d}", .{i});
                 layer.deinit();
             }
             log.debug("deinit self.layers", .{});
@@ -45,8 +46,9 @@ pub fn Model(comptime T: type) type {
         pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
             var output = input;
             for (self.layers.items, 0..) |layer, i| {
-                log.info("Layer {}: Input shape: {any}", .{ i + 1, output.data.shape.shape });
                 output = try layer.forward(output, self.allocator);
+                log.debug("layer-{} output[..50]={d}", .{ i, output.data.data[0..50] });
+                // output.label = try std.fmt.allocPrint(self.allocator, "layer-{}-{?s}", .{ i + 1, output.label });
                 // output.label = output.label orelse try std.fmt.allocPrint(self.allocator, "out-layer-{}", .{i + 1});
                 // output.label = output.label orelse blk: {
                 //     var buf: [16]u8 = undefined;
@@ -54,6 +56,10 @@ pub fn Model(comptime T: type) type {
                 //     break :blk label;
                 // };
             }
+            // HACK: hardcoded
+            output = try ops.softmax(T, output, self.allocator);
+            // log.info("FINAL output={d}", .{output.data.data[0..10]});
+            // log.info("FINAL output={d}", .{output.data.data[10..20]});
             return output;
         }
 
