@@ -57,10 +57,10 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             log.debug("running backward", .{});
             try self.graph_manager.backward(loss, self.allocator);
 
-            // std.log.info("rendering", .{});
-            // try utils.renderD2(NDTensor(T), loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.png");
-            // std.log.info("done", .{});
-            // try utils.sesame("/tmp/trainergraph.png", self.allocator);
+            std.log.info("rendering", .{});
+            try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.svg");
+            std.log.info("done", .{});
+            try utils.sesame("/tmp/trainergraph.svg", self.allocator);
 
             log.debug("updating", .{});
             self.optimizer.step(self.params);

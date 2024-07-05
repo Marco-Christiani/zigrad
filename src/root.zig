@@ -1,42 +1,50 @@
 const root = @import("root");
 const std = @import("std");
+const zig_builtin = @import("builtin");
+const build_options = @import("build_options");
 
 /// lib-wide options that can be overridden by the root file.
 /// E.g. const zigrad_settings = .{ .gradEnabled = true };
 pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigrad_settings else .{};
-
-// pub const settings: Settings = blk: {
-//     if (@hasDecl(root, "zigrad_settings")) {
-//         break :blk root.zigrad_settings;
-//     } else {
-//         break :blk .{};
-//     }
-// };
 
 pub const Settings = struct {
     grad_enabled: bool = true, // TODO: implement grad_enabled
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
+    seed: u64 = 4545611,
 };
 
-pub fn foo() !void {
-    std.debug.print("root is: {}\n", .{root});
+var prng = std.rand.DefaultPrng.init(settings.seed);
+pub const random = prng.random();
+
+// see zls
+// The type of `log_level` is not `std.log.Level`.
+var actual_log_level: std.log.Level = @enumFromInt(@intFromEnum(build_options.log_level));
+
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (@intFromEnum(level) > @intFromEnum(actual_log_level)) return;
+
+    const level_txt = comptime level.asText();
+    const scope_txt = comptime @tagName(scope);
+
+    const stderr = std.io.getStdErr().writer();
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+
+    stderr.print("{s:<5}: ({s:^6}): ", .{ level_txt, if (comptime std.mem.startsWith(u8, scope_txt, "zls_")) scope_txt[4..] else scope_txt }) catch return;
+    stderr.print(format, args) catch return;
+    stderr.writeByte('\n') catch return;
 }
 
-// comptime and mutable globals can be frustrating. need a better idea
-// pub const Settings = struct {
-//     grad_enabled: bool,
-//     max_dim: usize,
-//     grad_clip_max_norm: f32,
-//     grad_clip_delta: f32,
-//     grad_clip_enabled: bool,
-//
-//     var default: Settings = .{
-//         .grad_enabled = true,
-//         .max_dim = 4,
-//         .grad_clip_max_norm = 10.0,
-//         .grad_clip_delta = 1e-6,
-//         .grad_clip_enabled = true,
-//     };
-// };
+pub const std_options = std.Options{
+    // Always set this to debug to make std.log call into our handler, then control the runtime
+    // value in logFn itself
+    .log_level = .debug,
+    .logFn = logFn,
+};
