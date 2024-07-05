@@ -271,67 +271,6 @@ pub fn Conv2DLayer(comptime T: type) type {
             return result.setLabel("conv2d_out");
         }
 
-        // pub fn backward(tensor: *NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
-        //     log.info("conv2d backward() start", .{});
-        //     const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx.?));
-        //     if (self.input == null) {
-        //         return error.NoBackwardContext;
-        //     }
-        //     const batch_size = try self.input.?.data.shape.get(0);
-        //     const out_channels = self.out_channels;
-        //     const out_height = try tensor.data.shape.get(2);
-        //     const out_width = try tensor.data.shape.get(3);
-        //     log.info("upstream data: {d}", .{tensor.data.data});
-        //     log.info("upstream grad: {d}", .{tensor.grad.?.data});
-        //     // copy for reshaping
-        //     var grad_output_copy: *NDArray(T) = try tensor.grad.?.copy(allocator);
-        //     defer grad_output_copy.deinit(allocator);
-        //     try grad_output_copy.reshape(&[_]usize{ batch_size * out_channels, out_height * out_width });
-        //     log.info("Reshaped grad_output shape: {any}", .{grad_output_copy.shape.shape});
-        //     log.info("Reshaped grad_output data: {d}", .{grad_output_copy.data});
-        //     // Compute gradient w.r.t. weights
-        //     const col = try conv_utils.im2col(T, self.input.?.data, self.kernel_size, self.stride, self.padding, self.dilation, allocator);
-        //     defer col.deinit(allocator);
-        //     const grad_weights: *NDArray(T) = try grad_output_copy.matmul(col, false, true, allocator);
-        //     _ = try self.weights.grad.?._add(grad_weights);
-        //     log.info("grad_weights shape: {any}", .{grad_weights.shape.shape});
-        //     log.info("grad_weights data: {d}", .{grad_weights.data});
-        //     // Compute gradient w.r.t. bias
-        //     const bias_grad: *NDArray(T) = try tensor.grad.?.sum(allocator);
-        //     _ = try self.bias.grad.?._add(bias_grad);
-        //     log.info("Updated bias grad: {d}", .{self.bias.grad.?.data});
-        //     // Compute gradient w.r.t. input
-        //     var weights_copy: *NDTensor(T) = try self.weights.copy(allocator);
-        //     defer weights_copy.deinit();
-        //     _ = try weights_copy.reshape(&[_]usize{ out_channels, self.in_channels * self.kernel_size * self.kernel_size });
-        //     log.info("Reshaped weights shape: {any}", .{weights_copy.data.shape.shape});
-        //     log.info("Reshaped weights data: {d}", .{weights_copy.data.data});
-        //     const grad_col = try weights_copy.data.matmul(grad_output_copy, true, false, allocator);
-        //     defer grad_col.deinit(allocator);
-        //     log.info("grad_col shape: {any}", .{grad_col.shape.shape});
-        //     log.info("grad_col data: {d}", .{grad_col.data});
-        //     const grad_input = try conv_utils.col2im(
-        //         T,
-        //         grad_col,
-        //         self.input.?.data.shape.shape,
-        //         self.kernel_size,
-        //         self.stride,
-        //         self.padding,
-        //         self.dilation,
-        //         allocator,
-        //     );
-        //     defer grad_input.deinit(allocator);
-        //     log.info("grad_input shape: {any}", .{grad_input.shape.shape});
-        //     log.info("grad_input data: {d}", .{grad_input.data});
-        //     if (self.input.?.grad) |input_grad| {
-        //         _ = try input_grad._add(grad_input);
-        //     } else {
-        //         self.input.?.grad = try grad_input.copy(allocator);
-        //     }
-        //     log.info("Final input grad: {d}", .{self.input.?.grad.?.data});
-        //     log.info("conv2d backward() end", .{});
-        // }
-
         pub fn backward(tensor: *NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             const batch_size = try self.input.?.data.shape.get(0);

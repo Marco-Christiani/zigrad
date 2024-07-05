@@ -1,8 +1,10 @@
 const std = @import("std");
 const tensor = @import("tensor.zig");
+const random = @import("zigrad").random;
 
 const Op = tensor.Op;
 const NDTensor = tensor.NDTensor;
+const log = std.log.scoped(.zigrad_trainer);
 
 pub const PrintOptions = struct {
     add_symbol: []const u8,
@@ -13,6 +15,7 @@ pub const PrintOptions = struct {
     matmul_symbol: []const u8,
     matvec_symbol: []const u8,
     arrow_symbol: []const u8 = "<-",
+    reshape_symbol: []const u8 = "reshape",
     pub const plain = PrintOptions{
         .add_symbol = "+",
         .sub_symbol = "-",
@@ -42,25 +45,81 @@ pub const PrintOptions = struct {
     };
 };
 
+pub fn generateASCIIUUID(comptime length: usize) [length]u8 {
+    const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+    const alphabet_len = alphabet.len;
+    var random_bytes: [length]u8 = undefined;
+    random.bytes(&random_bytes);
+
+    for (random_bytes, 0..) |_, i| {
+        random_bytes[i] = alphabet[random_bytes[i] % alphabet_len];
+    }
+    return random_bytes;
+}
+
+fn randomSuffix(label: ?[]const u8, allocator: std.mem.Allocator) []const u8 {
+    if (label) |l| {
+        if (std.mem.containsAtLeast(u8, l, 1, "__")) return l; // already been labeled
+        const uid = generateASCIIUUID(4);
+        return std.fmt.allocPrint(allocator, "{s}__{s}", .{ l, uid }) catch {
+            @panic("Failed to set label");
+        };
+    }
+    const uid = generateASCIIUUID(4);
+    return std.fmt.allocPrint(allocator, "__{s}", .{uid}) catch {
+        @panic("Failed to set label");
+    };
+}
+
+const LabelGenerator = struct {
+    map: std.AutoHashMap(*const anyopaque, []const u8),
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) LabelGenerator {
+        return .{
+            .map = std.AutoHashMap(*const anyopaque, []const u8).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *LabelGenerator) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.map.deinit();
+    }
+
+    fn getOrCreateLabel(self: *LabelGenerator, ptr: *const anyopaque, base_label: ?[]const u8) ![]const u8 {
+        if (self.map.get(ptr)) |label| {
+            return label;
+        }
+
+        const new_label = randomSuffix(base_label, self.allocator);
+        try self.map.put(ptr, new_label);
+        return new_label;
+    }
+};
 pub fn printD2(
     node: anytype,
     opts: PrintOptions,
     writer: anytype,
+    label_gen: *LabelGenerator,
 ) !void {
     const T = @TypeOf(node);
     const info = @typeInfo(T);
-    // Ensure we're working with a pointer to a struct
-    if (info != .Pointer or info.Pointer.size != .One or @typeInfo(info.Pointer.child) != .Struct) {
-        @compileError("print_arrows expects a pointer to a struct");
-    }
     const S = info.Pointer.child;
-    // Check for required fields
+
     if (!@hasField(S, "label") or !@hasField(S, "op") or !@hasField(S, "children")) {
         @compileError("Struct must have 'label', 'op', and 'children' fields");
     }
+
+    const node_label = try label_gen.getOrCreateLabel(node, node.label);
+
     if (node.children) |children| {
         for (children) |elem| {
-            try writer.print("{?s}{s}{?s}", .{ node.label, opts.arrow_symbol, elem.label });
+            const elem_label = try label_gen.getOrCreateLabel(elem, elem.label);
+            try writer.print("{s}{s}{s}", .{ node_label, opts.arrow_symbol, elem_label });
             if (node.op) |op| {
                 const symbol = switch (op) {
                     .ADD => opts.add_symbol,
@@ -68,24 +127,22 @@ pub fn printD2(
                     .MUL => opts.mul_symbol,
                     .DIV => opts.div_symbol,
                     .SUM => opts.sum_symbol,
-                    .MATMUL => opts.matmul_symbol,
+                    .MATMUL_AB, .MATMUL_AtB, .MATMUL_ABt => opts.matmul_symbol,
                     .MATVEC => opts.matvec_symbol,
+                    .RESHAPE => opts.reshape_symbol,
                     else => "?",
                 };
                 try writer.print(": {s}\n", .{symbol});
-            } else if (@hasField(S, "_backward")) {
-                if (node._backward) |backward| {
-                    try writer.print(": {s}\n", .{@typeName(@TypeOf(backward))});
-                }
             } else {
+                try writer.print(": {s}\n", .{elem_label});
                 try writer.print("\n", .{});
             }
         }
         for (children) |elem| {
-            try printD2(elem, opts, writer);
+            try printD2(elem, opts, writer, label_gen);
         }
     } else {
-        try writer.print("{?s}\n", .{node.label});
+        try writer.print("{s}\n", .{node_label});
     }
 }
 
@@ -98,8 +155,12 @@ pub fn renderD2(
     var d2_code = std.ArrayList(u8).init(allocator);
     defer d2_code.deinit();
 
-    try printD2(node, opts, d2_code.writer());
+    var label_gen = LabelGenerator.init(allocator);
+    defer label_gen.deinit();
 
+    log.debug("traversing", .{});
+    try printD2(node, opts, d2_code.writer(), &label_gen);
+    log.debug("rendering", .{});
     const d2filepath = try std.fmt.allocPrint(allocator, "{s}{s}", .{ std.fs.path.stem(output_file), ".d2" });
     defer allocator.free(d2filepath);
     const d2file = try std.fs.cwd().createFile(d2filepath, .{});
@@ -114,7 +175,7 @@ pub fn renderD2(
         output_file,
     };
 
-    const result = try std.ChildProcess.run(.{
+    const result = try std.process.Child.run(.{
         .allocator = allocator,
         .argv = &args,
     });
@@ -136,7 +197,7 @@ pub fn sesame(filepath: []const u8, allocator: std.mem.Allocator) !void {
         else => std.log.err("Unsupported os {}", .{std.Target.Os.Tag}),
     };
 
-    const result = try std.ChildProcess.run(.{
+    const result = try std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ opencmd, filepath },
     });
