@@ -87,8 +87,16 @@ pub fn NDArray(comptime T: type) type {
             @memset(self.data, val);
         }
 
-        pub fn reshape(self: *Self, shape: []const usize) !void {
-            try self.shape.reshape(shape);
+        pub fn logShape(self: *const Self, comptime msg: ?[]const u8) void {
+            log.debug("{s} shape: {d}", .{
+                if (msg) |n| n else "",
+                self.shape.shape,
+            });
+        }
+
+        // TODO: make a copying reshape like tensor does
+        pub fn _reshape(self: *Self, shape: []const usize) !void {
+            try self.shape._reshape(shape);
         }
 
         pub fn get(self: Self, indices: []const usize) T {
@@ -299,6 +307,28 @@ pub fn NDArray(comptime T: type) type {
             return Self.init(&[_]T{s}, null, allocator);
         }
 
+        pub fn max(self: *const Self) !T {
+            if (self.data.len == 0) return error.EmptyArray;
+            return std.mem.max(T, self.data);
+        }
+
+        // TODO: naive
+        /// Copies. COM.
+        pub fn exp(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            const result = try Self.empty(self.shape.shape, allocator);
+            for (self.data, 0..) |val, i| {
+                result.data[i] = @exp(val);
+            }
+            return result;
+        }
+
+        /// In-place
+        pub fn _exp(self: *Self) void {
+            for (self.data) |*val| {
+                val.* = @exp(val.*);
+            }
+        }
+
         /// (...)-Mat-Mat: ND x KD (N,K>2) and broadcastable
         /// Simple dim rules: (M, K) x (K, N) = (M, N)
         pub fn matmul(self: *const Self, other: *const Self, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
@@ -308,8 +338,8 @@ pub fn NDArray(comptime T: type) type {
 
             const a_matrix_dims = self.shape.shape[self.shape.len() - 2 ..];
             const b_matrix_dims = other.shape.shape[other.shape.len() - 2 ..];
-            const a_batch_dims = self.shape.shape[0 .. self.shape.len() - 2];
-            const b_batch_dims = other.shape.shape[0 .. other.shape.len() - 2];
+            const a_batch_dims = if (self.shape.len() > 2) self.shape.shape[0 .. self.shape.len() - 2] else &[_]usize{1};
+            const b_batch_dims = if (other.shape.len() > 2) other.shape.shape[0 .. other.shape.len() - 2] else &[_]usize{1};
 
             const broadcast_batch_dims = try calculateBroadcastedShape(a_batch_dims, b_batch_dims, allocator);
             defer allocator.free(broadcast_batch_dims);
@@ -323,8 +353,10 @@ pub fn NDArray(comptime T: type) type {
             const K = if (trans_a) a_rows else a_cols;
             const N = if (trans_b) b_rows else b_cols;
 
-            if (K != (if (trans_b) b_cols else b_rows)) {
-                std.debug.panic("Incompatible matrix dimensions for matmul: {}x{} and {}x{}", .{ M, K, K, N });
+            if ((if (trans_a) a_rows else a_cols) != (if (trans_b) b_cols else b_rows)) {
+                std.debug.panic("Incompatible matrix dimensions for matmul: {}x{} and {}x{}  (trans_a={}, trans_b={})", .{
+                    a_rows, a_cols, b_rows, b_cols, trans_a, trans_b,
+                });
             }
 
             const batch_size = prod(broadcast_batch_dims);
@@ -363,6 +395,10 @@ pub fn NDArray(comptime T: type) type {
                 .data = output,
                 .shape = try Shape.init(output_shape, allocator),
             };
+            // NOTE: squeezing here means an unnecessary allocation and we should optimize this out later since
+            // we mocked an outer batch dim of 1 for the inputs, so the output will have an outer batch dim of 1
+            // but the inputs were both 2x2 so we should return a 2x2, thus squeeze it out
+            if (self.shape.len() == 2 and other.shape.len() == 2) try result.shape._squeeze();
             return result;
         }
 
@@ -475,7 +511,9 @@ pub fn NDArray(comptime T: type) type {
             while (result.shape.len() > target_shape.len()) {
                 const temp = result;
                 result = try temp.sum_along(allocator, .{ .dim = 0 });
-                if (temp != result) temp.deinit(allocator);
+                if (temp != result) {
+                    temp.deinit(allocator);
+                }
             }
 
             if (result.shape.len() == target_shape.len()) {
@@ -483,13 +521,16 @@ pub fn NDArray(comptime T: type) type {
                     if (s == 1 and result.shape.shape[dimi] != 1) {
                         const temp = result;
                         result = try temp.sum_along(allocator, .{ .dim = dimi, .keep_dims = true });
-                        if (temp != self) temp.deinit(allocator);
+                        if (temp != self) {
+                            temp.deinit(allocator);
+                        }
                     }
                 }
             }
 
             return result;
         }
+
         // pub fn unbroadcast(self: *Self, target_shape: *Shape, allocator: std.mem.Allocator) !*Self {
         //     if (self.shape.eq(target_shape.*, .{ .strict = true })) return self;
         //     var result: *Self = self;
@@ -509,6 +550,18 @@ pub fn NDArray(comptime T: type) type {
         //     }
         //     return result;
         // }
+
+        // TODO: impl in BLAS and add an inplace transpose
+        pub fn transpose(self: *const NDArray(T), allocator: std.mem.Allocator) !*NDArray(T) {
+            const new_shape = [_]usize{ self.shape.shape[1], self.shape.shape[0] };
+            var result = try NDArray(T).empty(&new_shape, allocator);
+            for (0..self.shape.shape[0]) |i| {
+                for (0..self.shape.shape[1]) |j| {
+                    result.data[j * self.shape.shape[0] + i] = self.data[i * self.shape.shape[1] + j];
+                }
+            }
+            return result;
+        }
     };
 }
 
@@ -561,7 +614,7 @@ pub fn blas_nrm2(T: type, x: []T, stride: usize) T {
     return switch (T) {
         f32 => c.cblas_snrm2(@intCast(x.len), x.ptr, @intCast(stride)),
         f64 => c.cblas_dnrm2(@intCast(x.len), x.ptr, @intCast(stride)),
-        else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+        else => @compileError("Unsupported type" ++ @typeName(T)),
     };
 }
 
@@ -598,23 +651,20 @@ pub const Shape = struct {
         errdefer self.alloc.free(result_shape);
         var i: usize = 0;
         while (i < dims) : (i += 1) {
-            const dimA = if (i < self.shape.len) self.shape[self.shape.len - 1 - i] else 1;
-            const dimB = if (i < other.shape.len) other.shape[other.shape.len - 1 - i] else 1;
-            if (dimA != dimB and dimA != 1 and dimB != 1) {
-                std.log.err("Cannot broadcast {d} and {d}", .{ self.shape, other.shape });
+            const dim_a = if (i < self.shape.len) self.shape[self.shape.len - 1 - i] else 1;
+            const dim_b = if (i < other.shape.len) other.shape[other.shape.len - 1 - i] else 1;
+            if (dim_a != dim_b and dim_a != 1 and dim_b != 1) {
+                log.err("Cannot broadcast {d} and {d}", .{ self.shape, other.shape });
                 return ZarrayError.Unbroadcastable;
             }
-            result_shape[dims - 1 - i] = @max(dimA, dimB);
+            result_shape[dims - 1 - i] = @max(dim_a, dim_b);
         }
         return Self{ .shape = result_shape, .alloc = self.alloc };
     }
 
     // TODO: usage should be minimized (or size stored but rarely needed this was)
     pub fn size(self: Self) usize {
-        if (self.shape.len == 0) return 0;
-        var total: usize = 1;
-        for (self.shape) |b| total *= b;
-        return total;
+        return prod(self.shape);
     }
 
     pub fn len(self: Self) usize {
@@ -623,14 +673,15 @@ pub const Shape = struct {
 
     /// Functional number of dims if the shape was squeezed
     pub fn realdims(self: Self) usize {
-        var ndim: usize = 1;
+        if (self.shape.len == 1) return 1;
+        var ndim: usize = 0;
         for (self.shape) |e| {
             if (e != 1) ndim += 1;
         }
         return ndim;
     }
 
-    pub fn squeeze(self: *Self) !*Self {
+    pub fn _squeeze(self: *Self) !void {
         var newshape = try self.alloc.alloc(usize, self.realdims());
         var j: usize = 0;
         for (0..self.shape.len) |i| {
@@ -641,25 +692,17 @@ pub const Shape = struct {
         }
         self.alloc.free(self.shape);
         self.shape = newshape;
-        return self;
     }
 
-    pub fn reshape(self: *Self, shape: []const usize) !void {
+    pub fn _reshape(self: *Self, shape: []const usize) !void {
         // TODO: reshape()
-        if (shape.len == 0) return ZarrayError.InvalidShape;
-        const requested_size = blk: {
-            var s: usize = 1;
-            for (shape) |e| s *= e;
-            break :blk s;
-        };
-        if (requested_size > self.size()) {
-            log.info("ShapeOutOfBounds requested_size={d} self.size={d} self.shape={d} requested_shape={d}", .{ requested_size, self.size(), self.shape, shape });
+        const requested_size = prod(shape);
+        if (requested_size != self.size()) {
+            log.err("ShapeOutOfBounds requested_size={d} self.size={d} self.shape={d} requested_shape={d}", .{ requested_size, self.size(), self.shape, shape });
             return ZarrayError.ShapeOutOfBounds;
         }
-        // for (0.., shape) |i, s| self.shape[i] = s;
         self.alloc.free(self.shape);
         self.shape = try self.alloc.dupe(usize, shape);
-        // @compileError("Not yet implemented");
     }
 
     pub fn get(self: Self, dim: usize) !usize {
@@ -669,28 +712,23 @@ pub const Shape = struct {
 
     pub fn rget(self: Self, dim: i32) !usize {
         if (@abs(dim) > self.len()) return error.DimOutOfBounds;
-        if (dim < 0) {
-            return self.shape[self.shape.len - @abs(dim)];
-        }
-        return self.shape[@abs(dim)];
+        if (dim >= 0) return error.InvalidDim; // must be a negative number
+        return self.shape[self.shape.len - @abs(dim)];
     }
 
-    const EqualOptions = struct { strict: bool = false };
+    const EqualOptions = struct {
+        /// require exactly equal
+        strict: bool = false,
+    };
 
     pub fn eq(a: Self, b: Self, options: EqualOptions) bool {
+        if (options.strict) return std.mem.eql(usize, a.shape, b.shape);
         const dims = @max(a.len(), b.len());
         var i: usize = 0;
-        while (i < dims) {
-            const dimA = if (i < a.len()) a.shape[a.shape.len - 1 - i] else 1;
-            const dimB = if (i < b.len()) b.shape[b.shape.len - 1 - i] else 1;
-            if (dimA != dimB) {
-                if (options.strict) {
-                    // require exactly equal, eq to std.mem.eq tho TODO: sub this later
-                    return false;
-                }
-                if (dimA != 1 and dimB != 1) return false;
-            }
-            i += 1;
+        while (i < dims) : (i += 1) {
+            const dim_a = if (i < a.len()) a.shape[a.shape.len - 1 - i] else 1;
+            const dim_b = if (i < b.len()) b.shape[b.shape.len - 1 - i] else 1;
+            if (dim_a != dim_b and dim_a != 1 and dim_b != 1) return false;
         }
         return true;
     }
@@ -701,7 +739,8 @@ pub const Range = struct {
     end: usize,
 };
 
-pub fn prod(dims: []usize) usize {
+pub fn prod(dims: []const usize) usize {
+    if (dims.len == 0) return 0;
     var s: usize = 1;
     for (dims) |f| s *= f;
     return s;
@@ -711,7 +750,7 @@ fn calculateBroadcastedShape(shape1: []const usize, shape2: []const usize, alloc
     const dims = @max(shape1.len, shape2.len);
     const result_shape = try allocator.alloc(usize, dims);
     var i: usize = 0;
-    while (i < dims) {
+    while (i < dims) : (i += 1) {
         const dimA = if (i < shape1.len) shape1[shape1.len - 1 - i] else 1;
         const dimB = if (i < shape2.len) shape2[shape2.len - 1 - i] else 1;
         if (dimA != dimB and dimA != 1 and dimB != 1) {
@@ -719,7 +758,6 @@ fn calculateBroadcastedShape(shape1: []const usize, shape2: []const usize, alloc
             return ZarrayError.Unbroadcastable;
         }
         result_shape[dims - 1 - i] = @max(dimA, dimB);
-        i += 1;
     }
     return result_shape;
 }
@@ -824,10 +862,10 @@ test "NDArray.reshape" {
     const Array = NDArray(T);
 
     var A = try Array.init(@constCast(&[_]T{ 1, 2, 3, 4, 5, 6 }), null, alloc);
-    try A.reshape(&[_]usize{ 2, 3 });
-    try std.testing.expectError(ZarrayError.ShapeOutOfBounds, A.reshape(&[_]usize{9}));
+    try A._reshape(&[_]usize{ 2, 3 });
+    try std.testing.expectError(ZarrayError.ShapeOutOfBounds, A._reshape(&[_]usize{9}));
     const v1 = A.get(&[_]usize{ 0, 0 });
-    try A.reshape(&[_]usize{ 2, 3 });
+    try A._reshape(&[_]usize{ 2, 3 });
     const v2 = A.get(&[_]usize{ 0, 0 });
     try std.testing.expectEqual(v1, v2);
 }
