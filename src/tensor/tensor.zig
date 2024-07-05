@@ -15,8 +15,8 @@ pub const Op = enum {
     SUB,
     MUL,
     DIV,
-    POW,
-    TANH,
+    POW, // TODO:
+    TANH, // TODO:
     MATMUL_AB,
     MATMUL_AtB,
     MATMUL_ABt,
@@ -79,12 +79,12 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn teardown(self: *const Self) void {
-            log.debug("teardown {?s}\n", .{self.label});
+            log.debug("teardown {?s}", .{self.label});
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
             if (self.children) |children| {
                 for (children) |c| {
                     std.log.debug("accessing child", .{});
-                    if (!c.acquired) c.teardown() else log.debug("skipping acquired tensor in teardown label={?s}\n", .{c.label});
+                    if (!c.acquired) c.teardown() else log.debug("skipping acquired tensor in teardown label={?s}", .{c.label});
                 }
             }
             log.debug("teardown()->deinit() {?s}", .{self.label});
