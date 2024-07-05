@@ -14,16 +14,19 @@ pub const PrintOptions = struct {
     sum_symbol: []const u8,
     matmul_symbol: []const u8,
     matvec_symbol: []const u8,
-    arrow_symbol: []const u8 = "<-",
+    max_symbol: []const u8 = "max",
+    exp_symbol: []const u8 = "exp",
     reshape_symbol: []const u8 = "reshape",
+    arrow_symbol: []const u8 = "<-",
+
     pub const plain = PrintOptions{
         .add_symbol = "+",
         .sub_symbol = "-",
         .mul_symbol = "×",
         .div_symbol = "/",
         .sum_symbol = "++",
-        .matmul_symbol = "@",
-        .matvec_symbol = "@@",
+        .matmul_symbol = "AB",
+        .matvec_symbol = "Ax",
     };
     pub const unicode1 = PrintOptions{
         .add_symbol = "+",
@@ -100,11 +103,13 @@ const LabelGenerator = struct {
         return new_label;
     }
 };
+
 pub fn printD2(
     node: anytype,
     opts: PrintOptions,
     writer: anytype,
     label_gen: *LabelGenerator,
+    visited: *std.AutoHashMap(*const anyopaque, void),
 ) !void {
     const T = @TypeOf(node);
     const info = @typeInfo(T);
@@ -115,6 +120,9 @@ pub fn printD2(
     }
 
     const node_label = try label_gen.getOrCreateLabel(node, node.label);
+
+    if (visited.contains(node)) return;
+    try visited.put(node, {});
 
     if (node.children) |children| {
         for (children) |elem| {
@@ -129,17 +137,18 @@ pub fn printD2(
                     .SUM => opts.sum_symbol,
                     .MATMUL_AB, .MATMUL_AtB, .MATMUL_ABt => opts.matmul_symbol,
                     .MATVEC => opts.matvec_symbol,
+                    .MAX => opts.max_symbol,
+                    .EXP => opts.exp_symbol,
                     .RESHAPE => opts.reshape_symbol,
                     else => "?",
                 };
                 try writer.print(": {s}\n", .{symbol});
             } else {
                 try writer.print(": {s}\n", .{elem_label});
-                try writer.print("\n", .{});
             }
         }
         for (children) |elem| {
-            try printD2(elem, opts, writer, label_gen);
+            try printD2(elem, opts, writer, label_gen, visited);
         }
     } else {
         try writer.print("{s}\n", .{node_label});
@@ -158,9 +167,13 @@ pub fn renderD2(
     var label_gen = LabelGenerator.init(allocator);
     defer label_gen.deinit();
 
+    var visited = std.AutoHashMap(*const anyopaque, void).init(allocator);
+    defer visited.deinit();
+
     log.debug("traversing", .{});
-    try printD2(node, opts, d2_code.writer(), &label_gen);
+    try printD2(node, opts, d2_code.writer(), &label_gen, &visited);
     log.debug("rendering", .{});
+
     const d2filepath = try std.fmt.allocPrint(allocator, "{s}{s}", .{ std.fs.path.stem(output_file), ".d2" });
     defer allocator.free(d2filepath);
     const d2file = try std.fs.cwd().createFile(d2filepath, .{});
