@@ -1,5 +1,10 @@
-default: brm
+default: bt
 
+bt:
+  zig build test
+
+b:
+  zig build
 
 btest file:
   zig build test -Dfile={{file}}

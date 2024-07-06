@@ -19,14 +19,14 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
     };
     return struct {
         const Self = @This();
-        model: *Model(T),
-        params: []*NDTensor(T),
+        model: Model(T),
+        params: []NDTensor(T),
         optimizer: SGD(T),
         allocator: std.mem.Allocator,
         graph_manager: Loss(NDTensor(T)),
 
         pub fn init(
-            model: *Model(T),
+            model: Model(T),
             learning_rate: T,
             loss_config: Loss(T).LossConfig,
             allocator: std.mem.Allocator,
@@ -45,9 +45,10 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             self.graph_manager.deinit();
             log.info("free params", .{});
             self.allocator.free(self.params);
+            self.* = undefined;
         }
 
-        pub fn trainStep(self: *Self, input: *NDTensor(T), target: *NDTensor(T)) !*NDTensor(T) {
+        pub fn trainStep(self: *Self, input: NDTensor(T), target: NDTensor(T)) !NDTensor(T) {
             const output = try self.model.forward(input);
             log.debug("calculating loss", .{});
             const loss = try lossf(T, output, target, self.allocator);
@@ -57,10 +58,10 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             log.debug("running backward", .{});
             try self.graph_manager.backward(loss, self.allocator);
 
-            std.log.info("rendering", .{});
-            try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.svg");
-            std.log.info("done", .{});
-            try utils.sesame("/tmp/trainergraph.svg", self.allocator);
+            // std.log.info("rendering", .{});
+            // try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.svg");
+            // std.log.info("done", .{});
+            // try utils.sesame("/tmp/trainergraph.svg", self.allocator);
 
             log.debug("updating", .{});
             self.optimizer.step(self.params);
@@ -71,7 +72,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             return loss;
         }
 
-        pub fn train(self: *Self, inputs: []*NDTensor(T), targets: []*NDTensor(T), epochs: usize) !void {
+        pub fn train(self: Self, inputs: []NDTensor(T), targets: []NDTensor(T), epochs: usize) !void {
             _ = epochs; // autofix
             _ = targets; // autofix
             _ = inputs; // autofix

@@ -5,23 +5,35 @@
 // TODO: exp
 // TODO: document bcast rules and shape rules for inplace ewise ops
 const std = @import("std");
-const c = @cImport(@cInclude("Accelerate/Accelerate.h"));
+// const blas = @import("../backend/blas.zig");
+const blas = @import("../backend/blas.zig");
 const log = std.log.scoped(.zigrad_zarray);
 
-pub const ZarrayError = error{ InvalidShape, Unbroadcastable, InvalidIndex, ShapeOutOfBounds, IncompatibleShapes };
+pub const ZarrayError = error{
+    InvalidShape,
+    Unbroadcastable,
+    InvalidIndex,
+    IndexOutOfBounds,
+    ShapeOutOfBounds,
+    DimOutOfBounds,
+    IncompatibleShapes,
+    RangeOutOfBounds,
+};
 
 pub fn NDArray(comptime T: type) type {
     return struct {
         const Self = @This();
-        shape: *Shape,
+        shape: Shape,
         data: []T,
+        view: bool = false,
 
-        pub fn init(values: []const T, shape: ?[]const usize, allocator: std.mem.Allocator) !*Self {
-            const result = try allocator.create(Self);
-
-            result.* = Self{
+        pub fn init(values: []const T, shape: ?[]const usize, allocator: std.mem.Allocator) !Self {
+            const result = Self{
                 .data = try allocator.dupe(T, values),
-                .shape = try Shape.init(shape orelse &[_]usize{values.len}, allocator),
+                .shape = Shape{
+                    .shape = try allocator.dupe(usize, shape orelse &[_]usize{values.len}),
+                    .alloc = allocator,
+                },
             };
             if (result.shape.size() != result.data.len) {
                 log.err("Invalid shape: result.shape.size()={d} result.data.len={d}", .{ result.shape.size(), result.data.len });
@@ -30,33 +42,33 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        pub fn initNoAlloc(values: []T, shape: []const usize, allocator: std.mem.Allocator) !*Self {
-            const result = allocator.create(Self) catch {
-                std.debug.panic("NDArray allocation failed.", .{});
-            };
-            const result_shape = try allocator.create(Shape);
-            result_shape.* = Shape{
-                .shape = @constCast(shape),
-                .alloc = allocator,
-            };
-
-            result.* = Self{
-                .data = values,
-                .shape = result_shape,
-            };
-            if (result.shape.size() > result.data.len) return ZarrayError.InvalidShape;
-            return result;
+        // pub fn initNoAlloc(values: []T, shape: []const usize, allocator: std.mem.Allocator) !*Self {
+        //     const result = allocator.create(Self) catch {
+        //         std.debug.panic("NDArray allocation failed.", .{});
+        //     };
+        //     const result_shape = try allocator.create(Shape);
+        //     result_shape.* = Shape{
+        //         .shape = @constCast(shape),
+        //         .alloc = allocator,
+        //     };
+        //
+        //     result.* = Self{
+        //         .data = values,
+        //         .shape = result_shape,
+        //     };
+        //     if (result.shape.size() > result.data.len) return ZarrayError.InvalidShape;
+        //     return result;
+        // }
+        //
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+            if (!self.view) allocator.free(self.data);
+            self.shape.deinit(); // fffff
+            // allocator.destroy(self);
+            // self.* = undefined;
         }
 
-        pub fn deinit(self: *const Self, allocator: std.mem.Allocator) void {
-            allocator.free(self.data);
-            self.shape.deinit();
-            allocator.destroy(self);
-        }
-
-        pub fn zerosLike(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const result = try allocator.create(Self);
-            result.* = .{
+        pub fn zerosLike(self: Self, allocator: std.mem.Allocator) !Self {
+            const result = .{
                 .data = try allocator.alloc(T, self.shape.size()),
                 .shape = try Shape.init(self.shape.shape, allocator),
             };
@@ -64,30 +76,26 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        pub fn empty(shape: []const usize, allocator: std.mem.Allocator) !*Self {
-            const result = try allocator.create(Self);
+        pub fn empty(shape: []const usize, allocator: std.mem.Allocator) !Self {
             const empty_shape = try Shape.init(shape, allocator);
-            result.* = .{
+            return .{
                 .data = try allocator.alloc(T, empty_shape.size()),
                 .shape = empty_shape,
             };
-            return result;
         }
 
-        pub fn copy(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const result = try allocator.create(Self);
-            result.* = .{
+        pub fn copy(self: Self, allocator: std.mem.Allocator) !Self {
+            return .{
                 .data = try allocator.dupe(T, self.data),
                 .shape = try self.shape.copy(allocator),
             };
-            return result;
         }
 
-        pub fn fill(self: *Self, val: T) void {
+        pub fn fill(self: Self, val: T) void {
             @memset(self.data, val);
         }
 
-        pub fn logShape(self: *const Self, comptime msg: ?[]const u8) void {
+        pub fn logShape(self: Self, comptime msg: ?[]const u8) void {
             log.debug("{s} shape: {d}", .{
                 if (msg) |n| n else "",
                 self.shape.shape,
@@ -96,29 +104,30 @@ pub fn NDArray(comptime T: type) type {
 
         // TODO: make a copying reshape like tensor does
         pub fn _reshape(self: *Self, shape: []const usize) !void {
+            // sorry im not rewriting all backward rn, im not so sure this would work?
             try self.shape._reshape(shape);
         }
 
         pub fn get(self: Self, indices: []const usize) T {
-            return self.data[self.posToOffset(indices)];
+            return self.data[self.posToOffset(indices) catch |e| std.debug.panic("Index error {any}", .{e})];
         }
 
-        pub fn set(self: *Self, indices: []const usize, value: T) ZarrayError!void {
+        pub fn set(self: Self, indices: []const usize, value: T) ZarrayError!void {
             if (indices.len != self.shape.len()) {
                 return ZarrayError.InvalidShape;
             }
             std.debug.assert(indices.len == self.shape.len());
-            const index = self.posToOffset(indices);
+            const index = try self.posToOffset(indices);
             self.data[index] = value;
         }
 
-        pub fn posToOffset(self: Self, indices: []const usize) usize {
-            std.debug.assert(indices.len == self.shape.len());
+        pub fn posToOffset(self: Self, indices: []const usize) !usize {
+            // std.debug.assert(indices.len == self.shape.len());
             var index: usize = 0;
             var stride: usize = 1;
             for (0..self.shape.len()) |i| {
                 const dim = self.shape.len() - i - 1;
-                const dimSize = self.shape.get(dim) catch unreachable;
+                const dimSize = try self.shape.get(dim);
                 const idx = indices[dim];
                 std.debug.assert(idx < dimSize);
 
@@ -151,13 +160,13 @@ pub fn NDArray(comptime T: type) type {
             return pos;
         }
 
-        pub fn size(self: *const Self) !void {
+        pub fn size(self: Self) !void {
             return self.data.len;
         }
 
-        pub fn print(self: *const Self) void {
+        pub fn print(self: Self) void {
             const alloc = std.heap.page_allocator;
-            var shapeStr: []u8 = alloc.alloc(u8, self.shape.len() * @sizeOf(usize)) catch unreachable;
+            var shapeStr: []u8 = alloc.alloc(u8, self.shape.len() * @sizeOf(usize)) catch @panic("allocation failed in print");
             defer alloc.free(shapeStr);
             var j: usize = 0;
             var bytes_written: usize = 0;
@@ -177,37 +186,77 @@ pub fn NDArray(comptime T: type) type {
             std.debug.print("{d}", .{self.data});
         }
 
-        pub fn slice(self: Self, ranges: []const Range) !Self {
+        /// View into contiguous slice along a single dim. Shape is allocated COM.
+        pub fn slice(self: Self, dim: usize, start: usize, end: usize) !Self {
+            var new_shape = try self.shape.alloc.dupe(usize, self.shape.shape);
+            new_shape[dim] = end - start;
+
+            return .{
+                .shape = Shape{ .shape = new_shape, .alloc = self.shape.alloc },
+                .data = try self.sliceRawNoAlloc(dim, start, end),
+                .view = true,
+            };
+        }
+
+        /// Completely mutable into a contiguous slice along a single dim, better know what you are doing.
+        /// if you touch the shape youre most likely up schitts creek.
+        pub fn sliceUnsafeNoAlloc(self: Self, dim: usize, start: usize, end: usize) !Self {
+            return .{
+                .shape = self.shape,
+                .data = try self.sliceRawNoAlloc(dim, start, end),
+                .view = true,
+            };
+        }
+
+        /// View into a raw contiguous slice along a single dim.
+        pub fn sliceRawNoAlloc(self: Self, dim: usize, start: usize, end: usize) ![]T {
+            if (start > end or end > self.shape.shape[dim]) {
+                return ZarrayError.RangeOutOfBounds;
+            }
+
+            const stride = try self.getStride(dim);
+            const start_index = start * stride;
+            const slice_size = (end - start) * stride;
+
+            return self.data[start_index .. start_index + slice_size];
+        }
+
+        /// Yields an arbitrary view into a tensor. May be non-contiguous. Shape is allocated COM.
+        pub fn sliceRanges(self: Self, ranges: []const Range) !Self {
             if (ranges.len != self.shape.len()) {
                 return ZarrayError.InvalidShape;
+            }
+            if (ranges.len > self.shape.len()) {
+                return ZarrayError.RangeOutOfBounds;
             }
 
             var new_shape = try self.shape.alloc.alloc(usize, self.shape.len());
             var start_index: usize = 0;
             var total_elements: usize = 1;
+            var stride: usize = 1;
 
             for (ranges, 0..) |range, i| {
                 if (range.end > self.shape.shape[i]) {
-                    return ZarrayError.ShapeOutOfBounds;
+                    return ZarrayError.IndexOutOfBounds;
                 }
                 new_shape[i] = range.end - range.start;
                 total_elements *= new_shape[i];
-                start_index += range.start * self.getStride(i);
+                // start_index += range.start * self.getStride(i);
+                start_index += range.start * stride;
+                stride *= self.shape.shape[i];
             }
 
-            const shape = try self.shape.alloc.create(Shape);
-            shape.* = Shape{ .shape = new_shape, .alloc = self.shape.alloc };
-
-            return Self{
-                .shape = shape,
+            return .{
+                .shape = Shape{ .shape = new_shape, .alloc = self.shape.alloc },
                 .data = self.data[start_index .. start_index + total_elements],
+                .view = true,
             };
         }
 
-        pub fn setSlice(self: *Self, ranges: []const Range, values: Self) !void {
-            const slice_ = try self.slice(ranges);
+        pub fn setSliceRanges(self: Self, ranges: []const Range, values: Self) !void {
+            const slice_ = try self.sliceRanges(ranges);
             defer slice_.shape.deinit();
-            if (!slice_.shape.eq(values.shape.*, .{ .strict = true })) {
+            if (!slice_.shape.eq(values.shape, .{ .strict = true })) {
                 return ZarrayError.IncompatibleShapes;
             }
 
@@ -218,6 +267,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         fn getStride(self: Self, dim: usize) usize {
+            if (dim >= self.shape.len()) return ZarrayError.DimOutOfBounds;
             var s: usize = 1;
             var i: usize = dim + 1;
             while (i < self.shape.len()) : (i += 1) {
@@ -227,18 +277,21 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// Element-wise addition
-        pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn add(self: Self, other: Self, allocator: std.mem.Allocator) !Self {
             const bshape = try self.shape.broadcast(other.shape);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| {
                 values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];
             }
-            return Self.initNoAlloc(values, bshape.shape, allocator);
+            return Self{
+                .data = values,
+                .shape = bshape,
+            };
         }
 
         /// In-place element-wise addition
-        pub fn _add(self: *Self, other: *const Self) !*Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+        pub fn _add(self: Self, other: Self) !Self {
+            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
@@ -246,17 +299,24 @@ pub fn NDArray(comptime T: type) type {
             return self;
         }
 
+        /// In-place scalar add
+        pub fn _add_scalar(self: Self, scalar: T) void {
+            for (self.data) |*val| {
+                val.* += scalar;
+            }
+        }
+
         /// Element-wise subtraction
-        pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn sub(self: Self, other: Self, allocator: std.mem.Allocator) !Self {
             const bshape = try self.shape.broadcast(other.shape);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] - other.data[i % other.data.len];
-            return Self.initNoAlloc(values, bshape.shape, allocator);
+            return Self{ .data = values, .shape = bshape };
         }
 
         /// In-place element-wise subtraction
-        pub fn _sub(self: *Self, other: *const Self) !*Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+        pub fn _sub(self: Self, other: Self) !Self {
+            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
@@ -265,16 +325,16 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// Element-wise multiplication
-        pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn mul(self: Self, other: Self, allocator: std.mem.Allocator) !Self {
             const bshape = try self.shape.broadcast(other.shape);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] * other.data[i % other.data.len];
-            return Self.initNoAlloc(values, bshape.shape, allocator);
+            return Self{ .data = values, .shape = bshape };
         }
 
         /// In-place element-wise multiplication
-        pub fn _mul(self: *Self, other: *const Self) !*Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+        pub fn _mul(self: Self, other: *const Self) !Self {
+            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
@@ -283,16 +343,16 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// Element-wise division
-        pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn div(self: Self, other: Self, allocator: std.mem.Allocator) !Self {
             const bshape = try self.shape.broadcast(other.shape);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] / other.data[i % other.data.len];
-            return Self.initNoAlloc(values, bshape.shape, allocator);
+            return Self{ .data = values, .shape = bshape };
         }
 
         /// In-place element-wise division
-        pub fn _div(self: *Self, other: *const Self) !*Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+        pub fn _div(self: Self, other: Self) !Self {
+            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
@@ -300,21 +360,34 @@ pub fn NDArray(comptime T: type) type {
             return self;
         }
 
-        /// Element-wise sum
-        pub fn sum(self: *Self, allocator: std.mem.Allocator) !*Self {
-            var s: T = 0;
-            for (self.data) |e| s += e;
-            return Self.init(&[_]T{s}, null, allocator);
+        /// Element-wise sum. COM.
+        pub fn sum(self: Self, allocator: std.mem.Allocator) !Self {
+            return try Self.init(&[_]T{self.sumNoAlloc()}, null, allocator);
         }
 
-        pub fn max(self: *const Self) !T {
+        /// Element-wise sum.
+        pub fn sumNoAlloc(self: Self) T {
+            // TODO: tired rn
+            // const VT = @Vector(16, T);
+            // var s: T = 0;
+            // var i: usize = 0;
+            // while (i < self.data.len - 16) : (i += 16) s += @reduce(.Add, @as(VT, self.data[i .. i + 16].*));
+            // for (i..self.data.len) |j| s += self.data[j];
+            // return s;
+            var s: T = 0;
+            for (0..self.data.len) |i| s += self.data[i];
+            return s;
+        }
+
+        /// COM.
+        pub fn max(self: Self, allocator: std.mem.Allocator) !Self {
             if (self.data.len == 0) return error.EmptyArray;
-            return std.mem.max(T, self.data);
+            return Self.init(&[_]T{std.mem.max(T, self.data)}, null, allocator);
         }
 
         // TODO: naive
         /// Copies. COM.
-        pub fn exp(self: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn exp(self: Self, allocator: std.mem.Allocator) !Self {
             const result = try Self.empty(self.shape.shape, allocator);
             for (self.data, 0..) |val, i| {
                 result.data[i] = @exp(val);
@@ -322,16 +395,21 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        /// In-place
-        pub fn _exp(self: *Self) void {
+        /// In-place e^x
+        pub fn _exp(self: Self) void {
             for (self.data) |*val| {
                 val.* = @exp(val.*);
             }
         }
 
+        /// In-place scaling
+        pub fn _scale(self: Self, scalar: T) void {
+            blas.blas_scale(T, scalar, self.data);
+        }
+
         /// (...)-Mat-Mat: ND x KD (N,K>2) and broadcastable
         /// Simple dim rules: (M, K) x (K, N) = (M, N)
-        pub fn matmul(self: *const Self, other: *const Self, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
+        pub fn matmul(self: Self, other: Self, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !Self {
             if (self.shape.len() < 2 or other.shape.len() < 2) {
                 std.debug.panic("Input tensors must have at least two dimensions.", .{});
             }
@@ -387,58 +465,53 @@ pub fn NDArray(comptime T: type) type {
                 const b_slice = other.data[b_start .. b_start + b_rows * b_cols];
                 const out_slice = output[out_start .. out_start + M * N];
 
-                blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, N);
+                blas.blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, N);
             }
-
-            const result = try allocator.create(Self);
-            result.* = Self{
+            // ooof this refactor is getting nasty
+            var result = Self{
                 .data = output,
                 .shape = try Shape.init(output_shape, allocator),
             };
             // NOTE: squeezing here means an unnecessary allocation and we should optimize this out later since
             // we mocked an outer batch dim of 1 for the inputs, so the output will have an outer batch dim of 1
             // but the inputs were both 2x2 so we should return a 2x2, thus squeeze it out
-            if (self.shape.len() == 2 and other.shape.len() == 2) try result.shape._squeeze();
+            if (self.shape.len() == 2 and other.shape.len() == 2) try @constCast(&result.shape)._squeeze();
             return result;
         }
 
-        pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn dot(self: Self, other: Self, allocator: std.mem.Allocator) !Self {
             if (self.shape.len() > 1 or other.shape.len() > 1) std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
             if (self.data.len != other.data.len) std.debug.panic("Incompatible lengths for dot product: {d} and {d}\n", .{ self.data.len, other.data.len });
 
-            const output: T = blas_dot(T, self.data, other.data);
-            return Self.init(&[_]T{output}, &[_]usize{1}, allocator);
+            const output: T = blas.blas_dot(T, self.data, other.data);
+            return try Self.init(&[_]T{output}, &[_]usize{1}, allocator);
         }
 
-        pub fn outer(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn outer(self: Self, other: Self, allocator: std.mem.Allocator) !Self {
             if (self.shape.len() != 1 or other.shape.len() != 1) std.debug.panic("Outer product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
             const M: usize = try self.shape.get(0);
             const N: usize = try other.shape.get(0);
             const output: []T = try allocator.alignedAlloc(T, null, M * N);
             @memset(output, 0);
             errdefer allocator.free(output);
-            blas_outer(T, self.data, other.data, output, 1);
-            const result = try allocator.create(Self);
-            result.* = Self{
+            blas.blas_outer(T, self.data, other.data, output, 1);
+            return .{
                 .data = output,
                 .shape = try Shape.init(&[_]usize{ M, N }, allocator),
             };
-            return result;
         }
 
-        pub fn matvec(self: *const Self, other: *const Self, trans_a: bool, allocator: std.mem.Allocator) !*Self {
+        pub fn matvec(self: Self, other: Self, trans_a: bool, allocator: std.mem.Allocator) !Self {
             // TODO: shape checks for matvec
             const output_size = if (trans_a) try self.shape.get(1) else try self.shape.get(0);
             const output: []T = try allocator.alignedAlloc(T, null, output_size);
             errdefer allocator.free(output);
-            blas_matvec(T, self.data, other.data, output, try self.shape.get(0), try self.shape.get(1), 1, 0, trans_a);
+            blas.blas_matvec(T, self.data, other.data, output, try self.shape.get(0), try self.shape.get(1), 1, 0, trans_a);
 
-            const result = try allocator.create(Self);
-            result.* = Self{
+            return Self{
                 .data = output,
                 .shape = try Shape.init(other.shape.shape, allocator),
             };
-            return result;
         }
 
         pub const SumOpts = struct {
@@ -446,11 +519,12 @@ pub fn NDArray(comptime T: type) type {
             keep_dims: bool = false,
         };
 
-        pub fn sum_along(self: *Self, allocator: std.mem.Allocator, opts: SumOpts) !*Self {
+        pub fn sum_along(self: Self, allocator: std.mem.Allocator, opts: SumOpts) !Self {
             const input_shape = self.shape.shape;
             const input_dims = input_shape.len;
             if (opts.dim >= input_dims) return ZarrayError.ShapeOutOfBounds;
 
+            // TODO: rm alloc
             var output_shape = try allocator.alloc(usize, if (opts.keep_dims) input_dims else input_dims - 1);
             defer allocator.free(output_shape);
             var idx: usize = 0;
@@ -491,11 +565,11 @@ pub fn NDArray(comptime T: type) type {
             return output;
         }
 
-        fn l2_norm(self: *const Self) T {
-            return blas_nrm2(T, self.data, 1);
+        fn l2_norm(self: Self) T {
+            return blas.blas_nrm2(T, self.data, 1);
         }
 
-        pub fn clip_norm(self: *Self, max_norm: T, delta: T) void {
+        pub fn clip_norm(self: Self, max_norm: T, delta: T) void {
             const norm = self.l2_norm();
             if (norm > max_norm) {
                 const scale = max_norm / (norm + delta);
@@ -506,31 +580,40 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// Unbroadcast to target shape
-        pub fn unbroadcast(self: *Self, target_shape: *Shape, allocator: std.mem.Allocator) !*Self {
-            var result: *Self = self;
+        /// TODO: think ab this later but could pointer swap (may give compiler more freedom to optimize)
+        pub fn unbroadcast(self: Self, target_shape: Shape, allocator: std.mem.Allocator) !Self {
+            var result = self;
+            var needs_dealloc = false;
+
             while (result.shape.len() > target_shape.len()) {
-                const temp = result;
-                result = try temp.sum_along(allocator, .{ .dim = 0 });
-                if (temp != result) {
-                    temp.deinit(allocator);
+                const temp = try result.sum_along(allocator, .{ .dim = 0 });
+                if (needs_dealloc) {
+                    @constCast(&result).deinit(allocator);
                 }
+                result = temp;
+                needs_dealloc = true;
             }
 
             if (result.shape.len() == target_shape.len()) {
                 for (target_shape.shape, 0..) |s, dimi| {
                     if (s == 1 and result.shape.shape[dimi] != 1) {
-                        const temp = result;
-                        result = try temp.sum_along(allocator, .{ .dim = dimi, .keep_dims = true });
-                        if (temp != self) {
-                            temp.deinit(allocator);
+                        const temp = try result.sum_along(allocator, .{ .dim = dimi, .keep_dims = true });
+                        if (needs_dealloc) {
+                            @constCast(&result).deinit(allocator);
                         }
+                        result = temp;
+                        needs_dealloc = true;
                     }
                 }
             }
 
+            if (!needs_dealloc) {
+                // if we haven't made any changes, create a copy
+                return try self.copy(allocator);
+            }
+
             return result;
         }
-
         // pub fn unbroadcast(self: *Self, target_shape: *Shape, allocator: std.mem.Allocator) !*Self {
         //     if (self.shape.eq(target_shape.*, .{ .strict = true })) return self;
         //     var result: *Self = self;
@@ -552,9 +635,9 @@ pub fn NDArray(comptime T: type) type {
         // }
 
         // TODO: impl in BLAS and add an inplace transpose
-        pub fn transpose(self: *const NDArray(T), allocator: std.mem.Allocator) !*NDArray(T) {
+        pub fn transpose(self: Self, allocator: std.mem.Allocator) !Self {
             const new_shape = [_]usize{ self.shape.shape[1], self.shape.shape[0] };
-            var result = try NDArray(T).empty(&new_shape, allocator);
+            var result = try Self.empty(&new_shape, allocator);
             for (0..self.shape.shape[0]) |i| {
                 for (0..self.shape.shape[1]) |j| {
                     result.data[j * self.shape.shape[0] + i] = self.data[i * self.shape.shape[1] + j];
@@ -565,87 +648,28 @@ pub fn NDArray(comptime T: type) type {
     };
 }
 
-/// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
-pub fn blas_dot(T: type, A: []T, B: []T) T {
-    switch (T) {
-        f32 => return c.cblas_sdot(@intCast(A.len), A.ptr, 1, B.ptr, 1),
-        f64 => return c.cblas_ddot(@intCast(A.len), A.ptr, 1, B.ptr, 1),
-        else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-    }
-}
-
-/// Computes mat-vec assuming a stride of 1 for the vec and row-major.
-/// a * (M, N) x (N,) + b * (N,) = (M,)
-/// Y = aAX + bY
-pub fn blas_matvec(T: type, A: []T, X: []T, Y: []T, M: usize, N: usize, alpha: T, beta: T, trans_a: bool) void {
-    const lda = N;
-    const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
-    switch (T) {
-        f32 => c.cblas_sgemv(c.CblasRowMajor, @intCast(ta), @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), X.ptr, 1, beta, Y.ptr, 1),
-        f64 => c.cblas_dgemv(c.CblasRowMajor, @intCast(ta), @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), X.ptr, 1, beta, Y.ptr, 1),
-        else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-    }
-}
-
-///  Assumes row-major.
-///  (M, K) x (K, N) = (M, N)
-pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize) void {
-    const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
-    const tb = if (trans_b) c.CblasTrans else c.CblasNoTrans;
-    switch (T) {
-        f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), 1.0, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), 0.0, C.ptr, @intCast(ldc)),
-        f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), 1.0, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), 0.0, C.ptr, @intCast(ldc)),
-        else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-    }
-}
-
-/// Outer product: A = alpha(xy') + A
-/// A: (M, N)
-pub fn blas_outer(T: type, x: []T, y: []T, A: []T, alpha: T) void {
-    switch (T) {
-        f32 => c.cblas_sger(c.CblasRowMajor, @intCast(x.len), @intCast(y.len), alpha, x.ptr, 1, y.ptr, 1, A.ptr, @intCast(y.len)),
-        f64 => c.cblas_dger(c.CblasRowMajor, @intCast(x.len), @intCast(y.len), alpha, x.ptr, 1, y.ptr, 1, A.ptr, @intCast(y.len)),
-        else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-    }
-}
-/// Outer product: A = alpha(xy') + A
-/// A: (M, N)
-pub fn blas_nrm2(T: type, x: []T, stride: usize) T {
-    return switch (T) {
-        f32 => c.cblas_snrm2(@intCast(x.len), x.ptr, @intCast(stride)),
-        f64 => c.cblas_dnrm2(@intCast(x.len), x.ptr, @intCast(stride)),
-        else => @compileError("Unsupported type" ++ @typeName(T)),
-    };
-}
-
 pub const Shape = struct {
     const Self = @This();
     shape: []usize,
     alloc: std.mem.Allocator,
 
-    pub fn init(shape: []const usize, allocator: std.mem.Allocator) !*Self {
+    pub fn init(shape: []const usize, allocator: std.mem.Allocator) !Self {
         if (shape.len == 0) return ZarrayError.InvalidShape;
-        const self = try allocator.create(Self);
-        self.alloc = allocator;
-        self.shape = try allocator.dupe(usize, shape);
-        return self;
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.alloc.free(self.shape);
-        self.alloc.destroy(self);
-    }
-
-    pub fn copy(self: *const Shape, allocator: std.mem.Allocator) !*Shape {
-        const result = try allocator.create(Shape);
-        result.* = .{
-            .shape = try allocator.dupe(usize, self.shape),
+        return Self{
             .alloc = allocator,
+            .shape = try allocator.dupe(usize, shape),
         };
-        return result;
     }
 
-    pub fn broadcast(self: *Self, other: *const Self) !Self {
+    pub fn deinit(self: Self) void {
+        self.alloc.free(self.shape);
+    }
+
+    pub fn copy(self: *const Shape, allocator: std.mem.Allocator) !Shape {
+        return try Self.init(self.shape, allocator);
+    }
+
+    pub fn broadcast(self: Self, other: Self) !Self {
         const dims = @max(self.len(), other.len());
         const result_shape = try self.alloc.alloc(usize, dims);
         errdefer self.alloc.free(result_shape);
@@ -682,6 +706,7 @@ pub const Shape = struct {
     }
 
     pub fn _squeeze(self: *Self) !void {
+        // TODO: realloc is a thing
         var newshape = try self.alloc.alloc(usize, self.realdims());
         var j: usize = 0;
         for (0..self.shape.len) |i| {
@@ -698,20 +723,21 @@ pub const Shape = struct {
         // TODO: reshape()
         const requested_size = prod(shape);
         if (requested_size != self.size()) {
-            log.err("ShapeOutOfBounds requested_size={d} self.size={d} self.shape={d} requested_shape={d}", .{ requested_size, self.size(), self.shape, shape });
+            log.info("ShapeOutOfBounds requested_size={d} self.size={d} self.shape={d} requested_shape={d}", .{ requested_size, self.size(), self.shape, shape });
             return ZarrayError.ShapeOutOfBounds;
         }
         self.alloc.free(self.shape);
+        // self.shape = try self.alloc.realloc(self.shape, shape.len);
         self.shape = try self.alloc.dupe(usize, shape);
     }
 
     pub fn get(self: Self, dim: usize) !usize {
-        if (dim >= self.len()) return error.DimOutOfBounds;
+        if (dim >= self.len()) return ZarrayError.DimOutOfBounds;
         return self.shape[dim];
     }
 
     pub fn rget(self: Self, dim: i32) !usize {
-        if (@abs(dim) > self.len()) return error.DimOutOfBounds;
+        if (@abs(dim) > self.len()) return ZarrayError.DimOutOfBounds;
         if (dim >= 0) return error.InvalidDim; // must be a negative number
         return self.shape[self.shape.len - @abs(dim)];
     }
@@ -861,7 +887,7 @@ test "NDArray.reshape" {
     const T = f64;
     const Array = NDArray(T);
 
-    var A = try Array.init(@constCast(&[_]T{ 1, 2, 3, 4, 5, 6 }), null, alloc);
+    var A = try Array.init(&[_]T{ 1, 2, 3, 4, 5, 6 }, null, alloc);
     try A._reshape(&[_]usize{ 2, 3 });
     try std.testing.expectError(ZarrayError.ShapeOutOfBounds, A._reshape(&[_]usize{9}));
     const v1 = A.get(&[_]usize{ 0, 0 });
@@ -965,7 +991,7 @@ test "NDArray.sum_along" {
     const expected1 = try Array.init(&[_]T{ 7, 3 }, null, alloc);
     defer expected1.deinit(alloc);
     try std.testing.expectEqualDeep(expected1, a2);
-    try std.testing.expect(a2.shape.eq(expected1.shape.*, .{}));
+    try std.testing.expect(a2.shape.eq(expected1.shape, .{}));
 }
 
 test "NDArray.slice" {
@@ -974,13 +1000,13 @@ test "NDArray.slice" {
     defer arr.deinit(alloc);
 
     // get 2x2 slice from the top-left corner
-    var slice = try arr.slice(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } });
+    var slice = try arr.sliceRanges(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } });
     defer slice.shape.deinit();
 
     // mutate
     const new_values = try NDArray(f32).init(&[_]f32{ 10, 20, 30, 40 }, &[_]usize{ 2, 2 }, alloc);
     defer new_values.deinit(alloc);
-    try slice.setSlice(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } }, new_values.*);
+    try slice.setSliceRanges(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } }, new_values);
     const exp = try NDArray(f32).init(&[_]f32{ 10, 20, 30, 40, 5, 6, 7, 8, 9 }, &[_]usize{ 3, 3 }, alloc);
     defer exp.deinit(alloc);
     try std.testing.expectEqualDeep(exp, arr);

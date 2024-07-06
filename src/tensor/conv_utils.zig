@@ -1,7 +1,9 @@
 const std = @import("std");
-const NDArray = @import("zarray.zig").NDArray;
+const zg = @import("zigrad");
+const zarray = zg.zarray;
+const NDArray = zarray.NDArray;
 
-pub fn im2col(comptime T: type, input: *NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !*NDArray(T) {
+pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !NDArray(T) {
     const batch_size = input.shape.shape[0];
     const channels = input.shape.shape[1];
     const height = input.shape.shape[2];
@@ -41,7 +43,7 @@ pub fn im2col(comptime T: type, input: *NDArray(T), kernel_size: usize, stride: 
     return col;
 }
 
-pub fn col2im(comptime T: type, col: *NDArray(T), input_shape: []const usize, kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !*NDArray(T) {
+pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !NDArray(T) {
     const batch_size = input_shape[0];
     const channels = input_shape[1];
     const height = input_shape[2];

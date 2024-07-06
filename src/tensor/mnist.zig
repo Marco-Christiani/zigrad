@@ -1,24 +1,27 @@
 const std = @import("std");
-const NDTensor = @import("tensor.zig").NDTensor;
 const Model = @import("model.zig").Model;
 const Conv2DLayer = @import("layer.zig").Conv2DLayer;
 const LinearLayer = @import("layer.zig").LinearLayer;
 const ReLULayer = @import("layer.zig").ReLULayer;
 const ops = @import("ops.zig");
 const Trainer = @import("trainer.zig").Trainer;
+const NDTensor = @import("tensor.zig").NDTensor;
+// const zg = @import("zigrad");
+// const NDTensor = zg.tensor.NDTensor;
 
 const log = std.log.scoped(.zigrad_mnist);
 
 pub fn MNISTModel(comptime T: type) type {
     return struct {
         const Self = @This();
-        model: *Model(T),
+        model: Model(T),
         allocator: std.mem.Allocator,
 
-        pub fn init(allocator: std.mem.Allocator) !*Self {
-            const self = try allocator.create(Self);
-            self.allocator = allocator;
-            self.model = try Model(T).init(allocator);
+        pub fn init(allocator: std.mem.Allocator) !Self {
+            var self = Self{
+                .allocator = allocator,
+                .model = try Model(T).init(allocator),
+            };
 
             var conv1 = try Conv2DLayer(T).init(allocator, 1, 32, 3, 1, 1, 1);
             var relu1 = try ReLULayer(T).init(allocator);
@@ -41,19 +44,20 @@ pub fn MNISTModel(comptime T: type) type {
         pub fn deinit(self: *Self) void {
             self.model.deinit();
             self.allocator.destroy(self);
+            self.* = undefined;
         }
 
-        pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            return self.model.forward(input);
+        pub fn forward(self: Self, input: NDTensor(T)) !NDTensor(T) {
+            return try ops.softmax(T, self.model.forward(input), self.allocator);
         }
 
-        pub fn getParameters(self: *Self) []*NDTensor(T) {
+        pub fn getParameters(self: Self) []NDTensor(T) {
             return self.model.getParameters();
         }
     };
 }
 
-pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size: usize) !struct { images: []*NDTensor(f32), labels: []*NDTensor(f32) } {
+pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size: usize) !struct { images: []NDTensor(f32), labels: []NDTensor(f32) } {
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
 
@@ -61,8 +65,8 @@ pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size:
     const file_contents = try file.readToEndAlloc(allocator, file_size);
     defer allocator.free(file_contents);
 
-    var images = std.ArrayList(*NDTensor(f32)).init(allocator);
-    var labels = std.ArrayList(*NDTensor(f32)).init(allocator);
+    var images = std.ArrayList(NDTensor(f32)).init(allocator);
+    var labels = std.ArrayList(NDTensor(f32)).init(allocator);
 
     var lines = std.mem.split(u8, file_contents, "\n");
     var batch_images = try allocator.alloc(f32, batch_size * 784);
@@ -118,8 +122,8 @@ pub fn main() !void {
     const data = try loadMNIST(allocator, "/tmp/mnist_train.csv", batch_size);
 
     defer {
-        for (data.images) |image| image.deinit();
-        for (data.labels) |label| label.deinit();
+        for (data.images) |*image| image.deinit();
+        for (data.labels) |*label| label.deinit();
         allocator.free(data.images);
         allocator.free(data.labels);
     }
@@ -146,8 +150,8 @@ pub fn main() !void {
     for (0..num_epochs) |epoch| {
         var total_loss: f32 = 0;
         // TODO: impl/use trainer loop
-        for (data.images, data.labels) |image, label| {
-            const loss = try trainer.trainStep(image.setLabel("image"), label.setLabel("label"));
+        for (data.images, data.labels) |*image, *label| {
+            const loss = try trainer.trainStep(image.setLabel("image").*, label.setLabel("label").*);
             total_loss += loss.get(&[_]usize{0});
             log.info("LOSS: {d}", .{loss.data.data});
             loss.teardown();
