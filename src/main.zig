@@ -2,10 +2,11 @@ const std = @import("std");
 const scalar = @import("scalar/grad.zig");
 const scalarnn = @import("scalar/nn.zig");
 const layer = @import("tensor/layer.zig");
+const mnist = @import("tensor/mnist.zig");
 
 pub fn main() !void {
     // try runScalar();
-    try layer.main();
+    try mnist.main();
 }
 
 fn runScalar() !void {

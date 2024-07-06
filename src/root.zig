@@ -48,3 +48,9 @@ pub const std_options = std.Options{
     .log_level = .debug,
     .logFn = logFn,
 };
+
+// test {
+//     _ = @import("tensor/zarray.zig");
+//     _ = @import("tensor/tensor.zig");
+//     std.testing.refAllDecls(@This());
+// }
