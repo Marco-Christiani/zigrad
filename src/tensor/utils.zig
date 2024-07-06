@@ -105,17 +105,17 @@ const LabelGenerator = struct {
 };
 
 pub fn printD2(
-    node: anytype,
+    T: type,
+    node: T,
     opts: PrintOptions,
     writer: anytype,
     label_gen: *LabelGenerator,
-    visited: *std.AutoHashMap(*const anyopaque, void),
+    visited: *std.AutoHashMap(T, void),
 ) !void {
-    const T = @TypeOf(node);
-    const info = @typeInfo(T);
-    const S = info.Pointer.child;
+    // const info = @typeInfo(T);
+    // const S = info.Struct;
 
-    if (!@hasField(S, "label") or !@hasField(S, "op") or !@hasField(S, "children")) {
+    if (!@hasField(T, "label") or !@hasField(T, "op") or !@hasField(T, "children")) {
         @compileError("Struct must have 'label', 'op', and 'children' fields");
     }
 
@@ -156,7 +156,8 @@ pub fn printD2(
 }
 
 pub fn renderD2(
-    node: anytype,
+    T: type,
+    node: T,
     opts: PrintOptions,
     allocator: std.mem.Allocator,
     output_file: []const u8,
@@ -167,7 +168,7 @@ pub fn renderD2(
     var label_gen = LabelGenerator.init(allocator);
     defer label_gen.deinit();
 
-    var visited = std.AutoHashMap(*const anyopaque, void).init(allocator);
+    var visited = std.AutoHashMap(T, void).init(allocator);
     defer visited.deinit();
 
     log.debug("traversing", .{});
@@ -240,12 +241,12 @@ pub fn main() !void {
     };
     const child1 = Node{ .label = "child1", .op = .MUL, .children = null };
     const child2 = Node{ .label = "child2", .op = .DIV, .children = null };
-    var root = Node{
+    const root = Node{
         .label = "root",
         .op = .ADD,
         .children = [2]*const Node{ &child1, &child2 },
     };
-    try renderD2(&root, PrintOptions.unicode1, alloc, "/tmp/generated1.png");
+    try renderD2(Node, root, PrintOptions.unicode1, alloc, "/tmp/generated1.png");
 
     const shape = &[_]usize{ 2, 3 };
     const Tensor = NDTensor(f32);
@@ -261,7 +262,7 @@ pub fn main() !void {
     t3.label = "t3";
     defer t3.deinit(alloc);
 
-    try renderD2(t3, PrintOptions.plain, alloc, "/tmp/generated2.png");
+    try renderD2(NDTensor(f32), t3, PrintOptions.plain, alloc, "/tmp/generated2.png");
     std.log.info("Done.\n", .{});
 
     // try sesame("/tmp/generated1.png", alloc);
