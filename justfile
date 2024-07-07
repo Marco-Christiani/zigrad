@@ -24,8 +24,8 @@ btt:
 btl:
   @just (btest "src/tensor/layer.zig")
 
-br file opts="":
-  zig build run -Dfile={{file}} {{opts}}
+br opts="":
+  zig build run {{opts}}
 
 brm:
   @just br src/tensor/mnist.zig
