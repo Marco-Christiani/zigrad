@@ -7,16 +7,26 @@ pub fn build(b: *std.Build) !void {
     const build_options = b.addOptions();
     build_options.step.name = "Zigrad build options";
     const build_options_module = build_options.createModule();
-    build_options.addOption(std.log.Level, "log_level", b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info);
+    build_options.addOption(
+        std.log.Level,
+        "log_level",
+        b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
+    );
 
     // TODO: cblas
     // switch (target.query.os_tag) {
     //     .linux => {},
     //     .macos => {},
     // }
-
+    const zarray_module = b.createModule(.{ .root_source_file = b.path("src/tensor/zarray.zig") });
+    const backend_module = b.createModule(.{ .root_source_file = b.path("src/backend/blas.zig") });
+    zarray_module.addImport("blas", backend_module);
     const zigrad_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
+        .imports = &.{
+            .{ .name = "zarray", .module = zarray_module },
+            .{ .name = "build_options", .module = build_options_module },
+        },
     });
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
@@ -25,7 +35,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     b.installArtifact(lib);
-    lib.root_module.addImport("build_options", build_options_module);
+    // lib.root_module.addImport("build_options", build_options_module);
 
     const exe = b.addExecutable(.{
         .name = "zigrad",
@@ -34,7 +44,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zigrad", zigrad_module);
-    exe.root_module.addImport("build_options", build_options_module);
+    // exe.root_module.addImport("build_options", build_options_module);
 
     exe.linkFramework("Accelerate");
     b.installArtifact(exe);

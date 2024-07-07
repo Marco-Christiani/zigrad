@@ -10,7 +10,7 @@ const settings = zg.settings;
 const NDTensor = @import("tensor.zig").NDTensor;
 const Loss = @import("tensor.zig").Loss;
 
-pub fn simple_mse_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocator: std.mem.Allocator) !NDTensor(T) {
+pub fn simple_mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var diff = (try y_pred.sub(y, allocator)).setLabel("diff");
     const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, allocator);
     diff2.label = "diff2";
@@ -22,7 +22,7 @@ pub fn simple_mse_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocator: 
     return (try sum_sq_diff.div(coef_tensor.setLabel("coef"), allocator)).setLabel("mse");
 }
 
-pub fn mse_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocator: std.mem.Allocator) !NDTensor(T) {
+pub fn mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.data.data.len));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -31,12 +31,7 @@ pub fn mse_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocator: std.mem
     }
     const mse = sum_sq_diff / n;
 
-    const result = try NDTensor(T).init(&[_]T{mse}, &[_]usize{1}, true, allocator);
-    result.label = "mse";
-
-    try result.setChildren(@constCast(&[_]NDTensor(T){ y_pred, y }));
-
-    result._backward = struct {
+    const bw_fn = struct {
         fn backward(tensor: NDTensor(T), _allocator: std.mem.Allocator) !void {
             _ = _allocator;
             const self_children = tensor.children orelse return error.NoChildren;
@@ -54,10 +49,17 @@ pub fn mse_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocator: std.mem
         }
     }.backward;
 
-    return result;
+    return try NDTensor(T).createDependent(.{
+        .data = try NDArray(T).init(&[_]T{mse}, &[_]usize{1}, allocator),
+        .children = &[_]*const NDTensor(T){ y_pred, y },
+        .label = "mse",
+        .requires_grad = true,
+        .allocator = allocator,
+        ._backward = bw_fn,
+    });
 }
 
-pub fn cross_entropy_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocator: std.mem.Allocator) !NDTensor(T) {
+pub fn cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.data.data.len));
     var sum_loss: T = 0;
     const epsilon: T = 1e-7; // safe log
@@ -68,11 +70,8 @@ pub fn cross_entropy_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocato
     }
 
     const mean_loss = sum_loss / n;
-    var result = try NDTensor(T).init(&[_]T{mean_loss}, &[_]usize{1}, true, allocator);
-    result.label = "cross_entropy";
-    try result.setChildren(@constCast(&[_]NDTensor(T){ y_pred, y }));
 
-    result._backward = struct {
+    const bw_fn = struct {
         fn backward(tensor: NDTensor(T), _allocator: std.mem.Allocator) !void {
             _ = _allocator;
             const self_children = tensor.children orelse return error.NoChildren;
@@ -90,18 +89,25 @@ pub fn cross_entropy_loss(T: type, y_pred: NDTensor(T), y: NDTensor(T), allocato
             }
         }
     }.backward;
-
-    return result;
+    return try NDTensor(T).createDependent(.{
+        .data = try NDArray(T).init(&[_]T{mean_loss}, &[_]usize{1}, allocator),
+        .op = null,
+        .children = &[_]*const NDTensor(T){ y_pred, y },
+        .label = "cross_entropy",
+        .requires_grad = true,
+        .allocator = allocator,
+        ._backward = bw_fn,
+    });
 }
 
-pub fn simple_softmax(T: type, input: NDTensor(T), allocator: std.mem.Allocator) !NDTensor(T) {
+pub fn simple_softmax(T: type, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     const max_val = try input.max(allocator);
     const exp_input = try (try input.sub(max_val, allocator)).exp(allocator);
     const sum = try exp_input.sum(allocator);
     return try exp_input.div(sum, allocator);
 }
 
-pub fn softmax(T: type, input: NDTensor(T), dim: usize, allocator: std.mem.Allocator) !NDTensor(T) {
+pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
     const dimsize = input.data.shape.get(dim);
     var result = try input.clone(allocator);
     errdefer result.deinit(allocator);

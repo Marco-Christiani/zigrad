@@ -9,7 +9,7 @@ const NDTensor = @import("tensor.zig").NDTensor;
 // const zg = @import("zigrad");
 // const NDTensor = zg.tensor.NDTensor;
 
-const log = std.log.scoped(.zigrad_mnist);
+const log = std.log.scoped(.zg_mnist);
 
 pub fn MNISTModel(comptime T: type) type {
     return struct {
@@ -30,6 +30,7 @@ pub fn MNISTModel(comptime T: type) type {
             var fc1 = try LinearLayer(T).init(allocator, 64 * 28 * 28, 128);
             var relu3 = try ReLULayer(T).init(allocator);
             var fc2 = try LinearLayer(T).init(allocator, 128, 10);
+            var relu4 = try ReLULayer(T).init(allocator);
 
             try self.model.addLayer(conv1.asLayer());
             try self.model.addLayer(relu1.asLayer());
@@ -38,6 +39,7 @@ pub fn MNISTModel(comptime T: type) type {
             try self.model.addLayer(fc1.asLayer());
             try self.model.addLayer(relu3.asLayer());
             try self.model.addLayer(fc2.asLayer());
+            try self.model.addLayer(relu4.asLayer());
             return self;
         }
 
@@ -46,18 +48,20 @@ pub fn MNISTModel(comptime T: type) type {
             self.allocator.destroy(self);
             self.* = undefined;
         }
-
-        pub fn forward(self: Self, input: NDTensor(T)) !NDTensor(T) {
-            return try ops.softmax(T, self.model.forward(input), self.allocator);
-        }
-
-        pub fn getParameters(self: Self) []NDTensor(T) {
-            return self.model.getParameters();
-        }
+        // pending model interface
+        // pub fn forward(self: Self, input: NDTensor(T)) !NDTensor(T) {
+        //     const a = self.model.forward(input);
+        //     log.info("softmaxing and returning", .{});
+        //     return try ops.softmax(T, a, self.allocator);
+        // }
+        //
+        // pub fn getParameters(self: Self) []NDTensor(T) {
+        //     return self.model.getParameters();
+        // }
     };
 }
 
-pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size: usize) !struct { images: []NDTensor(f32), labels: []NDTensor(f32) } {
+pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size: usize) !struct { images: []*NDTensor(f32), labels: []*NDTensor(f32) } {
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
 
@@ -65,8 +69,8 @@ pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size:
     const file_contents = try file.readToEndAlloc(allocator, file_size);
     defer allocator.free(file_contents);
 
-    var images = std.ArrayList(NDTensor(f32)).init(allocator);
-    var labels = std.ArrayList(NDTensor(f32)).init(allocator);
+    var images = std.ArrayList(*NDTensor(f32)).init(allocator);
+    var labels = std.ArrayList(*NDTensor(f32)).init(allocator);
 
     var lines = std.mem.split(u8, file_contents, "\n");
     var batch_images = try allocator.alloc(f32, batch_size * 784);
@@ -118,12 +122,12 @@ pub fn main() !void {
     // var allocator = std.heap.page_allocator;
     var allocator = std.heap.c_allocator;
     log.info("Loading data...", .{});
-    const batch_size = 32;
+    const batch_size = 64;
     const data = try loadMNIST(allocator, "/tmp/mnist_train.csv", batch_size);
 
     defer {
-        for (data.images) |*image| image.deinit();
-        for (data.labels) |*label| label.deinit();
+        for (data.images) |image| image.deinit();
+        for (data.labels) |label| label.deinit();
         allocator.free(data.images);
         allocator.free(data.labels);
     }
@@ -131,9 +135,9 @@ pub fn main() !void {
     var model = try MNISTModel(f32).init(allocator);
     var trainer = Trainer(f32, .ce).init(
         model.model,
-        0.001,
+        0.0003,
         .{
-            .grad_clip_max_norm = 100.0,
+            .grad_clip_max_norm = 10.0,
             .grad_clip_delta = 1e-6,
             .grad_clip_enabled = true,
         },
@@ -146,16 +150,16 @@ pub fn main() !void {
     }
 
     log.info("Training...", .{});
-    const num_epochs = 1;
+    const num_epochs = 5;
     for (0..num_epochs) |epoch| {
         var total_loss: f32 = 0;
         // TODO: impl/use trainer loop
-        for (data.images, data.labels) |*image, *label| {
-            const loss = try trainer.trainStep(image.setLabel("image").*, label.setLabel("label").*);
+        for (data.images, data.labels, 0..) |image, label, i| {
+            const loss = try trainer.trainStep(image.setLabel("image"), label.setLabel("label"));
             total_loss += loss.get(&[_]usize{0});
-            log.info("LOSS: {d}", .{loss.data.data});
-            loss.teardown();
-            break;
+            log.info("Loss: {d:<5.5} {d:<4.2} [{d}/{d}]", .{ loss.data.data[0], @as(f32, @floatFromInt(i / data.images.len)), i, data.images.len });
+            // loss.teardown();
+            // break;
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(data.images.len));
         log.info("Epoch {d}: Avg Loss = {d:.4}", .{ epoch + 1, avg_loss });

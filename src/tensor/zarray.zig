@@ -5,9 +5,8 @@
 // TODO: exp
 // TODO: document bcast rules and shape rules for inplace ewise ops
 const std = @import("std");
-// const blas = @import("../backend/blas.zig");
-const blas = @import("../backend/blas.zig");
-const log = std.log.scoped(.zigrad_zarray);
+const blas = @import("blas");
+const log = std.log.scoped(.zg_zarray);
 
 pub const ZarrayError = error{
     InvalidShape,
@@ -23,7 +22,7 @@ pub const ZarrayError = error{
 pub fn NDArray(comptime T: type) type {
     return struct {
         const Self = @This();
-        shape: Shape,
+        shape: *Shape,
         data: []T,
         view: bool = false,
 
@@ -32,10 +31,7 @@ pub fn NDArray(comptime T: type) type {
             const result = try allocator.create(Self);
             result.* = Self{
                 .data = try allocator.dupe(T, values),
-                .shape = Shape{
-                    .shape = try allocator.dupe(usize, shape orelse &[_]usize{values.len}),
-                    .alloc = allocator,
-                },
+                .shape = try Shape.init(shape orelse &[_]usize{values.len}, allocator),
             };
             if (result.shape.size() != result.data.len) {
                 log.err("Invalid shape: result.shape.size()={d} result.data.len={d}", .{ result.shape.size(), result.data.len });
@@ -256,7 +252,7 @@ pub fn NDArray(comptime T: type) type {
         pub fn setSliceRanges(self: Self, ranges: []const Range, values: Self) !void {
             const slice_ = try self.sliceRanges(ranges);
             defer slice_.shape.deinit();
-            if (!slice_.shape.eq(values.shape, .{ .strict = true })) {
+            if (!slice_.shape.eq(values.shape.*, .{ .strict = true })) {
                 return ZarrayError.IncompatibleShapes;
             }
 
@@ -278,7 +274,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = try self.shape.broadcast(other.shape);
+            const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| {
                 values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];
@@ -293,8 +289,8 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise addition
         pub fn _add(self: *const Self, other: *const Self) !*const Self {
-            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+                log.err("_add() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
             for (0..self.data.len) |i| self.data[i] += other.data[i % other.data.len];
@@ -308,7 +304,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise subtraction
         pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = try self.shape.broadcast(other.shape);
+            const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] - other.data[i % other.data.len];
             const result = try allocator.create(Self);
@@ -321,8 +317,8 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise subtraction
         pub fn _sub(self: *const Self, other: *const Self) !*const Self {
-            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+                log.err("_sub() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
             for (0..self.data.len) |i| self.data[i] -= other.data[i % other.data.len];
@@ -331,7 +327,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise multiplication
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = try self.shape.broadcast(other.shape);
+            const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] * other.data[i % other.data.len];
             const result = try allocator.create(Self);
@@ -344,8 +340,8 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise multiplication
         pub fn _mul(self: *const Self, other: *const Self) !*const Self {
-            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+                log.err("_mul() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
             for (0..self.data.len) |i| self.data[i] *= other.data[i % other.data.len];
@@ -354,7 +350,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise division
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = try self.shape.broadcast(other.shape);
+            const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] / other.data[i % other.data.len];
             const result = try allocator.create(Self);
@@ -367,8 +363,8 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise division
         pub fn _div(self: *const Self, other: *const Self) !*const Self {
-            if (!Shape.eq(self.shape, other.shape, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
+                log.err("_div() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return ZarrayError.IncompatibleShapes;
             }
             for (0..self.data.len) |i| self.data[i] /= other.data[i % other.data.len];
@@ -497,7 +493,7 @@ pub fn NDArray(comptime T: type) type {
             // NOTE: squeezing here means an unnecessary allocation and we should optimize this out later since
             // we mocked an outer batch dim of 1 for the inputs, so the output will have an outer batch dim of 1
             // but the inputs were both 2x2 so we should return a 2x2, thus squeeze it out
-            if (self.shape.len() == 2 and other.shape.len() == 2) try @constCast(&result.shape)._squeeze(); // FIXME: artifact of failed re-re-factor
+            if (self.shape.len() == 2 and other.shape.len() == 2) try result.shape._squeeze(); // FIXME: artifact of failed re-re-factor
             return result;
         }
 
@@ -612,7 +608,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Unbroadcast to target shape
         /// TODO: think ab this later but could pointer swap (may give compiler more freedom to optimize)
-        pub fn unbroadcast(self: *Self, target_shape: Shape, allocator: std.mem.Allocator) !*Self {
+        pub fn unbroadcast(self: *Self, target_shape: *Shape, allocator: std.mem.Allocator) !*Self {
             var result: *Self = self;
 
             while (result.shape.len() > target_shape.len()) {
@@ -657,23 +653,25 @@ pub const Shape = struct {
     shape: []usize,
     alloc: std.mem.Allocator,
 
-    pub fn init(shape: []const usize, allocator: std.mem.Allocator) !Self {
+    pub fn init(shape: []const usize, allocator: std.mem.Allocator) !*Self {
         if (shape.len == 0) return ZarrayError.InvalidShape;
-        return Self{
+        const self = try allocator.create(Self);
+        self.* = Self{
             .alloc = allocator,
             .shape = try allocator.dupe(usize, shape),
         };
+        return self;
     }
 
     pub fn deinit(self: Self) void {
         self.alloc.free(self.shape);
     }
 
-    pub fn copy(self: Shape, allocator: std.mem.Allocator) !Shape {
+    pub fn copy(self: Shape, allocator: std.mem.Allocator) !*Shape {
         return try Self.init(self.shape, allocator);
     }
 
-    pub fn broadcast(self: Self, other: Self) !Self {
+    pub fn broadcast(self: Self, other: Self) !*Self {
         const dims = @max(self.len(), other.len());
         const result_shape = try self.alloc.alloc(usize, dims);
         errdefer self.alloc.free(result_shape);
@@ -687,7 +685,9 @@ pub const Shape = struct {
             }
             result_shape[dims - 1 - i] = @max(dim_a, dim_b);
         }
-        return Self{ .shape = result_shape, .alloc = self.alloc };
+        const result = try self.alloc.create(Self);
+        result.* = Self{ .shape = result_shape, .alloc = self.alloc };
+        return result;
     }
 
     // TODO: usage should be minimized (or size stored but rarely needed this was)
@@ -995,7 +995,7 @@ test "NDArray.sum_along" {
     const expected1 = try Array.init(&[_]T{ 7, 3 }, null, alloc);
     defer expected1.deinit(alloc);
     try std.testing.expectEqualDeep(expected1, a2);
-    try std.testing.expect(a2.shape.eq(expected1.shape, .{}));
+    try std.testing.expect(a2.shape.eq(expected1.shape.*, .{}));
 }
 
 test "NDArray.slice" {

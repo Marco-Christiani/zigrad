@@ -2,6 +2,8 @@ const root = @import("root");
 const std = @import("std");
 const zig_builtin = @import("builtin");
 const build_options = @import("build_options");
+pub const zarray = @import("zarray");
+// pub const blas = @import("backend/blas.zig");
 
 /// lib-wide options that can be overridden by the root file.
 /// E.g. const zigrad_settings = .{ .gradEnabled = true };
@@ -37,7 +39,7 @@ fn logFn(
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
 
-    stderr.print("{s:<5}: ({s:^6}): ", .{ level_txt, if (comptime std.mem.startsWith(u8, scope_txt, "zls_")) scope_txt[4..] else scope_txt }) catch return;
+    stderr.print("[{s:<5}] {s:^6}: ", .{ level_txt, if (comptime std.mem.startsWith(u8, scope_txt, "zg_")) scope_txt[3..] else scope_txt }) catch return;
     stderr.print(format, args) catch return;
     stderr.writeByte('\n') catch return;
 }

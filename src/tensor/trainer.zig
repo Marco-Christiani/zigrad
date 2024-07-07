@@ -6,7 +6,7 @@ const SGD = @import("tensor.zig").SGD;
 const ops = @import("ops.zig");
 const utils = @import("utils.zig");
 
-const log = std.log.scoped(.zigrad_trainer);
+const log = std.log.scoped(.zg_trainer);
 
 // NOTE: temporarily hardcoded
 // const loss_fn = ops.simple_mse_loss;
@@ -20,7 +20,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
     return struct {
         const Self = @This();
         model: Model(T),
-        params: []NDTensor(T),
+        params: []*const NDTensor(T),
         optimizer: SGD(T),
         allocator: std.mem.Allocator,
         graph_manager: Loss(NDTensor(T)),
@@ -48,26 +48,32 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             self.* = undefined;
         }
 
-        pub fn trainStep(self: *Self, input: NDTensor(T), target: NDTensor(T)) !NDTensor(T) {
+        pub fn trainStep(self: *Self, input: *NDTensor(T), target: *const NDTensor(T)) !*NDTensor(T) {
+            log.debug("calling fwd...", .{});
             const output = try self.model.forward(input);
-            log.debug("calculating loss", .{});
+            // log.info("softmaxing", .{});
+            // TODO: softmax
+            // output = try ops.simple_softmax(T, output, self.allocator);
+            // log.debug("calculating loss", .{});
             const loss = try lossf(T, output, target, self.allocator);
+            // _ = lossf;
+            // const loss = try ops.simple_mse_loss(T, output, target, self.allocator);
 
             self.model.zeroGrad();
             loss.grad.?.fill(1);
             log.debug("running backward", .{});
             try self.graph_manager.backward(loss, self.allocator);
 
-            // std.log.info("rendering", .{});
+            // log.info("rendering", .{});
             // try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.svg");
-            // std.log.info("done", .{});
+            // log.info("done", .{});
             // try utils.sesame("/tmp/trainergraph.svg", self.allocator);
 
             log.debug("updating", .{});
             self.optimizer.step(self.params);
             // for (self.model.getParameters()) |param| {
             //     param.print();
-            //     std.debug.print("\n", .{});
+            //     std.debug.print("\n\n", .{});
             // }
             return loss;
         }
