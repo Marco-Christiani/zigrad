@@ -229,7 +229,7 @@ pub fn Conv2DLayer(comptime T: type) type {
         }
 
         pub fn forward(self: *Self, input: NDTensor(T), allocator: std.mem.Allocator) !NDTensor(T) {
-            self.input = try input.copy(allocator); // save for backward
+            self.input = try input.clone(allocator); // save for backward
             const batch_size = try input.data.shape.get(0);
             const in_height = try input.data.shape.get(2);
             const in_width = try input.data.shape.get(3);

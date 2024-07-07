@@ -103,7 +103,7 @@ pub fn simple_softmax(T: type, input: NDTensor(T), allocator: std.mem.Allocator)
 
 pub fn softmax(T: type, input: NDTensor(T), dim: usize, allocator: std.mem.Allocator) !NDTensor(T) {
     const dimsize = input.data.shape.get(dim);
-    var result = try input.copy(allocator);
+    var result = try input.clone(allocator);
     errdefer result.deinit(allocator);
 
     // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
