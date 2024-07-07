@@ -3,6 +3,7 @@ const scalar = @import("scalar/grad.zig");
 const scalarnn = @import("scalar/nn.zig");
 const layer = @import("tensor/layer.zig");
 const mnist = @import("tensor/mnist.zig");
+pub const std_options = @import("zigrad").std_options;
 
 pub fn main() !void {
     // try runScalar();

@@ -3,7 +3,7 @@ const Layer = @import("layer.zig").Layer;
 const NDTensor = @import("tensor.zig").NDTensor;
 const ops = @import("ops.zig");
 
-const log = std.log.scoped(.zigrad_model);
+const log = std.log.scoped(.zg_model);
 
 pub fn Model(comptime T: type) type {
     return struct {
@@ -40,11 +40,12 @@ pub fn Model(comptime T: type) type {
             try self.layers.append(layer);
         }
 
-        pub fn forward(self: Self, input: NDTensor(T)) !NDTensor(T) {
+        pub fn forward(self: Self, input: *NDTensor(T)) !*NDTensor(T) {
             var output = input;
             for (self.layers.items, 0..) |layer, i| {
+                _ = i;
                 output = try layer.forward(output, self.allocator);
-                log.debug("layer-{} output[..n]={d}", .{ i, output.data.data[0..@min(output.data.data.len, 50)] });
+                // log.info("layer-{} output[..n]={d}", .{ i, output.data.data[0..@min(output.data.data.len, 50)] });
                 // output.label = try std.fmt.allocPrint(self.allocator, "layer-{}-{?s}", .{ i + 1, output.label });
                 // output.label = output.label orelse try std.fmt.allocPrint(self.allocator, "out-layer-{}", .{i + 1});
                 // output.label = output.label orelse blk: {
@@ -58,8 +59,8 @@ pub fn Model(comptime T: type) type {
             return output;
         }
 
-        pub fn getParameters(self: Self) []NDTensor(T) {
-            var params = std.ArrayList(NDTensor(T)).init(self.allocator);
+        pub fn getParameters(self: Self) []*const NDTensor(T) {
+            var params = std.ArrayList(*const NDTensor(T)).init(self.allocator);
             defer params.deinit();
             for (self.layers.items) |layer| {
                 if (layer.getParameters()) |layer_params| {
