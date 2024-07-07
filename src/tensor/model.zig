@@ -40,11 +40,11 @@ pub fn Model(comptime T: type) type {
             try self.layers.append(layer);
         }
 
-        pub fn forward(self: Self, input: *NDTensor(T)) !*NDTensor(T) {
+        pub fn forward(self: Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             var output = input;
             for (self.layers.items, 0..) |layer, i| {
                 _ = i;
-                output = try layer.forward(output, self.allocator);
+                output = try layer.forward(output, fwd_allocator);
                 // log.info("layer-{} output[..n]={d}", .{ i, output.data.data[0..@min(output.data.data.len, 50)] });
                 // output.label = try std.fmt.allocPrint(self.allocator, "layer-{}-{?s}", .{ i + 1, output.label });
                 // output.label = output.label orelse try std.fmt.allocPrint(self.allocator, "out-layer-{}", .{i + 1});

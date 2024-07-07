@@ -44,8 +44,8 @@ pub fn MNISTModel(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            log.info("deinit model", .{});
             self.model.deinit();
-            self.allocator.destroy(self);
             self.* = undefined;
         }
         // pending model interface
@@ -120,6 +120,15 @@ pub fn main() !void {
     // defer _ = gpa.deinit();
     // const allocator = gpa.allocator();
     // var allocator = std.heap.page_allocator;
+    var acquired_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer acquired_arena.deinit();
+
+    var fw_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer fw_arena.deinit();
+
+    var bw_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer bw_arena.deinit();
+
     var allocator = std.heap.c_allocator;
     log.info("Loading data...", .{});
     const batch_size = 64;
@@ -132,7 +141,7 @@ pub fn main() !void {
         allocator.free(data.labels);
     }
 
-    var model = try MNISTModel(f32).init(allocator);
+    var model = try MNISTModel(f32).init(acquired_arena.allocator());
     var trainer = Trainer(f32, .ce).init(
         model.model,
         0.0003,
@@ -141,7 +150,6 @@ pub fn main() !void {
             .grad_clip_delta = 1e-6,
             .grad_clip_enabled = true,
         },
-        allocator,
     );
 
     defer {
@@ -155,11 +163,16 @@ pub fn main() !void {
         var total_loss: f32 = 0;
         // TODO: impl/use trainer loop
         for (data.images, data.labels, 0..) |image, label, i| {
-            const loss = try trainer.trainStep(image.setLabel("image"), label.setLabel("label"));
+            const loss = try trainer.trainStep(
+                image.setLabel("image"),
+                label.setLabel("label"),
+                bw_arena.allocator(),
+                fw_arena.allocator(),
+            );
             total_loss += loss.get(&[_]usize{0});
             log.info("Loss: {d:<5.5} {d:<4.2} [{d}/{d}]", .{ loss.data.data[0], @as(f32, @floatFromInt(i / data.images.len)), i, data.images.len });
-            // loss.teardown();
-            // break;
+            if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
+            if (!fw_arena.reset(.retain_capacity)) log.warn("Issue in fw arena reset", .{});
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(data.images.len));
         log.info("Epoch {d}: Avg Loss = {d:.4}", .{ epoch + 1, avg_loss });
