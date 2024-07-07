@@ -1,4 +1,4 @@
-default: bt
+default: br
 
 bt:
   zig build test

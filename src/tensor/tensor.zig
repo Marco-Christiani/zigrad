@@ -5,13 +5,12 @@ const std = @import("std");
 const zg = @import("zigrad");
 const settings = zg.settings;
 
-// const zarray = zg.zarray;
-const zarray = @import("zarray.zig");
+const zarray = zg.zarray;
 const Shape = zarray.Shape;
 const NDArray = zarray.NDArray;
 const ZarrayError = zarray.ZarrayError;
 
-const log = std.log.scoped(.zigrad_tensor);
+const log = std.log.scoped(.zg_tensor);
 
 pub const Op = enum {
     ADD,
@@ -138,13 +137,13 @@ pub fn NDTensor(comptime T: type) type {
             self.allocator.destroy(self);
         }
 
-        pub fn teardown(self: *const Self) void {
+        pub fn teardown(self: *Self) void {
             log.debug("teardown {?s}", .{self.label});
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
             if (self.children) |children| {
                 for (children) |c| {
                     std.log.debug("accessing child", .{});
-                    if (!c.acquired) c.teardown() else log.debug("skipping acquired tensor in teardown label={?s}", .{c.label});
+                    if (!c.acquired) @constCast(c).teardown() else log.debug("skipping acquired tensor in teardown label={?s}", .{c.label});
                 }
             }
             log.debug("teardown()->deinit() {?s}", .{self.label});
@@ -226,17 +225,16 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Copies. COM.
-        pub fn reshape(self: Self, new_shape: []const usize) !*Self {
+        pub fn reshape(self: *const Self, new_shape: []const usize) !*Self {
             const result = try createDependent(.{
-                .data = self.data.data,
+                .data = try self.data.copy(self.allocator),
                 .op = .RESHAPE,
-                .children = &[_]*Self{self},
+                .children = &[_]*const Self{self},
                 .label = null,
-                .acquired = false,
                 .requires_grad = self.requires_grad,
                 .allocator = self.allocator,
                 ._backward = null,
-                ._backward_ctx = null,
+                // ._backward_ctx = try self.allocator.dupe(usize, self.data.shape.shape), // original shape
             });
             errdefer result.deinit();
             try result.data._reshape(new_shape);
@@ -384,9 +382,9 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const max_val = try self.data.max();
+            const max_val = try self.data.max(allocator);
             return try createDependent(.{
-                .data = try dtype.init(&[_]T{max_val}, &[_]usize{1}, allocator),
+                .data = max_val,
                 .op = .MAX,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
@@ -782,7 +780,7 @@ pub fn SGD(comptime T: type) type {
         const Self = @This();
         lr: T,
 
-        pub fn step(self: Self, params: []NDTensor(T)) void {
+        pub fn step(self: Self, params: []*const NDTensor(T)) void {
             // lol. go to bed.
             for (params) |param| {
                 // param.data._sub(param.grad.?._mul(self.lr)); // TODO: really need to implement scalar ops...
