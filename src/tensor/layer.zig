@@ -131,17 +131,17 @@ pub fn LinearLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *const Tensor, allocator: std.mem.Allocator) !*Tensor {
+        pub fn forward(self: *Self, input: *const Tensor, fwd_allocator: std.mem.Allocator) !*Tensor {
             const batch_size = input.data.shape.shape[0];
             const flattened_size = zarray.prod(input.data.shape.shape[1..]);
             // a copying reshape on the tensor so the op is tracked and for backprop
             var flattened_input = (try input.reshape(&[_]usize{ batch_size, flattened_size })).setLabel("linearin_flat");
             flattened_input.logShape(null);
 
-            var linear0 = (try flattened_input.matmul(self.weights, allocator, .{ .trans_b = true })).setLabel("linear0");
+            var linear0 = (try flattened_input.matmul(self.weights, fwd_allocator, .{ .trans_b = true })).setLabel("linear0");
             linear0.logShape(null);
 
-            var linear1 = (try linear0.add(self.bias, allocator)).setLabel("linear1_out");
+            var linear1 = (try linear0.add(self.bias, fwd_allocator)).setLabel("linear1_out");
             linear1.logShape(null);
 
             return linear1;
@@ -238,20 +238,20 @@ pub fn Conv2DLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             const batch_size = try input.data.shape.get(0);
             const in_height = try input.data.shape.get(2);
             const in_width = try input.data.shape.get(3);
             const out_height = (in_height + 2 * self.padding - self.dilation * (self.kernel_size - 1) - 1) / self.stride + 1;
             const out_width = (in_width + 2 * self.padding - self.dilation * (self.kernel_size - 1) - 1) / self.stride + 1;
 
-            const col: *NDArray(T) = try conv_utils.im2col(T, input.data.*, self.kernel_size, self.stride, self.padding, self.dilation, allocator);
-            defer col.deinit(allocator);
+            const col: *NDArray(T) = try conv_utils.im2col(T, input.data.*, self.kernel_size, self.stride, self.padding, self.dilation, fwd_allocator);
+            defer col.deinit(fwd_allocator);
 
             try self.weights.data._reshape(&[_]usize{ self.out_channels, self.in_channels * self.kernel_size * self.kernel_size });
 
             // broadcasted mm for batching
-            var output = try self.weights.data.matmul(col, false, false, allocator);
+            var output = try self.weights.data.matmul(col, false, false, fwd_allocator);
 
             // reshape to 4D
             try output._reshape(&[_]usize{ batch_size, self.out_channels, out_height, out_width });
@@ -278,7 +278,7 @@ pub fn Conv2DLayer(comptime T: type) type {
                 .children = &[_]*const NDTensor(T){input},
                 .label = "conv2d_out",
                 .requires_grad = true,
-                .allocator = allocator,
+                .allocator = fwd_allocator,
                 ._backward = backward,
                 ._backward_ctx = self,
             });

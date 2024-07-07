@@ -8,8 +8,6 @@ const utils = @import("utils.zig");
 
 const log = std.log.scoped(.zg_trainer);
 
-// NOTE: temporarily hardcoded
-// const loss_fn = ops.simple_mse_loss;
 pub const LossFns = enum { mse, ce };
 
 pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
@@ -22,47 +20,50 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         model: Model(T),
         params: []*const NDTensor(T),
         optimizer: SGD(T),
-        allocator: std.mem.Allocator,
         graph_manager: Loss(NDTensor(T)),
 
         pub fn init(
             model: Model(T),
             learning_rate: T,
             loss_config: Loss(T).LossConfig,
-            allocator: std.mem.Allocator,
         ) Self {
             return .{
                 .model = model,
                 .params = model.getParameters(),
                 .optimizer = .{ .lr = learning_rate },
-                .allocator = allocator,
-                .graph_manager = Loss(NDTensor(T)).init(allocator, loss_config),
+                .graph_manager = Loss(NDTensor(T)).init(model.allocator, loss_config),
             };
         }
 
         pub fn deinit(self: *Self) void {
             log.info("deinit gm", .{});
             self.graph_manager.deinit();
-            log.info("free params", .{});
-            self.allocator.free(self.params);
+            log.info("free params ref", .{});
+            self.model.allocator.free(self.params);
             self.* = undefined;
         }
 
-        pub fn trainStep(self: *Self, input: *NDTensor(T), target: *const NDTensor(T)) !*NDTensor(T) {
+        pub fn trainStep(
+            self: *Self,
+            input: *NDTensor(T),
+            target: *const NDTensor(T),
+            fwd_allocator: std.mem.Allocator,
+            bwd_allocator: std.mem.Allocator,
+        ) !*NDTensor(T) {
             log.debug("calling fwd...", .{});
-            const output = try self.model.forward(input);
+            const output = try self.model.forward(input, fwd_allocator);
             // log.info("softmaxing", .{});
             // TODO: softmax
-            // output = try ops.simple_softmax(T, output, self.allocator);
+            // output = try ops.simple_softmax(T, output, backward_allocator);
             // log.debug("calculating loss", .{});
-            const loss = try lossf(T, output, target, self.allocator);
+            const loss = try lossf(T, output, target, bwd_allocator);
             // _ = lossf;
             // const loss = try ops.simple_mse_loss(T, output, target, self.allocator);
 
             self.model.zeroGrad();
             loss.grad.?.fill(1);
             log.debug("running backward", .{});
-            try self.graph_manager.backward(loss, self.allocator);
+            try self.graph_manager.backward(loss, bwd_allocator);
 
             // log.info("rendering", .{});
             // try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.svg");
