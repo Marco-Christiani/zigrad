@@ -3,10 +3,12 @@ const Model = @import("model.zig").Model;
 const Conv2DLayer = @import("layer.zig").Conv2DLayer;
 const LinearLayer = @import("layer.zig").LinearLayer;
 const ReLULayer = @import("layer.zig").ReLULayer;
+const FlattenLayer = @import("layer.zig").FlattenLayer;
 const ops = @import("ops.zig");
 const Trainer = @import("trainer.zig").Trainer;
 const NDTensor = @import("tensor.zig").NDTensor;
-// const zg = @import("zigrad");
+const zg = @import("zigrad");
+const prod = zg.zarray.prod;
 // const NDTensor = zg.tensor.NDTensor;
 
 const log = std.log.scoped(.zg_mnist);
@@ -27,6 +29,8 @@ pub fn MNISTModel(comptime T: type) type {
             var relu1 = try ReLULayer(T).init(allocator);
             var conv2 = try Conv2DLayer(T).init(allocator, 32, 64, 3, 1, 1, 1);
             var relu2 = try ReLULayer(T).init(allocator);
+
+            var reshape = FlattenLayer(T){};
             var fc1 = try LinearLayer(T).init(allocator, 64 * 28 * 28, 128);
             var relu3 = try ReLULayer(T).init(allocator);
             var fc2 = try LinearLayer(T).init(allocator, 128, 10);
@@ -36,6 +40,7 @@ pub fn MNISTModel(comptime T: type) type {
             try self.model.addLayer(relu1.asLayer());
             try self.model.addLayer(conv2.asLayer());
             try self.model.addLayer(relu2.asLayer());
+            try self.model.addLayer(reshape.asLayer());
             try self.model.addLayer(fc1.asLayer());
             try self.model.addLayer(relu3.asLayer());
             try self.model.addLayer(fc2.asLayer());
@@ -48,6 +53,7 @@ pub fn MNISTModel(comptime T: type) type {
             self.model.deinit();
             self.* = undefined;
         }
+
         // pending model interface
         // pub fn forward(self: Self, input: NDTensor(T)) !NDTensor(T) {
         //     const a = self.model.forward(input);
@@ -88,7 +94,8 @@ pub fn loadMNIST(allocator: std.mem.Allocator, filepath: []const u8, batch_size:
 
         for (0..784) |i| {
             const pixel_value = try std.fmt.parseFloat(f32, values.next().?);
-            batch_images[batch_count * 784 + i] = pixel_value / 255.0;
+            // batch_images[batch_count * 784 + i] = pixel_value / 255.0;
+            batch_images[batch_count * 784 + i] = pixel_value / 127.5 - 1;
         }
 
         batch_count += 1;
@@ -131,7 +138,7 @@ pub fn main() !void {
 
     var allocator = std.heap.c_allocator;
     log.info("Loading data...", .{});
-    const batch_size = 64;
+    const batch_size = 1;
     const data = try loadMNIST(allocator, "/tmp/mnist_train.csv", batch_size);
 
     defer {
@@ -170,7 +177,12 @@ pub fn main() !void {
                 fw_arena.allocator(),
             );
             total_loss += loss.get(&[_]usize{0});
-            log.info("Loss: {d:<5.5} {d:<4.2} [{d}/{d}]", .{ loss.data.data[0], @as(f32, @floatFromInt(i / data.images.len)), i, data.images.len });
+            log.info("Loss: {d:<5.5} {d:<4.2} [{d}/{d}]", .{
+                loss.data.data[0],
+                @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(data.images.len)),
+                i,
+                data.images.len,
+            });
             if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
             if (!fw_arena.reset(.retain_capacity)) log.warn("Issue in fw arena reset", .{});
         }

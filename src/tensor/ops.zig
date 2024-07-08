@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad");
 
+// const zarray = @import("zarray.zig");
 const zarray = zg.zarray;
 const Shape = zarray.Shape;
 const NDArray = zarray.NDArray;
@@ -12,8 +13,7 @@ const Loss = @import("tensor.zig").Loss;
 
 pub fn simple_mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var diff = (try y_pred.sub(y, allocator)).setLabel("diff");
-    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, allocator);
-    diff2.label = "diff2";
+    const diff2 = (try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, allocator)).setLabel("diff2");
     // const diff2 = (try y_pred.sub(y, allocator)).setLabel("diff2");
     const sq_diff = (try diff.mul(diff2, allocator)).setLabel("sq_diff");
     const sum_sq_diff = (try sq_diff.sum(allocator)).setLabel("sum_sq_diff");
@@ -60,6 +60,7 @@ pub fn mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allo
 }
 
 pub fn cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    std.log.info("{d} {d}", .{ y_pred.data.shape.shape, y.data.shape.shape });
     const n = @as(T, @floatFromInt(y.data.data.len));
     var sum_loss: T = 0;
     const epsilon: T = 1e-7; // safe log
@@ -100,7 +101,7 @@ pub fn cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTenso
     });
 }
 
-pub fn simple_softmax(T: type, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn ag_softmax_1d(T: type, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     const max_val = try input.max(allocator);
     const exp_input = try (try input.sub(max_val, allocator)).exp(allocator);
     const sum = try exp_input.sum(allocator);
@@ -108,61 +109,64 @@ pub fn simple_softmax(T: type, input: *const NDTensor(T), allocator: std.mem.All
 }
 
 pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
-    const dimsize = input.data.shape.get(dim);
+    const dimsize = try input.data.shape.get(dim);
     var result = try input.clone(allocator);
-    errdefer result.deinit(allocator);
+    errdefer result.deinit();
 
     // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
-    for (0..dimsize) |i| { // mutate a view into result
+    for (0..dimsize) |i| { // mutate a view into result by directly operating on the backing ndarray
         // slice i in the tgt dim
         const curr_slice = try result.data.sliceUnsafeNoAlloc(dim, i, i + 1);
-        const max_val = std.mem.max(T, curr_slice);
+        const max_val = std.mem.max(T, curr_slice.data);
 
         // exp(x-max)
         var curr_sum: T = 0;
-        for (curr_slice) |*val| {
+        for (curr_slice.data) |*val| {
             val.* = @exp(val.* - max_val);
-            curr_sum += val;
+            curr_sum += val.*;
         }
         // scale
-        try result.data._scale(1 / curr_sum);
+        curr_slice._scale(1 / curr_sum);
     }
 
-    // TODO: Softmax Backward
-    // if (input.requires_grad) {
-    //     const _backward = struct {
-    //         fn backward(tensor: *NDTensor(T), grad: ?*NDArray(T), _: std.mem.Allocator) !void {
-    //             var ctx: []zarray.Range = @ptrCast(@alignCast(tensor._backward_ctx.?));
-    //             const self_children = tensor.children orelse return error.NoChildren;
-    //             const fwd_input = self_children[0];
-    //             if (fwd_input.grad) |input_grad| {
-    //                 for (0..batch_size) |i| {
-    //                     ctx[0].start = i;
-    //                     ctx[0].end = i + 1;
-    //
-    //                     const softmax_output = try tensor.data.sliceRanges(ctx);
-    //                     defer softmax_output.shape.deinit();
-    //                     const incoming_grad = try grad.?.sliceRanges(ctx);
-    //                     defer incoming_grad.shape.deinit();
-    //
-    //                     // jvp
-    //                     const sum_grad = try softmax_output.dot(incoming_grad, allocator);
-    //
-    //                     var grad_slice = try softmax_output.mul(incoming_grad, allocator);
-    //                     defer grad_slice.deinit(allocator);
-    //                     try grad_slice._add_scalar(-sum_grad.data[0]);
-    //
-    //                     try input_grad.setSliceRanges(ctx, grad_slice);
-    //                 }
-    //             }
-    //         }
-    //     }.backward;
-    //
-    //     try result.setBackward(_backward, ranges);
-    //     try result.setChildren(&[_]*const NDTensor(T){input});
-    // }
+    // TODO: once confirmed can use more ndarray elementwise ops
+    const bw_fn = struct {
+        fn backward(tensor: NDTensor(T), _allocator: std.mem.Allocator) !void {
+            const self_children = tensor.children orelse return error.NoChildren;
+            const _input = self_children[0];
+            if (_input.grad == null) return;
+            const bw_ctx: *usize = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
+            const _dim: usize = bw_ctx.*;
+            defer _allocator.destroy(bw_ctx);
 
-    return result;
+            const _dimsize = try tensor.data.shape.get(_dim);
+            for (0.._dimsize) |i| {
+                const s = try tensor.data.sliceUnsafeNoAlloc(_dim, i, i + 1);
+                const dL_ds = try _input.grad.?.sliceUnsafeNoAlloc(_dim, i, i + 1);
+
+                var sum_diff: T = 0;
+                for (s.data, dL_ds.data) |s_i, dL_ds_i| {
+                    sum_diff += s_i * dL_ds_i;
+                }
+
+                for (s.data, dL_ds.data) |s_i, *dL_dx_i| {
+                    dL_dx_i.* = s_i * (dL_dx_i.* - sum_diff);
+                }
+            }
+        }
+    }.backward;
+    const ctx = try allocator.create(usize);
+    ctx.* = dim;
+
+    return try NDTensor(T).createDependent(.{
+        .data = result.data,
+        .children = &[_]*const NDTensor(T){input},
+        .label = "softmax",
+        .requires_grad = input.requires_grad,
+        .allocator = allocator,
+        ._backward = bw_fn,
+        ._backward_ctx = ctx,
+    });
 }
 
 test "mse_loss" {
@@ -236,11 +240,10 @@ test "softmax, cross-entropy, 2d" {
     const T = f32;
 
     // Test case 1: 2D input
-
     const input_data = [_]T{ 1.0, 2.0, 3.0, 4.0, 1.0, 2.0 };
     const input = try NDTensor(T).init(&input_data, &[_]usize{ 2, 3 }, true, allocator);
 
-    const softmax_output = try simple_softmax(T, input, allocator);
+    const softmax_output = try softmax(T, input, 0, allocator);
 
     const expected_softmax = [_]T{ 0.09003057, 0.24472848, 0.66524094, 0.8437947, 0.04201007, 0.11419519 };
     const expected_softmax_shape = [_]usize{ 2, 3 };
@@ -276,7 +279,7 @@ test "softmax, cross-entropy, 1d" {
     const input_data = [_]T{ -1.0, 0.0, 1.0 };
     const input = try NDTensor(T).init(&input_data, &[_]usize{3}, true, allocator);
 
-    const softmax_output = try simple_softmax(T, input, allocator);
+    const softmax_output = try ag_softmax_1d(T, input, allocator);
 
     const expected_softmax = [_]T{ 0.09003057, 0.24472848, 0.66524094 };
 
