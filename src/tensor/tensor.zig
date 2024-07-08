@@ -28,7 +28,6 @@ pub const Op = enum {
     RESHAPE,
     MAX,
     EXP, // TODO:
-    SOFTMAX, // TODO:
 };
 
 pub fn NDTensor(comptime T: type) type {
@@ -133,20 +132,20 @@ pub fn NDTensor(comptime T: type) type {
             // if (self._backward_ctx) |ctx| {
             //     if (@hasDecl(ctx, "deinit")) ctx.deinit();
             // }
-
+            if (self.children) |c| self.allocator.free(c);
             self.allocator.destroy(self);
         }
 
         pub fn teardown(self: *Self) void {
-            log.debug("teardown {?s}", .{self.label});
+            log.debug("START teardown {?s}", .{self.label});
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
             if (self.children) |children| {
                 for (children) |c| {
-                    std.log.debug("accessing child", .{});
-                    if (!c.acquired) @constCast(c).teardown() else log.debug("skipping acquired tensor in teardown label={?s}", .{c.label});
+                    log.debug("{?s} accessing child {?s}", .{ self.label, c.label });
+                    if (!c.acquired) @constCast(c).teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.label});
                 }
             }
-            log.debug("teardown()->deinit() {?s}", .{self.label});
+            log.debug("ENDING teardown()->deinit() {?s}", .{self.label});
             self.deinit();
         }
 
@@ -234,7 +233,6 @@ pub fn NDTensor(comptime T: type) type {
                 .requires_grad = self.requires_grad,
                 .allocator = self.allocator,
                 ._backward = null,
-                // ._backward_ctx = try self.allocator.dupe(usize, self.data.shape.shape), // original shape
             });
             errdefer result.deinit();
             try result.data._reshape(new_shape);
@@ -429,21 +427,29 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Matrix-vector multiplication. COM.
+        /// ---
+        /// # ADR
+        ///   - This does not use `createDependent()` as it is a special case where the grad shape different from data.
+        ///   - Moreover, we cannot just reshape to the correct shape.
+        ///   - Until I see more instances where this is required it will be written manually
+        ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
         pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            return try createDependent(.{
+            const out = try allocator.create(Self);
+            out.* = Self{
                 .data = try self.data.matvec(other.data, false, allocator),
                 .op = .MATVEC,
-                .children = &[_]*const Self{ self, other },
+                .children = try allocator.dupe(*const Self, &[_]*const Self{ self, other }),
+                .grad = if (self.requires_grad or other.requires_grad) try dtype.zeros(other.data.shape.shape, allocator) else null,
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
-            });
+            };
+            return out;
         }
 
         /// Sum of all elements in the tensor. COM.
         pub fn sum(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const s = try self.data.sum(allocator);
             return try createDependent(.{
-                .data = s,
+                .data = try self.data.sum(allocator),
                 .op = .SUM,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
@@ -507,8 +513,6 @@ pub fn NDTensor(comptime T: type) type {
                             defer a_grad_value.deinit(allocator);
                             defer b_grad_value.deinit(allocator);
 
-                            // const a_grad = try a.grad.?.unbroadcast(a_grad_value.shape, allocator);
-                            // const b_grad = try b.grad.?.unbroadcast(b_grad_value.shape, allocator);
                             const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, allocator);
                             const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, allocator);
 
@@ -521,7 +525,7 @@ pub fn NDTensor(comptime T: type) type {
                             const a = children[0];
                             const b = children[1];
 
-                            // Gradient for division: (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
+                            // (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
                             const a_grad_value = try self.grad.?.div(b.data, allocator);
                             const b_grad_value = try self.grad.?.mul(a.data, allocator);
 
@@ -585,7 +589,6 @@ pub fn NDTensor(comptime T: type) type {
                             var grad_B = try A.matmul(self.grad.?, true, false, allocator);
                             defer grad_B.deinit(allocator);
 
-                            // Transpose grad_B before adding
                             var grad_B_transposed = try grad_B.transpose(allocator);
                             defer grad_B_transposed.deinit(allocator);
 
@@ -646,24 +649,6 @@ pub fn NDTensor(comptime T: type) type {
                             for (self.data.data, self.grad.?.data, 0..) |exp_val, grad_val, i| {
                                 child.grad.?.data[i] += exp_val * grad_val;
                             }
-                        }
-                    },
-                    .SOFTMAX => {
-                        if (self.children) |children| {
-                            const child = children[0];
-                            const softmax_output = self.data;
-                            const incoming_grad = self.grad.?;
-
-                            var sum_grad: T = 0;
-                            for (softmax_output.data, incoming_grad.data) |s, g| {
-                                sum_grad += s * g;
-                            }
-
-                            for (softmax_output.data, incoming_grad.data, 0..) |s, g, i| {
-                                child.grad.?.data[i] += s * (g - sum_grad);
-                            }
-
-                            // try child.grad.?._add(child.grad.?);
                         }
                     },
                     else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
@@ -759,6 +744,12 @@ pub fn Loss(comptime T: type) type {
                 if (curr_node.requires_grad) {
                     log.debug("backward: {?s}", .{curr_node.label});
                     try curr_node.backward(alloc);
+                    log.debug("backprop {?s} grad norm is {d} max: {d} min: {d}", .{
+                        curr_node.label,
+                        curr_node.grad.?.l2_norm(),
+                        std.mem.max(f32, curr_node.grad.?.data),
+                        std.mem.min(f32, curr_node.grad.?.data),
+                    });
                     if (self.grad_clip_enabled and curr_node.requires_grad) {
                         if (curr_node.grad) |_| {
                             curr_node.clip_grad_norm_delta(.{ .max_norm = self.grad_clip_max_norm, .delta = self.grad_clip_delta });
@@ -976,7 +967,6 @@ test "tensor/GraphManager/divback" {
     t3.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
     try gm.backward(t3, alloc);
 
-    // Expected gradients for t1 and t2
     const expected_grad_t1 = &[_]T{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
     const expected_grad_t2 = &[_]T{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
 
