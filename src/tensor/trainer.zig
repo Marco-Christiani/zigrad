@@ -15,6 +15,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         .ce => ops.cross_entropy_loss,
         .mse => ops.mse_loss,
     };
+
     return struct {
         const Self = @This();
         model: Model(T),
@@ -51,17 +52,20 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
             log.debug("calling fwd...", .{});
-            const output = try self.model.forward(input, fwd_allocator);
-            // log.info("softmaxing", .{});
-            // TODO: softmax
-            // output = try ops.simple_softmax(T, output, backward_allocator);
-            // log.debug("calculating loss", .{});
+            var output = try self.model.forward(input, fwd_allocator);
+            output.logShape(null);
+            target.logShape(null);
+
+            logData("output(1): ", output.data.data);
+            log.debug("softmaxing", .{});
+            output = try ops.softmax(T, output, 0, bwd_allocator);
+            logData("output(2): ", output.data.data);
+            logData("target: ", target.data.data);
+            log.debug("calculating loss", .{});
             const loss = try lossf(T, output, target, bwd_allocator);
-            // _ = lossf;
-            // const loss = try ops.simple_mse_loss(T, output, target, self.allocator);
 
             self.model.zeroGrad();
-            loss.grad.?.fill(1);
+            loss.grad.?.fill(1.0);
             log.debug("running backward", .{});
             try self.graph_manager.backward(loss, bwd_allocator);
 
@@ -72,10 +76,14 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
 
             log.debug("updating", .{});
             self.optimizer.step(self.params);
-            // for (self.model.getParameters()) |param| {
-            //     param.print();
-            //     std.debug.print("\n\n", .{});
-            // }
+            for (self.model.getParameters()) |param| {
+                log.debug("param {?s} grad norm is {d} max: {d} min: {d}", .{
+                    param.label,
+                    param.grad.?.l2_norm(),
+                    std.mem.max(f32, param.grad.?.data),
+                    std.mem.min(f32, param.grad.?.data),
+                });
+            }
             return loss;
         }
 
@@ -94,6 +102,14 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             //     const avg_loss = total_loss / @as(T, @floatFromInt(inputs.len));
             //     log.info("Epoch {d}: Avg Loss = {d:.4}", .{ epoch + 1, avg_loss });
             // }
+        }
+
+        fn logData(msg: []const u8, data: []T) void {
+            var i: usize = 0;
+            const max_n = @min(data.len, 20);
+            while (i < max_n) : (i += 10) {
+                log.debug("{s}({d}){d}\n", .{ msg, data.len, data });
+            }
         }
     };
 }

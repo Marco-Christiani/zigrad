@@ -94,7 +94,7 @@ test "im2col col2im" {
     defer input.deinit(allocator);
 
     // im2col
-    var col = try im2col(f32, input, kernel_size, stride, padding, dilation, allocator);
+    var col = try im2col(f32, input.*, kernel_size, stride, padding, dilation, allocator);
     defer col.deinit(allocator);
 
     const expected_col_data = [_]f32{
@@ -115,7 +115,7 @@ test "im2col col2im" {
     try std.testing.expectEqualSlices(f32, &expected_col_data, col.data);
 
     // col2im
-    var im = try col2im(f32, col, &input_shape, kernel_size, stride, padding, dilation, allocator);
+    var im = try col2im(f32, col.*, &input_shape, kernel_size, stride, padding, dilation, allocator);
     defer im.deinit(allocator);
 
     const exp_im_data = [_]f32{ 4, 12, 18, 16, 30, 54, 63, 48, 54, 90, 99, 72, 52, 84, 90, 64 };
