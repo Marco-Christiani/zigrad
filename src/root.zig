@@ -60,7 +60,8 @@ pub const std_options = std.Options{
     .logFn = logFn,
 };
 
-// TODO: lib tests, recursive inclusion
+// TODO: lib tests, recursive inclusion *in progress*
 test {
+    _ = @import("tensor/tests/test_ops.zig");
     std.testing.refAllDecls(@This());
 }

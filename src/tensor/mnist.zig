@@ -10,7 +10,6 @@ const ops = zg.ops;
 const Trainer = zg.Trainer;
 const NDTensor = zg.tensor.NDTensor;
 const prod = zg.zarray.prod;
-// const NDTensor = zg.tensor.NDTensor;
 
 const log = std.log.scoped(.zg_mnist);
 

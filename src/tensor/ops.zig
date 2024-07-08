@@ -1,3 +1,4 @@
+// TODO: fused softmax-ce
 const std = @import("std");
 const zg = @import("../root.zig");
 
@@ -114,6 +115,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.me
     // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
     for (0..dimsize) |i| { // mutate a view into result by directly operating on the backing ndarray
         // slice i in the tgt dim
+        std.debug.print("i:{d}\n", .{i});
         const curr_slice = try result.data.sliceUnsafeNoAlloc(dim, i, i + 1);
         const max_val = std.mem.max(T, curr_slice.data);
 
@@ -125,6 +127,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.me
         }
         // scale
         curr_slice._scale(1 / curr_sum);
+        std.debug.print("\ncurr_slice:{d}\n", .{curr_slice.data});
     }
 
     // TODO: once confirmed can use more ndarray elementwise ops
@@ -165,138 +168,4 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.me
         ._backward = bw_fn,
         ._backward_ctx = ctx,
     });
-}
-
-test "mse_loss" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const T = f32;
-    const Tensor = NDTensor(T);
-
-    const y = try Tensor.init(&[_]T{1}, null, true, alloc);
-    const yh = try Tensor.init(&[_]T{1}, null, true, alloc);
-    var loss = try simple_mse_loss(T, yh, y, alloc);
-    try std.testing.expectEqualSlices(T, &[_]T{0}, loss.data.data);
-    // (1-2)**2 == 1
-    try yh.set(&[_]usize{0}, 2);
-    loss = try simple_mse_loss(T, yh, y, alloc);
-    try std.testing.expectEqualSlices(T, &[_]T{1}, loss.data.data);
-
-    // (1-3)**2 == 4
-    try yh.set(&[_]usize{0}, 3);
-    loss = try simple_mse_loss(T, yh, y, alloc);
-    try std.testing.expectEqualSlices(T, &[_]T{4}, loss.data.data);
-
-    // (-1-10)**2 == 121
-    try y.set(&[_]usize{0}, -1);
-    try yh.set(&[_]usize{0}, 10);
-    loss = try simple_mse_loss(T, yh, y, alloc);
-    try std.testing.expectEqualSlices(T, &[_]T{121}, loss.data.data);
-
-    // Arrays
-    const y_arr = try Tensor.init(&[_]T{ 1, 2, 3 }, &[_]usize{3}, true, alloc);
-    const yh_arr = try Tensor.init(&[_]T{ 2, 3, 4 }, &[_]usize{3}, true, alloc);
-    // FIXME: dim handling not entirely correct if you try adding dims numbers might be wrong, not sure what expected behavior should be
-    // const yh_arr = try Tensor.init(&[_]T{ 2, 3, 4 }, &[_]usize{3, 1}, true, alloc);
-
-    // ((1-2)^2 + (2-3)^2 + (3-4)^2) / 3 == (1 + 1 + 1) / 3 == 1
-    loss = try simple_mse_loss(T, yh_arr, y_arr, alloc);
-    try std.testing.expectEqualSlices(T, &[_]T{1}, loss.data.data);
-
-    // MSE backward
-    var gm = Loss(Tensor).init(alloc, .{});
-    defer gm.deinit();
-    loss.grad.?.fill(1.0);
-    loss.acquire();
-    try gm.backward(loss, alloc);
-    loss.print();
-}
-
-fn norm(comptime T: type, comptime n: u32, a: @Vector(n, T)) T {
-    return @reduce(.Add, a * a);
-}
-
-fn expectApproxSlices(comptime T: type, comptime n: u32, a: []const T, b: []const T) !void {
-    const VT = @Vector(n, T);
-    const na = norm(T, n, @as(VT, a[0..n].*));
-    const va = @as(VT, a[0..n].*) / @as(VT, @splat(na));
-
-    const nb = norm(T, n, @as(VT, b[0..n].*));
-    const vb = @as(VT, b[0..n].*) / @as(VT, @splat(nb));
-    const result = norm(T, n, va - vb);
-
-    if (result > 0.01) {
-        std.debug.print("norm was {d}\n", .{result});
-        try std.testing.expectEqualSlices(T, a, b);
-    }
-}
-
-test "softmax, cross-entropy, 2d" {
-    // const allocator = std.testing.allocator;
-    const allocator = std.heap.page_allocator;
-    const T = f32;
-
-    // Test case 1: 2D input
-    const input_data = [_]T{ 1.0, 2.0, 3.0, 4.0, 1.0, 2.0 };
-    const input = try NDTensor(T).init(&input_data, &[_]usize{ 2, 3 }, true, allocator);
-
-    const softmax_output = try softmax(T, input, 0, allocator);
-
-    const expected_softmax = [_]T{ 0.09003057, 0.24472848, 0.66524094, 0.8437947, 0.04201007, 0.11419519 };
-    const expected_softmax_shape = [_]usize{ 2, 3 };
-
-    // compare softmax outputs
-    // for (softmax_output.data.data, expected_softmax) |actual, expected| {
-    //     try std.testing.expectApproxEqAbs(expected, actual, 1e-4);
-    // }
-    try expectApproxSlices(T, 6, &expected_softmax, softmax_output.data.data);
-    try std.testing.expectEqualSlices(usize, &expected_softmax_shape, softmax_output.data.shape.shape);
-    // cross-entropy
-    const target_data = [_]T{ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
-    const target = try NDTensor(T).init(&target_data, &[_]usize{ 2, 3 }, true, allocator);
-
-    const loss = try cross_entropy_loss(T, softmax_output, target, allocator);
-    // defer loss.teardown();
-
-    const expected_loss: T = 1.4883861541748047;
-
-    try std.testing.expectApproxEqAbs(loss.data.data[0], expected_loss, 1e-4);
-
-    try loss.backward(allocator);
-
-    const expected_grads = [_]T{ -0.18634209, 0.00052114, 0.18582097, 0.26313502, -0.1983895, -0.06474546 };
-    // @round(@Vector(input_data.len, T), )
-    try expectApproxSlices(T, 6, &expected_grads, input.grad.?.data);
-}
-
-test "softmax, cross-entropy, 1d" {
-    // const allocator = std.testing.allocator;
-    const allocator = std.heap.page_allocator;
-    const T = f32;
-    const input_data = [_]T{ -1.0, 0.0, 1.0 };
-    const input = try NDTensor(T).init(&input_data, &[_]usize{3}, true, allocator);
-
-    const softmax_output = try ag_softmax_1d(T, input, allocator);
-
-    const expected_softmax = [_]T{ 0.09003057, 0.24472848, 0.66524094 };
-
-    try expectApproxSlices(T, 3, &expected_softmax, softmax_output.data.data);
-
-    // cross-entropy
-    const target_data = [_]T{ 0.0, 1.0, 0.0 };
-    const target = try NDTensor(T).init(&target_data, &[_]usize{3}, true, allocator);
-
-    const loss = try cross_entropy_loss(T, softmax_output, target, allocator);
-    // defer loss.teardown();
-
-    const expected_loss: T = 0.8654314875602722;
-
-    try std.testing.expectApproxEqAbs(loss.data.data[0], expected_loss, 1e-4);
-
-    try loss.backward(allocator);
-
-    const expected_grads = [_]T{ 3.8343130e-04, -4.2193821e-01, 4.2155474e-01 };
-
-    try expectApproxSlices(T, 3, &expected_grads, input.grad.?.data);
 }

@@ -509,8 +509,8 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
     gm.grad_clip_delta = 1e-6;
     gm.grad_clip_max_norm = 10.0;
     defer gm.deinit();
-    var optimizer = SGD(T){ .lr = 0.001 };
-    const lr_epoch_decay = 0.99999999999999999999;
+    var optimizer = SGD(T){ .lr = 0.01 };
+    const lr_epoch_decay = 1.0; // disable
 
     const grad_acc_steps = 32;
     var loss: *Tensor = try Tensor.init(&[_]T{0.0}, null, true, alloc);
@@ -593,7 +593,7 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
         y[i] = data[i][n_features];
     }
     const Tensor = NDTensor(T);
-    const batch_size = 100;
+    const batch_size = 32;
     const input_size = 2;
     const output_size = 1;
 
@@ -616,7 +616,7 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     defer gm.deinit();
     var optimizer = SGD(T){ .lr = 0.01 };
 
-    for (0..10) |epoch| {
+    for (0..15) |epoch| {
         var epoch_loss: T = 0;
         var batch_start_i: usize = 0;
         while (batch_start_i < y.len) : (batch_start_i += batch_size) {
