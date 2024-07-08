@@ -3,7 +3,6 @@ const std = @import("std");
 const zig_builtin = @import("builtin");
 const build_options = @import("build_options");
 pub const zarray = @import("zarray");
-// pub const blas = @import("backend/blas.zig");
 
 /// lib-wide options that can be overridden by the root file.
 /// E.g. const zigrad_settings = .{ .gradEnabled = true };
@@ -14,7 +13,7 @@ pub const Settings = struct {
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
-    seed: u64 = 4545611,
+    seed: u64 = 81761,
 };
 
 var prng = std.rand.DefaultPrng.init(settings.seed);
@@ -51,6 +50,7 @@ pub const std_options = std.Options{
     .logFn = logFn,
 };
 
+// TODO: lib tests, recursive inclusion
 // test {
 //     _ = @import("tensor/zarray.zig");
 //     _ = @import("tensor/tensor.zig");
