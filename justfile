@@ -1,7 +1,7 @@
-default: br
+default: bt
 
 bt:
-  zig build test
+  zig build test -Dlog_level=debug
 
 b:
   zig build

@@ -1,4 +1,15 @@
 *.json
-/zig-out/
-/outputs/
 drafts
+*.png
+*.svg
+*.d2
+*.log
+.DS_Store
+.*vim*
+.python-version
+outputs*
+*cache*
+.env
+*venv
+zig-out
+*.csv
