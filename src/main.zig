@@ -1,12 +1,13 @@
 const std = @import("std");
 const scalar = @import("scalar/grad.zig");
 const scalarnn = @import("scalar/nn.zig");
-const layer = @import("tensor/layer.zig");
-const mnist = @import("tensor/mnist.zig");
-pub const std_options = @import("zigrad").std_options;
+pub const zg = @import("zigrad");
+const mnist = zg.mnist;
+const layer = zg.layer;
 
 pub fn main() !void {
-    // try runScalar();
+    std.debug.print("{any}\n", .{zg.settings});
+    try runScalar();
     try mnist.main();
 }
 

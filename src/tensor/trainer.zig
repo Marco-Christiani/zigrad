@@ -1,10 +1,12 @@
 const std = @import("std");
-const Loss = @import("tensor.zig").Loss;
-const Model = @import("model.zig").Model;
-const NDTensor = @import("tensor.zig").NDTensor;
-const SGD = @import("tensor.zig").SGD;
-const ops = @import("ops.zig");
-const utils = @import("utils.zig");
+const zg = @import("../root.zig");
+
+const Loss = zg.tensor.Loss;
+const NDTensor = zg.tensor.NDTensor;
+const Model = zg.Model;
+const SGD = zg.tensor.SGD;
+const ops = zg.ops;
+const utils = zg.utils;
 
 const log = std.log.scoped(.zg_trainer);
 
