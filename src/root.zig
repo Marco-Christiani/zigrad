@@ -2,7 +2,17 @@ const root = @import("root");
 const std = @import("std");
 const zig_builtin = @import("builtin");
 const build_options = @import("build_options");
-pub const zarray = @import("zarray");
+
+pub const zarray = @import("tensor/zarray.zig");
+pub const tensor = @import("tensor/tensor.zig");
+pub const ops = @import("tensor/ops.zig");
+pub const mnist = @import("tensor/mnist.zig");
+pub const Trainer = @import("tensor/trainer.zig").Trainer;
+pub const Model = @import("tensor/model.zig").Model;
+pub const conv_utils = @import("tensor/conv_utils.zig");
+pub const utils = @import("tensor/utils.zig");
+pub const layer = @import("tensor/layer.zig");
+pub const winit = @import("tensor/winit.zig");
 
 /// lib-wide options that can be overridden by the root file.
 /// E.g. const zigrad_settings = .{ .gradEnabled = true };
@@ -51,8 +61,6 @@ pub const std_options = std.Options{
 };
 
 // TODO: lib tests, recursive inclusion
-// test {
-//     _ = @import("tensor/zarray.zig");
-//     _ = @import("tensor/tensor.zig");
-//     std.testing.refAllDecls(@This());
-// }
+test {
+    std.testing.refAllDecls(@This());
+}

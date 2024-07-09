@@ -1,17 +1,18 @@
 const std = @import("std");
-const conv_utils = @import("conv_utils.zig");
-const ops = @import("ops.zig");
-const Loss = @import("tensor.zig").Loss;
-const NDTensor = @import("tensor.zig").NDTensor;
-const SGD = @import("tensor.zig").SGD;
-const winit = @import("winit.zig");
+const zg = @import("../root.zig");
 
-const zg = @import("zigrad");
+const NDTensor = zg.tensor.NDTensor;
+const Loss = zg.tensor.Loss;
+const SGD = zg.tensor.SGD;
+
 const zarray = zg.zarray;
 const Shape = zarray.Shape;
 const NDArray = zarray.NDArray;
 const ZarrayError = zarray.ZarrayError;
-const settings = zg.settings;
+
+const conv_utils = zg.conv_utils;
+const ops = zg.ops;
+const winit = zg.winit;
 
 const log = std.log.scoped(.zg_layer);
 
