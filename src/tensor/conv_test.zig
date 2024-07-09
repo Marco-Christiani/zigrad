@@ -1,24 +1,36 @@
 const testing = std.testing;
 const std = @import("std");
-const NDTensor = @import("tensor.zig").NDTensor;
-const Loss = @import("tensor.zig").Loss;
-const Conv2DLayer = @import("layer.zig").Conv2DLayer;
-const ReLULayer = @import("layer.zig").ReLULayer;
-const Model = @import("model.zig").Model;
-const Trainer = @import("trainer.zig").Trainer;
-const ops = @import("ops.zig");
-const zigrad = @import("zigrad");
+
+const zg = @import("zigrad");
+const random = zg.random;
+const tensor = zg.tensor;
+const Op = tensor.Op;
+const NDTensor = tensor.NDTensor;
+const Loss = tensor.Loss;
+const Conv2DLayer = zg.layer.Conv2DLayer;
+const ReLULayer = zg.layer.ReLULayer;
+const Model = zg.Model;
+const Trainer = zg.Trainer;
+const ops = zg.ops;
+
+// const NDTensor = @import("tensor.zig").NDTensor;
+// const Loss = @import("tensor.zig").Loss;
+// const Conv2DLayer = @import("layer.zig").Conv2DLayer;
+// const ReLULayer = @import("layer.zig").ReLULayer;
+// const Model = @import("model.zig").Model;
+// const Trainer = @import("trainer.zig").Trainer;
+// const ops = @import("ops.zig");
 
 pub const std_options = .{
     .log_level = std.log.Level.debug,
 };
 
-pub const zigrad_settings = zigrad.Settings{
+pub const zigrad_settings = zg.Settings{
     .grad_clip_enabled = false,
 };
 
 pub fn main() !void {
-    std.log.warn("zigrad.settings: {}", .{zigrad.settings});
+    std.log.warn("zigrad.settings: {}", .{zg.settings});
     // try testConvModel();
     try testModelFwdBwd();
 }

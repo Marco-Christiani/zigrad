@@ -1,9 +1,11 @@
 const std = @import("std");
-const tensor = @import("tensor.zig");
-const random = @import("zigrad").random;
+const zg = @import("zigrad");
 
+const random = zg.random;
+const tensor = zg.tensor;
 const Op = tensor.Op;
 const NDTensor = tensor.NDTensor;
+
 const log = std.log.scoped(.zigrad_trainer);
 
 pub const PrintOptions = struct {

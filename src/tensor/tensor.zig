@@ -2,7 +2,7 @@
 // TODO: better operation abstraction
 // TODO: print graph, just take from the existing impl
 const std = @import("std");
-const zg = @import("zigrad");
+const zg = @import("../root.zig");
 const settings = zg.settings;
 
 const zarray = zg.zarray;

@@ -5,7 +5,7 @@
 // TODO: exp
 // TODO: document bcast rules and shape rules for inplace ewise ops
 const std = @import("std");
-const blas = @import("blas"); // see build notes
+const blas = @import("../backend/blas.zig");
 const log = std.log.scoped(.zg_zarray);
 
 pub const ZarrayError = error{

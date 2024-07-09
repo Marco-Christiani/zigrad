@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("zigrad");
+const zg = @import("../root.zig");
 const zarray = zg.zarray;
 const NDArray = zarray.NDArray;
 
