@@ -18,24 +18,22 @@ pub fn build(b: *std.Build) !void {
     //     .linux => {},
     //     .macos => {},
     // }
-    const zarray_module = b.createModule(.{ .root_source_file = b.path("src/tensor/zarray.zig") });
-    const backend_module = b.createModule(.{ .root_source_file = b.path("src/backend/blas.zig") });
-    zarray_module.addImport("blas", backend_module);
+
     const zigrad_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .imports = &.{
-            .{ .name = "zarray", .module = zarray_module },
             .{ .name = "build_options", .module = build_options_module },
         },
     });
-    const lib = b.addStaticLibrary(.{
-        .name = "zigrad",
-        .root_source_file = zigrad_module.root_source_file.?,
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(lib);
-    // lib.root_module.addImport("build_options", build_options_module);
+
+    // const lib = b.addStaticLibrary(.{
+    //     .name = "zigrad",
+    //     .root_source_file = zigrad_module.root_source_file.?,
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // lib.root_module.addImport("zigrad", zigrad_module);
+    // b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
         .name = "zigrad",
@@ -44,7 +42,6 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zigrad", zigrad_module);
-    // exe.root_module.addImport("build_options", build_options_module);
 
     exe.linkFramework("Accelerate");
     b.installArtifact(exe);
@@ -61,43 +58,14 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
+    const unit_tests = b.addTest(.{
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe_unit_tests.linkFramework("Accelerate");
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-    exe_unit_tests.root_module.addImport("zigrad", zigrad_module);
+    unit_tests.linkFramework("Accelerate");
+    const run_unit_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
-
-    inline for ([_]struct {
-        name: []const u8,
-        src: []const u8,
-    }{
-        .{ .name = "test-zarray", .src = "src/tensor/zarray.zig" },
-        .{ .name = "test-tensor", .src = "src/tensor/tensor.zig" },
-        .{ .name = "test-mnist", .src = "src/tensor/mnist.zig" },
-        .{ .name = "test-ops", .src = "src/tensor/ops.zig" },
-        .{ .name = "test-layer", .src = "src/tensor/layer.zig" },
-        .{ .name = "test-conv", .src = "src/tensor/conv_test.zig" },
-        .{ .name = "test-conv-utils", .src = "src/tensor/conv_utils.zig" },
-    }) |test_cfg| {
-        const test_name = test_cfg.name;
-        const test_src = test_cfg.src;
-        const libtest = b.addTest(.{
-            .name = test_name,
-            .root_source_file = b.path(test_src),
-            .optimize = optimize,
-        });
-        libtest.linkFramework("Accelerate");
-        // const curr_test = b.step(test_name, test_name);
-        const run_lib_unit_tests = b.addRunArtifact(libtest);
-        libtest.root_module.addImport("zigrad", zigrad_module);
-        // hahaha. done the hacky way for zls.
-        libtest.root_module.addImport("blas", b.addModule("blas", .{ .root_source_file = b.path("src/backend/blas.zig") }));
-        test_step.dependOn(&run_lib_unit_tests.step);
-    }
+    test_step.dependOn(&run_unit_tests.step);
 }

@@ -1,13 +1,14 @@
 const std = @import("std");
-const Model = @import("model.zig").Model;
-const Conv2DLayer = @import("layer.zig").Conv2DLayer;
-const LinearLayer = @import("layer.zig").LinearLayer;
-const ReLULayer = @import("layer.zig").ReLULayer;
-const FlattenLayer = @import("layer.zig").FlattenLayer;
-const ops = @import("ops.zig");
-const Trainer = @import("trainer.zig").Trainer;
-const NDTensor = @import("tensor.zig").NDTensor;
-const zg = @import("zigrad");
+const zg = @import("../root.zig");
+
+const Model = zg.Model;
+const Conv2DLayer = zg.layer.Conv2DLayer;
+const LinearLayer = zg.layer.LinearLayer;
+const ReLULayer = zg.layer.ReLULayer;
+const FlattenLayer = zg.layer.FlattenLayer;
+const ops = zg.ops;
+const Trainer = zg.Trainer;
+const NDTensor = zg.tensor.NDTensor;
 const prod = zg.zarray.prod;
 // const NDTensor = zg.tensor.NDTensor;
 
