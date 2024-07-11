@@ -18,7 +18,6 @@ pub fn build(b: *std.Build) !void {
     //     .linux => {},
     //     .macos => {},
     // }
-
     const zigrad_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .imports = &.{
