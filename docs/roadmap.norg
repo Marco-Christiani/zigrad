@@ -1,0 +1,54 @@
+@document.meta
+title: roadmap
+description: Status and tasking
+authors: mchristiani
+categories: public
+created: 2024-07-11T00:05:54-0500
+updated: 2024-07-12T17:44:14-0500
+version: 1.1.1
+@end
+
+
+* Codebase
+** Functionality
+*** (!) Test data generation @status=IP
+    Need to bring a proper formal way to test things together, this is high priority and in progress.
+*** ( ) finite difference
+
+** ( ) Arch. + Perf.
+*** ( ) should be a backend abstraction
+*** ( ) planning for bringing in an array dep. after I prove this point to myself...
+*** ( ) custom pool allocator
+*** ( ) Op fusion, @muladd, matmulacc, matvecacc, simd, etc.
+*** (!) arch organization first pass {:architecture:} @status=IP
+    Taking this further than expected, need to properly organize to keep it manageable. Good time to consider abstractions.
+
+** (-) Refactoring
+*** ( ) Rename tests https://ziglang.org/documentation/0.12.1/#Doctests
+*** ( ) Naming conventions for inplace, elementwise, and scalar operations
+*** (x) Children should be a slice, if not a different data type
+*** ( ) Prefer pass by value when possible and rely on compiler more
+** (-) Features
+*** (=) Pull in the View abstraction, since this requires custom backward is likely dependent on the `Module`/`Function` abstraction
+*** ( ) activation functions, might be same as above
+*** (-) ZArray
+****  (-) slice ops, potentially via View
+****  ( ) infer dim, good idea is to use a tuple with comptime type inspection instead of trying to deal with a signed slice for shape/indices
+****  ( ) reshape tests
+****  ( ) transpose could be better
+**  ( ) Future/Speculative Features
+*** ( ) code gen for elementwise ops
+    This could make primitives like ndarray/ndtensor more maintainble, many operations can be grouped into patterns to facilitate this (binop, unop, scalar-op, elementwise-op, maybe even heap-alloc vs not).
+*** ( ) lazy op fusion
+** ( ) Build system
+*** (!) Restructure project for proper exporting @status=IP
+*** ( ) overall its hacked together for testing, unhack it @status=IP
+    Follows with arch organization and test data generation, progress made.
+*** ( ) refine lib testing https://ziggit.dev/t/how-to-test-modules/735/5
+*** ( ) support real os's, but zigs build system changes every 5 minutes
+** (-) Known issues
+*** (x) global mutable config context, quite annoying
+*** (x) in the interest of iteration time, used arena allocators in the tests... actually check management, esp for `Shape`
+    - No. This has a performance penalty we are sticking to pools.
+*** ( ) lack of errdefer in a few places to avoid leaks
+
