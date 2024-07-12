@@ -13,3 +13,7 @@ outputs*
 *venv
 zig-out
 *.csv
+*.norg
+*.org
+!docs/architecture.norg
+!docs/roadmap.norg
