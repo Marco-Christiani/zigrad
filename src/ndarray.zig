@@ -128,6 +128,11 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn print(self: Self) void {
+            // self.printToWriter(std.io.getStdOut().writer());
+            self.printToWriter(std.io.getStdErr().writer()) catch @panic("print failure");
+        }
+
+        pub fn printToWriter(self: Self, writer: anytype) !void {
             const alloc = std.heap.page_allocator;
             var shapeStr: []u8 = alloc.alloc(u8, self.shape.len() * @sizeOf(usize)) catch @panic("allocation failed in print");
             defer alloc.free(shapeStr);
@@ -144,9 +149,9 @@ pub fn NDArray(comptime T: type) type {
                 }
                 j += 2;
             }
-
-            std.debug.print("NDArray<{any},{s}>", .{ T, shapeStr[0..bytes_written] });
-            std.debug.print("{d}", .{self.data});
+            const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shapeStr[0..bytes_written] }) catch @panic("allocation failed in print");
+            try writer.writeAll(preamble);
+            try utils.printNDSlice(self.data, self.shape.shape, writer);
         }
 
         /// View into contiguous slice along a single dim. Shape is allocated COM.
