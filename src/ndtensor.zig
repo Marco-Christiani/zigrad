@@ -307,18 +307,23 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn print(self: Self) void {
-            std.debug.print("NDTensor<{},{?s}>[", .{ T, if (self.op) |o| @tagName(o) else null });
-            std.debug.print("data: ", .{});
-            self.data.print();
+            // self.printToWriter(std.io.getStdOut().writer());
+            self.printToWriter(std.io.getStdErr().writer()) catch @panic("Failed to print tensor");
+        }
+
+        pub fn printToWriter(self: Self, writer: anytype) !void {
+            try writer.print("NDTensor<{},{?s}>", .{ T, if (self.op) |o| @tagName(o) else null });
+            try writer.writeAll("{data: ");
+            try self.data.printToWriter(writer);
             if (self.grad) |g| {
-                std.debug.print(" grad: ", .{});
-                g.print();
+                try writer.writeAll(" grad: ");
+                try g.printToWriter(writer);
             }
-            std.debug.print("], requires_grad={}", .{self.requires_grad});
+            try writer.print(", requires_grad={}", .{self.requires_grad});
             if (self.label) |l| {
-                std.debug.print(" label={s}", .{l});
+                try writer.print(" label={s}", .{l});
             }
-            std.debug.print("\n", .{});
+            try writer.writeAll("}\n");
         }
 
         pub const ClipOptions = struct {
