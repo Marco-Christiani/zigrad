@@ -1,5 +1,5 @@
 const zg = @import("../root.zig");
-const NDTensor = zg.tensor.NDTensor;
+const NDTensor = zg.NDTensor;
 const random = zg.random;
 
 pub fn heInit(comptime T: type, tensor: *const NDTensor(T)) void {

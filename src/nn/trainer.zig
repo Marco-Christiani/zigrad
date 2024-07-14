@@ -5,7 +5,9 @@ const Loss = zg.tensor.Loss;
 const NDTensor = zg.tensor.NDTensor;
 const Model = zg.Model;
 const SGD = zg.tensor.SGD;
-const ops = zg.ops;
+const cross_entropy_loss = zg.loss.cross_entropy_loss;
+const mse_loss = zg.loss.mse_loss;
+const softmax = zg.loss.softmax;
 const utils = zg.utils;
 
 const log = std.log.scoped(.zg_trainer);
@@ -14,8 +16,8 @@ pub const LossFns = enum { mse, ce };
 
 pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
     const lossf = switch (loss_fn) {
-        .ce => ops.cross_entropy_loss,
-        .mse => ops.mse_loss,
+        .ce => cross_entropy_loss,
+        .mse => mse_loss,
     };
 
     return struct {
@@ -60,7 +62,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
 
             logData("output(1): ", output.data.data);
             log.debug("softmaxing", .{});
-            output = try ops.softmax(T, output, 0, bwd_allocator);
+            output = try softmax(T, output, 0, bwd_allocator);
             logData("output(2): ", output.data.data);
             logData("target: ", target.data.data);
             log.debug("calculating loss", .{});
