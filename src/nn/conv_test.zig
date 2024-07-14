@@ -3,23 +3,14 @@ const std = @import("std");
 
 const zg = @import("zigrad");
 const random = zg.random;
-const tensor = zg.tensor;
-const Op = tensor.Op;
-const NDTensor = tensor.NDTensor;
-const Loss = tensor.Loss;
+const NDTensor = zg.NDTensor;
+const Op = zg.Op;
+const GraphManager = zg.GraphManager;
 const Conv2DLayer = zg.layer.Conv2DLayer;
 const ReLULayer = zg.layer.ReLULayer;
 const Model = zg.Model;
 const Trainer = zg.Trainer;
-const ops = zg.ops;
-
-// const NDTensor = @import("tensor.zig").NDTensor;
-// const Loss = @import("tensor.zig").Loss;
-// const Conv2DLayer = @import("layer.zig").Conv2DLayer;
-// const ReLULayer = @import("layer.zig").ReLULayer;
-// const Model = @import("model.zig").Model;
-// const Trainer = @import("trainer.zig").Trainer;
-// const ops = @import("ops.zig");
+const mse_loss = zg.loss.mse_loss;
 
 pub const std_options = .{
     .log_level = std.log.Level.debug,
@@ -158,9 +149,9 @@ fn testModelFwdBwd() !void {
     const output = try model.forward(input);
     std.debug.print("Output: {d}\n", .{output.data.data});
     std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
-    const loss = try ops.mse_loss(f32, output, target, model.allocator);
+    const loss = try mse_loss(f32, output, target, model.allocator);
     std.debug.print("Output shape: {any}\n", .{output.data.shape.shape});
-    var gm = Loss(NDTensor(f32)).init(allocator, .{ .grad_clip_enabled = false });
+    var gm = GraphManager(NDTensor(f32)).init(allocator, .{ .grad_clip_enabled = false });
     model.zeroGrad();
     loss.grad.?.fill(1);
     try gm.backward(loss, allocator);
