@@ -19,6 +19,7 @@ pub const winit = @import("tensor/winit.zig");
 pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigrad_settings else .{};
 
 pub const Settings = struct {
+    precision: type = f32,
     grad_enabled: bool = true, // TODO: implement grad_enabled
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
@@ -63,5 +64,6 @@ pub const std_options = std.Options{
 // TODO: lib tests, recursive inclusion *in progress*
 test {
     _ = @import("tensor/tests/test_ops.zig");
+    _ = @import("ndarray.zig");
     std.testing.refAllDecls(@This());
 }
