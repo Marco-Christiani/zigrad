@@ -1,7 +1,6 @@
 const std = @import("std");
 const zg = @import("../root.zig");
-const zarray = zg.zarray;
-const NDArray = zarray.NDArray;
+const NDArray = zg.NDArray;
 
 pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !*NDArray(T) {
     const batch_size = input.shape.shape[0];

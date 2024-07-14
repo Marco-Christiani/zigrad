@@ -6,10 +6,9 @@ const Conv2DLayer = zg.layer.Conv2DLayer;
 const LinearLayer = zg.layer.LinearLayer;
 const ReLULayer = zg.layer.ReLULayer;
 const FlattenLayer = zg.layer.FlattenLayer;
-const ops = zg.ops;
 const Trainer = zg.Trainer;
-const NDTensor = zg.tensor.NDTensor;
-const prod = zg.zarray.prod;
+const NDTensor = zg.NDTensor;
+const prod = zg.arrayutils.prod;
 
 const log = std.log.scoped(.zg_mnist);
 

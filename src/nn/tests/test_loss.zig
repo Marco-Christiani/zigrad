@@ -1,14 +1,12 @@
 const std = @import("std");
 const json = std.json;
 const zg = @import("../../root.zig");
-const ops = @import("../ops.zig");
 
-const zarray = zg.zarray;
-const Shape = zarray.Shape;
-const NDArray = zarray.NDArray;
-const ZarrayError = zarray.ZarrayError;
-const NDTensor = zg.tensor.NDTensor;
+const Shape = zg.Shape;
+const NDArray = zg.NDArray;
+const NDTensor = zg.NDTensor;
 const settings = zg.settings;
+const ag_softmax_1d = zg.loss.ag_softmax_1d;
 
 const SmceTestCase = struct {
     shape: []usize,
@@ -31,7 +29,7 @@ fn runTest(comptime name: []const u8, case: SmceTestCase, allocator: std.mem.All
     defer input.deinit();
 
     // const softmax_output = try ops.softmax(f32, input, case.dim, allocator);
-    const softmax_output = try ops.ag_softmax_1d(f32, input, allocator);
+    const softmax_output = try ag_softmax_1d(f32, input, allocator);
     defer softmax_output.deinit();
     std.debug.print("{s} {d} {d}\n", .{ name, case.shape, case.dim });
     std.debug.print("input: {d}\n", .{input.data.data});

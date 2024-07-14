@@ -3,16 +3,21 @@ const std = @import("std");
 const zig_builtin = @import("builtin");
 const build_options = @import("build_options");
 
-pub const zarray = @import("tensor/zarray.zig");
-pub const tensor = @import("tensor/tensor.zig");
-pub const ops = @import("tensor/ops.zig");
-pub const mnist = @import("tensor/mnist.zig");
-pub const Trainer = @import("tensor/trainer.zig").Trainer;
-pub const Model = @import("tensor/model.zig").Model;
-pub const conv_utils = @import("tensor/conv_utils.zig");
-pub const utils = @import("tensor/utils.zig");
-pub const layer = @import("tensor/layer.zig");
-pub const winit = @import("tensor/winit.zig");
+pub const NDArray = @import("ndarray.zig").NDArray;
+pub const Shape = @import("ndarray.zig").Shape;
+pub const arrayutils = @import("ndarray.zig").utils;
+pub const NDTensor = @import("ndtensor.zig").NDTensor;
+pub const Op = @import("ndtensor.zig").Op;
+pub const loss = @import("nn/loss.zig");
+pub const mnist = @import("nn/mnist.zig");
+pub const GraphManager = @import("graph_manager.zig").GraphManager;
+pub const Trainer = @import("nn/trainer.zig").Trainer;
+pub const Model = @import("nn/model.zig").Model;
+pub const conv_utils = @import("nn/conv_utils.zig");
+pub const utils = @import("nn/utils.zig");
+pub const layer = @import("nn/layer.zig");
+pub const winit = @import("nn/winit.zig");
+pub const optim = @import("nn/optim.zig");
 
 /// lib-wide options that can be overridden by the root file.
 /// E.g. const zigrad_settings = .{ .gradEnabled = true };
@@ -63,7 +68,7 @@ pub const std_options = std.Options{
 
 // TODO: lib tests, recursive inclusion *in progress*
 test {
-    _ = @import("tensor/tests/test_ops.zig");
     _ = @import("ndarray.zig");
+    _ = @import("nn/tests/test_loss.zig");
     std.testing.refAllDecls(@This());
 }

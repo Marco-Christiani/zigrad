@@ -1,17 +1,16 @@
 const std = @import("std");
 const zg = @import("../root.zig");
 
-const NDTensor = zg.tensor.NDTensor;
-const Loss = zg.tensor.Loss;
-const SGD = zg.tensor.SGD;
+const NDTensor = zg.NDTensor;
+const GraphManager = zg.GraphManager;
+const SGD = zg.optim.SGD;
 
-const zarray = zg.zarray;
-const Shape = zarray.Shape;
-const NDArray = zarray.NDArray;
-const ZarrayError = zarray.ZarrayError;
+const Shape = zg.Shape;
+const NDArray = zg.NDArray;
 
+const prod = zg.arrayutils.prod;
 const conv_utils = zg.conv_utils;
-const ops = zg.ops;
+const simple_mse_loss = zg.loss.simple_mse_loss;
 const winit = zg.winit;
 
 const log = std.log.scoped(.zg_layer);
@@ -437,7 +436,7 @@ pub fn FlattenLayer(comptime T: type) type {
         pub fn forward(_: *Self, input: *const NDTensor(T), _: std.mem.Allocator) !*NDTensor(T) {
             const batch_dim = input.data.shape.shape[0];
             const other_dims = input.data.shape.shape[1..];
-            return try input.reshape(&.{ batch_dim, zarray.prod(other_dims) });
+            return try input.reshape(&.{ batch_dim, prod(other_dims) });
         }
 
         pub fn getParameters(_: *Self) ?[]*NDTensor(T) {
@@ -503,7 +502,7 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
         p.fill(1);
     }
 
-    var gm = Loss(NDTensor(T)).init(alloc, .{});
+    var gm = GraphManager(NDTensor(T)).init(alloc, .{});
     gm.eager_teardown = false;
     gm.grad_clip_enabled = true;
     gm.grad_clip_delta = 1e-6;
@@ -550,7 +549,7 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
                 // const target = try Tensor.init(row[input_size..row.len], null, true, alloc);
                 const output = (try layer.forward(input, alloc)).setLabel("output");
 
-                const curr_loss = try ops.simple_mse_loss(f32, output, target, alloc);
+                const curr_loss = try simple_mse_loss(f32, output, target, alloc);
                 _ = try loss.data._add(curr_loss.data);
                 curr_loss.grad.?.fill(1.0 / @as(T, grad_acc_steps));
                 try gm.backward(curr_loss, alloc);
@@ -608,7 +607,7 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     input.acquire();
     target.acquire();
 
-    var gm = Loss(NDTensor(T)).init(alloc, .{});
+    var gm = GraphManager(NDTensor(T)).init(alloc, .{});
     gm.eager_teardown = true;
     gm.grad_clip_enabled = true;
     gm.grad_clip_max_norm = 10.0;
@@ -634,7 +633,7 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
             for (0..batch_y.len) |i| try target.set(&[_]usize{ i, 0 }, batch_y[i]);
 
             const output = try layer.forward(input, alloc);
-            const loss = try ops.simple_mse_loss(f32, output, target, alloc);
+            const loss = try simple_mse_loss(f32, output, target, alloc);
             epoch_loss += loss.data.data[0];
 
             loss.grad.?.fill(1.0);
@@ -686,7 +685,7 @@ test "LinearLayer forward and backward" {
     const output = try layer.forward(input, alloc);
     @memset(output.grad.?.data, 1.0);
 
-    var gm = Loss(NDTensor(T)).init(alloc, .{});
+    var gm = GraphManager(NDTensor(T)).init(alloc, .{});
     defer gm.deinit();
     try gm.backward(output, alloc);
 

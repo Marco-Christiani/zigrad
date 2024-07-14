@@ -1,8 +1,7 @@
 const std = @import("std");
 const zg = @import("../root.zig");
 const Layer = zg.layer.Layer;
-const NDTensor = zg.tensor.NDTensor;
-const ops = zg.ops;
+const NDTensor = zg.NDTensor;
 
 const log = std.log.scoped(.zg_model);
 

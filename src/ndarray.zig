@@ -5,8 +5,8 @@
 // TODO: exp
 // TODO: document bcast rules and shape rules for inplace ewise ops
 const std = @import("std");
-const utils = @import("ndarray/utils.zig");
-const Shape = @import("ndarray/Shape.zig");
+pub const utils = @import("ndarray/utils.zig");
+pub const Shape = @import("ndarray/Shape.zig");
 const blas = @import("backend/blas.zig");
 const log = std.log.scoped(.zg_ndarray);
 

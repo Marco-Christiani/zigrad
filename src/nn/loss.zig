@@ -2,13 +2,11 @@
 const std = @import("std");
 const zg = @import("../root.zig");
 
-const zarray = zg.zarray;
-const Shape = zarray.Shape;
-const NDArray = zarray.NDArray;
-const ZarrayError = zarray.ZarrayError;
+const Shape = zg.Shape;
+const NDArray = zg.NDArray;
 const settings = zg.settings;
-const NDTensor = zg.tensor.NDTensor;
-const Loss = zg.tensor.Loss;
+const NDTensor = zg.NDTensor;
+const GraphManager = zg.GraphManager;
 
 pub fn simple_mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var diff = (try y_pred.sub(y, allocator)).setLabel("diff");
