@@ -2,9 +2,8 @@ const std = @import("std");
 const zg = @import("zigrad");
 
 const random = zg.random;
-const tensor = zg.tensor;
-const Op = tensor.Op;
-const NDTensor = tensor.NDTensor;
+const Op = zg.Op;
+const NDTensor = zg.NDTensor;
 
 const log = std.log.scoped(.zigrad_trainer);
 

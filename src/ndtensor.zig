@@ -2,13 +2,14 @@
 // TODO: better operation abstraction
 // TODO: print graph, just take from the existing impl
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("root.zig");
 const settings = zg.settings;
 
-const zarray = zg.zarray;
-const Shape = zarray.Shape;
-const NDArray = zarray.NDArray;
-const ZarrayError = zarray.ZarrayError;
+const ndarray = @import("ndarray.zig");
+const Range = ndarray.Range;
+const Shape = ndarray.Shape;
+const NDArray = ndarray.NDArray;
+const GraphManager = @import("graph_manager.zig").GraphManager;
 
 const log = std.log.scoped(.zg_tensor);
 
@@ -262,7 +263,7 @@ pub fn NDTensor(comptime T: type) type {
             return self.data.posToOffset(indices);
         }
 
-        fn flexPosToIndex(self: Self, indices: []const usize) ZarrayError.InvalidIndex!usize {
+        fn flexPosToIndex(self: Self, indices: []const usize) error.InvalidIndex!usize {
             return self.data.flexPosToOffset(indices);
         }
 
@@ -278,7 +279,7 @@ pub fn NDTensor(comptime T: type) type {
         ///   - It is assumed the caller wants a temporary mutable view, return by copy.
         ///   - This creates a complex situation, there is no backward for this operation and it returns a mutable view.
         ///   - Caller must set backward
-        pub fn sliceRanges(self: Self, ranges: []const zarray.Range, allocator: std.mem.Allocator) !Self {
+        pub fn sliceRanges(self: Self, ranges: []const Range, allocator: std.mem.Allocator) !Self {
             log.err("WIP", .{});
             const sliced_data = try self.data.sliceRanges(ranges);
             return Self{
@@ -295,7 +296,7 @@ pub fn NDTensor(comptime T: type) type {
             };
         }
 
-        pub fn setSlice(self: Self, ranges: []const zarray.Range, values: Self) !void {
+        pub fn setSlice(self: Self, ranges: []const Range, values: Self) !void {
             if (self.requires_grad) {
                 // need to create a new operation
                 @compileError("Not implemented");
@@ -683,106 +684,6 @@ pub fn NDTensor(comptime T: type) type {
     };
 }
 
-/// Manages the overall graph, allows for a more memory efficient abstraction
-/// where the data structures used for traversing the graph during backprop
-/// can be managed independently and reused across training steps
-pub fn Loss(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        allocator: std.mem.Allocator,
-        sorted_nodes: std.ArrayList(*const T),
-        visited_nodes: std.AutoHashMap(*const T, void),
-        eager_teardown: bool = false,
-        grad_clip_enabled: bool = settings.grad_clip_enabled,
-        grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
-        grad_clip_delta: f32 = settings.grad_clip_delta,
-
-        pub const LossConfig = struct {
-            eager_teardown: bool = false,
-            grad_clip_enabled: bool = settings.grad_clip_enabled,
-            grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
-            grad_clip_delta: f32 = settings.grad_clip_delta,
-        };
-
-        pub fn init(allocator: std.mem.Allocator, opts: LossConfig) Self {
-            return Self{
-                .allocator = allocator,
-                .sorted_nodes = std.ArrayList(*const T).init(allocator),
-                .visited_nodes = std.AutoHashMap(*const T, void).init(allocator),
-                .grad_clip_enabled = opts.grad_clip_enabled,
-                .grad_clip_max_norm = opts.grad_clip_max_norm,
-                .grad_clip_delta = opts.grad_clip_delta,
-            };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.sorted_nodes.deinit();
-            self.visited_nodes.deinit();
-            self.* = undefined;
-        }
-
-        fn topo(self: *Self, node: *const T) void {
-            const gopr = self.visited_nodes.getOrPut(node) catch unreachable;
-            if (!gopr.found_existing) {
-                if (node.children) |children| {
-                    for (children) |child| {
-                        self.topo(child);
-                    }
-                }
-                self.sorted_nodes.append(node) catch unreachable;
-            }
-        }
-
-        // Must init grad on root node before backprop
-        pub fn backward(self: *Self, node: *const T, alloc: std.mem.Allocator) !void {
-            self.sorted_nodes.clearRetainingCapacity();
-            self.visited_nodes.clearRetainingCapacity();
-            self.topo(node);
-            const nodes = self.sorted_nodes.items;
-            for (0..nodes.len) |i| {
-                var curr_node = nodes[nodes.len - i - 1];
-                if (curr_node.requires_grad) {
-                    log.debug("backward: {?s}", .{curr_node.label});
-                    try curr_node.backward(alloc);
-                    log.debug("backprop {?s} grad norm is {d} max: {d} min: {d}", .{
-                        curr_node.label,
-                        curr_node.grad.?.l2_norm(),
-                        std.mem.max(f32, curr_node.grad.?.data),
-                        std.mem.min(f32, curr_node.grad.?.data),
-                    });
-                    if (self.grad_clip_enabled and curr_node.requires_grad) {
-                        if (curr_node.grad) |_| {
-                            curr_node.clip_grad_norm_delta(.{ .max_norm = self.grad_clip_max_norm, .delta = self.grad_clip_delta });
-                        }
-                    }
-                    // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
-                    // it just destroys the current tensor and not the children
-                    if (!curr_node.acquired and self.eager_teardown) @constCast(curr_node).deinit();
-                } else {
-                    log.debug("Skipping node {?s}", .{node.label});
-                }
-            }
-        }
-    };
-}
-
-pub fn SGD(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        lr: T,
-
-        pub fn step(self: Self, params: []*const NDTensor(T)) void {
-            // lol. go to bed.
-            for (params) |param| {
-                // param.data._sub(param.grad.?._mul(self.lr)); // TODO: really need to implement scalar ops...
-                for (0..param.data.data.len) |j| {
-                    param.data.data[j] -= self.lr * param.grad.?.data[j];
-                }
-            }
-        }
-    };
-}
-
 test "tensor/GraphManager/sum" {
     std.debug.print("{s} sum {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -799,7 +700,7 @@ test "tensor/GraphManager/sum" {
     try std.testing.expectEqualSlices(T, &[_]T{10}, sum_result.data.data);
 
     // Backward pass
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     if (!settings.grad_enabled) return error.GradNotEnabled;
     sum_result.grad.?.fill(1.0);
@@ -859,7 +760,7 @@ test "tensor/GraphManager/addback" {
     t2.acquire();
     t3.acquire();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     t3.grad = try Tensor.dtype.init(&[_]T{1}, shape, alloc);
     try gm.backward(t3, alloc);
@@ -885,7 +786,7 @@ test "tensor/GraphManager/mulback" {
     t2.acquire();
     t3.acquire();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     t3.grad = try Tensor.dtype.init(&[_]T{1}, shape, alloc);
     try gm.backward(t3, alloc);
@@ -915,7 +816,7 @@ test "tensor/GraphManager/moreback" {
     const backprop_alloc = backprop_arena.allocator();
     defer backprop_arena.deinit();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     h.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
     try gm.backward(h, backprop_alloc);
@@ -936,7 +837,7 @@ test "tensor/GraphManager/moreback" {
     temp = try w.mul(x, alloc);
     h = try temp.add(b, alloc);
 
-    var gm2 = Loss(Tensor).init(alloc, .{});
+    var gm2 = GraphManager(Tensor).init(alloc, .{});
     defer gm2.deinit();
     h.grad.?.fill(1);
     try gm.backward(h, alloc);
@@ -962,7 +863,7 @@ test "tensor/GraphManager/divback" {
     t2.acquire();
     t3.acquire();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     t3.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
     try gm.backward(t3, alloc);
@@ -990,7 +891,7 @@ test "tensor/GraphManager/matmul_backward" {
     t2.acquire();
     t3.acquire();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     // grad clipping will cause differences
     gm.grad_clip_enabled = false;
     defer gm.deinit();
@@ -1026,7 +927,7 @@ test "tensor/GraphManager/matvec_backward" {
     t2.acquire();
     t3.acquire();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0);
     try gm.backward(t3, alloc);
@@ -1054,7 +955,7 @@ test "tensor/GraphManager/dot_backward" {
     t2.acquire();
     t3.acquire();
 
-    var gm = Loss(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0);
     try gm.backward(t3, alloc);
