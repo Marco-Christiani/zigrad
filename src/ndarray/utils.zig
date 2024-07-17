@@ -44,7 +44,7 @@ fn flexSelectOffset(shape: []const usize, indices: []const usize) !usize {
     return index;
 }
 
-fn _printSlice(arr: []const f32, shape: []const usize, writer: anytype, index: *usize) !void {
+fn _printSlice(comptime T: type, arr: []const T, shape: []const usize, writer: anytype, index: *usize) !void {
     if (shape.len == 1) {
         try writer.writeAll("[");
         var i: usize = 0;
@@ -62,7 +62,7 @@ fn _printSlice(arr: []const f32, shape: []const usize, writer: anytype, index: *
     try writer.writeAll("[");
     var i: usize = 0;
     while (i < shape[0]) : (i += 1) {
-        try _printSlice(arr, shape[1..], writer, index);
+        try _printSlice(T, arr, shape[1..], writer, index);
         if (i < shape[0] - 1) {
             try writer.writeAll(", ");
         }
@@ -70,9 +70,9 @@ fn _printSlice(arr: []const f32, shape: []const usize, writer: anytype, index: *
     try writer.writeAll("]");
 }
 
-pub fn printNDSlice(arr: []const f32, shape: []const usize, writer: anytype) !void {
+pub fn printNDSlice(comptime T: type, arr: []const T, shape: []const usize, writer: anytype) !void {
     var index: usize = 0;
-    try _printSlice(arr, shape, writer, &index);
+    try _printSlice(T, arr, shape, writer, &index);
 }
 
 test printNDSlice {
@@ -80,21 +80,21 @@ test printNDSlice {
 
     // 2D array
     {
-        const arr1 = [_]f32{ 1, 2, 3, 4, 5, 6 };
+        const arr1 = [_]f64{ 1, 2, 3, 4, 5, 6 };
         const shape1 = [_]usize{ 3, 2 };
         var buffer1 = std.ArrayList(u8).init(allocator);
         defer buffer1.deinit();
-        try printNDSlice(&arr1, &shape1, buffer1.writer());
+        try printNDSlice(f64, &arr1, &shape1, buffer1.writer());
         try std.testing.expectEqualStrings("[[1, 2], [3, 4], [5, 6]]", buffer1.items);
     }
 
     // 3D array
     {
-        const arr2 = [_]f32{ 1, 2, 3, 4, 5, 6 };
+        const arr2 = [_]f64{ 1, 2, 3, 4, 5, 6 };
         const shape2 = [_]usize{ 3, 2, 1 };
         var buffer2 = std.ArrayList(u8).init(allocator);
         defer buffer2.deinit();
-        try printNDSlice(&arr2, &shape2, buffer2.writer());
+        try printNDSlice(f64, &arr2, &shape2, buffer2.writer());
         try std.testing.expectEqualStrings("[[[1], [2]], [[3], [4]], [[5], [6]]]", buffer2.items);
     }
 }

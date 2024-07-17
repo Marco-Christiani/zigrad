@@ -53,9 +53,24 @@ pub fn build(b: *std.Build) !void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // MNIST -------------------------------------------------------------------
+    // const mnist_exe = b.addExecutable(.{
+    //     .name = "zigrad",
+    //     .root_source_file = b.path("src/nn/mnist.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // mnist_exe.root_module.addImport("zigrad", zigrad_module);
+    //
+    // mnist_exe.linkFramework("Accelerate");
+    // b.installArtifact(mnist_exe);
+    // const run_mnist_cmd = b.addRunArtifact(mnist_exe);
+    // run_mnist_cmd.step.dependOn(b.getInstallStep());
+    // b.step("run-mnist", "Run mnist example").dependOn(&run_mnist_cmd.step);
+    // -------------------------------------------------------------------------
 
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/root.zig"),

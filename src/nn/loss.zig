@@ -56,37 +56,38 @@ pub fn mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allo
     });
 }
 
-pub fn cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-    std.log.info("{d} {d}", .{ y_pred.data.shape.shape, y.data.shape.shape });
-    const n = @as(T, @floatFromInt(y.data.data.len));
+pub fn softmax_cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var sum_loss: T = 0;
-    const epsilon: T = 1e-7; // safe log
+    const epsilon: T = 1e-7;
+    if (y_pred.data.shape.len() > 2) return error.NotSupported;
+    const batch_size = if (y_pred.data.shape.len() > 1) try y_pred.data.shape.get(0) else 1;
+    const last_dim = if (y_pred.data.shape.len() > 1) y_pred.data.shape.shape.len - 1 else 0;
+    const sm_preds = try ng_softmax(T, y_pred, last_dim, allocator);
 
-    for (y_pred.data.data, y.data.data) |pred, target| {
-        const safe_pred = @min(@max(pred, epsilon), 1 - epsilon);
-        sum_loss -= target * @log(safe_pred) + (1 - target) * @log(1 - safe_pred);
+    for (sm_preds.data.data, 0..) |pred, i| {
+        const target = y.data.data[i];
+        const safe_pred = @min(@max(pred, epsilon), 1.0 - epsilon);
+        sum_loss -= target * @log(safe_pred);
     }
-
-    const mean_loss = sum_loss / n;
+    const mean_loss = sum_loss / @as(T, @floatFromInt(batch_size));
 
     const bw_fn = struct {
-        fn backward(tensor: NDTensor(T), _allocator: std.mem.Allocator) !void {
-            _ = _allocator;
-            const self_children = tensor.children orelse return error.NoChildren;
-            const _y_pred = self_children[0];
-            const _y = self_children[1];
-            const _n = @as(T, @floatFromInt(_y.data.data.len));
-            const scale = @as(T, 1) / _n;
-
-            if (_y_pred.grad) |grad| {
-                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
-                    const safe_pred = @min(@max(pred_val, epsilon), 1 - epsilon);
-                    const grad_contrib = (safe_pred - target_val) * scale;
-                    grad_val.* += grad_contrib;
+        fn backward(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
+            const bw_ctx: *NDTensor(T) = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
+            defer bw_ctx.deinit();
+            const bw_self_children = bw_tensor.children orelse return error.NoChildren;
+            const bw_y_pred = bw_self_children[0];
+            const bw_y = bw_self_children[1];
+            const bw_batch_size = if (bw_y_pred.data.shape.len() > 1) try bw_y_pred.data.shape.get(0) else 1;
+            // const bw_n = @as(T, @floatFromInt(bw_y.data.data.len));
+            if (bw_y_pred.grad) |bw_grad| {
+                for (bw_grad.data, bw_ctx.data.data, bw_y.data.data) |*bw_grad_val, bw_sm_val, bw_target_val| {
+                    bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
                 }
             }
         }
     }.backward;
+
     return try NDTensor(T).createDependent(.{
         .data = try NDArray(T).init(&[_]T{mean_loss}, &[_]usize{1}, allocator),
         .op = null,
@@ -95,6 +96,7 @@ pub fn cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTenso
         .requires_grad = true,
         .allocator = allocator,
         ._backward = bw_fn,
+        ._backward_ctx = sm_preds, // no need to copy
     });
 }
 
@@ -105,55 +107,94 @@ pub fn ag_softmax_1d(T: type, input: *const NDTensor(T), allocator: std.mem.Allo
     return try exp_input.div(sum, allocator);
 }
 
-pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
-    const dimsize = try input.data.shape.get(dim);
+// There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
+// mutate a view into result by directly operating on the backing ndarray
+pub fn ng_softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
+    const shape = input.data.shape.shape;
+    if (dim >= shape.len) return error.InvalidDimension;
+
+    const dim_size = shape[dim];
+    const total_size = input.data.data.len;
+    const outer_size = @divExact(total_size, dim_size);
+
     var result = try input.clone(allocator);
     errdefer result.deinit();
 
-    // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
-    for (0..dimsize) |i| { // mutate a view into result by directly operating on the backing ndarray
-        // slice i in the tgt dim
-        std.debug.print("i:{d}\n", .{i});
-        const curr_slice = try result.data.sliceUnsafeNoAlloc(dim, i, i + 1);
-        const max_val = std.mem.max(T, curr_slice.data);
-
-        // exp(x-max)
-        var curr_sum: T = 0;
-        for (curr_slice.data) |*val| {
-            val.* = @exp(val.* - max_val);
-            curr_sum += val.*;
-        }
-        // scale
-        curr_slice._scale(1 / curr_sum);
-        std.debug.print("\ncurr_slice:{d}\n", .{curr_slice.data});
+    // TODO: use shape methods, or prod.
+    var strides = try allocator.alloc(usize, shape.len);
+    defer allocator.free(strides);
+    var stride: usize = 1;
+    var i: usize = shape.len;
+    while (i > 0) {
+        i -= 1;
+        strides[i] = stride;
+        stride *= shape[i];
     }
 
-    // TODO: once confirmed can use more ndarray elementwise ops
+    // calc softmax
+    var outer_idx: usize = 0;
+    while (outer_idx < outer_size) : (outer_idx += 1) {
+        const base_idx = (outer_idx / strides[dim]) * (strides[dim] * dim_size) + (outer_idx % strides[dim]);
+
+        //  max over slice
+        var max_val = result.data.data[base_idx];
+        for (1..dim_size) |j| {
+            const idx = base_idx + j * strides[dim];
+            max_val = @max(max_val, result.data.data[idx]);
+        }
+
+        // exp sum
+        var sum: T = 0;
+        for (0..dim_size) |j| {
+            const idx = base_idx + j * strides[dim];
+            const exp_val = @exp(result.data.data[idx] - max_val);
+            result.data.data[idx] = exp_val;
+            sum += exp_val;
+        }
+
+        // normalize
+        const scale = 1 / sum;
+        for (0..dim_size) |j| {
+            const idx = base_idx + j * strides[dim];
+            result.data.data[idx] *= scale;
+        }
+    }
+    return result;
+}
+
+pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
+    const result = try ng_softmax(T, input, dim, allocator);
     const bw_fn = struct {
-        fn backward(tensor: NDTensor(T), _allocator: std.mem.Allocator) !void {
-            const self_children = tensor.children orelse return error.NoChildren;
-            const _input = self_children[0];
-            if (_input.grad == null) return;
-            const bw_ctx: *usize = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
-            const _dim: usize = bw_ctx.*;
-            defer _allocator.destroy(bw_ctx);
+        fn backward(bw_tensor: NDTensor(T), bw_allocator: std.mem.Allocator) !void {
+            const bw_self_children = bw_tensor.children orelse return error.NoChildren;
+            const bw_input = bw_self_children[0];
+            if (bw_input.grad == null) return;
+            const bw_ctx: *usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
+            const bw_dim = bw_ctx.*;
+            defer bw_allocator.destroy(bw_ctx);
 
-            const _dimsize = try tensor.data.shape.get(_dim);
-            for (0.._dimsize) |i| {
-                const s = try tensor.data.sliceUnsafeNoAlloc(_dim, i, i + 1);
-                const dL_ds = try _input.grad.?.sliceUnsafeNoAlloc(_dim, i, i + 1);
+            const bw_shape = bw_tensor.data.shape.shape;
+            const bw_dim_size = bw_shape[bw_dim];
+            const bw_total_size = bw_tensor.data.data.len;
+            const bw_outer_size = @divExact(bw_total_size, bw_dim_size);
 
-                var sum_diff: T = 0;
-                for (s.data, dL_ds.data) |s_i, dL_ds_i| {
-                    sum_diff += s_i * dL_ds_i;
+            var bw_outer_idx: usize = 0;
+            while (bw_outer_idx < bw_outer_size) : (bw_outer_idx += 1) {
+                const bw_base_idx = bw_outer_idx * bw_dim_size;
+                var bw_sum_grad: T = 0;
+                for (0..bw_dim_size) |bw_j| {
+                    const bw_idx = bw_base_idx + bw_j;
+                    bw_sum_grad += bw_tensor.data.data[bw_idx] * bw_tensor.grad.?.data[bw_idx];
                 }
-
-                for (s.data, dL_ds.data) |s_i, *dL_dx_i| {
-                    dL_dx_i.* = s_i * (dL_dx_i.* - sum_diff);
+                for (0..bw_dim_size) |bw_j| {
+                    const bw_idx = bw_base_idx + bw_j;
+                    const bw_softmax_out = bw_tensor.data.data[bw_idx];
+                    bw_input.grad.?.data[bw_idx] += bw_softmax_out * (bw_tensor.grad.?.data[bw_idx] - bw_sum_grad);
                 }
             }
         }
     }.backward;
+
     const ctx = try allocator.create(usize);
     ctx.* = dim;
 
