@@ -133,7 +133,8 @@ pub fn LinearLayer(comptime T: type) type {
             input.logShape(null);
             result.logShape(null);
             result = (try self.bias.add(result, fwd_allocator)).setLabel("fwd1b");
-            return try result.reshape(&.{ try result.data.shape.get(1), try result.data.shape.get(0) });
+            const rt = try result.transpose();
+            return rt;
         }
 
         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
@@ -401,7 +402,7 @@ pub fn ReLULayer(comptime T: type) type {
                 const grad_input = input.grad.?;
                 for (grad_input.data, 0..) |*grad_value, i| {
                     grad_value.* = if (input.data.data[i] > 0) g.data[i] else 0;
-                    if (input.data.data[i] > 0 and g.data[i] != 0) std.debug.print("panda\t", .{});
+                    // if (input.data.data[i] > 0 and g.data[i] != 0) std.debug.print("panda\t", .{});
                 }
             }
         }
@@ -448,6 +449,127 @@ pub fn FlattenLayer(comptime T: type) type {
         pub fn deinit(_: *Self) void {}
 
         pub fn release(_: *Self) void {}
+
+        pub fn asLayer(self: *Self) Layer(T) {
+            return Layer(T).init(self);
+        }
+    };
+}
+
+pub fn MaxPool2DLayer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        allocator: std.mem.Allocator,
+
+        pub fn init(allocator: std.mem.Allocator, kernel_size: usize, stride: usize, padding: usize) !*Self {
+            const self = try allocator.create(Self);
+            self.* = .{
+                .kernel_size = kernel_size,
+                .stride = stride,
+                .padding = padding,
+                .allocator = allocator,
+            };
+            return self;
+        }
+
+        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            const batch_size = try input.data.shape.get(0);
+            const channels = try input.data.shape.get(1);
+            const in_height = try input.data.shape.get(2);
+            const in_width = try input.data.shape.get(3);
+
+            const out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1;
+            const out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1;
+
+            var output = try NDArray(T).empty(&[_]usize{ batch_size, channels, out_height, out_width }, fwd_allocator);
+            var indices = try NDArray(usize).empty(&[_]usize{ batch_size, channels, out_height, out_width }, fwd_allocator);
+
+            for (0..batch_size) |b| {
+                for (0..channels) |c| {
+                    for (0..out_height) |h| {
+                        for (0..out_width) |w| {
+                            var max_val: T = -std.math.inf(T);
+                            var max_index: usize = 0;
+
+                            for (0..self.kernel_size) |kh| {
+                                for (0..self.kernel_size) |kw| {
+                                    const h_in = h * self.stride + kh - self.padding;
+                                    const w_in = w * self.stride + kw - self.padding;
+
+                                    if (h_in < 0 or h_in >= in_height or w_in < 0 or w_in >= in_width) {
+                                        continue;
+                                    }
+
+                                    const index = b * channels * in_height * in_width +
+                                        c * in_height * in_width +
+                                        h_in * in_width +
+                                        w_in;
+                                    const val = input.data.data[index];
+
+                                    if (val > max_val) {
+                                        max_val = val;
+                                        max_index = index;
+                                    }
+                                }
+                            }
+
+                            const out_index = b * channels * out_height * out_width +
+                                c * out_height * out_width +
+                                h * out_width +
+                                w;
+                            output.data[out_index] = max_val;
+                            indices.data[out_index] = max_index;
+                        }
+                    }
+                }
+            }
+
+            return try NDTensor(T).createDependent(.{
+                .data = output,
+                .children = &[_]*const NDTensor(T){input},
+                .label = "maxpool2d_out",
+                .requires_grad = true,
+                .allocator = fwd_allocator,
+                ._backward = backward,
+                ._backward_ctx = indices,
+            });
+        }
+
+        pub fn backward(tensor: NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
+            const indices = @as(*NDArray(usize), @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext)));
+            std.debug.assert(tensor.children.?.len == 1);
+            var input = tensor.children.?[0];
+
+            for (0..tensor.grad.?.data.len) |i| {
+                const index = indices.data[i];
+                input.grad.?.data[index] += tensor.grad.?.data[i];
+            }
+
+            indices.deinit(allocator);
+        }
+
+        pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
+            _ = self;
+            return null; // MaxPool2D has no learnable parameters
+        }
+
+        pub fn zeroGrad(self: *Self) void {
+            _ = self;
+            // No gradients to zero out
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.destroy(self);
+        }
+
+        pub fn release(self: *Self) void {
+            _ = self;
+            // No tensors to release
+        }
 
         pub fn asLayer(self: *Self) Layer(T) {
             return Layer(T).init(self);

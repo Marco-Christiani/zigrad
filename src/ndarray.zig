@@ -151,7 +151,7 @@ pub fn NDArray(comptime T: type) type {
             }
             const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shapeStr[0..bytes_written] }) catch @panic("allocation failed in print");
             try writer.writeAll(preamble);
-            try utils.printNDSlice(self.data, self.shape.shape, writer);
+            try utils.printNDSlice(T, self.data, self.shape.shape, writer);
         }
 
         /// View into contiguous slice along a single dim. Shape is allocated COM.
@@ -609,8 +609,9 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        // TODO: inplace transpose. Naive, optimize.
+        // TODO: copies. Naive, optimize. Support >2d
         pub fn transpose(self: *Self, allocator: std.mem.Allocator) !*Self {
+            std.debug.assert(self.shape.len() < 3);
             if (self.shape.len() == 1) return self;
             const new_shape = [_]usize{ self.shape.shape[1], self.shape.shape[0] };
             var result = try Self.empty(&new_shape, allocator);

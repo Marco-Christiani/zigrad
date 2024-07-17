@@ -67,8 +67,8 @@ pub fn GraphManager(comptime T: type) type {
                     log.debug("backprop {?s} grad norm is {d} max: {d} min: {d}", .{
                         curr_node.label,
                         curr_node.grad.?.l2_norm(),
-                        std.mem.max(f32, curr_node.grad.?.data),
-                        std.mem.min(f32, curr_node.grad.?.data),
+                        std.mem.max(@TypeOf(curr_node.data.data[0]), curr_node.grad.?.data),
+                        std.mem.min(@TypeOf(curr_node.data.data[0]), curr_node.grad.?.data),
                     });
                     if (self.grad_clip_enabled and curr_node.requires_grad) {
                         if (curr_node.grad) |_| {

@@ -27,6 +27,7 @@ pub const Op = enum {
     MATVEC,
     SUM,
     RESHAPE,
+    TRANSPOSE,
     MAX,
     EXP, // TODO:
 };
@@ -238,6 +239,23 @@ pub fn NDTensor(comptime T: type) type {
             errdefer result.deinit();
             try result.data._reshape(new_shape);
             if (result.grad) |g| try g._reshape(new_shape);
+            return result;
+        }
+
+        /// Copies. COM.
+        pub fn transpose(self: *const Self) !*Self {
+            var result = try createDependent(.{
+                .data = try self.data.transpose(self.allocator),
+                .op = .TRANSPOSE,
+                .children = &[_]*const Self{self},
+                .label = null,
+                .requires_grad = false, // we will set grad ourselves, not great
+                .allocator = self.allocator,
+                ._backward = null,
+            });
+            errdefer result.deinit();
+            if (self.requires_grad) result.grad = try self.grad.?.transpose(self.allocator);
+            result.requires_grad = true;
             return result;
         }
 
@@ -636,6 +654,12 @@ pub fn NDTensor(comptime T: type) type {
                             const original_shape = children[0].data.shape;
                             try self.grad.?._reshape(original_shape.shape);
                             _ = try children[0].grad.?._add(self.grad.?);
+                        }
+                    },
+                    .TRANSPOSE => {
+                        if (self.children) |children| {
+                            const gt = try self.grad.?.transpose(allocator);
+                            _ = try children[0].grad.?._add(gt);
                         }
                     },
                     .MAX => {

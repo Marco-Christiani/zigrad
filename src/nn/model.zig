@@ -43,9 +43,8 @@ pub fn Model(comptime T: type) type {
         pub fn forward(self: Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             var output = input;
             for (self.layers.items, 0..) |layer, i| {
-                _ = i;
                 output = try layer.forward(output, fwd_allocator);
-                // log.info("layer-{} {d} output[..n]={d:.4}", .{ i, output.data.shape.shape, output.data.data[0..@min(output.data.data.len, 10)] });
+                log.debug("layer-{} {d} output[..n]={d:.4}", .{ i, output.data.shape.shape, output.data.data[0..@min(output.data.data.len, 10)] });
                 // output.label = try std.fmt.allocPrint(self.allocator, "layer-{}-{?s}", .{ i + 1, output.label });
                 // output.label = output.label orelse try std.fmt.allocPrint(self.allocator, "out-layer-{}", .{i + 1});
                 // output.label = output.label orelse blk: {

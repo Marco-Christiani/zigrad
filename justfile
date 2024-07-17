@@ -16,22 +16,22 @@ test file:
   zig test {{file}} -freference-trace
 
 btz:
-  @just (btest "src/tensor/zarray.zig")
+  @just (btest "src/ndarray.zig")
 
 btt:
-  @just (btest "src/tensor/tensor.zig")
+  @just (btest "src/ndtensor.zig")
 
 btl:
-  @just (btest "src/tensor/layer.zig")
+  @just (btest "src/nn/layer.zig")
 
 br opts="":
   zig build run {{opts}}
 
 brm:
-  @just br src/tensor/mnist.zig
+  @just br src/nn/mnist.zig
 
 brc:
-  @just (br "src/tensor/conv_test.zig")
+  @just (br "src/nn/conv_test.zig")
 
 pattern := 'error\(gpa\)*'
 run_pattern file:
@@ -44,4 +44,4 @@ run_pattern file:
 
 
 brpu:
-  @just (run_pattern "src/tensor/utils.zig")
+  @just (run_pattern "src/nn/utils.zig")

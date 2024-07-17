@@ -1,11 +1,11 @@
 const std = @import("std");
 const zg = @import("../root.zig");
 
-const Loss = zg.tensor.Loss;
-const NDTensor = zg.tensor.NDTensor;
+const GraphManager = zg.GraphManager;
+const NDTensor = zg.NDTensor;
 const Model = zg.Model;
-const SGD = zg.tensor.SGD;
-const cross_entropy_loss = zg.loss.cross_entropy_loss;
+const SGD = zg.optim.SGD;
+const cross_entropy_loss = zg.loss.softmax_cross_entropy_loss;
 const mse_loss = zg.loss.mse_loss;
 const softmax = zg.loss.softmax;
 const utils = zg.utils;
@@ -25,18 +25,18 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         model: Model(T),
         params: []*const NDTensor(T),
         optimizer: SGD(T),
-        graph_manager: Loss(NDTensor(T)),
+        graph_manager: GraphManager(NDTensor(T)),
 
         pub fn init(
             model: Model(T),
             learning_rate: T,
-            loss_config: Loss(T).LossConfig,
+            loss_config: GraphManager(T).LossConfig,
         ) Self {
             return .{
                 .model = model,
                 .params = model.getParameters(),
                 .optimizer = .{ .lr = learning_rate },
-                .graph_manager = Loss(NDTensor(T)).init(model.allocator, loss_config),
+                .graph_manager = GraphManager(NDTensor(T)).init(model.allocator, loss_config),
             };
         }
 
@@ -59,12 +59,11 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             var output = try self.model.forward(input, fwd_allocator);
             output.logShape(null);
             target.logShape(null);
+            // log.info("output:", .{});
+            // output.print();
 
-            logData("output(1): ", output.data.data);
-            log.debug("softmaxing", .{});
-            output = try softmax(T, output, 0, bwd_allocator);
-            logData("output(2): ", output.data.data);
-            logData("target: ", target.data.data);
+            logData("output(1): ", output.data.data[0..10]);
+            logData("target: ", target.data.data[0..10]);
             log.debug("calculating loss", .{});
             const loss = try lossf(T, output, target, bwd_allocator);
 
@@ -84,8 +83,8 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
                 log.debug("param {?s} grad norm is {d} max: {d} min: {d}", .{
                     param.label,
                     param.grad.?.l2_norm(),
-                    std.mem.max(f32, param.grad.?.data),
-                    std.mem.min(f32, param.grad.?.data),
+                    std.mem.max(f64, param.grad.?.data),
+                    std.mem.min(f64, param.grad.?.data),
                 });
             }
             return loss;
