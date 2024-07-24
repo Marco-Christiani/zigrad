@@ -240,7 +240,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     // var model = try MnistModel.initSimple2(acquired_arena.allocator()); // 717_210 (0.09ms, 92/92)
     // var model = try MnistModel.initConv(acquired_arena.allocator()); // 44_426 (0.16ms, 95/95)
     // var model = try MnistModel.initConv2(acquired_arena.allocator()); // 155_324 (0.24ms?)
-    log.warn("n params = {}", .{model.countParams()});
+    log.info("n params = {}", .{model.countParams()});
 
     log.info("Loading train data...", .{});
     const batch_size = 64;
@@ -298,14 +298,14 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     // model.model.eval() // TODO: model.eval()
     const train_eval = try evalMnist(fw_arena.allocator(), model, train_dataset);
     const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
-    log.warn("Train acc: {d:.2} (n={d})", .{ train_acc * 100, train_eval.n });
+    log.info("Train acc: {d:.2} (n={d})", .{ train_acc * 100, train_eval.n });
 
     log.info("Loading test data...", .{});
     const test_dataset = try MnistDataset.load(std.heap.c_allocator, test_path, batch_size);
     defer test_dataset.deinit();
     const test_eval = try evalMnist(fw_arena.allocator(), model, test_dataset);
     const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
-    log.warn("Test acc: {d:.2} (n={d})", .{ test_acc * 100, test_eval.n });
+    log.info("Test acc: {d:.2} (n={d})", .{ test_acc * 100, test_eval.n });
 }
 
 fn evalMnist(allocator: std.mem.Allocator, model: MnistModel, dataset: MnistDataset) !struct { correct: f32, n: u32 } {

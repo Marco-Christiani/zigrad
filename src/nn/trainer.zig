@@ -29,14 +29,14 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
 
         pub fn init(
             model: Model(T),
-            learning_rate: T,
-            loss_config: GraphManager(T).LossConfig,
+            optimizer: SGD(T),
+            graph_config: GraphManager(T).GraphOpts,
         ) Self {
             return .{
                 .model = model,
                 .params = model.getParameters(),
-                .optimizer = .{ .lr = learning_rate },
-                .graph_manager = GraphManager(NDTensor(T)).init(model.allocator, loss_config),
+                .optimizer = optimizer,
+                .graph_manager = GraphManager(NDTensor(T)).init(model.allocator, graph_config),
             };
         }
 
@@ -83,8 +83,8 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
                 log.debug("param {?s} grad norm is {d} max: {d} min: {d}", .{
                     param.label,
                     param.grad.?.l2_norm(),
-                    std.mem.max(f64, param.grad.?.data),
-                    std.mem.min(f64, param.grad.?.data),
+                    std.mem.max(std.meta.Child(@TypeOf(param.data.data)), param.grad.?.data),
+                    std.mem.min(std.meta.Child(@TypeOf(param.data.data)), param.grad.?.data),
                 });
             }
             return loss;

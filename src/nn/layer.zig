@@ -94,6 +94,22 @@ pub fn Layer(comptime T: type) type {
         pub fn release(self: Self) void {
             self.vtable.release(self.ptr);
         }
+
+        pub fn enableGrad(self: Self) void {
+            self._set_grad(true);
+        }
+
+        pub fn disableGrad(self: Self) void {
+            self._set_grad(false);
+        }
+
+        fn _set_grad(self: Self, enabled: bool) void {
+            if (self.getParameters()) |params| {
+                for (params) |param| {
+                    param.requires_grad = enabled; // NOTE: could possibly destroy grad here depending on aggressiveness
+                }
+            }
+        }
     };
 }
 
@@ -137,6 +153,7 @@ pub fn LinearLayer(comptime T: type) type {
             return rt;
         }
 
+        /// Uses autograd
         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
             _ = self;
             _ = allocator;
@@ -366,6 +383,7 @@ pub fn Conv2DLayer(comptime T: type) type {
 }
 
 // TODO: yes, there is no reason for this to be a layer, need to add support to the Layer interface for fromStatelessFunc kinda thing
+// or, since we have eager dynamic graph design, write your forward in pytorch style
 pub fn ReLULayer(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -456,6 +474,7 @@ pub fn FlattenLayer(comptime T: type) type {
     };
 }
 
+// TODO: MaxPool2D, this was a very fast thrown together impl to test something. Hard on cache, its just bad.
 pub fn MaxPool2DLayer(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -625,12 +644,8 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
     }
 
     var gm = GraphManager(NDTensor(T)).init(alloc, .{});
-    gm.eager_teardown = false;
-    gm.grad_clip_enabled = true;
-    gm.grad_clip_delta = 1e-6;
-    gm.grad_clip_max_norm = 10.0;
     defer gm.deinit();
-    var optimizer = SGD(T){ .lr = 0.01 };
+    var optimizer = SGD(T){ .lr = 0.01, .grad_clip_enabled = true };
     const lr_epoch_decay = 1.0; // disable
 
     const grad_acc_steps = 32;
@@ -686,6 +701,9 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
         std.debug.print("Weights: {d:>6.4}\t", .{layer.weights.data.data});
         std.debug.print("Bias: {d:.4}\n", .{layer.bias.data.data});
     }
+    try std.testing.expectApproxEqAbs(1.5, layer.weights.get(&.{ 0, 0 }), 0.1);
+    try std.testing.expectApproxEqAbs(3, layer.weights.get(&.{ 0, 1 }), 0.1);
+    try std.testing.expectApproxEqAbs(0, layer.bias.get(&.{ 0, 0 }), 0.1);
 }
 
 test "trainGradAccum" {
@@ -695,7 +713,10 @@ test "trainGradAccum" {
     defer arena.deinit();
     const T = f32;
 
-    const data = try readCsv(T, "/tmp/data.csv", alloc);
+    const data = readCsv(T, "/tmp/data.csv", alloc) catch |e| {
+        std.log.warn("{s} error opening test file. Skipping `trainGradAccum` test.", .{@errorName(e)});
+        return;
+    };
     try trainGradAccum(T, data, alloc);
 }
 
@@ -729,15 +750,11 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     input.acquire();
     target.acquire();
 
-    var gm = GraphManager(NDTensor(T)).init(alloc, .{});
-    gm.eager_teardown = true;
-    gm.grad_clip_enabled = true;
-    gm.grad_clip_max_norm = 10.0;
-    gm.grad_clip_delta = 1e-6;
+    var gm = GraphManager(NDTensor(T)).init(alloc, .{ .eager_teardown = true });
     defer gm.deinit();
-    var optimizer = SGD(T){ .lr = 0.01 };
+    var optimizer = SGD(T){ .lr = 0.01, .grad_clip_enabled = true };
 
-    for (0..15) |epoch| {
+    for (0..15) |_| {
         var epoch_loss: T = 0;
         var batch_start_i: usize = 0;
         while (batch_start_i < y.len) : (batch_start_i += batch_size) {
@@ -763,31 +780,23 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
             try gm.backward(loss, alloc);
             optimizer.step(params.?);
         }
-
-        std.debug.print("Epoch {d:<4}", .{epoch + 1});
-        std.debug.print("Loss: {d:<10.4}\t", .{epoch_loss});
-        std.debug.print("Weights: {d:>6.4}\t", .{layer.weights.data.data[0..input_size]});
-        std.debug.print("Bias: {d:<4.4}\n", .{layer.bias.data.data});
     }
 
-    std.debug.print("Weights: ", .{});
-    layer.weights.print();
-    std.debug.print("Biases: ", .{});
-    layer.bias.print();
-    std.debug.print("\n", .{});
     try std.testing.expectApproxEqAbs(1.5, layer.weights.get(&.{ 0, 0 }), 0.1);
     try std.testing.expectApproxEqAbs(3, layer.weights.get(&.{ 0, 1 }), 0.1);
     try std.testing.expectApproxEqAbs(0, layer.bias.get(&.{ 0, 0 }), 0.1);
 }
 
 test "trainBatched" {
-    std.debug.print("{s} trainBatched2 {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const alloc = arena.allocator();
     defer arena.deinit();
     const T = f32;
 
-    const data = try readCsv(T, "/tmp/data.csv", alloc);
+    const data = readCsv(T, "/tmp/data.csv", alloc) catch |e| {
+        std.log.warn("{s} error opening test file. Skipping `trainBatched` test.", .{@errorName(e)});
+        return;
+    };
     try trainBatched(T, data, alloc);
 }
 
@@ -798,10 +807,10 @@ test "LinearLayer forward and backward" {
     const T = f32;
 
     // input 2, output 2
-    var layer = try LinearLayer(T).init(alloc, 2, 2);
+    var layer = try LinearLayer(T).init(alloc, 2, 1);
     layer.weights.fill(2);
 
-    const input_shape = &[_]usize{ 1, 1, 2 };
+    const input_shape = &[_]usize{ 1, 2 };
     const input = try NDTensor(T).init(@constCast(&[_]T{ 3, 3 }), input_shape, true, alloc);
 
     const output = try layer.forward(input, alloc);
@@ -811,9 +820,5 @@ test "LinearLayer forward and backward" {
     defer gm.deinit();
     try gm.backward(output, alloc);
 
-    std.debug.print("Weights: ", .{});
-    layer.weights.print();
-    std.debug.print("bias: ", .{});
-    layer.bias.print();
-    try std.testing.expectEqual(12, output.get(&.{ 0, 0, 0 }));
+    try std.testing.expectEqual(12, output.get(&.{ 0, 0 }));
 }
