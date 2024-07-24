@@ -8,7 +8,6 @@ const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/Shape.zig");
 const blas = @import("backend/blas.zig");
-const NDArrayIterator = @import("ndarray/iterator.zig").NDArrayIterator;
 const log = std.log.scoped(.zg_ndarray);
 
 pub fn NDArray(comptime T: type) type {
@@ -569,11 +568,47 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn max_over_dim(self: *const Self, allocator: std.mem.Allocator, dim: usize, keep_dims: bool) !*Self {
-            _ = keep_dims; // autofix
-            _ = dim; // autofix
-            _ = allocator; // autofix
-            _ = self; // autofix
-            return error.NotImplemented;
+            const input_shape = self.shape.shape;
+            const input_dims = input_shape.len;
+            if (dim >= input_dims) return error.ShapeOutOfBounds;
+
+            var output_shape = try allocator.alloc(usize, if (keep_dims) input_dims else input_dims - 1);
+            defer allocator.free(output_shape);
+            var idx: usize = 0;
+            for (0..input_dims) |i| {
+                if (i != dim) {
+                    output_shape[idx] = input_shape[i];
+                    idx += 1;
+                } else if (keep_dims) {
+                    output_shape[idx] = 1;
+                    idx += 1;
+                }
+            }
+            const output = try Self.empty(output_shape, allocator);
+            errdefer output.deinit(allocator);
+
+            const max_dim_size = input_shape[dim];
+            var slice_size: usize = 1;
+            for (dim + 1..input_dims) |i| {
+                slice_size *= input_shape[i];
+            }
+
+            var num_slices: usize = 1;
+            for (0..dim) |i| {
+                num_slices *= input_shape[i];
+            }
+
+            for (0..output.data.len) |i| {
+                var max_val: T = -(std.math.inf(T) - 1);
+                const base_idx = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
+                for (0..max_dim_size) |j| {
+                    const curr_idx = base_idx + j * slice_size;
+                    max_val = @max(max_val, self.data[curr_idx]);
+                }
+                output.data[i] = max_val;
+            }
+
+            return output;
         }
 
         pub fn gather(self: *const Self, indices: *const NDArray(usize), dim: usize, allocator: std.mem.Allocator) !*Self {

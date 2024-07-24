@@ -1,6 +1,5 @@
-// TODO: implement view(), transpose(), and permute(), where the latter two mutate the shape
-// TODO: better operation abstraction
-// TODO: print graph, just take from the existing impl
+// TODO: implement view(), permute(), view is sort of an ever-changing WIP (these are ndarray tasks btw).
+// TODO: migrate primitive ops to newer _backward/_backward_ctx feature.
 const std = @import("std");
 const zg = @import("root.zig");
 const settings = zg.settings;
@@ -29,7 +28,7 @@ pub const Op = enum {
     RESHAPE,
     TRANSPOSE,
     MAX,
-    EXP, // TODO:
+    EXP,
 };
 
 pub fn NDTensor(comptime T: type) type {
@@ -61,6 +60,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Shape is allocated. COM.
+        /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
         pub fn empty(shape: []const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
             const self = try allocator.create(Self);
             self.* = Self{
@@ -70,6 +70,10 @@ pub fn NDTensor(comptime T: type) type {
                 .allocator = allocator,
             };
             return self;
+        }
+
+        pub fn requiresGrad(self: Self) bool {
+            return self.requires_grad and zg.rt_grad_enabled;
         }
 
         pub const CreateDependentOpts = struct {
@@ -101,6 +105,8 @@ pub fn NDTensor(comptime T: type) type {
         ///   3. The only foreseen situation to init with a specific `grad` value would be at the tail of a graph for backprop.
         ///      This is a cold operation and thus should be done explicitly, hence no support provided here. This drives support
         ///      for mutable `grad` pointer, so the caller can move the reference (Warning: this pattern is a red flag).
+        ///   4. Should this respect the global `grad_enabled` flag and override the flag parameter? Tbd.
+        ///      UPDATE: Changed my mind, overrides.
         pub fn createDependent(opts: CreateDependentOpts) !*Self {
             const self = try opts.allocator.create(Self);
             self.* = Self{
@@ -109,7 +115,7 @@ pub fn NDTensor(comptime T: type) type {
                 .children = try opts.allocator.dupe(*const Self, opts.children),
                 .label = if (opts.label) |l| try opts.allocator.dupe(u8, l) else null,
                 .grad = if (opts.requires_grad) try dtype.zeros(opts.data.shape.shape, opts.allocator) else null,
-                .requires_grad = opts.requires_grad,
+                .requires_grad = opts.requires_grad and zg.rt_grad_enabled,
                 .acquired = false,
                 ._backward = opts._backward,
                 ._backward_ctx = opts._backward_ctx,
@@ -198,7 +204,7 @@ pub fn NDTensor(comptime T: type) type {
             result.* = Self{
                 .data = try self.data.copy(allocator),
                 .grad = if (self.grad) |g| try g.copy(allocator) else null,
-                .requires_grad = self.requires_grad,
+                .requires_grad = self.requiresGrad(),
                 .op = null,
                 .children = null,
                 .label = null,
@@ -249,13 +255,15 @@ pub fn NDTensor(comptime T: type) type {
                 .op = .TRANSPOSE,
                 .children = &[_]*const Self{self},
                 .label = null,
-                .requires_grad = false, // we will set grad ourselves, not great
+                .requires_grad = false, // we will set grad ourselves for efficiency
                 .allocator = self.allocator,
                 ._backward = null,
             });
             errdefer result.deinit();
-            if (self.requires_grad) result.grad = try self.grad.?.transpose(self.allocator);
-            result.requires_grad = true;
+            if (self.requiresGrad()) { // need to make this call, not check the attribute flag
+                result.grad = try self.grad.?.transpose(self.allocator);
+                result.requires_grad = true;
+            }
             return result;
         }
 
@@ -302,8 +310,8 @@ pub fn NDTensor(comptime T: type) type {
             const sliced_data = try self.data.sliceRanges(ranges);
             return Self{
                 .data = sliced_data,
-                .grad = if (self.requires_grad) try self.grad.?.sliceRanges(ranges) else null,
-                .requires_grad = self.requires_grad,
+                .grad = if (self.requiresGrad()) try self.grad.?.sliceRanges(ranges) else null,
+                .requires_grad = self.requiresGrad(),
                 .op = null,
                 .children = null,
                 .label = null,
@@ -315,7 +323,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn setSlice(self: Self, ranges: []const Range, values: Self) !void {
-            if (self.requires_grad) {
+            if (self.requiresGrad()) {
                 // need to create a new operation
                 @compileError("Not implemented");
             } else {
@@ -463,8 +471,8 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.matvec(other.data, false, allocator),
                 .op = .MATVEC,
                 .children = try allocator.dupe(*const Self, &[_]*const Self{ self, other }),
-                .grad = if (self.requires_grad or other.requires_grad) try dtype.zeros(other.data.shape.shape, allocator) else null,
-                .requires_grad = self.requires_grad or other.requires_grad,
+                .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, allocator) else null,
+                .requires_grad = self.requiresGrad() or other.requires_grad,
                 .allocator = allocator,
             };
             return out;
@@ -489,6 +497,8 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
+            // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
+            if (!zg.rt_grad_enabled) return error.GradNotEnabled;
             if (!self.requires_grad) return;
             if (self._backward) |f| {
                 try f(self, allocator);
@@ -714,7 +724,6 @@ pub fn NDTensor(comptime T: type) type {
 }
 
 test "tensor/GraphManager/sum" {
-    std.debug.print("{s} sum {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -731,7 +740,7 @@ test "tensor/GraphManager/sum" {
     // Backward pass
     var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
-    if (!settings.grad_enabled) return error.GradNotEnabled;
+    if (!zg.rt_grad_enabled) return error.GradNotEnabled;
     sum_result.grad.?.fill(1.0);
     try gm.backward(sum_result, alloc);
 
@@ -740,7 +749,6 @@ test "tensor/GraphManager/sum" {
 }
 
 test "tensor/NDTensor index, add, div" {
-    std.debug.print("{s} index-add-div {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     const alloc = arena.allocator();
     defer arena.deinit();
@@ -753,26 +761,16 @@ test "tensor/NDTensor index, add, div" {
 
     // 1 2 3
     // 4 5 23
-    try t1.set(&[_]usize{ 1, 2 }, -5);
-    t1.print();
-    // std.debug.print("{d}\n", .{t1.get(&[_]usize{ 1, 2 })});
-    // std.debug.print("{d}\n", .{t1.indexToPos(5, alloc)});
+    try t1.set(&[_]usize{ 1, 2 }, 1.1);
+    try std.testing.expectEqual(1.1, t1.get(&.{ 1, 2 }));
 
     const t2 = try Tensor.init(&[_]f32{ 10, 20, 30, 40, 50, 60 }, shape, false, alloc);
-    t2.print();
     const t3 = try t1.add(t2, alloc);
-    t3.print();
-
-    std.debug.print("{d}\n", .{t3.data.data});
-    t3.print();
-    std.debug.print("{?any}\n", .{t3.children});
-
-    var t4 = try t3.div(t3, alloc);
-    t4.print();
+    const t4 = try t3.sub(t1, alloc);
+    try std.testing.expectEqualSlices(f32, t2.data.data, t4.data.data);
 }
 
 test "tensor/GraphManager/addback" {
-    std.debug.print("{s} gm/addback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     const alloc = arena.allocator();
     defer arena.deinit();
@@ -798,7 +796,6 @@ test "tensor/GraphManager/addback" {
 }
 
 test "tensor/GraphManager/mulback" {
-    std.debug.print("{s} gm/mulback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     const alloc = arena.allocator();
     defer arena.deinit();
@@ -824,7 +821,6 @@ test "tensor/GraphManager/mulback" {
 }
 
 test "tensor/GraphManager/moreback" {
-    std.debug.print("{s} gm/moreback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     const alloc = arena.allocator();
     defer arena.deinit();
@@ -873,11 +869,9 @@ test "tensor/GraphManager/moreback" {
     if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
-    h.print();
 }
 
 test "tensor/GraphManager/divback" {
-    std.debug.print("{s} gm/divback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -905,7 +899,6 @@ test "tensor/GraphManager/divback" {
 }
 
 test "tensor/GraphManager/matmul_backward" {
-    std.debug.print("{s} gm/mmback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -921,8 +914,6 @@ test "tensor/GraphManager/matmul_backward" {
     t3.acquire();
 
     var gm = GraphManager(Tensor).init(alloc, .{});
-    // grad clipping will cause differences
-    gm.grad_clip_enabled = false;
     defer gm.deinit();
     t3.grad.?.fill(1.0);
     try gm.backward(t3, alloc);
@@ -935,7 +926,6 @@ test "tensor/GraphManager/matmul_backward" {
 }
 
 test "tensor/GraphManager/matvec_backward" {
-    std.debug.print("{s} gm/mvback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -969,7 +959,6 @@ test "tensor/GraphManager/matvec_backward" {
 }
 
 test "tensor/GraphManager/dot_backward" {
-    std.debug.print("{s} gm/dotback {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
