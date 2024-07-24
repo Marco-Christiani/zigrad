@@ -12,26 +12,19 @@ pub fn GraphManager(comptime T: type) type {
         allocator: std.mem.Allocator,
         sorted_nodes: std.ArrayList(*const T),
         visited_nodes: std.AutoHashMap(*const T, void),
-        eager_teardown: bool = false,
-        grad_clip_enabled: bool = settings.grad_clip_enabled,
-        grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
-        grad_clip_delta: f32 = settings.grad_clip_delta,
+        eager_teardown: bool,
 
-        pub const LossConfig = struct {
+        pub const GraphOpts = struct {
+            /// Setting this means you _really_ know what you are doing.
             eager_teardown: bool = false,
-            grad_clip_enabled: bool = settings.grad_clip_enabled,
-            grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
-            grad_clip_delta: f32 = settings.grad_clip_delta,
         };
 
-        pub fn init(allocator: std.mem.Allocator, opts: LossConfig) Self {
+        pub fn init(allocator: std.mem.Allocator, opts: GraphOpts) Self {
             return Self{
                 .allocator = allocator,
                 .sorted_nodes = std.ArrayList(*const T).init(allocator),
                 .visited_nodes = std.AutoHashMap(*const T, void).init(allocator),
-                .grad_clip_enabled = opts.grad_clip_enabled,
-                .grad_clip_max_norm = opts.grad_clip_max_norm,
-                .grad_clip_delta = opts.grad_clip_delta,
+                .eager_teardown = opts.eager_teardown,
             };
         }
 
@@ -61,7 +54,7 @@ pub fn GraphManager(comptime T: type) type {
             const nodes = self.sorted_nodes.items;
             for (0..nodes.len) |i| {
                 var curr_node = nodes[nodes.len - i - 1];
-                if (curr_node.requires_grad) {
+                if (curr_node.requiresGrad()) {
                     log.debug("backward: {?s}", .{curr_node.label});
                     try curr_node.backward(alloc);
                     log.debug("backprop {?s} grad norm is {d} max: {d} min: {d}", .{
@@ -70,11 +63,6 @@ pub fn GraphManager(comptime T: type) type {
                         std.mem.max(@TypeOf(curr_node.data.data[0]), curr_node.grad.?.data),
                         std.mem.min(@TypeOf(curr_node.data.data[0]), curr_node.grad.?.data),
                     });
-                    if (self.grad_clip_enabled and curr_node.requires_grad) {
-                        if (curr_node.grad) |_| {
-                            curr_node.clip_grad_norm_delta(.{ .max_norm = self.grad_clip_max_norm, .delta = self.grad_clip_delta });
-                        }
-                    }
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children
                     if (!curr_node.acquired and self.eager_teardown) @constCast(curr_node).deinit();
