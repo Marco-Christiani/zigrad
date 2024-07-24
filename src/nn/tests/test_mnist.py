@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -44,9 +45,6 @@ def load_mnist(filepath, batch_size):
     print(f"Reshaped images shape: {images.shape}")
 
     dataset = TensorDataset(images, labels)
-    # for i in range(10):
-    #     print(i, labels[i, :10])
-    # __import__("pdb").set_trace()
     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
@@ -55,13 +53,10 @@ def train():
     print(f"Using device: {device}")
 
     model = SimpleMNISTModel().to(device)
-    # criterion = nn.NLLLoss2d()
-    # criterion = nn.BCEWithLogitsLoss()
-    # criterion = nn.BCELoss()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=0.1)
 
-    batch_size = 8
+    batch_size = 128
     num_epochs = 2
     dataloader = load_mnist("/tmp/mnist_train.csv", batch_size)
     print(f"Number of batches: {len(dataloader)}")
@@ -69,22 +64,24 @@ def train():
     for epoch in range(num_epochs):
         total_loss = 0
         for i, (images, labels) in enumerate(dataloader):
+            import time
+
+            ns_per_ms = 1000**2
+
+            t0 = time.monotonic_ns()
+
             images, labels = images.to(device), labels.to(device)
-            # print(f"Batch {i}: images shape: {images.shape}, labels shape: {labels.shape}")
 
             optimizer.zero_grad()
             outputs = model(images)
             loss = criterion(outputs, labels)
-            # print("outputs:", outputs[0])
-            # print("labels:", labels[0])
-            # print("loss:", criterion(outputs[0], labels[0]))
-            # return
             loss.backward()
             # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             optimizer.step()
+            dur_ms = (time.monotonic_ns() - t0) / ns_per_ms
 
             total_loss += loss.item()
-            print(f"Loss: {loss.item():.5f} {i/len(dataloader):.2f} [{i}/{len(dataloader)}]")
+            print(f"Loss: {loss.item():.5f} {i/len(dataloader):.2f} [{i}/{len(dataloader)}] [{dur_ms/batch_size}]")
 
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch + 1}: Avg Loss = {avg_loss:.4f}")

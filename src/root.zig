@@ -25,12 +25,13 @@ pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigra
 
 pub const Settings = struct {
     precision: type = f32,
-    grad_enabled: bool = true, // TODO: implement grad_enabled
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
-    grad_clip_enabled: bool = true,
+    grad_clip_enabled: bool = true, // TODO: remove this, user is responsible for managing this on learnables.
     seed: u64 = 81761,
 };
+
+pub var rt_grad_enabled: bool = true;
 
 var prng = std.rand.DefaultPrng.init(settings.seed);
 pub const random = prng.random();
