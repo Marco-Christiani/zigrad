@@ -8,6 +8,7 @@ const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/Shape.zig");
 const blas = @import("backend/blas.zig");
+const NDArrayIterator = @import("ndarray/iterator.zig").NDArrayIterator;
 const log = std.log.scoped(.zg_ndarray);
 
 pub fn NDArray(comptime T: type) type {
@@ -105,25 +106,21 @@ pub fn NDArray(comptime T: type) type {
             return index;
         }
 
-        pub fn offsetToPos(self: Self, offset: usize, allocator: std.mem.Allocator) []const usize {
-            const pos = allocator.alloc(usize, self.data.len) catch @panic("Failed to allocate shape slice.");
-            var remainingIndex = offset;
-            var stride: usize = 1;
-            for (0..self.shape.len()) |i| {
-                stride *= self.shape.get(i);
-            }
+        pub fn offsetToPos(self: Self, offset: usize, allocator: std.mem.Allocator) ![]usize {
+            const n = self.shape.len();
+            const pos = try allocator.alloc(usize, n);
+            errdefer allocator.free(pos);
 
-            for (0..self.shape.len()) |i| {
-                const dim = self.shape.len() - i - 1;
-                stride /= self.shape.get(dim);
-                pos[dim] = remainingIndex / stride;
-                remainingIndex %= stride;
+            var remainingIndex = offset;
+            for (0..n) |i| {
+                pos[i] = remainingIndex / self.shape.strides[i];
+                remainingIndex %= self.shape.strides[i];
             }
 
             return pos;
         }
 
-        pub fn size(self: Self) !void {
+        pub fn size(self: Self) usize {
             return self.data.len;
         }
 
@@ -220,6 +217,7 @@ pub fn NDArray(comptime T: type) type {
             };
         }
 
+        /// Should be analogous to: https://pytorch.org/docs/stable/generated/torch.slice_scatter.html#torch.slice_scatter
         pub fn setSliceRanges(self: Self, ranges: []const Range, values: Self) !void {
             const slice_ = try self.sliceRanges(ranges);
             defer slice_.shape.deinit();
@@ -233,7 +231,7 @@ pub fn NDArray(comptime T: type) type {
             }
         }
 
-        fn getStride(self: Self, dim: usize) !usize {
+        pub fn getStride(self: Self, dim: usize) !usize {
             if (dim >= self.shape.len()) return error.DimOutOfBounds;
             var s: usize = 1;
             var i: usize = dim + 1;
@@ -459,7 +457,10 @@ pub fn NDArray(comptime T: type) type {
             // NOTE: squeezing here means an unnecessary allocation and we should optimize this out later since
             // we mocked an outer batch dim of 1 for the inputs, so the output will have an outer batch dim of 1
             // but the inputs were both 2x2 so we should return a 2x2, thus squeeze it out
-            if (self.shape.len() == 2 and other.shape.len() == 2) try result.shape._squeeze(); // FIXME: artifact of failed re-re-factor
+            if (self.shape.len() == 2 and other.shape.len() == 2) { // FIXME: artifact of failed re-re-factor
+                try result.shape._squeeze();
+                if (result.shape.len() == 1) try result.shape._unsqueeze(); // squeezed 1 too far
+            }
             return result;
         }
 
@@ -564,6 +565,42 @@ pub fn NDArray(comptime T: type) type {
                 output.data[i] = total;
             }
 
+            return output;
+        }
+
+        pub fn max_over_dim(self: *const Self, allocator: std.mem.Allocator, dim: usize, keep_dims: bool) !*Self {
+            _ = keep_dims; // autofix
+            _ = dim; // autofix
+            _ = allocator; // autofix
+            _ = self; // autofix
+            return error.NotImplemented;
+        }
+
+        pub fn gather(self: *const Self, indices: *const NDArray(usize), dim: usize, allocator: std.mem.Allocator) !*Self {
+            // Step 1: Check shape constraints
+            std.debug.assert(self.shape.len() == indices.shape.len());
+            for (self.shape.shape, indices.shape.shape, 0..) |src_dim, idx_dim, i| {
+                if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
+            }
+
+            // Step 2: Create output tensor
+            var output = try Self.zeros(indices.shape.shape, allocator);
+            errdefer output.deinit(allocator);
+
+            // Step 3: Iterate over indices and select the corresponding elements from source
+            for (0..indices.data.len) |i| {
+                const idx_coord = try indices.offsetToPos(i, allocator);
+                defer allocator.free(idx_coord);
+
+                const src_coord = try allocator.dupe(usize, idx_coord);
+                defer allocator.free(src_coord);
+
+                src_coord[dim] = indices.data[i];
+                if (src_coord[dim] >= self.shape.shape[dim]) return error.IndexOutOfBounds;
+
+                const src_value = self.get(src_coord);
+                try output.set(idx_coord, src_value);
+            }
             return output;
         }
 
@@ -775,6 +812,95 @@ test "NDArray.sum_along" {
     defer expected1.deinit(alloc);
     try std.testing.expectEqualDeep(expected1, a2);
     try std.testing.expect(a2.shape.eq(expected1.shape.*, .{}));
+}
+
+test "NDArray.max_over_dim" {
+    const alloc = std.testing.allocator;
+    const shape = &[_]usize{ 2, 3, 4 };
+    const T = f64;
+    const Array = NDArray(T);
+
+    // [[[ 1,  2,  3,  4],
+    //   [ 5,  6,  7,  8],
+    //   [ 9, 10, 11, 12]],
+    //  [[13, 14, 15, 16],
+    //   [17, 18, 19, 20],
+    //   [21, 22, 23, 24]]]
+    var array = try Array.init(@constCast(&[_]T{
+        1,  2,  3,  4,
+        5,  6,  7,  8,
+        9,  10, 11, 12,
+        13, 14, 15, 16,
+        17, 18, 19, 20,
+        21, 22, 23, 24,
+    }), shape, alloc);
+    defer array.deinit(alloc);
+
+    // max over dim 0
+    var result1 = try array.max_over_dim(alloc, 0, true);
+    defer result1.deinit(alloc);
+    const expected1 = try Array.init(&[_]T{
+        13, 14, 15, 16,
+        17, 18, 19, 20,
+        21, 22, 23, 24,
+    }, &[_]usize{ 1, 3, 4 }, alloc);
+    defer expected1.deinit(alloc);
+    try std.testing.expectEqualDeep(expected1, result1);
+
+    // max over dim 1
+    const result2 = try array.max_over_dim(alloc, 1, false);
+    defer result2.deinit(alloc);
+    const expected2 = try Array.init(&[_]T{
+        9,  10, 11, 12,
+        21, 22, 23, 24,
+    }, &[_]usize{ 2, 4 }, alloc);
+    defer expected2.deinit(alloc);
+    try std.testing.expectEqualDeep(expected2, result2);
+
+    // max over dim 2
+    const result3 = try array.max_over_dim(alloc, 2, true);
+    defer result3.deinit(alloc);
+    const expected3 = try Array.init(&[_]T{
+        4,  8,  12,
+        16, 20, 24,
+    }, &[_]usize{ 2, 3, 1 }, alloc);
+    defer expected3.deinit(alloc);
+    try std.testing.expectEqualDeep(expected3, result3);
+}
+
+test "NDArray.gather" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f32;
+
+    // Case 1
+    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const input_shape = [_]usize{ 3, 3 };
+    var input = try NDArray(T).init(&input_data, &input_shape, alloc);
+    defer input.deinit(alloc);
+
+    const index_data = [_]usize{ 0, 1, 1, 2, 0, 2 };
+    const index_shape = [_]usize{ 3, 2 };
+    var index = try NDArray(usize).init(&index_data, &index_shape, alloc);
+    defer index.deinit(alloc);
+
+    const output = try input.gather(index, 1, alloc);
+    defer output.deinit(alloc);
+
+    try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.data);
+    try std.testing.expectEqualSlices(usize, &index_shape, output.shape.shape);
+
+    // Case 2: out of bounds
+    try index.set(&.{ 0, 0 }, 3);
+    try std.testing.expectError(error.IndexOutOfBounds, input.gather(index, 1, alloc));
+
+    // // Case 3: wrong shape
+    // const invalid_index_shape = [_]usize{4};
+    // var invalid_index = try NDArray(usize).init(&index_data, &invalid_index_shape, alloc);
+    // defer invalid_index.deinit(alloc);
+    //
+    // try std.testing.expectError(error.InvalidIndexShape, input.gather(invalid_index, 1, alloc));
 }
 
 test "NDArray.slice" {

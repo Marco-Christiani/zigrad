@@ -5,6 +5,7 @@ const log = std.log.scoped(.zg_shape);
 
 const Self = @This();
 shape: []usize,
+strides: []usize,
 alloc: std.mem.Allocator,
 
 pub fn init(shape: []const usize, allocator: std.mem.Allocator) !*Self {
@@ -13,12 +14,14 @@ pub fn init(shape: []const usize, allocator: std.mem.Allocator) !*Self {
     self.* = Self{
         .alloc = allocator,
         .shape = try allocator.dupe(usize, shape),
+        .strides = try calculateStrides(shape, allocator),
     };
     return self;
 }
 
 pub fn deinit(self: *Self) void {
     self.alloc.free(self.shape);
+    self.alloc.free(self.strides);
     self.alloc.destroy(self);
 }
 
@@ -41,7 +44,11 @@ pub fn broadcast(self: Self, other: Self) !*Self {
         result_shape[dims - 1 - i] = @max(dim_a, dim_b);
     }
     const result = try self.alloc.create(Self);
-    result.* = Self{ .shape = result_shape, .alloc = self.alloc };
+    result.* = Self{
+        .shape = result_shape,
+        .alloc = self.alloc,
+        .strides = try calculateStrides(result_shape, self.alloc),
+    };
     return result;
 }
 
@@ -82,6 +89,17 @@ pub fn _squeeze(self: *Self) !void {
     }
     self.alloc.free(self.shape);
     self.shape = newshape;
+    self.strides = try calculateStrides(newshape, self.alloc);
+}
+
+pub fn _unsqueeze(self: *Self) !void {
+    // TODO: realloc is a thing
+    var newshape = try self.alloc.alloc(usize, self.shape.len + 1);
+    @memcpy(newshape[1..], self.shape);
+    newshape[0] = 1;
+    self.alloc.free(self.shape);
+    self.shape = newshape;
+    self.strides = try calculateStrides(newshape, self.alloc);
 }
 
 pub fn _reshape(self: *Self, shape: []const usize) !void {
@@ -93,6 +111,7 @@ pub fn _reshape(self: *Self, shape: []const usize) !void {
     }
     self.alloc.free(self.shape);
     self.shape = try self.alloc.dupe(usize, shape);
+    self.strides = try calculateStrides(self.shape, self.alloc);
 }
 
 pub fn get(self: Self, dim: usize) !usize {
@@ -121,4 +140,17 @@ pub fn eq(a: Self, b: Self, options: EqualOptions) bool {
         if (dim_a != dim_b and dim_a != 1 and dim_b != 1) return false;
     }
     return true;
+}
+
+fn calculateStrides(shape: []const usize, allocator: std.mem.Allocator) ![]usize {
+    var strides = try allocator.alloc(usize, shape.len);
+    errdefer allocator.free(strides);
+    const n = shape.len;
+    var stride: usize = 1;
+    for (0..n) |i| {
+        strides[n - i - 1] = stride;
+        stride *= shape[n - i - 1];
+    }
+
+    return strides;
 }
