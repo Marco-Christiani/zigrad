@@ -611,18 +611,30 @@ pub fn NDArray(comptime T: type) type {
             return output;
         }
 
-        pub fn gather(self: *const Self, indices: *const NDArray(usize), dim: usize, allocator: std.mem.Allocator) !*Self {
-            // Step 1: Check shape constraints
+        pub const GatherOptions = struct {
+            indices: *const NDArray(usize),
+            dim: usize,
+            return_offsets: bool = false,
+        };
+
+        pub const GatherResult = struct {
+            output: *Self,
+            offsets: ?[]usize, // offsets taken, so they dont have to be recomputed
+        };
+
+        pub fn gather(self: *const Self, allocator: std.mem.Allocator, opts: GatherOptions) !GatherResult {
+            const indices = opts.indices;
+            const dim = opts.dim;
             std.debug.assert(self.shape.len() == indices.shape.len());
             for (self.shape.shape, indices.shape.shape, 0..) |src_dim, idx_dim, i| {
                 if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
             }
 
-            // Step 2: Create output tensor
             var output = try Self.zeros(indices.shape.shape, allocator);
             errdefer output.deinit(allocator);
+            const offsets = if (opts.return_offsets) try allocator.alloc(usize, indices.data.len) else null;
+            errdefer if (offsets) |o| allocator.free(o);
 
-            // Step 3: Iterate over indices and select the corresponding elements from source
             for (0..indices.data.len) |i| {
                 const idx_coord = try indices.offsetToPos(i, allocator);
                 defer allocator.free(idx_coord);
@@ -633,10 +645,19 @@ pub fn NDArray(comptime T: type) type {
                 src_coord[dim] = indices.data[i];
                 if (src_coord[dim] >= self.shape.shape[dim]) return error.IndexOutOfBounds;
 
-                const src_value = self.get(src_coord);
+                const src_offset = self.posToOffset(src_coord);
+                const src_value = self.data[src_offset];
                 try output.set(idx_coord, src_value);
+                if (offsets) |o| o[i] = src_offset;
             }
-            return output;
+            return .{ .output = output, .offsets = offsets };
+        }
+
+        /// COM
+        pub fn take(self: *Self, offsets: *const NDArray(usize), allocator: std.mem.Allocator) !*Self {
+            const result = try Self.empty(&.{offsets.data.len}, allocator);
+            for (result.data, offsets) |*r, o| r.* = self.data[o];
+            return result;
         }
 
         pub fn l2_norm(self: *const Self) T {
@@ -920,7 +941,7 @@ test "NDArray.gather" {
     var index = try NDArray(usize).init(&index_data, &index_shape, alloc);
     defer index.deinit(alloc);
 
-    const output = try input.gather(index, 1, alloc);
+    const output = (try input.gather(alloc, .{ .indices = index, .dim = 1 })).output;
     defer output.deinit(alloc);
 
     try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.data);
@@ -928,7 +949,7 @@ test "NDArray.gather" {
 
     // Case 2: out of bounds
     try index.set(&.{ 0, 0 }, 3);
-    try std.testing.expectError(error.IndexOutOfBounds, input.gather(index, 1, alloc));
+    try std.testing.expectError(error.IndexOutOfBounds, input.gather(alloc, .{ .indices = index, .dim = 1 }));
 
     // // Case 3: wrong shape
     // const invalid_index_shape = [_]usize{4};
