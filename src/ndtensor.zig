@@ -489,6 +489,43 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
+        pub const GatherOptions = struct {
+            // no reason this needs to be a tensor, other than to keep a consistent user interface, shouldnt worry ab ndarray
+            indices: *const NDTensor(usize),
+            dim: usize,
+        };
+
+        pub fn gather(self: *const Self, allocator: std.mem.Allocator, opts: GatherOptions) !*Self {
+            const gatherBackward = struct {
+                fn bwImpl(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
+                    const bw_children = bw_tensor.children orelse return error.NoChildren;
+                    const bw_input = bw_children[0];
+                    if (bw_input.grad == null) return;
+                    const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
+                    // how am i expected to free this, unknown len
+                    // defer bw_allocator.raw(offsets); // FIXME: just occuring to me the problem with this, if bw_allocator != fwd_allocator
+
+                    // bw_tensor must/should be the same len as indices used to index (note that offsets is a raw c ptr without a len)
+                    // std.debug.assert(offsets.len == bw_tensor.data.data.len); // can make this a real check when its a  null term alloc
+                    for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
+                }
+            }.bwImpl;
+
+            const gather_result = try self.data.gather(allocator, .{ .indices = opts.indices.data, .dim = opts.dim, .return_offsets = true });
+            // TODO: use a null terminated allocation instead, tired rn
+            const ctx = if (self.requiresGrad()) try allocator.dupe(usize, gather_result.offsets.?) else null;
+
+            return try createDependent(.{
+                .data = gather_result.output,
+                .op = null,
+                .children = &[_]*const Self{self},
+                .requires_grad = self.requires_grad,
+                .allocator = allocator,
+                ._backward = gatherBackward,
+                ._backward_ctx = if (ctx) |c| c.ptr else null,
+            });
+        }
+
         /// Callback is highly dynamic so passing a reference may be a better idea for _backward callback,
         /// but committing to compiler reliance in this refactor
         pub fn setBackward(self: *Self, backward_fn: *const fn (Self, std.mem.Allocator) anyerror!void, ctx: ?*anyopaque) void {
@@ -983,4 +1020,43 @@ test "tensor/GraphManager/dot_backward" {
 
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+}
+
+test "tensor/gather" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f32;
+    const Tensor = NDTensor(T);
+
+    // case 1: basic gather
+    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const input_shape = [_]usize{ 3, 3 };
+    var input = try Tensor.init(&input_data, &input_shape, true, alloc);
+    defer input.deinit();
+
+    const index_data = [_]usize{ 0, 1, 1, 2, 0, 2 };
+    const index_shape = [_]usize{ 3, 2 };
+    var index = try NDTensor(usize).init(&index_data, &index_shape, false, alloc);
+    defer index.deinit();
+
+    var output = try input.gather(alloc, .{ .indices = index, .dim = 1 });
+    defer output.deinit();
+
+    try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.data.data);
+    try std.testing.expectEqualSlices(usize, &index_shape, output.data.shape.shape);
+
+    // case 2: grad check
+    var gm = GraphManager(Tensor).init(alloc, .{});
+    defer gm.deinit();
+
+    output.grad.?.fill(1.0);
+    try gm.backward(output, alloc);
+
+    const expected_grad = [_]T{ 1, 1, 0, 0, 1, 1, 1, 0, 1 };
+    try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
+
+    // case 3: out of bounds
+    try index.set(&.{ 0, 0 }, 3);
+    try std.testing.expectError(error.IndexOutOfBounds, input.gather(alloc, .{ .indices = index, .dim = 1 }));
 }
