@@ -10,6 +10,18 @@ pub const Shape = @import("ndarray/Shape.zig");
 const blas = @import("backend/blas.zig");
 const log = std.log.scoped(.zg_ndarray);
 
+pub const MaxOverDimOptions = struct {
+    dim: usize,
+    keep_dims: bool = false,
+    return_offsets: bool = false,
+};
+
+pub const GatherOptions = struct {
+    indices: *const NDArray(usize),
+    dim: usize,
+    return_offsets: bool = false,
+};
+
 pub fn NDArray(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -567,10 +579,17 @@ pub fn NDArray(comptime T: type) type {
             return output;
         }
 
-        pub fn max_over_dim(self: *const Self, allocator: std.mem.Allocator, dim: usize, keep_dims: bool) !*Self {
+        pub const MaxOverDimResult = struct {
+            values: *Self,
+            offsets: ?[]usize,
+        };
+
+        pub fn maxOverDim(self: *const Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !MaxOverDimResult {
+            const dim = opts.dim;
+            const keep_dims = opts.keep_dims;
             const input_shape = self.shape.shape;
             const input_dims = input_shape.len;
-            if (dim >= input_dims) return error.ShapeOutOfBounds;
+            if (dim >= input_dims) return error.DimOutOfBounds;
 
             var output_shape = try allocator.alloc(usize, if (keep_dims) input_dims else input_dims - 1);
             defer allocator.free(output_shape);
@@ -586,6 +605,8 @@ pub fn NDArray(comptime T: type) type {
             }
             const output = try Self.empty(output_shape, allocator);
             errdefer output.deinit(allocator);
+            const offsets = if (opts.return_offsets) try allocator.alloc(usize, output.size()) else null;
+            errdefer if (offsets) |o| allocator.free(o);
 
             const max_dim_size = input_shape[dim];
             var slice_size: usize = 1;
@@ -593,32 +614,26 @@ pub fn NDArray(comptime T: type) type {
                 slice_size *= input_shape[i];
             }
 
-            var num_slices: usize = 1;
-            for (0..dim) |i| {
-                num_slices *= input_shape[i];
-            }
-
             for (0..output.data.len) |i| {
-                var max_val: T = -(std.math.inf(T) - 1);
-                const base_idx = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
-                for (0..max_dim_size) |j| {
-                    const curr_idx = base_idx + j * slice_size;
-                    max_val = @max(max_val, self.data[curr_idx]);
+                var max_val: T = -std.math.inf(T);
+                var max_offs: usize = 0;
+                const base_offs = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
+                for (0..max_dim_size) |j| { // can be optimized if the view along this dim is contiguous (just check dim stride)
+                    const curr_offs = base_offs + j * slice_size;
+                    const curr_val = self.data[curr_offs];
+                    if (curr_val > max_val) {
+                        max_val = curr_val;
+                        max_offs = curr_offs;
+                    }
                 }
                 output.data[i] = max_val;
+                if (offsets) |o| o[i] = max_offs;
             }
-
-            return output;
+            return .{ .values = output, .offsets = offsets };
         }
 
-        pub const GatherOptions = struct {
-            indices: *const NDArray(usize),
-            dim: usize,
-            return_offsets: bool = false,
-        };
-
         pub const GatherResult = struct {
-            output: *Self,
+            values: *Self,
             offsets: ?[]usize, // offsets taken, so they dont have to be recomputed
         };
 
@@ -650,7 +665,7 @@ pub fn NDArray(comptime T: type) type {
                 try output.set(idx_coord, src_value);
                 if (offsets) |o| o[i] = src_offset;
             }
-            return .{ .output = output, .offsets = offsets };
+            return .{ .values = output, .offsets = offsets };
         }
 
         /// COM
@@ -870,7 +885,7 @@ test "NDArray.sum_along" {
     try std.testing.expect(a2.shape.eq(expected1.shape.*, .{}));
 }
 
-test "NDArray.max_over_dim" {
+test "NDArray.maxOverDim" {
     const alloc = std.testing.allocator;
     const shape = &[_]usize{ 2, 3, 4 };
     const T = f64;
@@ -893,7 +908,7 @@ test "NDArray.max_over_dim" {
     defer array.deinit(alloc);
 
     // max over dim 0
-    var result1 = try array.max_over_dim(alloc, 0, true);
+    var result1 = (try array.maxOverDim(alloc, .{ .dim = 0, .keep_dims = true })).values;
     defer result1.deinit(alloc);
     const expected1 = try Array.init(&[_]T{
         13, 14, 15, 16,
@@ -904,7 +919,7 @@ test "NDArray.max_over_dim" {
     try std.testing.expectEqualDeep(expected1, result1);
 
     // max over dim 1
-    const result2 = try array.max_over_dim(alloc, 1, false);
+    const result2 = (try array.maxOverDim(alloc, .{ .dim = 1, .keep_dims = false })).values;
     defer result2.deinit(alloc);
     const expected2 = try Array.init(&[_]T{
         9,  10, 11, 12,
@@ -914,7 +929,7 @@ test "NDArray.max_over_dim" {
     try std.testing.expectEqualDeep(expected2, result2);
 
     // max over dim 2
-    const result3 = try array.max_over_dim(alloc, 2, true);
+    const result3 = (try array.maxOverDim(alloc, .{ .dim = 2, .keep_dims = true })).values;
     defer result3.deinit(alloc);
     const expected3 = try Array.init(&[_]T{
         4,  8,  12,
@@ -941,7 +956,7 @@ test "NDArray.gather" {
     var index = try NDArray(usize).init(&index_data, &index_shape, alloc);
     defer index.deinit(alloc);
 
-    const output = (try input.gather(alloc, .{ .indices = index, .dim = 1 })).output;
+    const output = (try input.gather(alloc, .{ .indices = index, .dim = 1 })).values;
     defer output.deinit(alloc);
 
     try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.data);

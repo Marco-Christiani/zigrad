@@ -12,6 +12,17 @@ const GraphManager = @import("graph_manager.zig").GraphManager;
 
 const log = std.log.scoped(.zg_tensor);
 
+pub const MaxOverDimOptions = struct {
+    dim: usize,
+    keep_dims: bool = false,
+};
+
+pub const GatherOptions = struct {
+    // no reason this needs to be a tensor, other than to keep a consistent user interface, shouldnt worry ab ndarray
+    indices: *const NDTensor(usize),
+    dim: usize,
+};
+
 pub const Op = enum {
     ADD,
     SUB,
@@ -489,11 +500,32 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        pub const GatherOptions = struct {
-            // no reason this needs to be a tensor, other than to keep a consistent user interface, shouldnt worry ab ndarray
-            indices: *const NDTensor(usize),
-            dim: usize,
-        };
+        pub fn maxOverDim(self: *const Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !*Self {
+            const maxBackward = struct {
+                // NOTE: See gather() comments, same apply here
+                fn bwImpl(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
+                    const bw_children = bw_tensor.children orelse return error.NoChildren;
+                    const bw_input = bw_children[0];
+                    if (bw_input.grad == null) return;
+                    const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
+                    for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
+                }
+            }.bwImpl;
+
+            const max_result = try self.data.maxOverDim(allocator, .{ .dim = opts.dim, .keep_dims = opts.keep_dims, .return_offsets = true });
+            // TODO: use a null terminated allocation instead, tired rn
+            const ctx = if (self.requiresGrad()) try allocator.dupe(usize, max_result.offsets.?) else null;
+
+            return try createDependent(.{
+                .data = max_result.values,
+                .op = null,
+                .children = &[_]*const Self{self},
+                .requires_grad = self.requires_grad,
+                .allocator = allocator,
+                ._backward = maxBackward,
+                ._backward_ctx = if (ctx) |c| c.ptr else null,
+            });
+        }
 
         pub fn gather(self: *const Self, allocator: std.mem.Allocator, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
@@ -516,7 +548,7 @@ pub fn NDTensor(comptime T: type) type {
             const ctx = if (self.requiresGrad()) try allocator.dupe(usize, gather_result.offsets.?) else null;
 
             return try createDependent(.{
-                .data = gather_result.output,
+                .data = gather_result.values,
                 .op = null,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
@@ -1059,4 +1091,52 @@ test "tensor/gather" {
     // case 3: out of bounds
     try index.set(&.{ 0, 0 }, 3);
     try std.testing.expectError(error.IndexOutOfBounds, input.gather(alloc, .{ .indices = index, .dim = 1 }));
+}
+
+test "tensor/maxOverDim" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f32;
+    const Tensor = NDTensor(T);
+
+    // case 1: basic max over dim operation
+    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const input_shape = [_]usize{ 3, 3 };
+    var input = try Tensor.init(&input_data, &input_shape, true, alloc);
+    defer input.deinit();
+
+    var output = try input.maxOverDim(alloc, .{ .dim = 1 });
+    defer output.deinit();
+
+    try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 9 }, output.data.data);
+    try std.testing.expectEqualSlices(usize, &[_]usize{3}, output.data.shape.shape);
+
+    // case 2: gradient check
+    var gm = GraphManager(Tensor).init(alloc, .{});
+    defer gm.deinit();
+
+    output.grad.?.fill(1.0);
+    try gm.backward(output, alloc);
+
+    const expected_grad = [_]T{ 0, 0, 1, 0, 0, 1, 0, 0, 1 };
+    try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
+
+    // case 3: max over different dimension
+    var output2 = try input.maxOverDim(alloc, .{ .dim = 0 });
+    defer output2.deinit();
+
+    try std.testing.expectEqualSlices(T, &[_]T{ 7, 8, 9 }, output2.data.data);
+    try std.testing.expectEqualSlices(usize, &[_]usize{3}, output2.data.shape.shape);
+
+    // reset grads
+    input.grad.?.fill(0);
+    output2.grad.?.fill(1.0);
+    try gm.backward(output2, alloc);
+
+    const expected_grad2 = [_]T{ 0, 0, 0, 0, 0, 0, 1, 1, 1 };
+    try std.testing.expectEqualSlices(T, &expected_grad2, input.grad.?.data);
+
+    // case 4: invalid dimension
+    try std.testing.expectError(error.DimOutOfBounds, input.maxOverDim(alloc, .{ .dim = 2 }));
 }
