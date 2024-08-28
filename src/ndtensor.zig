@@ -83,6 +83,17 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
+        pub fn cast(self: *Self, K: type) !*NDTensor(K) {
+            _ = self;
+            @compileError("Not implemented");
+        }
+
+        pub fn _unsqueeze(self: *Self) !*Self {
+            try self.data.shape._unsqueeze();
+            if (self.grad) |g| try g.shape._unsqueeze();
+            return self;
+        }
+
         pub fn requiresGrad(self: Self) bool {
             return self.requires_grad and zg.rt_grad_enabled;
         }
@@ -120,16 +131,19 @@ pub fn NDTensor(comptime T: type) type {
         ///      UPDATE: Changed my mind, overrides.
         pub fn createDependent(opts: CreateDependentOpts) !*Self {
             const self = try opts.allocator.create(Self);
+            const rg = opts.requires_grad and zg.rt_grad_enabled;
             self.* = Self{
                 .data = opts.data,
                 .op = opts.op,
+                // TODO: How to handle not holding references if requiresGrad == false??
+                // .children = if (rg) try opts.allocator.dupe(*const Self, opts.children) else null,
                 .children = try opts.allocator.dupe(*const Self, opts.children),
                 .label = if (opts.label) |l| try opts.allocator.dupe(u8, l) else null,
-                .grad = if (opts.requires_grad) try dtype.zeros(opts.data.shape.shape, opts.allocator) else null,
-                .requires_grad = opts.requires_grad and zg.rt_grad_enabled,
+                .grad = if (rg) try dtype.zeros(opts.data.shape.shape, opts.allocator) else null,
+                .requires_grad = rg,
                 .acquired = false,
-                ._backward = opts._backward,
-                ._backward_ctx = opts._backward_ctx,
+                ._backward = if (rg) opts._backward else null,
+                ._backward_ctx = if (rg) opts._backward_ctx else null,
                 .allocator = opts.allocator,
             };
             return self;
