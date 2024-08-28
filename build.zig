@@ -43,7 +43,6 @@ pub fn build(b: *std.Build) !void {
     exe.root_module.addImport("zigrad", zigrad_module);
 
     exe.linkFramework("Accelerate");
-    addProtobuf(b, exe, target, optimize);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -83,26 +82,4 @@ pub fn build(b: *std.Build) !void {
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
-}
-
-pub fn addProtobuf(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    const protobuf_dep = b.dependency("protobuf", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    exe.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
-
-    // Generation
-    const gen_proto = b.step("gen-proto", "generates zig files from protocol buffer definitions");
-    const protobuf = @import("protobuf");
-    const protoc_step = protobuf.RunProtocStep.create(b, protobuf_dep.builder, target, .{
-        .destination_directory = b.path("src/rl/proto"),
-        .source_files = &.{
-            "proto/event.proto",
-        },
-        .include_directories = &.{},
-    });
-
-    gen_proto.dependOn(&protoc_step.step);
 }

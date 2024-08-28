@@ -24,11 +24,11 @@ pub const optim = @import("nn/optim.zig");
 pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigrad_settings else .{};
 
 pub const Settings = struct {
-    precision: type = f32,
+    precision: type = f64,
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true, // TODO: remove this, user is responsible for managing this on learnables.
-    seed: u64 = 81761,
+    seed: u64 = 8171,
 };
 
 pub var rt_grad_enabled: bool = true;
