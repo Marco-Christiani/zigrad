@@ -24,6 +24,21 @@ def _smce(input_tensor, target_tensor) -> dict[str, list | float]:
     }
 
 
+def _smooth_l1(input_tensor, target_tensor, beta):
+    loss_fn = nn.SmoothL1Loss(beta=beta)
+    loss = loss_fn(input_tensor, target_tensor)
+    loss.backward()
+
+    return {
+        "shape": list(input_tensor.shape),
+        "input": input_tensor.flatten().tolist(),
+        "target": target_tensor.flatten().tolist(),
+        "beta": beta,
+        "loss": float(loss.item()),
+        "input_grad": input_tensor.grad.flatten().tolist(),
+    }
+
+
 def generate_smce_tests(output_dir: pathlib.Path) -> None:
     test_cases = {
         "softmax_crossentropy_1d": _smce(
@@ -34,9 +49,14 @@ def generate_smce_tests(output_dir: pathlib.Path) -> None:
             torch.tensor([[1.0, 2.0, 3.0], [4.0, 1.0, 2.0]], requires_grad=True),
             torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
         ),
+        "smooth_l1": _smooth_l1(
+            torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True),
+            torch.tensor([[2.0, 2.0, 2.0], [4.0, 4.0, 4.0]]),
+            beta=1.0,
+        ),
     }
 
-    dest = output_dir.joinpath("softmax_crossentropy_test_cases.json")
+    dest = output_dir.joinpath("loss_test_cases.json")
     dest.write_text(json.dumps(obj=test_cases, indent=2))
 
 
