@@ -74,6 +74,18 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
+        pub fn cast(self: *Self, K: type, allocator: std.mem.Allocator) !*NDArray(K) {
+            _ = allocator;
+            _ = self;
+            @compileError("Not implemented");
+            // defer allocator.destroy(self);
+            // const result = try allocator.create(NDArray(K));
+            // result.* = .{
+            //     .data = ,
+            //     .shape = self.shape,
+            // };
+        }
+
         pub fn fill(self: Self, val: T) void {
             @memset(self.data, val);
         }
@@ -147,7 +159,7 @@ pub fn NDArray(comptime T: type) type {
             var j: usize = 0;
             var bytes_written: usize = 0;
             for (self.shape.shape, 0..) |s, i| {
-                const b = std.fmt.formatIntBuf(shapeStr[j..shapeStr.len], s, 10, .lower, .{});
+                const b = std.fmt.formatIntBuf(shapeStr[bytes_written..shapeStr.len], s, 10, .lower, .{});
                 bytes_written += b;
                 if (i < self.shape.len() - 1 and j + b < shapeStr.len - 1) {
                     shapeStr[j + b] = 'x';
@@ -254,7 +266,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = try self.shape.broadcast(other.shape.*);
+            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else self.shape;
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| {
                 values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];
@@ -512,17 +524,19 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn matvec(self: *const Self, other: *const Self, trans_a: bool, allocator: std.mem.Allocator) !*Self {
             // TODO: shape checks for matvec
-            const output_size = if (trans_a) try self.shape.get(1) else try self.shape.get(0);
-            const output: []T = try allocator.alignedAlloc(T, null, output_size);
+            const M = if (trans_a) try self.shape.get(1) else try self.shape.get(0);
+            const N = if (trans_a) try self.shape.get(0) else try self.shape.get(1);
+            std.debug.assert(N == other.shape.size());
+            const output: []T = try allocator.alignedAlloc(T, null, M);
             errdefer allocator.free(output);
             @memset(output, 0);
 
-            blas.blas_matvec(T, self.data, other.data, output, try self.shape.get(0), try self.shape.get(1), 1, 0, trans_a);
+            blas.blas_matvec(T, self.data, other.data, output, M, N, 1, 0, trans_a);
 
             const result = try allocator.create(Self);
             result.* = Self{
                 .data = output,
-                .shape = try Shape.init(other.shape.shape, allocator),
+                .shape = try Shape.init(&.{M}, allocator),
             };
             return result;
         }
