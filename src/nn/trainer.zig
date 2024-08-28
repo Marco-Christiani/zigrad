@@ -73,9 +73,9 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             try self.graph_manager.backward(loss, bwd_allocator);
 
             // log.info("rendering", .{});
-            // try utils.renderD2(loss, utils.PrintOptions.plain, self.allocator, "/tmp/trainergraph.svg");
+            // try utils.renderD2(loss, utils.PrintOptions.plain, fwd_allocator, "/tmp/trainergraph.svg");
             // log.info("done", .{});
-            // try utils.sesame("/tmp/trainergraph.svg", self.allocator);
+            // try utils.sesame("/tmp/trainergraph.svg", fwd_allocator);
 
             log.debug("updating", .{});
             self.optimizer.step(self.params);

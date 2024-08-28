@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("zigrad");
+const zg = @import("../root.zig");
 
 const random = zg.random;
 const Op = zg.Op;
