@@ -48,6 +48,7 @@ pub fn GraphManager(comptime T: type) type {
 
         // Must init grad on root node before backprop
         pub fn backward(self: *Self, node: *const T, alloc: std.mem.Allocator) !void {
+            log.debug("BEGIN BWD", .{});
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
             self.topo(node);
