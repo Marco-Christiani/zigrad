@@ -10,7 +10,7 @@ const NDArray = zg.NDArray;
 
 const prod = zg.arrayutils.prod;
 const conv_utils = zg.conv_utils;
-const simple_mse_loss = zg.loss.simple_mse_loss;
+const simple_mse_loss = zg.loss.ag_mse_1d;
 const winit = zg.winit;
 
 const log = std.log.scoped(.zg_layer);
@@ -143,13 +143,22 @@ pub fn LinearLayer(comptime T: type) type {
         }
 
         pub fn forward(self: *const Self, input: *const Tensor, fwd_allocator: std.mem.Allocator) !*Tensor {
-            var result = (try self.weights.matmul(input, fwd_allocator, .{ .trans_b = true })).setLabel("fwd1w");
-            self.weights.logShape(null);
-            self.bias.logShape(null);
-            input.logShape(null);
-            result.logShape(null);
+            input.logShape("linear input ");
+            var result = blk: {
+                if (input.data.shape.len() == 1) { // TODO: realdims is valid logic but likely not fully supported by ndarray
+                    break :blk try self.weights.matvec(input, fwd_allocator);
+                } else {
+                    break :blk try self.weights.matmul(input, fwd_allocator, .{ .trans_b = true });
+                }
+            };
+            _ = result.setLabel("fwd1w");
+            // self.weights.logShape(null);
+            // self.bias.logShape(null);
+            result.logShape("linear mul ");
             result = (try self.bias.add(result, fwd_allocator)).setLabel("fwd1b");
+            result.logShape("linear add bias ");
             const rt = try result.transpose();
+            rt.logShape("linear out ");
             return rt;
         }
 
@@ -398,6 +407,7 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         pub fn forward(_: *Self, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+            input.logShape("relu in");
             const output = try input.data.copy(allocator);
             for (output.data) |*e| {
                 e.* = if (e.* > 0) e.* else 0;

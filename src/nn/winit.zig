@@ -1,6 +1,8 @@
 const zg = @import("../root.zig");
 const NDTensor = zg.NDTensor;
-const random = zg.random;
+// const random = zg.random;
+const std = @import("std");
+const random = std.crypto.random;
 
 pub fn heInit(comptime T: type, tensor: *const NDTensor(T)) void {
     const fan_in: T = @floatFromInt(tensor.data.shape.shape[1]);
