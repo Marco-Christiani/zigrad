@@ -1,5 +1,10 @@
 const std = @import("std");
-const c = @cImport(@cInclude("Accelerate/Accelerate.h"));
+const builtin = @import("builtin");
+const c = switch (builtin.target.os.tag) {
+    .linux => @cImport(@cInclude("cblas.h")),
+    .macos => @cImport(@cInclude("Accelerate/Accelerate.h")),
+    else => @compileError("Unsupported os"),
+};
 
 /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
 pub fn blas_dot(T: type, A: []T, B: []T) T {
