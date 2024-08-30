@@ -13,11 +13,6 @@ pub fn build(b: *std.Build) !void {
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
-    // TODO: cblas
-    // switch (target.query.os_tag) {
-    //     .linux => {},
-    //     .macos => {},
-    // }
     const zigrad_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .imports = &.{
@@ -40,9 +35,11 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("zigrad", zigrad_module);
 
-    exe.linkFramework("Accelerate");
+    exe.root_module.addImport("zigrad", zigrad_module);
+    std.debug.print("target.result.os.tag={}\n", .{target.result.os.tag});
+    // TODO: cblas
+    link(target, exe);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -77,9 +74,21 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    unit_tests.linkFramework("Accelerate");
     const run_unit_tests = b.addRunArtifact(unit_tests);
-
+    link(target, unit_tests);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
+}
+
+fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
+    switch (target.result.os.tag) {
+        .linux => {
+            // exe.addSystemFrameworkPath
+            // exe.linkFramework("cblas");
+            exe.linkSystemLibrary("blas");
+            exe.linkLibC();
+        },
+        .macos => exe.linkFramework("Accelerate"),
+        else => @panic("Os not supported."),
+    }
 }
