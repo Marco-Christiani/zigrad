@@ -52,8 +52,12 @@ fn logFn(
     const scope_txt = comptime @tagName(scope);
 
     const stderr = std.io.getStdErr().writer();
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
+    const stderr_mutex = std.debug.getStderrMutex();
+    // std.debug.lockStdErr();
+    // defer std.debug.unlockStdErr();
+
+    stderr_mutex.lock();
+    defer stderr_mutex.unlock();
 
     stderr.print("[{s:<5}] {s:^6}: ", .{ level_txt, if (comptime std.mem.startsWith(u8, scope_txt, "zg_")) scope_txt[3..] else scope_txt }) catch return;
     stderr.print(format, args) catch return;

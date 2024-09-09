@@ -10,8 +10,7 @@ pub fn main() !void {
     std.debug.print("{any}\n", .{zg.settings});
     // try runScalar();
     // try mnist.main();
-    // try @import("rl/tensorboard.zig").main();
-    try @import("rl/dqn.zig").main();
+    try @import("rl/dqn_train.zig").trainDQN();
 }
 
 fn runScalar() !void {
