@@ -89,7 +89,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             zg.rt_grad_enabled = false;
             const q_values = try self.policy_net.forward(state_tensor, allocator);
             defer q_values.deinit();
-            // q_values.setLabel("v.matvec").print();
+            // q_values.setLabel("q_values").print();
 
             // -------------------------------------------------------------------------------------------------
             // const stacked = try allocator.alloc(T, 8);
@@ -97,9 +97,10 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             // for (0..stacked.len) |i| stacked[i] = state[i % 4];
             // const state_tensor2 = try NDTensor(T).init(stacked, &[_]usize{ 2, 4 }, false, arena.allocator());
             // defer state_tensor2.deinit();
+            //
             // const q_values2 = try self.policy_net.forward(state_tensor2, allocator);
             // defer q_values2.deinit();
-            // // q_values2.setLabel("v.matmul").print();
+            // q_values2.setLabel("q_values2").print();
             // return if (q_values2.data.data[0] > q_values2.data.data[1]) 0 else 1;
             // -------------------------------------------------------------------------------------------------
 
@@ -294,15 +295,14 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
                 const next_q_value_1 = all_next_q_values.get(&.{ i, 1 });
                 const max_next_q = @max(next_q_value_0, next_q_value_1);
 
-                const target_q = if (done == 0) reward + self.gamma * max_next_q else reward;
+                var target_q: T = if (done == 0) reward + self.gamma * max_next_q else reward;
 
                 // update
                 std.debug.assert(action == 0 or action == 1);
-                // target_q = @max(@min(target_q, 100), -100);
+                target_q = @max(@min(target_q, 5.0), -5.0);
 
                 try target_q_values.set(&.{i}, target_q);
                 // try q_values.set(&.{i}, all_q_values.get(&.{ i, action }));
-
                 if (debug) std.debug.print("-- Sample {d}: action={d}, reward={d:.4}, done={d}, next_q_values=({d:.4}, {d:.4}), target_q={d:.4}\n", .{
                     i,
                     action,
@@ -324,6 +324,8 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             defer loss.deinit();
             std.debug.assert(loss.data.size() == 1);
             if (debug) std.debug.print("Loss: {d:.4} ", .{loss.data.data[0]});
+            self.policy_net.zeroGrad();
+            loss.grad.?.fill(1.0);
 
             // back
             try self.graph_manager.backward(loss, allocator);

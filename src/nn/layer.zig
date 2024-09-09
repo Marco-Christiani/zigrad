@@ -113,25 +113,106 @@ pub fn Layer(comptime T: type) type {
     };
 }
 
+// pub fn LinearLayer(comptime T: type) type {
+//     return struct {
+//         const Self = @This();
+//         const Tensor = NDTensor(T);
+//         weights: *Tensor,
+//         bias: *Tensor,
+//         allocator: std.mem.Allocator,
+//         parameters: [2]*NDTensor(T),
+
+//         pub fn init(allocator: std.mem.Allocator, input_size: usize, output_size: usize) !*Self {
+//             // TODO: maybe stack bias (benchmark)
+//             const weights_shape = [_]usize{ output_size, input_size };
+//             const bias_shape = [_]usize{ output_size, 1 };
+//             var weights = (try Tensor.empty(&weights_shape, true, allocator)).setLabel("linear_weights");
+//             var bias = (try Tensor.empty(&bias_shape, true, allocator)).setLabel("linear_bias");
+//             weights.acquire();
+//             bias.acquire();
+//             winit.heInit(T, weights);
+//             bias.fill(0.0);
+//             const self = try allocator.create(Self);
+//             self.* = Self{
+//                 .weights = weights,
+//                 .bias = bias,
+//                 .parameters = [_]*NDTensor(T){ weights, bias },
+//                 .allocator = allocator,
+//             };
+//             return self;
+//         }
+
+//         pub fn forward(self: *const Self, input: *const Tensor, fwd_allocator: std.mem.Allocator) !*Tensor {
+//             input.logShape("linear input ");
+//             var result = try self.weights.matmul(input, fwd_allocator, .{ .trans_b = true });
+//             _ = result.setLabel("fwd1w");
+//             // self.weights.logShape(null);
+//             // self.bias.logShape(null);
+//             result.logShape("linear mul ");
+
+//             result = (try self.bias.add(result, fwd_allocator)).setLabel("fwd1b");
+//             result.logShape("linear add bias ");
+//             // const rt = try result.transpose();
+//             // rt.logShape("linear out ");
+//             // return rt;
+//             return result;
+//         }
+
+//         /// Uses autograd
+//         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
+//             _ = self;
+//             _ = allocator;
+//         }
+
+//         pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
+//             return @constCast(&self.parameters);
+//         }
+
+//         pub fn zeroGrad(self: *Self) void {
+//             self.weights.grad.?.fill(0);
+//             self.bias.grad.?.fill(0);
+//         }
+
+//         pub fn deinit(self: *Self) void {
+//             self.release();
+//             self.weights.deinit();
+//             self.bias.deinit();
+//             self.allocator.destroy(self);
+//             self.* = undefined;
+//         }
+
+//         fn release(self: *Self) void {
+//             self.weights.release();
+//             self.bias.release();
+//         }
+
+//         pub fn asLayer(self: *Self) Layer(T) {
+//             return Layer(T).init(self);
+//         }
+//     };
+// }
+
+const blas = @import("../backend/blas.zig");
+
 pub fn LinearLayer(comptime T: type) type {
     return struct {
         const Self = @This();
-        const Tensor = NDTensor(T);
-        weights: *Tensor,
-        bias: *Tensor,
+        weights: *NDTensor(T),
+        bias: *NDTensor(T),
         allocator: std.mem.Allocator,
         parameters: [2]*NDTensor(T),
 
-        pub fn init(allocator: std.mem.Allocator, input_size: usize, output_size: usize) !*Self {
-            // TODO: maybe stack bias (benchmark)
-            const weights_shape = [_]usize{ output_size, input_size };
-            const bias_shape = [_]usize{ output_size, 1 };
-            var weights = (try Tensor.empty(&weights_shape, true, allocator)).setLabel("linear_weights");
-            var bias = (try Tensor.empty(&bias_shape, true, allocator)).setLabel("linear_bias");
+        pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !*Self {
+            const weights_shape = [_]usize{ out_features, in_features };
+            const bias_shape = [_]usize{out_features};
+            var weights = (try NDTensor(T).empty(&weights_shape, true, allocator)).setLabel("dqn_linear_weights");
+            var bias = (try NDTensor(T).empty(&bias_shape, true, allocator)).setLabel("dqn_linear_bias");
             weights.acquire();
             bias.acquire();
-            winit.heInit(T, weights);
+
+            zg.winit.heInit(T, weights);
             bias.fill(0.0);
+
             const self = try allocator.create(Self);
             self.* = Self{
                 .weights = weights,
@@ -142,34 +223,99 @@ pub fn LinearLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *const Self, input: *const Tensor, fwd_allocator: std.mem.Allocator) !*Tensor {
-            input.logShape("linear input ");
-            var result = blk: {
-                if (input.data.shape.len() == 1) { // TODO: realdims is valid logic but likely not fully supported by ndarray
-                    break :blk try self.weights.matvec(input, fwd_allocator);
-                } else {
-                    break :blk try self.weights.matmul(input, fwd_allocator, .{ .trans_b = true });
+        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            const batch_size = try input.data.shape.get(0);
+            const in_features = try input.data.shape.get(1);
+            const out_features = try self.weights.data.shape.get(0);
+
+            var output_data = try fwd_allocator.alloc(T, batch_size * out_features);
+            errdefer fwd_allocator.free(output_data);
+
+            const lda = in_features;
+            const ldb = in_features;
+            const ldc = out_features;
+
+            // log.info("linear fwd 1", .{});
+
+            // output = input * weights^T
+            blas.blas_matmul(T, input.data.data, self.weights.data.data, output_data, batch_size, out_features, in_features, false, true, lda, ldb, ldc);
+
+            // Add bias
+            for (0..batch_size) |i| {
+                for (0..out_features) |j| {
+                    output_data[i * out_features + j] += self.bias.data.data[j];
                 }
-            };
-            _ = result.setLabel("fwd1w");
-            // self.weights.logShape(null);
-            // self.bias.logShape(null);
-            result.logShape("linear mul ");
-            result = (try self.bias.add(result, fwd_allocator)).setLabel("fwd1b");
-            result.logShape("linear add bias ");
-            const rt = try result.transpose();
-            rt.logShape("linear out ");
-            return rt;
+            }
+
+            const output = try zg.NDArray(T).init(output_data, &[_]usize{ batch_size, out_features }, fwd_allocator);
+
+            return try NDTensor(T).createDependent(.{
+                .data = output,
+                .op = null,
+                .children = &[_]*const NDTensor(T){input},
+                .label = "dqn_linear_output",
+                .requires_grad = true,
+                .allocator = fwd_allocator,
+                ._backward = backward,
+                ._backward_ctx = self,
+            });
         }
 
-        /// Uses autograd
-        pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
-            _ = self;
+        fn backward(tensor: NDTensor(T), allocator: std.mem.Allocator) !void {
             _ = allocator;
+            const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
+            std.debug.assert(tensor.children.?.len == 1);
+            const weights = self.weights;
+            const bias = self.bias;
+            const input = tensor.children.?[0];
+
+            const batch_size = try input.data.shape.get(0);
+            const in_features = try input.data.shape.get(1);
+            const out_features = try weights.data.shape.get(0);
+            // Gradient w.r.t. weights: dL/dW = input^T * dL/dOutput
+            if (weights.grad) |weights_grad| {
+                // const lda = in_features;
+                // const ldb = out_features;
+                // const ldc = in_features;
+                // const lda = try input.data.shape.get(1);
+                // const ldb = try tensor.grad.?.shape.get(1);
+                // const ldc = try weights_grad.shape.get(1);
+
+                // log.info("linear backward 1", .{});
+                // Backward pass matmul (input^T * dL/dOutput)
+                blas.blas_matmul(T, input.data.data, tensor.grad.?.data, weights_grad.data, in_features, out_features, batch_size, true, false, in_features, out_features, out_features);
+            }
+
+            // Gradient w.r.t. bias: dL/dB = sum(dL/dOutput, dim=0)
+            if (bias.grad) |bias_grad| {
+                for (0..out_features) |j| {
+                    var sum: T = 0;
+                    for (0..batch_size) |i| {
+                        sum += tensor.grad.?.data[i * out_features + j];
+                    }
+                    bias_grad.data[j] += sum;
+                }
+            }
+
+            // Gradient w.r.t. input: dL/dInput = dL/dOutput * weights
+            if (input.grad) |input_grad| {
+                // const lda = out_features;
+                // const ldb = in_features;
+                // const ldc = in_features;
+
+                // const lda = try tensor.grad.?.shape.get(1);
+                // const ldb = try weights.grad.?.shape.get(1);
+                // const ldc = try input_grad.shape.get(1);
+                // blas.blas_matmul(T, tensor.grad.?.data, weights.data.data, input_grad.data, batch_size, in_features, out_features, false, false, lda, ldb, ldc);
+                // log.info("linear backward 2", .{});
+
+                // Backward pass matmul (dL/dOutput * weights)
+                blas.blas_matmul(T, tensor.grad.?.data, self.weights.data.data, input_grad.data, batch_size, in_features, out_features, false, false, out_features, in_features, in_features);
+            }
         }
 
         pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
-            return @constCast(&self.parameters);
+            return &self.parameters;
         }
 
         pub fn zeroGrad(self: *Self) void {
@@ -182,16 +328,15 @@ pub fn LinearLayer(comptime T: type) type {
             self.weights.deinit();
             self.bias.deinit();
             self.allocator.destroy(self);
-            self.* = undefined;
         }
 
-        fn release(self: *Self) void {
+        pub fn release(self: *Self) void {
             self.weights.release();
             self.bias.release();
         }
 
-        pub fn asLayer(self: *Self) Layer(T) {
-            return Layer(T).init(self);
+        pub fn asLayer(self: *Self) zg.layer.Layer(T) {
+            return zg.layer.Layer(T).init(self);
         }
     };
 }

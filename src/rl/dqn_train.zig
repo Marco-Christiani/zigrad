@@ -44,11 +44,13 @@ pub fn trainDQN() !void {
     // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     // defer _ = gpa.deinit();
     // const allocator = gpa.allocator();
-
-    var env = CartPole.init(zg.settings.seed);
+    // const seed = zg.settings.seed;
+    const seed = 45646;
+    var env = CartPole.init(seed);
+    const max_steps = 200;
     const tau = 0.005;
     // const tau = 0.5;
-    var optimizer = zg.optim.Adam(T).init(allocator, 0.001, 0.9, 0.999, 1e-8);
+    var optimizer = zg.optim.Adam(T).init(allocator, 1e-4, 0.9, 0.999, 1e-8);
     // var optimizer = zg.optim.SGD(T){ .lr = 0.001 };
     optimizer.grad_clip_enabled = true;
     optimizer.grad_clip_max_norm = 100;
@@ -56,7 +58,7 @@ pub fn trainDQN() !void {
         .input_size = 4,
         .hidden_size = 128,
         .output_size = 2,
-        .gamma = 0.9,
+        .gamma = 0.99,
         .eps_start = 0.9,
         .eps_end = 0.05,
         .eps_decay = 1000,
@@ -103,12 +105,12 @@ pub fn trainDQN() !void {
                 loss_count += 1;
                 // if (total_steps % 1_000 == 0) try agent.updateTargetNetwork(tau);
                 // if (total_steps % 1_000 == 0) try agent.updateTargetNetwork(tau);
-                // try agent.updateTargetNetwork(tau);
+                try agent.updateTargetNetwork(tau);
             }
             total_steps += 1;
-            if (step_result.done > 0) try agent.updateTargetNetwork(tau);
+            // if (step_result.done > 0) try agent.updateTargetNetwork(tau);
             _ = im_pool.reset(.retain_capacity);
-            if (step_result.done > 0) break;
+            if (step_result.done > 0 or steps >= max_steps) break;
         }
         // if (agent.replay_buffer.size > 1_000) {
         //     loss_sum += try agent.train(im_alloc);
