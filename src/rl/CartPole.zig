@@ -1,7 +1,8 @@
 const std = @import("std");
 const math = std.math;
-const zg = @import("zigrad");
-const T = zg.settings.precision;
+// const zg = @import("zigrad");
+// const T = zg.settings.precision;
+const T = f64;
 const Self = @This();
 
 gravity: T = 9.8,
@@ -52,7 +53,9 @@ pub fn step(self: *Self, action: u32) struct { state: [4]T, reward: T, done: u1 
     const sintheta = @sin(self.theta);
 
     const temp = (force + self.polemass_length * self.theta_dot * self.theta_dot * sintheta) / self.total_mass;
-    const thetaacc = (self.gravity * sintheta - costheta * temp) / (self.length * (4.0 / 3.0 - self.masspole * costheta * costheta / self.total_mass));
+    // const thetaacc = (self.gravity * sintheta - costheta * temp) / (self.length * (4.0 / 3.0 - self.masspole * costheta * costheta / self.total_mass));
+    const thetaacc = (self.gravity * sintheta - costheta * temp) * self.length /
+        (self.length * self.length * (4.0 / 3.0 - self.masspole * costheta * costheta / self.total_mass));
     const xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass;
 
     self.x = self.x + self.tau * self.x_dot;
@@ -78,6 +81,7 @@ pub fn step(self: *Self, action: u32) struct { state: [4]T, reward: T, done: u1 
         reward = 0.0;
     }
 
+    // std.debug.print("[zigrad] state: {any} reward: {} done: {}\n", .{ state, reward, done });
     return .{ .state = state, .reward = reward, .done = done };
 }
 
