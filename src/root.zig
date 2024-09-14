@@ -18,6 +18,9 @@ pub const utils = @import("nn/utils.zig");
 pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
+const serialize = @import("nn/serialize.zig");
+pub const saveModelToFile = serialize.saveModelToFile;
+pub const loadModelFromFile = serialize.loadModelFromFile;
 
 /// lib-wide options that can be overridden by the root file.
 /// E.g. const zigrad_settings = .{ .gradEnabled = true };
@@ -28,7 +31,9 @@ pub const Settings = struct {
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true, // TODO: remove this, user is responsible for managing this on learnables.
-    seed: u64 = 8171,
+    vmax: f32 = 100,
+    vmin: f32 = -100,
+    seed: u64 = 42,
 };
 
 pub var rt_grad_enabled: bool = true;
