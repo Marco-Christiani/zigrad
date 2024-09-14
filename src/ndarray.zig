@@ -693,14 +693,18 @@ pub fn NDArray(comptime T: type) type {
             return blas.blas_nrm2(T, self.data, 1);
         }
 
-        pub fn clip_norm(self: *const Self, max_norm: T, delta: T) void {
+        pub fn _clip_norm(self: *const Self, max_norm: T, delta: T) void {
             const norm = self.l2_norm();
             if (norm > max_norm) {
                 const scale = max_norm / (norm + delta);
-                for (self.data) |*value| {
+                for (self.data) |*value| { // TODO: use backend
                     value.* *= scale;
                 }
             }
+        }
+
+        pub fn _clip(self: *const Self, vmin: T, vmax: T) void {
+            for (self.data) |*value| value.* = @max(@min(value.*, vmax), vmin);
         }
 
         /// Unbroadcast to target shape
@@ -768,7 +772,7 @@ test "NDArray.clip_norm" {
     const max_norm: T = 4.0;
     const delta: T = 1e-6;
 
-    array.clip_norm(max_norm, delta);
+    array._clip_norm(max_norm, delta);
 
     const clipped_norm = array.l2_norm();
     try std.testing.expect(clipped_norm <= max_norm);

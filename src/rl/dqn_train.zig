@@ -53,7 +53,10 @@ pub fn trainDQN() !void {
     var optimizer = zg.optim.Adam(T).init(allocator, 1e-4, 0.9, 0.999, 1e-8);
     // var optimizer = zg.optim.SGD(T){ .lr = 0.001 };
     optimizer.grad_clip_enabled = true;
-    optimizer.grad_clip_max_norm = 100;
+    optimizer.grad_clip_opts = .{
+        // .Norm = .{ .grad_clip_max_norm = 100 },
+        .Value = .{ .vmin = -100, .vmax = 100 },
+    };
     var agent = try DQNAgent(T, 10_000).init(allocator, .{
         .input_size = 4,
         .hidden_size = 128,

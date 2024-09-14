@@ -377,13 +377,12 @@ pub fn NDTensor(comptime T: type) type {
             try writer.writeAll("}\n");
         }
 
-        pub const ClipOptions = struct {
-            max_norm: f32 = settings.grad_clip_max_norm,
-            delta: f32 = settings.grad_clip_delta,
-        };
+        pub fn clip_grad_norm_delta_(self: Self, max_norm: T, delta: T) void {
+            self.grad.?._clip_norm(max_norm, delta);
+        }
 
-        pub fn clip_grad_norm_delta(self: Self, opts: ClipOptions) void {
-            self.grad.?.clip_norm(opts.max_norm, opts.delta);
+        pub fn clip_grad_value_(self: Self, vmin: T, vmax: T) void {
+            self.grad.?._clip(vmin, vmax);
         }
 
         pub fn setChildren(self: *Self, children: []const *Self) !void {

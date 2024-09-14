@@ -5,8 +5,32 @@ const zg = @import("../root.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
 
-pub fn clipGrads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
-    for (params) |param| if (param.grad) |_| param.clip_grad_norm_delta(opts);
+const ClipNormOpts = struct {
+    grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
+    grad_clip_delta: f32 = settings.grad_clip_delta,
+};
+
+const ClipValueOpts = struct {
+    vmin: f32 = settings.vmin,
+    vmax: f32 = settings.vmax,
+};
+const ClipMode = enum { Norm, Value };
+
+const ClipOptions = union(ClipMode) {
+    Norm: ClipNormOpts,
+    Value: ClipValueOpts,
+};
+
+pub fn clipGrads(T: type, params: []*const NDTensor(T), opts: ClipOptions) void {
+    switch (opts) {
+        .Norm => |optss| for (params) |param|
+            if (param.grad) |_| param.clip_grad_norm_delta_(
+                optss.grad_clip_max_norm,
+                optss.grad_clip_delta,
+            ),
+        .Value => |optss| for (params) |param|
+            if (param.grad) |_| param.clip_grad_value_(optss.vmin, optss.vmax),
+    }
 }
 
 pub fn Optimizer(comptime T: type) type {
@@ -47,14 +71,10 @@ pub fn SGD(comptime T: type) type {
         const Self = @This();
         lr: T,
         grad_clip_enabled: bool = settings.grad_clip_enabled,
-        grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
-        grad_clip_delta: f32 = settings.grad_clip_delta,
+        grad_clip_opts: ?ClipOptions = null,
 
         pub fn step(self: Self, params: []*const NDTensor(T)) void {
-            if (self.grad_clip_enabled) clipGrads(T, params, .{
-                .max_norm = self.grad_clip_max_norm,
-                .delta = self.grad_clip_delta,
-            });
+            if (self.grad_clip_enabled) clipGrads(T, params, self.grad_clip_opts.?);
 
             // lol. go to bed.
             for (params) |param| {
@@ -85,8 +105,7 @@ pub fn Adam(comptime T: type) type {
         v: std.AutoHashMap(*const NDTensor(T), []T),
         allocator: std.mem.Allocator,
         grad_clip_enabled: bool = settings.grad_clip_enabled,
-        grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
-        grad_clip_delta: f32 = settings.grad_clip_delta,
+        grad_clip_opts: ?ClipOptions = null,
 
         pub fn init(allocator: std.mem.Allocator, learning_rate: T, beta1: T, beta2: T, epsilon: T) Self {
             return Self{
@@ -120,10 +139,7 @@ pub fn Adam(comptime T: type) type {
         }
 
         pub fn step(self: *Self, params: []*const NDTensor(T)) !void {
-            if (self.grad_clip_enabled) clipGrads(T, params, .{
-                .max_norm = self.grad_clip_max_norm,
-                .delta = self.grad_clip_delta,
-            });
+            if (self.grad_clip_enabled) clipGrads(T, params, self.grad_clip_opts.?);
             self.t += 1;
             const t_f: T = @floatFromInt(self.t);
             const lr_t = self.lr * math.sqrt(1 - math.pow(T, self.beta2, t_f)) / (1 - math.pow(T, self.beta1, t_f));

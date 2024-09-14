@@ -251,9 +251,13 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
         model.model,
         zg.optim.SGD(T){
             .lr = 0.01,
-            .grad_clip_max_norm = 10.0,
-            .grad_clip_delta = 1e-6,
             .grad_clip_enabled = false,
+            .grad_clip_opts = .{
+                .Norm = .{
+                    .grad_clip_max_norm = 10.0,
+                    .grad_clip_delta = 1e-6,
+                },
+            },
         },
         .{},
     );
