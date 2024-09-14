@@ -3,12 +3,19 @@ from ctypes import c_double
 from ctypes import c_uint32
 from ctypes import c_uint64
 from ctypes import POINTER
+import pathlib
 
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
 
-lib = ctypes.CDLL("./libcartpole_wrapper.so")
+libpath = pathlib.Path("./libcartpole_wrapper.so")
+if libpath.exists():
+    lib = ctypes.CDLL(str(libpath))
+elif (libpath := libpath.with_suffix(".dylib")).exists():
+    lib = ctypes.CDLL(str(libpath))
+else:
+    raise FileNotFoundError()
 
 lib.cartpole_init.argtypes = [c_uint64]
 lib.cartpole_init.restype = ctypes.c_void_p
@@ -43,9 +50,7 @@ class CartPole:
         state = (c_double * 4)()
         reward = c_double()
         done = ctypes.c_ubyte()
-        lib.cartpole_step(
-            self.obj, action, state, ctypes.byref(reward), ctypes.byref(done)
-        )
+        lib.cartpole_step(self.obj, action, state, ctypes.byref(reward), ctypes.byref(done))
         return list(state), reward.value, bool(done.value)
 
     def __del__(self):
