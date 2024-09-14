@@ -61,7 +61,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn zeros(shape: []const usize, allocator: std.mem.Allocator) !*Self {
             const result = try Self.empty(shape, allocator);
-            result.fill(0);
+            result.fill(@as(T, 0));
             return result;
         }
 
@@ -266,7 +266,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else self.shape;
+            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else try self.shape.copy(allocator);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| {
                 values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];
