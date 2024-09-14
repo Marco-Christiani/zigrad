@@ -241,8 +241,8 @@ pub fn LinearLayer(comptime T: type) type {
             weights.acquire();
             bias.acquire();
 
-            zg.winit.heInit(T, weights);
-            bias.fill(0.0);
+            zg.winit.kaimingUniformInit(T, weights, @sqrt(5.0));
+            zg.winit.biasInit(T, bias);
 
             const self = try allocator.create(Self);
             self.* = Self{
