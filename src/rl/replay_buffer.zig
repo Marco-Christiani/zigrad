@@ -8,15 +8,18 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
         allocator: std.mem.Allocator,
         data: [capacity]T,
         size: usize,
+        idx: usize, // make sure oldest item gets replaced
 
         pub fn init(allocator: std.mem.Allocator) Self {
             const buf: [capacity]T = undefined;
-            return Self{ .allocator = allocator, .data = buf, .size = 0 };
+            return Self{ .allocator = allocator, .data = buf, .size = 0, .idx = 0 };
         }
 
         pub fn add(self: *Self, elem: T) void {
-            self.data[self.size % capacity] = elem;
+            self.data[self.idx] = elem;
             self.size = @min(self.size + 1, capacity);
+            self.idx += 1;
+            self.idx %= capacity;
         }
 
         /// COM
