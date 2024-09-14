@@ -17,8 +17,28 @@ const log = std.log.scoped(.zg_layer);
 
 pub fn Layer(comptime T: type) type {
     return struct {
-        const Self = @This();
+        pub const TensorData = struct {
+            shape: []usize,
+            data: []T,
+        };
 
+        pub const LinearLayerData = struct {
+            type: []const u8,
+            weights: TensorData,
+            bias: TensorData,
+        };
+
+        pub const ReLULayerData = struct {
+            type: []const u8,
+        };
+
+        pub const LayerData = union(enum) {
+            linear: LinearLayerData,
+            relu: ReLULayerData,
+            // etc...
+        };
+
+        const Self = @This();
         vtable: *const VTable,
         ptr: *anyopaque,
 
@@ -28,6 +48,7 @@ pub fn Layer(comptime T: type) type {
             zeroGrad: *const fn (ctx: *anyopaque) void,
             deinit: *const fn (ctx: *anyopaque) void,
             release: *const fn (ctx: *anyopaque) void,
+            serialize: *const fn (ctx: *anyopaque) std.mem.Allocator.Error!LayerData,
         };
 
         pub fn init(pointer: anytype) Self {
@@ -59,12 +80,18 @@ pub fn Layer(comptime T: type) type {
                     self.release();
                 }
 
+                fn serializeFn(ctx: *anyopaque) std.mem.Allocator.Error!LayerData {
+                    const self: Ptr = @ptrCast(@alignCast(ctx));
+                    return self.serialize();
+                }
+
                 const vtable = VTable{
                     .forward = forwardFn,
                     .getParameters = getParametersFn,
                     .zeroGrad = zeroGradFn,
                     .deinit = deinitFn,
                     .release = releaseFn,
+                    .serialize = serializeFn,
                 };
             };
 
@@ -109,6 +136,10 @@ pub fn Layer(comptime T: type) type {
                     param.requires_grad = enabled; // NOTE: could possibly destroy grad here depending on aggressiveness
                 }
             }
+        }
+
+        pub fn serialize(self: Self) std.mem.Allocator.Error!LayerData {
+            return self.vtable.serialize(self.ptr);
         }
     };
 }
@@ -205,8 +236,8 @@ pub fn LinearLayer(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !*Self {
             const weights_shape = [_]usize{ out_features, in_features };
             const bias_shape = [_]usize{out_features};
-            var weights = (try NDTensor(T).empty(&weights_shape, true, allocator)).setLabel("dqn_linear_weights");
-            var bias = (try NDTensor(T).empty(&bias_shape, true, allocator)).setLabel("dqn_linear_bias");
+            var weights = (try NDTensor(T).empty(&weights_shape, true, allocator)).setLabel("linear_weights");
+            var bias = (try NDTensor(T).empty(&bias_shape, true, allocator)).setLabel("linear_bias");
             weights.acquire();
             bias.acquire();
 
@@ -235,8 +266,6 @@ pub fn LinearLayer(comptime T: type) type {
             const ldb = in_features;
             const ldc = out_features;
 
-            // log.info("linear fwd 1", .{});
-
             // output = input * weights^T
             blas.blas_matmul(T, input.data.data, self.weights.data.data, output_data, batch_size, out_features, in_features, false, true, lda, ldb, ldc);
 
@@ -253,7 +282,7 @@ pub fn LinearLayer(comptime T: type) type {
                 .data = output,
                 .op = null,
                 .children = &[_]*const NDTensor(T){input},
-                .label = "dqn_linear_output",
+                .label = "linear_output",
                 .requires_grad = true,
                 .allocator = fwd_allocator,
                 ._backward = backward,
@@ -274,14 +303,7 @@ pub fn LinearLayer(comptime T: type) type {
             const out_features = try weights.data.shape.get(0);
             // Gradient w.r.t. weights: dL/dW = input^T * dL/dOutput
             if (weights.grad) |weights_grad| {
-                // const lda = in_features;
-                // const ldb = out_features;
-                // const ldc = in_features;
-                // const lda = try input.data.shape.get(1);
-                // const ldb = try tensor.grad.?.shape.get(1);
-                // const ldc = try weights_grad.shape.get(1);
 
-                // log.info("linear backward 1", .{});
                 // Backward pass matmul (input^T * dL/dOutput)
                 blas.blas_matmul(T, input.data.data, tensor.grad.?.data, weights_grad.data, in_features, out_features, batch_size, true, false, in_features, out_features, out_features);
             }
@@ -299,16 +321,6 @@ pub fn LinearLayer(comptime T: type) type {
 
             // Gradient w.r.t. input: dL/dInput = dL/dOutput * weights
             if (input.grad) |input_grad| {
-                // const lda = out_features;
-                // const ldb = in_features;
-                // const ldc = in_features;
-
-                // const lda = try tensor.grad.?.shape.get(1);
-                // const ldb = try weights.grad.?.shape.get(1);
-                // const ldc = try input_grad.shape.get(1);
-                // blas.blas_matmul(T, tensor.grad.?.data, weights.data.data, input_grad.data, batch_size, in_features, out_features, false, false, lda, ldb, ldc);
-                // log.info("linear backward 2", .{});
-
                 // Backward pass matmul (dL/dOutput * weights)
                 blas.blas_matmul(T, tensor.grad.?.data, self.weights.data.data, input_grad.data, batch_size, in_features, out_features, false, false, out_features, in_features, in_features);
             }
@@ -335,8 +347,43 @@ pub fn LinearLayer(comptime T: type) type {
             self.bias.release();
         }
 
-        pub fn asLayer(self: *Self) zg.layer.Layer(T) {
-            return zg.layer.Layer(T).init(self);
+        pub fn deserialize(data: Layer(T).LayerData, alloc: std.mem.Allocator) !*Self {
+            const weights = try NDArray(T).empty(data.linear.weights.shape, alloc);
+            @memcpy(weights.data, data.linear.weights.data);
+            const wt = try NDTensor(T).fromZarray(weights, true, null, alloc);
+
+            const bias = try NDArray(T).empty(data.linear.bias.shape, alloc);
+            @memcpy(bias.data, data.linear.bias.data);
+            const bt = try NDTensor(T).fromZarray(bias, true, null, alloc);
+
+            const self = try alloc.create(Self);
+            self.* = .{
+                .weights = wt,
+                .bias = bt,
+                .allocator = alloc,
+                .parameters = [_]*NDTensor(T){ wt, bt },
+            };
+            return self;
+        }
+
+        pub fn serialize(self: *Self) std.mem.Allocator.Error!Layer(T).LayerData {
+            return .{
+                .linear = .{
+                    .type = "LinearLayer",
+                    .weights = .{
+                        .shape = try self.allocator.dupe(usize, self.weights.data.shape.shape),
+                        .data = try self.allocator.dupe(T, self.weights.data.data),
+                    },
+                    .bias = .{
+                        .shape = try self.allocator.dupe(usize, self.bias.data.shape.shape),
+                        .data = try self.allocator.dupe(T, self.bias.data.data),
+                    },
+                },
+            };
+        }
+
+        pub fn asLayer(self: *Self) Layer(T) {
+            return Layer(T).init(self);
         }
     };
 }
@@ -595,6 +642,14 @@ pub fn ReLULayer(comptime T: type) type {
 
         pub fn release(self: *Self) void {
             _ = self;
+        }
+
+        pub fn serialize(_: *Self) std.mem.Allocator.Error!Layer(T).LayerData {
+            return .{
+                .relu = .{
+                    .type = "ReLULayer",
+                },
+            };
         }
 
         pub fn asLayer(self: *Self) Layer(T) {
