@@ -45,8 +45,8 @@ pub fn trainDQN() !void {
     // defer _ = gpa.deinit();
     // const allocator = gpa.allocator();
     // const seed = zg.settings.seed;
-    const seed = 45646;
-    var env = CartPole.init(seed);
+    const s = std.crypto.random.int(usize);
+    var env = CartPole.init(s);
     const max_steps = 200;
     const tau = 0.005;
     // const tau = 0.5;
@@ -103,23 +103,21 @@ pub fn trainDQN() !void {
             total_reward += step_result.reward;
             state = step_result.state;
 
-            if (agent.replay_buffer.size > 128) {
+            if (agent.replay_buffer.isFull()) {
+                agent.policy_net.train(); // shouldnt matter
                 loss_sum += try agent.train(im_alloc);
                 loss_count += 1;
-                // if (total_steps % 1_000 == 0) try agent.updateTargetNetwork(tau);
-                // if (total_steps % 1_000 == 0) try agent.updateTargetNetwork(tau);
                 try agent.updateTargetNetwork(tau);
+                agent.policy_net.eval(); // shouldnt matter
             }
             total_steps += 1;
-            // if (step_result.done > 0) try agent.updateTargetNetwork(tau);
             _ = im_pool.reset(.retain_capacity);
+            if (total_steps % 10_000 == 0) {
+                std.debug.print("\n\nSaving model...\n", .{});
+                try zg.saveModelToFile(T, agent.policy_net.model, "policy_net.json", allocator);
+            }
             if (step_result.done > 0 or steps >= max_steps) break;
         }
-        // if (agent.replay_buffer.size > 1_000) {
-        //     loss_sum += try agent.train(im_alloc);
-        //     try agent.updateTargetNetwork(tau);
-        //     loss_count += 1;
-        // }
         const avg_action: T = action_sum / steps;
         total_rewards[episode] = total_reward;
 

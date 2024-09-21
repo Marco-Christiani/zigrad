@@ -235,11 +235,13 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             return loss.get(&.{0});
         }
 
+        // Direct straightforward dqn train step
         pub fn train(self: *Self, allocator: std.mem.Allocator) !T {
             const debug = false;
             const bs = 128;
-            var batch = try self.replay_buffer.sample(bs);
-            defer batch.deinit(allocator);
+            var bbatch = try self.replay_buffer.sample(bs);
+            defer bbatch.deinit(allocator);
+            var batch = bbatch.slice();
 
             // Flatten the batch states and next_states
             var states_flat = try allocator.alloc(T, bs * 4);
@@ -255,11 +257,16 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
                 @memcpy(next_states_flat[i * 4 .. (i + 1) * 4], &next_state);
             }
 
-            const states = try NDTensor(T).init(states_flat, &[_]usize{ bs, 4 }, true, allocator);
-            const actions = try NDTensor(usize).init(batch.items(.action), &[_]usize{ bs, 1 }, true, allocator);
+            const states = try NDTensor(T).init(states_flat, &[_]usize{ bs, 4 }, false, allocator);
+            const actions = try NDTensor(usize).init(batch.items(.action), &[_]usize{ bs, 1 }, false, allocator);
             const next_states = try NDTensor(T).init(next_states_flat, &[_]usize{ bs, 4 }, false, allocator);
-            const rewards = try NDTensor(T).init(batch.items(.reward), &[_]usize{bs}, true, allocator);
-            const dones = try NDTensor(T).init(batch.items(.done), &[_]usize{bs}, true, allocator);
+            const rewards = try NDTensor(T).init(batch.items(.reward), &[_]usize{bs}, false, allocator);
+            const dones = try NDTensor(T).init(batch.items(.done), &[_]usize{bs}, false, allocator);
+            _ = states.setLabel("states");
+            _ = actions.setLabel("actions");
+            _ = next_states.setLabel("next_states");
+            _ = rewards.setLabel("rewards");
+            _ = dones.setLabel("dones");
 
             defer {
                 states.deinit();
@@ -268,9 +275,12 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
                 rewards.deinit();
                 dones.deinit();
             }
+            zg.rt_grad_enabled = false;
             const all_next_q_values = try self.target_net.forward(next_states, allocator);
+            _ = all_next_q_values.setLabel("all_next_q_values");
             zg.rt_grad_enabled = true;
             const all_q_values = try self.policy_net.forward(states, allocator);
+            _ = all_q_values.setLabel("all_q_values");
 
             defer {
                 all_q_values.deinit();
@@ -279,27 +289,25 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             const q_values = try all_q_values.gather(allocator, .{ .indices = actions, .dim = 1 });
             defer q_values.deinit();
             _ = q_values.setLabel("q_values");
-            // var q_values = try NDTensor(T).empty(&[_]usize{bs}, true, allocator);
-            // defer q_values.deinit();
             zg.rt_grad_enabled = false;
 
             var target_q_values = try NDTensor(T).empty(&[_]usize{bs}, false, allocator);
             defer target_q_values.deinit();
+            _ = target_q_values.setLabel("target_q_values");
 
             for (0..bs) |i| {
-                const action = actions.get(&.{ i, 0 });
-                const reward = rewards.get(&.{i});
-                const done = dones.get(&.{i});
-                // std.debug.print("all_next_q_values.shape={d}\n", .{all_next_q_values.data.shape.shape});
+                const action = actions.data.data[i];
+                const reward = rewards.data.data[i];
+                const done = dones.data.data[i];
                 const next_q_value_0 = all_next_q_values.get(&.{ i, 0 });
                 const next_q_value_1 = all_next_q_values.get(&.{ i, 1 });
                 const max_next_q = @max(next_q_value_0, next_q_value_1);
+                // max_next_q = @max(@min(max_next_q, 100.0), -100.0);
 
-                var target_q: T = if (done == 0) reward + self.gamma * max_next_q else reward;
+                const target_q: T = if (done == 0) reward + self.gamma * max_next_q else reward;
 
                 // update
                 std.debug.assert(action == 0 or action == 1);
-                target_q = @max(@min(target_q, 5.0), -5.0);
 
                 try target_q_values.set(&.{i}, target_q);
                 // try q_values.set(&.{i}, all_q_values.get(&.{ i, action }));
@@ -324,6 +332,26 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             defer loss.deinit();
             std.debug.assert(loss.data.size() == 1);
             if (debug) std.debug.print("Loss: {d:.4} ", .{loss.data.data[0]});
+
+            // Debug output
+            const should_print = false;
+            if (should_print) {
+                const s1 = try q_values.data.sum(allocator);
+                defer s1.deinit(allocator);
+                const s2 = try target_q_values.data.sum(allocator);
+                defer s2.deinit(allocator);
+                std.debug.print("Q-values: min={d:.4} max={d:.4} mean={d:.4}\n", .{
+                    std.mem.min(T, q_values.data.data),
+                    std.mem.max(T, q_values.data.data),
+                    s1.get(&.{0}) / @as(T, @floatFromInt(q_values.data.data.len)),
+                });
+                std.debug.print("Target Q-values: min={d:.4} max={d:.4} mean={d:.4}\n", .{
+                    std.mem.min(T, target_q_values.data.data),
+                    std.mem.max(T, target_q_values.data.data),
+                    s2.get(&.{0}) / @as(T, @floatFromInt(target_q_values.data.data.len)),
+                });
+                std.debug.print("Loss: {d:.4}\n", .{loss.get(&.{0})});
+            }
             self.policy_net.zeroGrad();
             loss.grad.?.fill(1.0);
 
@@ -332,6 +360,10 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             const params = self.policy_net.params;
             try self.optimizer.step(params);
             const loss_value = loss.get(&.{0});
+
+            // try zg.utils.renderD2(loss, zg.utils.PrintOptions.plain, allocator, "/tmp/dqngraph.svg");
+            // try zg.utils.sesame("/tmp/dqngraph.svg", allocator);
+
             return loss_value;
         }
     };
