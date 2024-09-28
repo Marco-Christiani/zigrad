@@ -2,6 +2,7 @@ const std = @import("std");
 const zg = @import("root.zig");
 const settings = zg.settings;
 const log = std.log.scoped(.zg_graphmanager);
+const tracy = @import("tracy");
 
 /// Manages the overall graph, allows for a more memory efficient abstraction
 /// where the data structures used for traversing the graph during backprop
@@ -48,22 +49,22 @@ pub fn GraphManager(comptime T: type) type {
 
         // Must init grad on root node before backprop
         pub fn backward(self: *Self, node: *const T, alloc: std.mem.Allocator) !void {
-            log.debug("BEGIN BWD", .{});
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
+
+            const topo_zone = tracy.initZone(@src(), .{ .name = "GraphManager/topo" });
             self.topo(node);
+            topo_zone.deinit();
+
             const nodes = self.sorted_nodes.items;
+
+            const grad_loop_zone = tracy.initZone(@src(), .{ .name = "GraphManager/grad_loop_zone" });
             for (0..nodes.len) |i| {
+                const grad_loop_inner_zone = tracy.initZone(@src(), .{ .name = "GraphManager/grad_loop_zone/inner" });
+                defer grad_loop_inner_zone.deinit();
                 var curr_node = nodes[nodes.len - i - 1];
                 if (curr_node.requiresGrad()) {
-                    log.debug("backward: {?s}", .{curr_node.label});
                     try curr_node.backward(alloc);
-                    log.debug("backprop {?s} grad norm is {d} max: {d} min: {d}", .{
-                        curr_node.label,
-                        curr_node.grad.?.l2_norm(),
-                        std.mem.max(@TypeOf(curr_node.data.data[0]), curr_node.grad.?.data),
-                        std.mem.min(@TypeOf(curr_node.data.data[0]), curr_node.grad.?.data),
-                    });
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children
                     if (!curr_node.acquired and self.eager_teardown) @constCast(curr_node).deinit();
@@ -71,6 +72,7 @@ pub fn GraphManager(comptime T: type) type {
                     log.debug("Skipping node {?s}", .{node.label});
                 }
             }
+            grad_loop_zone.deinit();
         }
     };
 }
