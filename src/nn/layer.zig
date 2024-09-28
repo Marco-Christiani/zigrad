@@ -461,11 +461,45 @@ pub fn ReLULayer(comptime T: type) type {
 pub fn FlattenLayer(comptime T: type) type {
     return struct {
         const Self = @This();
+        allocator: std.mem.Allocator,
 
-        pub fn forward(_: *Self, input: *const NDTensor(T), _: std.mem.Allocator) !*NDTensor(T) {
+        pub fn init(allocator: std.mem.Allocator) !*Self {
+            const self = try allocator.create(Self);
+            self.* = .{ .allocator = allocator };
+            return self;
+        }
+
+        pub fn forward(_: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             const batch_dim = input.data.shape.shape[0];
             const other_dims = input.data.shape.shape[1..];
-            return try input.reshape(&.{ batch_dim, prod(other_dims) });
+            const flattened_dim = prod(other_dims);
+
+            // create new shape without allocating new memory for data
+            var new_shape = try fwd_allocator.alloc(usize, 2);
+            new_shape[0] = batch_dim;
+            new_shape[1] = flattened_dim;
+
+            // view of input tensor with new shape
+            const result = try NDTensor(T).createDependent(.{
+                .data = input.data, // Reuse the same data
+                // .op = .FLATTEN,
+                .children = &[_]*const NDTensor(T){input},
+                .label = "flattened",
+                .requires_grad = input.requires_grad,
+                .allocator = fwd_allocator,
+                ._backward = backward,
+            });
+
+            try result.data.shape._reshape(new_shape);
+            if (result.grad) |g| try g._reshape(new_shape);
+
+            return result;
+        }
+
+        fn backward(tensor: NDTensor(T), _: std.mem.Allocator) !void {
+            var input = tensor.children.?[0];
+            try input.grad.?._reshape(input.data.shape.shape);
+            @memcpy(input.grad.?.data, tensor.grad.?.data);
         }
 
         pub fn getParameters(_: *Self) ?[]*NDTensor(T) {
@@ -474,7 +508,9 @@ pub fn FlattenLayer(comptime T: type) type {
 
         pub fn zeroGrad(_: *Self) void {}
 
-        pub fn deinit(_: *Self) void {}
+        pub fn deinit(self: *Self) void {
+            self.allocator.destroy(self);
+        }
 
         pub fn release(_: *Self) void {}
 
@@ -680,6 +716,7 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
     target.acquire();
     defer input.release();
     defer target.release();
+    zg.rt_grad_enabled = true;
 
     for (0..15) |epoch| {
         var start_i: usize = 0;
