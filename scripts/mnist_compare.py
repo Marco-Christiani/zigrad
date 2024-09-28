@@ -8,7 +8,7 @@ class PerformanceParser:
     def __init__(self):
         self.data = {"framework": [], "epoch": [], "batch": [], "loss": [], "ms_per_sample": []}
 
-    def parse_zigrad_log(self, log_file):
+    def parse_log(self, log_file, framework):
         epoch_pattern = re.compile(r"Epoch (\d+): Avg Loss = ([\d.]+)")
         batch_pattern = re.compile(r"train_loss: ([\d.]+) \[(\d+)/\d+\] \[ms/sample: ([\d.]+)\]")
         current_epoch = 0
@@ -20,28 +20,12 @@ class PerformanceParser:
                     continue
                 batch_match = batch_pattern.search(line)
                 if batch_match:
-                    self.data["framework"].append("Zigrad")
+                    self.data["framework"].append(framework)
                     self.data["epoch"].append(current_epoch)
                     self.data["loss"].append(float(batch_match.group(1)))
                     self.data["batch"].append(int(batch_match.group(2)))
                     self.data["ms_per_sample"].append(float(batch_match.group(3)))
                     continue
-
-    def parse_pytorch_csv(self, csv_file, batch_size):
-        df = pd.read_csv(csv_file)
-        loss_df = df[(df["type"] == "metric") & (df["name"] == "loss")]
-        step_df = df[(df["type"] == "duration") & (df["name"] == "step")]
-
-        for _, row in loss_df.iterrows():
-            self.data["framework"].append("PyTorch")
-            self.data["epoch"].append(row["epoch"])
-            self.data["batch"].append(row["batch"])
-            self.data["loss"].append(row["value"])
-
-        for _, row in step_df.iterrows():
-            # s -> ms -> ms/sample
-            ms_per_sample = (row["value"] * 1000) / batch_size
-            self.data["ms_per_sample"].append(ms_per_sample)
 
     def get_dataframe(self):
         return pd.DataFrame(self.data)
@@ -53,7 +37,7 @@ class PerformanceParser:
             framework_df = df[df["framework"] == framework]
             fig.add_trace(
                 go.Scatter(
-                    x=framework_df["epoch"] * len(framework_df["batch"].unique()) + framework_df["batch"],
+                    x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
                     y=framework_df["loss"],
                     mode="lines",
                     name=f"{framework} Loss",
@@ -63,7 +47,7 @@ class PerformanceParser:
             )
             fig.add_trace(
                 go.Scatter(
-                    x=framework_df["epoch"] * len(framework_df["batch"].unique()) + framework_df["batch"],
+                    x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
                     y=framework_df["ms_per_sample"],
                     mode="lines",
                     name=f"{framework} MS/Sample",
@@ -85,9 +69,7 @@ class PerformanceParser:
 
 if __name__ == "__main__":
     parser = PerformanceParser()
-    parser.parse_zigrad_log("/tmp/zigrad_log.txt")
-    parser.parse_pytorch_csv(
-        "/tmp/zg_torch_profile_data.csv", batch_size=64
-    )  # Assuming batch_size=64, adjust if different
+    parser.parse_log("/tmp/zg_mnist_log.txt", "Zigrad")
+    parser.parse_log("/tmp/zg_mnist_torch_log.txt", "PyTorch")
     parser.plot_results()
     parser.print_summary()
