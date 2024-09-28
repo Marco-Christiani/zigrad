@@ -715,22 +715,22 @@ pub fn NDTensor(comptime T: type) type {
                         const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_abt" });
                         defer op_zone.deinit();
                         if (self.children) |children| {
-                            var A = children[0].data;
+                            const A = children[0].data;
                             const B = children[1].data;
 
                             // grad_A = grad_C * B
-                            const grad_A = try self.grad.?.matmul(B, false, false, allocator);
-                            defer grad_A.deinit(allocator);
-                            _ = try children[0].grad.?._add(grad_A);
+                            _ = try self.grad.?._bmm_acc(B, children[0].grad, 1.0, 1.0, false, false, allocator);
 
                             // grad_B = A^T * grad_C
-                            var grad_B = try A.matmul(self.grad.?, true, false, allocator);
-                            defer grad_B.deinit(allocator);
+                            // children[1].grad += grab_B^T
+                            // var grad_B = try A.matmul(self.grad.?, true, false, allocator);
+                            // defer grad_B.deinit(allocator);
+                            // var grad_B_transposed = try grad_B.transpose(allocator);
+                            // defer grad_B_transposed.deinit(allocator);
+                            // _ = try children[1].grad.?._add(grad_B_transposed);
 
-                            var grad_B_transposed = try grad_B.transpose(allocator);
-                            defer grad_B_transposed.deinit(allocator);
-
-                            _ = try children[1].grad.?._add(grad_B_transposed);
+                            // We can fuse into a matmulacc: grab_B^T == (A^T * grad_C)^T == grad_C^T *A
+                            _ = try self.grad.?._bmm_acc(A, children[1].grad, 1.0, 1.0, true, false, allocator);
                         }
                     },
                     .DOT => {
