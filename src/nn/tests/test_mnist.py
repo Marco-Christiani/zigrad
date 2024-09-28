@@ -1,3 +1,4 @@
+import platform
 import time
 from enum import StrEnum, auto
 
@@ -81,6 +82,7 @@ def main(
     print(f"device={device}")
     print(f"n_batches={len(dataloader)}")
     print(f"grad_mode={grad_mode}")
+    print(f"Platform: {platform.system()} {platform.release()} (Python {platform.python_version()})")
 
     model = Model().to(device)
     criterion = nn.CrossEntropyLoss()
