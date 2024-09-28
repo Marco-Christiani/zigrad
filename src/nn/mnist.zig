@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("../root.zig");
+const tracy = @import("tracy");
 
 const Model = zg.Model;
 const MaxPool2DLayer = zg.layer.MaxPool2DLayer;
@@ -58,7 +59,7 @@ const MnistModel = struct {
             .model = try Model(T).init(allocator),
         };
 
-        var reshape = FlattenLayer(T){};
+        var reshape = try FlattenLayer(T).init(allocator);
         var fc1 = try LinearLayer(T).init(allocator, 28 * 28, 128);
         var relu1 = try ReLULayer(T).init(allocator);
         var fc2 = try LinearLayer(T).init(allocator, 128, 64);
@@ -227,10 +228,12 @@ const MnistDataset = struct {
 };
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
+    var backing_fwd_alloc = tracy.TracingAllocator.initNamed("Main Allocator", std.heap.c_allocator);
+
     var acquired_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer acquired_arena.deinit();
 
-    var fw_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var fw_arena = std.heap.ArenaAllocator.init(backing_fwd_alloc.allocator());
     defer fw_arena.deinit();
 
     var bw_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
@@ -243,14 +246,14 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("n params = {}", .{model.countParams()});
 
     log.info("Loading train data...", .{});
-    const batch_size = 64;
+    const batch_size = 128;
     const train_dataset = try MnistDataset.load(std.heap.c_allocator, train_path, batch_size);
     defer train_dataset.deinit();
 
     var trainer = Trainer(T, .ce).init(
         model.model,
         zg.optim.SGD(T){
-            .lr = 0.01,
+            .lr = 0.1,
             .grad_clip_max_norm = 10.0,
             .grad_clip_delta = 1e-6,
             .grad_clip_enabled = false,
@@ -263,6 +266,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
         model.deinit();
     }
 
+    var step_timer = try std.time.Timer.start();
     var timer = try std.time.Timer.start();
     log.info("Training...", .{});
     const num_epochs = 2;
@@ -270,17 +274,18 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop, also val and acc calcs
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
-            timer.reset();
+            tracy.frameMarkNamed("batch");
+            step_timer.reset();
             const loss = try trainer.trainStep(
                 image.setLabel("image_batch"),
                 label.setLabel("label_batch"),
-                bw_arena.allocator(),
                 fw_arena.allocator(),
+                bw_arena.allocator(),
             );
-            const t1 = @as(f64, @floatFromInt(timer.read()));
+            const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
             total_loss += loss.get(&[_]usize{0});
-            log.info("Loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]", .{
+            log.info("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]", .{
                 loss.data.data[0],
                 i,
                 train_dataset.images.len,
@@ -292,27 +297,36 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         log.info("Epoch {d}: Avg Loss = {d:.4}", .{ epoch + 1, avg_loss });
     }
-
-    log.info("Training complete.\n", .{});
+    const train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+    log.info("Training complete ({d} epochs). [{d}ms]", .{ num_epochs, train_time_ms });
 
     // model.model.eval() // TODO: model.eval()
+    zg.rt_grad_enabled = false;
     const train_eval = try evalMnist(fw_arena.allocator(), model, train_dataset);
     const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
-    log.info("Train acc: {d:.2} (n={d})", .{ train_acc * 100, train_eval.n });
+    const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+    log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
 
     log.info("Loading test data...", .{});
     const test_dataset = try MnistDataset.load(std.heap.c_allocator, test_path, batch_size);
     defer test_dataset.deinit();
+    timer.reset();
     const test_eval = try evalMnist(fw_arena.allocator(), model, test_dataset);
+    const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
-    log.info("Test acc: {d:.2} (n={d})", .{ test_acc * 100, test_eval.n });
+    log.info("Test acc: {d:.2} (n={d}) [{d}ms]", .{ test_acc * 100, test_eval.n, eval_test_time_ms });
+    log.info("Train: {d}ms", .{train_time_ms});
+    log.info("Eval train: {d}ms", .{eval_train_time_ms});
+    log.info("Eval test: {d}ms", .{eval_test_time_ms});
 }
 
 fn evalMnist(allocator: std.mem.Allocator, model: MnistModel, dataset: MnistDataset) !struct { correct: f32, n: u32 } {
     // model.model.eval() // TODO: model.eval()
     var n: u32 = 0;
     var correct: f32 = 0;
+    var timer = try std.time.Timer.start();
     for (dataset.images, dataset.labels) |image, label| {
+        timer.reset();
         const output = try model.model.forward(image, allocator);
         const batch_n = try output.data.shape.get(0);
         for (0..batch_n) |j| {
@@ -323,6 +337,9 @@ fn evalMnist(allocator: std.mem.Allocator, model: MnistModel, dataset: MnistData
             correct += if (yh == y) 1 else 0;
             n += 1;
         }
+        const t1 = @as(f64, @floatFromInt(timer.read()));
+        const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_n));
+        log.info("ms/sample: {d}", .{ms_per_sample});
     }
     return .{ .correct = correct, .n = n };
 }
