@@ -1,0 +1,11 @@
+.{
+    .name = "zigrad",
+    .version = "0.0.1",
+    .paths = .{""},
+    .dependencies = .{
+        .tracy = .{
+            .url = "https://github.com/Marco-Christiani/zig-tracy/archive/refs/tags/v0.0.3b.tar.gz",
+            .hash = "1220847a8e1395c15ac39e200227a1f102c5a93be2ef12528d4ff97dd79ce164906a",
+        },
+    },
+}
