@@ -9,6 +9,7 @@ const cross_entropy_loss = zg.loss.softmax_cross_entropy_loss;
 const mse_loss = zg.loss.mse_loss;
 const softmax = zg.loss.softmax;
 const utils = zg.utils;
+const tracy = @import("tracy");
 
 const log = std.log.scoped(.zg_trainer);
 
@@ -56,7 +57,12 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
             log.debug("calling fwd...", .{});
+            const zone = tracy.initZone(@src(), .{ .name = "trainStep" });
+            defer zone.deinit();
+
+            const fwd_zone = tracy.initZone(@src(), .{ .name = "trainStep/fwd" });
             var output = try self.model.forward(input, fwd_allocator);
+            fwd_zone.deinit();
             output.logShape(null);
             target.logShape(null);
             // log.info("output:", .{});
@@ -65,12 +71,16 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             logData("output(1): ", output.data.data[0..10]);
             logData("target: ", target.data.data[0..10]);
             log.debug("calculating loss", .{});
+            const loss_zone = tracy.initZone(@src(), .{ .name = "trainStep/loss" });
             const loss = try lossf(T, output, target, bwd_allocator);
+            loss_zone.deinit();
 
             self.model.zeroGrad();
             loss.grad.?.fill(1.0);
             log.debug("running backward", .{});
+            const bwd_zone = tracy.initZone(@src(), .{ .name = "trainStep/bwd" });
             try self.graph_manager.backward(loss, bwd_allocator);
+            bwd_zone.deinit();
 
             // log.info("rendering", .{});
             // try utils.renderD2(loss, utils.PrintOptions.plain, fwd_allocator, "/tmp/trainergraph.svg");
@@ -78,15 +88,9 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             // try utils.sesame("/tmp/trainergraph.svg", fwd_allocator);
 
             log.debug("updating", .{});
+            const step_zone = tracy.initZone(@src(), .{ .name = "trainStep/step" });
             self.optimizer.step(self.params);
-            for (self.model.getParameters()) |param| {
-                log.debug("param {?s} grad norm is {d} max: {d} min: {d}", .{
-                    param.label,
-                    param.grad.?.l2_norm(),
-                    std.mem.max(std.meta.Child(@TypeOf(param.data.data)), param.grad.?.data),
-                    std.mem.min(std.meta.Child(@TypeOf(param.data.data)), param.grad.?.data),
-                });
-            }
+            step_zone.deinit();
             return loss;
         }
 
