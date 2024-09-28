@@ -33,30 +33,40 @@ class PerformanceParser:
     def plot_results(self):
         df = self.get_dataframe()
         fig = make_subplots(rows=2, cols=1, subplot_titles=("Loss per Batch", "MS per Sample"))
+
         for framework in df["framework"].unique():
             framework_df = df[df["framework"] == framework]
-            fig.add_trace(
-                go.Scatter(
-                    x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
-                    y=framework_df["loss"],
-                    mode="lines",
-                    name=f"{framework} Loss",
-                ),
-                row=1,
-                col=1,
+            loss_fig = go.Figure()
+            ms_per_sample_fig = go.Figure()
+
+            loss_trace = go.Scatter(
+                x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
+                y=framework_df["loss"],
+                mode="lines",
+                name=f"{framework} Loss",
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
-                    y=framework_df["ms_per_sample"],
-                    mode="lines",
-                    name=f"{framework} MS/Sample",
-                ),
-                row=2,
-                col=1,
+            ms_per_sample_trace = go.Scatter(
+                x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
+                y=framework_df["ms_per_sample"],
+                mode="lines",
+                name=f"{framework} MS/Sample",
             )
+
+            # add traces to individual figures
+            loss_fig.add_trace(loss_trace)
+            ms_per_sample_fig.add_trace(ms_per_sample_trace)
+
+            # save individual plots
+            loss_fig.write_html(f"/tmp/{framework}_loss.html")
+            ms_per_sample_fig.write_html(f"/tmp/{framework}_ms_per_sample.html")
+
+            fig.add_trace(loss_trace, row=1, col=1)
+            fig.add_trace(ms_per_sample_trace, row=2, col=1)
+
         fig.update_layout(height=800, width=1000, title_text="Zigrad vs PyTorch Performance")
         fig.show()
+
+        fig.write_html("/tmp/zg_mnist_zg_torch_perf.html")
 
     def print_summary(self):
         df = self.get_dataframe()
