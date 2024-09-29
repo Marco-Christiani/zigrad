@@ -3,5 +3,5 @@ common --enable_bzlmod
 common --enable_platform_specific_config
 # You can configure `/tmp/zig-cache`, or similar, specifically,
 # if you can ensure that the directory exists before the build.
-build:linux --sandbox_add_mount_pair=/tmp
-build:macos --sandbox_add_mount_pair=/var/tmp
+# build:linux --sandbox_add_mount_pair=/tmp
+# build:macos --sandbox_add_mount_pair=/var/tmp

@@ -20,14 +20,15 @@ pub fn build(b: *std.Build) !void {
         },
     });
 
-    // const lib = b.addStaticLibrary(.{
-    //     .name = "zigrad",
-    //     .root_source_file = zigrad_module.root_source_file.?,
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // lib.root_module.addImport("zigrad", zigrad_module);
-    // b.installArtifact(lib);
+    const lib = b.addStaticLibrary(.{
+        .name = "zigrad",
+        .root_source_file = zigrad_module.root_source_file.?,
+        .target = target,
+        .optimize = optimize,
+    });
+    lib.root_module.addImport("zigrad", zigrad_module);
+    link(target, lib);
+    b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
         .name = "zigrad",
@@ -38,7 +39,6 @@ pub fn build(b: *std.Build) !void {
 
     exe.root_module.addImport("zigrad", zigrad_module);
     std.debug.print("target.result.os.tag={}\n", .{target.result.os.tag});
-    // TODO: cblas
     link(target, exe);
     b.installArtifact(exe);
 
@@ -83,8 +83,6 @@ pub fn build(b: *std.Build) !void {
 fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
     switch (target.result.os.tag) {
         .linux => {
-            // exe.addSystemFrameworkPath
-            // exe.linkFramework("cblas");
             exe.linkSystemLibrary("blas");
             exe.linkLibC();
         },
