@@ -41,26 +41,38 @@ genrule(
 )
 
 load("@rules_python//python:defs.bzl", "py_runtime", "py_binary")
-load("@rules_python//python:pip.bzl", "pip_install")
-
-py_runtime(
-    name = "python3_8_runtime",
-    interpreter_path = "/path/to/python3.8/bin/python3",
-    files = [],
-)
-
-pip_install(
-    name = "pip_deps",
-    packages = {
-        "torch": "1.9.0",
-        "numpy": "1.19.2",
-    },
-)
+load("@zg_py_test_deps//:requirements.bzl", "requirement")
 
 py_binary(
     name = "generate_test_data",
-    srcs = ["tests/generate_test_data.py"],
-    main = "tests/generate_test_data.py",
-    runtime = ":python3_8_runtime",
-    deps = [":pip_deps"],
+    srcs = ["scripts/mnist_data.py"],
+    main = "scripts/mnist_data.py",
+    deps = [
+        requirement("torch"),
+        requirement("torchvision"),
+    ],
+)
+
+genrule(
+    name = "mnist_data",
+    outs = [
+        "test_data/zigrad_test_mnist_train_full.csv",
+        "test_data/zigrad_test_mnist_test_full.csv",
+        "test_data/zigrad_test_mnist_train_small.csv",
+        "test_data/zigrad_test_mnist_test_small.csv",
+    ],
+    cmd = "ZG_TEST_DATA_DIR=$(@D)/test_data $(location :generate_test_data)",
+    tools = [":generate_test_data"],
+)
+
+py_binary(
+    name = "mnist_torch",
+    srcs = ["src/nn/tests/test_mnist.py"],
+    main = "src/nn/tests/test_mnist.py",
+    data = [":mnist_data"],
+    env = {"ZG_TEST_DATA_DIR": "./test_data"},
+    deps = [
+      requirement("torch"),
+      requirement("numpy"),
+    ],
 )

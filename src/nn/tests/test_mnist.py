@@ -1,9 +1,11 @@
+import os
 import time
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
 
 
 class SimpleMNISTModel(nn.Module):
@@ -30,11 +32,18 @@ class SimpleMNISTModel(nn.Module):
 
 def load_mnist(filepath, batch_size):
     print(f"Loading data from {filepath}")
-    data = np.loadtxt(filepath, delimiter=",")
+    # data = np.loadtxt(filepath, delimiter=",")
+    data = []
+    with open(filepath, "r") as file:
+        for line in file:
+            data.append([float(value) for value in line.strip().split(",")])
+    data = torch.tensor(data, dtype=torch.float32)
     print(f"Data shape: {data.shape}")
 
     if data.shape[1] != 794:  # 784 pixels + 10 one-hot label
-        raise ValueError(f"Unexpected data shape. Expected 794 columns, got {data.shape[1]}")
+        raise ValueError(
+            f"Unexpected data shape. Expected 794 columns, got {data.shape[1]}"
+        )
 
     images = torch.FloatTensor(data[:, 10:])
     labels = torch.FloatTensor(data[:, :10])  # one-hot labels
@@ -58,7 +67,13 @@ def main(inference: bool, compile: bool):
 
     batch_size = 64
     num_epochs = 2
-    dataloader = load_mnist("/tmp/zigrad_test_mnist_train_full.csv", batch_size)
+    # for e, v in os.environ.items():
+    #     print(e, v)
+    print("MY WD IS", Path().absolute())
+    data_dir = Path(os.environ["ZG_TEST_DATA_DIR"])
+    print("DIR IS", str(data_dir), "ABSOLUTE DIR IS", str(data_dir.absolute()))
+    assert data_dir.exists()
+    dataloader = load_mnist(data_dir / "zigrad_test_mnist_train_full.csv", batch_size)
     print(f"Number of batches: {len(dataloader)}")
     if inference:
         model = model.eval()
@@ -85,7 +100,9 @@ def main(inference: bool, compile: bool):
             dur_ns = time.monotonic_ns() - t0
             dur_ms = dur_ns / ns_per_ms
             durs.append(dur_ns / batch_size)
-            print(f"Loss: {loss.item():.5f} {i/len(dataloader):.2f} [{i}/{len(dataloader)}] [{dur_ms/batch_size}]")
+            print(
+                f"Loss: {loss.item():.5f} {i/len(dataloader):.2f} [{i}/{len(dataloader)}] [{dur_ms/batch_size}]"
+            )
 
         avg_loss = total_loss / len(dataloader)
         edur_ms = (time.monotonic_ns() - et0) / ns_per_ms
@@ -94,14 +111,13 @@ def main(inference: bool, compile: bool):
     durs = durs[1:]  # ignore compilation
     e = time.monotonic_ns()
     print((e - s) / (1000**3))
-    durs = np.array(durs) / ns_per_ms
+    durs = torch.tensor(durs, requires_grad=False) / ns_per_ms
     print(
         f"Done. [{inference=} {compile=}] (mu={durs.mean():.5f} std={durs.std():.5f} min={durs.min():.5f} max={durs.max():.5f} total={durs.sum():.5f})"
     )
 
 
 if __name__ == "__main__":
-    import sys
     import argparse
 
     parser = argparse.ArgumentParser()

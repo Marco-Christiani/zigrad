@@ -4,3 +4,19 @@
 # zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 # zig.toolchain(zig_version = "0.12.0")
 # use_repo(zig, "zig_toolchains") # register toolchain
+
+bazel_dep(name = "rules_python", version = "0.36.0")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "zg_py_test_deps",
+    python_version = "3.12",
+    requirements_lock = "requirements.txt",
+)
+use_repo(pip, "zg_py_test_deps")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.12",
+    is_default = True,
+)
