@@ -131,12 +131,16 @@ const EqualOptions = struct {
 };
 
 pub fn eq(a: Self, b: Self, options: EqualOptions) bool {
-    if (options.strict) return std.mem.eql(usize, a.shape, b.shape);
-    const dims = @max(a.len(), b.len());
+    return eqRaw(a.shape, b.shape, options);
+}
+
+pub fn eqRaw(a: []usize, b: []usize, options: EqualOptions) bool {
+    if (options.strict) return std.mem.eql(usize, a, b);
+    const dims = @max(a.len, b.len);
     var i: usize = 0;
     while (i < dims) : (i += 1) {
-        const dim_a = if (i < a.len()) a.shape[a.shape.len - 1 - i] else 1;
-        const dim_b = if (i < b.len()) b.shape[b.shape.len - 1 - i] else 1;
+        const dim_a = if (i < a.len) a[a.len - 1 - i] else 1;
+        const dim_b = if (i < b.len) b[b.len - 1 - i] else 1;
         if (dim_a != dim_b and dim_a != 1 and dim_b != 1) return false;
     }
     return true;
