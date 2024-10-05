@@ -228,15 +228,15 @@ const MnistDataset = struct {
 };
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
-    var backing_fwd_alloc = tracy.TracingAllocator.initNamed("Main Allocator", std.heap.c_allocator);
+    var backing_fwd_alloc = tracy.TracingAllocator.initNamed("Main Allocator", std.heap.raw_c_allocator);
 
-    var acquired_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var acquired_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer acquired_arena.deinit();
 
     var fw_arena = std.heap.ArenaAllocator.init(backing_fwd_alloc.allocator());
     defer fw_arena.deinit();
 
-    var bw_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var bw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer bw_arena.deinit();
 
     var model = try MnistModel.initSimple(acquired_arena.allocator()); // 109_386 (0.02ms, 91/91)
@@ -246,8 +246,8 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("n params = {}", .{model.countParams()});
 
     log.info("Loading train data...", .{});
-    const batch_size = 128;
-    const train_dataset = try MnistDataset.load(std.heap.c_allocator, train_path, batch_size);
+    const batch_size = 64;
+    const train_dataset = try MnistDataset.load(std.heap.raw_c_allocator, train_path, batch_size);
     defer train_dataset.deinit();
 
     var trainer = Trainer(T, .ce).init(
@@ -269,7 +269,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     var step_timer = try std.time.Timer.start();
     var timer = try std.time.Timer.start();
     log.info("Training...", .{});
-    const num_epochs = 2;
+    const num_epochs = 3;
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop, also val and acc calcs
@@ -308,7 +308,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
 
     log.info("Loading test data...", .{});
-    const test_dataset = try MnistDataset.load(std.heap.c_allocator, test_path, batch_size);
+    const test_dataset = try MnistDataset.load(std.heap.raw_c_allocator, test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
     const test_eval = try evalMnist(fw_arena.allocator(), model, test_dataset);
@@ -349,5 +349,8 @@ pub fn main() !void {
 }
 
 test runMnist {
-    try runMnist("/tmp/zigrad_test_mnist_train_small.csv", "/tmp/zigrad_test_mnist_test_small.csv");
+    runMnist("/tmp/zigrad_test_mnist_train_small.csv", "/tmp/zigrad_test_mnist_test_small.csv") catch |err| switch (err) {
+        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `runMnist` test.", .{@errorName(err)}),
+        else => return err,
+    };
 }

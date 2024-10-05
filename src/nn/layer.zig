@@ -148,7 +148,7 @@ pub fn LinearLayer(comptime T: type) type {
                 if (input.data.shape.len() == 1) { // TODO: realdims is valid logic but likely not fully supported by ndarray
                     break :blk try self.weights.matvec(input, fwd_allocator);
                 } else {
-                    break :blk try self.weights.matmul(input, fwd_allocator, .{ .trans_b = true });
+                    break :blk try self.weights.bmm(input, fwd_allocator, .{ .trans_b = true });
                 }
             };
             _ = result.setLabel("fwd1w");
@@ -264,7 +264,7 @@ pub fn Conv2DLayer(comptime T: type) type {
             try self.weights.data._reshape(&[_]usize{ self.out_channels, self.in_channels * self.kernel_size * self.kernel_size });
 
             // broadcasted mm for batching
-            var output = try self.weights.data.matmul(col, false, false, fwd_allocator);
+            var output = try self.weights.data.bmm(col, false, false, fwd_allocator);
 
             // reshape to 4D
             try output._reshape(&[_]usize{ batch_size, self.out_channels, out_height, out_width });
@@ -318,7 +318,7 @@ pub fn Conv2DLayer(comptime T: type) type {
             try grad_output_copy._reshape(&[_]usize{ out_channels, batch_size * out_height * out_width });
             try col._reshape(&[_]usize{ batch_size * out_height * out_width, self.in_channels * self.kernel_size * self.kernel_size });
 
-            const grad_weights = try grad_output_copy.matmul(col, false, false, allocator);
+            const grad_weights = try grad_output_copy.bmm(col, false, false, allocator);
             defer grad_weights.deinit(allocator);
 
             // grad_weights should be (out_channels, in_channels * kernel_size * kernel_size)
@@ -340,7 +340,7 @@ pub fn Conv2DLayer(comptime T: type) type {
             defer weights_copy.deinit(allocator);
             try weights_copy._reshape(&[_]usize{ out_channels, self.in_channels * self.kernel_size * self.kernel_size });
 
-            const grad_col = try weights_copy.matmul(grad_output_copy, true, false, allocator);
+            const grad_col = try weights_copy.bmm(grad_output_copy, true, false, allocator);
             defer grad_col.deinit(allocator);
 
             const grad_input = try conv_utils.col2im(
@@ -474,11 +474,6 @@ pub fn FlattenLayer(comptime T: type) type {
             const other_dims = input.data.shape.shape[1..];
             const flattened_dim = prod(other_dims);
 
-            // create new shape without allocating new memory for data
-            var new_shape = try fwd_allocator.alloc(usize, 2);
-            new_shape[0] = batch_dim;
-            new_shape[1] = flattened_dim;
-
             // view of input tensor with new shape
             const result = try NDTensor(T).createDependent(.{
                 .data = input.data, // Reuse the same data
@@ -490,7 +485,8 @@ pub fn FlattenLayer(comptime T: type) type {
                 ._backward = backward,
             });
 
-            try result.data.shape._reshape(new_shape);
+            const new_shape = &.{ batch_dim, flattened_dim };
+            try result.data._reshape(new_shape);
             if (result.grad) |g| try g._reshape(new_shape);
 
             return result;
@@ -852,16 +848,15 @@ test "LinearLayer forward and backward" {
     defer arena.deinit();
     const alloc = arena.allocator();
     const T = f32;
-
+    zg.rt_grad_enabled = true;
     // input 2, output 2
     var layer = try LinearLayer(T).init(alloc, 2, 1);
     layer.weights.fill(2);
 
     const input_shape = &[_]usize{ 1, 2 };
-    const input = try NDTensor(T).init(@constCast(&[_]T{ 3, 3 }), input_shape, true, alloc);
-
+    const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, alloc);
     const output = try layer.forward(input, alloc);
-    @memset(output.grad.?.data, 1.0);
+    output.grad.?.fill(1.0);
 
     var gm = GraphManager(NDTensor(T)).init(alloc, .{});
     defer gm.deinit();
