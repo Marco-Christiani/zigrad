@@ -112,26 +112,27 @@ pub fn Layer(comptime T: type) type {
         }
     };
 }
-
+const tracy = @import("tracy");
+const blas = @import("../backend/blas.zig");
 pub fn LinearLayer(comptime T: type) type {
     return struct {
         const Self = @This();
-        const Tensor = NDTensor(T);
-        weights: *Tensor,
-        bias: *Tensor,
+        weights: *NDTensor(T),
+        bias: *NDTensor(T),
         allocator: std.mem.Allocator,
         parameters: [2]*NDTensor(T),
 
-        pub fn init(allocator: std.mem.Allocator, input_size: usize, output_size: usize) !*Self {
-            // TODO: maybe stack bias (benchmark)
-            const weights_shape = [_]usize{ output_size, input_size };
-            const bias_shape = [_]usize{ output_size, 1 };
-            var weights = (try Tensor.empty(&weights_shape, true, allocator)).setLabel("linear_weights");
-            var bias = (try Tensor.empty(&bias_shape, true, allocator)).setLabel("linear_bias");
+        pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !*Self {
+            const weights_shape = [_]usize{ out_features, in_features };
+            const bias_shape = [_]usize{ 1, out_features };
+            var weights = (try NDTensor(T).empty(&weights_shape, true, allocator)).setLabel("linear_weights");
+            var bias = (try NDTensor(T).empty(&bias_shape, true, allocator)).setLabel("linear_bias");
             weights.acquire();
             bias.acquire();
+
             winit.heInit(T, weights);
             bias.fill(0.0);
+
             const self = try allocator.create(Self);
             self.* = Self{
                 .weights = weights,
@@ -141,35 +142,123 @@ pub fn LinearLayer(comptime T: type) type {
             };
             return self;
         }
-
-        pub fn forward(self: *const Self, input: *const Tensor, fwd_allocator: std.mem.Allocator) !*Tensor {
-            input.logShape("linear input ");
-            var result = blk: {
-                if (input.data.shape.len() == 1) { // TODO: realdims is valid logic but likely not fully supported by ndarray
-                    break :blk try self.weights.matvec(input, fwd_allocator);
-                } else {
-                    break :blk try self.weights.bmm(input, fwd_allocator, .{ .trans_b = true });
-                }
-            };
-            _ = result.setLabel("fwd1w");
-            // self.weights.logShape(null);
-            // self.bias.logShape(null);
-            result.logShape("linear mul ");
-            result = (try self.bias.add(result, fwd_allocator)).setLabel("fwd1b");
-            result.logShape("linear add bias ");
-            const rt = try result.transpose();
-            rt.logShape("linear out ");
-            return rt;
+        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            // return try forwardAg1(self, input, fwd_allocator);
+            // return try forwardAg2(self, input, fwd_allocator);
+            return try forwardManual(self, input, fwd_allocator);
         }
 
-        /// Uses autograd
-        pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
-            _ = self;
-            _ = allocator;
+        // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
+        // in the backward for broadcasted bias addition thats not possible if its not tracked in the op graph so theres a
+        // slightly more optimized variant that explicitly handles the broadcast and unbroadcast to fuse ops.
+        pub fn forwardAg1(self: *const Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            // Labels are optional, useful if you want to render a diagram of the computational graph.
+            // To support single samples, just use matvec (see forwardAg2)
+            // (W@X^T + b)^T == X@W^T + b
+            return (try (try input.bmm(
+                self.weights,
+                fwd_allocator,
+                .{ .trans_b = true },
+            )).setLabel("lin_fwd1").add(self.bias, fwd_allocator)).setLabel("lin_fwd2");
+        }
+
+        // Same as the other autograd forward, but we support single 1d samples as well.
+        pub fn forwardAg2(self: *const Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            var result =
+                if (input.data.shape.len() == 1)
+                try self.weights.matvec(input, fwd_allocator)
+            else
+                try input.bmm(self.weights, fwd_allocator, .{ .trans_b = true });
+            return (try self.bias.add(result.setLabel("lin_fwd1"), fwd_allocator)).setLabel("lin_fwd2");
+        }
+
+        // Implement the forward and backward passes manually. The only benefit to this is not paying the cost of
+        // Zigrad figuring out the broadcast and unbroadcasting logic on the fly. This should highlight how little
+        // overhead Zigrad's abstractions are
+        pub fn forwardManual(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            const zone1 = tracy.initZone(@src(), .{ .name = "linear_fwd" });
+            defer zone1.deinit();
+            const batch_size = if (input.data.shape.len() > 1) try input.data.shape.get(0) else 1;
+            const out_features = self.weights.data.shape.shape[0];
+
+            const zone2 = tracy.initZone(@src(), .{ .name = "linear_fwd_tile_bias" });
+            var result_nd = try NDArray(T).empty(&[_]usize{ batch_size, out_features }, fwd_allocator);
+            for (0..batch_size) |i| {
+                const row_start = i * out_features;
+                const row_end = (i + 1) * out_features;
+                @memcpy(result_nd.data[row_start..row_end], self.bias.data.data);
+            }
+            zone2.deinit();
+
+            _ = try input.data._bmmAcc(
+                self.weights.data,
+                result_nd,
+                1.0,
+                1.0,
+                false,
+                true,
+                fwd_allocator,
+            );
+
+            return try NDTensor(T).createDependent(.{
+                .data = result_nd,
+                .children = &[_]*const NDTensor(T){ input, self.weights, self.bias },
+                .requires_grad = input.requires_grad or self.weights.requires_grad or self.bias.requires_grad,
+                .allocator = fwd_allocator,
+                ._backward = backwardManual, // Hook up the custom backward function
+                ._backward_ctx = self,
+            });
+        }
+
+        fn backwardManual(tensor: NDTensor(T), allocator: std.mem.Allocator) !void {
+            const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
+            const grad_output = tensor.grad orelse return error.NoGradient;
+            const input = tensor.children.?[0];
+
+            const batch_size = try grad_output.shape.get(0);
+            const out_features = try grad_output.shape.get(1);
+
+            const grad_W = self.weights.grad orelse return error.NoGradient;
+            const grad_B = self.bias.grad orelse return error.NoGradient;
+            const grad_input = input.grad orelse return error.NoGradient;
+
+            // weights grad
+            _ = try grad_output._bmmAcc(
+                input.data,
+                grad_W,
+                1.0,
+                1.0,
+                true, // grad_output^T * input
+                false,
+                allocator,
+            );
+
+            const n = out_features;
+            const incx: usize = 1;
+            const incy: usize = 1;
+            // grad_B with the first batch
+            blas.blas_axpy(T, n, 1.0, grad_output.data, incx, grad_B.data, incy);
+
+            // sum over the remaining batches
+            for (1..batch_size) |i| {
+                const offset = i * out_features;
+                blas.blas_axpy(T, n, 1.0, grad_output.data[offset..], incx, grad_B.data, incy);
+            }
+
+            // input gradient
+            _ = try grad_output._bmmAcc(
+                self.weights.data,
+                grad_input,
+                1.0,
+                1.0,
+                false, // grad_output * weights^T
+                false,
+                allocator,
+            );
         }
 
         pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
-            return @constCast(&self.parameters);
+            return &self.parameters;
         }
 
         pub fn zeroGrad(self: *Self) void {
@@ -182,10 +271,9 @@ pub fn LinearLayer(comptime T: type) type {
             self.weights.deinit();
             self.bias.deinit();
             self.allocator.destroy(self);
-            self.* = undefined;
         }
 
-        fn release(self: *Self) void {
+        pub fn release(self: *Self) void {
             self.weights.release();
             self.bias.release();
         }
@@ -195,7 +283,89 @@ pub fn LinearLayer(comptime T: type) type {
         }
     };
 }
-
+// pub fn LinearLayer(comptime T: type) type {
+//     return struct {
+//         const Self = @This();
+//         const Tensor = NDTensor(T);
+//         weights: *Tensor,
+//         bias: *Tensor,
+//         allocator: std.mem.Allocator,
+//         parameters: [2]*NDTensor(T),
+//
+//         pub fn init(allocator: std.mem.Allocator, input_size: usize, output_size: usize) !*Self {
+//             // TODO: maybe stack bias (benchmark)
+//             const weights_shape = [_]usize{ output_size, input_size };
+//             const bias_shape = [_]usize{ output_size, 1 };
+//             var weights = (try Tensor.empty(&weights_shape, true, allocator)).setLabel("linear_weights");
+//             var bias = (try Tensor.empty(&bias_shape, true, allocator)).setLabel("linear_bias");
+//             weights.acquire();
+//             bias.acquire();
+//             winit.heInit(T, weights);
+//             bias.fill(0.0);
+//             const self = try allocator.create(Self);
+//             self.* = Self{
+//                 .weights = weights,
+//                 .bias = bias,
+//                 .parameters = [_]*NDTensor(T){ weights, bias },
+//                 .allocator = allocator,
+//             };
+//             return self;
+//         }
+//
+//         pub fn forward(self: *const Self, input: *const Tensor, fwd_allocator: std.mem.Allocator) !*Tensor {
+//             input.logShape("linear input ");
+//             var result = blk: {
+//                 if (input.data.shape.len() == 1) { // TODO: realdims is valid logic but likely not fully supported by ndarray
+//                     break :blk try self.weights.matvec(input, fwd_allocator);
+//                 } else {
+//                     break :blk try self.weights.bmm(input, fwd_allocator, .{ .trans_b = true });
+//                 }
+//             };
+//             _ = result.setLabel("fwd1w");
+//             // self.weights.logShape(null);
+//             // self.bias.logShape(null);
+//             result.logShape("linear mul ");
+//             result = (try self.bias.add(result, fwd_allocator)).setLabel("fwd1b");
+//             result.logShape("linear add bias ");
+//             const rt = try result.transpose();
+//             rt.logShape("linear out ");
+//             return rt;
+//         }
+//
+//         /// Uses autograd
+//         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
+//             _ = self;
+//             _ = allocator;
+//         }
+//
+//         pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
+//             return @constCast(&self.parameters);
+//         }
+//
+//         pub fn zeroGrad(self: *Self) void {
+//             self.weights.grad.?.fill(0);
+//             self.bias.grad.?.fill(0);
+//         }
+//
+//         pub fn deinit(self: *Self) void {
+//             self.release();
+//             self.weights.deinit();
+//             self.bias.deinit();
+//             self.allocator.destroy(self);
+//             self.* = undefined;
+//         }
+//
+//         fn release(self: *Self) void {
+//             self.weights.release();
+//             self.bias.release();
+//         }
+//
+//         pub fn asLayer(self: *Self) Layer(T) {
+//             return Layer(T).init(self);
+//         }
+//     };
+// }
+//
 pub fn Conv2DLayer(comptime T: type) type {
     return struct {
         const Self = @This();
