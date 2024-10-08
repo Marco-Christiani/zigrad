@@ -58,7 +58,9 @@ class PerformanceParser:
         self.metadata[framework] = metadata
 
     def get_dataframe(self):
-        return pd.DataFrame(self.data)
+        df = pd.DataFrame(self.data)
+        # discard slowest time to give pytorch an advantage (tracing) and keep torch from skewing the plot
+        return df.drop(index=df['ms_per_sample'].idxmax())
 
     def plot_results(self):
         df = self.get_dataframe()
@@ -76,10 +78,10 @@ class PerformanceParser:
                 mode="lines",
                 name=f"{framework} loss",
             )
-            ms_per_sample_trace = go.Scatter(
-                x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
-                y=framework_df["ms_per_sample"],
-                mode="lines",
+            ms_per_sample_trace = go.Histogram(
+                # x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
+                x=framework_df["ms_per_sample"],
+                # mode="lines",
                 name=f"{framework} ms/sample",
             )
 
