@@ -256,12 +256,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn getStride(self: Self, dim: usize) !usize {
             if (dim >= self.shape.len()) return error.DimOutOfBounds;
-            var s: usize = 1;
-            var i: usize = dim + 1;
-            while (i < self.shape.len()) : (i += 1) {
-                s *= self.shape.shape[i];
-            }
-            return s;
+            return self.shape.strides[dim];
         }
 
         /// Element-wise addition
@@ -461,7 +456,10 @@ pub fn NDArray(comptime T: type) type {
             const n_batches = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
             var result: *Self = blk: {
                 if (accumulator) |acc| {
-                    if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) return error.IncompatibleAccumulatorShape;
+                    if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) {
+                        log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
+                        return error.IncompatibleAccumulatorShape;
+                    }
                     break :blk acc;
                 } else break :blk try Self.zeros(output_shape, allocator);
             };
