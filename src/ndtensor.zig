@@ -463,6 +463,7 @@ pub fn NDTensor(comptime T: type) type {
 
         pub const MmOptions = struct { trans_a: bool = false, trans_b: bool = false };
 
+        /// TODO: this should proxy to bmmAcc
         /// Matrix multiplication. COM.
         pub fn bmm(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
             const result = try createDependent(.{
@@ -473,6 +474,76 @@ pub fn NDTensor(comptime T: type) type {
             });
             result.op = if (!opts.trans_a and !opts.trans_b) .MATMUL_AB else if (opts.trans_a and !opts.trans_b) .MATMUL_AtB else if (!opts.trans_a and opts.trans_b) .MATMUL_ABt else .MATMUL_AtBt;
             return result;
+        }
+
+        pub const MmAccOptions = struct { trans_a: bool = false, trans_b: bool = false, alpha: T = 1.0, beta: T = 1.0 };
+
+        /// Matrix multiplication w accumulation. COM, output is written to directly.
+        pub fn bmmAcc(
+            self: *const NDTensor(T),
+            other: *const NDTensor(T),
+            output: *NDTensor(T),
+            allocator: std.mem.Allocator,
+            opts: MmAccOptions,
+        ) !void {
+            _ = try self.data._bmmAcc(
+                other.data,
+                output.data,
+                opts.alpha,
+                opts.beta,
+                opts.trans_a,
+                opts.trans_b,
+                allocator,
+            );
+
+            const requires_grad = zg.rt_grad_enabled and (self.requires_grad or other.requires_grad or output.requires_grad);
+            if (requires_grad) {
+                const ctx = try allocator.create(MmAccOptions);
+                ctx.* = opts;
+                output.children = try allocator.dupe(*const NDTensor(T), &[_]*const NDTensor(T){ self, other });
+                output._backward = bw_bmmAcc;
+                output._backward_ctx = ctx;
+                output.requires_grad = true;
+            }
+        }
+
+        // TODO: WIP!
+        fn bw_bmmAcc(
+            self: NDTensor(T),
+            allocator: std.mem.Allocator,
+        ) !void {
+            const grad_C = self.grad orelse return error.NoGradient;
+            const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
+            const children = self.children orelse return error.NoChildren;
+
+            const A = children[0].data; // Shape: (..., m, k)
+            const B = children[1].data; // Shape: (..., k, n)
+
+            // Gradient w.r.t A: grad_A += grad_C * B^T (or B depending on transpose settings)
+            if (children[0].grad) |grad_A| {
+                _ = try grad_C._bmmAcc(
+                    B,
+                    grad_A,
+                    opts.alpha, // Gradient scale factor
+                    1.0, // Accumulate into grad_A
+                    opts.trans_a, // Follow the original forward options for transposes
+                    opts.trans_b, // Invert transpose of B to reverse the operation);
+                    allocator,
+                );
+            }
+
+            // Gradient w.r.t B: grad_B += A^T * grad_C (or A depending on transpose settings)
+            if (children[1].grad) |grad_B| {
+                _ = try A._bmmAcc(
+                    grad_C,
+                    grad_B,
+                    opts.alpha, // Gradient scale factor
+                    1.0, // Accumulate into grad_B
+                    !opts.trans_a, // Invert transpose of A to reverse the operation
+                    opts.trans_b, // Follow the original forward options for transposes
+                    allocator,
+                );
+            }
         }
 
         /// Dot product of two tensors. COM.
