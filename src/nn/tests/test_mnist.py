@@ -10,17 +10,27 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, variant="simple"):
         super().__init__()
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(28 * 28, 128)
+        if variant == "simple":
+            dim_fc1 = (784, 128)
+            dim_fc2 = (128, 64)
+            dim_fc3 = (64, 10)
+        elif variant == "simple2":
+            dim_fc1 = (784, 784)
+            dim_fc2 = (784, 128)
+            dim_fc3 = (128, 10)
+        else:
+            raise ValueError("Invalid variant")
 
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(*dim_fc1)
         torch.nn.init.kaiming_normal_(self.fc1.weight)
         self.relu1 = nn.ReLU()
-        self.fc2 = nn.Linear(128, 64)
+        self.fc2 = nn.Linear(*dim_fc2)
         torch.nn.init.kaiming_normal_(self.fc2.weight)
         self.relu2 = nn.ReLU()
-        self.fc3 = nn.Linear(64, 10)
+        self.fc3 = nn.Linear(*dim_fc3)
         torch.nn.init.kaiming_normal_(self.fc3.weight)
 
     def forward(self, x):
@@ -72,6 +82,7 @@ def main(
     learning_rate: float = 0.1,
     device: str = "cpu",
     grad_mode: str = "default",
+    model_variant: str = "simple",
 ):
     dataloader = load_mnist("/tmp/zigrad_test_mnist_train_full.csv", batch_size)
     print(f"train={train}")
@@ -84,7 +95,7 @@ def main(
     print(f"grad_mode={grad_mode}")
     print(f"Platform: {platform.system()} {platform.release()} (Python {platform.python_version()})")
 
-    model = Model().to(device)
+    model = Model(model_variant).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=learning_rate)
 
@@ -151,6 +162,13 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training.")
     parser.add_argument("--num_epochs", type=int, default=2, help="Number of epochs.")
     parser.add_argument("--learning_rate", type=float, default=0.1, help="Learning rate.")
+    parser.add_argument(
+        "--model_variant",
+        type=str,
+        choices=["simple", "simple2"],
+        default="simple",
+        help="Which model arch to use.",
+    )
 
     args = parser.parse_args()
 
@@ -162,4 +180,5 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         device=args.device,
         grad_mode=args.grad_mode,
+        model_variant=args.model_variant,
     )
