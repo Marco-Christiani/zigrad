@@ -56,23 +56,15 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             fwd_allocator: std.mem.Allocator,
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
-            log.debug("calling fwd...", .{});
             const zone = tracy.initZone(@src(), .{ .name = "trainStep" });
             defer zone.deinit();
 
             const fwd_zone = tracy.initZone(@src(), .{ .name = "trainStep/fwd" });
-            var output = try self.model.forward(input, fwd_allocator);
+            const output = try self.model.forward(input, fwd_allocator);
             fwd_zone.deinit();
-            output.logShape(null);
-            target.logShape(null);
-            // log.info("output:", .{});
-            // output.print();
 
-            logData("output(1): ", output.data.data[0..10]);
-            logData("target: ", target.data.data[0..10]);
-            log.debug("calculating loss", .{});
             const loss_zone = tracy.initZone(@src(), .{ .name = "trainStep/loss" });
-            const loss = try lossf(T, output, target, bwd_allocator);
+            const loss = try lossf(T, output, target, fwd_allocator);
             loss_zone.deinit();
 
             self.model.zeroGrad();
@@ -87,7 +79,6 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             // log.info("done", .{});
             // try utils.sesame("/tmp/trainergraph.svg", fwd_allocator);
 
-            log.debug("updating", .{});
             const step_zone = tracy.initZone(@src(), .{ .name = "trainStep/step" });
             self.optimizer.step(self.params);
             step_zone.deinit();
