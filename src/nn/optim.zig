@@ -56,12 +56,10 @@ pub fn SGD(comptime T: type) type {
                 .delta = self.grad_clip_delta,
             });
 
-            // lol. go to bed.
             for (params) |param| {
-                // param.grad.?._scale(self.lr);
-                // _ = param.data._sub(param.grad.?) catch unreachable;
-                for (0..param.data.data.len) |j| {
-                    param.data.data[j] -= self.lr * param.grad.?.data[j];
+                for (param.data.data, param.grad.?.data) |*p, *g| {
+                    // param.data.data[j] -= self.lr * param.grad.?.data[j]; // turns out this line is *really* slow, why cant compiler optimize this?
+                    p.* -= self.lr * g.*;
                 }
             }
         }
