@@ -83,3 +83,11 @@ pub fn blas_scale(T: type, alpha: T, x: []T) void {
         else => @compileError("Unsupported type for BLAS scale"),
     }
 }
+
+pub fn blas_axpy(comptime T: type, n: usize, alpha: T, x: []const T, incx: usize, y: []T, incy: usize) void {
+    switch (T) {
+        f32 => c.cblas_saxpy(@intCast(n), alpha, x.ptr, @intCast(incx), y.ptr, @intCast(incy)),
+        f64 => c.cblas_daxpy(@intCast(n), alpha, x.ptr, @intCast(incx), y.ptr, @intCast(incy)),
+        else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
+    }
+}
