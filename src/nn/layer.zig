@@ -277,6 +277,8 @@ pub fn LinearLayer(comptime T: type) type {
         }
     };
 }
+
+/// Unoptimized in every way, this was for proof of concept. TODO: optimize Conv2DLayer
 pub fn Conv2DLayer(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -444,7 +446,7 @@ pub fn Conv2DLayer(comptime T: type) type {
         }
 
         fn getParameters(self: *Self) ?[]*NDTensor(T) {
-            return @constCast(&self.parameters);
+            return &self.parameters;
         }
 
         pub fn zeroGrad(self: *Self) void {
@@ -488,7 +490,6 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         pub fn forward(_: *Self, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-            input.logShape("relu in");
             const output = try input.data.copy(allocator);
             for (output.data) |*e| {
                 e.* = if (e.* > 0) e.* else 0;
@@ -498,7 +499,7 @@ pub fn ReLULayer(comptime T: type) type {
                 .data = output,
                 .children = &[_]*const NDTensor(T){input},
                 .label = "relu_out",
-                .requires_grad = true,
+                .requires_grad = input.requiresGrad(),
                 .allocator = allocator,
                 ._backward = backward,
             });
@@ -506,32 +507,25 @@ pub fn ReLULayer(comptime T: type) type {
 
         fn backward(tensor: NDTensor(T), _: std.mem.Allocator) !void {
             std.debug.assert(tensor.children.?.len == 1);
-            const input = tensor.children.?[0];
-            if (tensor.grad) |g| {
-                const grad_input = input.grad.?;
-                for (grad_input.data, 0..) |*grad_value, i| {
-                    grad_value.* = if (input.data.data[i] > 0) g.data[i] else 0;
-                    // if (input.data.data[i] > 0 and g.data[i] != 0) std.debug.print("panda\t", .{});
-                }
+            const children = tensor.children orelse return error.NoChildren;
+            const grad_t = tensor.grad orelse return error.NoGradient;
+            const input = children[0];
+            for (input.grad.?.data, input.data.data, grad_t.data) |*grad_in, value_in, grad_out| {
+                grad_in.* = if (value_in > 0) grad_out else 0;
             }
         }
 
-        pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
-            _ = self;
+        pub fn getParameters(_: *Self) ?[]*NDTensor(T) {
             return null;
         }
 
-        pub fn zeroGrad(self: *Self) void {
-            _ = self;
-        }
+        pub fn zeroGrad(_: *Self) void {}
 
         pub fn deinit(self: *Self) void {
             self.allocator.destroy(self);
         }
 
-        pub fn release(self: *Self) void {
-            _ = self;
-        }
+        pub fn release(_: *Self) void {}
 
         pub fn asLayer(self: *Self) Layer(T) {
             return Layer(T).init(self);
@@ -694,24 +688,17 @@ pub fn MaxPool2DLayer(comptime T: type) type {
             indices.deinit(allocator);
         }
 
-        pub fn getParameters(self: *Self) ?[]*NDTensor(T) {
-            _ = self;
-            return null; // MaxPool2D has no learnable parameters
+        pub fn getParameters(_: *Self) ?[]*NDTensor(T) {
+            return null;
         }
 
-        pub fn zeroGrad(self: *Self) void {
-            _ = self;
-            // No gradients to zero out
-        }
+        pub fn zeroGrad(_: *Self) void {}
 
         pub fn deinit(self: *Self) void {
             self.allocator.destroy(self);
         }
 
-        pub fn release(self: *Self) void {
-            _ = self;
-            // No tensors to release
-        }
+        pub fn release(_: *Self) void {}
 
         pub fn asLayer(self: *Self) Layer(T) {
             return Layer(T).init(self);
