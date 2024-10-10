@@ -60,7 +60,10 @@ class PerformanceParser:
     def get_dataframe(self):
         df = pd.DataFrame(self.data)
         # discard slowest time to give pytorch an advantage (tracing) and keep torch from skewing the plot
-        return df.drop(index=df['ms_per_sample'].idxmax())
+        torch_times = df["ms_per_sample"][df.framework.str.lower() == "pytorch"]
+        zg_times = df["ms_per_sample"][df.framework.str.lower() == "zigrad"]
+        df = df.drop(index=[torch_times.idxmax(), zg_times.idxmax()])
+        return df
 
     def plot_results(self):
         df = self.get_dataframe()
