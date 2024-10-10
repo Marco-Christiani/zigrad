@@ -20,6 +20,15 @@ pub fn build(b: *std.Build) !void {
         },
     });
 
+    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
+    const tracy = b.dependency("tracy", .{
+        .target = target,
+        .optimize = optimize,
+        .tracy_enable = tracy_enable,
+    });
+
+    zigrad_module.addImport("tracy", tracy.module("tracy"));
+
     // const lib = b.addStaticLibrary(.{
     //     .name = "zigrad",
     //     .root_source_file = zigrad_module.root_source_file.?,
@@ -40,6 +49,7 @@ pub fn build(b: *std.Build) !void {
     std.debug.print("target.result.os.tag={}\n", .{target.result.os.tag});
     // TODO: cblas
     link(target, exe);
+    add_tracy(exe, tracy);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -62,7 +72,7 @@ pub fn build(b: *std.Build) !void {
     // });
     // mnist_exe.root_module.addImport("zigrad", zigrad_module);
     //
-    // mnist_exe.linkFramework("Accelerate");
+    // link(target, mnist_exe);
     // b.installArtifact(mnist_exe);
     // const run_mnist_cmd = b.addRunArtifact(mnist_exe);
     // run_mnist_cmd.step.dependOn(b.getInstallStep());
@@ -76,6 +86,8 @@ pub fn build(b: *std.Build) !void {
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
+    // unit_tests.root_module.addImport("tracy", tracy.module("tracy"));
+    add_tracy(unit_tests, tracy);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 }
@@ -91,4 +103,10 @@ fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
         .macos => exe.linkFramework("Accelerate"),
         else => @panic("Os not supported."),
     }
+}
+
+fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
+    exe.root_module.addImport("tracy", tracy.module("tracy"));
+    exe.linkLibrary(tracy.artifact("tracy"));
+    exe.linkLibCpp();
 }

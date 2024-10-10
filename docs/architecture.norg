@@ -7,7 +7,7 @@ categories: [
   public
 ]
 created: 2024-07-10T23:43:15-0500
-updated: 2024-07-12T17:45:15-0500
+updated: 2024-10-04T15:03:34-0500
 version: 1.1.1
 @end
 
@@ -56,6 +56,8 @@ version: 1.1.1
   A potential solution is to try and hang ops off the tensor namespace (i.e. traits), attaching backwards functions as methods to keep the interface standardized. If possible, anyone could inject an arbitrary op into the autograd system seamlessly.
 
 ** Conclusion
+
+   Update: usingnamespace is likely going away! So some info here may have been based on outdated assumptions.
 
    1. `Function` is not a required abstraction and we should try namespace injection of methods.
    2. `Module` is still a good idea, unless I can think of another way to handle trainables without an abstraction.

@@ -30,12 +30,12 @@ pub fn blas_matvec(T: type, A: []T, X: []T, Y: []T, M: usize, N: usize, alpha: T
 
 ///  Assumes row-major.
 ///  (M, K) x (K, N) = (M, N)
-pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize) void {
+pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
     const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
     const tb = if (trans_b) c.CblasTrans else c.CblasNoTrans;
     switch (T) {
-        f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), 1.0, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), 0.0, C.ptr, @intCast(ldc)),
-        f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), 1.0, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), 0.0, C.ptr, @intCast(ldc)),
+        f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
+        f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
         else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
     }
 }
@@ -81,5 +81,13 @@ pub fn blas_scale(T: type, alpha: T, x: []T) void {
         f32 => c.cblas_sscal(@intCast(x.len), alpha, x.ptr, 1),
         f64 => c.cblas_dscal(@intCast(x.len), alpha, x.ptr, 1),
         else => @compileError("Unsupported type for BLAS scale"),
+    }
+}
+
+pub fn blas_axpy(comptime T: type, n: usize, alpha: T, x: []const T, incx: usize, y: []T, incy: usize) void {
+    switch (T) {
+        f32 => c.cblas_saxpy(@intCast(n), alpha, x.ptr, @intCast(incx), y.ptr, @intCast(incy)),
+        f64 => c.cblas_daxpy(@intCast(n), alpha, x.ptr, @intCast(incx), y.ptr, @intCast(incy)),
+        else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
     }
 }

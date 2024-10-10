@@ -256,17 +256,13 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn getStride(self: Self, dim: usize) !usize {
             if (dim >= self.shape.len()) return error.DimOutOfBounds;
-            var s: usize = 1;
-            var i: usize = dim + 1;
-            while (i < self.shape.len()) : (i += 1) {
-                s *= self.shape.shape[i];
-            }
-            return s;
+            return self.shape.strides[dim];
         }
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else self.shape;
+            // TODO: standardize this shape creation logic elsewhere (its a micro-optimization)
+            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else try self.shape.copy(allocator);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| {
                 values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];
@@ -410,7 +406,11 @@ pub fn NDArray(comptime T: type) type {
 
         /// (...)-Mat-Mat: ND x KD (N,K>2) and broadcastable
         /// Simple dim rules: (M, K) x (K, N) = (M, N)
-        pub fn matmul(self: *const Self, other: *const Self, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
+        pub fn bmm(self: *const Self, other: *const Self, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
+            return try self._bmmAcc(other, null, 1.0, 0.0, trans_a, trans_b, allocator);
+        }
+
+        pub fn _bmmAcc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
             if (self.shape.len() < 2) {
                 try self._reshape(&[_]usize{ 1, try self.shape.get(0) });
             }
@@ -423,7 +423,12 @@ pub fn NDArray(comptime T: type) type {
             const a_batch_dims = if (self.shape.len() > 2) self.shape.shape[0 .. self.shape.len() - 2] else &[_]usize{1};
             const b_batch_dims = if (other.shape.len() > 2) other.shape.shape[0 .. other.shape.len() - 2] else &[_]usize{1};
 
-            const broadcast_batch_dims = try utils.calculateBroadcastedShape(a_batch_dims, b_batch_dims, allocator);
+            // Even if nothing needs broadcasting and we have two 2d inputs, we still get a 3d shape w a batch of 1
+            // in that case, we dont have any extra broadcasted batch dims
+            const broadcast_batch_dims = blk: {
+                if (self.shape.len() == 2 and other.shape.len() == 2) break :blk try allocator.alloc(usize, 0);
+                break :blk try utils.calculateBroadcastedShape(a_batch_dims, b_batch_dims, allocator);
+            };
             defer allocator.free(broadcast_batch_dims);
 
             const a_rows = a_matrix_dims[0];
@@ -441,25 +446,35 @@ pub fn NDArray(comptime T: type) type {
                 });
             }
 
-            const batch_size = utils.prod(broadcast_batch_dims);
-            const output: []T = try allocator.alignedAlloc(T, null, batch_size * M * N);
-            errdefer allocator.free(output);
-
-            var output_shape = try allocator.alloc(usize, broadcast_batch_dims.len + 2);
+            const n_batch_dims = broadcast_batch_dims.len;
+            var output_shape = try allocator.alloc(usize, n_batch_dims + 2);
             defer allocator.free(output_shape);
-            @memcpy(output_shape[0..broadcast_batch_dims.len], broadcast_batch_dims);
-            output_shape[broadcast_batch_dims.len] = M;
-            output_shape[broadcast_batch_dims.len + 1] = N;
+            if (n_batch_dims > 0) @memcpy(output_shape[0..n_batch_dims], broadcast_batch_dims);
+            output_shape[n_batch_dims] = M;
+            output_shape[n_batch_dims + 1] = N;
 
-            const a_batch_size = utils.prod(a_batch_dims);
-            const b_batch_size = utils.prod(b_batch_dims);
+            const n_batches = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
+            var result: *Self = blk: {
+                if (accumulator) |acc| {
+                    if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) {
+                        log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
+                        return error.IncompatibleAccumulatorShape;
+                    }
+                    break :blk acc;
+                } else break :blk try Self.zeros(output_shape, allocator);
+            };
+            errdefer if (accumulator == null) result.deinit(allocator);
+
+            const n_batches_a = utils.prod(a_batch_dims);
+            const n_batches_b = utils.prod(b_batch_dims);
 
             const lda = a_cols;
             const ldb = b_cols;
+            const ldc = N;
 
-            for (0..batch_size) |i| {
-                const a_index = i % a_batch_size;
-                const b_index = i % b_batch_size;
+            for (0..n_batches) |i| {
+                const a_index = i % n_batches_a;
+                const b_index = i % n_batches_b;
 
                 const a_start = a_index * a_rows * a_cols;
                 const b_start = b_index * b_rows * b_cols;
@@ -467,22 +482,9 @@ pub fn NDArray(comptime T: type) type {
 
                 const a_slice = self.data[a_start .. a_start + a_rows * a_cols];
                 const b_slice = other.data[b_start .. b_start + b_rows * b_cols];
-                const out_slice = output[out_start .. out_start + M * N];
+                const out_slice = result.data[out_start .. out_start + M * N];
 
-                blas.blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, N);
-            }
-            var result = try allocator.create(Self);
-            result.* = Self{
-                .data = output,
-                .shape = try Shape.init(output_shape, allocator),
-            };
-            errdefer result.deinit(allocator);
-            // NOTE: squeezing here means an unnecessary allocation and we should optimize this out later since
-            // we mocked an outer batch dim of 1 for the inputs, so the output will have an outer batch dim of 1
-            // but the inputs were both 2x2 so we should return a 2x2, thus squeeze it out
-            if (self.shape.len() == 2 and other.shape.len() == 2) { // FIXME: artifact of failed re-re-factor
-                try result.shape._squeeze();
-                if (result.shape.len() == 1) try result.shape._unsqueeze(); // squeezed 1 too far
+                blas.blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
             }
             return result;
         }
@@ -841,27 +843,170 @@ test "NDArray.matmul" {
     const T = f64;
     const Array = NDArray(T);
 
-    // multiply a 2x2 and a 2x2 to get a 2x2
-    // [[1, 2]  * [[1, 1]  = [[3, 3]
-    //  [0, 1]]    [1, 1]]    [1, 1]]
-    const A1 = try Array.init(@constCast(&[_]T{ 1, 2, 0, 1 }), &[_]usize{ 2, 2 }, alloc);
-    const B1 = try Array.init(@constCast(&[_]T{ 1, 1, 1, 1 }), &[_]usize{ 2, 2 }, alloc);
-    const C1 = try A1.matmul(B1, false, false, alloc);
-    const expected1 = Array.init(&[_]T{ 3, 3, 1, 1 }, &[_]usize{ 2, 2 }, alloc);
-    try std.testing.expectEqualDeep(expected1, C1);
+    // Run a few tests with matching dims and mismatching dims that are broadcastable
+    // 3D batching (1): 1x2x3 and a 1x3x2 to get a 1x2x2
+    // 3D batching (2): 2x2x3 and a 2x3x2 to get a 2x2x2
+    // 3D batching + broadcasting (1): 2x2x3 and a 3x2 to get a 2x2x2
+    // 3D batching + broadcasting (2): 2x2x3 and a 1x3x2 to get a 2x2x2
+    // 4D batching + broadcasting (1): 1x2x2x3 and a 3x2 to get a 1x2x2x2
+    // 4D batching + broadcasting (2): 2x2x2x3 and a 2x3x2 to get a 2x2x2x2
+    // 4D batching + broadcasting (3): 2x2x2x3 and a 2x1x3x2 to get a 2x2x2x2
 
-    const shape1 = &[_]usize{ 2, 3 };
-    const shape2 = &[_]usize{ 3, 2 };
+    // Test 1: 2x2 * 2x2 = 2x2
+    {
+        // multiply a 2x2 and a 2x2 to get a 2x2
+        // [[1, 2]  * [[1, 1]  = [[3, 3]
+        //  [0, 1]]    [1, 1]]    [1, 1]]
+        const A1 = try Array.init(&.{ 1, 2, 0, 1 }, &[_]usize{ 2, 2 }, alloc);
+        const B1 = try Array.init(&.{ 1, 1, 1, 1 }, &[_]usize{ 2, 2 }, alloc);
+        const C1 = try A1.bmm(B1, false, false, alloc);
+        const expected1 = try Array.init(&.{ 3, 3, 1, 1 }, &[_]usize{ 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected1.data, C1.data);
+        try std.testing.expectEqualDeep(expected1.shape.shape, C1.shape.shape);
+        try std.testing.expectEqualDeep(expected1, C1);
+    }
 
-    // multiply a 2x3 and a 3x2 to get a 2x2
-    // [[1, 2, 3]  * [[1, 0]  = [[1, 2]
-    //  [4, 5, 6]]    [0, 1]     [4, 5]]
-    //                [0, 0]]
-    var A2 = try Array.init(@constCast(&[_]T{ 1, 2, 3, 4, 5, 6 }), shape1, alloc);
-    const B2 = try Array.init(@constCast(&[_]T{ 1, 0, 0, 1, 0, 0 }), shape2, alloc);
-    const C2 = try A2.matmul(B2, false, false, alloc);
-    const expected2 = Array.init(&[_]T{ 1, 2, 4, 5 }, &[_]usize{ 2, 2 }, alloc);
-    try std.testing.expectEqualDeep(expected2, C2);
+    // Test 2: 2x3 * 3x2 = 2x2
+    {
+
+        // multiply a 2x3 and a 3x2 to get a 2x2
+        // [[1, 2, 3]  * [[1, 0]  = [[1, 2]
+        //  [4, 5, 6]]    [0, 1]     [4, 5]]
+        //                [0, 0]]
+        const A2 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 2, 3 }, alloc);
+        const B2 = try Array.init(&.{ 1, 0, 0, 1, 0, 0 }, &[_]usize{ 3, 2 }, alloc);
+        const C2 = try A2.bmm(B2, false, false, alloc);
+        const expected2 = try Array.init(&.{ 1, 2, 4, 5 }, &[_]usize{ 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected2.data, C2.data);
+        try std.testing.expectEqualDeep(expected2.shape.shape, C2.shape.shape);
+        try std.testing.expectEqualDeep(expected2, C2);
+    }
+
+    // Test 3: 1x2x3 * 1x3x2 = 1x2x2
+    {
+        const A3 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 2, 3 }, alloc);
+        const B3 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 3, 2 }, alloc);
+        const C3 = try A3.bmm(B3, false, false, alloc);
+        const expected3 = try Array.init(&.{ 22, 28, 49, 64 }, &[_]usize{ 1, 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected3.data, C3.data);
+        try std.testing.expectEqualDeep(expected3.shape.shape, C3.shape.shape);
+        try std.testing.expectEqualDeep(expected3, C3);
+    }
+
+    // Test 4: 2x2x3 * 2x3x2 = 2x2x2
+    {
+        const A4 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, alloc);
+        const B4 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 3, 2 }, alloc);
+        const C4 = try A4.bmm(B4, false, false, alloc);
+        const expected4 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334 }, &[_]usize{ 2, 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected4.data, C4.data);
+        try std.testing.expectEqualDeep(expected4.shape.shape, C4.shape.shape);
+        try std.testing.expectEqualDeep(expected4, C4);
+    }
+
+    // Test 5: 2x2x3 * 3x2 = 2x2x2 (broadcasting)
+    {
+        const A5 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, alloc);
+        const B5 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 3, 2 }, alloc);
+        const C5 = try A5.bmm(B5, false, false, alloc);
+        const expected5 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected5.data, C5.data);
+        try std.testing.expectEqualDeep(expected5.shape.shape, C5.shape.shape);
+        try std.testing.expectEqualDeep(expected5, C5);
+    }
+
+    // Test 6: 2x2x3 * 1x3x2 = 2x2x2 (broadcasting)
+    {
+        const A6 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, alloc);
+        const B6 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 3, 2 }, alloc);
+        const C6 = try A6.bmm(B6, false, false, alloc);
+        const expected6 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected6.data, C6.data);
+        try std.testing.expectEqualDeep(expected6.shape.shape, C6.shape.shape);
+        try std.testing.expectEqualDeep(expected6, C6);
+    }
+
+    // Test 7: 1x2x2x3 * 3x2 = 1x2x2x2 (4D broadcasting)
+    {
+        const A7 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 1, 2, 2, 3 }, alloc);
+        const B7 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 3, 2 }, alloc);
+        const C7 = try A7.bmm(B7, false, false, alloc);
+        const expected7 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 1, 2, 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected7.data, C7.data);
+        try std.testing.expectEqualDeep(expected7.shape.shape, C7.shape.shape);
+        try std.testing.expectEqualDeep(expected7, C7);
+
+        // NOTE: This is different behavior than torch which treats this as a different case in broadcasting
+        const expected7b = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 1, 2, 2 }, alloc);
+        try A7._reshape(&.{ 2, 1, 2, 3 });
+        const C7b = try A7.bmm(B7, false, false, alloc);
+        try std.testing.expectEqualDeep(expected7b.data, C7b.data);
+        try std.testing.expectEqualDeep(expected7b.shape.shape, C7b.shape.shape);
+        try std.testing.expectEqualDeep(expected7b, C7b);
+    }
+
+    // Test 8: 2x2x2x3 * 2x3x2 = 2x2x2x2 (4D broadcasting)
+    {
+        const A8 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 }, &[_]usize{ 2, 2, 2, 3 }, alloc);
+        const B8 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 3, 2 }, alloc);
+        const C8 = try A8.bmm(B8, false, false, alloc);
+        const expected8 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334, 130, 172, 157, 208, 544, 604, 625, 694 }, &[_]usize{ 2, 2, 2, 2 }, alloc);
+        try std.testing.expectEqualDeep(expected8.data, C8.data);
+        try std.testing.expectEqualDeep(expected8.shape.shape, C8.shape.shape);
+        try std.testing.expectEqualDeep(expected8, C8);
+    }
+
+    // Test 9: 2x2x2x3 * 2x1x3x2 = 2x2x2x2 (4D broadcasting)
+    // FIXME: mm edge case pytorch parity, when this works test 7b should break
+    // {
+    //     const A9 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 }, &[_]usize{ 2, 2, 2, 3 }, alloc);
+    //     const B9 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 1, 3, 2 }, alloc);
+    //     const C9 = try A9.matmul(B9, false, false, alloc);
+    //     const expected9 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136, 382, 424, 463, 514, 544, 604, 625, 694 }, &[_]usize{ 2, 2, 2, 2 }, alloc);
+    //     expected9.print();
+    //     C9.print();
+    //     try std.testing.expectEqualDeep(expected9.data, C9.data);
+    //     try std.testing.expectEqualDeep(expected9.shape.shape, C9.shape.shape);
+    //     try std.testing.expectEqualDeep(expected9, C9);
+    // }
+}
+
+test "NDArray.matmul with accumulation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f64;
+    const Array = NDArray(T);
+
+    // Test: 2x2 * 2x2 with accumulation
+    {
+        // A = [[1, 2], [3, 4]]
+        const A = try Array.init(&.{ 1, 2, 3, 4 }, &[_]usize{ 2, 2 }, alloc);
+
+        // B = [[5, 6], [7, 8]]
+        const B = try Array.init(&.{ 5, 6, 7, 8 }, &[_]usize{ 2, 2 }, alloc);
+
+        // C (accumulator) = [[1, 1], [1, 1]]
+        const C = try Array.init(&.{ 1, 1, 1, 1 }, &[_]usize{ 2, 2 }, alloc);
+
+        // Perform C = 2 * A * B + 3 * C
+        const alpha: T = 2.0;
+        const beta: T = 3.0;
+        const result = try A._bmmAcc(B, C, alpha, beta, false, false, alloc);
+
+        // Expected result:
+        // 2 * [[1, 2], [3, 4]] * [[5, 6], [7, 8]] + 3 * [[1, 1], [1, 1]]
+        // = 2 * [[19, 22], [43, 50]] + [[3, 3], [3, 3]]
+        // = [[41, 47], [89, 103]]
+        const expected = try Array.init(&.{ 41, 47, 89, 103 }, &[_]usize{ 2, 2 }, alloc);
+
+        try std.testing.expectEqualDeep(expected.data, result.data);
+        try std.testing.expectEqualDeep(expected.shape.shape, result.shape.shape);
+
+        // Check that C was modified in-place
+        try std.testing.expectEqualDeep(expected.data, C.data);
+        try std.testing.expectEqualDeep(expected.shape.shape, C.shape.shape);
+    }
 }
 
 test "NDArray.matvec" {
@@ -1022,7 +1167,7 @@ pub fn main() !void {
     // multiply a 2x3 and a 3x2 to get a 2x2
     var A = try Array.init(@constCast(&[_]T{ 1, 2, 3, 4, 5, 6 }), shape1, alloc);
     const B = try Array.init(@constCast(&[_]T{ 1, 0, 0, 1, 0, 0 }), shape2, alloc);
-    var C = try A.matmul(B, false, false, alloc);
+    var C = try A.bmm(B, false, false, alloc);
     defer A.deinit(alloc);
     defer B.deinit(alloc);
     defer C.deinit(alloc);
