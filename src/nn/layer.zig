@@ -753,6 +753,7 @@ pub fn main() !void {
     try trainGradAccum(T, data, alloc);
 }
 
+/// An old demo, still works of course but there are way easier and faster ways to do this now.
 fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     const Tensor = NDTensor(T);
     const input_size = 2;
@@ -776,19 +777,11 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
     loss.acquire();
     defer loss.teardown();
     defer loss.release();
-    // this is a trick to avoid reallocating
-    const input = (try Tensor.init(
-        @constCast(&[_]T{0} ** input_size),
-        &[_]usize{ 1, input_size },
-        true,
-        alloc,
-    )).setLabel("input");
-    const target = (try Tensor.init(
-        @constCast(&[_]T{0} ** output_size),
-        &[_]usize{output_size},
-        true,
-        alloc,
-    )).setLabel("target");
+    // used to avoid reallocating
+    const input = try Tensor.empty(&.{ 1, input_size }, true, alloc);
+    input.setLabel("input").fill(0);
+    const target = try Tensor.empty(&.{output_size}, true, alloc);
+    target.setLabel("input").fill(0);
     input.acquire();
     target.acquire();
     defer input.release();
@@ -820,10 +813,10 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
             layer.zeroGrad();
         }
         optimizer.lr *= lr_epoch_decay;
-        std.debug.print("Epoch: {d:<4.4}", .{epoch + 1});
-        std.debug.print("AccLoss: {d:<10.4}\t", .{loss.data.data[0]});
-        std.debug.print("Weights: {d:>6.4}\t", .{layer.weights.data.data});
-        std.debug.print("Bias: {d:.4}\n", .{layer.bias.data.data});
+        log.info("Epoch: {d:<4.4}", .{epoch + 1});
+        log.info("AccLoss: {d:<10.4}\t", .{loss.data.data[0]});
+        log.info("Weights: {d:>6.4}\t", .{layer.weights.data.data});
+        log.info("Bias: {d:.4}\n", .{layer.bias.data.data});
     }
     try std.testing.expectApproxEqAbs(1.5, layer.weights.get(&.{ 0, 0 }), 0.1);
     try std.testing.expectApproxEqAbs(3, layer.weights.get(&.{ 0, 1 }), 0.1);
@@ -831,7 +824,6 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
 }
 
 test "trainGradAccum" {
-    std.debug.print("{s} trainGradAccum {s}\n", .{ "-" ** 5, "-" ** 5 });
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const alloc = arena.allocator();
     defer arena.deinit();
@@ -869,8 +861,10 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     defer alloc.free(params.?);
 
     // this is a trick to avoid reallocating
-    const input = try Tensor.init(@constCast(&[_]T{0} ** (batch_size * input_size)), &[_]usize{ batch_size, input_size }, true, alloc);
-    const target = try Tensor.init(@constCast(&[_]T{0} ** (batch_size * output_size)), &[_]usize{ batch_size, output_size }, true, alloc);
+    const input = try Tensor.empty(&.{ batch_size, input_size }, true, alloc);
+    input.setLabel("input").fill(0);
+    const target = try Tensor.empty(&.{ batch_size, output_size }, true, alloc);
+    target.setLabel("input").fill(0);
     input.acquire();
     target.acquire();
 
