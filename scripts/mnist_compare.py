@@ -54,7 +54,8 @@ class PerformanceParser:
                     self.data["batch"].append(int(batch_match.group(2)))
                     self.data["ms_per_sample"].append(float(batch_match.group(4)))
 
-        metadata["Platform"] = f"{platform.system()} {platform.release()} ({platform.python_version()})"
+        metadata["platform"] = f"{platform.system().lower()}-{platform.release().lower()}"
+        metadata["python"] = platform.python_version()
         self.metadata[framework] = metadata
 
     def get_dataframe(self):
@@ -71,28 +72,46 @@ class PerformanceParser:
 
     def plot_results(self, save_individual=False):
         df = self.get_dataframe()
+        metadata_text = self._format_metadata(self.metadata["PyTorch"])
         fig = make_subplots(
             rows=4,
             cols=1,
             subplot_titles=(
-                "Loss per Batch",
-                "Ms/Sample Distribution",
-                "Ms/Sample",
-                "Speedup Zigrad/PyTorch",
+                f"Speedup Zigrad/PyTorch<br><sub>{metadata_text}</sub>",
+                f"Ms/Sample Distribution<br><sub>{metadata_text}</sub>",
+                f"Ms/Sample<br><sub>{metadata_text}</sub>",
+                f"Loss per Batch<br><sub>{metadata_text}</sub>",
             ),
         )
+
         torch_ms_per_sample = df["ms_per_sample"][df["framework"].str.lower() == "pytorch"]
         zg_ms_per_sample = df["ms_per_sample"][df["framework"].str.lower() == "zigrad"]
+        zg_speedup = torch_ms_per_sample.to_numpy() / zg_ms_per_sample.to_numpy()
+        fig.add_scatter(
+            y=zg_speedup,
+            mode="lines",
+            name=f"Speed ratio",
+            row=1,
+            col=1,
+        )
+
+        for y_value, label in [(1, "No Speedup (1x)"), (2, "2x Speedup"), (3, "3x Speedup")]:
+            fig.add_hline(y=y_value, line_dash="dot", line_color="gray", opacity=0.8, showlegend=False, row=1, col=1)
+            fig.add_annotation(
+                x=0,
+                y=y_value + 0.1,
+                text=label,
+                xref="paper",
+                yref="y",
+                showarrow=False,
+                row=1,
+                col=1,
+                font={"size": 12, "color": "black"},
+                opacity=0.8,
+            )
+
         for framework in df["framework"].unique():
             framework_df = df[df["framework"] == framework]
-
-            # create individual plots
-            loss_scatter = go.Scatter(
-                x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
-                y=framework_df["loss"],
-                mode="lines",
-                name=f"{framework} loss",
-            )
 
             ms_per_sample_hist = go.Histogram(
                 x=framework_df["ms_per_sample"],
@@ -108,71 +127,39 @@ class PerformanceParser:
                 name=f"{framework} ms/sample",
             )
 
+            loss_scatter = go.Scatter(
+                x=framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"],
+                y=framework_df["loss"],
+                mode="lines",
+                name=f"{framework} loss",
+            )
+
             if save_individual:
                 go.Figure(loss_scatter).write_html(f"/tmp/{framework.lower()}_loss.html")
                 go.Figure(ms_per_sample_hist).write_html(f"/tmp/{framework.lower()}_ms_per_sample.html")
                 go.Figure(ms_per_sample_scatter).write_html(f"/tmp/{framework.lower()}_ms_per_sample_scatter.html")
 
-            fig.add_trace(loss_scatter, row=1, col=1)
             fig.add_trace(ms_per_sample_hist, row=2, col=1)
             fig.add_trace(ms_per_sample_scatter, row=3, col=1)
+            fig.add_trace(loss_scatter, row=4, col=1)
 
-            # metadata subtitle
-            metadata_text = self._format_metadata(self.metadata.get(framework, {}))
-            fig.layout.annotations[0].text = f"loss/batch<br><sub>{metadata_text}</sub>"  # type: ignore
-            fig.layout.annotations[1].text = f"ms/sample<br><sub>{metadata_text}</sub>"  # type: ignore
-            fig.layout.annotations[2].text = f"ms/sample<br><sub>{metadata_text}</sub>"  # type: ignore
+        # fig.layout.annotations[1].text += f"<br><sub>{metadata_text}</sub>"  # type: ignore
+        # fig.layout.annotations[2].text += f"ms/sample<br><sub>{metadata_text}</sub>"  # type: ignore
+        # fig.layout.annotations[3].text += f"loss/batch<br><sub>{metadata_text}</sub>"  # type: ignore
 
-        zg_speedup = torch_ms_per_sample.to_numpy() / zg_ms_per_sample.to_numpy() - 1
-
-        # The bars are hard to see if you have a lot of samples
-        # fig.add_bar(
-        #     y=zg_speedup,
-        #     row=4,
-        #     col=1,
-        #     marker_color=["red" if x < 0 else "green" for x in zg_speedup],
-        #     marker_cmid=0,
-        #     marker_cauto=True,
-        #     # marker_cmax=zg_speedup.max(),
-        #     # marker_cmin=zg_speedup.min(),
-        #     marker_colorscale="RdBu_r",
-        #     # offset=0,
-        #     # marker_width=0,
-        # )
-        speedup_range = zg_speedup.max() - zg_speedup.min()
-        zero_offset_pct = abs(zg_speedup.min()) / speedup_range
-        # eps_jitter = 0.01
-        fig.add_scatter(
-            y=zg_speedup,
-            mode="lines",
-            name=f"Speedup",
-            fillgradient=dict(  # noqa: C408
-                colorscale=[
-                    (0, "red"),
-                    (zero_offset_pct * abs(zg_speedup.min()) / 2, "red"),
-                    # (zero_offset_pct * (1 - eps_jitter), "red"),
-                    # (zero_offset_pct, "white"),
-                    (zero_offset_pct * zg_speedup.max() / 2, "darkblue"),
-                    (1, "blue"),
-                ],
-                type="vertical",
-            ),
-            fill="tozeroy",
-            line_width=0,
-            row=4,
-            col=1,
-        )
         fig.update_layout(
-            template="plotly_dark",
             bargap=0,
             bargroupgap=0,
             height=1600,
             width=1000,
-            title_text="Zigrad vs PyTorch Performance",
+            title_text="Zigrad vs PyTorch Performance<br><sub>MNIST Train<br>Model Arch - Simple</sub>",
+            margin_t=200,
+            showlegend=False,
         )
         fig.show()
 
         fig.write_html("/tmp/zg_mnist_zg_torch_perf.html")
+        fig.write_image("/tmp/zg_mnist_zg_torch_perf.png")
 
     def _format_metadata(self, metadata):
         return ", ".join([f"{key}: {value}" for key, value in metadata.items()])
