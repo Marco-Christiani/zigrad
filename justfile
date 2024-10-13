@@ -45,3 +45,9 @@ run_pattern file:
 
 brpu:
   @just (run_pattern "src/nn/utils.zig")
+
+benchmark:
+  python scripts/mnist_data.py
+  python src/nn/tests/test_mnist.py -t=1 --batch_size=64 --num_epochs=3 --model_variant=simple > /tmp/zg_mnist_torch_log.txt
+  just br '-Doptimize=ReleaseFast -Dtracy_enable=false' &> /tmp/zg_mnist_log.txt
+  python scripts/mnist_compare.py
