@@ -171,7 +171,9 @@ class PerformanceParser:
             print(f"\n--- {framework} Summary ---")
             print(f"Metadata: {self._format_metadata(self.metadata.get(framework, {}))}")
             print(f"Avg loss: {framework_df['loss'].mean():.4f}")
+            print(f"Std loss: {framework_df['loss'].std():.4f}")
             print(f"Avg ms/sample: {framework_df['ms_per_sample'].mean():.4f}")
+            print(f"Std ms/sample: {framework_df['ms_per_sample'].std():.4f}")
 
 
 if __name__ == "__main__":

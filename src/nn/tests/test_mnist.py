@@ -40,6 +40,57 @@ class Model(nn.Module):
         return self.fc3(x)
 
 
+class ModelAg(nn.Module):
+    def __init__(self, variant="simple"):
+        super().__init__()
+        if variant == "simple":
+            dim_fc1 = (784, 128)
+            dim_fc2 = (128, 64)
+            dim_fc3 = (64, 10)
+        elif variant == "simple2":
+            dim_fc1 = (784, 784)
+            dim_fc2 = (784, 128)
+            dim_fc3 = (128, 10)
+        else:
+            raise ValueError("Invalid variant")
+
+        # Initialize weights and biases
+        self.w1 = torch.empty(dim_fc1, requires_grad=True)
+        self.b1 = torch.zeros(dim_fc1[1], requires_grad=True)
+        self.w2 = torch.randn(dim_fc2, requires_grad=True)
+        self.b2 = torch.empty(dim_fc2[1], requires_grad=True)
+        self.w3 = torch.randn(dim_fc3, requires_grad=True)
+        self.b3 = torch.empty(dim_fc3[1], requires_grad=True)
+
+        torch.nn.init.kaiming_normal_(self.w1)
+        torch.nn.init.kaiming_normal_(self.w2)
+        torch.nn.init.kaiming_normal_(self.w3)
+
+    def relu(self, x):
+        return torch.clamp(x, min=0)
+
+    def flatten(self, x):
+        return x.view(x.size(0), -1)
+
+    def forward(self, x):
+        x = self.flatten(x)
+
+        # l1
+        x = x @ self.w1 + self.b1
+        x = self.relu(x)
+
+        # l2
+        x = x @ self.w2 + self.b2
+        x = self.relu(x)
+
+        # l3
+        x = x @ self.w3 + self.b3
+        return x
+
+    def parameters(self):
+        return [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3]
+
+
 def load_mnist(filepath, batch_size):
     print(f"Loading data from {filepath}")
     data = np.loadtxt(filepath, delimiter=",")
@@ -83,6 +134,7 @@ def main(
     device: str = "cpu",
     grad_mode: str = "default",
     model_variant: str = "simple",
+    autograd: bool = False,
 ):
     dataloader = load_mnist("/tmp/zigrad_test_mnist_train_full.csv", batch_size)
     print(f"train={train}")
@@ -94,8 +146,7 @@ def main(
     print(f"n_batches={len(dataloader)}")
     print(f"grad_mode={grad_mode}")
     print(f"Platform: {platform.system()} {platform.release()} (Python {platform.python_version()})")
-
-    model = Model(model_variant).to(device)
+    model = ModelAg(model_variant).to(device) if autograd else Model(model_variant).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=learning_rate)
 
@@ -107,6 +158,7 @@ def main(
     profiler = Profiler(len(dataloader))
 
     start_time = time.perf_counter()
+    losses = []
 
     for epoch in range(num_epochs):
         profiler.epoch = epoch
@@ -124,6 +176,7 @@ def main(
 
             outputs = model(images)
             loss = criterion(outputs, labels)
+            losses.append(loss.item())
 
             if train:
                 loss.backward()
@@ -142,6 +195,8 @@ def main(
     total_time_ms = (time.perf_counter() - start_time) * 1000
     print(f"Training complete ({num_epochs} epochs). [{total_time_ms:.2f}ms]")
 
+    print(f"Loss s={np.std(losses):.5} mu={np.mean(losses):.5}")
+
 
 class GradMode(StrEnum):
     default = auto()
@@ -153,8 +208,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", type=bool, default=False, help="Whether to torch.compile().")
-    parser.add_argument("-t", type=bool, default=False, help="Whether to train the model.")
+    parser.add_argument("-c", action="store_true", default=False, help="Whether to torch.compile().")
+    parser.add_argument("-t", action="store_true", default=False, help="Whether to train the model.")
     parser.add_argument("--grad_mode", type=GradMode, default="default", help="Set the PyTorch grad tracking policy.")
     parser.add_argument(
         "--device", type=str, choices=["cpu", "cuda", "mps"], default="cpu", help="Device to use for training."
@@ -169,6 +224,12 @@ if __name__ == "__main__":
         default="simple",
         help="Which model arch to use.",
     )
+    parser.add_argument(
+        "--autograd",
+        action="store_true",
+        default=False,
+        help="Use autograd implementation or dedicated modules.",
+    )
 
     args = parser.parse_args()
 
@@ -181,4 +242,5 @@ if __name__ == "__main__":
         device=args.device,
         grad_mode=args.grad_mode,
         model_variant=args.model_variant,
+        autograd=args.autograd,
     )
