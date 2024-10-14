@@ -17,3 +17,4 @@ zig-out
 *.org
 !docs/architecture.norg
 !docs/roadmap.norg
+!docs/*.png
