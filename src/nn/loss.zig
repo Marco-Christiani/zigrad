@@ -146,20 +146,18 @@ fn _softmax_fwd(T: type, input: *const NDTensor(T), dim: usize, allocator: std.m
             max_val = @max(max_val, result.data.data[idx]);
         }
 
-        // exp sum
-        var sum: T = 0;
+        // log-sum-exp
+        var sum_exp: T = 0;
         for (0..dim_size) |j| {
             const idx = base_idx + j * strides[dim];
-            const exp_val = @exp(result.data.data[idx] - max_val);
-            result.data.data[idx] = exp_val;
-            sum += exp_val;
+            sum_exp += @exp(result.data.data[idx] - max_val);
         }
+        const log_sum_exp = max_val + @log(sum_exp);
 
         // normalize
-        const scale = 1 / sum;
         for (0..dim_size) |j| {
             const idx = base_idx + j * strides[dim];
-            result.data.data[idx] *= scale;
+            result.data.data[idx] = @exp(result.data.data[idx] - log_sum_exp);
         }
     }
     return result;
