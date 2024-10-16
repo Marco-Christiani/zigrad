@@ -143,8 +143,8 @@ pub fn LinearLayer(comptime T: type) type {
             return self;
         }
         pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
-            return try forwardAg(self, input, fwd_allocator);
-            // return try forwardManual(self, input, fwd_allocator);
+            // return try forwardAg(self, input, fwd_allocator);
+            return try forwardManual(self, input, fwd_allocator);
         }
 
         // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
