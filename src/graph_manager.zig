@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("root.zig");
+const zg = @import("zigrad.zig");
 const settings = zg.settings;
 const log = std.log.scoped(.zg_graphmanager);
 const tracy = @import("tracy");

@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const NDArray = zg.NDArray;
 
 pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !*NDArray(T) {

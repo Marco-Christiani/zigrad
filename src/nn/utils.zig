@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 
 const random = zg.random;
 const Op = zg.Op;
@@ -138,16 +138,17 @@ pub fn printD2(
                     .MUL => opts.mul_symbol,
                     .DIV => opts.div_symbol,
                     .SUM => opts.sum_symbol,
-                    .MATMUL_AB, .MATMUL_AtB, .MATMUL_ABt => opts.matmul_symbol,
+                    .MATMUL_AB, .MATMUL_AtB, .MATMUL_ABt, .MATMUL_AtBt => opts.matmul_symbol,
                     .MATVEC => opts.matvec_symbol,
                     .MAX => opts.max_symbol,
                     .EXP => opts.exp_symbol,
                     .RESHAPE => opts.reshape_symbol,
                     else => "?",
+                    // else => if (node._backward) |bwfn| @typeInfo(bwfn),
                 };
                 try writer.print(": {s}\n", .{symbol});
             } else {
-                try writer.print(": {s}\n", .{elem_label});
+                try writer.print("\n", .{});
             }
         }
         for (children) |elem| {
@@ -173,11 +174,31 @@ pub fn renderD2(
     var visited = std.AutoHashMap(*const anyopaque, void).init(allocator);
     defer visited.deinit();
 
+    try d2_code.writer().writeAll(
+        \\vars: {
+        \\  d2-config: {
+        \\    theme-id: 101
+        \\    dark-theme-id: 101
+        \\    pad: 0
+        \\    center: true
+        \\    sketch: false
+        \\    layout-engine: dagre
+        \\  }
+        \\}
+        \\direction: right
+        \\style.fill: transparent
+        \\*.style.stroke: "#F7A41D"
+        \\(* <- *)[*].style.stroke: "#F7A41D"
+        \\
+    );
     log.debug("traversing", .{});
     try printD2(node, opts, d2_code.writer(), &label_gen, &visited);
     log.debug("rendering", .{});
-    const d2filepath = try std.fmt.allocPrint(allocator, "{s}{s}", .{ std.fs.path.stem(output_file), ".d2" });
+    // const d2filepath1 = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(output_file) orelse "", std.fs.path.stem(output_file) });
+    // const d2filepath = try std.fmt.allocPrint(allocator, "{s}{s}", .{ d2filepath1, ".d2" });
+    const d2filepath = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ std.fs.path.dirname(output_file) orelse "", std.fs.path.stem(output_file), ".d2" });
     defer allocator.free(d2filepath);
+    std.debug.print("d2filepath: {s}\n", .{d2filepath});
     const d2file = try std.fs.cwd().createFile(d2filepath, .{});
     defer d2file.close();
 
@@ -185,7 +206,7 @@ pub fn renderD2(
     const args = [_][]const u8{
         "d2",
         "--theme",
-        "200",
+        "101",
         d2filepath,
         output_file,
     };
@@ -243,31 +264,30 @@ pub fn main() !void {
     const child1 = Node{ .label = "child1", .op = .MUL, .children = null };
     const child2 = Node{ .label = "child2", .op = .DIV, .children = null };
     var root = Node{
-        .label = "root",
+        .label = try alloc.dupe(u8, "root"),
         .op = .ADD,
         .children = [2]*const Node{ &child1, &child2 },
     };
+    defer alloc.free(root.label.?);
     try renderD2(&root, PrintOptions.unicode1, alloc, "/tmp/generated1.png");
 
     const shape = &[_]usize{ 2, 3 };
     const Tensor = NDTensor(f32);
 
     var t1 = try Tensor.init(@constCast(&[_]f32{ 1, 2, 3, 4, 5, 6 }), shape, false, alloc);
-    t1.label = "t1";
-    defer t1.deinit(alloc);
+    _ = t1.setLabel("t1");
+    defer t1.deinit();
     var t2 = try Tensor.init(@constCast(&[_]f32{ 10, 20, 30, 40, 50, 60 }), shape, false, alloc);
-    t2.label = "t2";
-    defer t2.deinit(alloc);
+    _ = t2.setLabel("t2");
+    defer t2.deinit();
 
     var t3 = try t1.add(t2, alloc);
-    t3.label = "t3";
-    defer t3.deinit(alloc);
+    _ = t3.setLabel("t3");
+    defer t3.deinit();
 
     try renderD2(t3, PrintOptions.plain, alloc, "/tmp/generated2.png");
     std.log.info("Done.\n", .{});
 
     // try sesame("/tmp/generated1.png", alloc);
     // try sesame("/tmp/generated2.png", alloc);
-    // 2>&1 | rg --color always 'error(gpa)*' 2>&1 | tee /dev/tty | rg --color always --count-matches 'error(gpa)*' 2>&1 | awk '{s+=$1} END {print "Total Matches:", s}'
-    // 2>&1 | rg --passthru --color always 'error(gpa)*' 2>&1 | tee /dev/tty | rg --passthru --color always --count-matches 'error(gpa)*' 2>&1 | awk '{s+=$1} END {print "Total Matches:", s}'
 }

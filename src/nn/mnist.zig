@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const tracy = @import("tracy");
 
 const Model = zg.Model;
@@ -290,6 +290,10 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
                 train_dataset.images.len,
                 ms_per_sample,
             });
+            if (epoch == 0 and i == 0) {
+                try zg.utils.renderD2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph_mnist_simple_ag.svg");
+            }
+
             if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
             if (!fw_arena.reset(.retain_capacity)) log.warn("Issue in fw arena reset", .{});
         }

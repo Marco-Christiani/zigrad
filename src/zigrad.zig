@@ -67,6 +67,19 @@ pub const std_options = std.Options{
     .logFn = logFn,
 };
 
+/// # Welcome to Zigrad
+/// hello world 234 hello world 234
+/// ## Welcome to an h2 w a blank line
+///
+/// Here is some list:
+///   - item 1
+///   - item 2
+///
+/// And an ordered one:
+///  1. fork
+///  2. spoon
+pub const zelcome = null;
+
 // TODO: lib tests, recursive inclusion *in progress*
 test {
     _ = @import("ndarray.zig");
