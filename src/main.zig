@@ -8,7 +8,8 @@ pub const std_options = zg.std_options;
 
 pub fn main() !void {
     std.debug.print("{any}\n", .{zg.settings});
-    try runScalar();
+    // try zg.utils.main();
+    // try runScalar();
     try mnist.main();
 }
 

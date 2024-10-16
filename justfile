@@ -24,7 +24,7 @@ btt:
 btl:
   @just (btest "src/nn/layer.zig")
 
-br opts="":
+br +opts="":
   zig build run {{opts}}
 
 brm:
@@ -49,5 +49,12 @@ brpu:
 benchmark:
   python scripts/mnist_data.py
   python src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple > /tmp/zg_mnist_torch_log.txt
-  just br '-Doptimize=ReleaseFast -Dtracy_enable=false' &> /tmp/zg_mnist_log.txt
+  just br -Doptimize=ReleaseFast -Dtracy_enable=false &> /tmp/zg_mnist_log.txt
   python scripts/mnist_compare.py
+
+d2_bg file:
+  sed -i '' -e 's/fill:#1E1E2E;/fill:none;/g' {{file}}
+
+doc out="docgen":
+  zig build test src/root.zig -femit-docs={{ out }}
+  cd {{ out }} && python -m http.server

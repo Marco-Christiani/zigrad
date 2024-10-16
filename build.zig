@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) !void {
     );
 
     const zigrad_module = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/zigrad.zig"),
         .imports = &.{
             .{ .name = "build_options", .module = build_options_module },
         },
@@ -29,14 +29,16 @@ pub fn build(b: *std.Build) !void {
 
     zigrad_module.addImport("tracy", tracy.module("tracy"));
 
-    // const lib = b.addStaticLibrary(.{
-    //     .name = "zigrad",
-    //     .root_source_file = zigrad_module.root_source_file.?,
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
+    const lib = b.addStaticLibrary(.{
+        .name = "zigrad",
+        .root_source_file = zigrad_module.root_source_file.?,
+        .target = target,
+        .optimize = optimize,
+    });
     // lib.root_module.addImport("zigrad", zigrad_module);
-    // b.installArtifact(lib);
+    link(target, lib);
+    add_tracy(lib, tracy);
+    b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
         .name = "zigrad",
@@ -80,7 +82,7 @@ pub fn build(b: *std.Build) !void {
     // -------------------------------------------------------------------------
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/zigrad.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -90,6 +92,17 @@ pub fn build(b: *std.Build) !void {
     add_tracy(unit_tests, tracy);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // doc gen
+    const docs_step = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    docs_step.step.dependOn(&exe.step);
+
+    const docs = b.step("docs", "Generate documentation");
+    docs.dependOn(&docs_step.step);
 }
 
 fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
