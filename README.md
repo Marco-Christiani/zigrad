@@ -20,8 +20,13 @@
 \>2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
 <!-- link to a benchmarking page -->
 <!-- only need one of the bm plots, probably fast vs fast since that requires the least explanation -->
-<img src="./docs/zg_fast_vs_torch_fast_mnist_simple_d.png" >
-<!-- ![](./docs/zg_mnist_zg_torch_perf_0_speedupzigrad_pytorch_plotly.svg) -->\
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/zg_mnist_zg_torch_perf.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/zg_mnist_zg_torch_perf_dark.svg" >
+  <img alt="Description of the image" src="docs/zg_mnist_zg_torch_perf.svg">
+</picture>
+<!-- ![](./docs/zg_mnist_zg_torch_perf_0_speedupzigrad_pytorch_plotly.svg) -->
 
 <sub>*Tensorflow excluded for scaling purposes.</sub>
 <sub>**A hermetic, reproducible benchmarking pipeline built on Bazel will allow testing across more platforms (in progress).</sub>
