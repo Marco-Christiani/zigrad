@@ -1,0 +1,101 @@
+@document.meta
+title: roadmap
+description: Status and tasking
+authors: mchristiani
+categories: public
+created: 2024-07-11T00:05:54-0500
+updated: 2024-10-04T14:26:27-0500
+version: 1.1.1
+@end
+
+
+* Codebase
+** Functionality
+*** (!) Test data generation @status=IP
+    Need to bring a proper formal way to test things together, this is high priority and in progress
+    See hermetic build tasks.
+*** ( ) finite difference
+*** ( ) In general if in pure inference mode then perhaps defer to zml but this might require a translation layer, so maybe just a model conversion actually
+
+** ( ) Arch. + Perf.
+*** (x) should be a backend abstraction
+    Comptime switchinig on BLAS impl is fine for now. More specific tasks to expand further will be added later.
+*** (_) planning for bringing in an array dep. after I prove this point to myself...
+    Sticking with mine indefinitely.
+*** ( ) custom pool allocator (low priority)
+*** ( ) Op fusion, @muladd, matmulacc, matvecacc, simd, etc.
+*** (x) arch organization first pass {:architecture:} @status=IP
+    Taking this further than expected, need to properly organize to keep it manageable. Good time to consider abstractions.
+*** ( ) Decoupled backward graph, this also allows us to separately compile the graphs which will be important and separate data versioning and other logic.
+
+** (-) Refactoring
+*** ( ) Rename tests https://ziglang.org/documentation/0.12.1/#Doctests
+*** ( ) Naming conventions for inplace, elementwise, and scalar operations
+*** (x) Children should be a slice, if not a different data type
+*** ( ) Prefer pass by value when possible and rely on compiler more
+** (-) Features
+*** ( ) Multithreading
+*** ( ) GPU
+*** (=) Pull in the View abstraction, since this requires custom backward is likely dependent on the `Module`/`Function` abstraction
+*** ( ) activation functions, might be same as above
+*** (-) ZArray
+****  (-) slice ops, potentially via View
+****  ( ) infer dim, good idea is to use a tuple with comptime type inspection instead of trying to deal with a signed slice for shape/indices
+****  ( ) reshape tests
+****  ( ) transpose could be better
+****  ( ) bmm acc
+****  ( ) shape to use an fba
+*** ( ) detach
+**  ( ) Future/Speculative Features
+*** ( ) code gen for elementwise ops
+    This could make primitives like ndarray/ndtensor more maintainble, many operations can be grouped into patterns to facilitate this (binop, unop, scalar-op, elementwise-op, maybe even heap-alloc vs not).
+*** ( ) lazy op fusion (sort of part of a compiler epic)
+*** ( ) python bindings
+** ( ) Build system
+*** (x) Restructure project for proper exporting
+*** (x) overall its hacked together for testing, unhack it
+    Follows with arch organization and test data generation, progress made.
+*** ( ) refine lib testing https://ziggit.dev/t/how-to-test-modules/735/5
+*** ( ) support real os's, but zigs build system changes every 5 minutes
+*** ( ) hermetic build system w polyglot support for torch purposes and python bindings
+    1. nix+docker
+    2. bazel with zig rules
+    3. bazel with build.zig
+    4. buck2 with build.zig (makes sense over bazel in this case)
+** (-) Known issues
+*** (x) global mutable config context. Update: enabled comptime settings and runtime grad mode, its pretty good now.
+*** (x) in the interest of iteration time, used arena allocators in the tests... actually check management, esp for `Shape`
+    - No. This has a performance penalty we are sticking to pools.
+*** ( ) lack of errdefer in a few places to avoid leaks
+*** ( ) shape should use an fba for performance
+** Distributed Inference
+*** ( ) Distributed comms for GPU (NCCL) and CPU (Gloo)
+** Distributed Training
+** ML Graph Compiler
+*** ( ) compile the backprop graph
+
+* ML
+** (x) CV
+*** (x) Conv
+*** (x) MNIST Demo
+*** ( ) MaxPool needs a rework at some point
+*** ( ) rewrite conv ops with new packing scheme and no im2col/col2im.
+** (-) RL
+   Roughly ordered list by dependency
+   This is really just unstable at this point, not sure the problems rn.
+*** (x) Replay buffer
+*** (x) Global nograd context
+*** (x) Gather()
+**** (x) forward
+**** (x) backward
+*** (x) argmax and max over dim
+*** (-) DQN
+*** (-) exploration schedule [ref](https://github.com/DLR-RM/stable-baselines3/blob/1a69fc831414626cbbcf13343c6e78d9accb9104/stable_baselines3/common/utils.py#L100)
+
+*  Demos
+**  (x) cartpole sim
+**  (x) cartpole rendering (sadly adds dep, making this optional complicates build so tbd what to do here.)
+**  (_) mujoco (works but quite the build process, i dont want to add that complexity to main rn.)
+**  ( ) LLM (could migrate the sharded gpt2 impl)
+
+

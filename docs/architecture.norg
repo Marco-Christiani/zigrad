@@ -1,0 +1,89 @@
+@document.meta
+title: architecture
+description: Architecture and Abstractions
+authors: mchristiani
+categories: [
+  system
+  public
+]
+created: 2024-07-10T23:43:15-0500
+updated: 2024-10-04T15:03:34-0500
+version: 1.1.1
+@end
+
+* Notes
+
+  Zig's standard library follows patterns to manage complexity and make some abstractions more managable.
+
+  1. File as structs
+  Since files are also structs, they are often used as structs as a convenience. This also makes lengthy implementations easier to managed.
+
+  For example, `std/mem/Allocator.zig` contains the implementation for the `std.mem.Allocator` interface.
+
+  2. Use of folders
+
+  Folders, to group functionality together is used to break up long struct abstractions. This can be seen as an extension of the above technique.
+
+  To use `Function` or `Module`? Torch conventions in mind, choose to define terms like so,
+
+  `Function`: A custom op that sets a backward, possibly requiring state on backward
+  - `forward()`
+  -- Operates on data tensor is backed by (likely using array abstractions), not relying on autograd
+  -- Optionally sets ctx state on a tensor, but does not hold it
+  - `backward()`
+  -- Operates on data tensor is backed by to modify the grad.
+  -- Optionally accesses ctx state
+
+  `Module`: An op or sequence of ops that contains trainables, building block for a model.
+  - Holds state: trainable values
+  -- To be owned or not?
+  - `forward()`
+  -- Relies on autograd system. ops are on tensors, thus tracked
+  - `getParameters()`
+  -- Return state for update
+  - `acquire()`/`release()` and `deinit()`
+  -- Since state is owned, this is a consideration.
+  -- Relying on autograd has important implications, this is one.
+  --- Trainables should not be freed after backward, they need to be updated
+  --- Trainables should not be freed after update, unless training is done.
+
+  The question becomes whether the distinction is meaningful at all and if they could just be combined.
+
+  The idea of a `Function` does not actually need its own oop abstraction. This can be implemented as a function and often is, using closures, in other languages. Currently, there are operations in `zigrad` that would qualify as "functions" in this sense.
+
+  The downside is that its slightly messy to deal with disambiguating the scopes when using the func-in-struct trick in place of a closure. The backward implementations could be standalone functions, as done in the scalar implementation. Downsides are the management of generics, which would then have to be parameters, the lack of a standardized interface (for adding operations), and thus the lack of a standard calling convention that is compatible with all existing ops.
+
+  A potential solution is to try and hang ops off the tensor namespace (i.e. traits), attaching backwards functions as methods to keep the interface standardized. If possible, anyone could inject an arbitrary op into the autograd system seamlessly.
+
+** Conclusion
+
+   Update: usingnamespace is likely going away! So some info here may have been based on outdated assumptions.
+
+   1. `Function` is not a required abstraction and we should try namespace injection of methods.
+   2. `Module` is still a good idea, unless I can think of another way to handle trainables without an abstraction.
+    - This only way I can think of now is using tensor flags, as done previously, although I think this may be asking a bit much of the user to understand this and an abstraction would likely help with usability
+
+* Sketch
+
+  @code
+  NdArray/
+  | ops.zig   // could be split up by op types, depends on length
+  | Shape.zig // doesnt necessarily have to be an abstraction, can migrate this without changing structure
+  NdArray.zig // impl
+  NdTensor.zig // impl
+  autograd.zig // maybe. GraphManager, what else?
+  Backend.zig // abstract, referenced by NdArray and for custom nn ops
+  Backend/
+  | BlasBackend.zig // impl, exported
+  | CudaBackend.zig // impl, exported
+  nn/
+  | modules/
+  | | Module.zig // abstract
+  | | Conv2d.zig
+  | | Linear.zig
+  | | ReLU.zig
+  | Trainer.zig
+  | Model.zig  // abstract
+  root.zig
+  @end
+
