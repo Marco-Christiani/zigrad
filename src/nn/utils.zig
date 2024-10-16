@@ -186,19 +186,28 @@ pub fn renderD2(
         \\  }
         \\}
         \\direction: right
-        \\style.fill: transparent
-        \\*.style.stroke: "#F7A41D"
-        \\(* <- *)[*].style.stroke: "#F7A41D"
+        \\style: {
+        \\  font-size: 40
+        \\  fill: transparent
+        \\}
+        \\*.style: {
+        \\  stroke-width: 4
+        \\  font-size: 40
+        \\  stroke: "#F7A41D"
+        \\}
+        \\(* <- *)[*].style: {
+        \\  stroke: "#F7A41D"
+        \\  font-size: 35
+        \\  stroke-width: 5
+        \\}
         \\
     );
     log.debug("traversing", .{});
     try printD2(node, opts, d2_code.writer(), &label_gen, &visited);
     log.debug("rendering", .{});
-    // const d2filepath1 = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(output_file) orelse "", std.fs.path.stem(output_file) });
-    // const d2filepath = try std.fmt.allocPrint(allocator, "{s}{s}", .{ d2filepath1, ".d2" });
     const d2filepath = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ std.fs.path.dirname(output_file) orelse "", std.fs.path.stem(output_file), ".d2" });
     defer allocator.free(d2filepath);
-    std.debug.print("d2filepath: {s}\n", .{d2filepath});
+    log.debug("d2filepath: {s}", .{d2filepath});
     const d2file = try std.fs.cwd().createFile(d2filepath, .{});
     defer d2file.close();
 
