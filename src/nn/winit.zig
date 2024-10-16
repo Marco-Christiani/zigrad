@@ -1,4 +1,4 @@
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 // const random = zg.random;
 const std = @import("std");

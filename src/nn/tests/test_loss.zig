@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const zg = @import("../../root.zig");
+const zg = @import("../../zigrad.zig");
 
 const Shape = zg.Shape;
 const NDArray = zg.NDArray;

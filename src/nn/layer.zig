@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
@@ -188,6 +188,7 @@ pub fn LinearLayer(comptime T: type) type {
             // Hook up the custom backward function.
             return try NDTensor(T).createDependent(.{
                 .data = result_nd,
+                .label = "lin_fwdman",
                 .children = &[_]*const NDTensor(T){ input, self.weights, self.bias },
                 .requires_grad = input.requires_grad or self.weights.requires_grad or self.bias.requires_grad,
                 .allocator = fwd_allocator,

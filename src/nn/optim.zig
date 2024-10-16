@@ -1,7 +1,7 @@
 const std = @import("std");
 const math = std.math;
 
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
 const tracy = @import("tracy");

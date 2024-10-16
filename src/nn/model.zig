@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const Layer = zg.layer.Layer;
 const NDTensor = zg.NDTensor;
 

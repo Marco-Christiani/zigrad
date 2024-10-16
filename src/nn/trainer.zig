@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 
 const GraphManager = zg.GraphManager;
 const NDTensor = zg.NDTensor;
@@ -8,7 +8,6 @@ const SGD = zg.optim.SGD;
 const cross_entropy_loss = zg.loss.softmax_cross_entropy_loss;
 const mse_loss = zg.loss.mse_loss;
 const softmax = zg.loss.softmax;
-const utils = zg.utils;
 const tracy = @import("tracy");
 
 const log = std.log.scoped(.zg_trainer);
@@ -73,11 +72,6 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             const bwd_zone = tracy.initZone(@src(), .{ .name = "trainStep/bwd" });
             try self.graph_manager.backward(loss, bwd_allocator);
             bwd_zone.deinit();
-
-            // log.info("rendering", .{});
-            // try utils.renderD2(loss, utils.PrintOptions.plain, fwd_allocator, "/tmp/trainergraph.svg");
-            // log.info("done", .{});
-            // try utils.sesame("/tmp/trainergraph.svg", fwd_allocator);
 
             const step_zone = tracy.initZone(@src(), .{ .name = "trainStep/step" });
             self.optimizer.step(self.params);
