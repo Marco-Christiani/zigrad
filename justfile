@@ -42,7 +42,6 @@ run_pattern file:
    # | rg --passthru --color always --count-matches {{pattern}} 2&1 \
    # | .venv/bin/python tb.py
 
-
 brpu:
   @just (run_pattern "src/nn/utils.zig")
 
@@ -52,9 +51,6 @@ benchmark:
   just br -Doptimize=ReleaseFast -Dtracy_enable=false &> /tmp/zg_mnist_log.txt
   python scripts/mnist_compare.py
 
-d2_bg file:
-  sed -i '' -e 's/fill:#1E1E2E;/fill:none;/g' {{file}}
-
-doc out="docgen":
-  zig build test src/root.zig -femit-docs={{ out }}
-  cd {{ out }} && python -m http.server
+doc:
+  zig build docs
+  cd ./zig-out/docs/ && python -m http.server

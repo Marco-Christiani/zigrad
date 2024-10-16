@@ -68,16 +68,15 @@ pub const std_options = std.Options{
 };
 
 /// # Welcome to Zigrad
-/// hello world 234 hello world 234
-/// ## Welcome to an h2 w a blank line
+/// ## h2
 ///
-/// Here is some list:
+/// Here is a list:
 ///   - item 1
 ///   - item 2
 ///
 /// And an ordered one:
-///  1. fork
-///  2. spoon
+///  1. item 1
+///  2. item 2
 pub const zelcome = null;
 
 // TODO: lib tests, recursive inclusion *in progress*
