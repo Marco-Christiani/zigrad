@@ -1,6 +1,6 @@
 // TODO: fused softmax-ce
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 
 const Shape = zg.Shape;
 const NDArray = zg.NDArray;

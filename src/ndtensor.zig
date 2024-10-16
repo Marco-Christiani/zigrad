@@ -1,7 +1,7 @@
 // TODO: implement view(), permute(), view is sort of an ever-changing WIP (these are ndarray tasks btw).
 // TODO: migrate primitive ops to newer _backward/_backward_ctx feature.
 const std = @import("std");
-const zg = @import("root.zig");
+const zg = @import("zigrad.zig");
 const settings = zg.settings;
 
 const ndarray = @import("ndarray.zig");

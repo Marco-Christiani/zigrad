@@ -156,10 +156,10 @@ class PerformanceParser:
             margin_t=200,
             showlegend=False,
         )
-        fig.show()
 
         fig.write_html("/tmp/zg_mnist_zg_torch_perf.html")
         fig.write_image("/tmp/zg_mnist_zg_torch_perf.png")
+        return fig
 
     def _format_metadata(self, metadata):
         return ", ".join([f"{key}: {value}" for key, value in metadata.items()])
@@ -170,15 +170,22 @@ class PerformanceParser:
             framework_df = df[df["framework"] == framework]
             print(f"\n--- {framework} Summary ---")
             print(f"Metadata: {self._format_metadata(self.metadata.get(framework, {}))}")
-            print(f"Avg loss: {framework_df['loss'].mean():.4f}")
-            print(f"Std loss: {framework_df['loss'].std():.4f}")
-            print(f"Avg ms/sample: {framework_df['ms_per_sample'].mean():.4f}")
-            print(f"Std ms/sample: {framework_df['ms_per_sample'].std():.4f}")
+            print(f"Avg loss: {framework_df['loss'].mean():.6f}")
+            print(f"Std loss: {framework_df['loss'].std():.6f}")
+            print(f"Avg ms/sample: {framework_df['ms_per_sample'].mean():.6f}")
+            print(f"Std ms/sample: {framework_df['ms_per_sample'].std():.6f}")
+        torch_ms_per_sample = df["ms_per_sample"][df["framework"].str.lower() == "pytorch"]
+        zg_ms_per_sample = df["ms_per_sample"][df["framework"].str.lower() == "zigrad"]
+        zg_speedup = torch_ms_per_sample.to_numpy() / zg_ms_per_sample.to_numpy()
+        print("Speedup")
+        print(pd.Series(zg_speedup).describe())
 
 
 if __name__ == "__main__":
     parser = PerformanceParser()
     parser.parse_log("/tmp/zg_mnist_log.txt", "Zigrad")
     parser.parse_log("/tmp/zg_mnist_torch_log.txt", "PyTorch")
-    parser.plot_results()
+    fig = parser.plot_results()
     parser.print_summary()
+    input()
+    fig.show()

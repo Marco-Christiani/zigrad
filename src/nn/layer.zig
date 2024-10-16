@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
@@ -143,8 +143,8 @@ pub fn LinearLayer(comptime T: type) type {
             return self;
         }
         pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
-            // return try forwardAg(self, input, fwd_allocator);
-            return try forwardManual(self, input, fwd_allocator);
+            return try forwardAg(self, input, fwd_allocator);
+            // return try forwardManual(self, input, fwd_allocator);
         }
 
         // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
@@ -188,6 +188,7 @@ pub fn LinearLayer(comptime T: type) type {
             // Hook up the custom backward function.
             return try NDTensor(T).createDependent(.{
                 .data = result_nd,
+                .label = "lin_fwdman",
                 .children = &[_]*const NDTensor(T){ input, self.weights, self.bias },
                 .requires_grad = input.requires_grad or self.weights.requires_grad or self.bias.requires_grad,
                 .allocator = fwd_allocator,

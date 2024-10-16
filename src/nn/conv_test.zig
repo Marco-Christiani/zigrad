@@ -1,7 +1,7 @@
 const testing = std.testing;
 const std = @import("std");
 
-const zg = @import("zigrad");
+const zg = @import("../zigrad.zig");
 const random = zg.random;
 const NDTensor = zg.NDTensor;
 const Op = zg.Op;
