@@ -48,11 +48,19 @@ if __name__ == "__main__":
     train, test = pull_data(output_dir)
 
     # Save full and some smaller subsets for faster testing
-    train_csv = output_dir / "zigrad_test_mnist_train_full.csv"
-    test_csv = output_dir / "zigrad_test_mnist_test_full.csv"
-    print("creating", str(train_csv), str(train_csv.absolute()))
-    create_mnist_csv(train, train_csv)
-    head(4096, train_csv, train_csv.with_stem("zigrad_test_mnist_train_small"))
-    print("creating", str(test_csv))
-    create_mnist_csv(test, test_csv)
-    head(512, test_csv, test_csv.with_stem("zigrad_test_mnist_test_small"))
+    train_csv_full = output_dir / "zigrad_test_mnist_train_full.csv"
+    test_csv_full = output_dir / "zigrad_test_mnist_test_full.csv"
+    train_csv_small = train_csv_full.with_stem("zigrad_test_mnist_train_small")
+    test_csv_small = train_csv_full.with_stem("zigrad_test_mnist_test_small")
+    if all(
+        p.exists()
+        for p in (train_csv_full, test_csv_full, train_csv_small, test_csv_small)
+    ):
+        print("Already downloaded.")
+    else:
+        train, test = pull_data(output_dir)
+        create_mnist_csv(train, train_csv_full)
+        # Create some smaller subsets for faster testing
+        head(4096, train_csv_full, train_csv_small)
+        create_mnist_csv(test, test_csv_full)
+        head(512, train_csv_full, test_csv_small)

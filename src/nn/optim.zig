@@ -1,11 +1,14 @@
 const std = @import("std");
 const math = std.math;
 
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
+const tracy = @import("tracy");
 
 pub fn clipGrads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
+    const zone = tracy.initZone(@src(), .{ .name = "clipGrad" });
+    defer zone.deinit();
     for (params) |param| if (param.grad) |_| param.clip_grad_norm_delta(opts);
 }
 
@@ -56,12 +59,10 @@ pub fn SGD(comptime T: type) type {
                 .delta = self.grad_clip_delta,
             });
 
-            // lol. go to bed.
             for (params) |param| {
-                // param.grad.?._scale(self.lr);
-                // _ = param.data._sub(param.grad.?) catch unreachable;
-                for (0..param.data.data.len) |j| {
-                    param.data.data[j] -= self.lr * param.grad.?.data[j];
+                for (param.data.data, param.grad.?.data) |*p, *g| {
+                    // param.data.data[j] -= self.lr * param.grad.?.data[j]; // turns out this line is *really* slow, why cant compiler optimize this?
+                    p.* -= self.lr * g.*;
                 }
             }
         }

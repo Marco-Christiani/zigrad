@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../root.zig");
+const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
 const ops = @import("loss.zig");

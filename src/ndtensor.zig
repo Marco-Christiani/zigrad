@@ -1,7 +1,7 @@
 // TODO: implement view(), permute(), view is sort of an ever-changing WIP (these are ndarray tasks btw).
 // TODO: migrate primitive ops to newer _backward/_backward_ctx feature.
 const std = @import("std");
-const zg = @import("root.zig");
+const zg = @import("zigrad.zig");
 const settings = zg.settings;
 
 const ndarray = @import("ndarray.zig");
@@ -9,6 +9,8 @@ const Range = ndarray.Range;
 const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
+
+const tracy = @import("tracy");
 
 const log = std.log.scoped(.zg_tensor);
 
@@ -33,6 +35,7 @@ pub const Op = enum {
     MATMUL_AB,
     MATMUL_AtB,
     MATMUL_ABt,
+    MATMUL_AtBt,
     DOT,
     MATVEC,
     SUM,
@@ -460,16 +463,87 @@ pub fn NDTensor(comptime T: type) type {
 
         pub const MmOptions = struct { trans_a: bool = false, trans_b: bool = false };
 
+        /// TODO: this should proxy to bmmAcc
         /// Matrix multiplication. COM.
-        pub fn matmul(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
+        pub fn bmm(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
             const result = try createDependent(.{
-                .data = try self.data.matmul(other.data, opts.trans_a, opts.trans_b, allocator),
+                .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, allocator),
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
             });
-            result.op = if (!opts.trans_a and !opts.trans_b) .MATMUL_AB else if (opts.trans_a and !opts.trans_b) .MATMUL_AtB else if (!opts.trans_a and opts.trans_b) .MATMUL_ABt else @panic("No AtBt.");
+            result.op = if (!opts.trans_a and !opts.trans_b) .MATMUL_AB else if (opts.trans_a and !opts.trans_b) .MATMUL_AtB else if (!opts.trans_a and opts.trans_b) .MATMUL_ABt else .MATMUL_AtBt;
             return result;
+        }
+
+        pub const MmAccOptions = struct { trans_a: bool = false, trans_b: bool = false, alpha: T = 1.0, beta: T = 1.0 };
+
+        /// Matrix multiplication w accumulation. COM, output is written to directly.
+        pub fn bmmAcc(
+            self: *const NDTensor(T),
+            other: *const NDTensor(T),
+            output: *NDTensor(T),
+            allocator: std.mem.Allocator,
+            opts: MmAccOptions,
+        ) !void {
+            _ = try self.data._bmmAcc(
+                other.data,
+                output.data,
+                opts.alpha,
+                opts.beta,
+                opts.trans_a,
+                opts.trans_b,
+                allocator,
+            );
+
+            const requires_grad = zg.rt_grad_enabled and (self.requires_grad or other.requires_grad or output.requires_grad);
+            if (requires_grad) {
+                const ctx = try allocator.create(MmAccOptions);
+                ctx.* = opts;
+                output.children = try allocator.dupe(*const NDTensor(T), &[_]*const NDTensor(T){ self, other });
+                output._backward = bw_bmmAcc;
+                output._backward_ctx = ctx;
+                output.requires_grad = true;
+            }
+        }
+
+        // TODO: WIP!
+        fn bw_bmmAcc(
+            self: NDTensor(T),
+            allocator: std.mem.Allocator,
+        ) !void {
+            const grad_C = self.grad orelse return error.NoGradient;
+            const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
+            const children = self.children orelse return error.NoChildren;
+
+            const A = children[0].data; // Shape: (..., m, k)
+            const B = children[1].data; // Shape: (..., k, n)
+
+            // Gradient w.r.t A: grad_A += grad_C * B^T (or B depending on transpose settings)
+            if (children[0].grad) |grad_A| {
+                _ = try grad_C._bmmAcc(
+                    B,
+                    grad_A,
+                    opts.alpha, // Gradient scale factor
+                    1.0, // Accumulate into grad_A
+                    opts.trans_a, // Follow the original forward options for transposes
+                    opts.trans_b, // Invert transpose of B to reverse the operation);
+                    allocator,
+                );
+            }
+
+            // Gradient w.r.t B: grad_B += A^T * grad_C (or A depending on transpose settings)
+            if (children[1].grad) |grad_B| {
+                _ = try A._bmmAcc(
+                    grad_C,
+                    grad_B,
+                    opts.alpha, // Gradient scale factor
+                    1.0, // Accumulate into grad_B
+                    !opts.trans_a, // Invert transpose of A to reverse the operation
+                    opts.trans_b, // Follow the original forward options for transposes
+                    allocator,
+                );
+            }
         }
 
         /// Dot product of two tensors. COM.
@@ -580,16 +654,23 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "NDTensor/backward" });
+            defer zone.deinit();
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
             if (!self.requires_grad) return;
             if (self._backward) |f| {
+                const op_zone = tracy.initZone(@src(), .{ .name = "NDTensor/backward/custom" });
+                defer op_zone.deinit();
                 try f(self, allocator);
                 return;
             }
             if (self.op) |op| {
+                tracy.print("op={s}", .{@tagName(op)});
                 switch (op) {
                     .ADD => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_add" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -602,6 +683,8 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .SUB => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_sub" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -619,6 +702,8 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MUL => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_mul" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -638,6 +723,8 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .DIV => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_div" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -663,56 +750,60 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATMUL_AB => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_ab" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
-                            var A = children[0].data;
-                            const B = children[1].data;
-                            const grad_A = try self.grad.?.matmul(B, false, true, allocator);
-                            defer grad_A.deinit(allocator);
-                            _ = try children[0].grad.?._add(grad_A);
-                            const grad_B = try A.matmul(self.grad.?, true, false, allocator);
-                            defer grad_B.deinit(allocator);
-                            _ = try children[1].grad.?._add(grad_B);
+                            const A = children[0].data; // Shape: (..., m, k)
+                            const B = children[1].data; // Shape: (..., k, n)
+                            // grad_C Shape: (..., m, n)
+                            // grad_A += grad_C * B'
+                            _ = try self.grad.?._bmmAcc(B, children[0].grad, 1.0, 1.0, false, true, allocator);
+                            // grad_B += A' * grad_C
+                            _ = try A._bmmAcc(self.grad.?, children[1].grad, 1.0, 1.0, true, false, allocator);
                         }
                     },
                     .MATMUL_AtB => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_atb" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
-                            var A = children[0].data;
-                            const B = children[1].data;
-
-                            // grad_A = B * grad_C^T
-                            var grad_C_transposed = try self.grad.?.transpose(allocator);
-                            defer grad_C_transposed.deinit(allocator);
-                            const grad_A = try B.matmul(grad_C_transposed, false, false, allocator);
-                            defer grad_A.deinit(allocator);
-                            _ = try children[0].grad.?._add(grad_A);
-
-                            // grad_B = A * grad_C
-                            const grad_B = try A.matmul(self.grad.?, false, false, allocator);
-                            defer grad_B.deinit(allocator);
-                            _ = try children[1].grad.?._add(grad_B);
+                            const A = children[0].data; // Shape: (..., k, m)
+                            const B = children[1].data; // Shape: (..., k, n)
+                            // grad_C Shape: (..., m, n)
+                            // grad_A += B * grad_C'
+                            _ = try B._bmmAcc(self.grad.?, children[0].grad, 1.0, 1.0, false, true, allocator);
+                            // grad_B += A * grad_C
+                            _ = try A._bmmAcc(self.grad.?, children[1].grad, 1.0, 1.0, false, false, allocator);
                         }
                     },
                     .MATMUL_ABt => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_abt" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
-                            var A = children[0].data;
-                            const B = children[1].data;
-
-                            // grad_A = grad_C * B
-                            const grad_A = try self.grad.?.matmul(B, false, false, allocator);
-                            defer grad_A.deinit(allocator);
-                            _ = try children[0].grad.?._add(grad_A);
-
-                            // grad_B = A^T * grad_C
-                            var grad_B = try A.matmul(self.grad.?, true, false, allocator);
-                            defer grad_B.deinit(allocator);
-
-                            var grad_B_transposed = try grad_B.transpose(allocator);
-                            defer grad_B_transposed.deinit(allocator);
-
-                            _ = try children[1].grad.?._add(grad_B_transposed);
+                            const A = children[0].data; // Shape: (..., m, k)
+                            const B = children[1].data; // Shape: (..., n, k)
+                            // grad_C Shape: (..., m, n)
+                            // grad_A += grad_C * B
+                            _ = try self.grad.?._bmmAcc(B, children[0].grad, 1.0, 1.0, false, false, allocator);
+                            // grad_B += grad_C' * A
+                            _ = try self.grad.?._bmmAcc(A, children[1].grad, 1.0, 1.0, true, false, allocator);
+                        }
+                    },
+                    .MATMUL_AtBt => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_atbt" });
+                        defer op_zone.deinit();
+                        if (self.children) |children| {
+                            const A = children[0].data; // Shape: (..., k, m)
+                            const B = children[1].data; // Shape: (..., n, k)
+                            // grad_C Shape: (..., m, n)
+                            // grad_A += B' * grad_C'
+                            _ = try B._bmmAcc(self.grad.?, children[0].grad, 1.0, 1.0, true, true, allocator);
+                            // grad_B += grad_C * A'
+                            _ = try self.grad.?._bmmAcc(A, children[1].grad, 1.0, 1.0, false, true, allocator);
                         }
                     },
                     .DOT => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_dot" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             var a = children[0];
                             var b = children[1];
@@ -723,6 +814,8 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATVEC => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matvec" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             var A = children[0].data;
                             const x = children[1].data;
@@ -737,12 +830,16 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .SUM => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_sum" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const child = children[0];
                             _ = try child.grad.?._add(self.grad.?);
                         }
                     },
                     .RESHAPE => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_reshape" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const original_shape = children[0].data.shape;
                             try self.grad.?._reshape(original_shape.shape);
@@ -750,12 +847,16 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .TRANSPOSE => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_transpose" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const gt = try self.grad.?.transpose(allocator);
                             _ = try children[0].grad.?._add(gt);
                         }
                     },
                     .MAX => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_max" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const child = children[0];
                             const max_val = self.data.data[0];
@@ -767,6 +868,8 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .EXP => {
+                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_exp" });
+                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const child = children[0];
                             for (self.data.data, self.grad.?.data, 0..) |exp_val, grad_val, i| {
@@ -790,7 +893,7 @@ pub fn NDTensor(comptime T: type) type {
                         Op.MUL => ": x",
                         Op.DIV => ": /",
                         Op.SUM => ": ++",
-                        Op.MATMUL_AB, Op.MATMUL_AtB, Op.MATMUL_ABt => ": AB",
+                        Op.MATMUL_AB, Op.MATMUL_AtB, Op.MATMUL_ABt, Op.MATMUL_AtBt => ": AB",
                         Op.MATVEC => ": Ax",
                         else => std.debug.panic("Unsupported op {?}\n", .{self.op}),
                     };
@@ -981,6 +1084,176 @@ test "tensor/GraphManager/divback" {
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 }
 
+test "tensor/GraphManager/matmul_backward square" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f32;
+    const Tensor = NDTensor(T);
+    const shape = &[_]usize{ 2, 2 };
+
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, alloc);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, alloc);
+
+    // Case 1: No transpose
+    var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+    defer t3.deinit();
+
+    var gm = GraphManager(Tensor).init(alloc, .{});
+    defer gm.deinit();
+    t1.acquire();
+    t2.acquire();
+    t3.grad.?.fill(1.0);
+
+    try gm.backward(t3, alloc);
+    const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+    t1.grad.?.fill(0);
+    t2.grad.?.fill(0);
+
+    // Case 2: Transpose A
+    var t3_trans_a = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+    defer t3_trans_a.deinit();
+    t3_trans_a.grad.?.fill(1.0);
+
+    try gm.backward(t3_trans_a, alloc);
+    const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2_trans_a, t2.grad.?.data);
+    t1.grad.?.fill(0);
+    t2.grad.?.fill(0);
+
+    // Case 3: Transpose B
+    var t3_trans_b = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = true });
+    defer t3_trans_b.deinit();
+    t3_trans_b.grad.?.fill(1.0);
+    try gm.backward(t3_trans_b, alloc);
+
+    const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2_trans_b, t2.grad.?.data);
+    t1.grad.?.fill(0);
+    t2.grad.?.fill(0);
+
+    // Case 4: Transpose both A and B
+    var t3_trans_ab = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = true });
+    defer t3_trans_ab.deinit();
+    t3_trans_ab.grad.?.fill(1.0);
+    try gm.backward(t3_trans_ab, alloc);
+
+    const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2_trans_ab, t2.grad.?.data);
+
+    t1.release();
+    t1.deinit();
+    t2.release();
+    t2.deinit();
+}
+
+test "tensor/GraphManager/matmul_backward non-square" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const T = f32;
+    const Tensor = NDTensor(T);
+
+    // Case 1: No transpose (t1: [2, 2, 3], t2: [2, 3, 2])
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, true, alloc);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &[_]usize{ 2, 3, 2 }, true, alloc);
+
+    var gm = GraphManager(Tensor).init(alloc, .{});
+    defer gm.deinit();
+
+    // Case 1: No transpose
+    {
+        var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+        defer t3.deinit();
+        t1.acquire();
+        t2.acquire();
+        t3.grad.?.fill(1.0);
+        try gm.backward(t3, alloc);
+
+        const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
+        const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+
+        t1.grad.?.fill(0);
+        t2.grad.?.fill(0);
+    }
+
+    // Case 2: Transpose A (t1: [2, 3, 2], t2: [2, 3, 2])
+    {
+        var t1_case2 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, alloc);
+        var t3 = try t1_case2.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+        defer t3.deinit();
+        t1_case2.acquire();
+        t3.grad.?.fill(1.0);
+        try gm.backward(t3, alloc);
+
+        const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
+        const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case2.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+
+        t1_case2.release();
+        t1_case2.deinit();
+        t2.grad.?.fill(0);
+    }
+
+    // Case 3: Transpose B (t1: [2, 2, 3], t2: [2, 2, 3])
+    {
+        var t2_case3 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, alloc);
+        var t3 = try t1.bmm(t2_case3, alloc, .{ .trans_a = false, .trans_b = true });
+        defer t3.deinit();
+        t2_case3.acquire();
+        t3.grad.?.fill(1.0);
+        try gm.backward(t3, alloc);
+
+        const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
+        const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case3.grad.?.data);
+
+        t1.grad.?.fill(0);
+        t2_case3.release();
+        t2_case3.deinit();
+    }
+
+    // Case 4: Transpose both A and B (t1: [2, 3, 2], t2: [2, 2, 3])
+    {
+        var t1_case4 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, alloc);
+        var t2_case4 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, alloc);
+        var t3 = try t1_case4.bmm(t2_case4, alloc, .{ .trans_a = true, .trans_b = true });
+        defer t3.deinit();
+        t1_case4.acquire();
+        t2_case4.acquire();
+        t3.grad.?.fill(1.0);
+        try gm.backward(t3, alloc);
+
+        const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
+        const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case4.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case4.grad.?.data);
+
+        t1_case4.release();
+        t1_case4.deinit();
+        t2_case4.release();
+        t2_case4.deinit();
+    }
+
+    t1.release();
+    t1.deinit();
+    t2.release();
+    t2.deinit();
+}
+
 test "tensor/GraphManager/matmul_backward" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -991,21 +1264,66 @@ test "tensor/GraphManager/matmul_backward" {
 
     var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, alloc);
     var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, alloc);
-    var t3 = try t1.matmul(t2, alloc, .{});
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+
+    // Case 1: No transpose
+    var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+    defer t3.deinit();
 
     var gm = GraphManager(Tensor).init(alloc, .{});
     defer gm.deinit();
+    t1.acquire();
+    t2.acquire();
     t3.grad.?.fill(1.0);
-    try gm.backward(t3, alloc);
 
+    try gm.backward(t3, alloc);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
-
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+    t1.grad.?.fill(0);
+    t2.grad.?.fill(0);
+
+    // Case 2: Transpose A
+    var t3_trans_a = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+    defer t3_trans_a.deinit();
+    t3_trans_a.grad.?.fill(1.0);
+
+    try gm.backward(t3_trans_a, alloc);
+    const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2_trans_a, t2.grad.?.data);
+    t1.grad.?.fill(0);
+    t2.grad.?.fill(0);
+
+    // Case 3: Transpose B
+    var t3_trans_b = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = true });
+    defer t3_trans_b.deinit();
+    t3_trans_b.grad.?.fill(1.0);
+    try gm.backward(t3_trans_b, alloc);
+
+    const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2_trans_b, t2.grad.?.data);
+    t1.grad.?.fill(0);
+    t2.grad.?.fill(0);
+
+    // Case 4: Transpose both A and B
+    var t3_trans_ab = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = true });
+    defer t3_trans_ab.deinit();
+    t3_trans_ab.grad.?.fill(1.0);
+    try gm.backward(t3_trans_ab, alloc);
+
+    const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
+    const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
+    try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad_t2_trans_ab, t2.grad.?.data);
+
+    t1.release();
+    t1.deinit();
+    t2.release();
+    t2.deinit();
 }
 
 test "tensor/GraphManager/matvec_backward" {
