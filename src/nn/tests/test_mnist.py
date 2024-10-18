@@ -1,14 +1,16 @@
 import os
 import platform
 import time
-from enum import StrEnum, auto
+from enum import auto
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
+from torch.utils.data import TensorDataset
 
 
 class Model(nn.Module):
@@ -145,7 +147,6 @@ def main(
     num_epochs: int = 2,
     learning_rate: float = 0.1,
     device: str = "cpu",
-    grad_mode: str = "default",
     model_variant: str = "simple",
     autograd: bool = False,
 ):
@@ -161,7 +162,6 @@ def main(
     print(f"learning_rate={learning_rate}")
     print(f"device={device}")
     print(f"n_batches={len(dataloader)}")
-    print(f"grad_mode={grad_mode}")
     print(
         f"Platform: {platform.system()} {platform.release()} (Python {platform.python_version()})"
     )
@@ -229,6 +229,18 @@ class GradMode(StrEnum):
     inference = auto()
 
 
+def get_grad_context(grad_mode: GradMode):
+    match grad_mode:
+        case GradMode.default:
+            from contextlib import nullcontext
+
+            return nullcontext()
+        case GradMode.nograd:
+            return torch.no_grad()
+        case GradMode.inference:
+            return torch.inference_mode()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -275,14 +287,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    main(
-        train=args.t,
-        compile=args.c,
-        batch_size=args.batch_size,
-        num_epochs=args.num_epochs,
-        learning_rate=args.learning_rate,
-        device=args.device,
-        grad_mode=args.grad_mode,
-        model_variant=args.model_variant,
-        autograd=args.autograd,
-    )
+    print(f"grad_mode={args.grad_mode}")
+    with get_grad_context(args.grad_mode):
+        main(
+            train=args.t,
+            compile=args.c,
+            batch_size=args.batch_size,
+            num_epochs=args.num_epochs,
+            learning_rate=args.learning_rate,
+            device=args.device,
+            model_variant=args.model_variant,
+            autograd=args.autograd,
+        )
