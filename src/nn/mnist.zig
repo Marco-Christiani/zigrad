@@ -226,6 +226,7 @@ const MnistDataset = struct {
 };
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
+    defer @import("../backend/blas.zig").cleanup_jit();
     var backing_fwd_alloc = tracy.TracingAllocator.initNamed("Fwd Allocator", std.heap.raw_c_allocator);
     var backing_bw_alloc = tracy.TracingAllocator.initNamed("Bwd Allocator", std.heap.raw_c_allocator);
     var acquired_alloc = tracy.TracingAllocator.initNamed("Acquired Allocator", std.heap.raw_c_allocator);
@@ -290,9 +291,9 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
                 train_dataset.images.len,
                 ms_per_sample,
             });
-            if (epoch == 0 and i == 0) {
-                try zg.utils.renderD2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph_mnist_simple_ag.svg");
-            }
+            // if (epoch == 0 and i == 0) {
+            //     try zg.utils.renderD2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph_mnist_simple_ag.svg");
+            // }
 
             if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
             if (!fw_arena.reset(.retain_capacity)) log.warn("Issue in fw arena reset", .{});
@@ -350,12 +351,40 @@ fn evalMnist(allocator: std.mem.Allocator, model: MnistModel, dataset: MnistData
     return .{ .correct = correct, .n = n };
 }
 
+fn getMnistPaths(size: enum { full, small }, allocator: std.mem.Allocator) !struct { train_csv: []u8, test_csv: []u8 } {
+    const data_dir = std.posix.getenv("ZG_TEST_DATA_DIR") orelse "/tmp/zigrad_mnist_data";
+    return switch (size) {
+        .full => .{
+            .train_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_train_full.csv", .{data_dir}),
+            .test_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_test_full.csv", .{data_dir}),
+        },
+        .small => .{
+            .train_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_train_small.csv", .{data_dir}),
+            .test_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_test_small.csv", .{data_dir}),
+        },
+    };
+}
+
 pub fn main() !void {
-    try runMnist("/tmp/zigrad_test_mnist_train_full.csv", "/tmp/zigrad_test_mnist_test_full.csv");
+    const allocator = std.heap.c_allocator;
+    const fpaths = try getMnistPaths(.full, allocator);
+    defer {
+        allocator.free(fpaths.train_csv);
+        allocator.free(fpaths.test_csv);
+    }
+    log.info("train data: {s}", .{fpaths.train_csv});
+    log.info("test data: {s}", .{fpaths.test_csv});
+    try runMnist(fpaths.train_csv, fpaths.test_csv);
 }
 
 test runMnist {
-    runMnist("/tmp/zigrad_test_mnist_train_small.csv", "/tmp/zigrad_test_mnist_test_small.csv") catch |err| switch (err) {
+    const allocator = std.heap.c_allocator;
+    const fpaths = try getMnistPaths(.small, allocator);
+    defer {
+        allocator.free(fpaths.train_csv);
+        allocator.free(fpaths.test_csv);
+    }
+    runMnist(fpaths.train_csv, fpaths.test_csv) catch |err| switch (err) {
         std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `runMnist` test.", .{@errorName(err)}),
         else => return err,
     };
