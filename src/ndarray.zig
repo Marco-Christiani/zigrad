@@ -410,6 +410,41 @@ pub fn NDArray(comptime T: type) type {
             return try self._bmmAcc(other, null, 1.0, 0.0, trans_a, trans_b, allocator);
         }
 
+        /// # Design decisions regarding batch gemm support
+        ///
+        /// If we broadcasted an operand then we cant just call batch gemm which expects batch_size number of matrices
+        /// for all inputs
+        /// Note: if we continue with the current behavior, we gain a fast path where if the outer strides match, we can
+        ///    directly call batch gemm. This is essentially what we currently do and will not be correct for some cases
+        ///    but will be fast.
+        ///
+        /// There are a few ways to address this, listed below. We should likely have both, but for now we can go with
+        ///  option 1 and assume that we will not have to support very large calculations soon.
+        ///
+        /// ## Option 1
+        ///
+        ///   - Expand to the target shape, actually performing the broacast.
+        ///   - With all shapes matching, call batch gemm
+        ///
+        /// Discussion:
+        ///
+        ///   - Requires intermediate allocations.
+        ///   - Actually expanding the shape exerts memory pressure, for some problems this wont be feasible.
+        ///   - Have to implement expanding and another thing to optimize.
+        ///   - Probably fastest
+        ///
+        /// ## Option 2
+        ///
+        ///   - Continue to handle the broadcasting manually
+        ///   - If the outer strides (stridea and strideb) mismatch, we have to broadcast
+        ///   - For all dimensions inside of the first broadcasted dim we call batch gemm.
+        ///
+        /// Discussion:
+        ///
+        ///   - Less memory pressure by avoiding expansion
+        ///   - Easily parallelized, but need to be careful about what APIs provide what guarantees here
+        ///   - Will probably have the same edge case issue
+        ///
         pub fn _bmmAcc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
             if (self.shape.len() < 2) {
                 try self._reshape(&[_]usize{ 1, try self.shape.get(0) });
@@ -452,40 +487,13 @@ pub fn NDArray(comptime T: type) type {
             if (n_batch_dims > 0) @memcpy(output_shape[0..n_batch_dims], broadcast_batch_dims);
             output_shape[n_batch_dims] = M;
             output_shape[n_batch_dims + 1] = N;
-
-            const n_batches = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
-            var result: *Self = blk: {
-                if (accumulator) |acc| {
-                    if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) {
-                        log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
-                        return error.IncompatibleAccumulatorShape;
-                    }
-                    break :blk acc;
-                } else break :blk try Self.zeros(output_shape, allocator);
-            };
-            errdefer if (accumulator == null) result.deinit(allocator);
-
-            const n_batches_a = utils.prod(a_batch_dims);
-            const n_batches_b = utils.prod(b_batch_dims);
-
-            const lda = a_cols;
-            const ldb = b_cols;
-            const ldc = N;
-
-            for (0..n_batches) |i| {
-                const a_index = i % n_batches_a;
-                const b_index = i % n_batches_b;
-
-                const a_start = a_index * a_rows * a_cols;
-                const b_start = b_index * b_rows * b_cols;
-                const out_start = i * M * N;
-
-                const a_slice = self.data[a_start .. a_start + a_rows * a_cols];
-                const b_slice = other.data[b_start .. b_start + b_rows * b_cols];
-                const out_slice = result.data[out_start .. out_start + M * N];
-
-                blas.blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
+            if (accumulator) |acc| {
+                if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) {
+                    log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
+                    return error.IncompatibleAccumulatorShape;
+                }
             }
+            const n_batches = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
             return result;
         }
 

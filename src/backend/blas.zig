@@ -37,129 +37,15 @@ pub fn blas_matvec(T: type, A: []T, X: []T, Y: []T, M: usize, N: usize, alpha: T
     }
 }
 
-// pub const blas_matmul = vanilla_blas_matmul;
-// pub const blas_matmul = mkl_direct_matmul;
-pub const blas_matmul = mkl_jit_matmul;
-
 ///  Assumes row-major.
 ///  (M, K) x (K, N) = (M, N)
-pub fn vanilla_blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
+pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
     const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
     const tb = if (trans_b) c.CblasTrans else c.CblasNoTrans;
     switch (T) {
         f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
         f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
         else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-    }
-}
-
-// pub fn mkl_direct_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
-//     const ta = if (trans_a) c.MKL_TRANS else c.MKL_NOTRANS;
-//     const tb = if (trans_b) c.MKL_TRANS else c.MKL_NOTRANS;
-//     switch (T) {
-//         f32 => c.gemm(c.MKL_ROW_MAJOR, ta, tb, @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
-//         f64 => c.MKL_Dgemm(c.MKL_ROW_MAJOR, ta, tb, @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
-//         else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-//     }
-// }
-
-const mkl = @cImport(@cInclude("mkl/mkl_blas.h"));
-// pub fn mkl_jit_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
-//     const ta = if (trans_a) c.MKL_TRANS else c.MKL_NOTRANS;
-//     const tb = if (trans_b) c.MKL_TRANS else c.MKL_NOTRANS;
-//
-//     switch (T) {
-//         f32 => {
-//             var jitter: ?*anyopaque = null;
-//             _ = c.mkl_jit_create_sgemm(&jitter, c.MKL_ROW_MAJOR, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, @intCast(lda), @intCast(ldb), beta, @intCast(ldc));
-//             const sgemm_jit = c.mkl_jit_get_sgemm_ptr(jitter).?;
-//             sgemm_jit(jitter, A.ptr, B.ptr, C.ptr);
-//             _ = c.mkl_jit_destroy(jitter);
-//         },
-//         f64 => {
-//             var jitter: ?*anyopaque = null;
-//             _ = c.mkl_jit_create_dgemm(&jitter, c.MKL_ROW_MAJOR, ta, tb, @intCast(M), @intCast(N), @intCast(K), alpha, @intCast(lda), @intCast(ldb), beta, @intCast(ldc));
-//             const dgemm_jit = c.mkl_jit_get_dgemm_ptr(jitter).?;
-//             dgemm_jit(jitter, A.ptr, B.ptr, C.ptr);
-//             _ = c.mkl_jit_destroy(jitter);
-//         },
-//         else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-//     }
-// }
-
-pub fn mkl_jit_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
-    _ = alpha;
-    _ = beta;
-    const jitter = get_or_create_jit(T, M, N, K, trans_a, trans_b, lda, ldb, ldc) orelse @panic("Failed to create JIT function");
-
-    switch (T) {
-        f32 => {
-            const sgemm_jit = c.mkl_jit_get_sgemm_ptr(jitter).?;
-            sgemm_jit(jitter, A.ptr, B.ptr, C.ptr);
-        },
-        f64 => {
-            const dgemm_jit = c.mkl_jit_get_dgemm_ptr(jitter).?;
-            dgemm_jit(jitter, A.ptr, B.ptr, C.ptr);
-        },
-        else => @compileError("Unsupported type for JIT"),
-    }
-}
-
-const JitCache = struct {
-    jitter: ?*anyopaque,
-    m: usize,
-    n: usize,
-    k: usize,
-    trans_a: bool,
-    trans_b: bool,
-    lda: usize,
-    ldb: usize,
-    ldc: usize,
-};
-
-var jit_cache: [10]JitCache = .{.{ .jitter = null, .m = 0, .n = 0, .k = 0, .trans_a = false, .trans_b = false, .lda = 0, .ldb = 0, .ldc = 0 }} ** 10;
-var jit_cache_index: usize = 0;
-
-pub fn get_or_create_jit(
-    comptime T: type,
-    m: usize,
-    n: usize,
-    k: usize,
-    trans_a: bool,
-    trans_b: bool,
-    lda: usize,
-    ldb: usize,
-    ldc: usize,
-) ?*anyopaque {
-    for (jit_cache) |cache| {
-        if (cache.jitter != null and cache.m == m and cache.n == n and cache.k == k and cache.trans_a == trans_a and cache.trans_b == trans_b and cache.lda == lda and cache.ldb == ldb and cache.ldc == ldc) {
-            // std.log.info("CACHED" ** 10, .{});
-            return cache.jitter;
-        }
-    }
-
-    const ta = if (trans_a) c.MKL_TRANS else c.MKL_NOTRANS;
-    const tb = if (trans_b) c.MKL_TRANS else c.MKL_NOTRANS;
-
-    var new_jitter: ?*anyopaque = null;
-    switch (T) {
-        f32 => _ = c.mkl_jit_create_sgemm(&new_jitter, c.MKL_ROW_MAJOR, @intCast(ta), @intCast(tb), @intCast(m), @intCast(n), @intCast(k), 1.0, @intCast(lda), @intCast(ldb), 0.0, @intCast(ldc)),
-        f64 => _ = c.mkl_jit_create_dgemm(&new_jitter, c.MKL_ROW_MAJOR, @intCast(ta), @intCast(tb), @intCast(m), @intCast(n), @intCast(k), 1.0, @intCast(lda), @intCast(ldb), 0.0, @intCast(ldc)),
-        else => @compileError("Unsupported type for JIT"),
-    }
-
-    jit_cache[jit_cache_index] = .{ .jitter = new_jitter, .m = m, .n = n, .k = k, .trans_a = trans_a, .trans_b = trans_b, .lda = lda, .ldb = ldb, .ldc = ldc };
-    jit_cache_index = (jit_cache_index + 1) % jit_cache.len;
-
-    return new_jitter;
-}
-
-pub fn cleanup_jit() void {
-    for (&jit_cache) |*cache| {
-        if (cache.jitter) |jitter| {
-            _ = c.mkl_jit_destroy(jitter);
-            cache.jitter = null;
-        }
     }
 }
 
@@ -212,5 +98,73 @@ pub fn blas_axpy(comptime T: type, n: usize, alpha: T, x: []const T, incx: usize
         f32 => c.cblas_saxpy(@intCast(n), alpha, x.ptr, @intCast(incx), y.ptr, @intCast(incy)),
         f64 => c.cblas_daxpy(@intCast(n), alpha, x.ptr, @intCast(incx), y.ptr, @intCast(incy)),
         else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
+    }
+}
+
+// namespace oneapi::mkl::blas::row_major {
+//     void gemm_batch(sycl::queue &queue,
+//                     oneapi::mkl::transpose transa,
+//                     oneapi::mkl::transpose transb,
+//                     std::int64_t m,
+//                     std::int64_t n,
+//                     std::int64_t k,
+//                     Ts alpha,
+//                     sycl::buffer<Ta,1> &a,
+//                     std::int64_t lda,
+//                     std::int64_t stridea,
+//                     sycl::buffer<Tb,1> &b,
+//                     std::int64_t ldb,
+//                     std::int64_t strideb,
+//                     Ts beta,
+//                     sycl::buffer<Tc,1> &c,
+//                     std::int64_t ldc,
+//                     std::int64_t stridec,
+//                     std::int64_t batch_size,
+//                     compute_mode mode = compute_mode::unset)
+// }
+
+/// All parameters assumed to be correct. No dimension checking.
+/// Supports the case where an operand was broadcasted
+fn batch_gemm_broadcast(
+    comptime T: type,
+    trans_a: bool,
+    trans_b: bool,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: T,
+    A: []T,
+    lda: usize,
+    stridea: usize,
+    B: []T,
+    ldb: usize,
+    strideb: usize,
+    beta: T,
+    C: ?[]T,
+    ldc: usize,
+    stridec: usize,
+    batch_size: usize,
+    allocator: std.mem.Allocator,
+) !void {
+    const out_size = batch_size * m * n;
+    var result = C orelse try allocator.alloc(batch_size, allocator);
+    errdefer if (c == null) result.deinit(allocator);
+
+    const batch_size_a = A.len / (m * n);
+    const batch_size_b = B.len / (n * k);
+
+    for (0..batch_size) |i| {
+        const a_index = i % batch_size_a;
+        const b_index = i % batch_size_b;
+
+        const a_start = a_index * a_rows * a_cols;
+        const b_start = b_index * b_rows * b_cols;
+        const out_start = i * M * N;
+
+        const a_slice = a[a_start .. a_start + a_rows * a_cols];
+        const b_slice = other[b_start .. b_start + b_rows * b_cols];
+        const out_slice = result[out_start .. out_start + M * N];
+
+        blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
     }
 }
