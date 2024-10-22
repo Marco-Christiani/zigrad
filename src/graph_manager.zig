@@ -2,7 +2,6 @@ const std = @import("std");
 const zg = @import("zigrad.zig");
 const settings = zg.settings;
 const log = std.log.scoped(.zg_graphmanager);
-const tracy = @import("tracy");
 
 /// Manages the overall graph, allows for a more memory efficient abstraction
 /// where the data structures used for traversing the graph during backprop
@@ -51,17 +50,10 @@ pub fn GraphManager(comptime T: type) type {
         pub fn backward(self: *Self, node: *const T, alloc: std.mem.Allocator) !void {
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
-
-            const topo_zone = tracy.initZone(@src(), .{ .name = "GraphManager/topo" });
             self.topo(node);
-            topo_zone.deinit();
-
             const nodes = self.sorted_nodes.items;
 
-            const grad_loop_zone = tracy.initZone(@src(), .{ .name = "GraphManager/grad_loop_zone" });
             for (0..nodes.len) |i| {
-                const grad_loop_inner_zone = tracy.initZone(@src(), .{ .name = "GraphManager/grad_loop_zone/inner" });
-                defer grad_loop_inner_zone.deinit();
                 var curr_node = nodes[nodes.len - i - 1];
                 if (curr_node.requiresGrad()) {
                     try curr_node.backward(alloc);
@@ -72,7 +64,6 @@ pub fn GraphManager(comptime T: type) type {
                     log.debug("Skipping node {?s}", .{node.label});
                 }
             }
-            grad_loop_zone.deinit();
         }
     };
 }

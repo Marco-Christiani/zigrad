@@ -13,31 +13,32 @@ pub fn build(b: *std.Build) !void {
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
-    const zigrad_module = b.createModule(.{
+    const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
             .{ .name = "build_options", .module = build_options_module },
         },
     });
 
     const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
-    const tracy = b.dependency("tracy", .{
+    const tracy = b.lazyDependency("tracy", .{
         .target = target,
         .optimize = optimize,
         .tracy_enable = tracy_enable,
     });
-
-    zigrad_module.addImport("tracy", tracy.module("tracy"));
+    if (tracy_enable) zigrad.addImport("tracy", tracy.?.module("tracy"));
 
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
-        .root_source_file = zigrad_module.root_source_file.?,
+        .root_source_file = zigrad.root_source_file.?,
         .target = target,
         .optimize = optimize,
     });
     // lib.root_module.addImport("zigrad", zigrad_module);
     link(target, lib);
-    add_tracy(lib, tracy);
+    if (tracy_enable) add_tracy(lib, tracy.?);
     b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
@@ -47,11 +48,11 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    exe.root_module.addImport("zigrad", zigrad_module);
+    exe.root_module.addImport("zigrad", zigrad);
     std.debug.print("target.result.os.tag={}\n", .{target.result.os.tag});
     // TODO: cblas
     link(target, exe);
-    add_tracy(exe, tracy);
+    if (tracy_enable) add_tracy(exe, tracy.?);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -89,7 +90,7 @@ pub fn build(b: *std.Build) !void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
     // unit_tests.root_module.addImport("tracy", tracy.module("tracy"));
-    add_tracy(unit_tests, tracy);
+    if (tracy_enable) add_tracy(unit_tests, tracy.?);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
