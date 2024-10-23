@@ -1,0 +1,17 @@
+.{
+    .name = "mnist",
+    .version = "0.0.0",
+    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
+    .dependencies = .{
+        .zigrad = .{
+            .url = "../../",
+            .hash = "12204d8b03a0507890a27020bc762f9054312860c220133a3bbce57176d1f575e7bd",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
