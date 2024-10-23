@@ -17,7 +17,7 @@
 **Fast**
 <!-- benchmarks -->
 
-\>2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
+2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
 <!-- link to a benchmarking page -->
 <!-- only need one of the bm plots, probably fast vs fast since that requires the least explanation -->
 
