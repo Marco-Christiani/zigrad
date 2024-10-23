@@ -45,7 +45,7 @@ pub fn main() !void {
     try output.printToWriter(stdout);
     try input.grad.?.printToWriter(stdout);
 
-    try stdout.print("Success\n", .{});
+    try stdout.print("\nSuccess\n", .{});
 
     try bw.flush();
 }
