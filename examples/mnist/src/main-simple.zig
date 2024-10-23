@@ -1,3 +1,4 @@
+/// Trains a neural network model on the MNIST dataset using a manual training loop.
 const std = @import("std");
 const zg = @import("zigrad");
 const MnistModel = @import("model.zig").MnistModel;
