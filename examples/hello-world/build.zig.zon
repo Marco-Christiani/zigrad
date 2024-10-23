@@ -4,8 +4,8 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     .dependencies = .{
         .zigrad = .{
-            .url = "https://github.com/Marco-Christiani/zigrad/archive/refs/tags/v0.0.0-alpha.tar.gz",
-            .hash = "1220402127c31315a2610a0157d53390bb78dfa79ec8b63ebf7505568aa4bf3585ae",
+            .url = "git+https://github.com/Marco-Christiani/zigrad/#06e3b96dd9d0e68d678e4b35e75676fd92e1f762",
+            .hash = "12207d8c2a1236787a8bdc63ef76529ab6084460e0ebb9acf91c9edbece596356d43",
         },
     },
 
