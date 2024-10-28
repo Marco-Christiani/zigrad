@@ -167,10 +167,9 @@ pub fn LinearLayer(comptime T: type) type {
             const out_features = self.weights.data.shape.shape[0];
 
             var result_nd = try NDArray(T).empty(&[_]usize{ batch_size, out_features }, fwd_allocator);
+            const bd = self.bias.data.data;
             for (0..batch_size) |i| {
-                const row_start = i * out_features;
-                const row_end = (i + 1) * out_features;
-                @memcpy(result_nd.data[row_start..row_end], self.bias.data.data);
+                @memcpy(result_nd.data[i * out_features .. (i + 1) * out_features], bd);
             }
 
             _ = try input.data._bmmAcc(
@@ -221,18 +220,15 @@ pub fn LinearLayer(comptime T: type) type {
             // This is not really a great way to optimize this, btw. This is meant to demonstrate to a user how they can
             // implement custom functionality by accessing the underlying data directly.
             // const blas = @import("../backend/blas.zig");
-            // const batch_size = try grad_output.shape.get(0);
-            // const out_features = try grad_output.shape.get(1);
-            // const n = out_features;
-            // const incx: usize = 1;
-            // const incy: usize = 1;
+            // const batch_size = grad_output.shape.shape[0];
+            // const out_features = grad_output.shape.shape[1];
+            // const grad_B_data = grad_B.data;
+            // const grad_output_data = grad_output.data;
             // // grad_B with the first batch
-            // blas.blas_axpy(T, n, 1.0, grad_output.data, incx, grad_B.data, incy);
-            //
+            // blas.blas_axpy(T, out_features, 1.0, grad_output_data, 1, grad_B_data, 1);
             // // sum over the remaining batches
             // for (1..batch_size) |i| {
-            //     const offset = i * out_features;
-            //     blas.blas_axpy(T, n, 1.0, grad_output.data[offset..], incx, grad_B.data, incy);
+            //     blas.blas_axpy(T, out_features, 1.0, grad_output_data[i * out_features ..], 1, grad_B_data, 1);
             // }
 
             // input gradient

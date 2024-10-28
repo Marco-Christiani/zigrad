@@ -23,6 +23,8 @@ pub const GatherOptions = struct {
     dim: usize,
 };
 
+/// These Op enums are not really functional but are convenient for the user (i.e. when traversing the graph or debugging)
+/// There are many more ops supported than this. This may be deprecated by v1.
 pub const Op = enum {
     ADD,
     SUB,

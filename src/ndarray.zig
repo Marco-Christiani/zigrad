@@ -1,9 +1,3 @@
-// TODO:Scalar ops
-// TODO: support ND ops. finish broadcast integration
-// TODO: element-wise ops to blas if not then vector
-// TODO: Shape memory management, put it + tests somewhere
-// TODO: exp
-// TODO: document bcast rules and shape rules for inplace ewise ops
 const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/Shape.zig");
@@ -23,6 +17,7 @@ pub const GatherOptions = struct {
 };
 
 pub fn NDArray(comptime T: type) type {
+    // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
         shape: *Shape,
@@ -366,13 +361,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise sum.
         pub fn sumNoAlloc(self: *const Self) T {
-            // TODO: tired rn
-            // const VT = @Vector(16, T);
-            // var s: T = 0;
-            // var i: usize = 0;
-            // while (i < self.data.len - 16) : (i += 16) s += @reduce(.Add, @as(VT, self.data[i .. i + 16].*));
-            // for (i..self.data.len) |j| s += self.data[j];
-            // return s;
             var s: T = 0;
             for (0..self.data.len) |i| s += self.data[i];
             return s;
@@ -410,6 +398,41 @@ pub fn NDArray(comptime T: type) type {
             return try self._bmmAcc(other, null, 1.0, 0.0, trans_a, trans_b, allocator);
         }
 
+        /// # Design decisions regarding batch gemm support
+        ///
+        /// If we broadcasted an operand then we cant just call batch gemm which expects batch_size number of matrices
+        /// for all inputs
+        /// Note: if we continue with the current behavior, we gain a fast path where if the outer strides match, we can
+        ///    directly call batch gemm. This is essentially what we currently do and will not be correct for some cases
+        ///    but will be fast.
+        ///
+        /// There are a few ways to address this, listed below. We should likely have both, but for now we can go with
+        ///  option 1 and assume that we will not have to support very large calculations soon.
+        ///
+        /// ## Option 1
+        ///
+        ///   - Expand to the target shape, actually performing the broacast.
+        ///   - With all shapes matching, call batch gemm
+        ///
+        /// Discussion:
+        ///
+        ///   - Requires intermediate allocations.
+        ///   - Actually expanding the shape exerts memory pressure, for some problems this wont be feasible.
+        ///   - Have to implement expanding and another thing to optimize.
+        ///   - Probably fastest
+        ///
+        /// ## Option 2
+        ///
+        ///   - Continue to handle the broadcasting manually
+        ///   - If the outer strides (stridea and strideb) mismatch, we have to broadcast
+        ///   - For all dimensions inside of the first broadcasted dim we call batch gemm.
+        ///
+        /// Discussion:
+        ///
+        ///   - Less memory pressure by avoiding expansion
+        ///   - Easily parallelized, but need to be careful about what APIs provide what guarantees here
+        ///   - Will probably have the same edge case issue
+        ///
         pub fn _bmmAcc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
             if (self.shape.len() < 2) {
                 try self._reshape(&[_]usize{ 1, try self.shape.get(0) });
@@ -487,6 +510,147 @@ pub fn NDArray(comptime T: type) type {
                 blas.blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
             }
             return result;
+        }
+
+        /// Explicitly expands a tensor to match the shape of another.
+        /// This operation can only expand dimensions, never contract them.
+        /// If any dimension of self is larger than the corresponding dimension in other,
+        /// an error.InvalidExpansion is returned.
+        pub fn expandAs(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            // if shapes are identical, just return a copy.
+            if (self.shape.eq(other.shape.*, .{ .strict = true })) {
+                return self.copy(allocator);
+            }
+
+            const bshape = try self.shape.broadcast(other.shape.*);
+            defer bshape.deinit();
+
+            for (0..@min(self.shape.len(), other.shape.len())) |i| {
+                if (self.shape.shape[i] > other.shape.shape[i]) return error.InvalidExpansion;
+            }
+
+            const bvalues = try Self.zeros(bshape.shape, allocator);
+
+            // allocate index mappings
+            var self_indices = try allocator.alloc(usize, self.shape.shape.len);
+            defer allocator.free(self_indices);
+            var indices = try allocator.alloc(usize, bshape.shape.len);
+            defer allocator.free(indices);
+            @memset(indices, 0);
+
+            // precompute which dimensions are broadcasted (i.e., dimensions of size 1).
+            var is_broadcasted = try allocator.alloc(bool, self.shape.shape.len);
+            defer allocator.free(is_broadcasted);
+            for (self.shape.shape, 0..) |dim, i| {
+                is_broadcasted[i] = (dim == 1);
+            }
+
+            // iterate over broadcasted shape and copy values
+            while (true) {
+                // map indices to self.shape, using precomputed broadcast information
+                for (self.shape.shape, 0..) |_, i| {
+                    const bshape_index = bshape.shape.len - self.shape.shape.len + i;
+                    // if the dimension is broadcasted, always use 0, otherwise use the index
+                    self_indices[i] = if (is_broadcasted[i]) 0 else indices[bshape_index];
+                }
+
+                const self_offset = self.posToOffset(self_indices);
+                const bvalues_offset = bvalues.posToOffset(indices);
+                bvalues.data[bvalues_offset] = self.data[self_offset];
+
+                var dim = indices.len;
+                while (dim > 0) {
+                    dim -= 1;
+                    indices[dim] += 1;
+                    if (indices[dim] < bshape.shape[dim]) break;
+                    indices[dim] = 0;
+                }
+                if (dim == 0) break;
+            }
+
+            return bvalues;
+        }
+
+        test expandAs {
+            const contentCheck = struct {
+                /// Make sure the expansion was correct
+                fn contentCheck(original: *NDArray(f32), expanded: *NDArray(f32)) !void {
+                    if (original.shape.eq(expanded.shape.*, .{ .strict = true })) {
+                        try std.testing.expectEqualSlices(f32, original.data, expanded.data);
+                    }
+
+                    const orig_shape = original.shape.shape;
+                    const exp_shape = expanded.shape.shape;
+
+                    var indices = try std.testing.allocator.alloc(usize, exp_shape.len);
+                    defer std.testing.allocator.free(indices);
+                    @memset(indices, 0);
+
+                    while (true) {
+                        // calculate index for expanded array
+                        const exp_index = expanded.posToOffset(indices);
+
+                        // calculate corresponding index for original array
+                        var orig_indices = try std.testing.allocator.alloc(usize, orig_shape.len);
+                        defer std.testing.allocator.free(orig_indices);
+                        for (orig_shape, 0..) |dim, i| {
+                            orig_indices[i] = if (dim == 1) 0 else indices[i];
+                        }
+                        const orig_index = original.posToOffset(orig_indices);
+
+                        try std.testing.expectApproxEqAbs(expanded.data[exp_index], original.data[orig_index], std.math.floatEps(f32));
+
+                        // increment indices
+                        var dim = exp_shape.len;
+                        while (dim > 0) {
+                            dim -= 1;
+                            indices[dim] += 1;
+                            if (indices[dim] < exp_shape[dim]) break;
+                            indices[dim] = 0;
+                        }
+                        if (dim == 0) break;
+                    }
+                }
+            }.contentCheck;
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+            const Array = NDArray(f32);
+
+            const test_cases = [_][3][3]usize{
+                .{ .{ 1, 3, 2 }, .{ 2, 3, 2 }, .{ 2, 3, 2 } },
+                .{ .{ 1, 3, 2 }, .{ 2, 3, 2 }, .{ 2, 3, 2 } },
+                .{ .{ 1, 3, 1 }, .{ 7, 3, 1 }, .{ 7, 3, 1 } },
+                .{ .{ 2, 3, 4 }, .{ 2, 3, 4 }, .{ 2, 3, 4 } },
+                .{ .{ 7, 7, 7 }, .{ 3, 3, 3 }, .{ 0, 0, 0 } }, // failing case
+                .{ .{ 1, 3, 3 }, .{ 3, 1, 3 }, .{ 1, 1, 1 } }, // failing case
+            };
+            var rng = std.Random.DefaultPrng.init(99);
+            var nums: [512]f32 = undefined;
+            for (&nums) |*b| b.* = rng.random().float(f32);
+
+            inline for (test_cases) |case| {
+                const sa = utils.prod(&case[0]);
+                const A = try Array.init(nums[0..sa], &case[0], alloc);
+                defer A.deinit(alloc);
+                const B = try Array.zeros(&case[1], alloc);
+                defer B.deinit(alloc);
+                const expt = case[2];
+                if (std.mem.allEqual(usize, &expt, 0)) {
+                    try std.testing.expectError(error.Unbroadcastable, A.expandAs(B, alloc));
+                } else if (std.mem.allEqual(usize, &expt, @intCast(1))) {
+                    try std.testing.expectError(error.InvalidExpansion, A.expandAs(B, alloc));
+                } else {
+                    const C = try A.expandAs(B, alloc);
+                    defer C.deinit(alloc);
+                    try std.testing.expectEqualSlices(usize, &expt, C.shape.shape);
+                    try contentCheck(A, C);
+                }
+            }
+
+            // const A = try Array.init(&.{1, 2, 3, 4}, &.{2, 2}, alloc);
+            // const B = try Array.init(&.{1, 2, 3, 4}, &.{2, 2}, alloc);
+            // const C = try A.expandAs(B, alloc);
         }
 
         pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
