@@ -226,7 +226,6 @@ const MnistDataset = struct {
 };
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
-    defer @import("../backend/blas.zig").cleanup_jit();
     var backing_fwd_alloc = tracy.TracingAllocator.initNamed("Fwd Allocator", std.heap.raw_c_allocator);
     var backing_bw_alloc = tracy.TracingAllocator.initNamed("Bwd Allocator", std.heap.raw_c_allocator);
     var acquired_alloc = tracy.TracingAllocator.initNamed("Acquired Allocator", std.heap.raw_c_allocator);
