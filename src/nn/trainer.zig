@@ -8,7 +8,6 @@ const SGD = zg.optim.SGD;
 const cross_entropy_loss = zg.loss.softmax_cross_entropy_loss;
 const mse_loss = zg.loss.mse_loss;
 const softmax = zg.loss.softmax;
-const tracy = @import("tracy");
 
 const log = std.log.scoped(.zg_trainer);
 
@@ -55,27 +54,16 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             fwd_allocator: std.mem.Allocator,
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
-            const zone = tracy.initZone(@src(), .{ .name = "trainStep" });
-            defer zone.deinit();
-
-            const fwd_zone = tracy.initZone(@src(), .{ .name = "trainStep/fwd" });
             const output = try self.model.forward(input, fwd_allocator);
-            fwd_zone.deinit();
 
-            const loss_zone = tracy.initZone(@src(), .{ .name = "trainStep/loss" });
             const loss = try lossf(T, output, target, fwd_allocator);
-            loss_zone.deinit();
 
             self.model.zeroGrad();
             loss.grad.?.fill(1.0);
             log.debug("running backward", .{});
-            const bwd_zone = tracy.initZone(@src(), .{ .name = "trainStep/bwd" });
             try self.graph_manager.backward(loss, bwd_allocator);
-            bwd_zone.deinit();
 
-            const step_zone = tracy.initZone(@src(), .{ .name = "trainStep/step" });
             self.optimizer.step(self.params);
-            step_zone.deinit();
             return loss;
         }
 

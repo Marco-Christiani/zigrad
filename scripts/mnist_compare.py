@@ -196,5 +196,5 @@ if __name__ == "__main__":
     _ = parser.plot_results(True)
     fig = parser.plot_results(True, "plotly_dark")
     parser.print_summary()
-    # input()
+    input()
     fig.show()
