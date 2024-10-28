@@ -1,5 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const using_mkl = blk: {
+    const decls = @typeInfo(c).Struct.decls;
+    for (decls) |decl| {
+        if (std.mem.startsWith(u8, decl.name, "mkl_") or std.mem.startsWith(u8, decl.name, "MKL_")) {
+            break :blk true;
+        }
+    }
+    break :blk false;
+};
 const c = switch (builtin.target.os.tag) {
     .linux => @cImport(@cInclude("cblas.h")),
     .macos => @cImport(@cInclude("Accelerate/Accelerate.h")),

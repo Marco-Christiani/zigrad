@@ -1,5 +1,5 @@
 .{
-    .name = "hello-world",
+    .name = "mnist",
     .version = "0.0.0",
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     .dependencies = .{
