@@ -38,7 +38,7 @@ pub fn broadcast(self: Self, other: Self) !*Self {
         const dim_a = if (i < self.shape.len) self.shape[self.shape.len - 1 - i] else 1;
         const dim_b = if (i < other.shape.len) other.shape[other.shape.len - 1 - i] else 1;
         if (dim_a != dim_b and dim_a != 1 and dim_b != 1) {
-            log.err("Cannot broadcast {d} and {d}. (i={d}) dim a_{d}={d} b_{d}={d}", .{
+            log.warn("Cannot broadcast {d} and {d}. (i={d}) dim a_{d}={d} b_{d}={d}", .{
                 self.shape,
                 other.shape,
                 i,
