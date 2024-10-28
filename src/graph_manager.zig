@@ -50,9 +50,7 @@ pub fn GraphManager(comptime T: type) type {
         pub fn backward(self: *Self, node: *const T, alloc: std.mem.Allocator) !void {
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
-
             self.topo(node);
-
             const nodes = self.sorted_nodes.items;
 
             for (0..nodes.len) |i| {
