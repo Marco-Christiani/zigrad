@@ -512,6 +512,147 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
+        /// Explicitly expands a tensor to match the shape of another.
+        /// This operation can only expand dimensions, never contract them.
+        /// If any dimension of self is larger than the corresponding dimension in other,
+        /// an error.InvalidExpansion is returned.
+        pub fn expandAs(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            // if shapes are identical, just return a copy.
+            if (self.shape.eq(other.shape.*, .{ .strict = true })) {
+                return self.copy(allocator);
+            }
+
+            const bshape = try self.shape.broadcast(other.shape.*);
+            defer bshape.deinit();
+
+            for (0..@min(self.shape.len(), other.shape.len())) |i| {
+                if (self.shape.shape[i] > other.shape.shape[i]) return error.InvalidExpansion;
+            }
+
+            const bvalues = try Self.zeros(bshape.shape, allocator);
+
+            // allocate index mappings
+            var self_indices = try allocator.alloc(usize, self.shape.shape.len);
+            defer allocator.free(self_indices);
+            var indices = try allocator.alloc(usize, bshape.shape.len);
+            defer allocator.free(indices);
+            @memset(indices, 0);
+
+            // precompute which dimensions are broadcasted (i.e., dimensions of size 1).
+            var is_broadcasted = try allocator.alloc(bool, self.shape.shape.len);
+            defer allocator.free(is_broadcasted);
+            for (self.shape.shape, 0..) |dim, i| {
+                is_broadcasted[i] = (dim == 1);
+            }
+
+            // iterate over broadcasted shape and copy values
+            while (true) {
+                // map indices to self.shape, using precomputed broadcast information
+                for (self.shape.shape, 0..) |_, i| {
+                    const bshape_index = bshape.shape.len - self.shape.shape.len + i;
+                    // if the dimension is broadcasted, always use 0, otherwise use the index
+                    self_indices[i] = if (is_broadcasted[i]) 0 else indices[bshape_index];
+                }
+
+                const self_offset = self.posToOffset(self_indices);
+                const bvalues_offset = bvalues.posToOffset(indices);
+                bvalues.data[bvalues_offset] = self.data[self_offset];
+
+                var dim = indices.len;
+                while (dim > 0) {
+                    dim -= 1;
+                    indices[dim] += 1;
+                    if (indices[dim] < bshape.shape[dim]) break;
+                    indices[dim] = 0;
+                }
+                if (dim == 0) break;
+            }
+
+            return bvalues;
+        }
+
+        test expandAs {
+            const contentCheck = struct {
+                /// Make sure the expansion was correct
+                fn contentCheck(original: *NDArray(f32), expanded: *NDArray(f32)) !void {
+                    if (original.shape.eq(expanded.shape.*, .{ .strict = true })) {
+                        try std.testing.expectEqualSlices(f32, original.data, expanded.data);
+                    }
+
+                    const orig_shape = original.shape.shape;
+                    const exp_shape = expanded.shape.shape;
+
+                    var indices = try std.testing.allocator.alloc(usize, exp_shape.len);
+                    defer std.testing.allocator.free(indices);
+                    @memset(indices, 0);
+
+                    while (true) {
+                        // calculate index for expanded array
+                        const exp_index = expanded.posToOffset(indices);
+
+                        // calculate corresponding index for original array
+                        var orig_indices = try std.testing.allocator.alloc(usize, orig_shape.len);
+                        defer std.testing.allocator.free(orig_indices);
+                        for (orig_shape, 0..) |dim, i| {
+                            orig_indices[i] = if (dim == 1) 0 else indices[i];
+                        }
+                        const orig_index = original.posToOffset(orig_indices);
+
+                        try std.testing.expectApproxEqAbs(expanded.data[exp_index], original.data[orig_index], std.math.floatEps(f32));
+
+                        // increment indices
+                        var dim = exp_shape.len;
+                        while (dim > 0) {
+                            dim -= 1;
+                            indices[dim] += 1;
+                            if (indices[dim] < exp_shape[dim]) break;
+                            indices[dim] = 0;
+                        }
+                        if (dim == 0) break;
+                    }
+                }
+            }.contentCheck;
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+            const Array = NDArray(f32);
+
+            const test_cases = [_][3][3]usize{
+                .{ .{ 1, 3, 2 }, .{ 2, 3, 2 }, .{ 2, 3, 2 } },
+                .{ .{ 1, 3, 2 }, .{ 2, 3, 2 }, .{ 2, 3, 2 } },
+                .{ .{ 1, 3, 1 }, .{ 7, 3, 1 }, .{ 7, 3, 1 } },
+                .{ .{ 2, 3, 4 }, .{ 2, 3, 4 }, .{ 2, 3, 4 } },
+                .{ .{ 7, 7, 7 }, .{ 3, 3, 3 }, .{ 0, 0, 0 } }, // failing case
+                .{ .{ 1, 3, 3 }, .{ 3, 1, 3 }, .{ 1, 1, 1 } }, // failing case
+            };
+            var rng = std.Random.DefaultPrng.init(99);
+            var nums: [512]f32 = undefined;
+            for (&nums) |*b| b.* = rng.random().float(f32);
+
+            inline for (test_cases) |case| {
+                const sa = utils.prod(&case[0]);
+                const A = try Array.init(nums[0..sa], &case[0], alloc);
+                defer A.deinit(alloc);
+                const B = try Array.zeros(&case[1], alloc);
+                defer B.deinit(alloc);
+                const expt = case[2];
+                if (std.mem.allEqual(usize, &expt, 0)) {
+                    try std.testing.expectError(error.Unbroadcastable, A.expandAs(B, alloc));
+                } else if (std.mem.allEqual(usize, &expt, @intCast(1))) {
+                    try std.testing.expectError(error.InvalidExpansion, A.expandAs(B, alloc));
+                } else {
+                    const C = try A.expandAs(B, alloc);
+                    defer C.deinit(alloc);
+                    try std.testing.expectEqualSlices(usize, &expt, C.shape.shape);
+                    try contentCheck(A, C);
+                }
+            }
+
+            // const A = try Array.init(&.{1, 2, 3, 4}, &.{2, 2}, alloc);
+            // const B = try Array.init(&.{1, 2, 3, 4}, &.{2, 2}, alloc);
+            // const C = try A.expandAs(B, alloc);
+        }
+
         pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
             if (self.shape.len() > 1 or other.shape.len() > 1) std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
             if (self.data.len != other.data.len) std.debug.panic("Incompatible lengths for dot product: {d} and {d}\n", .{ self.data.len, other.data.len });
