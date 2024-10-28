@@ -16,7 +16,9 @@ version: 1.1.1
     See hermetic build tasks.
 *** ( ) finite difference
 *** ( ) In general if in pure inference mode then perhaps defer to zml but this might require a translation layer, so maybe just a model conversion actually
-
+*** ( ) MKL to {https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html}[oneMKL] {https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2024-2/overview.html}[oneMKL C Ref]
+*** ( ) oneMKL to oneDNN https://www.intel.com/content/www/us/en/developer/tools/oneapi/onednn.html
+    
 ** ( ) Arch. + Perf.
 *** (x) should be a backend abstraction
     Comptime switchinig on BLAS impl is fine for now. More specific tasks to expand further will be added later.
@@ -27,6 +29,7 @@ version: 1.1.1
 *** (x) arch organization first pass {:architecture:} @status=IP
     Taking this further than expected, need to properly organize to keep it manageable. Good time to consider abstractions.
 *** ( ) Decoupled backward graph, this also allows us to separately compile the graphs which will be important and separate data versioning and other logic.
+    const mkl = @cImport(@cInclude("mkl/mkl_.h"));
 
 ** (-) Refactoring
 *** ( ) Rename tests https://ziglang.org/documentation/0.12.1/#Doctests
