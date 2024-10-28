@@ -55,14 +55,10 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
             const output = try self.model.forward(input, fwd_allocator);
-
             const loss = try lossf(T, output, target, fwd_allocator);
-
             self.model.zeroGrad();
             loss.grad.?.fill(1.0);
-            log.debug("running backward", .{});
             try self.graph_manager.backward(loss, bwd_allocator);
-
             self.optimizer.step(self.params);
             return loss;
         }

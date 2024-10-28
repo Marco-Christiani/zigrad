@@ -1,6 +1,5 @@
 const root = @import("root");
 const std = @import("std");
-const zig_builtin = @import("builtin");
 const build_options = @import("build_options");
 
 pub const NDArray = @import("ndarray.zig").NDArray;
@@ -50,7 +49,6 @@ fn logFn(
 
     const level_txt = comptime level.asText();
     const scope_txt = comptime @tagName(scope);
-
     const stderr = std.io.getStdErr().writer();
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();

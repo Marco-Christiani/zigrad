@@ -1,6 +1,7 @@
 const std = @import("std");
 const math = std.math;
 
+const blas = @import("../backend/blas.zig");
 const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
@@ -55,13 +56,8 @@ pub fn SGD(comptime T: type) type {
                 .max_norm = self.grad_clip_max_norm,
                 .delta = self.grad_clip_delta,
             });
-
-            for (params) |param| {
-                for (param.data.data, param.grad.?.data) |*p, *g| {
-                    // param.data.data[j] -= self.lr * param.grad.?.data[j]; // turns out this line is *really* slow, why cant compiler optimize this?
-                    p.* -= self.lr * g.*;
-                }
-            }
+            const nlr = -self.lr;
+            for (params) |param| blas.blas_axpy(T, param.data.data.len, nlr, param.grad.?.data, 1, param.data.data, 1);
         }
 
         pub fn optimizer(self: *Self) Optimizer(T) {
