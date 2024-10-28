@@ -4,11 +4,8 @@ const math = std.math;
 const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
-const tracy = @import("tracy");
 
 pub fn clipGrads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
-    const zone = tracy.initZone(@src(), .{ .name = "clipGrad" });
-    defer zone.deinit();
     for (params) |param| if (param.grad) |_| param.clip_grad_norm_delta(opts);
 }
 

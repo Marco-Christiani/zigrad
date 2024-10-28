@@ -112,7 +112,6 @@ pub fn Layer(comptime T: type) type {
         }
     };
 }
-const tracy = @import("tracy");
 
 pub fn LinearLayer(comptime T: type) type {
     return struct {
@@ -164,8 +163,6 @@ pub fn LinearLayer(comptime T: type) type {
         // Zigrad figuring out the broadcast and unbroadcasting logic on the fly. This should highlight how little
         // overhead Zigrad's abstractions are
         pub fn forwardManual(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
-            const zone = tracy.initZone(@src(), .{ .name = "fast_linear_fw" });
-            defer zone.deinit();
             const batch_size = if (input.data.shape.len() > 1) try input.data.shape.get(0) else 1;
             const out_features = self.weights.data.shape.shape[0];
 
@@ -199,8 +196,6 @@ pub fn LinearLayer(comptime T: type) type {
         /// A custom backward impl that, technically, isnt optimized in any way aside from avoiding having
         /// to infer shape broadcasting logic which is shockingly fast in Zigrad for some reason.
         fn backwardManual(tensor: NDTensor(T), allocator: std.mem.Allocator) !void {
-            const zone = tracy.initZone(@src(), .{ .name = "fast_linear_bw" });
-            defer zone.deinit();
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             const grad_output = tensor.grad orelse return error.NoGradient;
             const input = tensor.children.?[0];

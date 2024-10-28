@@ -1,6 +1,5 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
-const tracy = @import("tracy");
 
 const Model = zg.Model;
 const MaxPool2DLayer = zg.layer.MaxPool2DLayer;
@@ -226,23 +225,17 @@ const MnistDataset = struct {
 };
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
-    // for analyzing memory usage (its all the dataset)
-    var backing_fwd_alloc = tracy.TracingAllocator.initNamed("Fwd Allocator", std.heap.raw_c_allocator);
-    var backing_bw_alloc = tracy.TracingAllocator.initNamed("Bwd Allocator", std.heap.raw_c_allocator);
-    var model_alloc = tracy.TracingAllocator.initNamed("Model Allocator", std.heap.raw_c_allocator);
-    var dataset_alloc = tracy.TracingAllocator.initNamed("Dataset Allocator", std.heap.raw_c_allocator);
-
-    var model_arena = std.heap.ArenaAllocator.init(model_alloc.allocator());
+    var model_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer model_arena.deinit();
 
-    var dataset_arena = std.heap.ArenaAllocator.init(dataset_alloc.allocator());
+    var dataset_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer dataset_arena.deinit();
 
-    var fw_arena = std.heap.ArenaAllocator.init(backing_fwd_alloc.allocator());
+    var fw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer fw_arena.deinit();
 
     // bw_arena is torn down before eval
-    var bw_arena = std.heap.ArenaAllocator.init(backing_bw_alloc.allocator());
+    var bw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
 
     var model = try MnistModel.initSimple(model_arena.allocator()); // 109_386
     // var model = try MnistModel.initSimple2(model_arena.allocator()); // 717_210
@@ -279,7 +272,6 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
-            tracy.frameMarkNamed("batch");
             step_timer.reset();
             const loss = try trainer.trainStep(
                 image.setLabel("image_batch"),
@@ -337,7 +329,6 @@ fn evalMnist(arena: std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDa
     var correct: f32 = 0;
     var timer = try std.time.Timer.start();
     for (dataset.images, dataset.labels) |image, label| {
-        tracy.frameMarkNamed("batch");
         timer.reset();
         const output = try model.model.forward(image, @constCast(&arena).allocator());
         const batch_n = try output.data.shape.get(0);

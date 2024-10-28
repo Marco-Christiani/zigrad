@@ -10,8 +10,6 @@ const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
 
-const tracy = @import("tracy");
-
 const log = std.log.scoped(.zg_tensor);
 
 pub const MaxOverDimOptions = struct {
@@ -25,6 +23,8 @@ pub const GatherOptions = struct {
     dim: usize,
 };
 
+/// These Op enums are not really functional but are convenient for the user (i.e. when traversing the graph or debugging)
+/// There are many more ops supported than this. This may be deprecated by v1.
 pub const Op = enum {
     ADD,
     SUB,
@@ -654,23 +654,16 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
-            const zone = tracy.initZone(@src(), .{ .name = "NDTensor/backward" });
-            defer zone.deinit();
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
             if (!self.requires_grad) return;
             if (self._backward) |f| {
-                const op_zone = tracy.initZone(@src(), .{ .name = "NDTensor/backward/custom" });
-                defer op_zone.deinit();
                 try f(self, allocator);
                 return;
             }
             if (self.op) |op| {
-                tracy.print("op={s}", .{@tagName(op)});
                 switch (op) {
                     .ADD => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_add" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -683,8 +676,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .SUB => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_sub" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -702,8 +693,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MUL => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_mul" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -723,8 +712,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .DIV => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_div" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const a = children[0];
                             const b = children[1];
@@ -750,8 +737,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATMUL_AB => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_ab" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const A = children[0].data; // Shape: (..., m, k)
                             const B = children[1].data; // Shape: (..., k, n)
@@ -763,8 +748,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATMUL_AtB => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_atb" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const A = children[0].data; // Shape: (..., k, m)
                             const B = children[1].data; // Shape: (..., k, n)
@@ -776,8 +759,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATMUL_ABt => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_abt" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const A = children[0].data; // Shape: (..., m, k)
                             const B = children[1].data; // Shape: (..., n, k)
@@ -789,8 +770,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATMUL_AtBt => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matmul_atbt" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const A = children[0].data; // Shape: (..., k, m)
                             const B = children[1].data; // Shape: (..., n, k)
@@ -802,8 +781,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .DOT => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_dot" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             var a = children[0];
                             var b = children[1];
@@ -814,8 +791,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .MATVEC => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_matvec" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             var A = children[0].data;
                             const x = children[1].data;
@@ -830,16 +805,12 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .SUM => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_sum" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const child = children[0];
                             _ = try child.grad.?._add(self.grad.?);
                         }
                     },
                     .RESHAPE => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_reshape" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const original_shape = children[0].data.shape;
                             try self.grad.?._reshape(original_shape.shape);
@@ -847,16 +818,12 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .TRANSPOSE => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_transpose" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const gt = try self.grad.?.transpose(allocator);
                             _ = try children[0].grad.?._add(gt);
                         }
                     },
                     .MAX => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_max" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const child = children[0];
                             const max_val = self.data.data[0];
@@ -868,8 +835,6 @@ pub fn NDTensor(comptime T: type) type {
                         }
                     },
                     .EXP => {
-                        const op_zone = tracy.initZone(@src(), .{ .name = "bw_exp" });
-                        defer op_zone.deinit();
                         if (self.children) |children| {
                             const child = children[0];
                             for (self.data.data, self.grad.?.data, 0..) |exp_val, grad_val, i| {
