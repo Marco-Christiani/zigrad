@@ -1,9 +1,3 @@
-// TODO:Scalar ops
-// TODO: support ND ops. finish broadcast integration
-// TODO: element-wise ops to blas if not then vector
-// TODO: Shape memory management, put it + tests somewhere
-// TODO: exp
-// TODO: document bcast rules and shape rules for inplace ewise ops
 const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/Shape.zig");
@@ -23,6 +17,7 @@ pub const GatherOptions = struct {
 };
 
 pub fn NDArray(comptime T: type) type {
+    // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
         shape: *Shape,
@@ -366,13 +361,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise sum.
         pub fn sumNoAlloc(self: *const Self) T {
-            // TODO: tired rn
-            // const VT = @Vector(16, T);
-            // var s: T = 0;
-            // var i: usize = 0;
-            // while (i < self.data.len - 16) : (i += 16) s += @reduce(.Add, @as(VT, self.data[i .. i + 16].*));
-            // for (i..self.data.len) |j| s += self.data[j];
-            // return s;
             var s: T = 0;
             for (0..self.data.len) |i| s += self.data[i];
             return s;
@@ -487,13 +475,40 @@ pub fn NDArray(comptime T: type) type {
             if (n_batch_dims > 0) @memcpy(output_shape[0..n_batch_dims], broadcast_batch_dims);
             output_shape[n_batch_dims] = M;
             output_shape[n_batch_dims + 1] = N;
-            if (accumulator) |acc| {
-                if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) {
-                    log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
-                    return error.IncompatibleAccumulatorShape;
-                }
-            }
+
             const n_batches = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
+            var result: *Self = blk: {
+                if (accumulator) |acc| {
+                    if (!Shape.eqRaw(acc.shape.shape, output_shape, .{ .strict = true })) {
+                        log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
+                        return error.IncompatibleAccumulatorShape;
+                    }
+                    break :blk acc;
+                } else break :blk try Self.zeros(output_shape, allocator);
+            };
+            errdefer if (accumulator == null) result.deinit(allocator);
+
+            const n_batches_a = utils.prod(a_batch_dims);
+            const n_batches_b = utils.prod(b_batch_dims);
+
+            const lda = a_cols;
+            const ldb = b_cols;
+            const ldc = N;
+
+            for (0..n_batches) |i| {
+                const a_index = i % n_batches_a;
+                const b_index = i % n_batches_b;
+
+                const a_start = a_index * a_rows * a_cols;
+                const b_start = b_index * b_rows * b_cols;
+                const out_start = i * M * N;
+
+                const a_slice = self.data[a_start .. a_start + a_rows * a_cols];
+                const b_slice = other.data[b_start .. b_start + b_rows * b_cols];
+                const out_slice = result.data[out_start .. out_start + M * N];
+
+                blas.blas_matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
+            }
             return result;
         }
 
