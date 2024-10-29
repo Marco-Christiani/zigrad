@@ -17,7 +17,7 @@
 **Fast**
 <!-- benchmarks -->
 
-2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
+2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks, 1.5x on x86. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
 <!-- link to a benchmarking page -->
 <!-- only need one of the bm plots, probably fast vs fast since that requires the least explanation -->
 
@@ -45,7 +45,8 @@ But wait, there's more..
 - Tiny binaries: binaries for the MNIST tests shown are under 400kb in `ReleaseFast` mode and under 200kb in `ReleaseSmall`.
 - Graph tracing
 - Tensorboard integration*
-- MKL Support
+- Cross platform
+- Statically linked executables
 - Minimal and transparent heap allocations
 <!-- Scalar API -->
 
@@ -75,6 +76,16 @@ We did not have to use Zigrad's modules to write this network at all, as Zigrad 
 
 ![](./docs/comp_graph_mnist_simple_ag.svg)
 
+## Example
+
+WIP
+
+```shell
+git clone https://github.com/Marco-Christiani/zigrad/
+cd zigrad/examples/hello-world
+zig build run
+```
+
 ## Roadmap
 
 A lot is planned and hoping for support from the Zig community so we can accomplish some of the more ambitious goals.
@@ -87,7 +98,10 @@ A lot is planned and hoping for support from the Zig community so we can accompl
 - Dynamic graph compiler
 - MLIR
 - Support for popular formats like ONNX and ggml.
+- ZML translation for inference
 
 ## Known Issues and Limitations
 
-- Until MKL support is extended the performance on other platforms will not be as strong
+- Lack of GPU support for now
+- Effort has been directed towards performant primitives, not many layer types have been implemented
+  - e.g. conv, pooling, etc are test implementations for verification, they are slow and unoptimized, I would not use them
