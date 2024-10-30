@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .tracy_enable = false,
     });
+    exe.linkLibC();
     exe.root_module.addImport("zigrad", zigrad_dep.module("zigrad"));
     b.installArtifact(exe);
 
