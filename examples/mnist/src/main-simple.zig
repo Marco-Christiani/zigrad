@@ -57,7 +57,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
                 ima.allocator(),
             );
             total_loss += loss.get(&[_]usize{0});
-            log.info("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]\n", .{
+            log.info("train_loss: {d:<5.5} [{d}/{d}]\n", .{
                 loss.data.data[0],
                 i,
                 train_dataset.images.len,
