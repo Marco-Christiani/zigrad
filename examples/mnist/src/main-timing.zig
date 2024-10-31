@@ -132,11 +132,21 @@ fn evalMnist(allocator: std.mem.Allocator, model: MnistModel(T), dataset: MnistD
 }
 
 pub fn main() !void {
-    try runMnist("/tmp/zigrad_test_mnist_train_full.csv", "/tmp/zigrad_test_mnist_test_full.csv");
+    var buf1: [1024]u8 = undefined;
+    var buf2: [1024]u8 = undefined;
+    const data_sub_dir = std.posix.getenv("DATA_DIR") orelse "data";
+    const train_full = try std.fmt.bufPrint(&buf1, "{s}/{s}", .{ data_sub_dir, "mnist_train_full.csv" });
+    const test_full = try std.fmt.bufPrint(&buf2, "{s}/{s}", .{ data_sub_dir, "mnist_test_full.csv" });
+    try runMnist(train_full, test_full);
 }
 
 test runMnist {
-    runMnist("/tmp/zigrad_test_mnist_train_small.csv", "/tmp/zigrad_test_mnist_test_small.csv") catch |err| switch (err) {
+    var buf1: [1024]u8 = undefined;
+    var buf2: [1024]u8 = undefined;
+    const data_sub_dir = std.posix.getenv("DATA_DIR") orelse "data";
+    const train_small = try std.fmt.bufPrint(&buf1, "{s}/{s}", .{ data_sub_dir, "mnist_train_small.csv" });
+    const test_small = try std.fmt.bufPrint(&buf2, "{s}/{s}", .{ data_sub_dir, "mnist_test_small.csv" });
+    runMnist(train_small, test_small) catch |err| switch (err) {
         std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `runMnist` test.", .{@errorName(err)}),
         else => return err,
     };
