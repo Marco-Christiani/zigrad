@@ -1,4 +1,8 @@
+"""Pulls mnist dataset and converts to csv artifacts."""
+
+import os
 from pathlib import Path
+
 import torch
 import torch.utils.data
 import torchvision
@@ -38,10 +42,12 @@ def head(n: int, inpath: Path, outpath: Path):
 
 
 if __name__ == "__main__":
-    train_csv_full = Path("/tmp/zigrad_test_mnist_train_full.csv")
-    test_csv_full = Path("/tmp/zigrad_test_mnist_test_full.csv")
-    train_csv_small = train_csv_full.with_stem("zigrad_test_mnist_train_small")
-    test_csv_small = train_csv_full.with_stem("zigrad_test_mnist_test_small")
+    data_dir = Path(os.getenv("DATA_DIR", "./data"))
+    data_dir.mkdir(exist_ok=True)
+    train_csv_full = data_dir.joinpath("mnist_train_full.csv")
+    test_csv_full = data_dir.joinpath("mnist_test_full.csv")
+    train_csv_small = train_csv_full.with_stem("mnist_train_small")
+    test_csv_small = train_csv_full.with_stem("mnist_test_small")
     if all(p.exists() for p in (train_csv_full, test_csv_full, train_csv_small, test_csv_small)):
         print("Already downloaded.")
     else:
