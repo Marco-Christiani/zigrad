@@ -213,6 +213,18 @@ class GradMode(StrEnum):
     inference = auto()
 
 
+def get_grad_context(grad_mode: GradMode):
+    match grad_mode:
+        case GradMode.default:
+            from contextlib import nullcontext
+
+            return nullcontext()
+        case GradMode.nograd:
+            return torch.no_grad()
+        case GradMode.inference:
+            return torch.inference_mode()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -241,15 +253,17 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    print(f"grad_mode={args.grad_mode}")
 
-    main(
-        train=args.t,
-        compile=args.c,
-        batch_size=args.batch_size,
-        num_epochs=args.num_epochs,
-        learning_rate=args.learning_rate,
-        device=args.device,
-        grad_mode=args.grad_mode,
-        model_variant=args.model_variant,
-        autograd=args.autograd,
-    )
+    with get_grad_context(args.grad_mode):
+        main(
+            train=args.t,
+            compile=args.c,
+            batch_size=args.batch_size,
+            num_epochs=args.num_epochs,
+            learning_rate=args.learning_rate,
+            device=args.device,
+            grad_mode=args.grad_mode,
+            model_variant=args.model_variant,
+            autograd=args.autograd,
+        )
