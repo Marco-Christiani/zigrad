@@ -93,7 +93,7 @@ class ModelAg(nn.Module):
         return [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3]
 
 
-def load_mnist(filepath, batch_size):
+def load_mnist(filepath: Path, batch_size: int, scale: bool, shuffle: bool = False):
     print(f"Loading data from {filepath}")
     data = np.loadtxt(filepath, delimiter=",")
     print(f"Data shape: {data.shape}")
@@ -102,6 +102,9 @@ def load_mnist(filepath, batch_size):
         raise ValueError(f"Unexpected data shape. Expected 794 columns, got {data.shape[1]}")
 
     images = torch.FloatTensor(data[:, 10:])
+    if scale:
+        print("Scaling pixel values")
+        images /= 255
     labels = torch.FloatTensor(data[:, :10])  # one-hot labels
 
     print(f"Images shape: {images.shape}, Labels shape: {labels.shape}")
@@ -110,7 +113,7 @@ def load_mnist(filepath, batch_size):
     print(f"Reshaped images shape: {images.shape}")
 
     dataset = TensorDataset(images, labels)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 class Profiler:
@@ -137,17 +140,20 @@ def main(
     grad_mode: str = "default",
     model_variant: str = "simple",
     autograd: bool = False,
+    scale_data: bool = True,
 ):
-    data_dir = Path(os.getenv("DATA_DIR", "/tmp/zigrad_mnist_data"))
-    dataloader = load_mnist(data_dir / "mnist_train_full.csv", batch_size)
-    print(f"train={train}")
-    print(f"compile={compile}")
-    print(f"batch_size={batch_size}")
-    print(f"num_epochs={num_epochs}")
-    print(f"learning_rate={learning_rate}")
-    print(f"device={device}")
+    data_dir = Path(os.getenv("ZG_DATA_DIR", "/tmp/zigrad_mnist_data"))
+    csv_path = data_dir / "mnist_train_full.csv"
+    dataloader = load_mnist(csv_path, batch_size, scale_data)
+    print(f"{csv_path=}")
+    print(f"{train=}")
+    print(f"{compile=}")
+    print(f"{batch_size=}")
+    print(f"{num_epochs=}")
+    print(f"{learning_rate=}")
+    print(f"{device=}")
     print(f"n_batches={len(dataloader)}")
-    print(f"grad_mode={grad_mode}")
+    print(f"{grad_mode=}")
     print(f"Platform: {platform.system()} {platform.release()} (Python {platform.python_version()})")
     model = ModelAg(model_variant).to(device) if autograd else Model(model_variant).to(device)
     criterion = nn.CrossEntropyLoss()

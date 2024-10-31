@@ -2,7 +2,7 @@ genrule(
     name = "simple",
     srcs = glob(["src/**/*.zig", "build.zig", "build.zig.zon"]),
     outs = ["zig-out/bin/simple"],
-    cmd = "DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache zig build simple -Doptimize=ReleaseFast && cp zig-out/bin/simple $@",
+    cmd = "ZG_DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache zig build simple -Doptimize=ReleaseFast && cp zig-out/bin/simple $@",
     tools = [":mnist_data"],
 )
 
@@ -11,7 +11,7 @@ genrule(
     name = "timing",
     srcs = glob(["src/**/*.zig", "build.zig", "build.zig.zon"]),
     outs = ["zig-out/bin/timing"],
-    cmd = "DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache zig build timing -Doptimize=ReleaseFast && cp zig-out/bin/timing $@",
+    cmd = "ZG_DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache zig build timing -Doptimize=ReleaseFast && cp zig-out/bin/timing $@",
     tools = [":mnist_data"],
 )
 
@@ -52,6 +52,6 @@ genrule(
         "data/mnist_train_small.csv",
         "data/mnist_test_small.csv",
     ],
-    cmd = "DATA_DIR=$(@D)/data $(location :generate_test_data)",
+    cmd = "ZG_DATA_DIR=$(@D)/data $(location :generate_test_data)",
     tools = [":generate_test_data"],
 )

@@ -71,7 +71,7 @@ def head(n: int, inpath: Path, outpath: Path) -> None:
 if __name__ == "__main__":
     import os
 
-    data_dir = Path(os.getenv("DATA_DIR", "/tmp/zigrad_mnist_data"))
+    data_dir = Path(os.getenv("ZG_DATA_DIR", "/tmp/zigrad_mnist_data"))
     data_dir.mkdir(exist_ok=True)
 
     train_csv_full = data_dir / "mnist_train_full.csv"

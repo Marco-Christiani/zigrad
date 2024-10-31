@@ -355,7 +355,7 @@ fn evalMnist(arena: std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDa
 }
 
 fn getMnistPaths(size: enum { full, small }, allocator: std.mem.Allocator) !struct { train_csv: []u8, test_csv: []u8 } {
-    const data_dir = std.posix.getenv("DATA_DIR") orelse "/tmp/";
+    const data_dir = std.posix.getenv("ZG_DATA_DIR") orelse "/tmp/";
     return switch (size) {
         .full => .{
             .train_csv = try std.fmt.allocPrint(allocator, "{s}/mnist_train_full.csv", .{data_dir}),
