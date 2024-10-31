@@ -46,9 +46,9 @@ brpu:
   @just (run_pattern "src/nn/utils.zig")
 
 benchmark:
-  python scripts/mnist_data.py
-  python src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple > /tmp/zg_mnist_torch_log.txt
-  just br -Doptimize=ReleaseFast -Dtracy_enable=false 2> /tmp/zg_mnist_log.txt
+  DATA_DIR=/tmp/zgmnist python examples/mnist/mnist_data.py
+  DATA_DIR=/tmp/zgmnist python src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple > /tmp/zg_mnist_torch_log.txt
+  DATA_DIR=/tmp/zgmnist just br -Doptimize=ReleaseFast -Dtracy_enable=false 2> /tmp/zg_mnist_log.txt
   python scripts/mnist_compare.py
 
 doc:

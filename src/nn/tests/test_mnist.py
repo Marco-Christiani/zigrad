@@ -1,6 +1,8 @@
+import os
 import platform
 import time
 from enum import StrEnum, auto
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -136,7 +138,8 @@ def main(
     model_variant: str = "simple",
     autograd: bool = False,
 ):
-    dataloader = load_mnist("/tmp/zigrad_test_mnist_train_full.csv", batch_size)
+    data_dir = Path(os.getenv("DATA_DIR", "/tmp/zigrad_mnist_data"))
+    dataloader = load_mnist(data_dir / "mnist_train_full.csv", batch_size)
     print(f"train={train}")
     print(f"compile={compile}")
     print(f"batch_size={batch_size}")

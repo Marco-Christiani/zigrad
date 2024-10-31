@@ -288,8 +288,14 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
                 n,
                 ms_per_sample,
             });
+            // Optional: Render a trace of the graph and look at the raw data
             // if (epoch == 0 and i == 0) {
-            //     try zg.utils.renderD2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph_mnist_simple_ag.svg");
+            //     try zg.utils.renderD2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph.svg");
+            //     const view = try image.data.slice(0, 0, 1);
+            //     defer view.shape.deinit();
+            //     std.debug.print("First Value:\n", .{});
+            //     view.print();
+            //     std.debug.print("\n", .{});
             // }
 
             if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
@@ -349,15 +355,15 @@ fn evalMnist(arena: std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDa
 }
 
 fn getMnistPaths(size: enum { full, small }, allocator: std.mem.Allocator) !struct { train_csv: []u8, test_csv: []u8 } {
-    const data_dir = std.posix.getenv("ZG_TEST_DATA_DIR") orelse "/tmp/zigrad_mnist_data";
+    const data_dir = std.posix.getenv("DATA_DIR") orelse "/tmp/";
     return switch (size) {
         .full => .{
-            .train_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_train_full.csv", .{data_dir}),
-            .test_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_test_full.csv", .{data_dir}),
+            .train_csv = try std.fmt.allocPrint(allocator, "{s}/mnist_train_full.csv", .{data_dir}),
+            .test_csv = try std.fmt.allocPrint(allocator, "{s}/mnist_test_full.csv", .{data_dir}),
         },
         .small => .{
-            .train_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_train_small.csv", .{data_dir}),
-            .test_csv = try std.fmt.allocPrint(allocator, "{s}/zigrad_test_mnist_test_small.csv", .{data_dir}),
+            .train_csv = try std.fmt.allocPrint(allocator, "{s}/mnist_train_small.csv", .{data_dir}),
+            .test_csv = try std.fmt.allocPrint(allocator, "{s}/mnist_test_small.csv", .{data_dir}),
         },
     };
 }
