@@ -102,7 +102,7 @@ def load_mnist(filepath: Path, batch_size: int, scale: bool, shuffle: bool = Fal
         raise ValueError(f"Unexpected data shape. Expected 794 columns, got {data.shape[1]}")
 
     images = torch.FloatTensor(data[:, 10:])
-    if scale:
+    if scale and images.max().max() > 1:  # torch underperforms otherwise, not zigrad though.
         print("Scaling pixel values")
         images /= 255
     labels = torch.FloatTensor(data[:, :10])  # one-hot labels
@@ -142,7 +142,7 @@ def main(
     autograd: bool = False,
     scale_data: bool = True,
 ):
-    data_dir = Path(os.getenv("ZG_DATA_DIR", "/tmp/zigrad_mnist_data"))
+    data_dir = Path(os.getenv("ZG_DATA_DIR", "data"))
     csv_path = data_dir / "mnist_train_full.csv"
     dataloader = load_mnist(csv_path, batch_size, scale_data)
     print(f"{csv_path=}")
