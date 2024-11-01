@@ -18,21 +18,27 @@ pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
 
-/// lib-wide options that can be overridden by the root file.
-/// E.g. const zigrad_settings = .{ .gradEnabled = true };
+/// lib-wide default options that can be overridden by the root file.
+/// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
+/// E.g. in your main file `const zigrad_settings = .{ .gradEnabled = true };`
 pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigrad_settings else .{};
 
+/// Default values
 pub const Settings = struct {
-    precision: type = f32,
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
-    grad_clip_enabled: bool = true, // TODO: remove this, user is responsible for managing this on learnables.
+    grad_clip_enabled: bool = true,
+    /// currently only used for generating node labels when tracing the comp graph
     seed: u64 = 81761,
 };
 
+/// Global flag for enabling/disabling gradient tracking.
+/// NOTE: there should be an inference mode coming, there was a comptime disable flag to allow for
+/// more optimizations tbd if it will be added back in the future.
 pub var rt_grad_enabled: bool = true;
 
 var prng = std.rand.DefaultPrng.init(settings.seed);
+/// currently only used for generating node labels when tracing the comp graph
 pub const random = prng.random();
 
 // see zls
@@ -66,15 +72,8 @@ pub const std_options = std.Options{
 };
 
 /// # Welcome to Zigrad
-/// ## h2
 ///
-/// Here is a list:
-///   - item 1
-///   - item 2
-///
-/// And an ordered one:
-///  1. item 1
-///  2. item 2
+/// In this documentation COM means "caller owns memory"
 pub const zelcome = null;
 
 // TODO: lib tests, recursive inclusion *in progress*
