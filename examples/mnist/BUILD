@@ -1,35 +1,16 @@
 genrule(
-    name = "simple",
+    name = "build",
     srcs = glob(["src/**/*.zig", "build.zig", "build.zig.zon"]),
-    outs = ["zig-out/bin/simple"],
-    cmd = "ZG_DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache zig build simple -Doptimize=ReleaseFast && cp zig-out/bin/simple $@",
+    outs = ["simple", "timing"],
+    cmd = """
+    ZG_DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) \
+    ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache \
+    ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache \
+    zig build -Doptimize=ReleaseFast && cp zig-out/bin/* $(@D)/\
+    """,
     tools = [":mnist_data"],
 )
 
-
-genrule(
-    name = "timing",
-    srcs = glob(["src/**/*.zig", "build.zig", "build.zig.zon"]),
-    outs = ["zig-out/bin/timing"],
-    cmd = "ZG_DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache ZIG_GLOBAL_CACHE_DIR=$$(pwd)/zig-cache zig build timing -Doptimize=ReleaseFast && cp zig-out/bin/timing $@",
-    tools = [":mnist_data"],
-)
-
-# Locations returns a list, need just the dir of the first item.
-# Only way to do this seems to be with a wrapper script. Someone please fix.
-sh_binary(
-    name = "simple_bin",
-    srcs = ["_bzl_run_helper.sh"],
-    data = [":mnist_data", ":simple"],
-    args = ["$(location :simple)", "$(locations :mnist_data)"],
-)
-
-sh_binary(
-    name = "timing_bin",
-    srcs = ["_bzl_run_helper.sh"],
-    data = [":mnist_data", ":timing"],
-    args = ["$(location :timing)", "$(locations :mnist_data)"],
-)
 
 load("@rules_python//python:defs.bzl", "py_runtime", "py_binary")
 load("@mnist_deps//:requirements.bzl", "requirement")
