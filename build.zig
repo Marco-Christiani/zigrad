@@ -55,7 +55,6 @@ pub fn build(b: *std.Build) !void {
     });
 
     exe.root_module.addImport("zigrad", zigrad);
-    std.debug.print("target.result.os.tag={}\n", .{target.result.os.tag});
     link(target, exe);
     if (tracy_enable) add_tracy(exe, tracy.?);
     b.installArtifact(exe);
@@ -63,8 +62,7 @@ pub fn build(b: *std.Build) !void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
+    // Arg passthru (`zig build run -- arg1 arg2 etc`)
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
