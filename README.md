@@ -17,7 +17,7 @@
 **Fast**
 <!-- benchmarks -->
 
-2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks, 1.5x on x86. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
+2.5x+ speedup over a compiled PyTorch model on Apple Silicon, 1.5x on x86. Expect similar performance gains across more architectures and platforms as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.*
 <!-- link to a benchmarking page -->
 <!-- only need one of the bm plots, probably fast vs fast since that requires the least explanation -->
 
@@ -28,8 +28,7 @@
 </picture>
 <!-- ![](./docs/zg_mnist_zg_torch_perf_0_speedupzigrad_pytorch_plotly.svg) -->
 
-<sub>*Tensorflow excluded for scaling purposes.</sub>
-<sub>**A hermetic, reproducible benchmarking pipeline built on Bazel will allow testing across more platforms (in progress).</sub>
+<sub>*Tensorflow excluded for scaling purposes (too slow). A hermetic, reproducible benchmarking pipeline built on Bazel will allow testing across more platforms (in progress, testers needed).</sub>
 
 **Built for specialized optimization**
 
@@ -76,14 +75,24 @@ We did not have to use Zigrad's modules to write this network at all, as Zigrad 
 
 ![](./docs/comp_graph_mnist_simple_ag.svg)
 
-## Example
+## Getting Started
 
-WIP
+The `examples/` directory has some standalone templates you can take and modify, the zon files are pinned to commit hashes.
+
+Hello world example shows how to run a backward pass using the `GraphManager.` Note that in this very simple example, we do not need the `GraphManager` and the script could be simplified but this is designed to get you familiar with the workflow.
 
 ```shell
 git clone https://github.com/Marco-Christiani/zigrad/
 cd zigrad/examples/hello-world
 zig build run
+```
+
+Run the mnist demo
+
+```shell
+cd zigrad/examples/mnist
+make help
+make
 ```
 
 ## Roadmap
