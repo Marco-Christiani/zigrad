@@ -1,3 +1,8 @@
+//! - Treat this as a way to search and browse the source code, documentation is otherwise lacking due to how quickly Zigrad has been iterating.
+//! - In this documentation COM means "caller owns memory"
+//! - ADR denotes decision records, this is essentially a discourse explaining rationale because things get complicated
+//! - Grep for "TODO" if you are interested in helping
+//! - If you got this far there are more detailed roadmap and arch notes under docs/
 const root = @import("root");
 const std = @import("std");
 const build_options = @import("build_options");
@@ -70,11 +75,6 @@ pub const std_options = std.Options{
     .log_level = .debug,
     .logFn = logFn,
 };
-
-/// # Welcome to Zigrad
-///
-/// In this documentation COM means "caller owns memory"
-pub const zelcome = null;
 
 // TODO: lib tests, recursive inclusion *in progress*
 test {

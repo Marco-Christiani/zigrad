@@ -1,3 +1,5 @@
+set unstable
+
 default:
   @just --choose
 
@@ -28,8 +30,36 @@ benchmark +verbose="":
   @echo "Comparing results"
   python scripts/mnist_compare.py
 
+[script("bash")]
 doc:
-  zig build docs
+  start_file_watcher() {
+    if command -v fswatch &>/dev/null; then
+      echo "Using fswatch to monitor changes..."
+      fswatch -o path | while read -r event
+      do
+        echo "Change detected, rebuilding docs..."
+        zig build docs
+      done &
+    elif command -v inotifywait &>/dev/null; then
+      echo "Using inotifywait to monitor changes..."
+      inotifywait -m -e modify,create,delete path | while read -r directory events filename
+      do
+        echo "Change detected in $directory$filename, rebuilding docs..."
+        zig build docs
+      done &
+    else
+      echo "Error: Neither fswatch nor inotifywait is available."
+      exit 1
+    fi
+    watcher_pid=$!
+  }
+  cleanup() {
+    echo "Stopping file watcher and cleaning up..."
+    kill $watcher_pid
+    echo "Cleanup complete."
+  }
+  trap cleanup EXIT INT
+  start_file_watcher
   cd ./zig-out/docs/ && python -m http.server
 
 pattern := 'error\(gpa\)*'
