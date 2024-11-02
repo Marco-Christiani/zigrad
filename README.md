@@ -14,6 +14,11 @@
 # Zigrad
 #### A deep learning framework built on an autograd engine with high level abstractions and low level control.
 
+
+https://github.com/user-attachments/assets/3842aa72-9b16-4c25-8789-eac7159e3768
+
+
+
 **Fast**
 <!-- benchmarks -->
 
