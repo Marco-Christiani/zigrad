@@ -119,3 +119,11 @@ A lot is planned and hoping for support from the Zig community so we can accompl
 - Lack of GPU support for now
 - Effort has been directed towards performant primitives, not many layer types have been implemented
   - e.g. conv, pooling, etc are test implementations for verification, they are slow and unoptimized, I would not use them
+  - 
+
+## Contributing
+
+- In addition to the above list, anything in in [docs/roadmap.norg](docs/roadmap.norg) is planned
+- Any open issue is available for development, just leave a comment mentioning your interest and I can provide support to help get you started if necessary
+- Otherwise, **please open an issue first, before working on a PR**
+- If you are interested in contributing but do not know where to start then open an issue or leave a comment
