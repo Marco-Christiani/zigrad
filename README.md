@@ -82,6 +82,19 @@ We did not have to use Zigrad's modules to write this network at all, as Zigrad 
 
 ## Getting Started
 
+Only dependency is a BLAS library.
+
+### Linux
+
+On linux you have some options,
+
+- MKL (recommended for best performance)
+- OpenBLAS
+
+Apple Silicon Requirements:
+
+- Nothing :)
+
 The `examples/` directory has some standalone templates you can take and modify, the zon files are pinned to commit hashes.
 
 Hello world example shows how to run a backward pass using the `GraphManager.` Note that in this very simple example, we do not need the `GraphManager` and the script could be simplified but this is designed to get you familiar with the workflow.
