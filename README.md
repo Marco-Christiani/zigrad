@@ -91,9 +91,11 @@ On linux you have some options,
 - MKL (recommended for best performance)
 - OpenBLAS
 
-Apple Silicon Requirements:
+### Apple Silicon
 
 - Nothing :)
+
+### Examples
 
 The `examples/` directory has some standalone templates you can take and modify, the zon files are pinned to commit hashes.
 
