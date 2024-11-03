@@ -14,10 +14,15 @@
 # Zigrad
 #### A deep learning framework built on an autograd engine with high level abstractions and low level control.
 
+
+https://github.com/user-attachments/assets/3842aa72-9b16-4c25-8789-eac7159e3768
+
+
+
 **Fast**
 <!-- benchmarks -->
 
-2.5x+ speedup over a compiled PyTorch* model on Apple Silicon on early benchmarks, 1.5x on x86. Expect similar performance gains across more architectures and platforms** as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
+2.5x+ speedup over a compiled PyTorch model on Apple Silicon, 1.5x on x86. Expect similar performance gains across more architectures and platforms as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.*
 <!-- link to a benchmarking page -->
 <!-- only need one of the bm plots, probably fast vs fast since that requires the least explanation -->
 
@@ -28,8 +33,7 @@
 </picture>
 <!-- ![](./docs/zg_mnist_zg_torch_perf_0_speedupzigrad_pytorch_plotly.svg) -->
 
-<sub>*Tensorflow excluded for scaling purposes.</sub>
-<sub>**A hermetic, reproducible benchmarking pipeline built on Bazel will allow testing across more platforms (in progress).</sub>
+<sub>*Tensorflow excluded for scaling purposes (too slow). A hermetic, reproducible benchmarking pipeline built on Bazel will allow testing across more platforms (in progress, testers needed).</sub>
 
 **Built for specialized optimization**
 
@@ -76,14 +80,39 @@ We did not have to use Zigrad's modules to write this network at all, as Zigrad 
 
 ![](./docs/comp_graph_mnist_simple_ag.svg)
 
-## Example
+## Getting Started
 
-WIP
+Only dependency is a BLAS library.
+
+### Linux
+
+On linux you have some options,
+
+- MKL (recommended for best performance)
+- OpenBLAS
+
+### Apple Silicon
+
+- Nothing :)
+
+### Examples
+
+The `examples/` directory has some standalone templates you can take and modify, the zon files are pinned to commit hashes.
+
+Hello world example shows how to run a backward pass using the `GraphManager.` Note that in this very simple example, we do not need the `GraphManager` and the script could be simplified but this is designed to get you familiar with the workflow.
 
 ```shell
 git clone https://github.com/Marco-Christiani/zigrad/
 cd zigrad/examples/hello-world
 zig build run
+```
+
+Run the mnist demo
+
+```shell
+cd zigrad/examples/mnist
+make help
+make
 ```
 
 ## Roadmap
@@ -105,3 +134,11 @@ A lot is planned and hoping for support from the Zig community so we can accompl
 - Lack of GPU support for now
 - Effort has been directed towards performant primitives, not many layer types have been implemented
   - e.g. conv, pooling, etc are test implementations for verification, they are slow and unoptimized, I would not use them
+  - 
+
+## Contributing
+
+- In addition to the above list, anything in in [docs/roadmap.norg](docs/roadmap.norg) is planned
+- Any open issue is available for development, just leave a comment mentioning your interest and I can provide support to help get you started if necessary
+- Otherwise, **please open an issue first, before working on a PR**
+- If you are interested in contributing but do not know where to start then open an issue or leave a comment
