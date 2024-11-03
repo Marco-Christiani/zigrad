@@ -10,9 +10,7 @@ DIM := \033[2m
 
 OR := \033[38;5;208m
 
-.PHONY: all clean build run-simple run-timing help
-VENV := venv
-PYTHON := $(VENV)/bin/python3
+PYTHON := python3
 ZG_DATA_DIR ?= data
 BUILD_MODE ?= ReleaseFast
 
@@ -25,34 +23,21 @@ $(RESET)
 endef
 export PROJECT_LOGO
 
-all: setup-python run-simple
+.PHONY: all intro clean build run-simple run-timing help
+all: intro run-simple
 
-# Create venv
-$(VENV):
+intro:
 	@echo "$$PROJECT_LOGO"
-	@echo "$(CYAN)$(BOLD)Creating Python virtual environment...$(RESET)"
-	@python3 -m venv $(VENV)
-	@echo "$(DIM)(This isolates project dependencies from your system Python)$(RESET)"
-	@echo "$(GREEN)✓ Done$(RESET)"
 
-# Install pydeps in venv
-setup-python: $(VENV)
-	@echo "$(CYAN)$(BOLD)Checking and installing Python dependencies...$(RESET)"
-	@$(PYTHON) -c "import torch" 2>/dev/null || \
-		(echo "$(YELLOW)Installing PyTorch...$(RESET)" && \
-		$(PYTHON) -m pip install torch)
-	@$(PYTHON) -c "import torchvision" 2>/dev/null || \
-		(echo "$(YELLOW)Installing TorchVision...$(RESET)" && \
-		$(PYTHON) -m pip install torchvision)
-	
-	@echo "$(YELLOW)→ Downloading MNIST data to $(ZG_DATA_DIR)...$(RESET)"
+# Pull data
+$(ZG_DATA_DIR):
+	@echo "$(CYAN)$(BOLD)Downloading MNIST data to $(ZG_DATA_DIR)...$(RESET)"
 	@ZG_DATA_DIR=$(ZG_DATA_DIR) $(PYTHON) mnist_data.py
 	@echo "$(GREEN)✓ Done$(RESET)"
 
 clean:
 	@echo "$(RED)$(BOLD)Cleaning up project directories...$(RESET)"
-	@echo "$(DIM)(Removing virtual environment, build artifacts, and dataset)$(RESET)"
-	@rm -rf $(VENV)
+	@echo "$(DIM)(Removing build artifacts and dataset)$(RESET)"
 	@rm -rf zig-cache zig-out
 	@rm -rf $(ZG_DATA_DIR)
 	@echo "$(GREEN)✓ Done$(RESET)"
@@ -64,12 +49,12 @@ clean:
 
 build: ./zig-out/bin/timing ./zig-out/bin/simple
 
-run-timing: ./zig-out/bin/timing
+run-timing: $(ZG_DATA_DIR) ./zig-out/bin/timing
 	@echo "$(CYAN)$(BOLD)Running MNIST with timing...$(RESET)"
 	@ZG_DATA_DIR=$(ZG_DATA_DIR) ./zig-out/bin/timing
 	@echo "$(GREEN)✓ Done$(RESET)"
 
-run-simple: ./zig-out/bin/simple
+run-simple: $(ZG_DATA_DIR) ./zig-out/bin/simple
 	@echo "$(CYAN)$(BOLD)Running MNIST...$(RESET)"
 	@ZG_DATA_DIR=$(ZG_DATA_DIR) ./zig-out/bin/simple
 	@echo "$(GREEN)✓ Done$(RESET)"
