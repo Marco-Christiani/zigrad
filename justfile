@@ -62,6 +62,12 @@ doc:
   start_file_watcher
   cd ./zig-out/docs/ && python -m http.server
 
+[group("examples")]
+example-mnist:
+  docker run -it -v $(pwd):/workspace -e DEBIAN_FRONTEND="noninteractive" debian bash -c "\
+  apt-get update -y && apt-get install -y make curl xz-utils libopenblas-dev python3-minimal && \
+  cd /workspace/examples/mnist/ && bash"
+
 pattern := 'error\(gpa\)*'
 run_pattern file:
    zig build run -Dfile={{file}} 2>&1 \
