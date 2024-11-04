@@ -12,6 +12,7 @@ import multiprocessing as mp
 import os
 import ssl
 import struct
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from io import BytesIO
@@ -19,7 +20,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="[%(levelname)s] %(funcName)s: %(message)s")
 DATA_DIR = Path(os.getenv("ZG_DATA_DIR", "data"))
 SCALE_VALS = bool(os.environ.get("SCALE_VALS", True))  # whether to scale pixel values
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file operations
@@ -143,12 +143,11 @@ def create_mnist_csv_parallel(image_data: bytes, label_data: bytes, output_path:
         results: dict[int, list[str]] = {}
         total_chunks = len(chunks)
 
-        for future in as_completed(future_to_chunk):
+        for future in progress(as_completed(future_to_chunk), len(future_to_chunk.keys())):
             chunk_idx, chunk_lines = future.result()
             results[chunk_idx] = chunk_lines
 
-            if len(results) % max(1, total_chunks // 10) == 0:  # log progress every 10%
-                logging.debug(f"Processing progress: {len(results)}/{total_chunks} chunks")
+            # logging.debug(f"{len(results)}/{total_chunks} chunks")
 
         with output_path.open("w", buffering=CHUNK_SIZE) as f:
             for chunk_idx in range(total_chunks):
@@ -167,6 +166,19 @@ def head_efficient(n: int, inpath: Path, outpath: Path) -> None:
                 break
             dst.write("".join(chunk))
             remaining -= len(chunk)
+
+
+def progress(obj, total=None, msg=""):
+    total = total or len(obj)
+
+    for i in range(1, total + 1):
+        sys.stdout.write(f"\r{msg}{i / total:.0%}")
+        sys.stdout.flush()
+        try:
+            yield next(obj)
+        except:
+            yield obj[i]
+    sys.stdout.write("\r")
 
 
 async def main() -> None:
@@ -211,4 +223,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=LOG_LEVEL,
+        format="[%(levelname)s] %(funcName)s: %(message)s",
+    )
     asyncio.run(main())
