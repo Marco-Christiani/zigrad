@@ -86,10 +86,14 @@ Only dependency is a BLAS library.
 
 ### Linux
 
-On linux you have some options,
+On linux (or intel mac) you have some options,
 
 - MKL (recommended for best performance)
+  - See https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-download.html
+  - Reccommend a system installation for simplicity although this can work with `conda` for example, just make sure you adjust the library paths as necessary.
 - OpenBLAS
+  - See https://github.com/OpenMathLib/OpenBLAS/wiki/Precompiled-installation-packages
+  - Likely available through your package manager as `libopenblas-dev` or `openblas-devel`
 
 ### Apple Silicon
 
