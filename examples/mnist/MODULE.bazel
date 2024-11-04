@@ -1,13 +1,5 @@
 bazel_dep(name = "rules_python", version = "0.36.0")
 
-pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
-pip.parse(
-    hub_name = "mnist_deps",
-    python_version = "3.12",
-    requirements_lock = "requirements.txt",
-)
-use_repo(pip, "mnist_deps")
-
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
     python_version = "3.12",

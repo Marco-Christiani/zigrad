@@ -1,3 +1,6 @@
+# After build, can run like so:
+# ZG_DATA_DIR=bazel-bin/data/ bazel-bin/simple
+# ZG_DATA_DIR=bazel-bin/data/ bazel-bin/timing
 genrule(
     name = "build",
     srcs = glob(["src/**/*.zig", "build.zig", "build.zig.zon"]),
@@ -13,16 +16,11 @@ genrule(
 
 
 load("@rules_python//python:defs.bzl", "py_runtime", "py_binary")
-load("@mnist_deps//:requirements.bzl", "requirement")
 
 py_binary(
     name = "generate_test_data",
     srcs = ["mnist_data.py"],
     main = "mnist_data.py",
-    deps = [
-        requirement("torch"),
-        requirement("torchvision"),
-    ],
 )
 
 genrule(
