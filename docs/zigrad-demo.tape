@@ -6,9 +6,7 @@ Output zigrad-demo.mp4
 Set FontSize 12
 
 Hide
-# Real dir where we run the demo (venv already set up)
-# Use tmp dir to show cloning
-Type "cd .. && pushd $(mktemp -d) && clear"
+Type "cd $(mktemp -d) && clear"
 Enter
 Show
 
@@ -21,12 +19,6 @@ Enter
 Type "clear"
 Sleep 0.5
 Enter
-
-# Back to real dir
-Hide
-Type "popd && pwd && clear"
-Enter
-Show
 
 Type "cd examples/mnist"
 Sleep 0.8
@@ -41,19 +33,28 @@ Type "clear"
 Sleep 0.5
 Enter
 
+# build cache
+Hide
+Type "zig build -Doptimize=ReleaseFast"
+Enter
+Sleep 11
+Type "clear"
+Enter
+Show
+
 Type "make"
 Sleep 0.8
 Enter
-Sleep 7
+Sleep 6
 
-Type "clear"
-Sleep 0.5
-Enter
-Type "# Run benchmarks"
-Enter
-Type "just benchmark -v"
-Enter
-Sleep 15
+# Type "clear"
+# Sleep 0.5
+# Enter
+# Type "# Run benchmarks"
+# Enter
+# Type "just benchmark -v"
+# Enter
+# Sleep 15
 
 ## This is just too slow tbh maybe save in a different tape
 # Type "# Or, if you prefer bazel for better isolation..."

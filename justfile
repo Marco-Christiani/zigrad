@@ -35,7 +35,7 @@ doc:
   start_file_watcher() {
     if command -v fswatch &>/dev/null; then
       echo "Using fswatch to monitor changes..."
-      fswatch -o path | while read -r event
+      fswatch -o *.zig src | while read -r event
       do
         echo "Change detected, rebuilding docs..."
         zig build docs
