@@ -25,6 +25,7 @@ pub const GatherOptions = struct {
 
 /// These Op enums are not really functional but are convenient for the user (i.e. when traversing the graph or debugging)
 /// There are many more ops supported than this. This may be deprecated by v1.
+/// Zigrad does not switch on the op during backward and ops can be added without existing the existing enum values.
 pub const Op = enum {
     ADD,
     SUB,
@@ -261,6 +262,15 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Copies. COM.
         pub fn reshape(self: *const Self, new_shape: []const usize) !*Self {
+            const reshape_bw = struct {
+                fn reshape_bw_impl(_self: Self, _: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const original_shape = children[0].data.shape;
+                    try self.grad.?._reshape(original_shape.shape);
+                    _ = try children[0].grad.?._add(self.grad.?);
+                }
+            }.reshape_bw_impl;
+
             const result = try createDependent(.{
                 .data = try self.data.copy(self.allocator),
                 .op = .RESHAPE,
@@ -268,7 +278,7 @@ pub fn NDTensor(comptime T: type) type {
                 .label = null,
                 .requires_grad = self.requires_grad,
                 .allocator = self.allocator,
-                ._backward = null,
+                ._backward = reshape_bw,
             });
             errdefer result.deinit();
             try result.data._reshape(new_shape);
@@ -278,6 +288,14 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Copies. COM.
         pub fn transpose(self: *const Self) !*Self {
+            const transpose_bw = struct {
+                fn transpose_bw_impl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const gt = try self.grad.?.transpose(bw_allocator);
+                    defer gt.deinit(bw_allocator);
+                    _ = try children[0].grad.?._add(gt);
+                }
+            }.transpose_bw_impl;
             var result = try createDependent(.{
                 .data = try self.data.transpose(self.allocator),
                 .op = .TRANSPOSE,
@@ -285,7 +303,7 @@ pub fn NDTensor(comptime T: type) type {
                 .label = null,
                 .requires_grad = false, // we will set grad ourselves for efficiency
                 .allocator = self.allocator,
-                ._backward = null,
+                ._backward = transpose_bw,
             });
             errdefer result.deinit();
             if (self.requiresGrad()) { // need to make this call, not check the attribute flag
@@ -396,68 +414,178 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise addition. COM.
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            const addBw = struct {
+                fn addBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const a = children[0];
+                    const b = children[1];
+
+                    const a_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(a.grad.?.shape, bw_allocator);
+                    const b_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(b.grad.?.shape, bw_allocator);
+                    defer a_grad.deinit(bw_allocator);
+                    defer b_grad.deinit(bw_allocator);
+
+                    _ = try a.grad.?._add(a_grad);
+                    _ = try b.grad.?._add(b_grad);
+                }
+            }.addBwImpl;
             return try createDependent(.{
                 .data = try self.data.add(other.data, allocator),
                 .op = .ADD,
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = self.allocator,
+                ._backward = addBw,
             });
         }
 
         /// Element-wise subtraction. COM.
         pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            const subBw = struct {
+                fn subBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const a = children[0];
+                    const b = children[1];
+
+                    const a_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(a.grad.?.shape, bw_allocator);
+                    const b_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(b.grad.?.shape, bw_allocator);
+                    defer a_grad.deinit(bw_allocator);
+                    defer b_grad.deinit(bw_allocator);
+
+                    _ = try a.grad.?._add(a_grad);
+                    _ = try b.grad.?._sub(b_grad);
+                }
+            }.subBwImpl;
             return try createDependent(.{
                 .data = try self.data.sub(other.data, allocator),
                 .op = .SUB,
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
+                ._backward = subBw,
             });
         }
 
         /// Element-wise multiplication. COM.
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            const mulBw = struct {
+                fn mulBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const a = children[0];
+                    const b = children[1];
+
+                    // TODO: can remove a copy here
+
+                    // (dL/dy) * (dy/da), (dL/dy) * (dy/db)
+                    const a_grad_value = try b.data.mul(_self.grad.?, bw_allocator);
+                    const b_grad_value = try a.data.mul(_self.grad.?, bw_allocator);
+
+                    defer a_grad_value.deinit(bw_allocator);
+                    defer b_grad_value.deinit(bw_allocator);
+
+                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_allocator);
+                    const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, bw_allocator);
+
+                    defer a_grad.deinit(bw_allocator);
+                    defer b_grad.deinit(bw_allocator);
+
+                    _ = try a.grad.?._add(a_grad);
+                    _ = try b.grad.?._add(b_grad);
+                }
+            }.mulBwImpl;
             return try createDependent(.{
                 .data = try self.data.mul(other.data, allocator),
                 .op = .MUL,
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
+                ._backward = mulBw,
             });
         }
 
         /// Element-wise division. COM.
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            const divBw = struct {
+                fn divBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const a = children[0];
+                    const b = children[1];
+
+                    // TODO: can remove at least one copy here right?
+
+                    // (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
+                    const a_grad_value = try _self.grad.?.div(b.data, bw_allocator);
+                    const b_grad_value = try _self.grad.?.mul(a.data, bw_allocator);
+
+                    defer a_grad_value.deinit(bw_allocator);
+                    defer b_grad_value.deinit(bw_allocator);
+
+                    const bsq = try b.data.mul(b.data, bw_allocator);
+                    const neg_b_grad_value = try b_grad_value.div(bsq, bw_allocator);
+
+                    defer bsq.deinit(bw_allocator);
+                    defer neg_b_grad_value.deinit(bw_allocator);
+
+                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_allocator);
+                    const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, bw_allocator);
+
+                    _ = try a.grad.?._add(a_grad);
+                    _ = try b.grad.?._sub(b_grad);
+                }
+            }.divBwImpl;
             return try createDependent(.{
                 .data = try self.data.div(other.data, allocator),
                 .op = .DIV,
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
+                ._backward = divBw,
             });
         }
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *const Self, allocator: std.mem.Allocator) !*Self {
             const max_val = try self.data.max(allocator);
+            const maxBw = struct {
+                fn maxBwImpl(_self: Self, _: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const child = children[0];
+                    const bw_max_val = _self.data.data[0];
+                    for (child.data.data, 0..) |val, i| {
+                        if (val == bw_max_val) {
+                            child.grad.?.data[i] += _self.grad.?.data[0];
+                        }
+                    }
+                }
+            }.maxBwImpl;
             return try createDependent(.{
                 .data = max_val,
                 .op = .MAX,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
+                ._backward = maxBw,
             });
         }
 
         /// Element-wise exponential. COM.
         pub fn exp(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            const expBw = struct {
+                fn expBwImpl(_self: Self, _: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const child = children[0];
+                    for (_self.data.data, _self.grad.?.data, 0..) |exp_val, grad_val, i| {
+                        child.grad.?.data[i] += exp_val * grad_val;
+                    }
+                }
+            }.expBwImpl;
             return try createDependent(.{
                 .data = try self.data.exp(allocator),
                 .op = .EXP,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
+                ._backward = expBw,
             });
         }
 
@@ -466,11 +594,15 @@ pub fn NDTensor(comptime T: type) type {
         /// TODO: this should proxy to bmmAcc
         /// Matrix multiplication. COM.
         pub fn bmm(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
+            const ctx = try allocator.create(MmAccOptions);
+            ctx.* = MmAccOptions{ .trans_a = opts.trans_a, .trans_b = opts.trans_b, .alpha = 1, .beta = 0 };
             const result = try createDependent(.{
                 .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, allocator),
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
+                ._backward = bw_bmmAcc,
+                ._backward_ctx = ctx,
             });
             result.op = if (!opts.trans_a and !opts.trans_b) .MATMUL_AB else if (opts.trans_a and !opts.trans_b) .MATMUL_AtB else if (!opts.trans_a and opts.trans_b) .MATMUL_ABt else .MATMUL_AtBt;
             return result;
@@ -507,7 +639,6 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
 
-        // TODO: WIP!
         fn bw_bmmAcc(
             self: NDTensor(T),
             allocator: std.mem.Allocator,
@@ -515,45 +646,77 @@ pub fn NDTensor(comptime T: type) type {
             const grad_C = self.grad orelse return error.NoGradient;
             const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
             const children = self.children orelse return error.NoChildren;
+            const A = children[0].data;
+            const grad_A = children[0].grad;
+            const B = children[1].data;
+            const grad_B = children[1].grad;
 
-            const A = children[0].data; // Shape: (..., m, k)
-            const B = children[1].data; // Shape: (..., k, n)
-
-            // Gradient w.r.t A: grad_A += grad_C * B^T (or B depending on transpose settings)
-            if (children[0].grad) |grad_A| {
-                _ = try grad_C._bmmAcc(
-                    B,
-                    grad_A,
-                    opts.alpha, // Gradient scale factor
-                    1.0, // Accumulate into grad_A
-                    opts.trans_a, // Follow the original forward options for transposes
-                    opts.trans_b, // Invert transpose of B to reverse the operation);
-                    allocator,
-                );
+            if (self.op) |op| {
+                switch (op) {
+                    .MATMUL_AB => {
+                        // A Shape: (..., m, k)
+                        // B Shape: (..., k, n)
+                        // grad_C Shape: (..., m, n)
+                        // grad_A += grad_C * B'
+                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, true, allocator);
+                        // grad_B += A' * grad_C
+                        _ = try A._bmmAcc(grad_C, grad_B, 1.0, 1.0, true, false, allocator);
+                    },
+                    .MATMUL_AtB => {
+                        // A Shape: (..., k, m)
+                        // B Shape: (..., k, n)
+                        // grad_C Shape: (..., m, n)
+                        // grad_A += B * grad_C'
+                        _ = try B._bmmAcc(self.grad.?, grad_A, 1.0, 1.0, false, true, allocator);
+                        // grad_B += A * grad_C
+                        _ = try A._bmmAcc(self.grad.?, grad_B, 1.0, 1.0, false, false, allocator);
+                    },
+                    .MATMUL_ABt => {
+                        // A Shape: (..., m, k)
+                        // B Shape: (..., n, k)
+                        // grad_C Shape: (..., m, n)
+                        // grad_A += grad_C * B
+                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, false, allocator);
+                        // grad_B += grad_C' * A
+                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, true, false, allocator);
+                    },
+                    .MATMUL_AtBt => {
+                        // A Shape: (..., k, m)
+                        // B Shape: (..., n, k)
+                        // grad_C Shape: (..., m, n)
+                        // grad_A += B' * grad_C'
+                        _ = try B._bmmAcc(grad_C, grad_A, 1.0, 1.0, true, true, allocator);
+                        // grad_B += grad_C * A'
+                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, false, true, allocator);
+                    },
+                    else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
+                }
             }
-
-            // Gradient w.r.t B: grad_B += A^T * grad_C (or A depending on transpose settings)
-            if (children[1].grad) |grad_B| {
-                _ = try A._bmmAcc(
-                    grad_C,
-                    grad_B,
-                    opts.alpha, // Gradient scale factor
-                    1.0, // Accumulate into grad_B
-                    !opts.trans_a, // Invert transpose of A to reverse the operation
-                    opts.trans_b, // Follow the original forward options for transposes
-                    allocator,
-                );
-            }
+            // clean up context
+            allocator.destroy(opts);
         }
 
         /// Dot product of two tensors. COM.
         pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            const dotBw = struct {
+                fn dotBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    var a = children[0];
+                    var b = children[1];
+                    const grad_a = try b.data.mul(_self.grad.?, bw_allocator);
+                    const grad_b = try a.data.mul(_self.grad.?, bw_allocator);
+                    _ = try a.grad.?._add(grad_a);
+                    _ = try b.grad.?._add(grad_b);
+                }
+            }.dotBwImpl;
+
             return try createDependent(.{
                 .data = try self.data.dot(other.data, allocator),
                 .op = .DOT,
                 .children = &[_]*const Self{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
+                ._backward = dotBw,
             });
         }
 
@@ -565,6 +728,22 @@ pub fn NDTensor(comptime T: type) type {
         ///   - Until I see more instances where this is required it will be written manually
         ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
         pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            const matvecBw = struct {
+                fn matvecBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    var A = children[0].data;
+                    const x = children[1].data;
+
+                    //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
+                    const grad_A = try _self.grad.?.outer(x, bw_allocator);
+                    _ = try children[0].grad.?._add(grad_A);
+
+                    //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
+                    const grad_x = try A.matvec(_self.grad.?, true, bw_allocator);
+                    _ = try children[1].grad.?._add(grad_x);
+                }
+            }.matvecBwImpl;
+
             const out = try allocator.create(Self);
             out.* = Self{
                 .data = try self.data.matvec(other.data, false, allocator),
@@ -573,30 +752,39 @@ pub fn NDTensor(comptime T: type) type {
                 .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, allocator) else null,
                 .requires_grad = self.requiresGrad() or other.requires_grad,
                 .allocator = allocator,
+                ._backward = matvecBw,
             };
             return out;
         }
 
         /// Sum of all elements in the tensor. COM.
         pub fn sum(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            const sumBw = struct {
+                fn sumBwImpl(_self: NDTensor(T), _: std.mem.Allocator) !void {
+                    const children = _self.children orelse return error.NoChildren;
+                    const child = children[0];
+                    _ = try child.grad.?._add(_self.grad.?);
+                }
+            }.sumBwImpl;
             return try createDependent(.{
                 .data = try self.data.sum(allocator),
                 .op = .SUM,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
+                ._backward = sumBw,
             });
         }
 
         pub fn maxOverDim(self: *const Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !*Self {
             const maxBackward = struct {
                 // NOTE: See gather() comments, same apply here
-                fn bwImpl(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
-                    const bw_children = bw_tensor.children orelse return error.NoChildren;
+                fn bwImpl(_self: Self, _: std.mem.Allocator) !void {
+                    const bw_children = _self.children orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
-                    const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-                    for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
+                    const offsets: [*]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                    for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
                 }
             }.bwImpl;
 
@@ -663,79 +851,6 @@ pub fn NDTensor(comptime T: type) type {
             }
             if (self.op) |op| {
                 switch (op) {
-                    .ADD => {
-                        if (self.children) |children| {
-                            const a = children[0];
-                            const b = children[1];
-
-                            const a_grad = try (try self.grad.?.copy(allocator)).unbroadcast(a.grad.?.shape, allocator);
-                            const b_grad = try (try self.grad.?.copy(allocator)).unbroadcast(b.grad.?.shape, allocator);
-
-                            _ = try a.grad.?._add(a_grad);
-                            _ = try b.grad.?._add(b_grad);
-                        }
-                    },
-                    .SUB => {
-                        if (self.children) |children| {
-                            const a = children[0];
-                            const b = children[1];
-
-                            const a_grad = try (try self.grad.?.copy(allocator)).unbroadcast(a.grad.?.shape, allocator);
-                            const b_grad = try (try self.grad.?.copy(allocator)).unbroadcast(b.grad.?.shape, allocator);
-
-                            defer { // TODO: unbroadcast memory management elsewhere as well
-                                a_grad.deinit(self.allocator);
-                                b_grad.deinit(self.allocator);
-                            }
-
-                            _ = try a.grad.?._add(a_grad);
-                            _ = try b.grad.?._sub(b_grad);
-                        }
-                    },
-                    .MUL => {
-                        if (self.children) |children| {
-                            const a = children[0];
-                            const b = children[1];
-
-                            // (dL/dy) * (dy/da), (dL/dy) * (dy/db)
-                            const a_grad_value = try b.data.mul(self.grad.?, allocator);
-                            const b_grad_value = try a.data.mul(self.grad.?, allocator);
-
-                            defer a_grad_value.deinit(allocator);
-                            defer b_grad_value.deinit(allocator);
-
-                            const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, allocator);
-                            const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, allocator);
-
-                            _ = try a.grad.?._add(a_grad);
-                            _ = try b.grad.?._add(b_grad);
-                        }
-                    },
-                    .DIV => {
-                        if (self.children) |children| {
-                            const a = children[0];
-                            const b = children[1];
-
-                            // (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
-                            const a_grad_value = try self.grad.?.div(b.data, allocator);
-                            const b_grad_value = try self.grad.?.mul(a.data, allocator);
-
-                            defer a_grad_value.deinit(allocator);
-                            defer b_grad_value.deinit(allocator);
-
-                            const bsq = try b.data.mul(b.data, allocator);
-                            const neg_b_grad_value = try b_grad_value.div(bsq, allocator);
-
-                            defer bsq.deinit(allocator);
-                            defer neg_b_grad_value.deinit(allocator);
-
-                            const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, allocator);
-                            const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, allocator);
-
-                            _ = try a.grad.?._add(a_grad);
-                            _ = try b.grad.?._sub(b_grad);
-                        }
-                    },
                     .MATMUL_AB => {
                         if (self.children) |children| {
                             const A = children[0].data; // Shape: (..., m, k)
@@ -778,68 +893,6 @@ pub fn NDTensor(comptime T: type) type {
                             _ = try B._bmmAcc(self.grad.?, children[0].grad, 1.0, 1.0, true, true, allocator);
                             // grad_B += grad_C * A'
                             _ = try self.grad.?._bmmAcc(A, children[1].grad, 1.0, 1.0, false, true, allocator);
-                        }
-                    },
-                    .DOT => {
-                        if (self.children) |children| {
-                            var a = children[0];
-                            var b = children[1];
-                            const grad_a = try b.data.mul(self.grad.?, allocator);
-                            const grad_b = try a.data.mul(self.grad.?, allocator);
-                            _ = try a.grad.?._add(grad_a);
-                            _ = try b.grad.?._add(grad_b);
-                        }
-                    },
-                    .MATVEC => {
-                        if (self.children) |children| {
-                            var A = children[0].data;
-                            const x = children[1].data;
-
-                            //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
-                            const grad_A = try self.grad.?.outer(x, allocator);
-                            _ = try children[0].grad.?._add(grad_A);
-
-                            //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
-                            const grad_x = try A.matvec(self.grad.?, true, allocator);
-                            _ = try children[1].grad.?._add(grad_x);
-                        }
-                    },
-                    .SUM => {
-                        if (self.children) |children| {
-                            const child = children[0];
-                            _ = try child.grad.?._add(self.grad.?);
-                        }
-                    },
-                    .RESHAPE => {
-                        if (self.children) |children| {
-                            const original_shape = children[0].data.shape;
-                            try self.grad.?._reshape(original_shape.shape);
-                            _ = try children[0].grad.?._add(self.grad.?);
-                        }
-                    },
-                    .TRANSPOSE => {
-                        if (self.children) |children| {
-                            const gt = try self.grad.?.transpose(allocator);
-                            _ = try children[0].grad.?._add(gt);
-                        }
-                    },
-                    .MAX => {
-                        if (self.children) |children| {
-                            const child = children[0];
-                            const max_val = self.data.data[0];
-                            for (child.data.data, 0..) |val, i| {
-                                if (val == max_val) {
-                                    child.grad.?.data[i] += self.grad.?.data[0];
-                                }
-                            }
-                        }
-                    },
-                    .EXP => {
-                        if (self.children) |children| {
-                            const child = children[0];
-                            for (self.data.data, self.grad.?.data, 0..) |exp_val, grad_val, i| {
-                                child.grad.?.data[i] += exp_val * grad_val;
-                            }
                         }
                     },
                     else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
