@@ -39,6 +39,7 @@ pub fn blas_matvec(T: type, A: []T, X: []T, Y: []T, M: usize, N: usize, alpha: T
 
 ///  Assumes row-major.
 ///  (M, K) x (K, N) = (M, N)
+/// C := alpha*op(A)*op(B) + beta*C
 pub fn blas_matmul(T: type, A: []T, B: []T, C: []T, M: usize, N: usize, K: usize, trans_a: bool, trans_b: bool, lda: usize, ldb: usize, ldc: usize, alpha: T, beta: T) void {
     const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
     const tb = if (trans_b) c.CblasTrans else c.CblasNoTrans;
