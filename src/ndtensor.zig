@@ -850,53 +850,7 @@ pub fn NDTensor(comptime T: type) type {
                 return;
             }
             if (self.op) |op| {
-                switch (op) {
-                    .MATMUL_AB => {
-                        if (self.children) |children| {
-                            const A = children[0].data; // Shape: (..., m, k)
-                            const B = children[1].data; // Shape: (..., k, n)
-                            // grad_C Shape: (..., m, n)
-                            // grad_A += grad_C * B'
-                            _ = try self.grad.?._bmmAcc(B, children[0].grad, 1.0, 1.0, false, true, allocator);
-                            // grad_B += A' * grad_C
-                            _ = try A._bmmAcc(self.grad.?, children[1].grad, 1.0, 1.0, true, false, allocator);
-                        }
-                    },
-                    .MATMUL_AtB => {
-                        if (self.children) |children| {
-                            const A = children[0].data; // Shape: (..., k, m)
-                            const B = children[1].data; // Shape: (..., k, n)
-                            // grad_C Shape: (..., m, n)
-                            // grad_A += B * grad_C'
-                            _ = try B._bmmAcc(self.grad.?, children[0].grad, 1.0, 1.0, false, true, allocator);
-                            // grad_B += A * grad_C
-                            _ = try A._bmmAcc(self.grad.?, children[1].grad, 1.0, 1.0, false, false, allocator);
-                        }
-                    },
-                    .MATMUL_ABt => {
-                        if (self.children) |children| {
-                            const A = children[0].data; // Shape: (..., m, k)
-                            const B = children[1].data; // Shape: (..., n, k)
-                            // grad_C Shape: (..., m, n)
-                            // grad_A += grad_C * B
-                            _ = try self.grad.?._bmmAcc(B, children[0].grad, 1.0, 1.0, false, false, allocator);
-                            // grad_B += grad_C' * A
-                            _ = try self.grad.?._bmmAcc(A, children[1].grad, 1.0, 1.0, true, false, allocator);
-                        }
-                    },
-                    .MATMUL_AtBt => {
-                        if (self.children) |children| {
-                            const A = children[0].data; // Shape: (..., k, m)
-                            const B = children[1].data; // Shape: (..., n, k)
-                            // grad_C Shape: (..., m, n)
-                            // grad_A += B' * grad_C'
-                            _ = try B._bmmAcc(self.grad.?, children[0].grad, 1.0, 1.0, true, true, allocator);
-                            // grad_B += grad_C * A'
-                            _ = try self.grad.?._bmmAcc(A, children[1].grad, 1.0, 1.0, false, true, allocator);
-                        }
-                    },
-                    else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
-                }
+                std.debug.panic("Op {s} backward not implemented.", .{@tagName(op)});
             }
         }
 
