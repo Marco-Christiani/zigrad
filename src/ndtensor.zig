@@ -48,17 +48,22 @@ pub const Op = enum {
 
 pub fn NDTensor(comptime T: type) type {
     return struct {
+
+        // signature for a backwards callback
+        const Callback = *const fn (Self, std.mem.Allocator) anyerror!void;
+        
         pub const dtype = NDArray(T);
         const Self = @This();
+
         data: *dtype,
         op: ?Op = null,
-        children: ?[]const *const Self = null,
+        children: ?[]const *Self = null,
         label: ?[]const u8 = null,
         grad: ?*dtype = null,
         requires_grad: bool,
         acquired: bool = false, // not inherited
         allocator: std.mem.Allocator,
-        _backward: ?*const fn (Self, std.mem.Allocator) anyerror!void = null, // see notes below
+        _backward: ?Callback = null, // see notes below
         _backward_ctx: ?*anyopaque = null,
 
         /// Values and shape are allocated. COM.
@@ -105,11 +110,11 @@ pub fn NDTensor(comptime T: type) type {
         pub const CreateDependentOpts = struct {
             data: *dtype,
             op: ?Op = null,
-            children: []const *const Self,
+            children: []const *Self,
             label: ?[]const u8 = null,
             requires_grad: bool,
             allocator: std.mem.Allocator,
-            _backward: ?*const fn (Self, std.mem.Allocator) anyerror!void = null,
+            _backward: ?Callback = null,
             _backward_ctx: ?*anyopaque = null,
         };
 
@@ -141,7 +146,7 @@ pub fn NDTensor(comptime T: type) type {
                 .op = opts.op,
                 // TODO: How to handle not holding references if requiresGrad == false??
                 // .children = if (rg) try opts.allocator.dupe(*const Self, opts.children) else null,
-                .children = try opts.allocator.dupe(*const Self, opts.children),
+                .children = try opts.allocator.dupe(*Self, opts.children),
                 .label = if (opts.label) |l| try opts.allocator.dupe(u8, l) else null,
                 .grad = if (rg) try dtype.zeros(opts.data.shape.shape, opts.allocator) else null,
                 .requires_grad = rg,
@@ -179,7 +184,7 @@ pub fn NDTensor(comptime T: type) type {
             if (self.children) |children| {
                 for (children) |c| {
                     log.debug("{?s} accessing child {?s}", .{ self.label, c.label });
-                    if (!c.acquired) @constCast(c).teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.label});
+                    if (!c.acquired) c.teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.label});
                 }
             }
             log.debug("ENDING teardown()->deinit() {?s}", .{self.label});
@@ -261,7 +266,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Copies. COM.
-        pub fn reshape(self: *const Self, new_shape: []const usize) !*Self {
+        pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const reshape_bw = struct {
                 fn reshape_bw_impl(_self: Self, _: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -274,7 +279,7 @@ pub fn NDTensor(comptime T: type) type {
             const result = try createDependent(.{
                 .data = try self.data.copy(self.allocator),
                 .op = .RESHAPE,
-                .children = &[_]*const Self{self},
+                .children = &.{ self },
                 .label = null,
                 .requires_grad = self.requires_grad,
                 .allocator = self.allocator,
@@ -287,7 +292,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Copies. COM.
-        pub fn transpose(self: *const Self) !*Self {
+        pub fn transpose(self: *Self) !*Self {
             const transpose_bw = struct {
                 fn transpose_bw_impl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -299,7 +304,7 @@ pub fn NDTensor(comptime T: type) type {
             var result = try createDependent(.{
                 .data = try self.data.transpose(self.allocator),
                 .op = .TRANSPOSE,
-                .children = &[_]*const Self{self},
+                .children = &.{ self },
                 .label = null,
                 .requires_grad = false, // we will set grad ourselves for efficiency
                 .allocator = self.allocator,
@@ -413,7 +418,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise addition. COM.
-        pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn add(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
             const addBw = struct {
                 fn addBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -432,7 +437,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.add(other.data, allocator),
                 .op = .ADD,
-                .children = &[_]*const Self{ self, other },
+                .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = self.allocator,
                 ._backward = addBw,
@@ -440,7 +445,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise subtraction. COM.
-        pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn sub(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
             const subBw = struct {
                 fn subBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -459,7 +464,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.sub(other.data, allocator),
                 .op = .SUB,
-                .children = &[_]*const Self{ self, other },
+                .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
                 ._backward = subBw,
@@ -467,7 +472,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise multiplication. COM.
-        pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn mul(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
             const mulBw = struct {
                 fn mulBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -496,7 +501,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.mul(other.data, allocator),
                 .op = .MUL,
-                .children = &[_]*const Self{ self, other },
+                .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
                 ._backward = mulBw,
@@ -504,7 +509,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise division. COM.
-        pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn div(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
             const divBw = struct {
                 fn divBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -536,7 +541,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.div(other.data, allocator),
                 .op = .DIV,
-                .children = &[_]*const Self{ self, other },
+                .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
                 ._backward = divBw,
@@ -544,7 +549,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
-        pub fn max(self: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn max(self: *Self, allocator: std.mem.Allocator) !*Self {
             const max_val = try self.data.max(allocator);
             const maxBw = struct {
                 fn maxBwImpl(_self: Self, _: std.mem.Allocator) !void {
@@ -569,7 +574,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise exponential. COM.
-        pub fn exp(self: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn exp(self: *Self, allocator: std.mem.Allocator) !*Self {
             const expBw = struct {
                 fn expBwImpl(_self: Self, _: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -593,12 +598,12 @@ pub fn NDTensor(comptime T: type) type {
 
         /// TODO: this should proxy to bmmAcc
         /// Matrix multiplication. COM.
-        pub fn bmm(self: *const Self, other: *const Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
+        pub fn bmm(self: *Self, other: *Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
             const ctx = try allocator.create(MmAccOptions);
             ctx.* = MmAccOptions{ .trans_a = opts.trans_a, .trans_b = opts.trans_b, .alpha = 1, .beta = 0 };
             const result = try createDependent(.{
                 .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, allocator),
-                .children = &[_]*const Self{ self, other },
+                .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
                 ._backward = bw_bmmAcc,
@@ -632,7 +637,7 @@ pub fn NDTensor(comptime T: type) type {
             if (requires_grad) {
                 const ctx = try allocator.create(MmAccOptions);
                 ctx.* = opts;
-                output.children = try allocator.dupe(*const NDTensor(T), &[_]*const NDTensor(T){ self, other });
+                output.children = try allocator.dupe(*NDTensor(T), &.{ self, other });
                 output._backward = bw_bmmAcc;
                 output._backward_ctx = ctx;
                 output.requires_grad = true;
@@ -697,7 +702,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Dot product of two tensors. COM.
-        pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn dot(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
             const dotBw = struct {
                 fn dotBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -713,7 +718,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.dot(other.data, allocator),
                 .op = .DOT,
-                .children = &[_]*const Self{ self, other },
+                .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
                 .allocator = allocator,
                 ._backward = dotBw,
@@ -727,7 +732,7 @@ pub fn NDTensor(comptime T: type) type {
         ///   - Moreover, we cannot just reshape to the correct shape.
         ///   - Until I see more instances where this is required it will be written manually
         ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
-        pub fn matvec(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn matvec(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
             const matvecBw = struct {
                 fn matvecBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -748,7 +753,7 @@ pub fn NDTensor(comptime T: type) type {
             out.* = Self{
                 .data = try self.data.matvec(other.data, false, allocator),
                 .op = .MATVEC,
-                .children = try allocator.dupe(*const Self, &[_]*const Self{ self, other }),
+                .children = try allocator.dupe(*Self, &.{ self, other }),
                 .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, allocator) else null,
                 .requires_grad = self.requiresGrad() or other.requires_grad,
                 .allocator = allocator,
@@ -758,7 +763,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Sum of all elements in the tensor. COM.
-        pub fn sum(self: *const Self, allocator: std.mem.Allocator) !*Self {
+        pub fn sum(self: *Self, allocator: std.mem.Allocator) !*Self {
             const sumBw = struct {
                 fn sumBwImpl(_self: NDTensor(T), _: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -769,14 +774,14 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.sum(allocator),
                 .op = .SUM,
-                .children = &[_]*const Self{self},
+                .children = &.{ self },
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
                 ._backward = sumBw,
             });
         }
 
-        pub fn maxOverDim(self: *const Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !*Self {
+        pub fn maxOverDim(self: *Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !*Self {
             const maxBackward = struct {
                 // NOTE: See gather() comments, same apply here
                 fn bwImpl(_self: Self, _: std.mem.Allocator) !void {
@@ -795,7 +800,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = max_result.values,
                 .op = null,
-                .children = &[_]*const Self{self},
+                .children = &.{ self },
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
                 ._backward = maxBackward,
@@ -803,7 +808,7 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        pub fn gather(self: *const Self, allocator: std.mem.Allocator, opts: GatherOptions) !*Self {
+        pub fn gather(self: *Self, allocator: std.mem.Allocator, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
                 fn bwImpl(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
                     const bw_children = bw_tensor.children orelse return error.NoChildren;
@@ -826,7 +831,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = gather_result.values,
                 .op = null,
-                .children = &[_]*const Self{self},
+                .children = &.{ self },
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
                 ._backward = gatherBackward,
@@ -836,7 +841,7 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Callback is highly dynamic so passing a reference may be a better idea for _backward callback,
         /// but committing to compiler reliance in this refactor
-        pub fn setBackward(self: *Self, backward_fn: *const fn (Self, std.mem.Allocator) anyerror!void, ctx: ?*anyopaque) void {
+        pub fn setBackward(self: *Self, backward_fn: Callback, ctx: ?*anyopaque) void {
             self._backward = backward_fn;
             self._backward_ctx = ctx;
         }

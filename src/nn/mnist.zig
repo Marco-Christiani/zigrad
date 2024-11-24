@@ -309,7 +309,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("Training complete ({d} epochs). [{d}ms]", .{ num_epochs, train_time_ms });
 
     // model.model.eval() // TODO: model.eval()
-    const train_eval = try evalMnist(fw_arena, model, train_dataset);
+    const train_eval = try evalMnist(&fw_arena, model, train_dataset);
     const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
@@ -319,7 +319,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     const test_dataset = try MnistDataset.load(dataset_arena.allocator(), test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
-    const test_eval = try evalMnist(fw_arena, model, test_dataset);
+    const test_eval = try evalMnist(&fw_arena, model, test_dataset);
     const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
     log.info("Test acc: {d:.2} (n={d}) [{d}ms]", .{ test_acc * 100, test_eval.n, eval_test_time_ms });
@@ -328,7 +328,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("Eval test: {d}ms", .{eval_test_time_ms});
 }
 
-fn evalMnist(arena: std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDataset) !struct { correct: f32, n: u32 } {
+fn evalMnist(arena: *std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDataset) !struct { correct: f32, n: u32 } {
     zg.rt_grad_enabled = false;
     // model.model.eval() // TODO: model.eval()
     var n: u32 = 0;
@@ -336,7 +336,7 @@ fn evalMnist(arena: std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDa
     var timer = try std.time.Timer.start();
     for (dataset.images, dataset.labels) |image, label| {
         timer.reset();
-        const output = try model.model.forward(image, @constCast(&arena).allocator());
+        const output = try model.model.forward(image, arena.allocator());
         const batch_n = try output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;
@@ -349,7 +349,7 @@ fn evalMnist(arena: std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDa
         const t1 = @as(f64, @floatFromInt(timer.read()));
         const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_n));
         log.info("ms/sample: {d}", .{ms_per_sample});
-        if (!@constCast(&arena).reset(.retain_capacity)) log.warn("Issue in arena reset", .{});
+        if (!arena.reset(.retain_capacity)) log.warn("Issue in arena reset", .{});
     }
     return .{ .correct = correct, .n = n };
 }

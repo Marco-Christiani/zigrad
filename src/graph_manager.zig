@@ -10,7 +10,7 @@ pub fn GraphManager(comptime T: type) type {
     return struct {
         const Self = @This();
         allocator: std.mem.Allocator,
-        sorted_nodes: std.ArrayList(*const T),
+        sorted_nodes: std.ArrayList(*T),
         visited_nodes: std.AutoHashMap(*const T, void),
         eager_teardown: bool,
 
@@ -22,7 +22,7 @@ pub fn GraphManager(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator, opts: GraphOpts) Self {
             return Self{
                 .allocator = allocator,
-                .sorted_nodes = std.ArrayList(*const T).init(allocator),
+                .sorted_nodes = std.ArrayList(*T).init(allocator),
                 .visited_nodes = std.AutoHashMap(*const T, void).init(allocator),
                 .eager_teardown = opts.eager_teardown,
             };
@@ -34,7 +34,7 @@ pub fn GraphManager(comptime T: type) type {
             self.* = undefined;
         }
 
-        fn topo(self: *Self, node: *const T) void {
+        fn topo(self: *Self, node: *T) void {
             const gopr = self.visited_nodes.getOrPut(node) catch unreachable;
             if (!gopr.found_existing) {
                 if (node.children) |children| {
@@ -47,7 +47,7 @@ pub fn GraphManager(comptime T: type) type {
         }
 
         // Must init grad on root node before backprop
-        pub fn backward(self: *Self, node: *const T, alloc: std.mem.Allocator) !void {
+        pub fn backward(self: *Self, node: *T, alloc: std.mem.Allocator) !void {
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
             self.topo(node);
@@ -59,7 +59,7 @@ pub fn GraphManager(comptime T: type) type {
                     try curr_node.backward(alloc);
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children
-                    if (!curr_node.acquired and self.eager_teardown) @constCast(curr_node).deinit();
+                    if (!curr_node.acquired and self.eager_teardown) curr_node.deinit();
                 } else {
                     log.debug("Skipping node {?s}", .{node.label});
                 }

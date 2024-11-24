@@ -39,8 +39,8 @@ pub fn Model(comptime T: type) type {
         }
 
         /// COM.
-        pub fn getParameters(self: Self) []*const NDTensor(T) {
-            var params = std.ArrayList(*const NDTensor(T)).init(self.allocator);
+        pub fn getParameters(self: Self) []*NDTensor(T) {
+            var params = std.ArrayList(*NDTensor(T)).init(self.allocator);
             defer params.deinit();
             for (self.layers.items) |layer| {
                 if (layer.getParameters()) |layer_params| {

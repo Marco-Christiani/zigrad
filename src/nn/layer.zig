@@ -23,7 +23,7 @@ pub fn Layer(comptime T: type) type {
         ptr: *anyopaque,
 
         pub const VTable = struct {
-            forward: *const fn (ctx: *anyopaque, input: *const NDTensor(T), allocator: std.mem.Allocator) anyerror!*NDTensor(T),
+            forward: *const fn (ctx: *anyopaque, input: *NDTensor(T), allocator: std.mem.Allocator) anyerror!*NDTensor(T),
             getParameters: *const fn (ctx: *anyopaque) ?[]*NDTensor(T),
             zeroGrad: *const fn (ctx: *anyopaque) void,
             deinit: *const fn (ctx: *anyopaque) void,
@@ -34,7 +34,7 @@ pub fn Layer(comptime T: type) type {
             const Ptr = @TypeOf(pointer);
 
             const gen = struct {
-                fn forwardFn(ctx: *anyopaque, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+                fn forwardFn(ctx: *anyopaque, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
                     const self: Ptr = @ptrCast(@alignCast(ctx));
                     return self.forward(input, allocator);
                 }
@@ -74,7 +74,7 @@ pub fn Layer(comptime T: type) type {
             };
         }
 
-        pub fn forward(self: Self, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
             return self.vtable.forward(self.ptr, input, allocator);
         }
 
@@ -141,7 +141,7 @@ pub fn LinearLayer(comptime T: type) type {
             };
             return self;
         }
-        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             // return try forwardAg(self, input, fwd_allocator);
             return try forwardManual(self, input, fwd_allocator);
         }
@@ -162,7 +162,7 @@ pub fn LinearLayer(comptime T: type) type {
         // Implement the forward and backward passes manually. The only benefit to this is not paying the cost of
         // Zigrad figuring out the broadcast and unbroadcasting logic on the fly. This should highlight how little
         // overhead Zigrad's abstractions are
-        pub fn forwardManual(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forwardManual(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             const batch_size = if (input.data.shape.len() > 1) try input.data.shape.get(0) else 1;
             const out_features = self.weights.data.shape.shape[0];
 
@@ -185,7 +185,7 @@ pub fn LinearLayer(comptime T: type) type {
             return try NDTensor(T).createDependent(.{
                 .data = result_nd,
                 .label = "lin_fwdman",
-                .children = &[_]*const NDTensor(T){ input, self.weights, self.bias },
+                .children = &.{ input, self.weights, self.bias },
                 .requires_grad = input.requires_grad or self.weights.requires_grad or self.bias.requires_grad,
                 .allocator = fwd_allocator,
                 ._backward = backwardManual,
@@ -326,7 +326,7 @@ pub fn Conv2DLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             const batch_size = try input.data.shape.get(0);
             const in_height = try input.data.shape.get(2);
             const in_width = try input.data.shape.get(3);
@@ -481,7 +481,7 @@ pub fn ReLULayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(_: *Self, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(_: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
             const output = try input.data.copy(allocator);
             for (output.data) |*e| {
                 e.* = if (e.* > 0) e.* else 0;
@@ -489,7 +489,7 @@ pub fn ReLULayer(comptime T: type) type {
 
             return try NDTensor(T).createDependent(.{
                 .data = output,
-                .children = &[_]*const NDTensor(T){input},
+                .children = &.{ input },
                 .label = "relu_out",
                 .requires_grad = input.requiresGrad(),
                 .allocator = allocator,
@@ -536,7 +536,7 @@ pub fn FlattenLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(_: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(_: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             const batch_dim = input.data.shape.shape[0];
             const other_dims = input.data.shape.shape[1..];
             const flattened_dim = prod(other_dims);
@@ -545,7 +545,7 @@ pub fn FlattenLayer(comptime T: type) type {
             const result = try NDTensor(T).createDependent(.{
                 .data = input.data, // Reuse the same data
                 // .op = .FLATTEN,
-                .children = &[_]*const NDTensor(T){input},
+                .children = &.{ input },
                 .label = "flattened",
                 .requires_grad = input.requires_grad,
                 .allocator = fwd_allocator,
@@ -604,7 +604,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
             const batch_size = try input.data.shape.get(0);
             const channels = try input.data.shape.get(1);
             const in_height = try input.data.shape.get(2);
@@ -658,7 +658,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
 
             return try NDTensor(T).createDependent(.{
                 .data = output,
-                .children = &[_]*const NDTensor(T){input},
+                .children = &.{ input },
                 .label = "maxpool2d_out",
                 .requires_grad = true,
                 .allocator = fwd_allocator,
