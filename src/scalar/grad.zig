@@ -615,88 +615,88 @@ test "test graph" {
     // std.log.info("{?s}", .{a.label});
 }
 
-//test "test mul" {
-//    const allocator = std.testing.allocator;
-//    const a = try Value.init(allocator, 2.0, "a");
-//    const b = try Value.init(allocator, -3.0, "b");
-//    const c = mul(allocator, a, b).setLabel("c");
-//
-//    try std.testing.expectEqual(c.value, a.value * b.value);
-//
-//    std.log.info("Attempting deinit", .{});
-//    c.deinit();
-//    std.log.info("Success", .{});
-//}
-//
-//test "test add" {
-//    const allocator = std.testing.allocator;
-//    const a = try Value.init(allocator, 2.0, "a");
-//    const b = try Value.init(allocator, -3.0, "b");
-//    const c = add(allocator, a, b).setLabel("c");
-//
-//    try std.testing.expectEqual(c.value, a.value + b.value);
-//
-//    std.log.info("Attempting deinit", .{});
-//    c.deinit();
-//    std.log.info("Success", .{});
-//}
+test "test mul" {
+    const allocator = std.testing.allocator;
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, -3.0, "b");
+    const c = mul(allocator, a, b).setLabel("c");
 
-//test "test topo" {
-//    const allocator = std.testing.allocator;
-//
-//    // Create nodes
-//    const a = try Value.init(allocator, 2.0, "a");
-//    const b = try Value.init(allocator, 3.0, "b");
-//    const c = add(allocator, a, b).setLabel("c");
-//    const d = try Value.init(allocator, 2.0, "d");
-//    const e = mul(allocator, c, d).setLabel("e");
-//    // introduce another path
-//    var f = mul(allocator, d, e).setLabel("f");
-//
-//    const order = topologicalSort(allocator, f);
-//    // var order = try dfs(allocator, e);
-//    defer allocator.free(order);
-//    for (order, 0..) |value, i| {
-//        std.debug.print("{}: {?s}\n", .{ i + 1, value.label });
-//    }
-//
-//    f.deinit();
-//}
+    try std.testing.expectEqual(c.value, a.value * b.value);
 
-//test "test backprop" {
-//    const allocator = std.testing.allocator;
-//    var w = try Value.init(allocator, 1.0, "w");
-//    var b = try Value.init(allocator, 1.0, "b");
-//    var x = try Value.init(allocator, 2.0, "x");
-//    var y = try Value.init(allocator, -3.0, "y");
-//    var temp = mul(allocator, x, w).setLabel("t");
-//    var pred = add(allocator, temp, b).setLabel("p");
-//    var err = sub(allocator, y, pred).setLabel("e");
-//    err.print();
-//    pred.print();
-//    temp.print();
-//    try err.backward();
-//    std.debug.print("Post backward:\n", .{});
-//    err.print();
-//    y.print();
-//    pred.print();
-//    temp.print();
-//    b.print();
-//    x.print();
-//    w.print();
-//
-//    try std.testing.expect(1.0 == y.grad);
-//    try std.testing.expect(-1.0 == pred.grad);
-//    try std.testing.expect(-1.0 == b.grad);
-//    try std.testing.expect(-2.0 == w.grad);
-//    try std.testing.expect(-1.0 == x.grad);
-//    defer err.deinit();
-//}
-//
-//test "test lm" {
-//    const allocator = std.testing.allocator;
-//    _ = try linearModel(allocator, null);
-//}
+    std.log.info("Attempting deinit", .{});
+    c.deinit();
+    std.log.info("Success", .{});
+}
+
+test "test add" {
+    const allocator = std.testing.allocator;
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, -3.0, "b");
+    const c = add(allocator, a, b).setLabel("c");
+
+    try std.testing.expectEqual(c.value, a.value + b.value);
+
+    std.log.info("Attempting deinit", .{});
+    c.deinit();
+    std.log.info("Success", .{});
+}
+
+test "test topo" {
+    const allocator = std.testing.allocator;
+
+    // Create nodes
+    const a = try Value.init(allocator, 2.0, "a");
+    const b = try Value.init(allocator, 3.0, "b");
+    const c = add(allocator, a, b).setLabel("c");
+    const d = try Value.init(allocator, 2.0, "d");
+    const e = mul(allocator, c, d).setLabel("e");
+    // introduce another path
+    var f = mul(allocator, d, e).setLabel("f");
+
+    const order = topologicalSort(allocator, f);
+    // var order = try dfs(allocator, e);
+    defer allocator.free(order);
+    for (order, 0..) |value, i| {
+        std.debug.print("{}: {?s}\n", .{ i + 1, value.label });
+    }
+
+    f.deinit();
+}
+
+test "test backprop" {
+    const allocator = std.testing.allocator;
+    var w = try Value.init(allocator, 1.0, "w");
+    var b = try Value.init(allocator, 1.0, "b");
+    var x = try Value.init(allocator, 2.0, "x");
+    var y = try Value.init(allocator, -3.0, "y");
+    var temp = mul(allocator, x, w).setLabel("t");
+    var pred = add(allocator, temp, b).setLabel("p");
+    var err = sub(allocator, y, pred).setLabel("e");
+    err.print();
+    pred.print();
+    temp.print();
+    try err.backward();
+    std.debug.print("Post backward:\n", .{});
+    err.print();
+    y.print();
+    pred.print();
+    temp.print();
+    b.print();
+    x.print();
+    w.print();
+
+    try std.testing.expect(1.0 == y.grad);
+    try std.testing.expect(-1.0 == pred.grad);
+    try std.testing.expect(-1.0 == b.grad);
+    try std.testing.expect(-2.0 == w.grad);
+    try std.testing.expect(-1.0 == x.grad);
+    defer err.deinit();
+}
+
+test "test lm" {
+    const allocator = std.testing.allocator;
+    _ = try linearModel(allocator, null);
+}
 
 // test "test print" {
 //     const allocator = &std.testing.allocator;
@@ -709,7 +709,7 @@ test "test graph" {
 //     var err = sub(allocator, y, pred).setLabel("e");
 //     defer err.deinit();
 //     try err.backward();
-
+//
 //     // TODO: Free json
 //     var graphJson = try serializeValueToJson(allocator.*, err);
 //     defer graphJson.object.deinit();
@@ -718,7 +718,7 @@ test "test graph" {
 //     // write to a file
 //     // const file = try std.fs.cwd().createFile("output.json", .{});
 //     // defer file.close();
-
+//
 //     // const fileWriter = file.writer();
 //     // try std.json.stringify(graphJson, .{}, fileWriter);
 // }
