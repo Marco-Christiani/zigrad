@@ -1,6 +1,6 @@
 const std = @import("std");
+const log = std.log.scoped(.zg_dqn_replay_buffer);
 
-/// TODO: Currently a rough prototype this is not what the final version will be
 pub fn ReplayBuffer(T: type, capacity: usize) type {
     return struct {
         const Self = @This();
@@ -15,6 +15,7 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
             return Self{ .allocator = allocator, .data = buf, .size = 0, .idx = 0 };
         }
 
+        /// Add an item to the buffer
         pub fn add(self: *Self, elem: T) void {
             self.data[self.idx] = elem;
             self.size = @min(self.size + 1, capacity);
@@ -22,7 +23,7 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
             self.idx %= capacity;
         }
 
-        /// COM
+        /// Sample with replacement. COM.
         pub fn sample(self: Self, n: usize) !Sample {
             var soa = Sample{};
             for (0..n) |_| {
@@ -45,7 +46,7 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
                 while (std.mem.containsAtLeast(usize, taken, 1, &.{idx})) {
                     idx = std.crypto.random.uintLessThan(usize, self.size);
                     retries += 1;
-                    if (retries >= n - n / 2) std.debug.print("retry:{d} idx:{d} n:{d} size:{d} capacity:{d}\n", .{ retries, idx, n, self.size, capacity });
+                    if (retries >= n - n / 2) log.debug("retry:{d} idx:{d} n:{d} size:{d} capacity:{d}\n", .{ retries, idx, n, self.size, capacity });
                 }
                 taken[i] = idx;
                 try soa.append(self.allocator, self.data[idx]);
