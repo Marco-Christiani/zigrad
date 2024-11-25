@@ -1,6 +1,6 @@
 const std = @import("std");
 const maskedCrc32c = @import("crc.zig").maskedCrc32c;
-const TensorBoardLogger = @import("TensorboardLogger.zig");
+pub const TensorBoardLogger = @import("TensorboardLogger.zig");
 
 test "tensorboard logger" {
     const allocator = std.testing.allocator;

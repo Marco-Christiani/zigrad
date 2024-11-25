@@ -4,17 +4,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addStaticLibrary(.{
-        .name = "tensorboard",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const protobuf_dep = b.dependency("protobuf", .{
         .target = target,
         .optimize = optimize,
     });
-    lib.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+
+    const tensorboard = b.addModule("tensorboard", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tensorboard.addImport("protobuf", protobuf_dep.module("protobuf"));
+
+    const lib = b.addStaticLibrary(.{
+        .name = "tensorboard",
+        .root_source_file = tensorboard.root_source_file,
+        .target = target,
+        .optimize = optimize,
+    });
 
     const gen_proto = b.step("gen-proto", "generates zig files from protocol buffer definitions");
     const protobuf = @import("protobuf");
