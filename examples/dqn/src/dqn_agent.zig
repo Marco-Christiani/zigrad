@@ -2,7 +2,7 @@ const std = @import("std");
 const zg = @import("zigrad");
 const NDTensor = zg.NDTensor;
 const ReplayBuffer = @import("replay_buffer.zig").ReplayBuffer;
-const DQNModel = @import("model.zig").DQNModel;
+const DQNModel = @import("dqn_model.zig").DQNModel;
 const GraphManager = zg.GraphManager;
 
 pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
