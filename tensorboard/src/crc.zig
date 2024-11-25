@@ -1,6 +1,10 @@
 ///! This implementation is designed to match that used by tensorboard
 const std = @import("std");
 
+// Hypothetically, the below table corresponds to some specific crc settings
+// and could be generated at comptime by using stdlib's crc, it's not obvious
+// to me what those settings are, though and `std.hash.crc.Crc32Cksum` does
+// not give us the expected results.
 const CRC_TABLE = [256]u32{
     0x00000000, 0xf26b8303, 0xe13b70f7, 0x1350f3f4,
     0xc79a971f, 0x35f1141c, 0x26a1e7e8, 0xd4ca64eb,
@@ -68,13 +72,12 @@ const CRC_TABLE = [256]u32{
     0xbe2da0a5, 0x4c4623a6, 0x5f16d052, 0xad7d5351,
 };
 
-pub fn crc32c(data: []const u8) u32 {
+fn crc32c(data: []const u8) u32 {
     var crc: u32 = 0xFFFFFFFF;
     for (data) |byte| {
         crc = (CRC_TABLE[(crc ^ byte) & 0xFF] ^ (crc >> 8));
     }
     return ~crc;
-    // return std.hash.crc.Crc32Cksum.hash(data);
 }
 
 pub fn maskedCrc32c(data: []const u8) u32 {
