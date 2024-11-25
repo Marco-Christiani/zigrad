@@ -1,0 +1,21 @@
+.{
+    .name = "tensorboard",
+
+    .version = "0.0.0",
+
+    //.minimum_zig_version = "0.11.0",
+    .dependencies = .{
+        .protobuf = .{
+            .url = "https://github.com/Arwalk/zig-protobuf/archive/7c49ed66e029c9c7e6253b3d6d256118745550a4.tar.gz",
+            .hash = "122063ee7ff32a3c1aefd91a46a9fc23df0571949c3a02e2f44d39afbad0b53018a3",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        //"LICENSE",
+        //"README.md",
+    },
+}
