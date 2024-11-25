@@ -1,7 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
-const pb = @import("protobuf");
-const tb = @import("gen_proto/tensorboard.pb.zig");
 const maskedCrc32c = @import("crc.zig").maskedCrc32c;
 const TensorBoardLogger = @import("TensorboardLogger.zig");
 
