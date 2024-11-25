@@ -108,10 +108,10 @@ pub fn trainDQN() !void {
         if (episode >= 100) {
             const running_avg = blk: {
                 var sum: T = 0;
-                for (total_rewards[episode - 999 .. episode + 1]) |r| {
+                for (total_rewards[episode - 100 .. episode]) |r| {
                     sum += r;
                 }
-                break :blk sum / 1000;
+                break :blk sum / 100;
             };
 
             try tb_logger.addScalar("episode/running_avg", running_avg, @intCast(episode));
