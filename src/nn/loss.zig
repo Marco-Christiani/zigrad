@@ -9,7 +9,7 @@ const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
 
 /// Relies on autograd, operates on the flat data.
-pub fn ag_mse_1d(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var diff = (try y_pred.sub(y, allocator)).setLabel("diff");
     const diff2 = (try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, allocator)).setLabel("diff2");
     // const diff2 = (try y_pred.sub(y, allocator)).setLabel("diff2");
@@ -20,7 +20,7 @@ pub fn ag_mse_1d(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), all
     return (try sum_sq_diff.div(coef_tensor.setLabel("coef"), allocator)).setLabel("mse");
 }
 
-pub fn mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.data.data.len));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -58,7 +58,7 @@ pub fn mse_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allo
 }
 
 /// Runs over last dim.
-pub fn softmax_cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     var sum_loss: T = 0;
     const epsilon: T = 1e-7;
     if (y_pred.data.shape.len() > 2) return error.NotSupported;
@@ -91,9 +91,9 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const
     }.backward;
 
     return try NDTensor(T).createDependent(.{
-        .data = try NDArray(T).init(&[_]T{mean_loss}, &[_]usize{1}, allocator),
+        .data = try NDArray(T).init(&.{ mean_loss }, &.{ 1 }, allocator),
         .op = null,
-        .children = &[_]*const NDTensor(T){ y_pred, y },
+        .children = &.{ y_pred, y },
         .label = "cross_entropy",
         .requires_grad = true,
         .allocator = allocator,
@@ -103,7 +103,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *const NDTensor(T), y: *const
 }
 
 /// Relies on autograd, operates on the flat data.
-pub fn ag_softmax_1d(T: type, input: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn ag_softmax_1d(T: type, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
     const max_val = try input.max(allocator);
     const exp_input = try (try input.sub(max_val, allocator)).exp(allocator);
     const sum = try exp_input.sum(allocator);
@@ -112,7 +112,7 @@ pub fn ag_softmax_1d(T: type, input: *const NDTensor(T), allocator: std.mem.Allo
 
 // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
 // mutate a view into result by directly operating on the backing ndarray
-fn _softmax_fwd(T: type, input: *const NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
+fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize, allocator: std.mem.Allocator) !*NDTensor(T) {
     const shape = input.data.shape.shape;
     if (dim >= shape.len) return error.InvalidDimension;
 
@@ -201,7 +201,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.me
 
     return try NDTensor(T).createDependent(.{
         .data = result.data,
-        .children = &[_]*const NDTensor(T){input},
+        .children = &.{ input },
         .label = "softmax",
         .allocator = allocator,
         .requires_grad = true,
@@ -210,7 +210,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, allocator: std.me
     });
 }
 
-pub fn smooth_l1_loss(comptime T: type, y_pred: *const NDTensor(T), y: *const NDTensor(T), beta: T, allocator: std.mem.Allocator) !*NDTensor(T) {
+pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, allocator: std.mem.Allocator) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.data.data.len));
     var sum_loss: T = 0;
 
@@ -253,8 +253,8 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *const NDTensor(T), y: *const ND
     beta_ctx.* = beta;
 
     return try NDTensor(T).createDependent(.{
-        .data = try NDArray(T).init(&[_]T{loss}, &[_]usize{1}, allocator),
-        .children = &[_]*const NDTensor(T){ y_pred, y },
+        .data = try NDArray(T).init(&.{ loss }, &.{ 1 }, allocator),
+        .children = &.{ y_pred, y },
         .label = "smooth_l1",
         .requires_grad = true,
         .allocator = allocator,

@@ -22,7 +22,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
     return struct {
         const Self = @This();
         model: Model(T),
-        params: []*const NDTensor(T),
+        params: []*NDTensor(T),
         optimizer: SGD(T),
         graph_manager: GraphManager(NDTensor(T)),
 
@@ -50,7 +50,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         pub fn trainStep(
             self: *Self,
             input: *NDTensor(T),
-            target: *const NDTensor(T),
+            target: *NDTensor(T),
             fwd_allocator: std.mem.Allocator,
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
