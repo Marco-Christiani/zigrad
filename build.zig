@@ -61,18 +61,17 @@ pub fn build(b: *std.Build) void {
 }
 
 pub fn generateBackend(cuda: bool) void {
-    
     const backend: []const u8 = if (cuda) ".CUDA" else ".HOST";
 
-    const format: []const u8 = 
+    const format: []const u8 =
         \\pub const Backend = enum{{ HOST, CUDA }};
         \\pub const backend: Backend = {s};
     ;
 
     var buffer: [128]u8 = undefined;
 
-    const contents = std.fmt.bufPrint(buffer[0..], format, .{ backend }) catch unreachable;
-    
+    const contents = std.fmt.bufPrint(buffer[0..], format, .{backend}) catch unreachable;
+
     stringToFile("src/backend.zig", contents);
 }
 
