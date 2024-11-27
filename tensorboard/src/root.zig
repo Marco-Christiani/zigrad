@@ -2,7 +2,7 @@ const std = @import("std");
 const maskedCrc32c = @import("crc.zig").maskedCrc32c;
 pub const TensorBoardLogger = @import("TensorboardLogger.zig");
 
-test "tensorboard logger" {
+test TensorBoardLogger {
     const allocator = std.testing.allocator;
     var logger = try TensorBoardLogger.init("/tmp/tensorboard_logs", allocator);
     defer logger.deinit();
@@ -18,10 +18,14 @@ test "tensorboard logger" {
         try logger.addScalar("example/scalar", scalar_value, step);
 
         // Add histogram
-        var histogram_values: [1000]f64 = undefined;
+        var histogram_values: [1000]f32 = undefined;
         for (&histogram_values) |*v| {
-            v.* = random.floatNorm(f64) + @as(f64, @floatFromInt(i));
+            v.* = random.floatNorm(f32) + @as(f32, @floatFromInt(i));
         }
         try logger.addHistogram("example/histogram", &histogram_values, step);
     }
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }
