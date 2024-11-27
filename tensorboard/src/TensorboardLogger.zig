@@ -85,7 +85,7 @@ pub fn addScalar(self: *Self, tag: []const u8, value: f32, step: i64) !void {
     try self.writeEvent(&event);
 }
 
-pub fn addHistogram(self: *Self, tag: []const u8, values: []const f64, step: i64) !void {
+pub fn addHistogram(self: *Self, tag: []const u8, values: []const f32, step: i64) !void {
     var event = tb.Event.init(self.allocator);
     defer event.deinit();
 
@@ -100,9 +100,9 @@ pub fn addHistogram(self: *Self, tag: []const u8, values: []const f64, step: i64
 
     var histo = tb.HistogramProto.init(self.allocator);
 
-    const min, const max = std.mem.minMax(f64, values);
-    histo.min = min;
-    histo.max = max;
+    const min, const max = std.mem.minMax(f32, values);
+    histo.min = @floatCast(min);
+    histo.max = @floatCast(max);
     histo.num = @floatFromInt(values.len);
     histo.sum = blk: {
         var total: f64 = 0;
@@ -126,7 +126,7 @@ pub fn addHistogram(self: *Self, tag: []const u8, values: []const f64, step: i64
     try self.writeEvent(&event);
 }
 
-fn computeBuckets(histo: *tb.HistogramProto, values: []const f64, num_buckets: usize) !void {
+fn computeBuckets(histo: *tb.HistogramProto, values: []const f32, num_buckets: usize) !void {
     const min = histo.min;
     const max = histo.max;
     const bucket_width = (max - min) / @as(f64, @floatFromInt(num_buckets));
