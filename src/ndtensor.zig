@@ -51,7 +51,7 @@ pub fn NDTensor(comptime T: type) type {
 
         // signature for a backwards callback
         const Callback = *const fn (Self, std.mem.Allocator) anyerror!void;
-        
+
         pub const dtype = NDArray(T);
         const Self = @This();
 
@@ -279,7 +279,7 @@ pub fn NDTensor(comptime T: type) type {
             const result = try createDependent(.{
                 .data = try self.data.copy(self.allocator),
                 .op = .RESHAPE,
-                .children = &.{ self },
+                .children = &.{self},
                 .label = null,
                 .requires_grad = self.requires_grad,
                 .allocator = self.allocator,
@@ -304,7 +304,7 @@ pub fn NDTensor(comptime T: type) type {
             var result = try createDependent(.{
                 .data = try self.data.transpose(self.allocator),
                 .op = .TRANSPOSE,
-                .children = &.{ self },
+                .children = &.{self},
                 .label = null,
                 .requires_grad = false, // we will set grad ourselves for efficiency
                 .allocator = self.allocator,
@@ -774,7 +774,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = try self.data.sum(allocator),
                 .op = .SUM,
-                .children = &.{ self },
+                .children = &.{self},
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
                 ._backward = sumBw,
@@ -800,7 +800,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = max_result.values,
                 .op = null,
-                .children = &.{ self },
+                .children = &.{self},
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
                 ._backward = maxBackward,
@@ -831,7 +831,7 @@ pub fn NDTensor(comptime T: type) type {
             return try createDependent(.{
                 .data = gather_result.values,
                 .op = null,
-                .children = &.{ self },
+                .children = &.{self},
                 .requires_grad = self.requires_grad,
                 .allocator = allocator,
                 ._backward = gatherBackward,
