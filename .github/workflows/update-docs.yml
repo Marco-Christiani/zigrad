@@ -40,8 +40,8 @@ jobs:
         run: |
           git config --global user.name "$GIT_AUTHOR_NAME"
           git config --global user.email "$GIT_AUTHOR_EMAIL"
-          cp ./zig-out/docs/sources.tar sources.tar
           git checkout gh-pages
+          cp ./zig-out/docs/sources.tar sources.tar
           git add sources.tar
           git commit -m "Update source files tar"
           git push origin gh-pages
