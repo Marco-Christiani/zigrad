@@ -30,6 +30,7 @@ jobs:
       - name: Build docs
         run: |
           zig build docs
+          cp ./zig-out/docs/sources.tar sources.tar
 
       - name: Switch branches and update tar
         env:
