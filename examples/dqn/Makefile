@@ -26,7 +26,7 @@ $(RESET)
 endef
 export PROJECT_LOGO
 
-.PHONY: all intro ensure-zig clean build run help
+.PHONY: all intro ensure-zig clean build run py-bindings help
 all: intro run
 
 intro:
@@ -82,6 +82,9 @@ run: ./zig-out/bin/dqn
 	@echo "$(CYAN)$(BOLD)Running DQN...$(RESET)"
 	@./zig-out/bin/dqn
 	@echo "$(GREEN)✓ Done$(RESET)"
+
+py-bindings:
+	zig build-lib cartpole_wrapper.zig -Doptimize=ReleaseFast -dynamic
 
 help:
 	@echo "$$PROJECT_LOGO"

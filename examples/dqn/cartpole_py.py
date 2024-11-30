@@ -4,7 +4,7 @@ from ctypes import POINTER, c_double, c_uint32, c_uint64
 
 import numpy as np
 
-libpath = pathlib.Path("./libcartpole_wrapper.so")
+libpath = pathlib.Path("./libcartpole_wrapper.so").absolute()
 if libpath.exists() or (libpath := libpath.with_suffix(".dylib")).exists():
     lib = ctypes.CDLL(str(libpath))
 else:
