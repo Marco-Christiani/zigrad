@@ -1,0 +1,5 @@
+*.so
+*.dylib
+*.o
+__pycache__
+.zig-cache
