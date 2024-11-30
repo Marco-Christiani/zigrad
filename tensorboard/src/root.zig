@@ -4,7 +4,7 @@ pub const TensorBoardLogger = @import("TensorboardLogger.zig");
 
 test TensorBoardLogger {
     const allocator = std.testing.allocator;
-    var logger = try TensorBoardLogger.init("/tmp/tensorboard_logs", allocator);
+    var logger = try TensorBoardLogger.init("/tmp/", allocator);
     defer logger.deinit();
 
     var prng = std.rand.DefaultPrng.init(0);
