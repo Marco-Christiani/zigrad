@@ -14,7 +14,10 @@ pub fn init(log_dir: []const u8, allocator: std.mem.Allocator) !Self {
     const full_log_dir = try std.fmt.allocPrint(allocator, "{s}/run-{d}", .{ log_dir, timestamp });
     defer allocator.free(full_log_dir);
 
-    try std.fs.makeDirAbsolute(full_log_dir);
+    std.fs.makeDirAbsolute(full_log_dir) catch |err| switch (err) {
+        error.FileNotFound => std.debug.panicExtra(@errorReturnTrace(), @returnAddress(), "Path does not exist at {s}", .{log_dir}),
+        inline else => return err,
+    };
 
     const file_name = try std.fmt.allocPrint(allocator, "{s}/events.out.tfevents.{d}", .{ full_log_dir, timestamp });
     defer allocator.free(file_name);
@@ -37,9 +40,10 @@ pub fn init(log_dir: []const u8, allocator: std.mem.Allocator) !Self {
 pub fn deinit(self: *Self) void {
     self.buffer.flush() catch {};
     self.file.close();
+    self.* = undefined;
 }
 
-fn writeFileVersion(self: *Self) !void {
+fn writeFileVersion(self: Self) !void {
     var event = tb.Event.init(self.allocator);
     defer event.deinit();
 
@@ -48,7 +52,7 @@ fn writeFileVersion(self: *Self) !void {
     try self.writeEvent(&event);
 }
 
-fn writeEvent(self: *Self, event: *tb.Event) !void {
+fn writeEvent(self: Self, event: *tb.Event) !void {
     const bytes = try event.encode(self.allocator);
     defer self.allocator.free(bytes);
 
@@ -57,15 +61,17 @@ fn writeEvent(self: *Self, event: *tb.Event) !void {
     const length_crc = maskedCrc32c(length_bytes);
     const data_crc = maskedCrc32c(bytes);
 
-    try self.buffer.writer().writeAll(length_bytes);
-    try self.buffer.writer().writeInt(u32, length_crc, .little);
-    try self.buffer.writer().writeAll(bytes);
-    try self.buffer.writer().writeInt(u32, data_crc, .little);
+    var buffer = self.buffer;
+    var writer = buffer.writer();
+    try writer.writeAll(length_bytes);
+    try writer.writeInt(u32, length_crc, .little);
+    try writer.writeAll(bytes);
+    try writer.writeInt(u32, data_crc, .little);
 
-    try self.buffer.flush();
+    try buffer.flush();
 }
 
-pub fn addScalar(self: *Self, tag: []const u8, value: f32, step: i64) !void {
+pub fn addScalar(self: Self, tag: []const u8, value: f32, step: i64) !void {
     var event = tb.Event.init(self.allocator);
     defer event.deinit();
 
@@ -85,7 +91,7 @@ pub fn addScalar(self: *Self, tag: []const u8, value: f32, step: i64) !void {
     try self.writeEvent(&event);
 }
 
-pub fn addHistogram(self: *Self, tag: []const u8, values: []const f32, step: i64) !void {
+pub fn addHistogram(self: Self, tag: []const u8, values: []const f32, step: i64) !void {
     var event = tb.Event.init(self.allocator);
     defer event.deinit();
 
