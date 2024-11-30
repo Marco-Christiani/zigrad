@@ -30,7 +30,6 @@ jobs:
       - name: Build docs
         run: |
           zig build docs
-          cp ./zig-out/docs/sources.tar sources.tar
 
       - name: Switch branches and update tar
         env:
@@ -41,6 +40,7 @@ jobs:
         run: |
           git config --global user.name "$GIT_AUTHOR_NAME"
           git config --global user.email "$GIT_AUTHOR_EMAIL"
+          cp ./zig-out/docs/sources.tar sources.tar
           git checkout gh-pages
           git add sources.tar
           git commit -m "Update source files tar"
