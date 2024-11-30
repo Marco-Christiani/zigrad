@@ -7,19 +7,18 @@ const T = f32;
 
 pub fn trainDQN() !void {
     // Use ArenaAllocator for bulk allocations
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Separate pool for intermediate tensors
-    var im_pool = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var im_pool = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer im_pool.deinit();
     const im_alloc = im_pool.allocator();
 
     // Initialize environment and logger
     const s = std.crypto.random.int(usize);
     var env = CartPole.init(s);
-    // TODO: Need to mkdir
     var tb_logger = try tb.TensorBoardLogger.init("/tmp/dqn_logs", allocator);
     defer tb_logger.deinit();
 
@@ -76,7 +75,7 @@ pub fn trainDQN() !void {
 
             if (total_steps > 128) {
                 agent.policy_net.train();
-                const loss = try agent.train(im_alloc);
+                const loss = try agent.train(im_alloc, tb_logger);
                 loss_sum += loss;
                 loss_count += 1;
                 try agent.updateTargetNetwork(tau);

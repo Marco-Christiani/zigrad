@@ -1,4 +1,5 @@
 const std = @import("std");
+const tb = @import("tensorboard");
 const zg = @import("zigrad");
 const NDTensor = zg.NDTensor;
 const ReplayBuffer = @import("replay_buffer.zig").ReplayBuffer;
@@ -17,10 +18,10 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
         eps_end: T,
         eps_decay: T,
         eps: T,
-
         gamma: T,
         optimizer: zg.optim.Optimizer(T),
         graph_manager: GraphManager(NDTensor(T)),
+        steps_done: usize,
 
         const Transition = struct {
             state: [4]T,
@@ -46,6 +47,8 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
 
             const policy_net = try DQNModel(T).init(allocator, config.input_size, config.hidden_size, config.output_size);
             const target_net = try DQNModel(T).init(allocator, config.input_size, config.hidden_size, config.output_size);
+
+            // initialize target network weights to match policy network
             const policy_params = policy_net.getParameters();
             const target_params = target_net.getParameters();
             defer policy_net.allocator.free(policy_params);
@@ -66,6 +69,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
                 .gamma = config.gamma,
                 .optimizer = config.optimizer,
                 .graph_manager = GraphManager(NDTensor(T)).init(allocator, .{}),
+                .steps_done = 0,
             };
             return self;
         }
@@ -79,6 +83,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
 
         pub fn selectAction(self: *Self, state: [4]T, step: usize, allocator: std.mem.Allocator) !u32 {
             self.eps = self.eps_end + (self.eps_start - self.eps_end) * @exp(-1.0 * @as(T, @floatFromInt(step)) / self.eps_decay);
+
             if (std.crypto.random.float(T) <= self.eps) {
                 return std.crypto.random.intRangeAtMost(u32, 0, 1);
             }
@@ -89,18 +94,6 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             zg.rt_grad_enabled = false;
             const q_values = try self.policy_net.forward(state_tensor, allocator);
             defer q_values.deinit();
-
-            // -------------------------------------------------------------------------------------------------
-            // const stacked = try allocator.alloc(T, 8);
-            // defer allocator.free(stacked);
-            // for (0..stacked.len) |i| stacked[i] = state[i % 4];
-            // const state_tensor2 = try NDTensor(T).init(stacked, &[_]usize{ 2, 4 }, false, arena.allocator());
-            // defer state_tensor2.deinit();
-            //
-            // const q_values2 = try self.policy_net.forward(state_tensor2, allocator);
-            // defer q_values2.deinit();
-            // return if (q_values2.data.data[0] > q_values2.data.data[1]) 0 else 1;
-            // -------------------------------------------------------------------------------------------------
 
             std.debug.assert(try q_values.data.shape.realdims() == 1);
             std.debug.assert(q_values.data.shape.len() == 2);
@@ -124,7 +117,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             }
         }
 
-        pub fn train(self: *Self, allocator: std.mem.Allocator) !T {
+        pub fn train(self: *Self, allocator: std.mem.Allocator, tb_logger: tb.TensorBoardLogger) !T {
             const bs = 128;
             var batch = try self.replay_buffer.sample2(bs);
             defer batch.deinit(allocator);
@@ -170,6 +163,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             const max_next_q_values = try all_next_q_values.maxOverDim(allocator, .{ .dim = 1, .keep_dims = false });
             defer max_next_q_values.deinit();
 
+            // compute targets
             const gamma_tensor = try NDTensor(T).init(&[_]T{self.gamma}, &[_]usize{1}, false, allocator);
             defer gamma_tensor.deinit();
             const discounted_max_next_q_values = try max_next_q_values.mul(gamma_tensor, allocator);
@@ -187,10 +181,10 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             defer targets.deinit();
             _ = targets.setLabel("targets");
 
-            // clip Q-targets
+            // clip targets
             for (targets.data.data) |*t| t.* = std.math.clamp(t.*, q_min, q_max);
 
-            // enable gradients for policy network forward pass and loss computation
+            // enable gradients for policy forward pass and loss
             zg.rt_grad_enabled = true;
             const all_q_values = try self.policy_net.forward(states, allocator);
             defer all_q_values.deinit();
@@ -203,15 +197,23 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             defer q_values.deinit();
             _ = q_values.setLabel("q_values");
 
+            // compute loss
             const loss = try zg.loss.smooth_l1_loss(T, q_values, targets, 1.0, allocator);
             defer loss.deinit();
 
+            // log metrics
+            try tb_logger.addHistogram("training/q_values", q_values.data.data, @intCast(self.steps_done));
+            try tb_logger.addHistogram("training/target_values", targets.data.data, @intCast(self.steps_done));
+            try tb_logger.addScalar("training/loss", loss.get(&.{0}), @intCast(self.steps_done));
+            try tb_logger.addScalar("training/epsilon", self.eps, @intCast(self.steps_done));
+
+            // backward pass and optimization
             self.policy_net.zeroGrad();
             loss.grad.?.fill(1.0);
-
             try self.graph_manager.backward(loss, allocator);
             try self.optimizer.step(self.policy_net.params);
 
+            self.steps_done += 1;
             zg.rt_grad_enabled = false;
             return loss.get(&.{0});
         }
