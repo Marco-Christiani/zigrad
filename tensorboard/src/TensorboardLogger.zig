@@ -14,7 +14,10 @@ pub fn init(log_dir: []const u8, allocator: std.mem.Allocator) !Self {
     const full_log_dir = try std.fmt.allocPrint(allocator, "{s}/run-{d}", .{ log_dir, timestamp });
     defer allocator.free(full_log_dir);
 
-    try std.fs.makeDirAbsolute(full_log_dir);
+    std.fs.makeDirAbsolute(full_log_dir) catch |err| switch (err) {
+        error.FileNotFound => std.debug.panicExtra(@errorReturnTrace(), @returnAddress(), "Path does not exist at {s}", .{log_dir}),
+        inline else => return err,
+    };
 
     const file_name = try std.fmt.allocPrint(allocator, "{s}/events.out.tfevents.{d}", .{ full_log_dir, timestamp });
     defer allocator.free(file_name);
