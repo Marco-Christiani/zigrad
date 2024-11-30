@@ -1,0 +1,16 @@
+name: Format Check
+on: [pull_request]
+
+jobs:
+  check-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+      - name: Check formatting
+        run: |
+          zig fmt --check **/*.zig
+          if [ $? -ne 0 ]; then
+            echo "❌ Code must be formatted using 'zig fmt'. Please run it locally and commit the changes."
+            exit 1
+          fi
