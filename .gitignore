@@ -1,5 +1,6 @@
 *.json
 drafts
+*.so
 *.png
 *.svg
 *.d2

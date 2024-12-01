@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 
+const DeviceReference = zg.DeviceReference;
 const GraphManager = zg.GraphManager;
 const NDTensor = zg.NDTensor;
 const Model = zg.Model;
@@ -35,7 +36,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
                 .model = model,
                 .params = model.getParameters(),
                 .optimizer = optimizer,
-                .graph_manager = GraphManager(NDTensor(T)).init(model.allocator, graph_config),
+                .graph_manager = GraphManager(NDTensor(T)).init(model.device.allocator, graph_config),
             };
         }
 
@@ -43,7 +44,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             log.info("deinit gm", .{});
             self.graph_manager.deinit();
             log.info("free params ref", .{});
-            self.model.allocator.free(self.params);
+            self.model.device.allocator.free(self.params);
             self.* = undefined;
         }
 
@@ -51,14 +52,14 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             self: *Self,
             input: *NDTensor(T),
             target: *NDTensor(T),
-            fwd_allocator: std.mem.Allocator,
-            bwd_allocator: std.mem.Allocator,
+            fwd_device: DeviceReference,
+            bwd_device: DeviceReference,
         ) !*NDTensor(T) {
-            const output = try self.model.forward(input, fwd_allocator);
-            const loss = try lossf(T, output, target, fwd_allocator);
+            const output = try self.model.forward(input, fwd_device);
+            const loss = try lossf(T, output, target, fwd_device);
             self.model.zeroGrad();
-            loss.grad.?.fill(1.0);
-            try self.graph_manager.backward(loss, bwd_allocator);
+            loss.grad.?.fill(1.0, bwd_device);
+            try self.graph_manager.backward(loss, bwd_device);
             self.optimizer.step(self.params);
             return loss;
         }
