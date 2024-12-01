@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
+const DeviceReference = zg.DeviceReference;
 
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
@@ -23,7 +24,7 @@ pub fn Layer(comptime T: type) type {
         ptr: *anyopaque,
 
         pub const VTable = struct {
-            forward: *const fn (ctx: *anyopaque, input: *NDTensor(T), allocator: std.mem.Allocator) anyerror!*NDTensor(T),
+            forward: *const fn (ctx: *anyopaque, input: *NDTensor(T), device: DeviceReference) anyerror!*NDTensor(T),
             getParameters: *const fn (ctx: *anyopaque) ?[]*NDTensor(T),
             zeroGrad: *const fn (ctx: *anyopaque) void,
             deinit: *const fn (ctx: *anyopaque) void,
@@ -34,9 +35,9 @@ pub fn Layer(comptime T: type) type {
             const Ptr = @TypeOf(pointer);
 
             const gen = struct {
-                fn forwardFn(ctx: *anyopaque, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+                fn forwardFn(ctx: *anyopaque, input: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
                     const self: Ptr = @ptrCast(@alignCast(ctx));
-                    return self.forward(input, allocator);
+                    return self.forward(input, device);
                 }
 
                 fn getParametersFn(ctx: *anyopaque) ?[]*NDTensor(T) {
@@ -74,8 +75,8 @@ pub fn Layer(comptime T: type) type {
             };
         }
 
-        pub fn forward(self: Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-            return self.vtable.forward(self.ptr, input, allocator);
+        pub fn forward(self: Self, input: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+            return self.vtable.forward(self.ptr, input, device);
         }
 
         /// Note that layer may not have any trainables
@@ -118,55 +119,55 @@ pub fn LinearLayer(comptime T: type) type {
         const Self = @This();
         weights: *NDTensor(T),
         bias: *NDTensor(T),
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
         parameters: [2]*NDTensor(T),
 
-        pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !*Self {
+        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !*Self {
             const weights_shape = [_]usize{ out_features, in_features };
             const bias_shape = [_]usize{ 1, out_features };
-            var weights = (try NDTensor(T).empty(&weights_shape, true, allocator)).setLabel("linear_weights");
-            var bias = (try NDTensor(T).empty(&bias_shape, true, allocator)).setLabel("linear_bias");
+            var weights = (try NDTensor(T).empty(&weights_shape, true, device)).setLabel("linear_weights");
+            var bias = (try NDTensor(T).empty(&bias_shape, true, device)).setLabel("linear_bias");
             weights.acquire();
             bias.acquire();
 
             winit.heInit(T, weights);
             bias.fill(0.0);
 
-            const self = try allocator.create(Self);
+            const self = try device.allocator.create(Self);
             self.* = Self{
                 .weights = weights,
                 .bias = bias,
                 .parameters = [_]*NDTensor(T){ weights, bias },
-                .allocator = allocator,
+                .device = device,
             };
             return self;
         }
-        pub fn forward(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
-            // return try forwardAg(self, input, fwd_allocator);
-            return try forwardManual(self, input, fwd_allocator);
+        pub fn forward(self: *Self, input: *NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
+            // return try forwardAg(self, input, fwd_device);
+            return try forwardManual(self, input, fwd_device);
         }
 
         // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
         // in the backward for broadcasted bias addition thats not possible if its not tracked in the op graph so theres a
         // slightly more optimized variant that explicitly handles the broadcast and unbroadcast.
-        pub fn forwardAg(self: *const Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forwardAg(self: *const Self, input: *const NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
             // Labels are optional, useful if you want to render a diagram of the computational graph.
             // (W@X^T + b)^T == X@W^T + b
             return (try (try input.bmm(
                 self.weights,
-                fwd_allocator,
+                fwd_device,
                 .{ .trans_b = true },
-            )).setLabel("lin_fwd1").add(self.bias, fwd_allocator)).setLabel("lin_fwd2");
+            )).setLabel("lin_fwd1").add(self.bias, fwd_device)).setLabel("lin_fwd2");
         }
 
         // Implement the forward and backward passes manually. The only benefit to this is not paying the cost of
         // Zigrad figuring out the broadcast and unbroadcasting logic on the fly. This should highlight how little
         // overhead Zigrad's abstractions are
-        pub fn forwardManual(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forwardManual(self: *Self, input: *NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
             const batch_size = if (input.data.shape.len() > 1) try input.data.shape.get(0) else 1;
             const out_features = self.weights.data.shape.shape[0];
 
-            var result_nd = try NDArray(T).empty(&[_]usize{ batch_size, out_features }, fwd_allocator);
+            var result_nd = try NDArray(T).empty(&[_]usize{ batch_size, out_features }, fwd_device);
             const bd = self.bias.data.data;
             for (0..batch_size) |i| {
                 @memcpy(result_nd.data[i * out_features .. (i + 1) * out_features], bd);
@@ -179,7 +180,7 @@ pub fn LinearLayer(comptime T: type) type {
                 1.0,
                 false,
                 true,
-                fwd_allocator,
+                fwd_device,
             );
             // Hook up the custom backward function.
             return try NDTensor(T).createDependent(.{
@@ -187,7 +188,7 @@ pub fn LinearLayer(comptime T: type) type {
                 .label = "lin_fwdman",
                 .children = &.{ input, self.weights, self.bias },
                 .requires_grad = input.requires_grad or self.weights.requires_grad or self.bias.requires_grad,
-                .allocator = fwd_allocator,
+                .device = fwd_device,
                 ._backward = backwardManual,
                 ._backward_ctx = self,
             });
@@ -195,7 +196,7 @@ pub fn LinearLayer(comptime T: type) type {
 
         /// A custom backward impl that, technically, isnt optimized in any way aside from avoiding having
         /// to infer shape broadcasting logic which is shockingly fast in Zigrad for some reason.
-        fn backwardManual(tensor: NDTensor(T), allocator: std.mem.Allocator) !void {
+        fn backwardManual(tensor: NDTensor(T), device: DeviceReference) !void {
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             const grad_output = tensor.grad orelse return error.NoGradient;
             const input = tensor.children.?[0];
@@ -212,10 +213,10 @@ pub fn LinearLayer(comptime T: type) type {
                 1.0,
                 true, // grad_output^T * input
                 false,
-                allocator,
+                device,
             );
             // similar performance to the below optimized variant and simpler. essentially the exact thing that autograd does.
-            const bias_grad = try grad_output.sum_along(allocator, .{ .dim = 0 });
+            const bias_grad = try grad_output.sum_along(device, .{ .dim = 0 });
             _ = try grad_B._add(bias_grad);
             // This is not really a great way to optimize this, btw. This is meant to demonstrate to a user how they can
             // implement custom functionality by accessing the underlying data directly.
@@ -239,7 +240,7 @@ pub fn LinearLayer(comptime T: type) type {
                 1.0,
                 false, // grad_output * weights^T
                 false,
-                allocator,
+                device,
             );
         }
 
@@ -248,15 +249,15 @@ pub fn LinearLayer(comptime T: type) type {
         }
 
         pub fn zeroGrad(self: *Self) void {
-            self.weights.grad.?.fill(0);
-            self.bias.grad.?.fill(0);
+            self.weights.grad.?.fill(0, self.device);
+            self.bias.grad.?.fill(0, self.device);
         }
 
         pub fn deinit(self: *Self) void {
             self.release();
             self.weights.deinit();
             self.bias.deinit();
-            self.allocator.destroy(self);
+            self.device.allocator.destroy(self);
         }
 
         pub fn release(self: *Self) void {
@@ -277,7 +278,7 @@ pub fn Conv2DLayer(comptime T: type) type {
 
         weights: *NDTensor(T),
         bias: *NDTensor(T),
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
         parameters: [2]*NDTensor(T),
         in_channels: usize,
         out_channels: usize,
@@ -288,7 +289,7 @@ pub fn Conv2DLayer(comptime T: type) type {
         input: ?NDTensor(T), // backward ctx, TBD if we should go back to this for static graph support later
 
         pub fn init(
-            allocator: std.mem.Allocator,
+            device: DeviceReference,
             in_channels: usize,
             out_channels: usize,
             kernel_size: usize,
@@ -301,19 +302,19 @@ pub fn Conv2DLayer(comptime T: type) type {
             var weights = (try NDTensor(T).empty(
                 &weights_shape,
                 true,
-                allocator,
+                device,
             )).setLabel("conv2d_weights");
-            var bias = (try NDTensor(T).empty(&bias_shape, true, allocator)).setLabel("conv2d_bias");
+            var bias = (try NDTensor(T).empty(&bias_shape, true, device)).setLabel("conv2d_bias");
             weights.acquire();
             bias.acquire();
             winit.heInit(T, weights);
             bias.fill(0.0);
-            const self = try allocator.create(Self);
+            const self = try device.allocator.create(Self);
 
             self.* = .{
                 .weights = weights,
                 .bias = bias,
-                .allocator = allocator,
+                .device = device,
                 .parameters = [_]*NDTensor(T){ weights, bias },
                 .in_channels = in_channels,
                 .out_channels = out_channels,
@@ -326,20 +327,20 @@ pub fn Conv2DLayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: *Self, input: *NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
             const batch_size = try input.data.shape.get(0);
             const in_height = try input.data.shape.get(2);
             const in_width = try input.data.shape.get(3);
             const out_height = (in_height + 2 * self.padding - self.dilation * (self.kernel_size - 1) - 1) / self.stride + 1;
             const out_width = (in_width + 2 * self.padding - self.dilation * (self.kernel_size - 1) - 1) / self.stride + 1;
 
-            const col: *NDArray(T) = try conv_utils.im2col(T, input.data.*, self.kernel_size, self.stride, self.padding, self.dilation, fwd_allocator);
-            defer col.deinit(fwd_allocator);
+            const col: *NDArray(T) = try conv_utils.im2col(T, input.data.*, self.kernel_size, self.stride, self.padding, self.dilation, fwd_device);
+            defer col.deinit(fwd_device);
 
             try self.weights.data._reshape(&[_]usize{ self.out_channels, self.in_channels * self.kernel_size * self.kernel_size });
 
             // broadcasted mm for batching
-            var output = try self.weights.data.bmm(col, false, false, fwd_allocator);
+            var output = try self.weights.data.bmm(col, false, false, fwd_device);
 
             // reshape to 4D
             try output._reshape(&[_]usize{ batch_size, self.out_channels, out_height, out_width });
@@ -366,13 +367,13 @@ pub fn Conv2DLayer(comptime T: type) type {
                 .children = &[_]*const NDTensor(T){input},
                 .label = "conv2d_out",
                 .requires_grad = true,
-                .allocator = fwd_allocator,
+                .allocator = fwd_device,
                 ._backward = backward,
                 ._backward_ctx = self,
             });
         }
 
-        pub fn backward(tensor: NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
+        pub fn backward(tensor: NDTensor(T), device: DeviceReference) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             std.debug.assert(tensor.children.?.len == 1);
             const input = tensor.children.?[0];
@@ -382,19 +383,19 @@ pub fn Conv2DLayer(comptime T: type) type {
             const out_width = try tensor.data.shape.get(3);
 
             // copy for reshaping
-            var grad_output_copy = try tensor.grad.?.copy(allocator);
-            defer grad_output_copy.deinit(allocator);
+            var grad_output_copy = try tensor.grad.?.copy(device);
+            defer grad_output_copy.deinit(device);
             try grad_output_copy._reshape(&[_]usize{ batch_size * out_channels, out_height * out_width });
 
             // w.r.t. weights
-            const col = try conv_utils.im2col(T, input.data.*, self.kernel_size, self.stride, self.padding, self.dilation, allocator);
-            defer col.deinit(allocator);
+            const col = try conv_utils.im2col(T, input.data.*, self.kernel_size, self.stride, self.padding, self.dilation, device);
+            defer col.deinit(device);
 
             try grad_output_copy._reshape(&[_]usize{ out_channels, batch_size * out_height * out_width });
             try col._reshape(&[_]usize{ batch_size * out_height * out_width, self.in_channels * self.kernel_size * self.kernel_size });
 
-            const grad_weights = try grad_output_copy.bmm(col, false, false, allocator);
-            defer grad_weights.deinit(allocator);
+            const grad_weights = try grad_output_copy.bmm(col, false, false, device);
+            defer grad_weights.deinit(device);
 
             // grad_weights should be (out_channels, in_channels * kernel_size * kernel_size)
             try grad_weights._reshape(&[_]usize{
@@ -406,17 +407,17 @@ pub fn Conv2DLayer(comptime T: type) type {
             _ = try self.weights.grad.?._add(grad_weights);
 
             // w.r.t. bias
-            const bias_grad = try tensor.grad.?.sum(allocator);
-            defer bias_grad.deinit(allocator);
+            const bias_grad = try tensor.grad.?.sum(device);
+            defer bias_grad.deinit(device);
             _ = try self.bias.grad.?._add(bias_grad);
 
             // w.r.t. input
-            var weights_copy = try self.weights.data.copy(allocator);
-            defer weights_copy.deinit(allocator);
+            var weights_copy = try self.weights.data.copy(device);
+            defer weights_copy.deinit(device);
             try weights_copy._reshape(&[_]usize{ out_channels, self.in_channels * self.kernel_size * self.kernel_size });
 
-            const grad_col = try weights_copy.bmm(grad_output_copy, true, false, allocator);
-            defer grad_col.deinit(allocator);
+            const grad_col = try weights_copy.bmm(grad_output_copy, true, false, device);
+            defer grad_col.deinit(device);
 
             const grad_input = try conv_utils.col2im(
                 T,
@@ -426,9 +427,9 @@ pub fn Conv2DLayer(comptime T: type) type {
                 self.stride,
                 self.padding,
                 self.dilation,
-                allocator,
+                device,
             );
-            defer grad_input.deinit(allocator);
+            defer grad_input.deinit(device);
 
             if (input.grad) |input_grad| {
                 _ = try input_grad._add(grad_input);
@@ -442,8 +443,8 @@ pub fn Conv2DLayer(comptime T: type) type {
         }
 
         pub fn zeroGrad(self: *Self) void {
-            self.weights.grad.?.fill(0);
-            self.bias.grad.?.fill(0);
+            self.weights.grad.?.fill(0, self.device);
+            self.bias.grad.?.fill(0, self.device);
         }
 
         pub fn deinit(self: *Self) void {
@@ -452,7 +453,7 @@ pub fn Conv2DLayer(comptime T: type) type {
             self.bias.deinit();
             // self.input should not be freed be us unless we choose to copy for backward later
             // if (self.input) |input| input.deinit(allocator);
-            self.allocator.destroy(self);
+            self.device.allocator.destroy(self);
         }
 
         pub fn release(self: *Self) void {
@@ -471,18 +472,18 @@ pub fn Conv2DLayer(comptime T: type) type {
 pub fn ReLULayer(comptime T: type) type {
     return struct {
         const Self = @This();
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
 
-        pub fn init(allocator: std.mem.Allocator) !*Self {
-            const self = try allocator.create(Self);
+        pub fn init(device: DeviceReference) !*Self {
+            const self = try device.allocator.create(Self);
             self.* = Self{
-                .allocator = allocator,
+                .device = device,
             };
             return self;
         }
 
-        pub fn forward(_: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-            const output = try input.data.copy(allocator);
+        pub fn forward(_: *Self, input: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+            const output = try input.data.copy(device);
             for (output.data) |*e| {
                 e.* = if (e.* > 0) e.* else 0;
             }
@@ -492,12 +493,12 @@ pub fn ReLULayer(comptime T: type) type {
                 .children = &.{ input },
                 .label = "relu_out",
                 .requires_grad = input.requiresGrad(),
-                .allocator = allocator,
+                .device = device,
                 ._backward = backward,
             });
         }
 
-        fn backward(tensor: NDTensor(T), _: std.mem.Allocator) !void {
+        fn backward(tensor: NDTensor(T), _: DeviceReference) !void {
             std.debug.assert(tensor.children.?.len == 1);
             const children = tensor.children orelse return error.NoChildren;
             const grad_t = tensor.grad orelse return error.NoGradient;
@@ -514,7 +515,7 @@ pub fn ReLULayer(comptime T: type) type {
         pub fn zeroGrad(_: *Self) void {}
 
         pub fn deinit(self: *Self) void {
-            self.allocator.destroy(self);
+            self.device.allocator.destroy(self);
         }
 
         pub fn release(_: *Self) void {}
@@ -528,15 +529,15 @@ pub fn ReLULayer(comptime T: type) type {
 pub fn FlattenLayer(comptime T: type) type {
     return struct {
         const Self = @This();
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
 
-        pub fn init(allocator: std.mem.Allocator) !*Self {
-            const self = try allocator.create(Self);
-            self.* = .{ .allocator = allocator };
+        pub fn init(device: DeviceReference) !*Self {
+            const self = try device.allocator.create(Self);
+            self.* = .{ .device = device };
             return self;
         }
 
-        pub fn forward(_: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(_: *Self, input: *NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
             const batch_dim = input.data.shape.shape[0];
             const other_dims = input.data.shape.shape[1..];
             const flattened_dim = prod(other_dims);
@@ -548,7 +549,7 @@ pub fn FlattenLayer(comptime T: type) type {
                 .children = &.{ input },
                 .label = "flattened",
                 .requires_grad = input.requires_grad,
-                .allocator = fwd_allocator,
+                .device = fwd_device,
                 ._backward = backward,
             });
 
@@ -559,7 +560,7 @@ pub fn FlattenLayer(comptime T: type) type {
             return result;
         }
 
-        fn backward(tensor: NDTensor(T), _: std.mem.Allocator) !void {
+        fn backward(tensor: NDTensor(T), _: DeviceReference) !void {
             var input = tensor.children.?[0];
             try input.grad.?._reshape(input.data.shape.shape);
             @memcpy(input.grad.?.data, tensor.grad.?.data);
@@ -572,7 +573,7 @@ pub fn FlattenLayer(comptime T: type) type {
         pub fn zeroGrad(_: *Self) void {}
 
         pub fn deinit(self: *Self) void {
-            self.allocator.destroy(self);
+            self.device.allocator.destroy(self);
         }
 
         pub fn release(_: *Self) void {}
@@ -591,20 +592,20 @@ pub fn MaxPool2DLayer(comptime T: type) type {
         kernel_size: usize,
         stride: usize,
         padding: usize,
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
 
-        pub fn init(allocator: std.mem.Allocator, kernel_size: usize, stride: usize, padding: usize) !*Self {
-            const self = try allocator.create(Self);
+        pub fn init(device: DeviceReference, kernel_size: usize, stride: usize, padding: usize) !*Self {
+            const self = try device.allocator.create(Self);
             self.* = .{
                 .kernel_size = kernel_size,
                 .stride = stride,
                 .padding = padding,
-                .allocator = allocator,
+                .device = device,
             };
             return self;
         }
 
-        pub fn forward(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: *Self, input: *NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
             const batch_size = try input.data.shape.get(0);
             const channels = try input.data.shape.get(1);
             const in_height = try input.data.shape.get(2);
@@ -613,8 +614,8 @@ pub fn MaxPool2DLayer(comptime T: type) type {
             const out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1;
             const out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1;
 
-            var output = try NDArray(T).empty(&[_]usize{ batch_size, channels, out_height, out_width }, fwd_allocator);
-            var indices = try NDArray(usize).empty(&[_]usize{ batch_size, channels, out_height, out_width }, fwd_allocator);
+            var output = try NDArray(T).empty(&[_]usize{ batch_size, channels, out_height, out_width }, fwd_device);
+            var indices = try NDArray(usize).empty(&[_]usize{ batch_size, channels, out_height, out_width }, fwd_device);
 
             for (0..batch_size) |b| {
                 for (0..channels) |c| {
@@ -661,13 +662,13 @@ pub fn MaxPool2DLayer(comptime T: type) type {
                 .children = &.{ input },
                 .label = "maxpool2d_out",
                 .requires_grad = true,
-                .allocator = fwd_allocator,
+                .allocator = fwd_device,
                 ._backward = backward,
                 ._backward_ctx = indices,
             });
         }
 
-        pub fn backward(tensor: NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
+        pub fn backward(tensor: NDTensor(T), device: DeviceReference) anyerror!void {
             const indices = @as(*NDArray(usize), @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext)));
             std.debug.assert(tensor.children.?.len == 1);
             var input = tensor.children.?[0];
@@ -677,7 +678,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
                 input.grad.?.data[index] += tensor.grad.?.data[i];
             }
 
-            indices.deinit(allocator);
+            indices.deinit(device);
         }
 
         pub fn getParameters(_: *Self) ?[]*NDTensor(T) {
@@ -687,7 +688,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
         pub fn zeroGrad(_: *Self) void {}
 
         pub fn deinit(self: *Self) void {
-            self.allocator.destroy(self);
+            self.device.allocator.destroy(self);
         }
 
         pub fn release(_: *Self) void {}
@@ -816,13 +817,13 @@ test "trainGradAccum" {
 }
 
 /// For this implementation the dataset must be evenly divisible by the batch size as a simplification
-fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
+fn trainBatched(comptime T: type, data: [][]T, device: DeviceReference) !void {
     // using an arena is more efficient, less freeing here.
-    const X = try alloc.alloc([]T, data.len);
-    const y = try alloc.alloc(T, data.len);
+    const X = try device.alocator.alloc([]T, data.len);
+    const y = try device.memAlloc(T, data.len);
     const n_features = 2;
     for (0..data.len) |i| {
-        X[i] = try alloc.alloc(T, n_features);
+        X[i] = try device.memAlloc(T, n_features);
         for (0..n_features) |j| {
             X[i][j] = data[i][j];
         }
@@ -834,20 +835,20 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     const input_size = 2;
     const output_size = 1;
 
-    const layer = try LinearLayer(T).init(alloc, input_size, 1);
+    const layer = try LinearLayer(T).init(device, input_size, 1);
     defer layer.deinit();
     const params = layer.getParameters();
-    defer alloc.free(params.?);
+    defer device.allocator.free(params.?);
 
     // this is a trick to avoid reallocating
-    const input = try Tensor.empty(&.{ batch_size, input_size }, true, alloc);
+    const input = try Tensor.empty(&.{ batch_size, input_size }, true, device);
     input.setLabel("input").fill(0);
-    const target = try Tensor.empty(&.{ batch_size, output_size }, true, alloc);
+    const target = try Tensor.empty(&.{ batch_size, output_size }, true, device);
     target.setLabel("input").fill(0);
     input.acquire();
     target.acquire();
 
-    var gm = GraphManager(NDTensor(T)).init(alloc, .{ .eager_teardown = true });
+    var gm = GraphManager(NDTensor(T)).init(device, .{ .eager_teardown = true });
     defer gm.deinit();
     var optimizer = SGD(T){ .lr = 0.01, .grad_clip_enabled = true };
 
@@ -868,13 +869,13 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
             }
             for (0..batch_y.len) |i| try target.set(&[_]usize{ i, 0 }, batch_y[i]);
 
-            const output = try layer.forward(input, alloc);
-            const loss = try simple_mse_loss(f32, output, target, alloc);
+            const output = try layer.forward(input, device);
+            const loss = try simple_mse_loss(f32, output, target, device);
             epoch_loss += loss.data.data[0];
 
             loss.grad.?.fill(1.0);
             layer.zeroGrad();
-            try gm.backward(loss, alloc);
+            try gm.backward(loss, device);
             optimizer.step(params.?);
         }
     }
@@ -886,35 +887,41 @@ fn trainBatched(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
 
 test "trainBatched" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    const alloc = arena.allocator();
     defer arena.deinit();
+
+    var cpu = zg.device.HostDevice.init(arena.allocator());
+    defer cpu.deinit();
+
     const T = f32;
 
-    const data = readCsv(T, "/tmp/data.csv", alloc) catch |e| {
+    const data = readCsv(T, "/tmp/data.csv", cpu.reference()) catch |e| {
         std.log.warn("{s} error opening test file. Skipping `trainBatched` test.", .{@errorName(e)});
         return;
     };
-    try trainBatched(T, data, alloc);
+    try trainBatched(T, data, cpu);
 }
 
 test "LinearLayer forward and backward" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
+
+    var cpu = zg.device.HostDevice.init(arena.allocator());
+    defer cpu.deinit();
+    
     const T = f32;
     zg.rt_grad_enabled = true;
     // input 2, output 2
-    var layer = try LinearLayer(T).init(alloc, 2, 1);
+    var layer = try LinearLayer(T).init(cpu.reference(), 2, 1);
     layer.weights.fill(2);
 
     const input_shape = &[_]usize{ 1, 2 };
-    const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, alloc);
-    const output = try layer.forward(input, alloc);
+    const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, cpu.reference());
+    const output = try layer.forward(input, cpu.reference());
     output.grad.?.fill(1.0);
 
-    var gm = GraphManager(NDTensor(T)).init(alloc, .{});
+    var gm = GraphManager(NDTensor(T)).init(cpu.reference(), .{});
     defer gm.deinit();
-    try gm.backward(output, alloc);
+    try gm.backward(output, cpu.reference());
 
     try std.testing.expectEqual(12, output.get(&.{ 0, 0 }));
 }

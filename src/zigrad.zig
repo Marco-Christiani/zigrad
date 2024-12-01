@@ -23,6 +23,10 @@ pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
 
+pub const device = @import("device").device;
+pub const DeviceReference = device.DeviceReference;
+pub const backend = device.backend;
+
 /// lib-wide default options that can be overridden by the root file.
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
 /// E.g. in your main file `const zigrad_settings = .{ .gradEnabled = true };`

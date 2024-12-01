@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
+const DeviceReference = zg.DeviceReference;
 
 const Model = zg.Model;
 const MaxPool2DLayer = zg.layer.MaxPool2DLayer;
@@ -17,25 +18,25 @@ const T = f32;
 const MnistModel = struct {
     const Self = @This();
     model: Model(T),
-    allocator: std.mem.Allocator,
+    device: DeviceReference,
 
-    pub fn initConv(allocator: std.mem.Allocator) !Self {
-        var conv1 = try Conv2DLayer(T).init(allocator, 1, 6, 5, 1, 0, 1);
-        var pool1 = try MaxPool2DLayer(T).init(allocator, 2, 2, 0);
-        var relu1 = try ReLULayer(T).init(allocator);
-        var conv2 = try Conv2DLayer(T).init(allocator, 6, 16, 5, 1, 0, 1);
-        var pool2 = try MaxPool2DLayer(T).init(allocator, 2, 2, 0);
-        var relu2 = try ReLULayer(T).init(allocator);
-        var flatten = try FlattenLayer(T).init(allocator);
-        var fc1 = try LinearLayer(T).init(allocator, 256, 120);
-        var relu3 = try ReLULayer(T).init(allocator);
-        var fc2 = try LinearLayer(T).init(allocator, 120, 84);
-        var relu4 = try ReLULayer(T).init(allocator);
-        var fc3 = try LinearLayer(T).init(allocator, 84, 10);
+    pub fn initConv(device: DeviceReference) !Self {
+        var conv1 = try Conv2DLayer(T).init(device, 1, 6, 5, 1, 0, 1);
+        var pool1 = try MaxPool2DLayer(T).init(device, 2, 2, 0);
+        var relu1 = try ReLULayer(T).init(device);
+        var conv2 = try Conv2DLayer(T).init(device, 6, 16, 5, 1, 0, 1);
+        var pool2 = try MaxPool2DLayer(T).init(device, 2, 2, 0);
+        var relu2 = try ReLULayer(T).init(device);
+        var flatten = try FlattenLayer(T).init(device);
+        var fc1 = try LinearLayer(T).init(device, 256, 120);
+        var relu3 = try ReLULayer(T).init(device);
+        var fc2 = try LinearLayer(T).init(device, 120, 84);
+        var relu4 = try ReLULayer(T).init(device);
+        var fc3 = try LinearLayer(T).init(device, 84, 10);
 
         var self = Self{
-            .allocator = allocator,
-            .model = try Model(T).init(allocator),
+            .device = device,
+            .model = try Model(T).init(device),
         };
         try self.model.addLayer(conv1.asLayer());
         try self.model.addLayer(pool1.asLayer());
@@ -52,18 +53,18 @@ const MnistModel = struct {
         return self;
     }
 
-    pub fn initSimple(allocator: std.mem.Allocator) !Self {
+    pub fn initSimple(device: DeviceReference) !Self {
         var self = Self{
-            .allocator = allocator,
-            .model = try Model(T).init(allocator),
+            .device = device,
+            .model = try Model(T).init(device),
         };
 
-        var reshape = try FlattenLayer(T).init(allocator);
-        var fc1 = try LinearLayer(T).init(allocator, 28 * 28, 128);
-        var relu1 = try ReLULayer(T).init(allocator);
-        var fc2 = try LinearLayer(T).init(allocator, 128, 64);
-        var relu2 = try ReLULayer(T).init(allocator);
-        var fc3 = try LinearLayer(T).init(allocator, 64, 10);
+        var reshape = try FlattenLayer(T).init(device);
+        var fc1 = try LinearLayer(T).init(device, 28 * 28, 128);
+        var relu1 = try ReLULayer(T).init(device);
+        var fc2 = try LinearLayer(T).init(device, 128, 64);
+        var relu2 = try ReLULayer(T).init(device);
+        var fc3 = try LinearLayer(T).init(device, 64, 10);
 
         try self.model.addLayer(reshape.asLayer());
 
@@ -77,18 +78,18 @@ const MnistModel = struct {
         return self;
     }
 
-    pub fn initSimple2(allocator: std.mem.Allocator) !Self {
+    pub fn initSimple2(device: DeviceReference) !Self {
         var self = Self{
-            .allocator = allocator,
-            .model = try Model(T).init(allocator),
+            .device = device,
+            .model = try Model(T).init(device),
         };
 
-        var reshape = try FlattenLayer(T).init(allocator);
-        var fc1 = try LinearLayer(T).init(allocator, 28 * 28, 28 * 28);
-        var relu1 = try ReLULayer(T).init(allocator);
-        var fc2 = try LinearLayer(T).init(allocator, 28 * 28, 128);
-        var relu2 = try ReLULayer(T).init(allocator);
-        var fc3 = try LinearLayer(T).init(allocator, 128, 10);
+        var reshape = try FlattenLayer(T).init(device);
+        var fc1 = try LinearLayer(T).init(device, 28 * 28, 28 * 28);
+        var relu1 = try ReLULayer(T).init(device);
+        var fc2 = try LinearLayer(T).init(device, 28 * 28, 128);
+        var relu2 = try ReLULayer(T).init(device);
+        var fc3 = try LinearLayer(T).init(device, 128, 10);
 
         try self.model.addLayer(reshape.asLayer());
 
@@ -102,22 +103,22 @@ const MnistModel = struct {
         return self;
     }
 
-    pub fn initConv2(allocator: std.mem.Allocator) !Self {
+    pub fn initConv2(device: DeviceReference) !Self {
         var self = Self{
-            .allocator = allocator,
-            .model = try Model(T).init(allocator),
+            .device = device,
+            .model = try Model(T).init(device),
         };
 
-        var conv1 = try Conv2DLayer(T).init(allocator, 1, 3, 5, 1, 0, 1);
-        var relu1 = try ReLULayer(T).init(allocator);
-        var conv2 = try Conv2DLayer(T).init(allocator, 3, 3, 5, 1, 0, 1);
-        var relu2 = try ReLULayer(T).init(allocator);
+        var conv1 = try Conv2DLayer(T).init(device, 1, 3, 5, 1, 0, 1);
+        var relu1 = try ReLULayer(T).init(device);
+        var conv2 = try Conv2DLayer(T).init(device, 3, 3, 5, 1, 0, 1);
+        var relu2 = try ReLULayer(T).init(device);
 
-        var reshape = try FlattenLayer(T).init(allocator);
-        var fc1 = try LinearLayer(T).init(allocator, 3 * 20 * 20, 128);
-        var relu3 = try ReLULayer(T).init(allocator);
-        var fc2 = try LinearLayer(T).init(allocator, 128, 10);
-        var relu4 = try ReLULayer(T).init(allocator);
+        var reshape = try FlattenLayer(T).init(device);
+        var fc1 = try LinearLayer(T).init(device, 3 * 20 * 20, 128);
+        var relu3 = try ReLULayer(T).init(device);
+        var fc2 = try LinearLayer(T).init(device, 128, 10);
+        var relu4 = try ReLULayer(T).init(device);
 
         try self.model.addLayer(conv1.asLayer());
         try self.model.addLayer(relu1.asLayer());
@@ -151,7 +152,7 @@ const MnistModel = struct {
     pub fn countParams(self: Self) usize {
         var total: usize = 0;
         const params = self.model.getParameters();
-        defer self.model.allocator.free(params);
+        defer self.model.device.allocator.free(params);
         for (params) |p| {
             total += p.grad.?.size();
         }
@@ -159,27 +160,30 @@ const MnistModel = struct {
     }
 };
 
+
 const MnistDataset = struct {
     images: []*NDTensor(T),
     labels: []*NDTensor(T),
-    allocator: std.mem.Allocator,
+    device: DeviceReference,
 
-    pub fn load(allocator: std.mem.Allocator, csv_path: []const u8, batch_size: usize) !@This() {
+    pub fn load(device: DeviceReference, csv_path: []const u8, batch_size: usize) !@This() {
+        // This example is entirely on the CPU so I'm keeping the
+        // allocator directly for all of the data allocations.
         const file = try std.fs.cwd().openFile(csv_path, .{});
         defer file.close();
 
         const file_size = try file.getEndPos();
-        const file_contents = try file.readToEndAlloc(allocator, file_size);
-        defer allocator.free(file_contents);
+        const file_contents = try file.readToEndAlloc(device.allocator, file_size);
+        defer device.allocator.free(file_contents);
 
-        var images = std.ArrayList(*NDTensor(T)).init(allocator);
-        var labels = std.ArrayList(*NDTensor(T)).init(allocator);
+        var images = std.ArrayList(*NDTensor(T)).init(device.allocator);
+        var labels = std.ArrayList(*NDTensor(T)).init(device.allocator);
 
         var lines = std.mem.split(u8, file_contents, "\n");
-        var batch_images = try allocator.alloc(T, batch_size * 784);
-        defer allocator.free(batch_images);
-        var batch_labels = try allocator.alloc(T, batch_size * 10);
-        defer allocator.free(batch_labels);
+        var batch_images = try device.allocator.alloc(T, batch_size * 784);
+        defer device.allocator.free(batch_images);
+        var batch_labels = try device.allocator.alloc(T, batch_size * 10);
+        defer device.allocator.free(batch_labels);
         var batch_count: usize = 0;
 
         while (lines.next()) |line| {
@@ -198,8 +202,8 @@ const MnistDataset = struct {
             batch_count += 1;
 
             if (batch_count == batch_size or lines.peek() == null) {
-                const image_tensor = try NDTensor(T).init(batch_images, &[_]usize{ batch_size, 1, 28, 28 }, true, allocator);
-                const label_tensor = try NDTensor(T).init(batch_labels, &[_]usize{ batch_size, 10 }, true, allocator);
+                const image_tensor = try NDTensor(T).init(batch_images, &[_]usize{ batch_size, 1, 28, 28 }, true, device);
+                const label_tensor = try NDTensor(T).init(batch_labels, &[_]usize{ batch_size, 10 }, true, device);
                 try images.append(image_tensor);
                 try labels.append(label_tensor);
                 batch_count = 0;
@@ -207,37 +211,53 @@ const MnistDataset = struct {
         }
 
         if (batch_count > 0) { // remainder
-            const image_tensor = try NDTensor(T).init(batch_images[0 .. batch_count * 784], &[_]usize{ batch_count, 1, 28, 28 }, true, allocator);
-            const label_tensor = try NDTensor(T).init(batch_labels[0 .. batch_count * 10], &[_]usize{ batch_count, 10 }, true, allocator);
+            const image_tensor = try NDTensor(T).init(batch_images[0 .. batch_count * 784], &[_]usize{ batch_count, 1, 28, 28 }, true, device);
+            const label_tensor = try NDTensor(T).init(batch_labels[0 .. batch_count * 10], &[_]usize{ batch_count, 10 }, true, device);
             try images.append(image_tensor);
             try labels.append(label_tensor);
         }
 
-        return .{ .images = try images.toOwnedSlice(), .labels = try labels.toOwnedSlice(), .allocator = allocator };
+        return .{ .images = try images.toOwnedSlice(), .labels = try labels.toOwnedSlice(), .device = device };
     }
 
     fn deinit(self: @This()) void {
         for (self.images) |image| image.deinit();
         for (self.labels) |label| label.deinit();
-        self.allocator.free(self.images);
-        self.allocator.free(self.labels);
+        self.device.allocator.free(self.images);
+        self.device.allocator.free(self.labels);
     }
 };
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
+    // TODO: When we get caching finalized for the HostDevice
+    // and ensure freeing on the backward pass, we can 
+    // move these to a single HostDevice. Right now, multiple
+    // device instances are created as a hack to for support.
     var model_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer model_arena.deinit();
 
-    var dataset_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-    defer dataset_arena.deinit();
+    var model_cpu = zg.device.HostDevice.init(model_arena.allocator());
+    defer model_cpu.deinit();
 
     var fw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer fw_arena.deinit();
 
+    var fwd_cpu = zg.device.HostDevice.init(model_arena.allocator());
+    defer fwd_cpu.deinit();
+
+    var dataset_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
+    defer dataset_arena.deinit();
+
+    var dataset_cpu = zg.device.HostDevice.init(dataset_arena.allocator());
+    defer dataset_cpu.deinit();
+
     // bw_arena is torn down before eval
     var bw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
 
-    var model = try MnistModel.initSimple(model_arena.allocator()); // 109_386
+    var bw_cpu = zg.device.HostDevice.init(model_arena.allocator());
+    defer bw_cpu.deinit();
+
+    var model = try MnistModel.initSimple(model_cpu.reference()); // 109_386
     // var model = try MnistModel.initSimple2(model_arena.allocator()); // 717_210
     // var model = try MnistModel.initConv(model_arena.allocator()); // 44_426
     // var model = try MnistModel.initConv2(model_arena.allocator()); // 155_324
@@ -245,7 +265,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
 
     log.info("Loading train data...", .{});
     const batch_size = 64;
-    const train_dataset = try MnistDataset.load(dataset_arena.allocator(), train_path, batch_size);
+    const train_dataset = try MnistDataset.load(dataset_cpu.reference(), train_path, batch_size);
     const n = train_dataset.images.len;
 
     var trainer = Trainer(T, .ce).init(
@@ -276,8 +296,8 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
             const loss = try trainer.trainStep(
                 image.setLabel("image_batch"),
                 label.setLabel("label_batch"),
-                fw_arena.allocator(),
-                bw_arena.allocator(),
+                fwd_cpu.reference(),
+                bw_cpu.reference(),
             );
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
@@ -309,17 +329,17 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("Training complete ({d} epochs). [{d}ms]", .{ num_epochs, train_time_ms });
 
     // model.model.eval() // TODO: model.eval()
-    const train_eval = try evalMnist(&fw_arena, model, train_dataset);
+    const train_eval = try evalMnist(fwd_cpu.reference(), &fw_arena, model, train_dataset);
     const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
     train_dataset.deinit();
 
     log.info("Loading test data...", .{});
-    const test_dataset = try MnistDataset.load(dataset_arena.allocator(), test_path, batch_size);
+    const test_dataset = try MnistDataset.load(dataset_cpu.reference(), test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
-    const test_eval = try evalMnist(&fw_arena, model, test_dataset);
+    const test_eval = try evalMnist(fwd_cpu.reference(), &fw_arena, model, test_dataset);
     const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
     log.info("Test acc: {d:.2} (n={d}) [{d}ms]", .{ test_acc * 100, test_eval.n, eval_test_time_ms });
@@ -328,7 +348,12 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("Eval test: {d}ms", .{eval_test_time_ms});
 }
 
-fn evalMnist(arena: *std.heap.ArenaAllocator, model: MnistModel, dataset: MnistDataset) !struct { correct: f32, n: u32 } {
+fn evalMnist(
+    device: DeviceReference,
+    arena: *std.heap.ArenaAllocator,
+    model: MnistModel, 
+    dataset: MnistDataset,
+) !struct { correct: f32, n: u32 } {
     zg.rt_grad_enabled = false;
     // model.model.eval() // TODO: model.eval()
     var n: u32 = 0;
@@ -336,7 +361,7 @@ fn evalMnist(arena: *std.heap.ArenaAllocator, model: MnistModel, dataset: MnistD
     var timer = try std.time.Timer.start();
     for (dataset.images, dataset.labels) |image, label| {
         timer.reset();
-        const output = try model.model.forward(image, arena.allocator());
+        const output = try model.model.forward(image, device);
         const batch_n = try output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;
