@@ -26,8 +26,7 @@ const c = switch (builtin.target.os.tag) {
 };
 
 pub const Blas = struct {
-//    /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
-
+    /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
     pub fn dot(
         _: Blas,
         T: type,
@@ -40,7 +39,7 @@ pub const Blas = struct {
             else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
         }
     }
-    
+
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
     /// a * (M, N) x (N,) + b * (N,) = (M,)
     /// Y = aAX + bY
@@ -53,7 +52,7 @@ pub const Blas = struct {
         M: usize,
         N: usize,
         trans_a: bool,
-        alpha: T, 
+        alpha: T,
         beta: T,
     ) void {
         const lda = N;
@@ -65,11 +64,12 @@ pub const Blas = struct {
         }
     }
 
-    ///  Assumes row-major.
-    ///  (M, K) x (K, N) = (M, N)
+    /// Assumes row-major.
+    /// (M, K) x (K, N) = (M, N)
     /// C := alpha*op(A)*op(B) + beta*C
     pub fn matmul(
-        _: Blas, T: type,
+        _: Blas,
+        T: type,
         A: []const T,
         B: []const T,
         C: []T,
@@ -92,7 +92,7 @@ pub const Blas = struct {
             else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
         }
     }
-    
+
     /// Outer product: A = alpha(xy') + A
     /// A: (M, N)
     pub fn outer(
@@ -109,7 +109,7 @@ pub const Blas = struct {
             else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
         }
     }
-    
+
     /// Outer product: A = alpha(xy') + A
     /// A: (M, N)
     pub fn nrm2(
@@ -123,7 +123,7 @@ pub const Blas = struct {
             else => @compileError("Unsupported type" ++ @typeName(T)),
         };
     }
-    
+
     pub fn max(
         _: Blas,
         T: type,
@@ -135,7 +135,7 @@ pub const Blas = struct {
             else => @compileError("Unsupported type for BLAS max"),
         }
     }
-    
+
     pub fn sum(
         _: Blas,
         T: type,
@@ -147,12 +147,12 @@ pub const Blas = struct {
             else => @compileError("Unsupported type for BLAS sum"),
         }
     }
-    
+
     pub fn scale(
         _: Blas,
         T: type,
         x: []T,
-        alpha: T, 
+        alpha: T,
     ) void {
         switch (T) {
             f32 => c.cblas_sscal(@intCast(x.len), alpha, x.ptr, 1),
@@ -160,7 +160,7 @@ pub const Blas = struct {
             else => @compileError("Unsupported type for BLAS scale"),
         }
     }
-    
+
     pub fn axpy(
         _: Blas,
         comptime T: type,
@@ -176,9 +176,8 @@ pub const Blas = struct {
         }
     }
 };
-        
-pub const HostDevice = struct {
 
+pub const HostDevice = struct {
     const Error = std.mem.Allocator.Error;
 
     blas: Blas,
@@ -196,7 +195,7 @@ pub const HostDevice = struct {
     pub fn memAlloc(self: HostDevice, comptime T: type, n: usize) Error![]T {
         return self.allocator.alloc(T, n);
     }
-    
+
     pub fn memFree(self: HostDevice, slice: anytype) void {
         return self.allocator.free(slice);
     }
@@ -204,11 +203,11 @@ pub const HostDevice = struct {
     pub fn memDupe(self: HostDevice, comptime T: type, src: []const T) Error![]T {
         return self.allocator.dupe(T, src);
     }
-    
+
     pub fn memFill(_: HostDevice, comptime T: type, slice: []T, value: T) void {
         @memset(slice, value);
     }
-    
+
     // remove data dependencies on this to speed it up
     pub fn memSequence(_: HostDevice, comptime T: type, slice: []T, initial: T, step: T) void {
         var current = initial; // move from register memory
@@ -227,7 +226,5 @@ pub const HostDevice = struct {
     pub const reference = switch (backend) {
         .HOST => host_reference,
         .CUDA => @import("cuda_device.zig").host_reference,
-    };            
+    };
 };
-
-

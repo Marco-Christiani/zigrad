@@ -18,57 +18,56 @@ fn dtype(comptime T: type) cuda.dtype {
     return switch (T) {
         f16 => @compileError("f16 not current supported."),
         f32 => cuda.SINGLE,
-        f64 => cuda.DOUBLE,  
+        f64 => cuda.DOUBLE,
         else => @compileError("Only floating points supported"),
     };
 }
 
 pub const Blas = struct {
-
     /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
     pub fn dot(
         self: *const Blas,
-        T: type, 
+        T: type,
         x: []const T,
         y: []const T,
     ) T {
-        var result: T = 0.0;   
+        var result: T = 0.0;
         cuda.dot(dtype(T), self.stream(), x.ptr, y.ptr, &result, x.len);
         return result;
     }
-    
+
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
     /// a * (M, N) x (N,) + b * (N,) = (M,)
     /// Y = aAX + bY
     pub fn matvec(
-        self: *const Blas, 
-        T: type, 
-        A: []const T, 
-        x: []const T, 
-        y: []T, 
-        M: usize, 
+        self: *const Blas,
+        T: type,
+        A: []const T,
+        x: []const T,
+        y: []T,
+        M: usize,
         N: usize,
         trans_a: bool,
         alpha: T,
-        beta: T, 
+        beta: T,
     ) void {
         cuda.gemv(dtype(T), self.cublas(), A.len, x.ptr, y.ptr, M, N, trans_a, alpha, beta);
     }
-    
+
     ///  Assumes row-major.
     ///  (M, K) x (K, N) = (M, N)
     /// C := alpha*op(A)*op(B) + beta*C
     pub fn matmul(
         self: *const Blas,
-        T: type, 
+        T: type,
         A: []const T,
         B: []const T,
-        C: []T, 
+        C: []T,
         M: usize,
         N: usize,
         K: usize,
         trans_a: bool,
-        trans_b: bool, 
+        trans_b: bool,
         lda: usize,
         ldb: usize,
         ldc: usize,
@@ -77,7 +76,7 @@ pub const Blas = struct {
     ) void {
         cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
     }
-    
+
     /// Outer product: A = alpha(xy') + A
     /// A: (M, N)
     pub fn outer(
@@ -90,15 +89,15 @@ pub const Blas = struct {
     ) void {
         cuda.ger(dtype(T), self.cublas(), x.ptr, y.ptr, A.ptr, x.len, y.len, y.len, alpha);
     }
-    
+
     pub fn nrm2(
         self: *const Blas,
-        T: type, 
-        x: []T, 
+        T: type,
+        x: []T,
     ) T {
         return std.math.sqrt(self.dot(T, x, x));
     }
-    
+
     pub fn max(
         self: *const Blas,
         T: type,
@@ -108,7 +107,7 @@ pub const Blas = struct {
         cuda.reduce_max(dtype(T), self.stream(), x.ptr, &result, x.len);
         return result;
     }
-    
+
     pub fn sum(
         self: *const Blas,
         T: type,
@@ -132,7 +131,7 @@ pub const Blas = struct {
         self: *const Blas,
         comptime T: type,
         x: []const T,
-        y: []T, 
+        y: []T,
         alpha: T,
     ) void {
         cuda.axpy(dtype(T), self.cublas(), x.ptr, y.ptr, x.len, 1, 1, alpha);
@@ -150,7 +149,6 @@ pub const Blas = struct {
 };
 
 pub const NN = struct {
-
     pub fn reluForward(self: *const NN, comptime T: type, x: []const T, y: []T) void {
         cuda.relu_forward(dtype(T), self.stream(), x.ptr, y.ptr, x.len);
     }
@@ -186,7 +184,7 @@ pub const NN = struct {
     }
 };
 
-const ScratchMemory =  struct {
+const ScratchMemory = struct {
     head: usize = 0,
     tail: usize = 0,
     pub fn deinit(self: *ScratchMemory, stream: *anyopaque) void {
@@ -215,9 +213,7 @@ const ScratchMemory =  struct {
     }
 };
 
-
 pub const CudaDevice = struct {
-
     const Error = std.mem.Allocator.Error;
 
     // keep these out of the user api
@@ -242,7 +238,7 @@ pub const CudaDevice = struct {
             .context = .{
                 .device_number = device_number,
                 .stream = stream,
-                .cublas = cublas,  
+                .cublas = cublas,
                 .cudnn = cudnn,
             },
             .nn = .{},
@@ -280,7 +276,7 @@ pub const CudaDevice = struct {
     pub fn memAlloc(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
         return self.cache.get(T, n) orelse self.memAllocUncached(T, n);
     }
-    
+
     pub fn memDupe(self: *CudaDevice, comptime T: type, src: []const T) Error![]T {
         const dup = try self.alloc(T, src.len);
         self.memTransfer(T, src, dup, .DtoD);
@@ -297,12 +293,12 @@ pub const CudaDevice = struct {
             self.freeUncached(slice);
         }
     }
-    
+
     pub fn memFill(self: CudaDevice, comptime T: type, slice: []T, value: T) void {
         var _value = value; // move from register memory
         cuda.memFill(dtype(T), slice.ptr, slice.len, &_value, self.context.stream);
     }
-    
+
     pub fn memSequence(self: CudaDevice, comptime T: type, slice: []T, initial: T, step: T) void {
         var _init = initial; // move from register memory
         var _step = step; // move from register memory
@@ -312,20 +308,20 @@ pub const CudaDevice = struct {
     const Direction = enum { HtoD, DtoH, DtoD };
 
     pub fn memTransfer(
-        self: CudaDevice, 
-        comptime T: type, 
-        src: []const T, 
-        dst: []T, 
+        self: CudaDevice,
+        comptime T: type,
+        src: []const T,
+        dst: []T,
         direction: Direction,
-    ) void {        
+    ) void {
         std.debug.assert(src.len == dst.len);
-        switch(direction) {
+        switch (direction) {
             .HtoD => cuda.memcpyHtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
             .DtoH => cuda.memcpyDtoH(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
             .DtoD => cuda.memcpyDtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
         }
     }
-    
+
     pub fn sync(self: CudaDevice) void {
         cuda.streamSynchronize(self.context.stream);
     }
@@ -336,6 +332,3 @@ pub const CudaDevice = struct {
         return self.context.device_number == other.context.device_number;
     }
 };
-
-
-
