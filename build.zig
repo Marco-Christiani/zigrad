@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) !void {
     );
 
     const rebuild = b.option(bool, "rebuild", "force backend to recompile") orelse false;
+    const device_module = buildDeviceModule(b, target, rebuild);
 
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
@@ -24,7 +25,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "build_options", .module = build_options_module },
-            .{ .name = "device", .module = buildDeviceModule(b, target, rebuild) },
+            .{ .name = "device", .module = device_module },
         },
     });
 
@@ -50,6 +51,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    lib.root_module.addImport("build_options", build_options_module);
+    lib.root_module.addImport("device", device_module);
     link(target, lib);
     if (tracy_enable) add_tracy(lib, tracy.?);
     b.installArtifact(lib);
@@ -126,7 +129,7 @@ pub fn buildDeviceModule(b: *std.Build, target: std.Build.ResolvedTarget, rebuil
         runCommand(b, &.{ "python3", b.pathJoin(&.{ here, "scripts", "backend.py" }), @tagName(new_backend) });
     }
 
-    const device = b.addModule("device", .{
+    const device = b.createModule(.{
         .root_source_file = b.path("src/device/root.zig"),
         .link_libc = true,
         .target = target,
@@ -141,7 +144,7 @@ pub fn buildDeviceModule(b: *std.Build, target: std.Build.ResolvedTarget, rebuil
     }
 
     if (new_backend == .CUDA) {
-        const cuda = b.addModule("cuda", .{
+        const cuda = b.createModule(.{
             .root_source_file = b.path("src/cuda/root.zig"),
             .target = target,
             .link_libc = true,
