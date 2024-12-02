@@ -426,8 +426,8 @@ pub fn NDTensor(comptime T: type) type {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
-                    const a_grad = try (try _self.grad.?.copy(bw_device)).unbroadcast(a.grad.?.shape, bw_device);
-                    const b_grad = try (try _self.grad.?.copy(bw_device)).unbroadcast(b.grad.?.shape, bw_device);
+                    const a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, bw_device);
+                    const b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, bw_device);
                     defer a_grad.deinit(bw_device);
                     defer b_grad.deinit(bw_device);
 
@@ -533,7 +533,9 @@ pub fn NDTensor(comptime T: type) type {
                     defer neg_b_grad_value.deinit(bw_device);
 
                     const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_device);
+                    defer a_grad.deinit(bw_device);
                     const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, bw_device);
+                    defer b_grad.deinit(bw_device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._sub(b_grad);
@@ -711,7 +713,9 @@ pub fn NDTensor(comptime T: type) type {
                     var a = children[0];
                     var b = children[1];
                     const grad_a = try b.data.mul(_self.grad.?, bw_device);
+                    defer grad_a.deinit(bw_device);
                     const grad_b = try a.data.mul(_self.grad.?, bw_device);
+                    defer grad_b.deinit(bw_device);
                     _ = try a.grad.?._add(grad_a);
                     _ = try b.grad.?._add(grad_b);
                 }
@@ -736,6 +740,7 @@ pub fn NDTensor(comptime T: type) type {
         ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
         pub fn matvec(self: *Self, other: *Self, device: DeviceReference) !*Self {
             const matvecBw = struct {
+                /// TODO: Use accumulation
                 fn matvecBwImpl(_self: Self, _device: DeviceReference) !void {
                     const children = _self.children orelse return error.NoChildren;
                     var A = children[0].data;
@@ -743,10 +748,12 @@ pub fn NDTensor(comptime T: type) type {
 
                     //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
                     const grad_A = try _self.grad.?.outer(x, _device);
+                    defer grad_A.deinit(_device);
                     _ = try children[0].grad.?._add(grad_A);
 
                     //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
                     const grad_x = try A.matvec(_self.grad.?, true, _device);
+                    defer grad_x.deinit(_device);
                     _ = try children[1].grad.?._add(grad_x);
                 }
             }.matvecBwImpl;
@@ -786,18 +793,21 @@ pub fn NDTensor(comptime T: type) type {
         pub fn maxOverDim(self: *Self, device: DeviceReference, opts: MaxOverDimOptions) !*Self {
             const maxBackward = struct {
                 // NOTE: See gather() comments, same apply here
-                fn bwImpl(_self: Self, _: DeviceReference) !void {
+                fn bwImpl(_self: Self, bw_device: DeviceReference) !void {
                     const bw_children = _self.children orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
-                    const offsets: [*]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                    const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                    const offsets: []usize = std.mem.span(raw_offsets);
                     for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
+                    bw_device.memFree(offsets);
                 }
             }.bwImpl;
 
             const max_result = try self.data.maxOverDim(device, .{ .dim = opts.dim, .keep_dims = opts.keep_dims, .return_offsets = true });
             // TODO: use a null terminated allocation instead, tired rn
-            const ctx = if (self.requiresGrad()) try device.allocator.dupe(usize, max_result.offsets.?) else null;
+            const ctx = if (self.requiresGrad()) try device.allocator.dupeZ(usize, max_result.offsets.?) else null;
+            if (max_result.offsets) |offs| device.allocator.free(offs);
 
             return try createDependent(.{
                 .data = max_result.values,
@@ -889,172 +899,203 @@ pub fn NDTensor(comptime T: type) type {
 }
 
 test "tensor/GraphManager/sum" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, alloc);
+    var input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, device);
     _ = input.setLabel("input");
-    var sum_result = try input.sum(alloc);
+    var sum_result = try input.sum(device);
     _ = sum_result.setLabel("sum_result");
 
     try std.testing.expectEqualSlices(T, &[_]T{10}, sum_result.data.data);
 
+    defer {
+        input.deinit();
+        sum_result.deinit();
+    }
+
     // Backward pass
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     if (!zg.rt_grad_enabled) return error.GradNotEnabled;
-    sum_result.grad.?.fill(1.0);
-    try gm.backward(sum_result, alloc);
+    sum_result.grad.?.fill(1.0, device);
+    try gm.backward(sum_result, device);
 
     const expected_grad = &[_]T{ 1, 1, 1, 1 };
     try std.testing.expectEqualSlices(T, expected_grad, input.grad.?.data);
 }
 
 test "tensor/NDTensor index, add, div" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{ 2, 3 };
     const Tensor = NDTensor(f32);
 
     // 1 2 3
     // 4 5 6
-    var t1 = try Tensor.init(&[_]f32{ 1, 2, 3, 4, 5, 6 }, shape, false, alloc);
+    var t1 = try Tensor.init(&[_]f32{ 1, 2, 3, 4, 5, 6 }, shape, false, device);
 
     // 1 2 3
     // 4 5 23
     try t1.set(&[_]usize{ 1, 2 }, 1.1);
     try std.testing.expectEqual(1.1, t1.get(&.{ 1, 2 }));
 
-    const t2 = try Tensor.init(&[_]f32{ 10, 20, 30, 40, 50, 60 }, shape, false, alloc);
-    const t3 = try t1.add(t2, alloc);
-    const t4 = try t3.sub(t1, alloc);
+    const t2 = try Tensor.init(&[_]f32{ 10, 20, 30, 40, 50, 60 }, shape, false, device);
+    const t3 = try t1.add(t2, device);
+    const t4 = try t3.sub(t1, device);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+        t4.deinit();
+    }
+
     try std.testing.expectEqualSlices(f32, t2.data.data, t4.data.data);
 }
 
 test "tensor/GraphManager/addback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{1};
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var t1 = try Tensor.init(&[_]T{2}, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{3}, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{2}, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{3}, shape, true, device);
     // t3 = t1 + t2;
     // dt3/dt1 = 1, dt3/dt2 = 1
-    var t3 = try t1.add(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t3 = try t1.add(t2, device);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(&[_]T{1}, shape, alloc);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3, device);
     try std.testing.expectEqualDeep(&[_]T{1.0}, t1.grad.?.data);
     try std.testing.expectEqualDeep(&[_]T{1.0}, t2.grad.?.data);
 }
 
 test "tensor/GraphManager/mulback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{1};
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var t1 = try Tensor.init(&[_]T{2}, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{3}, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{2}, shape, true, device);
+    const t2 = try Tensor.init(&[_]T{3}, shape, true, device);
     // t3 = t1 * t2;
     // dt3/dt1 = t2, dt3/dt2 = t1
-    var t3 = try t1.mul(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t3 = try t1.mul(t2, device);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(&[_]T{1}, shape, alloc);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3, device);
     try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
     try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
 }
 
 test "tensor/GraphManager/moreback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{2};
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var w = try Tensor.init(&[_]f32{ 3, 2 }, shape, true, alloc);
-    var b = try Tensor.init(&[_]f32{ 1, 1 }, shape, true, alloc);
-    var x = try Tensor.init(&[_]f32{ 4, 4 }, shape, true, alloc);
+    var w = try Tensor.init(&[_]f32{ 3, 2 }, shape, true, device);
+    defer w.deinit();
+    var b = try Tensor.init(&[_]f32{ 1, 1 }, shape, true, device);
+    defer b.deinit();
+    var x = try Tensor.init(&[_]f32{ 4, 4 }, shape, true, device);
+    defer x.deinit();
 
     // h = w*x + b
     // dh/dw = x, dh/db = 1
-    var temp = try w.mul(x, alloc);
-    var h = try temp.add(b, alloc);
+    const temp = try w.mul(x, device);
+    defer temp.deinit();
+    const h = try temp.add(b, device);
+    defer h.deinit();
 
-    var backprop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const backprop_alloc = backprop_arena.allocator();
-    defer backprop_arena.deinit();
-
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    h.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
-    try gm.backward(h, backprop_alloc);
-    if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
+    h.grad.?.fill(1.0, device);
+    try gm.backward(h, device);
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expectEqualSlices(T, &[_]T{ 1.0, 1.0 }, b.grad.?.data);
 
     // 2 x 1
     const shape2 = &[_]usize{ 2, 1 };
-    w.grad.?.fill(0);
-    b.grad.?.fill(0);
-    x.grad.?.fill(0);
+    w.grad.?.fill(0, device);
+    b.grad.?.fill(0, device);
+    x.grad.?.fill(0, device);
     try w._reshape(shape2);
     try b._reshape(shape2);
     try x._reshape(shape2);
     // h = w*x + b
     // dh/dw = x, dh/db = 1
-    temp = try w.mul(x, alloc);
-    h = try temp.add(b, alloc);
+    const temp2 = try w.mul(x, device);
+    defer temp2.deinit();
+    const h2 = try temp2.add(b, device);
+    defer h2.deinit();
 
-    var gm2 = GraphManager(Tensor).init(alloc, .{});
+    var gm2 = GraphManager(Tensor).init(device.allocator, .{});
     defer gm2.deinit();
-    h.grad.?.fill(1);
-    try gm.backward(h, alloc);
-    if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
+    h2.grad.?.fill(1.0, device);
+    try gm2.backward(h2, device);
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
 }
 
 test "tensor/GraphManager/divback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{2};
 
-    var t1 = try Tensor.init(&[_]T{ 4, 9 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 2, 3 }, shape, true, alloc);
-    var t3 = try t1.div(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t1 = try Tensor.init(&[_]T{ 4, 9 }, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{ 2, 3 }, shape, true, device);
+    var t3 = try t1.div(t2, device);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3, device);
 
     const expected_grad_t1 = &[_]T{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
     const expected_grad_t2 = &[_]T{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
@@ -1064,117 +1105,118 @@ test "tensor/GraphManager/divback" {
 }
 
 test "tensor/GraphManager/matmul_backward square" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{ 2, 2 };
 
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, device);
 
     // Case 1: No transpose
-    var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
-    defer t3.deinit();
+    var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t1.acquire();
-    t2.acquire();
-    t3.grad.?.fill(1.0);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
+    t3.grad.?.fill(1.0, device);
 
-    try gm.backward(t3, alloc);
+    try gm.backward(t3, device);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 2: Transpose A
-    var t3_trans_a = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+    var t3_trans_a = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
-    t3_trans_a.grad.?.fill(1.0);
+    t3_trans_a.grad.?.fill(1.0, device);
 
-    try gm.backward(t3_trans_a, alloc);
+    try gm.backward(t3_trans_a, device);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_a, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 3: Transpose B
-    var t3_trans_b = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = true });
+    var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
-    t3_trans_b.grad.?.fill(1.0);
-    try gm.backward(t3_trans_b, alloc);
+    t3_trans_b.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_b, device);
 
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_b, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 4: Transpose both A and B
-    var t3_trans_ab = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = true });
+    var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
-    t3_trans_ab.grad.?.fill(1.0);
-    try gm.backward(t3_trans_ab, alloc);
+    t3_trans_ab.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_ab, device);
 
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_ab, t2.grad.?.data);
-
-    t1.release();
-    t1.deinit();
-    t2.release();
-    t2.deinit();
 }
 
 test "tensor/GraphManager/matmul_backward non-square" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
     // Case 1: No transpose (t1: [2, 2, 3], t2: [2, 3, 2])
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &[_]usize{ 2, 3, 2 }, true, alloc);
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &[_]usize{ 2, 3, 2 }, true, device);
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
 
     // Case 1: No transpose
     {
-        var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+        var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
         defer t3.deinit();
         t1.acquire();
         t2.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3, device);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
         try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 
-        t1.grad.?.fill(0);
-        t2.grad.?.fill(0);
+        t1.grad.?.fill(0, device);
+        t2.grad.?.fill(0, device);
     }
 
     // Case 2: Transpose A (t1: [2, 3, 2], t2: [2, 3, 2])
     {
-        var t1_case2 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, alloc);
-        var t3 = try t1_case2.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+        var t1_case2 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, device);
+        var t3 = try t1_case2.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
         defer t3.deinit();
         t1_case2.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3, device);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
@@ -1183,38 +1225,38 @@ test "tensor/GraphManager/matmul_backward non-square" {
 
         t1_case2.release();
         t1_case2.deinit();
-        t2.grad.?.fill(0);
+        t2.grad.?.fill(0, device);
     }
 
     // Case 3: Transpose B (t1: [2, 2, 3], t2: [2, 2, 3])
     {
-        var t2_case3 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, alloc);
-        var t3 = try t1.bmm(t2_case3, alloc, .{ .trans_a = false, .trans_b = true });
+        var t2_case3 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, device);
+        var t3 = try t1.bmm(t2_case3, device, .{ .trans_a = false, .trans_b = true });
         defer t3.deinit();
         t2_case3.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3, device);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
         try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case3.grad.?.data);
 
-        t1.grad.?.fill(0);
+        t1.grad.?.fill(0, device);
         t2_case3.release();
         t2_case3.deinit();
     }
 
     // Case 4: Transpose both A and B (t1: [2, 3, 2], t2: [2, 2, 3])
     {
-        var t1_case4 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, alloc);
-        var t2_case4 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, alloc);
-        var t3 = try t1_case4.bmm(t2_case4, alloc, .{ .trans_a = true, .trans_b = true });
+        var t1_case4 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, device);
+        var t2_case4 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, device);
+        var t3 = try t1_case4.bmm(t2_case4, device, .{ .trans_a = true, .trans_b = true });
         defer t3.deinit();
         t1_case4.acquire();
         t2_case4.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3, device);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
@@ -1234,65 +1276,67 @@ test "tensor/GraphManager/matmul_backward non-square" {
 }
 
 test "tensor/GraphManager/matmul_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{ 2, 2 };
 
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, device);
 
     // Case 1: No transpose
-    var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+    var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t1.acquire();
     t2.acquire();
-    t3.grad.?.fill(1.0);
+    t3.grad.?.fill(1.0, device);
 
-    try gm.backward(t3, alloc);
+    try gm.backward(t3, device);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 2: Transpose A
-    var t3_trans_a = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+    var t3_trans_a = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
-    t3_trans_a.grad.?.fill(1.0);
+    t3_trans_a.grad.?.fill(1.0, device);
 
-    try gm.backward(t3_trans_a, alloc);
+    try gm.backward(t3_trans_a, device);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_a, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 3: Transpose B
-    var t3_trans_b = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = true });
+    var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
-    t3_trans_b.grad.?.fill(1.0);
-    try gm.backward(t3_trans_b, alloc);
+    t3_trans_b.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_b, device);
 
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_b, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 4: Transpose both A and B
-    var t3_trans_ab = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = true });
+    var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
-    t3_trans_ab.grad.?.fill(1.0);
-    try gm.backward(t3_trans_ab, alloc);
+    t3_trans_ab.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_ab, device);
 
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
@@ -1306,9 +1350,11 @@ test "tensor/GraphManager/matmul_backward" {
 }
 
 test "tensor/GraphManager/matvec_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape_mat = &[_]usize{ 2, 2 };
@@ -1319,17 +1365,19 @@ test "tensor/GraphManager/matvec_backward" {
     // grad = [1, 1]'
     // dl/dA = grad * [1, 1] = [[2, 2], [2, 2]]
     // dl/dx = A' * grad = [4, 6]'
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape_mat, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 1 }, shape_vec, true, alloc);
-    var t3 = try t1.matvec(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape_mat, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 1 }, shape_vec, true, device);
+    var t3 = try t1.matvec(t2, device);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad.?.fill(1.0);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3, device);
 
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 6 };
@@ -1339,24 +1387,28 @@ test "tensor/GraphManager/matvec_backward" {
 }
 
 test "tensor/GraphManager/dot_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{3};
 
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, alloc);
-    var t3 = try t1.dot(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3 }, shape, true, device);
+    const t2 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, device);
+    var t3 = try t1.dot(t2, device);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad.?.fill(1.0);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3, device);
 
     const expected_grad_t1 = &[_]T{ 4, 5, 6 };
     const expected_grad_t2 = &[_]T{ 1, 2, 3 };
@@ -1365,89 +1417,99 @@ test "tensor/GraphManager/dot_backward" {
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 }
 
+// TODO: Fix memory freeing conundrum with gather() then dont use an arena here.
 test "tensor/gather" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = arena.allocator();
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
     // case 1: basic gather
     const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const input_shape = [_]usize{ 3, 3 };
-    var input = try Tensor.init(&input_data, &input_shape, true, alloc);
+    var input = try Tensor.init(&input_data, &input_shape, true, device);
     defer input.deinit();
 
     const index_data = [_]usize{ 0, 1, 1, 2, 0, 2 };
     const index_shape = [_]usize{ 3, 2 };
-    var index = try NDTensor(usize).init(&index_data, &index_shape, false, alloc);
+    var index = try NDTensor(usize).init(&index_data, &index_shape, false, device);
     defer index.deinit();
 
-    var output = try input.gather(alloc, .{ .indices = index, .dim = 1 });
+    var output = try input.gather(device, .{ .indices = index, .dim = 1 });
     defer output.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.data.data);
     try std.testing.expectEqualSlices(usize, &index_shape, output.data.shape.shape);
 
     // case 2: grad check
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
 
-    output.grad.?.fill(1.0);
-    try gm.backward(output, alloc);
+    output.grad.?.fill(1.0, device);
+    try gm.backward(output, device);
 
     const expected_grad = [_]T{ 1, 1, 0, 0, 1, 1, 1, 0, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
 
     // case 3: out of bounds
     try index.set(&.{ 0, 0 }, 3);
-    try std.testing.expectError(error.IndexOutOfBounds, input.gather(alloc, .{ .indices = index, .dim = 1 }));
+    try std.testing.expectError(error.IndexOutOfBounds, input.gather(device, .{ .indices = index, .dim = 1 }));
 }
 
+// TODO: Fix memory freeing conundrum with maxOverDim() then dont use an arena here.
 test "tensor/maxOverDim" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = arena.allocator();
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
     // case 1: basic max over dim operation
     const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const input_shape = [_]usize{ 3, 3 };
-    var input = try Tensor.init(&input_data, &input_shape, true, alloc);
+    var input = try Tensor.init(&input_data, &input_shape, true, device);
     defer input.deinit();
 
-    var output = try input.maxOverDim(alloc, .{ .dim = 1 });
+    var output = try input.maxOverDim(device, .{ .dim = 1 });
     defer output.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 9 }, output.data.data);
     try std.testing.expectEqualSlices(usize, &[_]usize{3}, output.data.shape.shape);
 
     // case 2: gradient check
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
 
-    output.grad.?.fill(1.0);
-    try gm.backward(output, alloc);
+    output.grad.?.fill(1.0, device);
+    try gm.backward(output, device);
 
     const expected_grad = [_]T{ 0, 0, 1, 0, 0, 1, 0, 0, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
 
     // case 3: max over different dimension
-    var output2 = try input.maxOverDim(alloc, .{ .dim = 0 });
+    var output2 = try input.maxOverDim(device, .{ .dim = 0 });
     defer output2.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 7, 8, 9 }, output2.data.data);
     try std.testing.expectEqualSlices(usize, &[_]usize{3}, output2.data.shape.shape);
 
     // reset grads
-    input.grad.?.fill(0);
-    output2.grad.?.fill(1.0);
-    try gm.backward(output2, alloc);
+    input.grad.?.fill(0, device);
+    output2.grad.?.fill(1.0, device);
+    try gm.backward(output2, device);
 
     const expected_grad2 = [_]T{ 0, 0, 0, 0, 0, 0, 1, 1, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad2, input.grad.?.data);
 
     // case 4: invalid dimension
-    try std.testing.expectError(error.DimOutOfBounds, input.maxOverDim(alloc, .{ .dim = 2 }));
+    try std.testing.expectError(error.DimOutOfBounds, input.maxOverDim(device, .{ .dim = 2 }));
 }
