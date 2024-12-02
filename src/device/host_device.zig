@@ -217,6 +217,8 @@ pub const HostDevice = struct {
         }
     }
 
+    pub fn sync(_: HostDevice) void {}
+
     // since host is it's own reference when compiling for HOST only,
     // this is always trivially true. Only for debug compatibility.
     pub inline fn isCompatible(_: *const HostDevice, _: *const HostDevice) bool {
