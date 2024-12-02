@@ -490,7 +490,7 @@ pub fn ReLULayer(comptime T: type) type {
 
             return try NDTensor(T).createDependent(.{
                 .data = output,
-                .children = &.{ input },
+                .children = &.{input},
                 .label = "relu_out",
                 .requires_grad = input.requiresGrad(),
                 .device = device,
@@ -546,7 +546,7 @@ pub fn FlattenLayer(comptime T: type) type {
             const result = try NDTensor(T).createDependent(.{
                 .data = input.data, // Reuse the same data
                 // .op = .FLATTEN,
-                .children = &.{ input },
+                .children = &.{input},
                 .label = "flattened",
                 .requires_grad = input.requires_grad,
                 .device = fwd_device,
@@ -659,7 +659,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
 
             return try NDTensor(T).createDependent(.{
                 .data = output,
-                .children = &.{ input },
+                .children = &.{input},
                 .label = "maxpool2d_out",
                 .requires_grad = true,
                 .allocator = fwd_device,
@@ -736,31 +736,35 @@ pub fn main() !void {
 /// An old demo, still works of course but there are way easier and faster ways to do this now.
 fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void {
     const Tensor = NDTensor(T);
+    var cpu = zg.device.HostDevice.init(alloc);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const input_size = 2;
     const output_size = 1;
 
-    const layer = try LinearLayer(T).init(alloc, input_size, output_size);
+    const layer = try LinearLayer(T).init(device, input_size, output_size);
     defer layer.deinit();
     const params = layer.getParameters();
-    defer if (params) |p| alloc.free(p);
+    defer if (params) |p| device.memFree(p);
     for (params.?) |p| {
         p.fill(1);
     }
 
-    var gm = GraphManager(NDTensor(T)).init(alloc, .{});
+    var gm = GraphManager(NDTensor(T)).init(device.allocator, .{});
     defer gm.deinit();
     var optimizer = SGD(T){ .lr = 0.01, .grad_clip_enabled = true };
     const lr_epoch_decay = 1.0; // disable
 
     const grad_acc_steps = 32;
-    var loss: *Tensor = try Tensor.init(&[_]T{0.0}, null, true, alloc);
+    var loss: *Tensor = try Tensor.init(&[_]T{0.0}, null, true, device);
     loss.acquire();
     defer loss.teardown();
     defer loss.release();
     // used to avoid reallocating
-    const input = try Tensor.empty(&.{ 1, input_size }, true, alloc);
+    const input = try Tensor.empty(&.{ 1, input_size }, true, device);
     input.setLabel("input").fill(0);
-    const target = try Tensor.empty(&.{output_size}, true, alloc);
+    const target = try Tensor.empty(&.{output_size}, true, device);
     target.setLabel("input").fill(0);
     input.acquire();
     target.acquire();
@@ -773,7 +777,7 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
         while (start_i < data.len) : (start_i += grad_acc_steps) {
             const end_i = @min(start_i + grad_acc_steps, data.len);
             loss.fill(0);
-            loss.grad.?.fill(0);
+            loss.grad.?.fill(0, device);
             for (data[start_i..end_i]) |row| {
                 // clever way, but NEED to zero these grads
                 input.data.data = row[0..input_size];
@@ -781,12 +785,12 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
                 // this is the more intuitive, less performant method but this keeps all prev ones on the graph which may be req in some cases
                 // const input = try Tensor.init(row[0..input_size], &[_]usize{ input_size, output_size }, true, alloc);
                 // const target = try Tensor.init(row[input_size..row.len], null, true, alloc);
-                const output = (try layer.forward(input, alloc)).setLabel("output");
+                const output = (try layer.forward(input, device)).setLabel("output");
 
-                const curr_loss = try simple_mse_loss(f32, output, target, alloc);
+                const curr_loss = try simple_mse_loss(f32, output, target, device);
                 _ = try loss.data._add(curr_loss.data);
-                curr_loss.grad.?.fill(1.0 / @as(T, grad_acc_steps));
-                try gm.backward(curr_loss, alloc);
+                curr_loss.grad.?.fill(1.0 / @as(T, grad_acc_steps), device);
+                try gm.backward(curr_loss, device);
             }
 
             optimizer.step(params.?);
@@ -819,7 +823,7 @@ test "trainGradAccum" {
 /// For this implementation the dataset must be evenly divisible by the batch size as a simplification
 fn trainBatched(comptime T: type, data: [][]T, device: DeviceReference) !void {
     // using an arena is more efficient, less freeing here.
-    const X = try device.alocator.alloc([]T, data.len);
+    const X = try device.allocator.alloc([]T, data.len);
     const y = try device.memAlloc(T, data.len);
     const n_features = 2;
     for (0..data.len) |i| {
@@ -848,7 +852,7 @@ fn trainBatched(comptime T: type, data: [][]T, device: DeviceReference) !void {
     input.acquire();
     target.acquire();
 
-    var gm = GraphManager(NDTensor(T)).init(device, .{ .eager_teardown = true });
+    var gm = GraphManager(NDTensor(T)).init(device.allocator, .{ .eager_teardown = true });
     defer gm.deinit();
     var optimizer = SGD(T){ .lr = 0.01, .grad_clip_enabled = true };
 
@@ -856,8 +860,8 @@ fn trainBatched(comptime T: type, data: [][]T, device: DeviceReference) !void {
         var epoch_loss: T = 0;
         var batch_start_i: usize = 0;
         while (batch_start_i < y.len) : (batch_start_i += batch_size) {
-            input.grad.?.fill(0.0);
-            target.grad.?.fill(0.0);
+            input.grad.?.fill(0.0, device);
+            target.grad.?.fill(0.0, device);
             const batch_end_i = @min(batch_start_i + batch_size, y.len);
             const batch_x = X[batch_start_i..batch_end_i];
             const batch_y = y[batch_start_i..batch_end_i];
@@ -873,7 +877,7 @@ fn trainBatched(comptime T: type, data: [][]T, device: DeviceReference) !void {
             const loss = try simple_mse_loss(f32, output, target, device);
             epoch_loss += loss.data.data[0];
 
-            loss.grad.?.fill(1.0);
+            loss.grad.?.fill(1.0, device);
             layer.zeroGrad();
             try gm.backward(loss, device);
             optimizer.step(params.?);
@@ -894,11 +898,11 @@ test "trainBatched" {
 
     const T = f32;
 
-    const data = readCsv(T, "/tmp/data.csv", cpu.reference()) catch |e| {
+    const data = readCsv(T, "/tmp/data.csv", cpu.allocator) catch |e| {
         std.log.warn("{s} error opening test file. Skipping `trainBatched` test.", .{@errorName(e)});
         return;
     };
-    try trainBatched(T, data, cpu);
+    try trainBatched(T, data, cpu.reference());
 }
 
 test "LinearLayer forward and backward" {
@@ -907,7 +911,9 @@ test "LinearLayer forward and backward" {
 
     var cpu = zg.device.HostDevice.init(arena.allocator());
     defer cpu.deinit();
-    
+
+    const device = cpu.reference();
+
     const T = f32;
     zg.rt_grad_enabled = true;
     // input 2, output 2
@@ -917,9 +923,9 @@ test "LinearLayer forward and backward" {
     const input_shape = &[_]usize{ 1, 2 };
     const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, cpu.reference());
     const output = try layer.forward(input, cpu.reference());
-    output.grad.?.fill(1.0);
+    output.grad.?.fill(1.0, device);
 
-    var gm = GraphManager(NDTensor(T)).init(cpu.reference(), .{});
+    var gm = GraphManager(NDTensor(T)).init(cpu.allocator, .{});
     defer gm.deinit();
     try gm.backward(output, cpu.reference());
 
