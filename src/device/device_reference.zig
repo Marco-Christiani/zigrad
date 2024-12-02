@@ -158,14 +158,20 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn memDupe(self: Self, slice: anytype) void {
+        pub fn memDupe(self: Self, T: type, slice: anytype) Error![]T {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memDupe(slice),
+                inline else => |dev| dev.memDupe(T, slice),
+            };
+        }
+
+        pub fn memFill(self: Self, comptime T: type, slice: []T, value: T) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.memFill(T, slice, value),
             };
         }
 
         pub fn memTransfer(
-            self: DeviceReference,
+            self: Self,
             comptime T: type,
             src: []const T,
             dst: []T,
@@ -177,7 +183,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn sync(self: DeviceReference) void {
+        pub fn sync(self: Self) void {
             return switch (self.ptrs) {
                 .aux => |dev| dev.sync(),
                 .host => {},
