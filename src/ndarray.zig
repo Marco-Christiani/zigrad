@@ -687,7 +687,7 @@ pub fn NDArray(comptime T: type) type {
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = output,
-                .shape = try Shape.init(&[_]usize{ M, N }, device),
+                .shape = try Shape.init(&[_]usize{ M, N }, device.allocator),
             };
             return result;
         }
@@ -704,7 +704,17 @@ pub fn NDArray(comptime T: type) type {
             errdefer device.allocator.free(output);
             @memset(output, 0);
 
-            device.blas.matvec(T, self.data, other.data, output, M, N, 1, 0, trans_a);
+            device.blas.matvec(
+                T,
+                self.data,
+                other.data,
+                output,
+                M,
+                N,
+                trans_a,
+                1,
+                0,
+            );
 
             const result = try device.allocator.create(Self);
             result.* = Self{
@@ -837,7 +847,7 @@ pub fn NDArray(comptime T: type) type {
             errdefer if (offsets) |o| device.allocator.free(o);
 
             for (0..indices.data.len) |i| {
-                const idx_coord = try indices.offsetToPos(i, device.allocator);
+                const idx_coord = try indices.offsetToPos(i, device);
                 defer device.allocator.free(idx_coord);
 
                 const src_coord = try device.allocator.dupe(usize, idx_coord);
