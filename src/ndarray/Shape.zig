@@ -97,6 +97,7 @@ pub fn _squeeze(self: *Self) !void {
     }
     self.alloc.free(self.shape);
     self.shape = newshape;
+    self.alloc.free(self.strides);
     self.strides = try calculateStrides(newshape, self.alloc);
 }
 
@@ -107,6 +108,7 @@ pub fn _unsqueeze(self: *Self) !void {
     newshape[0] = 1;
     self.alloc.free(self.shape);
     self.shape = newshape;
+    self.alloc.free(self.strides);
     self.strides = try calculateStrides(newshape, self.alloc);
 }
 
@@ -119,6 +121,7 @@ pub fn _reshape(self: *Self, shape: []const usize) !void {
     }
     self.alloc.free(self.shape);
     self.shape = try self.alloc.dupe(usize, shape);
+    self.alloc.free(self.strides);
     self.strides = try calculateStrides(self.shape, self.alloc);
 }
 
