@@ -84,6 +84,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    unit_tests.root_module.addImport("build_options", build_options_module);
+    unit_tests.root_module.addImport("device", device_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
     if (tracy_enable) add_tracy(unit_tests, tracy.?);
