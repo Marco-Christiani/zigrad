@@ -33,22 +33,25 @@ const TestCases = struct {
 };
 
 fn verifySmceLoss(comptime name: []const u8, case: SmceTestCase, allocator: std.mem.Allocator) !void {
-    var gm = zg.GraphManager(NDTensor(f32)).init(allocator, .{});
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+    var gm = zg.GraphManager(NDTensor(f32)).init(device.allocator, .{});
     defer gm.deinit();
-    const input = try NDTensor(f32).init(case.input, case.shape, true, allocator);
+    const input = try NDTensor(f32).init(case.input, case.shape, true, device);
     defer input.deinit();
 
     std.log.info("{s} {d}\n", .{ name, case.shape });
     std.log.info("input: {d}\n", .{input.data.data});
     std.log.info("target: {d}\n", .{case.target});
 
-    const target = try NDTensor(f32).init(case.target, case.shape, true, allocator);
+    const target = try NDTensor(f32).init(case.target, case.shape, true, device);
     defer target.deinit();
 
-    const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target, allocator);
-    loss.grad.?.fill(1.0);
+    const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target, device);
+    loss.grad.?.fill(1.0, device);
     defer loss.deinit();
-    try gm.backward(loss, allocator);
+    try gm.backward(loss, device);
 
     std.log.info("loss: {d}\n", .{loss.data.data});
     std.log.info("expected: {d}\n", .{case.loss});
@@ -58,10 +61,10 @@ fn verifySmceLoss(comptime name: []const u8, case: SmceTestCase, allocator: std.
     try std.testing.expectApproxEqAbs(case.loss, loss.data.data[0], 1e-4);
 
     const PRECISION = f16; // precision to compare grad slices at
-    const grad_exp_trunc = try allocator.alloc(PRECISION, input.grad.?.data.len);
-    const grad_actual_trunc = try allocator.alloc(PRECISION, input.grad.?.data.len);
-    defer allocator.free(grad_exp_trunc);
-    defer allocator.free(grad_actual_trunc);
+    const grad_exp_trunc = try device.memAlloc(PRECISION, input.grad.?.data.len);
+    const grad_actual_trunc = try device.memAlloc(PRECISION, input.grad.?.data.len);
+    defer device.memFree(grad_exp_trunc);
+    defer device.memFree(grad_actual_trunc);
     for (case.input_grad, input.grad.?.data, 0..) |e1, e2, i| {
         grad_exp_trunc[i] = @floatCast(e1);
         grad_actual_trunc[i] = @floatCast(e2);
@@ -88,12 +91,15 @@ test "softmax_cross_entropy_loss" {
 }
 
 fn verifySmoothL1Loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !void {
-    var gm = zg.GraphManager(NDTensor(f32)).init(allocator, .{});
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+    var gm = zg.GraphManager(NDTensor(f32)).init(device.allocator, .{});
     defer gm.deinit();
-    const input = try NDTensor(f32).init(case.input, case.shape, true, allocator);
+    const input = try NDTensor(f32).init(case.input, case.shape, true, device);
     defer input.deinit();
 
-    const target = try NDTensor(f32).init(case.target, case.shape, true, allocator);
+    const target = try NDTensor(f32).init(case.target, case.shape, true, device);
     defer target.deinit();
 
     std.log.info("Smooth L1 Loss Test", .{});
@@ -101,11 +107,11 @@ fn verifySmoothL1Loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !voi
     std.log.info("Target: {d}", .{target.data.data});
     std.log.info("Beta: {d}", .{case.beta});
 
-    const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta, allocator);
-    loss.grad.?.fill(1.0);
+    const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta, device);
+    loss.grad.?.fill(1.0, device);
     defer loss.deinit();
 
-    try gm.backward(loss, allocator);
+    try gm.backward(loss, device);
 
     std.log.info("Calculated loss: {d}n", .{loss.data.data[0]});
     std.log.info("Expected loss: {d}", .{case.loss});
