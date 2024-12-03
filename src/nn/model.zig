@@ -33,9 +33,9 @@ pub fn Model(comptime T: type) type {
             try self.layers.append(layer);
         }
 
-        pub fn forward(self: Self, input: *NDTensor(T), fwd_device: DeviceReference) !*NDTensor(T) {
+        pub fn forward(self: Self, input: *NDTensor(T)) !*NDTensor(T) {
             var output = input;
-            for (self.layers.items) |layer| output = try layer.forward(output, fwd_device);
+            for (self.layers.items) |layer| output = try layer.forward(output);
             return output;
         }
 

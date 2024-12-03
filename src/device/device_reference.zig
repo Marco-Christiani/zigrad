@@ -135,6 +135,9 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
     return struct {
         const Self = @This();
 
+        pub const HostType = HostDevice;
+        pub const AuxType = AuxDevice;
+
         pub const Error = std.mem.Allocator.Error;
 
         pub const DevicePtrs = union(enum) {
@@ -198,6 +201,10 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
                 .aux => self.ptrs.aux.isCompatible(other.ptrs.aux),
                 .host => true,
             };
+        }
+
+        pub fn isHost(self: DeviceReference) bool {
+            return self.ptrs == .HOST;
         }
     };
 }

@@ -52,14 +52,12 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             self: *Self,
             input: *NDTensor(T),
             target: *NDTensor(T),
-            fwd_device: DeviceReference,
-            bwd_device: DeviceReference,
         ) !*NDTensor(T) {
-            const output = try self.model.forward(input, fwd_device);
-            const loss = try lossf(T, output, target, fwd_device);
+            const output = try self.model.forward(input);
+            const loss = try lossf(T, output, target);
             self.model.zeroGrad();
-            loss.grad.?.fill(1.0, bwd_device);
-            try self.graph_manager.backward(loss, bwd_device);
+            try loss.setupGrad(0);
+            try self.graph_manager.backward(loss);
             self.optimizer.step(self.params);
             return loss;
         }
