@@ -46,13 +46,14 @@ pub const Op = enum {
     TRANSPOSE,
     MAX,
     EXP,
+    TRANSFER,
 };
 
 pub fn NDTensor(comptime T: type) type {
     return struct {
 
         // signature for a backwards callback
-        const Callback = *const fn (Self, DeviceReference) anyerror!void;
+        const Callback = *const fn (Self) anyerror!void;
 
         pub const dtype = NDArray(T);
         const Self = @This();
@@ -107,6 +108,13 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn requiresGrad(self: Self) bool {
             return self.requires_grad and zg.rt_grad_enabled;
+        }
+
+        pub fn setupGrad(self: *Self, fill_value: ?T) !void {
+            if (self.grad == null) {
+                self.grad = try dtype.empty(self.data.shape.shape, self.device);
+            }
+            return self.grad.?.fill(fill_value orelse return, self.device);
         }
 
         pub const CreateDependentOpts = struct {
@@ -226,6 +234,69 @@ pub fn NDTensor(comptime T: type) type {
             return result;
         }
 
+        fn toDeviceImpl(
+            src: []const T,
+            dst: []T,
+            src_device: DeviceReference,
+            dst_device: DeviceReference,
+        ) !void {
+            if (comptime @typeInfo(@TypeOf(src_device)) != .Struct)
+                return;
+
+            // currently only implemented for a single aux device.
+            std.debug.assert(!src_device.isCompatible(dst_device));
+
+            if (src_device.isHost()) {
+                dst_device.memTransfer(T, src, dst, .HtoD);
+            } else {
+                src_device.memTransfer(T, src, dst, .DtoH);
+            }
+        }
+
+        pub fn _toDevice(self: *Self, device: DeviceReference) !void {
+            if (self.device.isCompatible(device))
+                return self;
+
+            const data = try device.memAlloc(T, self.data.data.len);
+            toDeviceImpl(self.data.data, data, self.device, device);
+            self.device.memFree(self.data.data);
+            self.data.data = data;
+            self.device = device;
+        }
+
+        pub fn toDevice(self: *Self, device: DeviceReference) !*Self {
+            if (self.device.isCompatible(device))
+                return self;
+
+            const to_device_bw = struct {
+                fn to_device_bw_impl(_self: Self) !void {
+                    const child = (_self.children orelse return error.NoChildren)[0];
+                    toDeviceImpl(_self.grad.?.data, child.grad.?.data, self.device, child.device);
+                }
+            }.to_device_bw_impl;
+
+            const data = try dtype.empty(self.data.shape, device);
+
+            toDeviceImpl(self.data.data, data.data, self.device, device);
+
+            var result = try createDependent(.{
+                .data = data,
+                .op = .TRANSFER,
+                .children = &.{self},
+                .label = null,
+                .requires_grad = false,
+                .device = self.device,
+                ._backward = to_device_bw,
+            });
+
+            errdefer result.deinit();
+            if (self.requiresGrad()) { // need to make this call, not check the attribute flag
+                result.grad = try dtype.zeros(self.data.shape, device);
+                result.requires_grad = true;
+            }
+            return result;
+        }
+
         // NOTE: Check callsites and see if we can fix the comments here
         /// Only data and grad are copied. Child references and other metadata is not retained aside from requires_grad.
         /// Passed allocator used for allocations, not the owned one (i.e. not `@This()` one).
@@ -234,18 +305,18 @@ pub fn NDTensor(comptime T: type) type {
         /// # ADR
         ///   - The choice to have an allocator provided is important, intended to be used for backward
         ///   - If the tensor backing `dtype` changes its allocator ownership contract, then this needs to be changed
-        pub fn clone(self: Self, device: DeviceReference) !*Self {
-            const result = try device.allocator.create(Self);
-            errdefer device.allocator.destroy(result);
+        pub fn clone(self: Self) !*Self {
+            const result = try self.device.allocator.create(Self);
+            errdefer self.device.allocator.destroy(result);
             result.* = Self{
-                .data = try self.data.copy(device),
-                .grad = if (self.grad) |g| try g.copy(device) else null,
+                .data = try self.data.copy(self.device),
+                .grad = if (self.grad) |g| try g.copy(self.device) else null,
                 .requires_grad = self.requiresGrad(),
                 .op = null,
                 .children = null,
                 .label = null,
                 .acquired = false,
-                .device = device,
+                .device = self.device,
                 ._backward = null,
                 ._backward_ctx = null,
             };
@@ -270,7 +341,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const reshape_bw = struct {
-                fn reshape_bw_impl(_self: Self, _: DeviceReference) !void {
+                fn reshape_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const original_shape = children[0].data.shape;
                     try self.grad.?._reshape(original_shape.shape);
@@ -296,10 +367,10 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn transpose(self: *Self) !*Self {
             const transpose_bw = struct {
-                fn transpose_bw_impl(_self: Self, bw_device: DeviceReference) !void {
+                fn transpose_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
-                    const gt = try self.grad.?.transpose(bw_device);
-                    defer gt.deinit(bw_device);
+                    const gt = try self.grad.?.transpose(_self.device);
+                    defer gt.deinit(_self.device);
                     _ = try children[0].grad.?._add(gt);
                 }
             }.transpose_bw_impl;
@@ -347,8 +418,8 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// COM
-        fn indexToPos(self: Self, index: usize, device: DeviceReference) []const usize {
-            return self.data.offsetToPos(index, device.allocator);
+        fn indexToPos(self: Self, index: usize) []const usize {
+            return self.data.offsetToPos(index, self.device.allocator);
         }
 
         /// [WIP] Values and grads are views into self. Shapes are allocated and COM.
@@ -358,7 +429,7 @@ pub fn NDTensor(comptime T: type) type {
         ///   - It is assumed the caller wants a temporary mutable view, return by copy.
         ///   - This creates a complex situation, there is no backward for this operation and it returns a mutable view.
         ///   - Caller must set backward
-        pub fn sliceRanges(self: Self, ranges: []const Range, device: DeviceReference) !Self {
+        pub fn sliceRanges(self: Self, ranges: []const Range) !Self {
             log.err("WIP", .{});
             const sliced_data = try self.data.sliceRanges(ranges);
             return Self{
@@ -369,7 +440,7 @@ pub fn NDTensor(comptime T: type) type {
                 .children = null,
                 .label = null,
                 .acquired = false,
-                .device = device,
+                .device = self.device,
                 ._backward = null,
                 ._backward_ctx = null,
             };
@@ -420,23 +491,24 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise addition. COM.
-        pub fn add(self: *Self, other: *Self, device: DeviceReference) !*Self {
+        pub fn add(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const addBw = struct {
-                fn addBwImpl(_self: Self, bw_device: DeviceReference) !void {
+                fn addBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
-                    const a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, bw_device);
-                    const b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, bw_device);
-                    defer a_grad.deinit(bw_device);
-                    defer b_grad.deinit(bw_device);
-
+                    const a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, _self.device);
+                    const b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, _self.device);
+                    defer a_grad.deinit(_self.device);
+                    defer b_grad.deinit(_self.device);
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._add(b_grad);
                 }
             }.addBwImpl;
             return try createDependent(.{
-                .data = try self.data.add(other.data, device),
+                .data = try self.data.add(other.data),
                 .op = .ADD,
                 .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
@@ -446,36 +518,40 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise subtraction. COM.
-        pub fn sub(self: *Self, other: *Self, device: DeviceReference) !*Self {
+        pub fn sub(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const subBw = struct {
-                fn subBwImpl(_self: Self, bw_device: DeviceReference) !void {
+                fn subBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
 
-                    const a_grad = try (try _self.grad.?.copy(bw_device)).unbroadcast(a.grad.?.shape, bw_device);
-                    const b_grad = try (try _self.grad.?.copy(bw_device)).unbroadcast(b.grad.?.shape, bw_device);
-                    defer a_grad.deinit(bw_device);
-                    defer b_grad.deinit(bw_device);
+                    const a_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(a.grad.?.shape, _self.device);
+                    const b_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(b.grad.?.shape, _self.device);
+                    defer a_grad.deinit(_self.device);
+                    defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._sub(b_grad);
                 }
             }.subBwImpl;
             return try createDependent(.{
-                .data = try self.data.sub(other.data, device),
+                .data = try self.data.sub(other.data, self.device),
                 .op = .SUB,
                 .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = subBw,
             });
         }
 
         /// Element-wise multiplication. COM.
         pub fn mul(self: *Self, other: *Self, device: DeviceReference) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const mulBw = struct {
-                fn mulBwImpl(_self: Self, bw_device: DeviceReference) !void {
+                fn mulBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -483,17 +559,17 @@ pub fn NDTensor(comptime T: type) type {
                     // TODO: can remove a copy here
 
                     // (dL/dy) * (dy/da), (dL/dy) * (dy/db)
-                    const a_grad_value = try b.data.mul(_self.grad.?, bw_device);
-                    const b_grad_value = try a.data.mul(_self.grad.?, bw_device);
+                    const a_grad_value = try b.data.mul(_self.grad.?, _self.device);
+                    const b_grad_value = try a.data.mul(_self.grad.?, _self.device);
 
-                    defer a_grad_value.deinit(bw_device);
-                    defer b_grad_value.deinit(bw_device);
+                    defer a_grad_value.deinit(_self.device);
+                    defer b_grad_value.deinit(_self.device);
 
-                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_device);
-                    const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, bw_device);
+                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
+                    const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
 
-                    defer a_grad.deinit(bw_device);
-                    defer b_grad.deinit(bw_device);
+                    defer a_grad.deinit(_self.device);
+                    defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._add(b_grad);
@@ -510,9 +586,11 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise division. COM.
-        pub fn div(self: *Self, other: *Self, device: DeviceReference) !*Self {
+        pub fn div(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const divBw = struct {
-                fn divBwImpl(_self: Self, bw_device: DeviceReference) !void {
+                fn divBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -520,40 +598,40 @@ pub fn NDTensor(comptime T: type) type {
                     // TODO: can remove at least one copy here right?
 
                     // (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
-                    const a_grad_value = try _self.grad.?.div(b.data, bw_device);
-                    const b_grad_value = try _self.grad.?.mul(a.data, bw_device);
+                    const a_grad_value = try _self.grad.?.div(b.data, _self.device);
+                    const b_grad_value = try _self.grad.?.mul(a.data, _self.device);
 
-                    defer a_grad_value.deinit(bw_device);
-                    defer b_grad_value.deinit(bw_device);
+                    defer a_grad_value.deinit(_self.device);
+                    defer b_grad_value.deinit(_self.device);
 
-                    const bsq = try b.data.mul(b.data, bw_device);
-                    const neg_b_grad_value = try b_grad_value.div(bsq, bw_device);
+                    const bsq = try b.data.mul(b.data, _self.device);
+                    const neg_b_grad_value = try b_grad_value.div(bsq, _self.device);
 
-                    defer bsq.deinit(bw_device);
-                    defer neg_b_grad_value.deinit(bw_device);
+                    defer bsq.deinit(_self.device);
+                    defer neg_b_grad_value.deinit(_self.device);
 
-                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_device);
-                    defer a_grad.deinit(bw_device);
-                    const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, bw_device);
-                    defer b_grad.deinit(bw_device);
+                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
+                    defer a_grad.deinit(_self.device);
+                    const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
+                    defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._sub(b_grad);
                 }
             }.divBwImpl;
             return try createDependent(.{
-                .data = try self.data.div(other.data, device),
+                .data = try self.data.div(other.data, self.device),
                 .op = .DIV,
                 .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = divBw,
             });
         }
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
-        pub fn max(self: *Self, device: DeviceReference) !*Self {
-            const max_val = try self.data.max(device);
+        pub fn max(self: *Self) !*Self {
+            const max_val = try self.data.max(self.device);
             const maxBw = struct {
                 fn maxBwImpl(_self: Self, _: DeviceReference) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -571,15 +649,15 @@ pub fn NDTensor(comptime T: type) type {
                 .op = .MAX,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = maxBw,
             });
         }
 
         /// Element-wise exponential. COM.
-        pub fn exp(self: *Self, device: DeviceReference) !*Self {
+        pub fn exp(self: *Self) !*Self {
             const expBw = struct {
-                fn expBwImpl(_self: Self, _: DeviceReference) !void {
+                fn expBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const child = children[0];
                     for (_self.data.data, _self.grad.?.data, 0..) |exp_val, grad_val, i| {
@@ -588,11 +666,11 @@ pub fn NDTensor(comptime T: type) type {
                 }
             }.expBwImpl;
             return try createDependent(.{
-                .data = try self.data.exp(device),
+                .data = try self.data.exp(self.device),
                 .op = .EXP,
                 .children = &[_]*const Self{self},
                 .requires_grad = self.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = expBw,
             });
         }
@@ -602,6 +680,8 @@ pub fn NDTensor(comptime T: type) type {
         /// TODO: this should proxy to bmmAcc
         /// Matrix multiplication. COM.
         pub fn bmm(self: *Self, other: *Self, device: DeviceReference, opts: MmOptions) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const ctx = try device.allocator.create(MmAccOptions);
             ctx.* = MmAccOptions{ .trans_a = opts.trans_a, .trans_b = opts.trans_b, .alpha = 1, .beta = 0 };
             const result = try createDependent(.{
@@ -623,9 +703,10 @@ pub fn NDTensor(comptime T: type) type {
             self: *const NDTensor(T),
             other: *const NDTensor(T),
             output: *NDTensor(T),
-            device: DeviceReference,
             opts: MmAccOptions,
         ) !void {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             _ = try self.data._bmmAcc(
                 other.data,
                 output.data,
@@ -633,28 +714,24 @@ pub fn NDTensor(comptime T: type) type {
                 opts.beta,
                 opts.trans_a,
                 opts.trans_b,
-                device,
             );
 
             const requires_grad = zg.rt_grad_enabled and (self.requires_grad or other.requires_grad or output.requires_grad);
             if (requires_grad) {
-                const ctx = try device.allocator.create(MmAccOptions);
+                const ctx = try self.device.allocator.create(MmAccOptions);
                 ctx.* = opts;
-                output.children = try device.allocator.dupe(*NDTensor(T), &.{ self, other });
+                output.children = try self.device.allocator.dupe(*NDTensor(T), &.{ self, other });
                 output._backward = bw_bmmAcc;
                 output._backward_ctx = ctx;
                 output.requires_grad = true;
             }
         }
 
-        fn bw_bmmAcc(
-            self: NDTensor(T),
-            device: DeviceReference,
-        ) !void {
+        fn bw_bmmAcc(self: NDTensor(T)) !void {
             const grad_C = self.grad orelse return error.NoGradient;
 
             const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
-            defer device.allocator.destroy(opts);
+            defer self.device.allocator.destroy(opts);
 
             const children = self.children orelse return error.NoChildren;
             const A = children[0].data;
@@ -669,36 +746,36 @@ pub fn NDTensor(comptime T: type) type {
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B'
-                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, true, device);
+                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, true);
                         // grad_B += A' * grad_C
-                        _ = try A._bmmAcc(grad_C, grad_B, 1.0, 1.0, true, false, device);
+                        _ = try A._bmmAcc(grad_C, grad_B, 1.0, 1.0, true, false);
                     },
                     .MATMUL_AtB => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B * grad_C'
-                        _ = try B._bmmAcc(self.grad.?, grad_A, 1.0, 1.0, false, true, device);
+                        _ = try B._bmmAcc(self.grad.?, grad_A, 1.0, 1.0, false, true);
                         // grad_B += A * grad_C
-                        _ = try A._bmmAcc(self.grad.?, grad_B, 1.0, 1.0, false, false, device);
+                        _ = try A._bmmAcc(self.grad.?, grad_B, 1.0, 1.0, false, false);
                     },
                     .MATMUL_ABt => {
                         // A Shape: (..., m, k)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B
-                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, false, device);
+                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, false);
                         // grad_B += grad_C' * A
-                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, true, false, device);
+                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, true, false);
                     },
                     .MATMUL_AtBt => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B' * grad_C'
-                        _ = try B._bmmAcc(grad_C, grad_A, 1.0, 1.0, true, true, device);
+                        _ = try B._bmmAcc(grad_C, grad_A, 1.0, 1.0, true, true);
                         // grad_B += grad_C * A'
-                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, false, true, device);
+                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, false, true);
                     },
                     else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
                 }
@@ -706,16 +783,18 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Dot product of two tensors. COM.
-        pub fn dot(self: *Self, other: *Self, device: DeviceReference) !*Self {
+        pub fn dot(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const dotBw = struct {
-                fn dotBwImpl(_self: Self, bw_device: DeviceReference) !void {
+                fn dotBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
-                    const grad_a = try b.data.mul(_self.grad.?, bw_device);
-                    defer grad_a.deinit(bw_device);
-                    const grad_b = try a.data.mul(_self.grad.?, bw_device);
-                    defer grad_b.deinit(bw_device);
+                    const grad_a = try b.data.mul(_self.grad.?, _self.device);
+                    defer grad_a.deinit(_self.device);
+                    const grad_b = try a.data.mul(_self.grad.?, _self.device);
+                    defer grad_b.deinit(_self.device);
                     _ = try a.grad.?._add(grad_a);
                     _ = try b.grad.?._add(grad_b);
                 }
@@ -726,7 +805,7 @@ pub fn NDTensor(comptime T: type) type {
                 .op = .DOT,
                 .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = dotBw,
             });
         }
@@ -738,54 +817,56 @@ pub fn NDTensor(comptime T: type) type {
         ///   - Moreover, we cannot just reshape to the correct shape.
         ///   - Until I see more instances where this is required it will be written manually
         ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
-        pub fn matvec(self: *Self, other: *Self, device: DeviceReference) !*Self {
+        pub fn matvec(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.isCompatible(other.device));
+
             const matvecBw = struct {
                 /// TODO: Use accumulation
-                fn matvecBwImpl(_self: Self, _device: DeviceReference) !void {
+                fn matvecBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     var A = children[0].data;
                     const x = children[1].data;
 
                     //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
-                    const grad_A = try _self.grad.?.outer(x, _device);
-                    defer grad_A.deinit(_device);
+                    const grad_A = try _self.grad.?.outer(x, _self.device);
+                    defer grad_A.deinit(_self.device);
                     _ = try children[0].grad.?._add(grad_A);
 
                     //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
-                    const grad_x = try A.matvec(_self.grad.?, true, _device);
-                    defer grad_x.deinit(_device);
+                    const grad_x = try A.matvec(_self.grad.?, true, _self.device);
+                    defer grad_x.deinit(_self.device);
                     _ = try children[1].grad.?._add(grad_x);
                 }
             }.matvecBwImpl;
 
-            const out = try device.allocator.create(Self);
+            const out = try self.device.allocator.create(Self);
             out.* = Self{
-                .data = try self.data.matvec(other.data, false, device),
+                .data = try self.data.matvec(other.data, false),
                 .op = .MATVEC,
-                .children = try device.allocator.dupe(*Self, &.{ self, other }),
-                .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, device) else null,
+                .children = try self.device.allocator.dupe(*Self, &.{ self, other }),
+                .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, self.device) else null,
                 .requires_grad = self.requiresGrad() or other.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = matvecBw,
             };
             return out;
         }
 
         /// Sum of all elements in the tensor. COM.
-        pub fn sum(self: *Self, device: DeviceReference) !*Self {
+        pub fn sum(self: *Self) !*Self {
             const sumBw = struct {
-                fn sumBwImpl(_self: NDTensor(T), _: DeviceReference) !void {
+                fn sumBwImpl(_self: NDTensor(T)) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const child = children[0];
                     _ = try child.grad.?._add(_self.grad.?);
                 }
             }.sumBwImpl;
             return try createDependent(.{
-                .data = try self.data.sum(device),
+                .data = try self.data.sum(self.device),
                 .op = .SUM,
                 .children = &.{self},
                 .requires_grad = self.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = sumBw,
             });
         }
@@ -793,14 +874,14 @@ pub fn NDTensor(comptime T: type) type {
         pub fn maxOverDim(self: *Self, device: DeviceReference, opts: MaxOverDimOptions) !*Self {
             const maxBackward = struct {
                 // NOTE: See gather() comments, same apply here
-                fn bwImpl(_self: Self, bw_device: DeviceReference) !void {
+                fn bwImpl(_self: Self) !void {
                     const bw_children = _self.children orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
                     const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
                     const offsets: []usize = std.mem.span(raw_offsets);
                     for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
-                    bw_device.memFree(offsets);
+                    _self.device.memFree(offsets);
                 }
             }.bwImpl;
 
@@ -822,13 +903,13 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
-                fn bwImpl(bw_tensor: NDTensor(T), _: DeviceReference) !void {
+                fn bwImpl(bw_tensor: NDTensor(T)) !void {
                     const bw_children = bw_tensor.children orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
                     const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
                     // how am i expected to free this, unknown len
-                    // defer bw_device.raw(offsets); // FIXME: just occuring to me the problem with this, if bw_device != fwd_allocator
+                    // defer _self.device.raw(offsets); // FIXME: just occuring to me the problem with this, if _self.device != fwd_allocator
 
                     // bw_tensor must/should be the same len as indices used to index (note that offsets is a raw c ptr without a len)
                     // std.debug.assert(offsets.len == bw_tensor.data.data.len); // can make this a real check when its a  null term alloc
@@ -858,12 +939,12 @@ pub fn NDTensor(comptime T: type) type {
             self._backward_ctx = ctx;
         }
 
-        pub fn backward(self: Self, device: DeviceReference) !void {
+        pub fn backward(self: Self) !void {
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
             if (!self.requires_grad) return;
             if (self._backward) |f| {
-                try f(self, device);
+                try f(self);
                 return;
             }
             if (self.op) |op| {
@@ -1167,7 +1248,7 @@ test "tensor/GraphManager/matmul_backward square" {
     var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
     t3_trans_ab.grad.?.fill(1.0, device);
-    try gm.backward(t3_trans_ab, device);
+    try gm.backward(t3_trans_ab);
 
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
@@ -1198,7 +1279,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
         t1.acquire();
         t2.acquire();
         t3.grad.?.fill(1.0, device);
-        try gm.backward(t3, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };

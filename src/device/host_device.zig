@@ -2,15 +2,11 @@ const std = @import("std");
 const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 
-// TODO: @andrewCodeDev review these changes, helped with LSP for me >> START
-// default reference if cuda device is not specified
 fn host_reference(self: *HostDevice) DeviceReference {
-    return .{ .ptrs = DeviceReference.DevicePtrs{ .host = self }, .allocator = self.allocator };
+    return self;
 }
 
-pub const DeviceReference = @import("device_reference.zig").DeviceReference(HostDevice);
-// pub const DeviceReference = *HostDevice;
-// TODO: @andrewCodeDev review these changes, helped with LSP for me << END
+pub const DeviceReference = *HostDevice;
 
 const using_mkl = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -225,6 +221,10 @@ pub const HostDevice = struct {
     // since host is it's own reference when compiling for HOST only,
     // this is always trivially true. Only for debug compatibility.
     pub inline fn isCompatible(_: *const HostDevice, _: *const HostDevice) bool {
+        return true;
+    }
+
+    pub fn isHost(_: DeviceReference) bool {
         return true;
     }
 

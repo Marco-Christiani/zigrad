@@ -58,13 +58,13 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
 }
 
 /// Runs over last dim.
-pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     var sum_loss: T = 0;
     const epsilon: T = 1e-7;
     if (y_pred.data.shape.len() > 2) return error.NotSupported;
     const batch_size = if (y_pred.data.shape.len() > 1) try y_pred.data.shape.get(0) else 1;
     const last_dim = if (y_pred.data.shape.len() > 1) y_pred.data.shape.shape.len - 1 else 0;
-    const sm_preds = try _softmax_fwd(T, y_pred, last_dim, device);
+    const sm_preds = try _softmax_fwd(T, y_pred, last_dim);
 
     for (sm_preds.data.data, 0..) |pred, i| {
         const target = y.data.data[i];
@@ -74,7 +74,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     const mean_loss = sum_loss / @as(T, @floatFromInt(batch_size));
 
     const bw_fn = struct {
-        fn backward(bw_tensor: NDTensor(T), _: DeviceReference) !void {
+        fn backward(bw_tensor: NDTensor(T)) !void {
             const bw_ctx: *NDTensor(T) = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
             defer bw_ctx.deinit();
             const bw_self_children = bw_tensor.children orelse return error.NoChildren;
@@ -91,28 +91,28 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     }.backward;
 
     return try NDTensor(T).createDependent(.{
-        .data = try NDArray(T).init(&.{ mean_loss }, &.{ 1 }, device),
+        .data = try NDArray(T).init(&.{mean_loss}, &.{1}, y_pred.device),
         .op = null,
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
         .requires_grad = true,
-        .device = device,
+        .device = y_pred.device,
         ._backward = bw_fn,
         ._backward_ctx = sm_preds, // no need to copy
     });
 }
 
 /// Relies on autograd, operates on the flat data.
-pub fn ag_softmax_1d(T: type, input: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    const max_val = try input.max(device);
-    const exp_input = try (try input.sub(max_val, device)).exp(device);
-    const sum = try exp_input.sum(device);
-    return try exp_input.div(sum, device);
+pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
+    const max_val = try input.max();
+    const exp_input = try (try input.sub(max_val)).exp();
+    const sum = try exp_input.sum();
+    return try exp_input.div(sum);
 }
 
 // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
 // mutate a view into result by directly operating on the backing ndarray
-fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
+fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
     const shape = input.data.shape.shape;
     if (dim >= shape.len) return error.InvalidDimension;
 
@@ -120,12 +120,12 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize, device: DeviceReferenc
     const total_size = input.data.data.len;
     const outer_size = @divExact(total_size, dim_size);
 
-    var result = try input.clone(device);
+    var result = try input.clone();
     errdefer result.deinit();
 
     // TODO: use shape methods, or prod.
-    var strides = try device.allocator.alloc(usize, shape.len);
-    defer device.allocator.free(strides);
+    var strides = try input.device.allocator.alloc(usize, shape.len);
+    defer input.device.allocator.free(strides);
     var stride: usize = 1;
     var i: usize = shape.len;
     while (i > 0) {
@@ -201,7 +201,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
 
     return try NDTensor(T).createDependent(.{
         .data = result.data,
-        .children = &.{ input },
+        .children = &.{input},
         .label = "softmax",
         .device = device,
         .requires_grad = true,
@@ -253,7 +253,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     beta_ctx.* = beta;
 
     return try NDTensor(T).createDependent(.{
-        .data = try NDArray(T).init(&.{ loss }, &.{ 1 }, device),
+        .data = try NDArray(T).init(&.{loss}, &.{1}, device),
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
         .requires_grad = true,

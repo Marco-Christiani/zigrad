@@ -160,7 +160,6 @@ const MnistModel = struct {
     }
 };
 
-
 const MnistDataset = struct {
     images: []*NDTensor(T),
     labels: []*NDTensor(T),
@@ -230,7 +229,7 @@ const MnistDataset = struct {
 
 pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     // TODO: When we get caching finalized for the HostDevice
-    // and ensure freeing on the backward pass, we can 
+    // and ensure freeing on the backward pass, we can
     // move these to a single HostDevice. Right now, multiple
     // device instances are created as a hack to for support.
     var model_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
@@ -242,9 +241,6 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     var fw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer fw_arena.deinit();
 
-    var fwd_cpu = zg.device.HostDevice.init(model_arena.allocator());
-    defer fwd_cpu.deinit();
-
     var dataset_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer dataset_arena.deinit();
 
@@ -253,9 +249,6 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
 
     // bw_arena is torn down before eval
     var bw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-
-    var bw_cpu = zg.device.HostDevice.init(model_arena.allocator());
-    defer bw_cpu.deinit();
 
     var model = try MnistModel.initSimple(model_cpu.reference()); // 109_386
     // var model = try MnistModel.initSimple2(model_arena.allocator()); // 717_210
@@ -296,8 +289,6 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
             const loss = try trainer.trainStep(
                 image.setLabel("image_batch"),
                 label.setLabel("label_batch"),
-                fwd_cpu.reference(),
-                bw_cpu.reference(),
             );
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
@@ -329,7 +320,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     log.info("Training complete ({d} epochs). [{d}ms]", .{ num_epochs, train_time_ms });
 
     // model.model.eval() // TODO: model.eval()
-    const train_eval = try evalMnist(fwd_cpu.reference(), &fw_arena, model, train_dataset);
+    const train_eval = try evalMnist(&fw_arena, model, train_dataset);
     const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
@@ -339,7 +330,7 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
     const test_dataset = try MnistDataset.load(dataset_cpu.reference(), test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
-    const test_eval = try evalMnist(fwd_cpu.reference(), &fw_arena, model, test_dataset);
+    const test_eval = try evalMnist(&fw_arena, model, test_dataset);
     const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
     log.info("Test acc: {d:.2} (n={d}) [{d}ms]", .{ test_acc * 100, test_eval.n, eval_test_time_ms });
@@ -349,9 +340,8 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
 }
 
 fn evalMnist(
-    device: DeviceReference,
     arena: *std.heap.ArenaAllocator,
-    model: MnistModel, 
+    model: MnistModel,
     dataset: MnistDataset,
 ) !struct { correct: f32, n: u32 } {
     zg.rt_grad_enabled = false;
@@ -361,7 +351,7 @@ fn evalMnist(
     var timer = try std.time.Timer.start();
     for (dataset.images, dataset.labels) |image, label| {
         timer.reset();
-        const output = try model.model.forward(image, device);
+        const output = try model.model.forward(image);
         const batch_n = try output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;

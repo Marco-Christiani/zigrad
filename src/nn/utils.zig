@@ -128,7 +128,7 @@ pub fn printD2(
     try visited.put(node, {});
 
     if (node.children) |children| {
-        for (children) |elem| {
+        write_loop: for (children) |elem| {
             const elem_label = try label_gen.getOrCreateLabel(elem, elem.label);
             try writer.print("{s}{s}{s}", .{ node_label, opts.arrow_symbol, elem_label });
             if (node.op) |op| {
@@ -143,6 +143,7 @@ pub fn printD2(
                     .MAX => opts.max_symbol,
                     .EXP => opts.exp_symbol,
                     .RESHAPE => opts.reshape_symbol,
+                    .TRANSFER => continue :write_loop, // skip
                     else => "?",
                     // else => if (node._backward) |bwfn| @typeInfo(bwfn),
                 };
