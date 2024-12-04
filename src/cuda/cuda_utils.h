@@ -3,6 +3,10 @@
 
 #include "decls.h"
 
+enum UPDATE_OP {
+  UPD_SET, UPD_ADD, UPD_SUB
+};
+
 EXTERN_C void initDevice(unsigned);
 EXTERN_C void* memAlloc(len_t N, void*);
 EXTERN_C void memcpyHtoD(void* dptr, void const* hptr, len_t N, void*);
@@ -21,5 +25,6 @@ EXTERN_C void* initCublasHandle(void* stream);
 EXTERN_C void deinitCublasHandle(void* handle);
 EXTERN_C void* initCudnnHandle(void* stream);
 EXTERN_C void deinitCudnnHandle(void* handle);
+EXTERN_C void memUpdateIndex(dtype id, void* dst, const void* src, const len_t* idx, UPDATE_OP upd, void* stream);
 
 #endif

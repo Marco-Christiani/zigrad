@@ -95,6 +95,33 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
+        pub fn zeros(shape: []const usize, requires_grad: bool, device: DeviceReference) !*Self {
+            const self = try device.allocator.create(Self);
+            self.* = Self{
+                .data = try dtype.zeros(shape, device),
+                .grad = if (requires_grad) try dtype.zeros(shape, device) else null,
+                .requires_grad = requires_grad,
+                .device = device,
+            };
+            return self;
+        }
+
+        pub fn getShape(self: Self) []const usize {
+            return self.data.shape.shape;
+        }
+
+        pub fn getSize(self: Self) []const usize {
+            return self.data.data.len;
+        }
+
+        pub fn getStrides(self: Self) []const usize {
+            return self.data.shape.strides;
+        }
+
+        pub fn getData(self: Self) []T {
+            return self.data.data;
+        }
+
         pub fn cast(self: *Self, K: type) !*NDTensor(K) {
             _ = self;
             @compileError("Not implemented");
@@ -631,23 +658,25 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *Self) !*Self {
-            const max_val = try self.data.max(self.device);
+            const max_mem = try dtype.empty(&.{1}, self.device);
+            const max_idx = try self.device.memCreate(i32);
+
+            self.device.blas.maxForward(T, self.getData(), max_mem.data, max_idx);
+
             const maxBw = struct {
-                fn maxBwImpl(_self: Self, _: DeviceReference) !void {
+                fn maxBwImpl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const child = children[0];
-                    const bw_max_val = _self.data.data[0];
-                    for (child.data.data, 0..) |val, i| {
-                        if (val == bw_max_val) {
-                            child.grad.?.data[i] += _self.grad.?.data[0];
-                        }
-                    }
+                    const iptr: *i32 = @ptrCast(@alignCast(_self._backward_ctx.?));
+                    self.device.blas.maxReverse(T, _self.grad.?.data.data, child.grad.?.data.data, iptr);
+                    self.device.memDestroy(iptr);
                 }
             }.maxBwImpl;
+
             return try createDependent(.{
-                .data = max_val,
+                .data = max_mem,
                 .op = .MAX,
-                .children = &[_]*const Self{self},
+                .children = &.{self},
                 .requires_grad = self.requires_grad,
                 .device = self.device,
                 ._backward = maxBw,
@@ -791,12 +820,9 @@ pub fn NDTensor(comptime T: type) type {
                     const children = _self.children orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
-                    const grad_a = try b.data.mul(_self.grad.?, _self.device);
-                    defer grad_a.deinit(_self.device);
-                    const grad_b = try a.data.mul(_self.grad.?, _self.device);
-                    defer grad_b.deinit(_self.device);
-                    _ = try a.grad.?._add(grad_a);
-                    _ = try b.grad.?._add(grad_b);
+                    const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
+                    _self.device.blas.axpy(T, a.getData(), b.grad.?.data, gscalar);
+                    _self.device.blas.axpy(T, b.getData(), b.grad.?.data, gscalar);
                 }
             }.dotBwImpl;
 
