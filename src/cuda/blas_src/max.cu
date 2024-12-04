@@ -10,7 +10,7 @@ __global__ void __max_fwd_set(const T* src, T* dst, const int* idx) {
 
 template <typename T>
 __global__ void __max_bwd_set(const T* y_grd, T* x_grd, const int* idx) {
-  x_grd[*idx] = *y_grd;
+  x_grd[*idx] += *y_grd;
 }
 
 extern "C" void max_forward(
