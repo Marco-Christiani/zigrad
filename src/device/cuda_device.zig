@@ -324,39 +324,6 @@ pub const CudaDevice = struct {
         cuda.memSequence(dtype(T), slice.ptr, slice.len, &_init, &_step, self.context.stream);
     }
 
-    pub fn memSetIndex(
-        self: CudaDevice,
-        comptime T: type,
-        src: *const T,
-        dst: []T,
-        idx: *const usize,
-    ) void {
-        std.debug.assert(idx < @min(src.len, dst.len));
-        cuda.memUpdateIndex(dtype(T), dst.ptr, src.ptr, idx, cuda.UPD_SET, self.context.stream);
-    }
-
-    pub fn memAddIndex(
-        self: CudaDevice,
-        comptime T: type,
-        src: []const T,
-        dst: []T,
-        idx: *const usize,
-    ) void {
-        std.debug.assert(idx < @min(src.len, dst.len));
-        cuda.memUpdateIndex(dtype(T), dst.ptr, src.ptr, idx, cuda.UPD_ADD, self.context.stream);
-    }
-
-    pub fn memSubIndex(
-        self: CudaDevice,
-        comptime T: type,
-        src: []const T,
-        dst: []T,
-        idx: *const usize,
-    ) void {
-        std.debug.assert(idx < @min(src.len, dst.len));
-        cuda.memUpdateIndex(dtype(T), dst.ptr, src.ptr, idx, cuda.UPD_SUB, self.context.stream);
-    }
-
     const Direction = enum { HtoD, DtoH, DtoD };
 
     pub fn memTransfer(
