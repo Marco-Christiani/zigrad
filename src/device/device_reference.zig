@@ -6,9 +6,15 @@ pub fn Blas(comptime Parent: type) type {
         const Self = @This();
 
         /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
-        pub fn dot(self: *const Self, T: type, x: []const T, y: []const T) T {
+        pub fn dot(
+            self: *const Blas,
+            T: type,
+            x: []const T,
+            y: []const T,
+            z: []T,
+        ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.dot(T, x, y),
+                inline else => |dev| dev.blas.dot(T, x, y, z),
             };
         }
 
@@ -158,6 +164,18 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         pub fn memFree(self: Self, slice: anytype) void {
             return switch (self.ptrs) {
                 inline else => |dev| dev.memFree(slice),
+            };
+        }
+
+        pub fn memCreate(self: Self, comptime T: type) Error!*T {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.memCreate(T),
+            };
+        }
+
+        pub fn memDestroy(self: Self, ptr: anytype) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.memFree(ptr),
             };
         }
 

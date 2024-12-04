@@ -32,7 +32,7 @@ pub fn NDArray(comptime T: type) type {
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = try device.memDupe(T, values),
-                .shape = try Shape.init(shape orelse &[_]usize{values.len}, device.allocator),
+                .shape = try Shape.init(shape orelse &.{values.len}, device.allocator),
             };
             if (result.shape.size() != result.data.len) {
                 log.err("Invalid shape: result.shape.size()={d} result.data.len={d}", .{ result.shape.size(), result.data.len });
@@ -370,8 +370,11 @@ pub fn NDArray(comptime T: type) type {
 
         /// COM.
         pub fn max(self: *const Self, device: DeviceReference) !*Self {
-            if (self.data.len == 0) return error.EmptyArray;
-            return Self.init(&[_]T{std.mem.max(T, self.data)}, null, device);
+            const max_arr = try Self.empty(&.{1}, device);
+            const max_idx = try device.memCreate(i32);
+            defer device.memDestroy(max_idx);
+            device.blas.maxForward(T, self.data, max_arr.data, max_idx);
+            return max_arr;
         }
 
         // TODO: naive
@@ -658,9 +661,9 @@ pub fn NDArray(comptime T: type) type {
         pub fn dot(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             if (self.shape.len() > 1 or other.shape.len() > 1) std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
             if (self.data.len != other.data.len) std.debug.panic("Incompatible lengths for dot product: {d} and {d}\n", .{ self.data.len, other.data.len });
-
-            const output: T = device.blas.dot(T, self.data, other.data);
-            return try Self.init(&[_]T{output}, &[_]usize{1}, device);
+            const out_arr = try Self.empty(&.{1}, device);
+            device.blas.dot(T, self.data, other.data, out_arr.data);
+            return self;
         }
 
         pub fn outer(self: *const Self, other: *const Self, device: DeviceReference) !*Self {

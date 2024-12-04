@@ -63,12 +63,21 @@ EXTERN_C void nrm2(
   len_t stride
 );
 
-EXTERN_C void reduce_max(
+EXTERN_C void max_forward(
   dtype id,
-  void* stream,
-  const void* a_data,
-  void* result,
+  void* cublas_handle,
+  const void* x,
+  void* y,
+  int* idx,
   len_t n
+);
+
+EXTERN_C void max_reverse(
+  dtype id,
+  void* cublas_handle,
+  const void* y_grd,
+  void* x_grd,
+  int* idx
 );
 
 EXTERN_C void reduce_sum(
@@ -90,12 +99,10 @@ EXTERN_C void scale(
 EXTERN_C void axpy(
   dtype id,
   void* cublas_handle,
-  const void* a_data,
-  void* b_data,
+  const void* x,
+  void* y,
   len_t n, 
-  len_t inca,
-  len_t incb,
-  double alpha
+  const void* alpha
 );
 
 EXTERN_C void addition(

@@ -30,10 +30,9 @@ pub const Blas = struct {
         T: type,
         x: []const T,
         y: []const T,
-    ) T {
-        var result: T = 0.0;
-        cuda.dot(dtype(T), self.stream(), x.ptr, y.ptr, &result, x.len);
-        return result;
+        z: []T,
+    ) void {
+        cuda.dot(dtype(T), self.cublas(), x.ptr, y.ptr, z.ptr, x.len);
     }
 
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
@@ -98,14 +97,24 @@ pub const Blas = struct {
         return std.math.sqrt(self.dot(T, x, x));
     }
 
-    pub fn max(
+    pub fn maxForward(
         self: *const Blas,
         T: type,
-        x: []const T,
-    ) T {
-        var result: T = -std.math.inf(T);
-        cuda.reduce_max(dtype(T), self.stream(), x.ptr, &result, x.len);
-        return result;
+        src: []const T,
+        dst: []T,
+        idx: *i32,
+    ) void {
+        cuda.max_forward(dtype(T), self.cublas(), src.ptr, dst.ptr, idx, src.len);
+    }
+
+    pub fn maxReverse(
+        self: *const Blas,
+        T: type,
+        y_grd: []const T,
+        x_grd: []T,
+        idx: *i32,
+    ) void {
+        cuda.max_reverse(dtype(T), self.cublas(), y_grd.ptr, x_grd.ptr, idx);
     }
 
     pub fn sum(
@@ -132,9 +141,9 @@ pub const Blas = struct {
         comptime T: type,
         x: []const T,
         y: []T,
-        alpha: T,
+        alpha: *const T,
     ) void {
-        cuda.axpy(dtype(T), self.cublas(), x.ptr, y.ptr, x.len, 1, 1, alpha);
+        cuda.axpy(dtype(T), self.cublas(), x.ptr, y.ptr, x.len, alpha);
     }
 
     fn cublas(self: *const Blas) *anyopaque {
@@ -294,6 +303,16 @@ pub const CudaDevice = struct {
         }
     }
 
+    pub fn memCreate(self: HostDevice, comptime T: type) Error!*T {
+        const raw_ptr = cuda.memAlloc(@sizeOf(T), self.context.stream);
+        const dev_ptr: *T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
+        return dev_ptr;
+    }
+
+    pub fn memDestroy(self: HostDevice, ptr: anytype) void {
+        cuda.memFree(@constCast(ptr), self.context.stream);
+    }
+
     pub fn memFill(self: CudaDevice, comptime T: type, slice: []T, value: T) void {
         var _value = value; // move from register memory
         cuda.memFill(dtype(T), slice.ptr, slice.len, &_value, self.context.stream);
@@ -303,6 +322,39 @@ pub const CudaDevice = struct {
         var _init = initial; // move from register memory
         var _step = step; // move from register memory
         cuda.memSequence(dtype(T), slice.ptr, slice.len, &_init, &_step, self.context.stream);
+    }
+
+    pub fn memSetIndex(
+        self: CudaDevice,
+        comptime T: type,
+        src: *const T,
+        dst: []T,
+        idx: *const usize,
+    ) void {
+        std.debug.assert(idx < @min(src.len, dst.len));
+        cuda.memUpdateIndex(dtype(T), dst.ptr, src.ptr, idx, cuda.UPD_SET, self.context.stream);
+    }
+
+    pub fn memAddIndex(
+        self: CudaDevice,
+        comptime T: type,
+        src: []const T,
+        dst: []T,
+        idx: *const usize,
+    ) void {
+        std.debug.assert(idx < @min(src.len, dst.len));
+        cuda.memUpdateIndex(dtype(T), dst.ptr, src.ptr, idx, cuda.UPD_ADD, self.context.stream);
+    }
+
+    pub fn memSubIndex(
+        self: CudaDevice,
+        comptime T: type,
+        src: []const T,
+        dst: []T,
+        idx: *const usize,
+    ) void {
+        std.debug.assert(idx < @min(src.len, dst.len));
+        cuda.memUpdateIndex(dtype(T), dst.ptr, src.ptr, idx, cuda.UPD_SUB, self.context.stream);
     }
 
     const Direction = enum { HtoD, DtoH, DtoD };

@@ -31,10 +31,11 @@ pub const Blas = struct {
         T: type,
         x: []const T,
         y: []const T,
+        z: []T,
     ) T {
         switch (T) {
-            f32 => return c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            f64 => return c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
             else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
         }
     }
@@ -123,16 +124,31 @@ pub const Blas = struct {
         };
     }
 
-    pub fn max(
+    pub fn maxForward(
         _: Blas,
         T: type,
-        x: []const T,
-    ) T {
-        switch (T) {
-            f32 => return c.cblas_isamax(@intCast(x.len), x.ptr, 1),
-            f64 => return c.cblas_idamax(@intCast(x.len), x.ptr, 1),
+        src: []const T,
+        dst: []T,
+        idx: *i32,
+    ) void {
+        const _idx = switch (T) {
+            f32 => c.cblas_isamax(@intCast(src.len), src.ptr, 1),
+            f64 => c.cblas_idamax(@intCast(src.len), src.ptr, 1),
             else => @compileError("Unsupported type for BLAS max"),
-        }
+        };
+        idx.* = @intCast(_idx);
+        dst[0] = src[_idx];
+    }
+
+    pub fn maxReverse(
+        _: Blas,
+        T: type,
+        y_grd: []const T,
+        x_grd: []T,
+        idx: *i32,
+    ) void {
+        const _idx: usize = @intCast(idx.*);
+        x_grd[0] += y_grd[_idx];
     }
 
     pub fn sum(
@@ -163,14 +179,13 @@ pub const Blas = struct {
     pub fn axpy(
         _: Blas,
         comptime T: type,
-        n: usize,
         x: []const T,
         y: []T,
-        alpha: T,
+        alpha: *const T,
     ) void {
         switch (T) {
-            f32 => c.cblas_saxpy(@intCast(n), alpha, x.ptr, 1, y.ptr, 1),
-            f64 => c.cblas_daxpy(@intCast(n), alpha, x.ptr, 1, y.ptr, 1),
+            f32 => c.cblas_saxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
+            f64 => c.cblas_daxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
             else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
         }
     }
@@ -197,6 +212,14 @@ pub const HostDevice = struct {
 
     pub fn memFree(self: HostDevice, slice: anytype) void {
         return self.allocator.free(slice);
+    }
+
+    pub fn memCreate(self: HostDevice, comptime T: type) Error!*T {
+        return self.allocator.create(T);
+    }
+
+    pub fn memDestroy(self: HostDevice, slice: anytype) void {
+        return self.allocator.destroy(slice);
     }
 
     pub fn memDupe(self: HostDevice, comptime T: type, src: []const T) Error![]T {

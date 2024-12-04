@@ -8,40 +8,27 @@
 
 extern "C" void dot(
   dtype id,
-  void* stream,
-  const void* a_data,
-  const void* b_data,
-  void* result,
+  void* handle,
+  const void* x,
+  const void* y,
+  void* z,
   len_t n
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _handle = static_cast<cublasHandle_t>(handle);
+  const auto _n = static_cast<int>(n);
 
   switch (id) {
     case SINGLE: {
-      const auto iter_a = static_cast<const float*>(a_data);
-      const auto iter_b = static_cast<const float*>(b_data);
-      const auto _result = static_cast<float*>(result);
-      *_result = thrust::inner_product(
-        thrust::cuda::par.on(_stream), 
-        iter_a,  
-        iter_a + n,
-        iter_b,
-        static_cast<float>(0)
-      );
-      return;
+      const auto _x = static_cast<const float*>(x);
+      const auto _y = static_cast<const float*>(y);
+      const auto _z = static_cast<float*>(z);
+      return CUBLAS_ASSERT(cublasSdot(_handle, _n, _x, 1, _y, 1, _z));
     }
     case DOUBLE: {
-      const auto iter_a = static_cast<const double*>(a_data);
-      const auto iter_b = static_cast<const double*>(b_data);
-      const auto _result = static_cast<double*>(result);
-      *_result = thrust::inner_product(
-        thrust::cuda::par.on(_stream), 
-        iter_a,  
-        iter_a + n,
-        iter_b,
-        static_cast<double>(0)
-      );
-      return;
+      const auto _x = static_cast<const double*>(x);
+      const auto _y = static_cast<const double*>(y);
+      const auto _z = static_cast<double*>(z);
+      return CUBLAS_ASSERT(cublasDdot(_handle, _n, _x, 1, _y, 1, _z));
     }
   }
 }
