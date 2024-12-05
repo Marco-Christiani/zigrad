@@ -11,14 +11,14 @@ const GraphManager = zg.GraphManager;
 
 /// Relies on autograd, operates on the flat data.
 pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    var diff = (try y_pred.sub(y, device)).setLabel("diff");
+    var diff = (try y_pred.sub(y)).setLabel("diff");
     const diff2 = (try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, device)).setLabel("diff2");
     // const diff2 = (try y_pred.sub(y, allocator)).setLabel("diff2");
-    const sq_diff = (try diff.mul(diff2, device)).setLabel("sq_diff");
-    const sum_sq_diff = (try sq_diff.sum(device)).setLabel("sum_sq_diff");
+    const sq_diff = (try diff.mul(diff2)).setLabel("sq_diff");
+    const sum_sq_diff = (try sq_diff.sum()).setLabel("sum_sq_diff");
     const coef = @as(T, @floatFromInt(y.data.data.len));
     const coef_tensor = try NDTensor(T).init(&[_]T{coef}, null, true, device);
-    return (try sum_sq_diff.div(coef_tensor.setLabel("coef"), device)).setLabel("mse");
+    return (try sum_sq_diff.div(coef_tensor.setLabel("coef"))).setLabel("mse");
 }
 
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
@@ -226,12 +226,12 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     const loss = sum_loss / n;
 
     const bw_fn = struct {
-        fn backward(tensor: NDTensor(T), bw_device: DeviceReference) !void {
+        fn backward(tensor: NDTensor(T)) !void {
             const self_children = tensor.children orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];
             const _bw_ctx: *T = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
-            defer bw_device.allocator.destroy(_bw_ctx);
+            defer tensor.device.memDestroy(_bw_ctx);
             const _beta = _bw_ctx.*;
 
             const _n = @as(T, @floatFromInt(_y.data.data.len));

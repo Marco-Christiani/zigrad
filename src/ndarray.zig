@@ -660,12 +660,12 @@ pub fn NDArray(comptime T: type) type {
             // const C = try A.expandAs(B, alloc);
         }
 
-        pub fn dot(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
+        pub fn dot(self: *Self, other: *const Self, device: DeviceReference) !*Self {
             if (self.shape.len() > 1 or other.shape.len() > 1) std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
             if (self.data.len != other.data.len) std.debug.panic("Incompatible lengths for dot product: {d} and {d}\n", .{ self.data.len, other.data.len });
             const out_arr = try Self.empty(&.{1}, device);
             device.blas.dot(T, self.data, other.data, out_arr.data);
-            return self;
+            return out_arr;
         }
 
         pub fn outer(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
@@ -876,12 +876,16 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        pub fn l2_norm(self: *const Self, device: DeviceReference) T {
-            return device.blas.nrm2(T, self.data);
+        pub fn l2_norm(self: *const Self, device: DeviceReference) !*Self {
+            const result = try Self.empty(&.{1}, device);
+            device.blas.nrm2(T, self.data, result.data, 1);
+            return result;
         }
 
         pub fn clip_norm(self: *const Self, max_norm: T, delta: T, device: DeviceReference) void {
-            const norm = self.l2_norm(device);
+            const norm_ = device.memAlloc(T, 1) catch @panic("OOM");
+            device.blas.nrm2(T, self.data, norm_, 1);
+            const norm = norm_[0];
             if (norm > max_norm) {
                 const scale = max_norm / (norm + delta);
                 for (self.data) |*value| {
@@ -954,7 +958,9 @@ test "NDArray.clip_norm" {
     var array = try Array.init(&[_]T{ 2, 2, 1, 4 }, shape, device.reference());
     defer array.deinit(device.reference());
 
-    const initial_norm = array.l2_norm(device.reference());
+    const initial_norm_ndarray = try array.l2_norm(device.reference());
+    try std.testing.expectEqual(1, initial_norm_ndarray.size());
+    const initial_norm = initial_norm_ndarray.get(&.{0});
     try std.testing.expectEqual(@as(T, 5.0), initial_norm);
 
     const max_norm: T = 4.0;
@@ -962,7 +968,8 @@ test "NDArray.clip_norm" {
 
     array.clip_norm(max_norm, delta, device.reference());
 
-    const clipped_norm = array.l2_norm(device.reference());
+    const clipped_norm_ndarray = try array.l2_norm(device.reference());
+    const clipped_norm = clipped_norm_ndarray.get(&.{0});
     try std.testing.expect(clipped_norm <= max_norm);
 
     const expected_values = &[_]T{
@@ -1028,10 +1035,11 @@ test "NDArray.dot" {
     const T = f64;
     const Array = NDArray(T);
 
-    const a = try Array.init(@constCast(&[_]T{ 1, 2, 3 }), null, device);
-    const b = try Array.init(@constCast(&[_]T{ 1, 1, 1 }), null, device);
+    const a = try Array.init(&.{ 1, 2, 3 }, null, device);
+    const b = try Array.init(&.{ 1, 1, 1 }, null, device);
     const result = try a.dot(b, device);
-    const expected = Array.init(&[_]T{6}, null, device);
+    const expected = Array.init(&.{6}, null, device);
+    std.debug.print("dot result: {d}\n", .{result.data});
     try std.testing.expectEqualDeep(expected, result);
 }
 
