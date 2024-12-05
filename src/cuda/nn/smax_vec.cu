@@ -10,7 +10,8 @@ extern "C" void smax_vec_forward(
   void* cudnn_handle,
   const void* x,
   void* y,
-  len_t n
+  len_t n,
+  smaxtype op
 ) {
   const auto _cudnn_handle = static_cast<cudnnHandle_t>(cudnn_handle);
   const int _n = static_cast<int>(n);
@@ -25,7 +26,7 @@ extern "C" void smax_vec_forward(
       const float beta = 0.0f;
       return CUDNN_ASSERT(cudnnSoftmaxForward(
         _cudnn_handle,
-        CUDNN_SOFTMAX_ACCURATE,
+        SMAX_OP_TYPE(op),
         CUDNN_SOFTMAX_MODE_INSTANCE,
         &alpha, desc, x,
         &beta, desc, y
@@ -36,7 +37,7 @@ extern "C" void smax_vec_forward(
       const double beta = 0.0;
       return CUDNN_ASSERT(cudnnSoftmaxForward(
         _cudnn_handle,
-        CUDNN_SOFTMAX_ACCURATE,
+        SMAX_OP_TYPE(op),
         CUDNN_SOFTMAX_MODE_INSTANCE,
         &alpha, desc, x,
         &beta, desc, y

@@ -13,4 +13,15 @@ typedef unsigned char dtype;
 static const dtype SINGLE = 0;
 static const dtype DOUBLE = 1;
 
+
+typedef unsigned char reduxtype;
+static const reduxtype RDX_NONE = 0;
+static const reduxtype RDX_MEAN = 1;
+static const reduxtype RDX_SUM = 2;
+
+typedef unsigned char smaxtype;
+static const smaxtype SMAX_FAST = 0;
+static const smaxtype SMAX_MAX = 1;
+static const smaxtype SMAX_LOG = 2;
+
 #endif

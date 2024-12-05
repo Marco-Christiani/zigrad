@@ -4,7 +4,7 @@
 #include "nn_utils.cu"
 
 template <typename T>
-class ReluBwdFunctor {
+struct ReluBwdFunctor {
     __device__
     thrust::tuple<T, T> operator()(thrust::tuple<T, T> tup, T x_grd) const {
         return ((thrust::get<0>(tup) > T{0}) ? thrust::get<1>(tup) : T{0}) + x_grd;

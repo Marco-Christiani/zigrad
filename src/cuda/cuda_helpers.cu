@@ -7,6 +7,9 @@
 #include "cuda_includes.cu"
 #include "decls.h"
 
+typedef float f32;
+typedef double f64;
+
 inline CUstream get_stream(void* context) {
   return static_cast<CUstream>(context);
 }

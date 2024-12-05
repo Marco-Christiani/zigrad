@@ -821,8 +821,8 @@ pub fn NDTensor(comptime T: type) type {
                     var a = children[0];
                     var b = children[1];
                     const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
-                    _self.device.blas.axpy(T, a.getData(), a.grad.?.data, gscalar);
-                    _self.device.blas.axpy(T, b.getData(), b.grad.?.data, gscalar);
+                    _self.device.blas.axpy(T, b.getData(), a.grad.?.data, gscalar);
+                    _self.device.blas.axpy(T, a.getData(), b.grad.?.data, gscalar);
                 }
             }.dotBwImpl;
 

@@ -158,11 +158,11 @@ pub const Blas = struct {
         _: Blas,
         T: type,
         x: []const T,
-        z: []T,
+        y: []T,
     ) void {
         switch (T) {
-            f32 => z[0] = c.cblas_sasum(@intCast(x.len), x.ptr, 1),
-            f64 => z[0] = c.cblas_dasum(@intCast(x.len), x.ptr, 1),
+            f32 => y[0] = c.cblas_sasum(@intCast(x.len), x.ptr, 1),
+            f64 => y[0] = c.cblas_dasum(@intCast(x.len), x.ptr, 1),
             else => @compileError("Unsupported type for BLAS sum"),
         }
     }
