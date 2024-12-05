@@ -121,10 +121,9 @@ pub const Blas = struct {
         self: *const Blas,
         T: type,
         x: []const T,
+        y: []T,
     ) T {
-        var result: T = 0.0;
-        cuda.reduce_sum(dtype(T), self.stream(), x.ptr, &result, x.len);
-        return result;
+        cuda.reduce_sum(dtype(T), self.cublas(), x.ptr, y.ptr, x.len);
     }
 
     pub fn scale(

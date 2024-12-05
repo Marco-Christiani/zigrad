@@ -5,37 +5,24 @@
 
 EXTERN_C void reduce_sum(
   dtype id,
-  void* stream,
-  const void* a_data,
-  void* result,
+  void* handle,
+  const void* x,
+  void* y,
   len_t n
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _handle = static_cast<cublasHandle_t>(handle);
+  const auto _n = static_cast<int>(n);
 
   switch (id) {
     case SINGLE: {
-      const auto _result = static_cast<float*>(result);
-      const auto iter = static_cast<const float*>(a_data);
-      *_result = thrust::reduce(
-        thrust::cuda::par.on(_stream), 
-        iter,  
-        iter + n,
-        static_cast<float>(0),
-        thrust::plus<float>()
-      );
-      return;
+      const auto _x = static_cast<const float*>(x);
+      const auto _y = static_cast<float*>(y);
+      return CUBLAS_ASSERT(cublasSasum(_handle, _n, _x, 1, _y));
     }
     case DOUBLE: {
-      const auto _result = static_cast<double*>(result);
-      const auto iter = static_cast<const double*>(a_data);
-      *_result = thrust::reduce(
-        thrust::cuda::par.on(_stream), 
-        iter,  
-        iter + n,
-        static_cast<double>(0),
-        thrust::plus<double>()
-      );
-      return;
+      const auto _x = static_cast<const double*>(x);
+      const auto _y = static_cast<double*>(y);
+      return CUBLAS_ASSERT(cublasDasum(_handle, _n, _x, 1, _y));
     }
   }
 }

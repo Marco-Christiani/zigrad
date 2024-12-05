@@ -358,7 +358,9 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise sum. COM.
         pub fn sum(self: *const Self, device: DeviceReference) !*Self {
-            return try Self.init(&[_]T{self.sumNoAlloc()}, &.{1}, device);
+            const sum_arr = try Self.empty(&.{1}, device);
+            device.blas.sum(T, self.data, sum_arr.data);
+            return sum_arr;
         }
 
         /// Element-wise sum.
