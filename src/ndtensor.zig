@@ -535,7 +535,7 @@ pub fn NDTensor(comptime T: type) type {
                 }
             }.addBwImpl;
             return try createDependent(.{
-                .data = try self.data.add(other.data),
+                .data = try self.data.add(other.data, self.device),
                 .op = .ADD,
                 .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
@@ -574,7 +574,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Element-wise multiplication. COM.
-        pub fn mul(self: *Self, other: *Self, device: DeviceReference) !*Self {
+        pub fn mul(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.isCompatible(other.device));
 
             const mulBw = struct {
@@ -603,11 +603,11 @@ pub fn NDTensor(comptime T: type) type {
                 }
             }.mulBwImpl;
             return try createDependent(.{
-                .data = try self.data.mul(other.data, device),
+                .data = try self.data.mul(other.data, self.device),
                 .op = .MUL,
                 .children = &.{ self, other },
                 .requires_grad = self.requires_grad or other.requires_grad,
-                .device = device,
+                .device = self.device,
                 ._backward = mulBw,
             });
         }
@@ -775,36 +775,36 @@ pub fn NDTensor(comptime T: type) type {
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B'
-                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, true);
+                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, true, self.device);
                         // grad_B += A' * grad_C
-                        _ = try A._bmmAcc(grad_C, grad_B, 1.0, 1.0, true, false);
+                        _ = try A._bmmAcc(grad_C, grad_B, 1.0, 1.0, true, false, self.device);
                     },
                     .MATMUL_AtB => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B * grad_C'
-                        _ = try B._bmmAcc(self.grad.?, grad_A, 1.0, 1.0, false, true);
+                        _ = try B._bmmAcc(self.grad.?, grad_A, 1.0, 1.0, false, true, self.device);
                         // grad_B += A * grad_C
-                        _ = try A._bmmAcc(self.grad.?, grad_B, 1.0, 1.0, false, false);
+                        _ = try A._bmmAcc(self.grad.?, grad_B, 1.0, 1.0, false, false, self.device);
                     },
                     .MATMUL_ABt => {
                         // A Shape: (..., m, k)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B
-                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, false);
+                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, false, self.device);
                         // grad_B += grad_C' * A
-                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, true, false);
+                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, true, false, self.device);
                     },
                     .MATMUL_AtBt => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B' * grad_C'
-                        _ = try B._bmmAcc(grad_C, grad_A, 1.0, 1.0, true, true);
+                        _ = try B._bmmAcc(grad_C, grad_A, 1.0, 1.0, true, true, self.device);
                         // grad_B += grad_C * A'
-                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, false, true);
+                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, false, true, self.device);
                     },
                     else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
                 }
@@ -867,7 +867,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const out = try self.device.allocator.create(Self);
             out.* = Self{
-                .data = try self.data.matvec(other.data, false),
+                .data = try self.data.matvec(other.data, false, self.device),
                 .op = .MATVEC,
                 .children = try self.device.allocator.dupe(*Self, &.{ self, other }),
                 .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, self.device) else null,
@@ -1016,7 +1016,7 @@ test "tensor/GraphManager/sum" {
 
     var input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, device);
     _ = input.setLabel("input");
-    var sum_result = try input.sum(device);
+    var sum_result = try input.sum();
     _ = sum_result.setLabel("sum_result");
 
     try std.testing.expectEqualSlices(T, &[_]T{10}, sum_result.data.data);
@@ -1031,7 +1031,7 @@ test "tensor/GraphManager/sum" {
     defer gm.deinit();
     if (!zg.rt_grad_enabled) return error.GradNotEnabled;
     sum_result.grad.?.fill(1.0, device);
-    try gm.backward(sum_result, device);
+    try gm.backward(sum_result);
 
     const expected_grad = &[_]T{ 1, 1, 1, 1 };
     try std.testing.expectEqualSlices(T, expected_grad, input.grad.?.data);
@@ -1056,8 +1056,8 @@ test "tensor/NDTensor index, add, div" {
     try std.testing.expectEqual(1.1, t1.get(&.{ 1, 2 }));
 
     const t2 = try Tensor.init(&[_]f32{ 10, 20, 30, 40, 50, 60 }, shape, false, device);
-    const t3 = try t1.add(t2, device);
-    const t4 = try t3.sub(t1, device);
+    const t3 = try t1.add(t2);
+    const t4 = try t3.sub(t1);
     defer {
         t1.deinit();
         t2.deinit();
@@ -1082,7 +1082,7 @@ test "tensor/GraphManager/addback" {
     var t2 = try Tensor.init(&[_]T{3}, shape, true, device);
     // t3 = t1 + t2;
     // dt3/dt1 = 1, dt3/dt2 = 1
-    var t3 = try t1.add(t2, device);
+    var t3 = try t1.add(t2);
     defer {
         t1.deinit();
         t2.deinit();
@@ -1092,7 +1092,7 @@ test "tensor/GraphManager/addback" {
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0, device);
-    try gm.backward(t3, device);
+    try gm.backward(t3);
     try std.testing.expectEqualDeep(&[_]T{1.0}, t1.grad.?.data);
     try std.testing.expectEqualDeep(&[_]T{1.0}, t2.grad.?.data);
 }
@@ -1111,7 +1111,7 @@ test "tensor/GraphManager/mulback" {
     const t2 = try Tensor.init(&[_]T{3}, shape, true, device);
     // t3 = t1 * t2;
     // dt3/dt1 = t2, dt3/dt2 = t1
-    var t3 = try t1.mul(t2, device);
+    var t3 = try t1.mul(t2);
     defer {
         t1.deinit();
         t2.deinit();
@@ -1121,7 +1121,7 @@ test "tensor/GraphManager/mulback" {
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0, device);
-    try gm.backward(t3, device);
+    try gm.backward(t3);
     try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
     try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
 }
@@ -1145,15 +1145,15 @@ test "tensor/GraphManager/moreback" {
 
     // h = w*x + b
     // dh/dw = x, dh/db = 1
-    const temp = try w.mul(x, device);
+    const temp = try w.mul(x);
     defer temp.deinit();
-    const h = try temp.add(b, device);
+    const h = try temp.add(b);
     defer h.deinit();
 
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     h.grad.?.fill(1.0, device);
-    try gm.backward(h, device);
+    try gm.backward(h);
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expectEqualSlices(T, &[_]T{ 1.0, 1.0 }, b.grad.?.data);
 
@@ -1167,15 +1167,15 @@ test "tensor/GraphManager/moreback" {
     try x._reshape(shape2);
     // h = w*x + b
     // dh/dw = x, dh/db = 1
-    const temp2 = try w.mul(x, device);
+    const temp2 = try w.mul(x);
     defer temp2.deinit();
-    const h2 = try temp2.add(b, device);
+    const h2 = try temp2.add(b);
     defer h2.deinit();
 
     var gm2 = GraphManager(Tensor).init(device.allocator, .{});
     defer gm2.deinit();
     h2.grad.?.fill(1.0, device);
-    try gm2.backward(h2, device);
+    try gm2.backward(h2);
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
 }
@@ -1192,7 +1192,7 @@ test "tensor/GraphManager/divback" {
 
     var t1 = try Tensor.init(&[_]T{ 4, 9 }, shape, true, device);
     var t2 = try Tensor.init(&[_]T{ 2, 3 }, shape, true, device);
-    var t3 = try t1.div(t2, device);
+    var t3 = try t1.div(t2);
     defer {
         t1.deinit();
         t2.deinit();
@@ -1202,7 +1202,7 @@ test "tensor/GraphManager/divback" {
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0, device);
-    try gm.backward(t3, device);
+    try gm.backward(t3);
 
     const expected_grad_t1 = &[_]T{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
     const expected_grad_t2 = &[_]T{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
@@ -1236,7 +1236,7 @@ test "tensor/GraphManager/matmul_backward square" {
     }
     t3.grad.?.fill(1.0, device);
 
-    try gm.backward(t3, device);
+    try gm.backward(t3);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
@@ -1249,7 +1249,7 @@ test "tensor/GraphManager/matmul_backward square" {
     defer t3_trans_a.deinit();
     t3_trans_a.grad.?.fill(1.0, device);
 
-    try gm.backward(t3_trans_a, device);
+    try gm.backward(t3_trans_a);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
@@ -1261,7 +1261,7 @@ test "tensor/GraphManager/matmul_backward square" {
     var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
     t3_trans_b.grad.?.fill(1.0, device);
-    try gm.backward(t3_trans_b, device);
+    try gm.backward(t3_trans_b);
 
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
@@ -1323,7 +1323,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
         defer t3.deinit();
         t1_case2.acquire();
         t3.grad.?.fill(1.0, device);
-        try gm.backward(t3, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
@@ -1342,7 +1342,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
         defer t3.deinit();
         t2_case3.acquire();
         t3.grad.?.fill(1.0, device);
-        try gm.backward(t3, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
@@ -1363,7 +1363,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
         t1_case4.acquire();
         t2_case4.acquire();
         t3.grad.?.fill(1.0, device);
-        try gm.backward(t3, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
@@ -1405,7 +1405,7 @@ test "tensor/GraphManager/matmul_backward" {
     t2.acquire();
     t3.grad.?.fill(1.0, device);
 
-    try gm.backward(t3, device);
+    try gm.backward(t3);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
@@ -1418,7 +1418,7 @@ test "tensor/GraphManager/matmul_backward" {
     defer t3_trans_a.deinit();
     t3_trans_a.grad.?.fill(1.0, device);
 
-    try gm.backward(t3_trans_a, device);
+    try gm.backward(t3_trans_a);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
@@ -1430,7 +1430,7 @@ test "tensor/GraphManager/matmul_backward" {
     var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
     t3_trans_b.grad.?.fill(1.0, device);
-    try gm.backward(t3_trans_b, device);
+    try gm.backward(t3_trans_b);
 
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
@@ -1443,7 +1443,7 @@ test "tensor/GraphManager/matmul_backward" {
     var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
     t3_trans_ab.grad.?.fill(1.0, device);
-    try gm.backward(t3_trans_ab, device);
+    try gm.backward(t3_trans_ab);
 
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
@@ -1474,7 +1474,7 @@ test "tensor/GraphManager/matvec_backward" {
     // dl/dx = A' * grad = [4, 6]'
     var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape_mat, true, device);
     var t2 = try Tensor.init(&[_]T{ 1, 1 }, shape_vec, true, device);
-    var t3 = try t1.matvec(t2, device);
+    var t3 = try t1.matvec(t2);
     defer {
         t1.deinit();
         t2.deinit();
@@ -1484,7 +1484,7 @@ test "tensor/GraphManager/matvec_backward" {
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0, device);
-    try gm.backward(t3, device);
+    try gm.backward(t3);
 
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 6 };
@@ -1505,7 +1505,7 @@ test "tensor/GraphManager/dot_backward" {
 
     var t1 = try Tensor.init(&[_]T{ 1, 2, 3 }, shape, true, device);
     const t2 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, device);
-    var t3 = try t1.dot(t2, device);
+    var t3 = try t1.dot(t2);
     defer {
         t1.deinit();
         t2.deinit();
@@ -1515,7 +1515,7 @@ test "tensor/GraphManager/dot_backward" {
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t3.grad.?.fill(1.0, device);
-    try gm.backward(t3, device);
+    try gm.backward(t3);
 
     const expected_grad_t1 = &[_]T{ 4, 5, 6 };
     const expected_grad_t2 = &[_]T{ 1, 2, 3 };
@@ -1558,7 +1558,7 @@ test "tensor/gather" {
     defer gm.deinit();
 
     output.grad.?.fill(1.0, device);
-    try gm.backward(output, device);
+    try gm.backward(output);
 
     const expected_grad = [_]T{ 1, 1, 0, 0, 1, 1, 1, 0, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
@@ -1597,7 +1597,7 @@ test "tensor/maxOverDim" {
     defer gm.deinit();
 
     output.grad.?.fill(1.0, device);
-    try gm.backward(output, device);
+    try gm.backward(output);
 
     const expected_grad = [_]T{ 0, 0, 1, 0, 0, 1, 0, 0, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
@@ -1612,7 +1612,7 @@ test "tensor/maxOverDim" {
     // reset grads
     input.grad.?.fill(0, device);
     output2.grad.?.fill(1.0, device);
-    try gm.backward(output2, device);
+    try gm.backward(output2);
 
     const expected_grad2 = [_]T{ 0, 0, 0, 0, 0, 0, 1, 1, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad2, input.grad.?.data);

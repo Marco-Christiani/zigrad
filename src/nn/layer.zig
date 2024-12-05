@@ -783,12 +783,12 @@ fn trainGradAccum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !void
                 // this is the more intuitive, less performant method but this keeps all prev ones on the graph which may be req in some cases
                 // const input = try Tensor.init(row[0..input_size], &[_]usize{ input_size, output_size }, true, alloc);
                 // const target = try Tensor.init(row[input_size..row.len], null, true, alloc);
-                const output = (try layer.forward(input, device)).setLabel("output");
+                const output = (try layer.forward(input)).setLabel("output");
 
                 const curr_loss = try simple_mse_loss(f32, output, target, device);
                 _ = try loss.data._add(curr_loss.data);
                 curr_loss.grad.?.fill(1.0 / @as(T, grad_acc_steps), device);
-                try gm.backward(curr_loss, device);
+                try gm.backward(curr_loss);
             }
 
             optimizer.step(params.?);
@@ -871,13 +871,13 @@ fn trainBatched(comptime T: type, data: [][]T, device: DeviceReference) !void {
             }
             for (0..batch_y.len) |i| try target.set(&[_]usize{ i, 0 }, batch_y[i]);
 
-            const output = try layer.forward(input, device);
+            const output = try layer.forward(input);
             const loss = try simple_mse_loss(f32, output, target, device);
             epoch_loss += loss.data.data[0];
 
             loss.grad.?.fill(1.0, device);
             layer.zeroGrad();
-            try gm.backward(loss, device);
+            try gm.backward(loss);
             optimizer.step(params.?);
         }
     }
@@ -920,12 +920,12 @@ test "LinearLayer forward and backward" {
 
     const input_shape = &[_]usize{ 1, 2 };
     const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, cpu.reference());
-    const output = try layer.forward(input, cpu.reference());
+    const output = try layer.forward(input);
     output.grad.?.fill(1.0, device);
 
     var gm = GraphManager(NDTensor(T)).init(cpu.allocator, .{});
     defer gm.deinit();
-    try gm.backward(output, cpu.reference());
+    try gm.backward(output);
 
     try std.testing.expectEqual(12, output.get(&.{ 0, 0 }));
 }

@@ -48,10 +48,10 @@ fn verifySmceLoss(comptime name: []const u8, case: SmceTestCase, allocator: std.
     const target = try NDTensor(f32).init(case.target, case.shape, true, device);
     defer target.deinit();
 
-    const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target, device);
+    const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target);
     loss.grad.?.fill(1.0, device);
     defer loss.deinit();
-    try gm.backward(loss, device);
+    try gm.backward(loss);
 
     std.log.info("loss: {d}\n", .{loss.data.data});
     std.log.info("expected: {d}\n", .{case.loss});
@@ -111,7 +111,7 @@ fn verifySmoothL1Loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !voi
     loss.grad.?.fill(1.0, device);
     defer loss.deinit();
 
-    try gm.backward(loss, device);
+    try gm.backward(loss);
 
     std.log.info("Calculated loss: {d}n", .{loss.data.data[0]});
     std.log.info("Expected loss: {d}", .{case.loss});
