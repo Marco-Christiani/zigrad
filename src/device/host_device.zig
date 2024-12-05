@@ -32,7 +32,7 @@ pub const Blas = struct {
         x: []const T,
         y: []const T,
         z: []T,
-    ) T {
+    ) void {
         switch (T) {
             f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
             f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
@@ -110,18 +110,20 @@ pub const Blas = struct {
         }
     }
 
-    /// Outer product: A = alpha(xy') + A
+    /// L2 Norm: A = alpha(xy') + A
     /// A: (M, N)
     pub fn nrm2(
         _: Blas,
         T: type,
         x: []T,
-    ) T {
-        return switch (T) {
-            f32 => c.cblas_snrm2(@intCast(x.len), x.ptr, 1),
-            f64 => c.cblas_dnrm2(@intCast(x.len), x.ptr, 1),
+        z: []T,
+        incX: usize,
+    ) void {
+        switch (T) {
+            f32 => z[0] = c.cblas_snrm2(@intCast(x.len), x.ptr, @intCast(incX)),
+            f64 => z[0] = c.cblas_dnrm2(@intCast(x.len), x.ptr, @intCast(incX)),
             else => @compileError("Unsupported type" ++ @typeName(T)),
-        };
+        }
     }
 
     pub fn maxForward(
@@ -130,10 +132,11 @@ pub const Blas = struct {
         src: []const T,
         dst: []T,
         idx: *i32,
+        incX: usize,
     ) void {
         const _idx = switch (T) {
-            f32 => c.cblas_isamax(@intCast(src.len), src.ptr, 1),
-            f64 => c.cblas_idamax(@intCast(src.len), src.ptr, 1),
+            f32 => c.cblas_isamax(@intCast(src.len), src.ptr, incX),
+            f64 => c.cblas_idamax(@intCast(src.len), src.ptr, incX),
             else => @compileError("Unsupported type for BLAS max"),
         };
         idx.* = @intCast(_idx);
@@ -156,7 +159,7 @@ pub const Blas = struct {
         T: type,
         x: []const T,
         z: []T,
-    ) T {
+    ) void {
         switch (T) {
             f32 => z[0] = c.cblas_sasum(@intCast(x.len), x.ptr, 1),
             f64 => z[0] = c.cblas_dasum(@intCast(x.len), x.ptr, 1),
