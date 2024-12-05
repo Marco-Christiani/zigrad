@@ -22,7 +22,7 @@ EXTERN_C void relu_reverse(
 
 EXTERN_C void smax_vec_forward(
   dtype id,
-  void* stream,
+  void* cudnn_handle,
   const void* x,
   void* y,
   len_t n
@@ -30,7 +30,7 @@ EXTERN_C void smax_vec_forward(
 
 EXTERN_C void smax_vec_reverse(
   dtype id,
-  void* stream,
+  void* cudnn_handle,
   const void* y_val,
   const void* y_grd,
   void* x_grd,
@@ -39,7 +39,7 @@ EXTERN_C void smax_vec_reverse(
 
 EXTERN_C void smax_2D_row_forward(
   dtype id,
-  void* stream,
+  void* cudnn_handle,
   const void* x,
   void* y,
   len_t m,
