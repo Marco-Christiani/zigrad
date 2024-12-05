@@ -1,5 +1,5 @@
 const std = @import("std");
-const backend = @import("root.zig").backend;
+pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 
 fn host_reference(self: *HostDevice) DeviceReference {
