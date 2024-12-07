@@ -49,7 +49,7 @@ pub const PrintOptions = struct {
     };
 };
 
-pub fn generateASCIIUUID(comptime length: usize) [length]u8 {
+pub fn generate_asciiuuid(comptime length: usize) [length]u8 {
     const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
     const alphabet_len = alphabet.len;
     var random_bytes: [length]u8 = undefined;
@@ -61,15 +61,15 @@ pub fn generateASCIIUUID(comptime length: usize) [length]u8 {
     return random_bytes;
 }
 
-fn randomSuffix(label: ?[]const u8, allocator: std.mem.Allocator) []const u8 {
+fn random_suffix(label: ?[]const u8, allocator: std.mem.Allocator) []const u8 {
     if (label) |l| {
         if (std.mem.containsAtLeast(u8, l, 1, "__")) return l; // already been labeled
-        const uid = generateASCIIUUID(4);
+        const uid = generate_asciiuuid(4);
         return std.fmt.allocPrint(allocator, "{s}__{s}", .{ l, uid }) catch {
             @panic("Failed to set label");
         };
     }
-    const uid = generateASCIIUUID(4);
+    const uid = generate_asciiuuid(4);
     return std.fmt.allocPrint(allocator, "__{s}", .{uid}) catch {
         @panic("Failed to set label");
     };
@@ -94,18 +94,18 @@ const LabelGenerator = struct {
         self.map.deinit();
     }
 
-    fn getOrCreateLabel(self: *LabelGenerator, ptr: *const anyopaque, base_label: ?[]const u8) ![]const u8 {
+    fn get_or_create_label(self: *LabelGenerator, ptr: *const anyopaque, base_label: ?[]const u8) ![]const u8 {
         if (self.map.get(ptr)) |label| {
             return label;
         }
 
-        const new_label = randomSuffix(base_label, self.allocator);
+        const new_label = random_suffix(base_label, self.allocator);
         try self.map.put(ptr, new_label);
         return new_label;
     }
 };
 
-pub fn printD2(
+pub fn print_d2(
     node: anytype,
     opts: PrintOptions,
     writer: anytype,
@@ -120,7 +120,7 @@ pub fn printD2(
         @compileError("Struct must have 'label', 'op', and 'children' fields");
     }
 
-    const node_label = try label_gen.getOrCreateLabel(node, node.label);
+    const node_label = try label_gen.get_or_create_label(node, node.label);
 
     if (visited.contains(node)) {
         return; // Skip if we've already visited this node
@@ -129,7 +129,7 @@ pub fn printD2(
 
     if (node.children) |children| {
         write_loop: for (children) |elem| {
-            const elem_label = try label_gen.getOrCreateLabel(elem, elem.label);
+            const elem_label = try label_gen.get_or_create_label(elem, elem.label);
             try writer.print("{s}{s}{s}", .{ node_label, opts.arrow_symbol, elem_label });
             if (node.op) |op| {
                 const symbol = switch (op) {
@@ -153,14 +153,14 @@ pub fn printD2(
             }
         }
         for (children) |elem| {
-            try printD2(elem, opts, writer, label_gen, visited);
+            try print_d2(elem, opts, writer, label_gen, visited);
         }
     } else {
         try writer.print("{s}\n", .{node_label});
     }
 }
 
-pub fn renderD2(
+pub fn render_d2(
     node: anytype,
     opts: PrintOptions,
     allocator: std.mem.Allocator,
@@ -204,7 +204,7 @@ pub fn renderD2(
         \\
     );
     log.debug("traversing", .{});
-    try printD2(node, opts, d2_code.writer(), &label_gen, &visited);
+    try print_d2(node, opts, d2_code.writer(), &label_gen, &visited);
     log.debug("rendering", .{});
     const d2filepath = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ std.fs.path.dirname(output_file) orelse "", std.fs.path.stem(output_file), ".d2" });
     defer allocator.free(d2filepath);
@@ -279,23 +279,23 @@ pub fn main() !void {
         .children = [2]*const Node{ &child1, &child2 },
     };
     defer alloc.free(root.label.?);
-    try renderD2(&root, PrintOptions.unicode1, alloc, "/tmp/generated1.png");
+    try render_d2(&root, PrintOptions.unicode1, alloc, "/tmp/generated1.png");
 
     const shape = &[_]usize{ 2, 3 };
     const Tensor = NDTensor(f32);
 
     var t1 = try Tensor.init(@constCast(&[_]f32{ 1, 2, 3, 4, 5, 6 }), shape, false, alloc);
-    _ = t1.setLabel("t1");
+    _ = t1.set_label("t1");
     defer t1.deinit();
     var t2 = try Tensor.init(@constCast(&[_]f32{ 10, 20, 30, 40, 50, 60 }), shape, false, alloc);
-    _ = t2.setLabel("t2");
+    _ = t2.set_label("t2");
     defer t2.deinit();
 
     var t3 = try t1.add(t2, alloc);
-    _ = t3.setLabel("t3");
+    _ = t3.set_label("t3");
     defer t3.deinit();
 
-    try renderD2(t3, PrintOptions.plain, alloc, "/tmp/generated2.png");
+    try render_d2(t3, PrintOptions.plain, alloc, "/tmp/generated2.png");
     std.log.info("Done.\n", .{});
 
     // try sesame("/tmp/generated1.png", alloc);

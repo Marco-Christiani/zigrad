@@ -34,7 +34,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         ) Self {
             return .{
                 .model = model,
-                .params = model.getParameters(),
+                .params = model.get_parameters(),
                 .optimizer = optimizer,
                 .graph_manager = GraphManager(NDTensor(T)).init(model.device.allocator, graph_config),
             };
@@ -48,15 +48,15 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             self.* = undefined;
         }
 
-        pub fn trainStep(
+        pub fn train_step(
             self: *Self,
             input: *NDTensor(T),
             target: *NDTensor(T),
         ) !*NDTensor(T) {
             const output = try self.model.forward(input);
             const loss = try lossf(T, output, target);
-            self.model.zeroGrad();
-            try loss.setupGrad(0);
+            self.model.zero_grad();
+            try loss.setup_grad(0);
             try self.graph_manager.backward(loss);
             self.optimizer.step(self.params);
             return loss;
@@ -71,7 +71,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             // for (0..epochs) |epoch| {
             //     var total_loss: T = 0;
             //     for (inputs, targets) |input, target| {
-            //         const loss = try self.trainStep(input, target);
+            //         const loss = try self.train_step(input, target);
             //         total_loss += loss;
             //     }
             //     const avg_loss = total_loss / @as(T, @floatFromInt(inputs.len));
@@ -79,7 +79,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             // }
         }
 
-        fn logData(msg: []const u8, data: []T) void {
+        fn log_data(msg: []const u8, data: []T) void {
             var i: usize = 0;
             const max_n = @min(data.len, 20);
             while (i < max_n) : (i += 10) {

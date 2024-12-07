@@ -29,7 +29,7 @@ pub fn Model(comptime T: type) type {
             for (self.layers.items) |layer| layer.release();
         }
 
-        pub fn addLayer(self: *Self, layer: Layer(T)) !void {
+        pub fn add_layer(self: *Self, layer: Layer(T)) !void {
             try self.layers.append(layer);
         }
 
@@ -40,19 +40,19 @@ pub fn Model(comptime T: type) type {
         }
 
         /// COM.
-        pub fn getParameters(self: Self) []*NDTensor(T) {
+        pub fn get_parameters(self: Self) []*NDTensor(T) {
             var params = std.ArrayList(*NDTensor(T)).init(self.device.allocator);
             defer params.deinit();
             for (self.layers.items) |layer| {
-                if (layer.getParameters()) |layer_params| {
+                if (layer.get_parameters()) |layer_params| {
                     for (layer_params) |p| params.append(p) catch unreachable;
                 }
             }
             return params.toOwnedSlice() catch unreachable;
         }
 
-        pub fn zeroGrad(self: Self) void {
-            for (self.layers.items) |layer| layer.zeroGrad();
+        pub fn zero_grad(self: Self) void {
+            for (self.layers.items) |layer| layer.zero_grad();
         }
     };
 }

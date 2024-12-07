@@ -41,12 +41,12 @@ fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
         1 => struct {
             pub fn score(src: *NDTensor(T), trg: usize, reduce: bool) !*NDTensor {
                 const data = try NDArray(T).empty(&.{1}, src.device);
-                src.device.nn.nllLoss1DIndexForward(T, src.getData(), trg, data.data, config.input_logits, reduce, config.reduce_type);
-                return try NDTensor(T).createDependent(.{
+                src.device.nn.nll_loss_1d_index_forward(T, src.get_data(), trg, data.data, config.input_logits, reduce, config.reduce_type);
+                return try NDTensor(T).create_dependent(.{
                     .data = data,
                     .op = .DIV,
                     .children = &.{src},
-                    .requires_grad = src.requires_grad or src.requires_grad,
+                    .requires_gradient = src.requires_gradient or src.requires_gradient,
                     .device = src.device,
                     ._backward = backward,
                     ._backward_ctx = @ptrFromInt(trg),
@@ -55,7 +55,7 @@ fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
 
             fn backward(src: *zg.NDTensor(T)) anyerror!void {
                 const trg: usize = @intFromPtr(src._backward_ctx.?);
-                src.device.nn.nllLoss1DIndexBackward(T, src.getData(), src.grad.?.data, trg, config.reduce_type);
+                src.device.nn.nll_loss_1d_index_backward(T, src.get_data(), src.grad.?.data, trg, config.reduce_type);
             }
         },
         else => @compileError("Unsupported Dimensions for NLLIndex"),
@@ -64,14 +64,14 @@ fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
 
 /// Relies on autograd, operates on the flat data.
 pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    var diff = (try y_pred.sub(y)).setLabel("diff");
-    const diff2 = (try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, device)).setLabel("diff2");
-    // const diff2 = (try y_pred.sub(y, allocator)).setLabel("diff2");
-    const sq_diff = (try diff.mul(diff2)).setLabel("sq_diff");
-    const sum_sq_diff = (try sq_diff.sum()).setLabel("sum_sq_diff");
+    var diff = (try y_pred.sub(y)).set_label("diff");
+    const diff2 = (try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, device)).set_label("diff2");
+    // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
+    const sq_diff = (try diff.mul(diff2)).set_label("sq_diff");
+    const sum_sq_diff = (try sq_diff.sum()).set_label("sum_sq_diff");
     const coef = @as(T, @floatFromInt(y.data.data.len));
     const coef_tensor = try NDTensor(T).init(&[_]T{coef}, null, true, device);
-    return (try sum_sq_diff.div(coef_tensor.setLabel("coef"))).setLabel("mse");
+    return (try sum_sq_diff.div(coef_tensor.set_label("coef"))).set_label("mse");
 }
 
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
@@ -100,11 +100,11 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
         }
     }.backward;
 
-    return try NDTensor(T).createDependent(.{
+    return try NDTensor(T).create_dependent(.{
         .data = try NDArray(T).init(&[_]T{mse}, &[_]usize{1}, device),
         .children = &[_]*const NDTensor(T){ y_pred, y },
         .label = "mse",
-        .requires_grad = true,
+        .requires_gradient = true,
         .device = device,
         ._backward = bw_fn,
     });
@@ -143,12 +143,12 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         }
     }.backward;
 
-    return try NDTensor(T).createDependent(.{
+    return try NDTensor(T).create_dependent(.{
         .data = try NDArray(T).init(&.{mean_loss}, &.{1}, y_pred.device),
         .op = null,
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
-        .requires_grad = true,
+        .requires_gradient = true,
         .device = y_pred.device,
         ._backward = bw_fn,
         ._backward_ctx = sm_preds, // no need to copy
@@ -252,12 +252,12 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
     const ctx = try device.allocator.create(usize);
     ctx.* = dim;
 
-    return try NDTensor(T).createDependent(.{
+    return try NDTensor(T).create_dependent(.{
         .data = result.data,
         .children = &.{input},
         .label = "softmax",
         .device = device,
-        .requires_grad = true,
+        .requires_gradient = true,
         ._backward = bw_fn,
         ._backward_ctx = ctx,
     });
@@ -284,7 +284,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
             const _y_pred = self_children[0];
             const _y = self_children[1];
             const _bw_ctx: *T = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
-            defer tensor.device.memDestroy(_bw_ctx);
+            defer tensor.device.mem_destroy(_bw_ctx);
             const _beta = _bw_ctx.*;
 
             const _n = @as(T, @floatFromInt(_y.data.data.len));
@@ -305,11 +305,11 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     const beta_ctx = try device.allocator.create(T);
     beta_ctx.* = beta;
 
-    return try NDTensor(T).createDependent(.{
+    return try NDTensor(T).create_dependent(.{
         .data = try NDArray(T).init(&.{loss}, &.{1}, device),
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
-        .requires_grad = true,
+        .requires_gradient = true,
         .device = device,
         ._backward = bw_fn,
         ._backward_ctx = beta_ctx,
@@ -344,11 +344,11 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
 //     const ctx = try allocator.create(usize);
 //     ctx.* = dim;
 //
-//     return try NDTensor(T).createDependent(.{
+//     return try NDTensor(T).create_dependent(.{
 //         .data = result, // *NDArray
 //         .children = &[_]*const NDTensor(T){input},
 //         .label = "myop",
-//         .requires_grad = input.requires_grad,
+//         .requires_gradient = input.requires_gradient,
 //         .allocator = allocator,
 //         ._backward = bw_fn,
 //         ._backward_ctx = ctx,

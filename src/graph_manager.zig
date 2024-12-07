@@ -56,7 +56,7 @@ pub fn GraphManager(comptime T: type) type {
 
             for (0..nodes.len) |i| {
                 var curr_node = nodes[nodes.len - i - 1];
-                if (curr_node.requiresGrad()) {
+                if (curr_node.requires_grad()) {
                     try curr_node.backward();
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children

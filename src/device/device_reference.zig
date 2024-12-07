@@ -91,7 +91,7 @@ pub fn Blas(comptime Parent: type) type {
             };
         }
 
-        pub fn maxForward(
+        pub fn max_forward(
             self: *const Self,
             T: type,
             src: []const T,
@@ -99,11 +99,11 @@ pub fn Blas(comptime Parent: type) type {
             idx: *i32,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.maxForward(T, self.cublas(), src.ptr, dst.ptr, idx),
+                inline else => |dev| dev.blas.max_forward(T, self.cublas(), src.ptr, dst.ptr, idx),
             };
         }
 
-        pub fn maxReverse(
+        pub fn max_reverse(
             self: *const Blas,
             T: type,
             y_grd: []const T,
@@ -111,7 +111,7 @@ pub fn Blas(comptime Parent: type) type {
             idx: *i32,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.maxReverse(T, self.cublas(), y_grd.ptr, x_grd.ptr, idx),
+                inline else => |dev| dev.blas.max_reverse(T, self.cublas(), y_grd.ptr, x_grd.ptr, idx),
             };
         }
 
@@ -158,51 +158,51 @@ pub fn NN(comptime Parent: type) type {
     return struct {
         const Self = @This();
 
-        pub fn reluForward(self: *const Self, comptime T: type, x: []const T, y: []T) void {
+        pub fn relu_forward(self: *const Self, comptime T: type, x: []const T, y: []T) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.reluForward(T, x, y),
+                inline else => |dev| dev.nn.relu_forward(T, x, y),
             };
         }
 
-        pub fn reluBackward(self: *const Self, comptime T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
+        pub fn relu_backward(self: *const Self, comptime T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.reluBackward(T, x, y_grd, x_grd),
+                inline else => |dev| dev.nn.relu_backward(T, x, y_grd, x_grd),
             };
         }
 
-        pub fn smaxVecForward(self: *const Self, comptime T: type, x: []const T, y: []T, op: SmaxType) void {
+        pub fn smax_vec_forward(self: *const Self, comptime T: type, x: []const T, y: []T, op: SmaxType) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.smaxVecForward(T, x, y, op),
+                inline else => |dev| dev.nn.smax_vec_forward(T, x, y, op),
             };
         }
 
-        pub fn smaxVecBackward(self: *const Self, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
+        pub fn smax_vec_backward(self: *const Self, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.smaxVecBackward(T, y_val, y_grd, x_grd, op),
+                inline else => |dev| dev.nn.smax_vec_backward(T, y_val, y_grd, x_grd, op),
             };
         }
 
-        pub fn smaxRowForward(self: *const Self, comptime T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
+        pub fn smax_row_forward(self: *const Self, comptime T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.smaxRowForward(T, X, Y, m, n, op),
+                inline else => |dev| dev.nn.smax_row_forward(T, X, Y, m, n, op),
             };
         }
 
-        pub fn smaxRowBackward(self: *const Self, comptime T: type, Y_val: []const T, Y_grd: []const T, X_grd: []T, m: usize, n: usize, op: SmaxType) void {
+        pub fn smax_row_backward(self: *const Self, comptime T: type, Y_val: []const T, Y_grd: []const T, X_grd: []T, m: usize, n: usize, op: SmaxType) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.smaxRowForward(T, Y_val, Y_grd, X_grd, m, n, op),
+                inline else => |dev| dev.nn.smax_row_forward(T, Y_val, Y_grd, X_grd, m, n, op),
             };
         }
 
-        pub fn nllLoss1DIndexForward(self: *const Self, comptime T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+        pub fn nll_loss_1d_index_forward(self: *const Self, comptime T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.nllLoss1DIndexForward(T, src, trg, dst.ptr, input_logits, reduce, reduce_type),
+                inline else => |dev| dev.nn.nll_loss_1d_index_forward(T, src, trg, dst.ptr, input_logits, reduce, reduce_type),
             };
         }
 
-        pub fn nllLoss1DIndexBackward(self: *const Self, comptime T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
+        pub fn nll_loss_1d_index_backward(self: *const Self, comptime T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
             return switch (self.parent()) {
-                inline else => |dev| dev.nn.nllLoss1DIndexForward(T, src_val, src_grd, trg, reduce_type),
+                inline else => |dev| dev.nn.nll_loss_1d_index_forward(T, src_val, src_grd, trg, reduce_type),
             };
         }
 
@@ -231,43 +231,43 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         blas: Blas(Self) = .{},
         allocator: std.mem.Allocator,
 
-        pub fn memAlloc(self: Self, comptime T: type, n: usize) Error![]T {
+        pub fn mem_alloc(self: Self, comptime T: type, n: usize) Error![]T {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memAlloc(T, n),
+                inline else => |dev| dev.mem_alloc(T, n),
             };
         }
 
-        pub fn memFree(self: Self, slice: anytype) void {
+        pub fn mem_free(self: Self, slice: anytype) void {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memFree(slice),
+                inline else => |dev| dev.mem_free(slice),
             };
         }
 
-        pub fn memCreate(self: Self, comptime T: type) Error!*T {
+        pub fn mem_create(self: Self, comptime T: type) Error!*T {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memCreate(T),
+                inline else => |dev| dev.mem_create(T),
             };
         }
 
-        pub fn memDestroy(self: Self, ptr: anytype) void {
+        pub fn mem_destroy(self: Self, ptr: anytype) void {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memFree(ptr),
+                inline else => |dev| dev.mem_free(ptr),
             };
         }
 
-        pub fn memDupe(self: Self, T: type, slice: anytype) Error![]T {
+        pub fn mem_dupe(self: Self, T: type, slice: anytype) Error![]T {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memDupe(T, slice),
+                inline else => |dev| dev.mem_dupe(T, slice),
             };
         }
 
-        pub fn memFill(self: Self, comptime T: type, slice: []T, value: T) void {
+        pub fn mem_fill(self: Self, comptime T: type, slice: []T, value: T) void {
             return switch (self.ptrs) {
-                inline else => |dev| dev.memFill(T, slice, value),
+                inline else => |dev| dev.mem_fill(T, slice, value),
             };
         }
 
-        pub fn memTransfer(
+        pub fn mem_transfer(
             self: Self,
             comptime T: type,
             src: []const T,
@@ -275,7 +275,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             direction: AuxDevice.Direction,
         ) void {
             return switch (self.ptrs) {
-                .aux => |dev| dev.memTransfer(T, src, dst, direction),
+                .aux => |dev| dev.mem_transfer(T, src, dst, direction),
                 .host => @memcpy(dst, src),
             };
         }
@@ -287,17 +287,17 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn isCompatible(self: DeviceReference, other: DeviceReference) bool {
+        pub fn is_compatible(self: DeviceReference, other: DeviceReference) bool {
             if (std.meta.activeTag(self.ptrs) != std.meta.activeTag(other.ptrs)) {
                 return false;
             }
             return switch (self.ptrs) {
-                .aux => self.ptrs.aux.isCompatible(other.ptrs.aux),
+                .aux => self.ptrs.aux.is_compatible(other.ptrs.aux),
                 .host => true,
             };
         }
 
-        pub fn isHost(self: DeviceReference) bool {
+        pub fn is_host(self: DeviceReference) bool {
             return self.ptrs == .HOST;
         }
     };

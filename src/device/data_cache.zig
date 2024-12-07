@@ -36,7 +36,7 @@ const PtrStack = struct {
     }
     
     // after setup, this function should never be called again.
-    pub fn growCapacity(self: *PtrStack, allocator: std.mem.Allocator, n: usize) !void {
+    pub fn grow_capacity(self: *PtrStack, allocator: std.mem.Allocator, n: usize) !void {
         const cap = self.ptrs.len;
         if (allocator.resize(self.ptrs, cap + n)) {
             self.ptrs.len += n;
@@ -85,7 +85,7 @@ pub fn deinit(self: *Self) void {
 
     while (iter.next()) |stack| {
         if (debug and stack.index != 0) {
-            @panic("Unfreed cached pointers - try poppingIterator() to access and free all memory first.");
+            @panic("Unfreed cached pointers - try popping_iterator() to access and free all memory first.");
         }
         stack.deinit(self.allocator);
     }
@@ -95,7 +95,7 @@ pub fn deinit(self: *Self) void {
 pub fn reserve(self: *Self, comptime T: type, len: usize, n: usize) Error!void {
     const entry = try self.map.getOrPut(self.allocator, len * @sizeOf(T));
     if (!entry.found_existing) entry.value_ptr.* = .{};
-    try entry.value_ptr.growCapacity(self.allocator, n);
+    try entry.value_ptr.grow_capacity(self.allocator, n);
     self.capacity += 1;
 }
 
@@ -111,7 +111,7 @@ pub fn put(self: *Self, comptime T: type, data: []T) bool {
     return stack.push(@constCast(data.ptr));
 }
 
-pub fn poppingIterator(self: *Self) PoppingIterator {
+pub fn popping_iterator(self: *Self) PoppingIterator {
     return PoppingIterator.init(&self.map);
 }
     

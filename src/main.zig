@@ -8,6 +8,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var cpu = zg.device.HostDevice.init(0, gpa.allocator());
+    var cpu = zg.device.HostDevice.init(gpa.allocator());
     defer cpu.deinit();
 }
