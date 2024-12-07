@@ -1,63 +1,56 @@
+#ifndef __NN_NLL_ZIG__
+#define __NN_NLL_ZIG__
 
 #include "nn_utils.cu"
+#include <limits>
 
 template <typename T>
 __global__ void __nll_loss_1D_index_reduce_kernel(
     const T* src,
     len_t trg,
+    T* dst,
     len_t n,
-    T* total_rdx,
-    int ignore_idx,
     reduxtype reduxop
 ) {
-  if (static_cast<int>(trg) == ignore_idx) {
-    *total_rdx = T(0);
-    return;
-  }
-  // NONE means we didn't reduce at all
-  // so it's not actually an option here
   if (reduxop == RDX_SUM) {
-      *total_rdx = -src[trg];
+      *dst = -src[trg];
   } else {
-      *total_rdx = -src[trg] / T(n);
+      *dst = -src[trg] / T(n);
   }
 }
 
 template<typename T>
 void __nll_loss_1D_index_reduce(
   void* cudnn_handle,
-  void* src,
+  const void* x,
   len_t trg,
+  void* y,
   len_t n,
-  void* rdx,
-  int ignore_idx,
   reduxtype reduxop
 ) {
-  cudaStream_t stream;
-  CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(cudnn_handle), &stream));
-  const auto _src = static_cast<T*>(src);
-  const auto _rdx = static_cast<T*>(rdx);
-  __nll_loss_1D_index_reduce_kernel<T><<<1,1,0,stream>>>(_src, trg, n, _rdx, ignore_idx, reduxop);
-  return;
+  const auto stream = __cudnn_stream(cudnn_handle);
+  const auto _src = static_cast<const T*>(x);
+  const auto _dst = static_cast<T*>(y);
+  __nll_loss_1D_index_reduce_kernel<T><<<1,1,0,stream>>>(_src, trg, _dst, n, reduxop);
 }
 
-extern "C" void nll_loss_1D_index_reduce(
+extern "C" void nll_loss_1D_index_forward(
   dtype id,
   void* cudnn_handle,
   void* src,
   len_t trg,
+  void* dst,
   len_t n,
-  void* rdx,
-  int ignore_idx,
+  bool inplace_smax,
   reduxtype reduxop
 ) {
-  smax_vec_forward(id, cudnn_handle, src, src, n);
-
-  switch (id) {
-    case SINGLE:
-      return __nll_loss_1D_index_reduce<f32>(cudnn_handle, src, trg, n, rdx, ignore_idx, reduxop);
-    case DOUBLE:
-      return __nll_loss_1D_index_reduce<f64>(cudnn_handle, src, trg, n, rdx, ignore_idx, reduxop);
+  if (inplace_smax) {
+    smax_vec_forward(id, cudnn_handle, src, src, n, SMAX_LOG);
+  }
+  if (id == SINGLE) {
+      __nll_loss_1D_index_reduce<f32>(cudnn_handle, src, trg, dst, n, reduxop);
+  } else {
+      __nll_loss_1D_index_reduce<f64>(cudnn_handle, src, trg, dst, n, reduxop);
   }  
 }
 
@@ -67,13 +60,6 @@ struct NLLBwdFunctor {
     len_t trg;
     T denom;
 
-    __host__ __device__ 
-    NLLBwdFunctor() = default;
-    __host__ __device__ 
-    NLLBwdFunctor(const NLLBwdFunctor& other) = default;
-    __host__ __device__
-    NLLBwdFunctor(len_t _trg, T _denom) : trg{_trg}, denom{_denom} {}
-  
     __device__
     T operator()(T src_val, len_t idx) const {
         const T tmp = (idx == this->trg) ? T(1) : T(0);
@@ -90,8 +76,7 @@ void __nll_loss_1D_index_reverse(
   len_t n,
   reduxtype reduxop
 ) {
-  cudaStream_t stream;
-  CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(cudnn_handle), &stream));
+  const auto stream = __cudnn_stream(cudnn_handle);
   const auto idx_iter = thrust::make_counting_iterator(0UL);
   const auto _x_val_iter = static_cast<const T*>(x_val);
   const auto _x_grd_iter = static_cast<T*>(x_grd);
@@ -102,7 +87,7 @@ void __nll_loss_1D_index_reverse(
     _x_val_iter + n,
     idx_iter,
     _x_grd_iter,
-    NLLBwdFunctor<T>(trg, denom)
+    NLLBwdFunctor<T>{ .trg = trg, .denom = denom }
   );
 }
 
@@ -122,3 +107,5 @@ extern "C" void nll_loss_1D_index_reverse(
       return __nll_loss_1D_index_reverse<f64>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
   }
 }
+
+#endif

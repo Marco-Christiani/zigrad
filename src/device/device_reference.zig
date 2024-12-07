@@ -1,5 +1,7 @@
 const std = @import("std");
 const HostDevice = @import("host_device.zig").HostDevice;
+const ReduceType = @import("device_common.zig").ReduceType;
+const SmaxType = @import("device_common.zig").SmaxType;
 
 pub fn Blas(comptime Parent: type) type {
     return struct {
@@ -81,20 +83,35 @@ pub fn Blas(comptime Parent: type) type {
         pub fn nrm2(
             self: *const Self,
             T: type,
-            x: []T,
-        ) T {
+            x: []const T,
+            y: []T,
+        ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.nrm2(T, x),
+                inline else => |dev| dev.blas.nrm2(T, x, y),
             };
         }
 
-        pub fn max(
+        pub fn maxForward(
             self: *const Self,
             T: type,
-            x: []const T,
-        ) T {
+            src: []const T,
+            dst: []T,
+            idx: *i32,
+        ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.max(T, x),
+                inline else => |dev| dev.blas.maxForward(T, self.cublas(), src.ptr, dst.ptr, idx),
+            };
+        }
+
+        pub fn maxReverse(
+            self: *const Blas,
+            T: type,
+            y_grd: []const T,
+            x_grd: []T,
+            idx: *i32,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.maxReverse(T, self.cublas(), y_grd.ptr, x_grd.ptr, idx),
             };
         }
 
@@ -137,6 +154,64 @@ pub fn Blas(comptime Parent: type) type {
     };
 }
 
+pub fn NN(comptime Parent: type) type {
+    return struct {
+        const Self = @This();
+
+        pub fn reluForward(self: *const Self, comptime T: type, x: []const T, y: []T) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.reluForward(T, x, y),
+            };
+        }
+
+        pub fn reluBackward(self: *const Self, comptime T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.reluBackward(T, x, y_grd, x_grd),
+            };
+        }
+
+        pub fn smaxVecForward(self: *const Self, comptime T: type, x: []const T, y: []T, op: SmaxType) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.smaxVecForward(T, x, y, op),
+            };
+        }
+
+        pub fn smaxVecBackward(self: *const Self, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.smaxVecBackward(T, y_val, y_grd, x_grd, op),
+            };
+        }
+
+        pub fn smaxRowForward(self: *const Self, comptime T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.smaxRowForward(T, X, Y, m, n, op),
+            };
+        }
+
+        pub fn smaxRowBackward(self: *const Self, comptime T: type, Y_val: []const T, Y_grd: []const T, X_grd: []T, m: usize, n: usize, op: SmaxType) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.smaxRowForward(T, Y_val, Y_grd, X_grd, m, n, op),
+            };
+        }
+
+        pub fn nllLoss1DIndexForward(self: *const Self, comptime T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.nllLoss1DIndexForward(T, src, trg, dst.ptr, input_logits, reduce, reduce_type),
+            };
+        }
+
+        pub fn nllLoss1DIndexBackward(self: *const Self, comptime T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.nllLoss1DIndexForward(T, src_val, src_grd, trg, reduce_type),
+            };
+        }
+
+        fn parent(self: *const Self) Parent.DevicePtrs {
+            return @as(*const Parent, @alignCast(@fieldParentPtr("nn", self))).ptrs;
+        }
+    };
+}
+
 pub fn DeviceReference(comptime AuxDevice: type) type {
     return struct {
         const Self = @This();
@@ -152,6 +227,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         };
 
         ptrs: DevicePtrs,
+        nn: NN(Self) = .{},
         blas: Blas(Self) = .{},
         allocator: std.mem.Allocator,
 

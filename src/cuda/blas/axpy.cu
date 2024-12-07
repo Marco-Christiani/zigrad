@@ -18,7 +18,6 @@ extern "C" void axpy(
   
   switch (id) {
     case SINGLE: {
-      const auto _alpha = static_cast<const float*>(alpha);
       return CUBLAS_ASSERT(cublasSaxpy(
           get_handle(cublas_handle),  
           _n, 

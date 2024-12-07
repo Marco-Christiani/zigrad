@@ -27,6 +27,7 @@ pub const blas = @import("backend/blas.zig");
 pub const device = @import("device").device;
 pub const DeviceReference = device.DeviceReference;
 pub const backend = device.backend;
+pub const ReduceType = device.ReduceType;
 
 /// lib-wide default options that can be overridden by the root file.
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.

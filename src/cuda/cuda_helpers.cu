@@ -64,4 +64,41 @@ inline void handleCudnnError(cudnnStatus_t err, const char *file, int line)
   }
 }
 
+template <typename T>
+T* __alloc_scalar(cudaStream_t stream) {
+  CUdeviceptr dptr;
+  const CUstream _stream = static_cast<CUstream>(stream);
+  CURESULT_ASSERT(cuMemAllocAsync(&dptr, sizeof(T), _stream));
+  return reinterpret_cast<T*>(dptr);
+}
+
+template <typename T>
+inline void __free_scalar(cudaStream_t stream, T* s) {
+  CUstream _stream = static_cast<CUstream>(stream);
+  CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(s);
+  CURESULT_ASSERT(cuMemFreeAsync(dptr, _stream));
+}
+
+template <typename T>
+T __transfer_scalar(cudaStream_t stream, T* s) {
+  T result;
+  CUstream _stream = static_cast<CUstream>(stream);
+  CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(s);
+  CURESULT_ASSERT(cuMemcpyDtoHAsync(&result, dptr, sizeof(T), _stream));
+  CURESULT_ASSERT(cuStreamSynchronize(_stream));
+  return result;
+}
+
+inline cudaStream_t __cublas_stream(void* handle) {
+  cudaStream_t stream;
+  CUBLAS_ASSERT(cublasGetStream(static_cast<cublasHandle_t>(handle), &stream));
+  return stream;
+}
+
+inline cudaStream_t __cudnn_stream(void* handle) {
+  cudaStream_t stream;
+  CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(handle), &stream));
+  return stream;
+}
+
 #endif

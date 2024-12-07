@@ -8,7 +8,7 @@ fn host_reference(self: *HostDevice) DeviceReference {
 
 pub const DeviceReference = *HostDevice;
 
-const using_mkl = blk: {
+pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
     for (decls) |decl| {
         if (std.mem.startsWith(u8, decl.name, "mkl_") or std.mem.startsWith(u8, decl.name, "MKL_")) {
@@ -115,13 +115,12 @@ pub const Blas = struct {
     pub fn nrm2(
         _: Blas,
         T: type,
-        x: []T,
-        z: []T,
-        incX: usize,
+        x: []const T,
+        y: []T,
     ) void {
         switch (T) {
-            f32 => z[0] = c.cblas_snrm2(@intCast(x.len), x.ptr, @intCast(incX)),
-            f64 => z[0] = c.cblas_dnrm2(@intCast(x.len), x.ptr, @intCast(incX)),
+            f32 => y[0] = c.cblas_snrm2(@intCast(x.len), x.ptr, 1),
+            f64 => y[0] = c.cblas_dnrm2(@intCast(x.len), x.ptr, 1),
             else => @compileError("Unsupported type" ++ @typeName(T)),
         }
     }
@@ -151,7 +150,7 @@ pub const Blas = struct {
         idx: *i32,
     ) void {
         const _idx: usize = @intCast(idx.*);
-        x_grd[0] += y_grd[_idx];
+        x_grd[_idx] += y_grd[0];
     }
 
     pub fn sum(
@@ -193,6 +192,10 @@ pub const Blas = struct {
             else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
         }
     }
+
+    const bmm = if (using_mkl) bmmImpl else void;
+
+    fn bmmImpl(comptime _: type) void {}
 };
 
 pub const HostDevice = struct {
@@ -255,7 +258,7 @@ pub const HostDevice = struct {
         return true;
     }
 
-    pub const reference: fn (self: *HostDevice) DeviceReference = switch (backend) {
+    pub const reference = switch (backend) {
         .HOST => host_reference,
         .CUDA => @import("cuda_device.zig").host_reference,
     };
