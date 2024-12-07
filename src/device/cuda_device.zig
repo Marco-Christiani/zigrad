@@ -113,7 +113,7 @@ pub const Blas = struct {
         cuda.nrm2(dtype(T), self.cublas(), x.ptr, y.ptr, x.len);
     }
 
-    pub fn maxForward(
+    pub fn max_forward(
         self: *const Blas,
         T: type,
         src: []const T,
@@ -123,7 +123,7 @@ pub const Blas = struct {
         cuda.max_forward(dtype(T), self.cublas(), src.ptr, dst.ptr, idx, src.len);
     }
 
-    pub fn maxBackward(
+    pub fn max_backward(
         self: *const Blas,
         T: type,
         y_grd: []const T,
@@ -173,36 +173,36 @@ pub const Blas = struct {
 };
 
 pub const NN = struct {
-    pub fn reluForward(self: *const NN, comptime T: type, x: []const T, y: []T) void {
+    pub fn relu_forward(self: *const NN, comptime T: type, x: []const T, y: []T) void {
         cuda.relu_forward(dtype(T), self.stream(), x.ptr, y.ptr, x.len);
     }
 
-    pub fn reluBackward(self: *const NN, comptime T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
+    pub fn relu_backward(self: *const NN, comptime T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
         cuda.relu_reverse(dtype(T), self.stream(), x.ptr, y_grd.ptr, x_grd.ptr, x.len);
     }
 
-    pub fn smaxVecForward(self: *const NN, comptime T: type, x: []const T, y: []T, op: SmaxType) void {
+    pub fn smax_vec_forward(self: *const NN, comptime T: type, x: []const T, y: []T, op: SmaxType) void {
         cuda.smax_vec_forward(dtype(T), self.cudnn(), x.ptr, y.ptr, x.len, smaxtype(op));
     }
 
-    pub fn smaxVecBackward(self: *const NN, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
+    pub fn smax_vec_backward(self: *const NN, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
         cuda.smax_vec_reverse(dtype(T), self.cudnn(), y_val.ptr, y_grd.ptr, x_grd.ptr, y_val.len, smaxtype(op));
     }
 
-    pub fn smaxRowForward(self: *const NN, comptime T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
+    pub fn smax_row_forward(self: *const NN, comptime T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
         cuda.smax_2D_row_forward(dtype(T), self.cudnn(), X.ptr, Y.ptr, m, n, op);
     }
 
-    pub fn smaxRowBackward(self: *const NN, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, m: usize, n: usize, op: SmaxType) void {
+    pub fn smax_row_backward(self: *const NN, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, m: usize, n: usize, op: SmaxType) void {
         cuda.smax_2D_row_reverse(dtype(T), self.cudnn(), y_val.ptr, y_grd.ptr, x_grd.ptr, m, n, smaxtype(op));
     }
 
-    pub fn nllLoss1DIndexForward(self: *const NN, comptime T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+    pub fn nll_loss_1d_index_forward(self: *const NN, comptime T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
         const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
         cuda.nll_loss_1D_index_forward(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
     }
 
-    pub fn nllLoss1DIndexBackward(self: *const NN, comptime T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
+    pub fn nll_loss_1d_index_backward(self: *const NN, comptime T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
         cuda.nll_loss_1D_index_reverse(dtype(T), self.cudnn(), src_grd.ptr, trg, src_grd.ptr, src_val.len, rdxtype(reduce_type));
     }
 
@@ -222,7 +222,7 @@ pub const ScratchMemory = struct {
     tail: usize = 0,
     pub fn deinit(self: *ScratchMemory, stream: *anyopaque) void {
         if (self.head != 0) {
-            cuda.memFree(@as(*anyopaque, @ptrFromInt(self.head)), stream);
+            cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.head)), stream);
         }
         self.* = undefined;
     }
@@ -234,10 +234,10 @@ pub const ScratchMemory = struct {
         // check if we have enough scratch to provide a payload
         if (self.tail < (self.head + total)) {
             if (self.head != 0) {
-                cuda.memFree(@as(*anyopaque, @ptrFromInt(self.head)), stream);
+                cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.head)), stream);
             }
             // after a first pass through the network, we should know if we have enough memory.
-            const ptr = cuda.memAlloc(total) orelse @panic("Cannot allocate scratch memory.");
+            const ptr = cuda.mem_alloc(total) orelse @panic("Cannot allocate scratch memory.");
             self.head = @intFromPtr(ptr);
             self.tail = self.head + total;
         }
@@ -286,8 +286,8 @@ pub const CudaDevice = struct {
 
     pub fn deinit(self: *CudaDevice) void {
         // free everything we own first...
-        var iter = self.cache.poppingIterator();
-        while (iter.next()) |ptr| cuda.memFree(ptr, self.context.stream);
+        var iter = self.cache.popping_iterator();
+        while (iter.next()) |ptr| cuda.mem_free(ptr, self.context.stream);
         self.cache.deinit();
 
         self.sync();
@@ -301,57 +301,57 @@ pub const CudaDevice = struct {
         return .{ .ptrs = DeviceReference.DevicePtrs{ .aux = self }, .allocator = self.allocator };
     }
 
-    pub fn memAllocUncached(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
-        const raw_ptr = cuda.memAlloc(n * @sizeOf(T), self.context.stream);
+    pub fn mem_allocUncached(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
+        const raw_ptr = cuda.mem_alloc(n * @sizeOf(T), self.context.stream);
         const dev_ptr: [*]T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
         return dev_ptr[0..n];
     }
 
-    pub fn memAlloc(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
-        return self.cache.get(T, n) orelse self.memAllocUncached(T, n);
+    pub fn mem_alloc(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
+        return self.cache.get(T, n) orelse self.mem_allocUncached(T, n);
     }
 
-    pub fn memDupe(self: *CudaDevice, comptime T: type, src: []const T) Error![]T {
-        const dup = try self.memAlloc(T, src.len);
-        self.memTransfer(T, src, dup, .DtoD);
+    pub fn mem_dupe(self: *CudaDevice, comptime T: type, src: []const T) Error![]T {
+        const dup = try self.mem_alloc(T, src.len);
+        self.mem_transfer(T, src, dup, .DtoD);
         return dup;
     }
 
-    pub fn memFreeUncached(self: *CudaDevice, slice: anytype) void {
-        cuda.memFree(@constCast(slice.ptr), self.context.stream);
+    pub fn mem_freeUncached(self: *CudaDevice, slice: anytype) void {
+        cuda.mem_free(@constCast(slice.ptr), self.context.stream);
     }
 
-    pub fn memFree(self: *CudaDevice, slice: anytype) void {
+    pub fn mem_free(self: *CudaDevice, slice: anytype) void {
         const T = std.meta.Child(@TypeOf(slice));
         if (!self.cache.put(T, slice)) {
-            self.memFreeUncached(slice);
+            self.mem_freeUncached(slice);
         }
     }
 
-    pub fn memCreate(self: HostDevice, comptime T: type) Error!*T {
-        const raw_ptr = cuda.memAlloc(@sizeOf(T), self.context.stream);
+    pub fn mem_create(self: HostDevice, comptime T: type) Error!*T {
+        const raw_ptr = cuda.mem_alloc(@sizeOf(T), self.context.stream);
         const dev_ptr: *T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
         return dev_ptr;
     }
 
-    pub fn memDestroy(self: HostDevice, ptr: anytype) void {
-        cuda.memFree(@constCast(ptr), self.context.stream);
+    pub fn mem_destroy(self: HostDevice, ptr: anytype) void {
+        cuda.mem_free(@constCast(ptr), self.context.stream);
     }
 
-    pub fn memFill(self: CudaDevice, comptime T: type, slice: []T, value: T) void {
+    pub fn mem_fill(self: CudaDevice, comptime T: type, slice: []T, value: T) void {
         var _value = value; // move from register memory
-        cuda.memFill(dtype(T), slice.ptr, slice.len, &_value, self.context.stream);
+        cuda.mem_fill(dtype(T), slice.ptr, slice.len, &_value, self.context.stream);
     }
 
-    pub fn memSequence(self: CudaDevice, comptime T: type, slice: []T, initial: T, step: T) void {
+    pub fn mem_sequence(self: CudaDevice, comptime T: type, slice: []T, initial: T, step: T) void {
         var _init = initial; // move from register memory
         var _step = step; // move from register memory
-        cuda.memSequence(dtype(T), slice.ptr, slice.len, &_init, &_step, self.context.stream);
+        cuda.mem_sequence(dtype(T), slice.ptr, slice.len, &_init, &_step, self.context.stream);
     }
 
     const Direction = enum { HtoD, DtoH, DtoD };
 
-    pub fn memTransfer(
+    pub fn mem_transfer(
         self: CudaDevice,
         comptime T: type,
         src: []const T,
@@ -372,7 +372,7 @@ pub const CudaDevice = struct {
 
     // Unlike host compatibility, this can vary. The upper-level DeviceReference
     // type will ensure to only hand other CudaDevice objects to this function.
-    pub fn isCompatible(self: *const CudaDevice, other: *const CudaDevice) bool {
+    pub fn is_compatible(self: *const CudaDevice, other: *const CudaDevice) bool {
         return self.context.device_number == other.context.device_number;
     }
 };

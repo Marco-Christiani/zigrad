@@ -32,7 +32,7 @@ const TestCases = struct {
     smooth_l1: SmoothL1TestCase,
 };
 
-fn verifySmceLoss(comptime name: []const u8, case: SmceTestCase, allocator: std.mem.Allocator) !void {
+fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: std.mem.Allocator) !void {
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -61,10 +61,10 @@ fn verifySmceLoss(comptime name: []const u8, case: SmceTestCase, allocator: std.
     try std.testing.expectApproxEqAbs(case.loss, loss.data.data[0], 1e-4);
 
     const PRECISION = f16; // precision to compare grad slices at
-    const grad_exp_trunc = try device.memAlloc(PRECISION, input.grad.?.data.len);
-    const grad_actual_trunc = try device.memAlloc(PRECISION, input.grad.?.data.len);
-    defer device.memFree(grad_exp_trunc);
-    defer device.memFree(grad_actual_trunc);
+    const grad_exp_trunc = try device.mem_alloc(PRECISION, input.grad.?.data.len);
+    const grad_actual_trunc = try device.mem_alloc(PRECISION, input.grad.?.data.len);
+    defer device.mem_free(grad_exp_trunc);
+    defer device.mem_free(grad_actual_trunc);
     for (case.input_grad, input.grad.?.data, 0..) |e1, e2, i| {
         grad_exp_trunc[i] = @floatCast(e1);
         grad_actual_trunc[i] = @floatCast(e2);
@@ -86,11 +86,11 @@ test "softmax_cross_entropy_loss" {
 
     const allocator = json_arena.allocator();
     const test_cases = try json.parseFromSliceLeaky(TestCases, allocator, content, .{});
-    try verifySmceLoss("softmax_crossentropy_1d", test_cases.softmax_crossentropy_1d, allocator);
-    try verifySmceLoss("softmax_crossentropy_2d", test_cases.softmax_crossentropy_2d, allocator);
+    try verify_smce_loss("softmax_crossentropy_1d", test_cases.softmax_crossentropy_1d, allocator);
+    try verify_smce_loss("softmax_crossentropy_2d", test_cases.softmax_crossentropy_2d, allocator);
 }
 
-fn verifySmoothL1Loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !void {
+fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !void {
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -136,5 +136,5 @@ test "smooth_l1_loss" {
     const allocator = json_arena.allocator();
     const test_cases = try json.parseFromSliceLeaky(TestCases, allocator, content, .{});
 
-    try verifySmoothL1Loss(test_cases.smooth_l1, allocator);
+    try verify_smooth_l1_loss(test_cases.smooth_l1, allocator);
 }

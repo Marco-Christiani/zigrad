@@ -6,7 +6,7 @@ const ops = @import("loss.zig");
 const Layer = @import("layer.zig").Layer;
 const LinearLayer = @import("layer.zig").LinearLayer;
 const ReLULayer = @import("layer.zig").ReLULayer;
-const readCsv = @import("layer.zig").readCsv;
+const read_csv = @import("layer.zig").read_csv;
 const SGD = zg.optim.SGD;
 
 pub fn MLP(comptime T: type) type {
@@ -26,8 +26,8 @@ pub fn MLP(comptime T: type) type {
 
             for (0..layer_sizes.len - 1) |i| {
                 const curr_ll = try LinearLayer(T).init(allocator, layer_sizes[i], layer_sizes[i + 1]);
-                try self.layers.append(curr_ll.asLayer());
-                if (i < layer_sizes.len - 1) try self.layers.append((try ReLULayer(T).init(allocator)).asLayer());
+                try self.layers.append(curr_ll.as_layer());
+                if (i < layer_sizes.len - 1) try self.layers.append((try ReLULayer(T).init(allocator)).as_layer());
             }
 
             return self;
@@ -57,16 +57,16 @@ pub fn MLP(comptime T: type) type {
             return x;
         }
 
-        pub fn zeroGrad(self: *const Self) void {
+        pub fn zero_grad(self: *const Self) void {
             for (self.layers.items) |layer| {
-                layer.zeroGrad();
+                layer.zero_grad();
             }
         }
 
         pub fn parameters(self: *const Self) ![]*Tensor {
             var params = std.ArrayList(*Tensor).init(self.allocator);
             for (self.layers.items) |layer| {
-                if (layer.getParameters()) |layer_params| {
+                if (layer.get_parameters()) |layer_params| {
                     for (layer_params) |p| try params.append(p);
                 }
             }
@@ -75,7 +75,7 @@ pub fn MLP(comptime T: type) type {
     };
 }
 
-pub fn trainMLP(comptime T: type, data: [][]T, layer_sizes: []const usize, alloc: std.mem.Allocator) !void {
+pub fn train_mlp(comptime T: type, data: [][]T, layer_sizes: []const usize, alloc: std.mem.Allocator) !void {
     const Tensor = NDTensor(T);
 
     const mlp = try MLP(T).init(alloc, layer_sizes);
@@ -132,7 +132,7 @@ pub fn trainMLP(comptime T: type, data: [][]T, layer_sizes: []const usize, alloc
             loss.print_arrows();
 
             loss.grad.?.fill(1.0);
-            mlp.zeroGrad();
+            mlp.zero_grad();
             try gm.backward(loss, alloc);
             optimizer.step(params);
         }
@@ -150,15 +150,15 @@ pub fn trainMLP(comptime T: type, data: [][]T, layer_sizes: []const usize, alloc
 //     const T = f32;
 //
 //     std.debug.print("Reading data\n", .{});
-//     const data = try readCsv(T, "/tmp/data.csv", alloc);
+//     const data = try read_csv(T, "/tmp/data.csv", alloc);
 //     std.debug.print("data.len={}\n", .{data.len});
 //
 //     // const layer_sizes = &[_]usize{ 2, 64, 32, 1 };
 //     const layer_sizes = &[_]usize{ 2, 64, 32, 1 };
-//     try trainMLP(T, data, layer_sizes, alloc);
+//     try train_mlp(T, data, layer_sizes, alloc);
 // }
 
-fn generateXORDataset(T: type, n: usize, alloc: std.mem.Allocator) ![][]T {
+fn generate_xordataset(T: type, n: usize, alloc: std.mem.Allocator) ![][]T {
     var rng = std.Random.DefaultPrng.init(42);
     const random = rng.random();
     const arr = try alloc.alloc([]T, n);
@@ -180,7 +180,7 @@ test "MLP/XOR" {
     const T = f32;
 
     std.debug.print("Generating XOR dataset\n", .{});
-    const data = try generateXORDataset(T, 1000, alloc);
+    const data = try generate_xordataset(T, 1000, alloc);
     defer {
         for (0..data.len) |i| alloc.free(data[i]);
         alloc.free(data);
@@ -188,7 +188,7 @@ test "MLP/XOR" {
     std.debug.print("data.len={}\n", .{data.len});
 
     const layer_sizes = &[_]usize{ 2, 64, 32, 1 };
-    try trainMLP(T, data, layer_sizes, alloc);
+    try train_mlp(T, data, layer_sizes, alloc);
 
     // Test the trained model
     const mlp = try MLP(T).init(alloc, layer_sizes);

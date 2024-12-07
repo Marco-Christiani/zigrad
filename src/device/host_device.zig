@@ -125,7 +125,7 @@ pub const Blas = struct {
         }
     }
 
-    pub fn maxForward(
+    pub fn max_forward(
         _: Blas,
         T: type,
         src: []const T,
@@ -142,7 +142,7 @@ pub const Blas = struct {
         dst[0] = src[_idx];
     }
 
-    pub fn maxReverse(
+    pub fn max_reverse(
         _: Blas,
         T: type,
         y_grd: []const T,
@@ -193,9 +193,9 @@ pub const Blas = struct {
         }
     }
 
-    const bmm = if (using_mkl) bmmImpl else void;
+    const bmm = if (using_mkl) bmm_impl else void;
 
-    fn bmmImpl(comptime _: type) void {}
+    fn bmm_impl(comptime _: type) void {}
 };
 
 pub const HostDevice = struct {
@@ -213,32 +213,32 @@ pub const HostDevice = struct {
         self.* = undefined;
     }
 
-    pub fn memAlloc(self: HostDevice, comptime T: type, n: usize) Error![]T {
+    pub fn mem_alloc(self: HostDevice, comptime T: type, n: usize) Error![]T {
         return self.allocator.alloc(T, n);
     }
 
-    pub fn memFree(self: HostDevice, slice: anytype) void {
+    pub fn mem_free(self: HostDevice, slice: anytype) void {
         return self.allocator.free(slice);
     }
 
-    pub fn memCreate(self: HostDevice, comptime T: type) Error!*T {
+    pub fn mem_create(self: HostDevice, comptime T: type) Error!*T {
         return self.allocator.create(T);
     }
 
-    pub fn memDestroy(self: HostDevice, slice: anytype) void {
+    pub fn mem_destroy(self: HostDevice, slice: anytype) void {
         return self.allocator.destroy(slice);
     }
 
-    pub fn memDupe(self: HostDevice, comptime T: type, src: []const T) Error![]T {
+    pub fn mem_dupe(self: HostDevice, comptime T: type, src: []const T) Error![]T {
         return self.allocator.dupe(T, src);
     }
 
-    pub fn memFill(_: HostDevice, comptime T: type, slice: []T, value: T) void {
+    pub fn mem_fill(_: HostDevice, comptime T: type, slice: []T, value: T) void {
         @memset(slice, value);
     }
 
     // remove data dependencies on this to speed it up
-    pub fn memSequence(_: HostDevice, comptime T: type, slice: []T, initial: T, step: T) void {
+    pub fn mem_sequence(_: HostDevice, comptime T: type, slice: []T, initial: T, step: T) void {
         var current = initial; // move from register memory
         for (slice) |*x| {
             x.* = current;
@@ -250,11 +250,11 @@ pub const HostDevice = struct {
 
     // since host is it's own reference when compiling for HOST only,
     // this is always trivially true. Only for debug compatibility.
-    pub inline fn isCompatible(_: *const HostDevice, _: *const HostDevice) bool {
+    pub inline fn is_compatible(_: *const HostDevice, _: *const HostDevice) bool {
         return true;
     }
 
-    pub fn isHost(_: DeviceReference) bool {
+    pub fn is_host(_: DeviceReference) bool {
         return true;
     }
 
