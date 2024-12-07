@@ -1,7 +1,6 @@
 const std = @import("std");
 const log = std.log.scoped(.cuda);
 const cuda = @import("cuda").impl;
-const cuda_loss = @import("cuda_loss.zig");
 const DataCache = @import("data_cache.zig");
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
