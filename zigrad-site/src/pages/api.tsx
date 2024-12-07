@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import Layout from '@theme/Layout';
 import BrowserOnly from '@docusaurus/BrowserOnly';
+import clsx from 'clsx';
 import styles from "./api.module.css";
 
 function APIDocsContent() {
@@ -27,7 +28,7 @@ function APIDocsContent() {
     <div className="api-docs-container padding-vert--sm padding-horiz--lg">
       <div id="navWrap">
         {/* <input type="search" id="search" autocomplete="off" spellcheck="false" placeholder="`s` to search, `?` to see more options"> */}
-        <input type="search" id="search" className={styles.search} placeholder="`s` to search, `?` to see more options">
+        <input type="search" id="search" className={clsx("navbar__search-input", styles.search)} placeholder="`s` to search, `?` to see more options">
         </input>
         <div id="sectNav" className="hidden"><ul id="listNav"></ul></div>
       </div>

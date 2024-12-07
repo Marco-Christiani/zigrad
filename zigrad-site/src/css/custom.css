@@ -34,6 +34,18 @@
   color: var(--ifm-color-content);
 }
 
+.navbar__brand {
+  /*margin-right: 0px;*/
+  margin-left: 1rem;
+}
+
+/*.navbar__logo > img {*/
+  /*width: 100px;*/
+  /*height: 40px;*/
+  /*padding-top: 5px;*/
+/*}*/
+
+/**/
 /* Zig API docs */
 
 .hidden {
@@ -128,6 +140,15 @@ kbd {
 #listNav li a.active {
   background-color: #FFBB4D;
   color: #000;
+}
+
+.api-docs-container td  {
+  /*border: var(--ifm-table-border-width) solid var(--ifm-table-border-color)*/
+  border: unset;
+}
+
+.api-docs-container td > p {
+  margin: unset;
 }
 
 ul.columns {
