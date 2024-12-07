@@ -301,14 +301,14 @@ pub const CudaDevice = struct {
         return .{ .ptrs = DeviceReference.DevicePtrs{ .aux = self }, .allocator = self.allocator };
     }
 
-    pub fn mem_allocUncached(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
+    pub fn mem_alloc_uncached(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
         const raw_ptr = cuda.mem_alloc(n * @sizeOf(T), self.context.stream);
         const dev_ptr: [*]T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
         return dev_ptr[0..n];
     }
 
     pub fn mem_alloc(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
-        return self.cache.get(T, n) orelse self.mem_allocUncached(T, n);
+        return self.cache.get(T, n) orelse self.mem_alloc_uncached(T, n);
     }
 
     pub fn mem_dupe(self: *CudaDevice, comptime T: type, src: []const T) Error![]T {
@@ -317,14 +317,14 @@ pub const CudaDevice = struct {
         return dup;
     }
 
-    pub fn mem_freeUncached(self: *CudaDevice, slice: anytype) void {
+    pub fn mem_free_uncached(self: *CudaDevice, slice: anytype) void {
         cuda.mem_free(@constCast(slice.ptr), self.context.stream);
     }
 
     pub fn mem_free(self: *CudaDevice, slice: anytype) void {
         const T = std.meta.Child(@TypeOf(slice));
         if (!self.cache.put(T, slice)) {
-            self.mem_freeUncached(slice);
+            self.mem_free_uncached(slice);
         }
     }
 

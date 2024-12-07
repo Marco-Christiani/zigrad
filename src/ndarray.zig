@@ -150,20 +150,21 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn print_to_writer(self: Self, writer: anytype, device: DeviceReference) !void {
-            print_to_writerImpl(self, self.data, writer, device);
+            print_to_writer_impl(self, self.data, writer, device);
         }
 
         fn has_transfer(comptime DT: type) bool {
             return if (@typeInfo(DT) == .Struct) @hasDecl(T, "transfer") else false;
         }
 
-        fn print_to_writerImpl(self: Self, _data: []T, writer: anytype, device: DeviceReference) !void {
+        fn print_to_writer_impl(self: Self, _data: []T, writer: anytype, device: DeviceReference) !void {
             if (comptime has_transfer(@TypeOf(device))) {
                 if (!device.is_host()) {
                     const _host_data = device.allocator.alloc(T, self.data.len);
                     defer device.allocator.free(_host_data);
                     device.transfer(_data, _host_data, .DtoH);
-                    return self.print_to_writerImpl(_host_data, writer, device);
+                    device.sync();
+                    return self.print_to_writer_impl(_host_data, writer, device);
                 }
             }
 
