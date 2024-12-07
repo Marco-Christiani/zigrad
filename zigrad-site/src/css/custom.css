@@ -33,3 +33,187 @@
 .adaptiveText {
   color: var(--ifm-color-content);
 }
+
+/* Zig API docs */
+
+.hidden {
+  display: none;
+}
+
+/* [src] */
+#hdrName a {
+  font-size: 0.7em;
+  padding-left: 1em;
+}
+
+#helpDialog {
+  width: 21em;
+  height: 21em;
+  position: fixed;
+  top: 0;
+  left: 0;
+  background-color: #333;
+  color: #fff;
+  border: 1px solid #fff;
+}
+#helpDialog h1 {
+  text-align: center;
+  font-size: 1.5em;
+}
+#helpDialog dt, #helpDialog dd {
+  display: inline;
+  margin: 0 0.2em;
+}
+kbd {
+  color: #000;
+  background-color: #fafbfc;
+  border-color: #d1d5da;
+  border-bottom-color: #c6cbd1;
+  box-shadow-color: #c6cbd1;
+  display: inline-block;
+  padding: 0.3em 0.2em;
+  font: 1.2em monospace;
+  line-height: 0.8em;
+  vertical-align: middle;
+  border: solid 1px;
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0;
+  cursor: default;
+}
+
+#listSearchResults li.selected {
+  background-color: #93e196;
+}
+
+#tableFnErrors dt {
+  font-weight: bold;
+}
+
+/*dl > div {*/
+/*    padding: 0.5em;*/
+/*    border: 1px solid #c0c0c0;*/
+/*    margin-top: 0.5em;*/
+/*}*/
+/**/
+/*td {*/
+/*  vertical-align: top;*/
+/*  margin: 0;*/
+/*  padding: 0.5em;*/
+/*  max-width: 20em;*/
+/*  text-overflow: ellipsis;*/
+/*  overflow-x: hidden;*/
+/*}*/
+
+#listNav {
+  list-style-type: none;
+  margin: 0.5em 0 0 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #f1f1f1;
+}
+#listNav li {
+  float:left;
+}
+#listNav li a {
+  display: block;
+  color: #000;
+  text-align: center;
+  padding: .5em .8em;
+  text-decoration: none;
+}
+#listNav li a:hover {
+  background-color: #555;
+  color: #fff;
+}
+#listNav li a.active {
+  background-color: #FFBB4D;
+  color: #000;
+}
+
+ul.columns {
+  column-width: 20em;
+}
+
+.tok-kw {
+    color: #333;
+    font-weight: bold;
+}
+.tok-str {
+    color: #d14;
+}
+.tok-builtin {
+    color: #0086b3;
+}
+.tok-comment {
+    color: #777;
+    font-style: italic;
+}
+.tok-fn {
+    color: #900;
+    font-weight: bold;
+}
+.tok-null {
+    color: #008080;
+}
+.tok-number {
+    color: #008080;
+}
+.tok-type {
+    color: #458;
+    font-weight: bold;
+}
+
+/*@media (prefers-color-scheme: dark) {*/
+[data-theme='dark'] {
+  .fieldDocs {
+    border-color:#2A2A2A;
+  }
+  #listNav {
+    background-color: #333;
+  }
+  #listNav li a {
+    color: #fff;
+  }
+  #listNav li a:hover {
+    background-color: #555;
+    color: #fff;
+  }
+  #listNav li a.active {
+    background-color: #FFBB4D;
+    color: #000;
+  }
+  #listSearchResults li.selected {
+    background-color: #000;
+  }
+  #listSearchResults li.selected a {
+    color: #fff;
+  }
+  dl > div {
+    border-color: #373737;
+  }
+  .tok-kw {
+      color: #eee;
+  }
+  .tok-str {
+      color: #2e5;
+  }
+  .tok-builtin {
+      color: #ff894c;
+  }
+  .tok-comment {
+      color: #aa7;
+  }
+  .tok-fn {
+      color: #B1A0F8;
+  }
+  .tok-null {
+      color: #ff8080;
+  }
+  .tok-number {
+      color: #ff8080;
+  }
+  .tok-type {
+      color: #68f;
+  }
+}
+

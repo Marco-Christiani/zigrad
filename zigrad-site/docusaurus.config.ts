@@ -42,7 +42,9 @@ const config: Config = {
           // Please change this to your repo.
           // Remove this to remove the "edit this page" links.
           editUrl:
-            'https://github.com/facebook/docusaurus/tree/main/packages/create-docusaurus/templates/shared/',
+            // TODO: change later
+            // 'https://github.com/Marco-Christiani/Zigrad/tree/gh-pages/',
+            'https://github.com/Marco-Christiani/Zigrad/tree/docusaurus/zigrad-site/',
         },
         blog: false,
         theme: {
@@ -56,7 +58,7 @@ const config: Config = {
     // Replace with your project's social card
     image: 'img/docusaurus-social-card.jpg',
     navbar: {
-      title: 'My Site',
+      // title: 'Zigrad',
       logo: {
         alt: 'My Site Logo',
         src: 'img/logo.svg',
@@ -66,7 +68,13 @@ const config: Config = {
           type: 'docSidebar',
           sidebarId: 'tutorialSidebar',
           position: 'left',
-          label: 'Tutorial',
+          label: 'Guide',
+        },
+        {
+          to: '/api/',
+          // sidebarId: 'tutorialSidebar',
+          position: 'left',
+          label: 'API',
         },
         {
           href: 'https://github.com/Marco-Christiani/Zigrad',

@@ -63,7 +63,7 @@ function HomepageHeader() {
           </Link>
           <Link
             className="button button--info"
-            to="/docs/performance">
+            to="/docs/benchmarks">
             <div style={{
               display: 'flex',
               alignItems: 'center',
