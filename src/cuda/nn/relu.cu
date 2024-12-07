@@ -3,14 +3,6 @@
 
 #include "nn_utils.cu"
 
-template <typename T>
-struct ReluBwdFunctor {
-    __device__
-    thrust::tuple<T, T> operator()(thrust::tuple<T, T> tup, T x_grd) const {
-        return ((thrust::get<0>(tup) > T{0}) ? thrust::get<1>(tup) : T{0}) + x_grd;
-    }
-};
-
 extern "C" void relu_forward(
   dtype id,
   void* stream,
@@ -47,6 +39,14 @@ extern "C" void relu_forward(
     }
   }
 }
+
+template <typename T>
+struct ReluBwdFunctor {
+    __device__
+    T operator()(thrust::tuple<T, T> tup, T x_grd) const {
+        return ((thrust::get<0>(tup) > T{0}) ? thrust::get<1>(tup) : T{0}) + x_grd;
+    }
+};
 
 extern "C" void relu_reverse(
   dtype id,

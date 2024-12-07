@@ -2,12 +2,65 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
+const ReduceType = zg.ReduceType;
 
 const Shape = zg.Shape;
 const NDArray = zg.NDArray;
 const settings = zg.settings;
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
+
+// NOTE: Reductions return NaN when "reduce" is set to false.
+// This is for c-compatibility and this value is instead traded for null.
+
+// nll entry point
+pub fn nll(comptime T: type, comptime config: NLLConfig) NLLType(T, config) {
+    return .{};
+}
+
+pub const NLLConfig = struct {
+    // dimensions of input tensor
+    dimensions: usize,
+    // nll expecting logits - if true,
+    // softmax will be used on input
+    input_logits: bool,
+    // specifies that the target type
+    // will be provided as an index
+    target_type: enum { indices, encoding },
+    // specifies the reduce type used
+    reduce_type: ReduceType,
+};
+
+// negative log likelihood
+pub fn NLLType(comptime T: type, comptime config: NLLConfig) type {
+    return if (config.target_type == .indices) NLLIndex(T, config) else @compileError("Unimplemented");
+}
+
+fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
+    return switch (config.dimensions) {
+        1 => struct {
+            pub fn score(src: *NDTensor(T), trg: usize, reduce: bool) !*NDTensor {
+                const data = try NDArray(T).empty(&.{1}, src.device);
+                src.device.nn.nllLoss1DIndexForward(T, src.getData(), trg, data.data, config.input_logits, reduce, config.reduce_type);
+                return try NDTensor(T).createDependent(.{
+                    .data = data,
+                    .op = .DIV,
+                    .children = &.{src},
+                    .requires_grad = src.requires_grad or src.requires_grad,
+                    .device = src.device,
+                    ._backward = backward,
+                    ._backward_ctx = @ptrFromInt(trg),
+                });
+            }
+
+            fn backward(src: *zg.NDTensor(T)) anyerror!void {
+                const trg: usize = @intFromPtr(src._backward_ctx.?);
+                src.device.nn.nllLoss1DIndexBackward(T, src.getData(), src.grad.?.data, trg, config.reduce_type);
+            }
+        },
+        else => @compileError("Unsupported Dimensions for NLLIndex"),
+    };
+}
 
 /// Relies on autograd, operates on the flat data.
 pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {

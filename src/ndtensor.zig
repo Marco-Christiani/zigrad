@@ -11,7 +11,6 @@ const Range = ndarray.Range;
 const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
-
 const log = std.log.scoped(.zg_tensor);
 
 pub const MaxOverDimOptions = struct {
@@ -487,6 +486,8 @@ pub fn NDTensor(comptime T: type) type {
             // self.printToWriter(std.io.getStdOut().writer());
             self.printToWriter(std.io.getStdErr().writer()) catch @panic("Failed to print tensor");
         }
+
+        // fn ...(
 
         pub fn printToWriter(self: Self, writer: anytype) !void {
             try writer.print("NDTensor<{},{?s}>", .{ T, if (self.op) |o| @tagName(o) else null });

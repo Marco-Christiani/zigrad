@@ -25,7 +25,8 @@ EXTERN_C void smax_vec_forward(
   void* cudnn_handle,
   const void* x,
   void* y,
-  len_t n
+  len_t n,
+  smaxtype smaxop
 );
 
 EXTERN_C void smax_vec_reverse(
@@ -54,6 +55,37 @@ EXTERN_C void softmax_2D_row_reverse(
   void* x_grd,
   len_t m,
   len_t n
+);
+
+EXTERN_C void clamp(
+  dtype id,
+  void* stream,
+  const void* x,
+  void* y,
+  len_t n,
+  double lower,
+  double upper
+);
+
+EXTERN_C void nll_loss_1D_index_forward(
+  dtype id,
+  void* cudnn_handle,
+  void* src,
+  len_t trg,
+  void* dst,
+  len_t n,
+  bool inplace_smax,
+  reduxtype reduxop
+);
+
+EXTERN_C void nll_loss_1D_index_reverse(
+  dtype id,
+  void* cudnn_handle,
+  const void* x_val,
+  void *x_grd,
+  len_t trg,
+  len_t n,
+  reduxtype reduxop
 );
 
 #endif

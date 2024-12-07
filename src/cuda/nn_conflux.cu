@@ -1,3 +1,5 @@
 #include "nn/relu.cu"
 #include "nn/smax_vec.cu"
 #include "nn/smax_2D_row.cu"
+#include "nn/clamp.cu"
+#include "nn/nll_loss.cu"

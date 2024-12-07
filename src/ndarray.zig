@@ -149,7 +149,24 @@ pub fn NDArray(comptime T: type) type {
             self.printToWriter(std.io.getStdErr().writer()) catch @panic("print failure");
         }
 
-        pub fn printToWriter(self: Self, writer: anytype) !void {
+        pub fn printToWriter(self: Self, writer: anytype, device: DeviceReference) !void {
+            printToWriterImpl(self, self.data, writer, device);
+        }
+
+        fn hasTransfer(comptime DT: type) bool {
+            return if (@typeInfo(DT) == .Struct) @hasDecl(T, "transfer") else false;
+        }
+
+        fn printToWriterImpl(self: Self, _data: []T, writer: anytype, device: DeviceReference) !void {
+            if (comptime hasTransfer(@TypeOf(device))) {
+                if (!device.isHost()) {
+                    const _host_data = device.allocator.alloc(T, self.data.len);
+                    defer device.allocator.free(_host_data);
+                    device.transfer(_data, _host_data, .DtoH);
+                    return self.printToWriterImpl(_host_data, writer, device);
+                }
+            }
+
             const alloc = std.heap.page_allocator;
             var shapeStr: []u8 = alloc.alloc(u8, self.shape.len() * @sizeOf(usize)) catch @panic("allocation failed in print");
             defer alloc.free(shapeStr);
@@ -441,6 +458,11 @@ pub fn NDArray(comptime T: type) type {
         ///   - Will probably have the same edge case issue
         ///
         pub fn _bmmAcc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, device: DeviceReference) !*Self {
+
+            //if (comptime @TypeOf(device.bmm) != void) {
+            //    return device.bmm(....);
+            //}
+
             if (self.shape.len() < 2) {
                 try self._reshape(&[_]usize{ 1, try self.shape.get(0) });
             }
@@ -884,7 +906,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn clip_norm(self: *const Self, max_norm: T, delta: T, device: DeviceReference) void {
             const norm_ = device.memAlloc(T, 1) catch @panic("OOM");
-            device.blas.nrm2(T, self.data, norm_, 1);
+            device.blas.nrm2(T, self.data, norm_);
             const norm = norm_[0];
             if (norm > max_norm) {
                 const scale = max_norm / (norm + delta);

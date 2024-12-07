@@ -58,9 +58,9 @@ EXTERN_C void ger(
 EXTERN_C void nrm2(
   dtype id,
   void* cublas_handle,
-  void* a_data,
-  len_t n,
-  len_t stride
+  const void* x,
+  void* y,
+  len_t n
 );
 
 EXTERN_C void max_forward(
