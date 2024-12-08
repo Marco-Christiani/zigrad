@@ -906,7 +906,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn clip_norm(self: *const Self, max_norm: T, delta: T, device: DeviceReference) void {
-            const norm_ = device.mem_alloc(T, 1) catch @panic("OOM");
+            const norm_ = device.scratch.get(T, 1);
             device.blas.nrm2(T, self.data, norm_);
             const norm = norm_[0];
             if (norm > max_norm) {

@@ -49,12 +49,12 @@ fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
                     .requires_gradient = src.requires_gradient or src.requires_gradient,
                     .device = src.device,
                     ._backward = backward,
-                    ._backward_ctx = @ptrFromInt(trg),
+                    ._backward_ctx = @ptrFromInt(trg +| 1), // prevent nullptr
                 });
             }
 
             fn backward(src: *zg.NDTensor(T)) anyerror!void {
-                const trg: usize = @intFromPtr(src._backward_ctx.?);
+                const trg: usize = @intFromPtr(src._backward_ctx.?) -| 1;
                 src.device.nn.nll_loss_1d_index_backward(T, src.get_data(), src.grad.?.data, trg, config.reduce_type);
             }
         },

@@ -100,12 +100,14 @@ extern "C" void nll_loss_1D_index_reverse(
   len_t n,
   reduxtype reduxop
 ) {
-  switch (id) {
-    case SINGLE:
-      return __nll_loss_1D_index_reverse<f32>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
-    case DOUBLE: 
-      return __nll_loss_1D_index_reverse<f64>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
+
+  if (id == SINGLE) {
+      __nll_loss_1D_index_reverse<f32>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
+  } else {
+      __nll_loss_1D_index_reverse<f64>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
   }
+
+  CUDA_ASSERT(cudaPeekAtLastError());
 }
 
 #endif

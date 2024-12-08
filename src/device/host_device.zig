@@ -198,18 +198,65 @@ pub const Blas = struct {
     fn bmm_impl(comptime _: type) void {}
 };
 
+pub const ScratchMemory = struct {
+    head: usize = 0,
+    tail: usize = 0,
+    // We're using malloc for memory alignment. After one pass
+    // through a network, this should never need to be resized.
+    pub fn deinit(self: *ScratchMemory) void {
+        if (self.head != 0) {
+            std.c.free(@ptrFromInt(self.head));
+        }
+        self.* = undefined;
+    }
+    pub fn get(self: *ScratchMemory, comptime T: type, n: usize) []T {
+        const total: usize = @sizeOf(T) * n;
+        // check if we have enough scratch to provide a payload
+        if (self.tail < (self.head + total)) {
+            if (self.head != 0) {
+                std.c.free(@ptrFromInt(self.head));
+            }
+            const ptr = std.c.malloc(total) orelse @panic("Cannot allocate scratch memory");
+            self.head = @intFromPtr(ptr);
+            self.tail = self.head + total;
+        }
+        const ptr: [*]T = @ptrFromInt(self.head);
+        return ptr[0..n];
+    }
+};
+
+pub const NN = struct {
+    pub fn clip_norm(self: *const NN, comptime T: type, x_val: []T, max_norm: T, delta: T) f64 {
+        var nrm: [1]T = undefined;
+        self.parent().blas.nrm2(T, x_val, nrm[0..]);
+
+        const norm = nrm[0];
+        if (norm > max_norm) {
+            const scale = max_norm / (norm + delta);
+            for (self.data) |*value| {
+                value.* *= scale;
+            }
+        }
+    }
+
+    fn parent(self: *const NN) *const HostDevice {
+        return @alignCast(@fieldParentPtr("nn", self));
+    }
+};
+
 pub const HostDevice = struct {
     const Error = std.mem.Allocator.Error;
 
     blas: Blas,
+    scratch: ScratchMemory,
     allocator: std.mem.Allocator,
 
     pub fn init(backing_allocator: std.mem.Allocator) HostDevice {
-        return .{ .allocator = backing_allocator, .blas = .{} };
+        return .{ .allocator = backing_allocator, .blas = .{}, .scratch = .{} };
     }
 
     pub fn deinit(self: *HostDevice) void {
-        // more in the future when we bring in caching
+        self.scratch.deinit();
         self.* = undefined;
     }
 
