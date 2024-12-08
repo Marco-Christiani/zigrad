@@ -3,13 +3,14 @@
 const std = @import("std");
 const zg = @import("zigrad.zig");
 const settings = zg.settings;
+const DeviceReference = zg.DeviceReference;
+const backend = zg.backend;
 
 const ndarray = @import("ndarray.zig");
 const Range = ndarray.Range;
 const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
-
 const log = std.log.scoped(.zg_tensor);
 
 pub const MaxOverDimOptions = struct {
@@ -44,13 +45,14 @@ pub const Op = enum {
     TRANSPOSE,
     MAX,
     EXP,
+    TRANSFER,
 };
 
 pub fn NDTensor(comptime T: type) type {
     return struct {
 
         // signature for a backwards callback
-        const Callback = *const fn (Self, std.mem.Allocator) anyerror!void;
+        const Callback = *const fn (Self) anyerror!void;
 
         pub const dtype = NDArray(T);
         const Self = @This();
@@ -60,36 +62,63 @@ pub fn NDTensor(comptime T: type) type {
         children: ?[]const *Self = null,
         label: ?[]const u8 = null,
         grad: ?*dtype = null,
-        requires_grad: bool,
+        requires_gradient: bool,
         acquired: bool = false, // not inherited
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
         _backward: ?Callback = null, // see notes below
         _backward_ctx: ?*anyopaque = null,
 
         /// Values and shape are allocated. COM.
-        pub fn init(values: []const T, shape: ?[]const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
+        pub fn init(values: []const T, shape: ?[]const usize, requires_gradient: bool, device: DeviceReference) !*Self {
             const self_shape = shape orelse &[_]usize{values.len};
-            const self = try allocator.create(Self);
+            const self = try device.allocator.create(Self);
             self.* = Self{
-                .data = try dtype.init(values, self_shape, allocator),
-                .grad = if (requires_grad) try dtype.zeros(self_shape, allocator) else null,
-                .requires_grad = requires_grad,
-                .allocator = allocator,
+                .data = try dtype.init(values, self_shape, device),
+                .grad = if (requires_gradient) try dtype.zeros(self_shape, device) else null,
+                .requires_gradient = requires_gradient,
+                .device = device,
             };
             return self;
         }
 
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
-        pub fn empty(shape: []const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
-            const self = try allocator.create(Self);
+        pub fn empty(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+            const self = try device.allocator.create(Self);
             self.* = Self{
-                .data = try dtype.empty(shape, allocator),
-                .grad = if (requires_grad) try dtype.zeros(shape, allocator) else null,
-                .requires_grad = requires_grad,
-                .allocator = allocator,
+                .data = try dtype.empty(shape, device),
+                .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
+                .requires_gradient = requires_gradient,
+                .device = device,
             };
             return self;
+        }
+
+        pub fn zeros(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+            const self = try device.allocator.create(Self);
+            self.* = Self{
+                .data = try dtype.zeros(shape, device),
+                .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
+                .requires_gradient = requires_gradient,
+                .device = device,
+            };
+            return self;
+        }
+
+        pub fn get_shape(self: Self) []const usize {
+            return self.data.shape.shape;
+        }
+
+        pub fn get_size(self: Self) []const usize {
+            return self.data.data.len;
+        }
+
+        pub fn get_strides(self: Self) []const usize {
+            return self.data.shape.strides;
+        }
+
+        pub fn get_data(self: Self) []T {
+            return self.data.data;
         }
 
         pub fn cast(self: *Self, K: type) !*NDTensor(K) {
@@ -103,8 +132,15 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
-        pub fn requiresGrad(self: Self) bool {
-            return self.requires_grad and zg.rt_grad_enabled;
+        pub fn requires_grad(self: Self) bool {
+            return self.requires_gradient and zg.rt_grad_enabled;
+        }
+
+        pub fn setup_grad(self: *Self, fill_value: ?T) !void {
+            if (self.grad == null) {
+                self.grad = try dtype.empty(self.data.shape.shape, self.device);
+            }
+            return self.grad.?.fill(fill_value orelse return, self.device);
         }
 
         pub const CreateDependentOpts = struct {
@@ -112,8 +148,8 @@ pub fn NDTensor(comptime T: type) type {
             op: ?Op = null,
             children: []const *Self,
             label: ?[]const u8 = null,
-            requires_grad: bool,
-            allocator: std.mem.Allocator,
+            requires_gradient: bool,
+            device: DeviceReference,
             _backward: ?Callback = null,
             _backward_ctx: ?*anyopaque = null,
         };
@@ -132,28 +168,28 @@ pub fn NDTensor(comptime T: type) type {
         ///
         /// # ADR
         ///   1. Intended for creating intermediates hence alloc/no-alloc specifications.
-        ///   2. To support graph usage without the intention of backprop, requires_grad=false will not allocate a grad.
+        ///   2. To support graph usage without the intention of backprop, requires_gradient=false will not allocate a grad.
         ///   3. The only foreseen situation to init with a specific `grad` value would be at the tail of a graph for backprop.
         ///      This is a cold operation and thus should be done explicitly, hence no support provided here. This drives support
         ///      for mutable `grad` pointer, so the caller can move the reference (Warning: this pattern is a red flag).
         ///   4. Should this respect the global `grad_enabled` flag and override the flag parameter? Tbd.
         ///      UPDATE: Changed my mind, overrides.
-        pub fn createDependent(opts: CreateDependentOpts) !*Self {
-            const self = try opts.allocator.create(Self);
-            const rg = opts.requires_grad and zg.rt_grad_enabled;
+        pub fn create_dependent(opts: CreateDependentOpts) !*Self {
+            const self = try opts.device.allocator.create(Self);
+            const rg = opts.requires_gradient and zg.rt_grad_enabled;
             self.* = Self{
                 .data = opts.data,
                 .op = opts.op,
-                // TODO: How to handle not holding references if requiresGrad == false??
+                // TODO: How to handle not holding references if requires_grad == false??
                 // .children = if (rg) try opts.allocator.dupe(*const Self, opts.children) else null,
-                .children = try opts.allocator.dupe(*Self, opts.children),
-                .label = if (opts.label) |l| try opts.allocator.dupe(u8, l) else null,
-                .grad = if (rg) try dtype.zeros(opts.data.shape.shape, opts.allocator) else null,
-                .requires_grad = rg,
+                .children = try opts.device.allocator.dupe(*Self, opts.children),
+                .label = if (opts.label) |l| try opts.device.allocator.dupe(u8, l) else null,
+                .grad = if (rg) try dtype.zeros(opts.data.shape.shape, opts.device) else null,
+                .requires_gradient = rg,
                 .acquired = false,
                 ._backward = if (rg) opts._backward else null,
                 ._backward_ctx = if (rg) opts._backward_ctx else null,
-                .allocator = opts.allocator,
+                .device = opts.device,
             };
             return self;
         }
@@ -161,21 +197,21 @@ pub fn NDTensor(comptime T: type) type {
         pub fn deinit(self: *Self) void {
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
             // log.debug("deinit().data {?s}", .{self.label});
-            self.data.deinit(self.allocator);
+            self.data.deinit(self.device);
             if (self.grad) |g| {
                 // log.debug("deinit().grad {?s}", .{self.label});
-                g.deinit(self.allocator);
+                g.deinit(self.device);
             }
 
             // TODO: verify this is heap first, possibly by checking alignment, not sure.
-            if (self.label) |l| self.allocator.free(l);
+            if (self.label) |l| self.device.allocator.free(l);
 
             // TODO: ohhhh this is tricky...
             // if (self._backward_ctx) |ctx| {
             //     if (@hasDecl(ctx, "deinit")) ctx.deinit();
             // }
-            if (self.children) |c| self.allocator.free(c);
-            self.allocator.destroy(self);
+            if (self.children) |c| self.device.allocator.free(c);
+            self.device.allocator.destroy(self);
         }
 
         pub fn teardown(self: *Self) void {
@@ -200,16 +236,16 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Values are not allocated, grad_shape is allocated. COM.
-        pub fn fromZarray(values: *dtype, requires_grad: bool, grad_shape: ?Shape, allocator: std.mem.Allocator) !*Self {
-            log.warn("Consider createDependent() if you are about to set children. This may be deprecated.", .{});
-            const result = try allocator.create(Self);
+        pub fn from_zarray(values: *dtype, requires_gradient: bool, grad_shape: ?Shape, device: DeviceReference) !*Self {
+            log.warn("Consider create_dependent() if you are about to set children. This may be deprecated.", .{});
+            const result = try device.allocator.create(Self);
             const grad: ?*dtype = blk: {
-                if (requires_grad) {
+                if (requires_gradient) {
                     if (grad_shape) |s| {
                         log.warn("`grad_shape` may be deprecated.", .{});
-                        break :blk try dtype.zeros(s.shape, allocator);
+                        break :blk try dtype.zeros(s.shape, device);
                     } else {
-                        break :blk (try dtype.zeros(values.shape.shape, allocator));
+                        break :blk (try dtype.zeros(values.shape.shape, device));
                     }
                 } else {
                     break :blk null;
@@ -218,39 +254,102 @@ pub fn NDTensor(comptime T: type) type {
             result.* = Self{
                 .data = values,
                 .grad = grad,
-                .requires_grad = requires_grad,
-                .allocator = allocator,
+                .requires_gradient = requires_gradient,
+                .device = device,
             };
             return result;
         }
 
+        fn to_deviceImpl(
+            src: []const T,
+            dst: []T,
+            src_device: DeviceReference,
+            dst_device: DeviceReference,
+        ) !void {
+            if (comptime @typeInfo(@TypeOf(src_device)) != .Struct)
+                return;
+
+            // currently only implemented for a single aux device.
+            std.debug.assert(!src_device.is_compatible(dst_device));
+
+            if (src_device.is_host()) {
+                dst_device.mem_transfer(T, src, dst, .HtoD);
+            } else {
+                src_device.mem_transfer(T, src, dst, .DtoH);
+            }
+        }
+
+        pub fn _to_device(self: *Self, device: DeviceReference) !void {
+            if (self.device.is_compatible(device))
+                return self;
+
+            const data = try device.mem_alloc(T, self.data.data.len);
+            to_deviceImpl(self.data.data, data, self.device, device);
+            self.device.mem_free(self.data.data);
+            self.data.data = data;
+            self.device = device;
+        }
+
+        pub fn to_device(self: *Self, device: DeviceReference) !*Self {
+            if (self.device.is_compatible(device))
+                return self;
+
+            const to_device_bw = struct {
+                fn to_device_bw_impl(_self: Self) !void {
+                    const child = (_self.children orelse return error.NoChildren)[0];
+                    to_deviceImpl(_self.grad.?.data, child.grad.?.data, self.device, child.device);
+                }
+            }.to_device_bw_impl;
+
+            const data = try dtype.empty(self.data.shape, device);
+
+            to_deviceImpl(self.data.data, data.data, self.device, device);
+
+            var result = try create_dependent(.{
+                .data = data,
+                .op = .TRANSFER,
+                .children = &.{self},
+                .label = null,
+                .requires_gradient = false,
+                .device = self.device,
+                ._backward = to_device_bw,
+            });
+
+            errdefer result.deinit();
+            if (self.requires_grad()) { // need to make this call, not check the attribute flag
+                result.grad = try dtype.zeros(self.data.shape, device);
+                result.requires_gradient = true;
+            }
+            return result;
+        }
+
         // NOTE: Check callsites and see if we can fix the comments here
-        /// Only data and grad are copied. Child references and other metadata is not retained aside from requires_grad.
+        /// Only data and grad are copied. Child references and other metadata is not retained aside from requires_gradient.
         /// Passed allocator used for allocations, not the owned one (i.e. not `@This()` one).
         ///
         /// ---
         /// # ADR
         ///   - The choice to have an allocator provided is important, intended to be used for backward
         ///   - If the tensor backing `dtype` changes its allocator ownership contract, then this needs to be changed
-        pub fn clone(self: Self, allocator: std.mem.Allocator) !*Self {
-            const result = try allocator.create(Self);
-            errdefer allocator.destroy(result);
+        pub fn clone(self: Self) !*Self {
+            const result = try self.device.allocator.create(Self);
+            errdefer self.device.allocator.destroy(result);
             result.* = Self{
-                .data = try self.data.copy(allocator),
-                .grad = if (self.grad) |g| try g.copy(allocator) else null,
-                .requires_grad = self.requiresGrad(),
+                .data = try self.data.copy(self.device),
+                .grad = if (self.grad) |g| try g.copy(self.device) else null,
+                .requires_gradient = self.requires_grad(),
                 .op = null,
                 .children = null,
                 .label = null,
                 .acquired = false,
-                .allocator = allocator,
+                .device = self.device,
                 ._backward = null,
                 ._backward_ctx = null,
             };
             return result;
         }
 
-        pub fn logShape(self: Self, comptime msg: ?[]const u8) void {
+        pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
             log.debug("{s}{s} data shape: {d} grad shape: {?d}", .{
                 if (msg) |n| n else "",
                 if (self.label) |l| l else "",
@@ -268,7 +367,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const reshape_bw = struct {
-                fn reshape_bw_impl(_self: Self, _: std.mem.Allocator) !void {
+                fn reshape_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const original_shape = children[0].data.shape;
                     try self.grad.?._reshape(original_shape.shape);
@@ -276,13 +375,13 @@ pub fn NDTensor(comptime T: type) type {
                 }
             }.reshape_bw_impl;
 
-            const result = try createDependent(.{
-                .data = try self.data.copy(self.allocator),
+            const result = try create_dependent(.{
+                .data = try self.data.copy(self.device),
                 .op = .RESHAPE,
                 .children = &.{self},
                 .label = null,
-                .requires_grad = self.requires_grad,
-                .allocator = self.allocator,
+                .requires_gradient = self.requires_gradient,
+                .device = self.device,
                 ._backward = reshape_bw,
             });
             errdefer result.deinit();
@@ -294,38 +393,38 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn transpose(self: *Self) !*Self {
             const transpose_bw = struct {
-                fn transpose_bw_impl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                fn transpose_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
-                    const gt = try self.grad.?.transpose(bw_allocator);
-                    defer gt.deinit(bw_allocator);
+                    const gt = try self.grad.?.transpose(_self.device);
+                    defer gt.deinit(_self.device);
                     _ = try children[0].grad.?._add(gt);
                 }
             }.transpose_bw_impl;
-            var result = try createDependent(.{
-                .data = try self.data.transpose(self.allocator),
+            var result = try create_dependent(.{
+                .data = try self.data.transpose(self.device),
                 .op = .TRANSPOSE,
                 .children = &.{self},
                 .label = null,
-                .requires_grad = false, // we will set grad ourselves for efficiency
-                .allocator = self.allocator,
+                .requires_gradient = false, // we will set grad ourselves for efficiency
+                .device = self.device,
                 ._backward = transpose_bw,
             });
             errdefer result.deinit();
-            if (self.requiresGrad()) { // need to make this call, not check the attribute flag
-                result.grad = try self.grad.?.transpose(self.allocator);
-                result.requires_grad = true;
+            if (self.requires_grad()) { // need to make this call, not check the attribute flag
+                result.grad = try self.grad.?.transpose(self.device);
+                result.requires_gradient = true;
             }
             return result;
         }
 
-        pub fn setLabel(self: *Self, comptime label: []const u8) *Self {
-            if (self.label) |l| self.allocator.free(l);
-            self.label = self.allocator.dupe(u8, label) catch @panic("OOM");
+        pub fn set_label(self: *Self, comptime label: []const u8) *Self {
+            if (self.label) |l| self.device.allocator.free(l);
+            self.label = self.device.allocator.dupe(u8, label) catch @panic("OOM");
             return self;
         }
 
         pub fn fill(self: Self, val: T) void {
-            self.data.fill(val);
+            self.data.fill(val, self.device);
         }
 
         pub fn get(self: Self, indices: []const usize) T {
@@ -336,17 +435,17 @@ pub fn NDTensor(comptime T: type) type {
             try self.data.set(indices, value);
         }
 
-        fn posToIndex(self: Self, indices: []const usize) usize {
-            return self.data.posToOffset(indices);
+        fn pos_to_index(self: Self, indices: []const usize) usize {
+            return self.data.pos_to_offset(indices);
         }
 
-        fn flexPosToIndex(self: Self, indices: []const usize) error.InvalidIndex!usize {
+        fn flex_pos_to_index(self: Self, indices: []const usize) error.InvalidIndex!usize {
             return self.data.flexPosToOffset(indices);
         }
 
         /// COM
-        fn indexToPos(self: Self, index: usize, allocator: std.mem.Allocator) []const usize {
-            return self.data.offsetToPos(index, allocator);
+        fn index_to_pos(self: Self, index: usize) []const usize {
+            return self.data.offset_to_pos(index, self.device.allocator);
         }
 
         /// [WIP] Values and grads are views into self. Shapes are allocated and COM.
@@ -356,47 +455,49 @@ pub fn NDTensor(comptime T: type) type {
         ///   - It is assumed the caller wants a temporary mutable view, return by copy.
         ///   - This creates a complex situation, there is no backward for this operation and it returns a mutable view.
         ///   - Caller must set backward
-        pub fn sliceRanges(self: Self, ranges: []const Range, allocator: std.mem.Allocator) !Self {
+        pub fn slice_ranges(self: Self, ranges: []const Range) !Self {
             log.err("WIP", .{});
-            const sliced_data = try self.data.sliceRanges(ranges);
+            const sliced_data = try self.data.slice_ranges(ranges);
             return Self{
                 .data = sliced_data,
-                .grad = if (self.requiresGrad()) try self.grad.?.sliceRanges(ranges) else null,
-                .requires_grad = self.requiresGrad(),
+                .grad = if (self.requires_grad()) try self.grad.?.slice_ranges(ranges) else null,
+                .requires_gradient = self.requires_grad(),
                 .op = null,
                 .children = null,
                 .label = null,
                 .acquired = false,
-                .allocator = allocator,
+                .device = self.device,
                 ._backward = null,
                 ._backward_ctx = null,
             };
         }
 
-        pub fn setSlice(self: Self, ranges: []const Range, values: Self) !void {
-            if (self.requiresGrad()) {
+        pub fn set_slice(self: Self, ranges: []const Range, values: Self) !void {
+            if (self.requires_grad()) {
                 // need to create a new operation
                 @compileError("Not implemented");
             } else {
                 // if not tracking gradients can just set the values directly
-                try self.data.setSliceRanges(ranges, values.data.*);
+                try self.data.set_slice_ranges(ranges, values.data.*);
             }
         }
 
         pub fn print(self: Self) void {
-            // self.printToWriter(std.io.getStdOut().writer());
-            self.printToWriter(std.io.getStdErr().writer()) catch @panic("Failed to print tensor");
+            // self.print_to_writer(std.io.getStdOut().writer());
+            self.print_to_writer(std.io.getStdErr().writer()) catch @panic("Failed to print tensor");
         }
 
-        pub fn printToWriter(self: Self, writer: anytype) !void {
+        // fn ...(
+
+        pub fn print_to_writer(self: Self, writer: anytype) !void {
             try writer.print("NDTensor<{},{?s}>", .{ T, if (self.op) |o| @tagName(o) else null });
             try writer.writeAll("{data: ");
-            try self.data.printToWriter(writer);
+            try self.data.print_to_writer(writer);
             if (self.grad) |g| {
                 try writer.writeAll(" grad: ");
-                try g.printToWriter(writer);
+                try g.print_to_writer(writer);
             }
-            try writer.print(", requires_grad={}", .{self.requires_grad});
+            try writer.print(", requires_gradient={}", .{self.requires_gradient});
             if (self.label) |l| {
                 try writer.print(" label={s}", .{l});
             }
@@ -409,72 +510,76 @@ pub fn NDTensor(comptime T: type) type {
         };
 
         pub fn clip_grad_norm_delta(self: Self, opts: ClipOptions) void {
-            self.grad.?.clip_norm(opts.max_norm, opts.delta);
+            self.grad.?.clip_norm(opts.max_norm, opts.delta, self.device);
         }
 
-        pub fn setChildren(self: *Self, children: []const *Self) !void {
-            log.warn("Deprecation warning: use createDependent.", .{});
-            self.children = try self.allocator.dupe(*Self, children);
+        pub fn set_children(self: *Self, children: []const *Self) !void {
+            log.warn("Deprecation warning: use create_dependent.", .{});
+            self.children = try self.device.allocator.dupe(*Self, children);
         }
 
         /// Element-wise addition. COM.
-        pub fn add(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn add(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
             const addBw = struct {
-                fn addBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                fn add_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
-
-                    const a_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(a.grad.?.shape, bw_allocator);
-                    const b_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(b.grad.?.shape, bw_allocator);
-                    defer a_grad.deinit(bw_allocator);
-                    defer b_grad.deinit(bw_allocator);
-
+                    const a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, _self.device);
+                    const b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, _self.device);
+                    defer a_grad.deinit(_self.device);
+                    defer b_grad.deinit(_self.device);
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._add(b_grad);
                 }
-            }.addBwImpl;
-            return try createDependent(.{
-                .data = try self.data.add(other.data, allocator),
+            }.add_bw_impl;
+            return try create_dependent(.{
+                .data = try self.data.add(other.data, self.device),
                 .op = .ADD,
                 .children = &.{ self, other },
-                .requires_grad = self.requires_grad or other.requires_grad,
-                .allocator = self.allocator,
+                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                .device = self.device,
                 ._backward = addBw,
             });
         }
 
         /// Element-wise subtraction. COM.
-        pub fn sub(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn sub(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
             const subBw = struct {
-                fn subBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                fn sub_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
 
-                    const a_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(a.grad.?.shape, bw_allocator);
-                    const b_grad = try (try _self.grad.?.copy(bw_allocator)).unbroadcast(b.grad.?.shape, bw_allocator);
-                    defer a_grad.deinit(bw_allocator);
-                    defer b_grad.deinit(bw_allocator);
+                    const a_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(a.grad.?.shape, _self.device);
+                    const b_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(b.grad.?.shape, _self.device);
+                    defer a_grad.deinit(_self.device);
+                    defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._sub(b_grad);
                 }
-            }.subBwImpl;
-            return try createDependent(.{
-                .data = try self.data.sub(other.data, allocator),
+            }.sub_bw_impl;
+            return try create_dependent(.{
+                .data = try self.data.sub(other.data, self.device),
                 .op = .SUB,
                 .children = &.{ self, other },
-                .requires_grad = self.requires_grad or other.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                .device = self.device,
                 ._backward = subBw,
             });
         }
 
         /// Element-wise multiplication. COM.
-        pub fn mul(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn mul(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
             const mulBw = struct {
-                fn mulBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                fn mul_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -482,36 +587,38 @@ pub fn NDTensor(comptime T: type) type {
                     // TODO: can remove a copy here
 
                     // (dL/dy) * (dy/da), (dL/dy) * (dy/db)
-                    const a_grad_value = try b.data.mul(_self.grad.?, bw_allocator);
-                    const b_grad_value = try a.data.mul(_self.grad.?, bw_allocator);
+                    const a_grad_value = try b.data.mul(_self.grad.?, _self.device);
+                    const b_grad_value = try a.data.mul(_self.grad.?, _self.device);
 
-                    defer a_grad_value.deinit(bw_allocator);
-                    defer b_grad_value.deinit(bw_allocator);
+                    defer a_grad_value.deinit(_self.device);
+                    defer b_grad_value.deinit(_self.device);
 
-                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_allocator);
-                    const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, bw_allocator);
+                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
+                    const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
 
-                    defer a_grad.deinit(bw_allocator);
-                    defer b_grad.deinit(bw_allocator);
+                    defer a_grad.deinit(_self.device);
+                    defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._add(b_grad);
                 }
-            }.mulBwImpl;
-            return try createDependent(.{
-                .data = try self.data.mul(other.data, allocator),
+            }.mul_bw_impl;
+            return try create_dependent(.{
+                .data = try self.data.mul(other.data, self.device),
                 .op = .MUL,
                 .children = &.{ self, other },
-                .requires_grad = self.requires_grad or other.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                .device = self.device,
                 ._backward = mulBw,
             });
         }
 
         /// Element-wise division. COM.
-        pub fn div(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn div(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
             const divBw = struct {
-                fn divBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                fn div_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -519,94 +626,100 @@ pub fn NDTensor(comptime T: type) type {
                     // TODO: can remove at least one copy here right?
 
                     // (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
-                    const a_grad_value = try _self.grad.?.div(b.data, bw_allocator);
-                    const b_grad_value = try _self.grad.?.mul(a.data, bw_allocator);
+                    const a_grad_value = try _self.grad.?.div(b.data, _self.device);
+                    const b_grad_value = try _self.grad.?.mul(a.data, _self.device);
 
-                    defer a_grad_value.deinit(bw_allocator);
-                    defer b_grad_value.deinit(bw_allocator);
+                    defer a_grad_value.deinit(_self.device);
+                    defer b_grad_value.deinit(_self.device);
 
-                    const bsq = try b.data.mul(b.data, bw_allocator);
-                    const neg_b_grad_value = try b_grad_value.div(bsq, bw_allocator);
+                    const bsq = try b.data.mul(b.data, _self.device);
+                    const neg_b_grad_value = try b_grad_value.div(bsq, _self.device);
 
-                    defer bsq.deinit(bw_allocator);
-                    defer neg_b_grad_value.deinit(bw_allocator);
+                    defer bsq.deinit(_self.device);
+                    defer neg_b_grad_value.deinit(_self.device);
 
-                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, bw_allocator);
-                    const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, bw_allocator);
+                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
+                    defer a_grad.deinit(_self.device);
+                    const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
+                    defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad);
                     _ = try b.grad.?._sub(b_grad);
                 }
-            }.divBwImpl;
-            return try createDependent(.{
-                .data = try self.data.div(other.data, allocator),
+            }.div_bw_impl;
+            return try create_dependent(.{
+                .data = try self.data.div(other.data, self.device),
                 .op = .DIV,
                 .children = &.{ self, other },
-                .requires_grad = self.requires_grad or other.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                .device = self.device,
                 ._backward = divBw,
             });
         }
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
-        pub fn max(self: *Self, allocator: std.mem.Allocator) !*Self {
-            const max_val = try self.data.max(allocator);
+        pub fn max(self: *Self) !*Self {
+            const max_mem = try dtype.empty(&.{1}, self.device);
+            const max_idx = try self.device.mem_create(i32);
+
+            self.device.blas.max_forward(T, self.get_data(), max_mem.data, max_idx);
+
             const maxBw = struct {
-                fn maxBwImpl(_self: Self, _: std.mem.Allocator) !void {
+                fn max_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const child = children[0];
-                    const bw_max_val = _self.data.data[0];
-                    for (child.data.data, 0..) |val, i| {
-                        if (val == bw_max_val) {
-                            child.grad.?.data[i] += _self.grad.?.data[0];
-                        }
-                    }
+                    const iptr: *i32 = @ptrCast(@alignCast(_self._backward_ctx.?));
+                    self.device.blas.max_reverse(T, _self.grad.?.data.data, child.grad.?.data.data, iptr);
+                    self.device.mem_destroy(iptr);
                 }
-            }.maxBwImpl;
-            return try createDependent(.{
-                .data = max_val,
+            }.max_bw_impl;
+
+            return try create_dependent(.{
+                .data = max_mem,
                 .op = .MAX,
-                .children = &[_]*const Self{self},
-                .requires_grad = self.requires_grad,
-                .allocator = allocator,
+                .children = &.{self},
+                .requires_gradient = self.requires_gradient,
+                .device = self.device,
                 ._backward = maxBw,
             });
         }
 
         /// Element-wise exponential. COM.
-        pub fn exp(self: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn exp(self: *Self) !*Self {
             const expBw = struct {
-                fn expBwImpl(_self: Self, _: std.mem.Allocator) !void {
+                fn exp_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const child = children[0];
                     for (_self.data.data, _self.grad.?.data, 0..) |exp_val, grad_val, i| {
                         child.grad.?.data[i] += exp_val * grad_val;
                     }
                 }
-            }.expBwImpl;
-            return try createDependent(.{
-                .data = try self.data.exp(allocator),
+            }.exp_bw_impl;
+            return try create_dependent(.{
+                .data = try self.data.exp(self.device),
                 .op = .EXP,
                 .children = &[_]*const Self{self},
-                .requires_grad = self.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient,
+                .device = self.device,
                 ._backward = expBw,
             });
         }
 
         pub const MmOptions = struct { trans_a: bool = false, trans_b: bool = false };
 
-        /// TODO: this should proxy to bmmAcc
+        /// TODO: this should proxy to bmm_acc
         /// Matrix multiplication. COM.
-        pub fn bmm(self: *Self, other: *Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
-            const ctx = try allocator.create(MmAccOptions);
+        pub fn bmm(self: *Self, other: *Self, device: DeviceReference, opts: MmOptions) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
+            const ctx = try device.allocator.create(MmAccOptions);
             ctx.* = MmAccOptions{ .trans_a = opts.trans_a, .trans_b = opts.trans_b, .alpha = 1, .beta = 0 };
-            const result = try createDependent(.{
-                .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, allocator),
+            const result = try create_dependent(.{
+                .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, device),
                 .children = &.{ self, other },
-                .requires_grad = self.requires_grad or other.requires_grad,
-                .allocator = allocator,
-                ._backward = bw_bmmAcc,
+                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                .device = device,
+                ._backward = bw_bmm_acc,
                 ._backward_ctx = ctx,
             });
             result.op = if (!opts.trans_a and !opts.trans_b) .MATMUL_AB else if (opts.trans_a and !opts.trans_b) .MATMUL_AtB else if (!opts.trans_a and opts.trans_b) .MATMUL_ABt else .MATMUL_AtBt;
@@ -616,40 +729,40 @@ pub fn NDTensor(comptime T: type) type {
         pub const MmAccOptions = struct { trans_a: bool = false, trans_b: bool = false, alpha: T = 1.0, beta: T = 1.0 };
 
         /// Matrix multiplication w accumulation. COM, output is written to directly.
-        pub fn bmmAcc(
+        pub fn bmm_acc(
             self: *const NDTensor(T),
             other: *const NDTensor(T),
             output: *NDTensor(T),
-            allocator: std.mem.Allocator,
             opts: MmAccOptions,
         ) !void {
-            _ = try self.data._bmmAcc(
+            std.debug.assert(self.device.is_compatible(other.device));
+
+            _ = try self.data._bmm_acc(
                 other.data,
                 output.data,
                 opts.alpha,
                 opts.beta,
                 opts.trans_a,
                 opts.trans_b,
-                allocator,
             );
 
-            const requires_grad = zg.rt_grad_enabled and (self.requires_grad or other.requires_grad or output.requires_grad);
-            if (requires_grad) {
-                const ctx = try allocator.create(MmAccOptions);
+            const requires_gradient = zg.rt_grad_enabled and (self.requires_gradient or other.requires_gradient or output.requires_gradient);
+            if (requires_gradient) {
+                const ctx = try self.device.allocator.create(MmAccOptions);
                 ctx.* = opts;
-                output.children = try allocator.dupe(*NDTensor(T), &.{ self, other });
-                output._backward = bw_bmmAcc;
+                output.children = try self.device.allocator.dupe(*NDTensor(T), &.{ self, other });
+                output._backward = bw_bmm_acc;
                 output._backward_ctx = ctx;
-                output.requires_grad = true;
+                output.requires_gradient = true;
             }
         }
 
-        fn bw_bmmAcc(
-            self: NDTensor(T),
-            allocator: std.mem.Allocator,
-        ) !void {
+        fn bw_bmm_acc(self: NDTensor(T)) !void {
             const grad_C = self.grad orelse return error.NoGradient;
+
             const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
+            defer self.device.allocator.destroy(opts);
+
             const children = self.children orelse return error.NoChildren;
             const A = children[0].data;
             const grad_A = children[0].grad;
@@ -663,64 +776,63 @@ pub fn NDTensor(comptime T: type) type {
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B'
-                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, true, allocator);
+                        _ = try grad_C._bmm_acc(B, grad_A, 1.0, 1.0, false, true, self.device);
                         // grad_B += A' * grad_C
-                        _ = try A._bmmAcc(grad_C, grad_B, 1.0, 1.0, true, false, allocator);
+                        _ = try A._bmm_acc(grad_C, grad_B, 1.0, 1.0, true, false, self.device);
                     },
                     .MATMUL_AtB => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B * grad_C'
-                        _ = try B._bmmAcc(self.grad.?, grad_A, 1.0, 1.0, false, true, allocator);
+                        _ = try B._bmm_acc(self.grad.?, grad_A, 1.0, 1.0, false, true, self.device);
                         // grad_B += A * grad_C
-                        _ = try A._bmmAcc(self.grad.?, grad_B, 1.0, 1.0, false, false, allocator);
+                        _ = try A._bmm_acc(self.grad.?, grad_B, 1.0, 1.0, false, false, self.device);
                     },
                     .MATMUL_ABt => {
                         // A Shape: (..., m, k)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B
-                        _ = try grad_C._bmmAcc(B, grad_A, 1.0, 1.0, false, false, allocator);
+                        _ = try grad_C._bmm_acc(B, grad_A, 1.0, 1.0, false, false, self.device);
                         // grad_B += grad_C' * A
-                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, true, false, allocator);
+                        _ = try grad_C._bmm_acc(A, grad_B, 1.0, 1.0, true, false, self.device);
                     },
                     .MATMUL_AtBt => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B' * grad_C'
-                        _ = try B._bmmAcc(grad_C, grad_A, 1.0, 1.0, true, true, allocator);
+                        _ = try B._bmm_acc(grad_C, grad_A, 1.0, 1.0, true, true, self.device);
                         // grad_B += grad_C * A'
-                        _ = try grad_C._bmmAcc(A, grad_B, 1.0, 1.0, false, true, allocator);
+                        _ = try grad_C._bmm_acc(A, grad_B, 1.0, 1.0, false, true, self.device);
                     },
                     else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
                 }
             }
-            // clean up context
-            allocator.destroy(opts);
         }
 
         /// Dot product of two tensors. COM.
-        pub fn dot(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn dot(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
             const dotBw = struct {
-                fn dotBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                fn dot_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
-                    const grad_a = try b.data.mul(_self.grad.?, bw_allocator);
-                    const grad_b = try a.data.mul(_self.grad.?, bw_allocator);
-                    _ = try a.grad.?._add(grad_a);
-                    _ = try b.grad.?._add(grad_b);
+                    const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
+                    _self.device.blas.axpy(T, b.get_data(), a.grad.?.data, gscalar);
+                    _self.device.blas.axpy(T, a.get_data(), b.grad.?.data, gscalar);
                 }
-            }.dotBwImpl;
+            }.dot_bw_impl;
 
-            return try createDependent(.{
-                .data = try self.data.dot(other.data, allocator),
+            return try create_dependent(.{
+                .data = try self.data.dot(other.data, self.device),
                 .op = .DOT,
                 .children = &.{ self, other },
-                .requires_grad = self.requires_grad or other.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                .device = self.device,
                 ._backward = dotBw,
             });
         }
@@ -728,112 +840,120 @@ pub fn NDTensor(comptime T: type) type {
         /// Matrix-vector multiplication. COM.
         /// ---
         /// # ADR
-        ///   - This does not use `createDependent()` as it is a special case where the grad shape different from data.
+        ///   - This does not use `create_dependent()` as it is a special case where the grad shape different from data.
         ///   - Moreover, we cannot just reshape to the correct shape.
         ///   - Until I see more instances where this is required it will be written manually
         ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
-        pub fn matvec(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn matvec(self: *Self, other: *Self) !*Self {
+            std.debug.assert(self.device.is_compatible(other.device));
+
             const matvecBw = struct {
-                fn matvecBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
+                /// TODO: Use accumulation
+                fn matvec_bw_impl(_self: Self) !void {
                     const children = _self.children orelse return error.NoChildren;
                     var A = children[0].data;
                     const x = children[1].data;
 
                     //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
-                    const grad_A = try _self.grad.?.outer(x, bw_allocator);
+                    const grad_A = try _self.grad.?.outer(x, _self.device);
+                    defer grad_A.deinit(_self.device);
                     _ = try children[0].grad.?._add(grad_A);
 
                     //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
-                    const grad_x = try A.matvec(_self.grad.?, true, bw_allocator);
+                    const grad_x = try A.matvec(_self.grad.?, true, _self.device);
+                    defer grad_x.deinit(_self.device);
                     _ = try children[1].grad.?._add(grad_x);
                 }
-            }.matvecBwImpl;
+            }.matvec_bw_impl;
 
-            const out = try allocator.create(Self);
+            const out = try self.device.allocator.create(Self);
             out.* = Self{
-                .data = try self.data.matvec(other.data, false, allocator),
+                .data = try self.data.matvec(other.data, false, self.device),
                 .op = .MATVEC,
-                .children = try allocator.dupe(*Self, &.{ self, other }),
-                .grad = if (self.requiresGrad() or other.requires_grad) try dtype.zeros(other.data.shape.shape, allocator) else null,
-                .requires_grad = self.requiresGrad() or other.requires_grad,
-                .allocator = allocator,
+                .children = try self.device.allocator.dupe(*Self, &.{ self, other }),
+                .grad = if (self.requires_grad() or other.requires_gradient) try dtype.zeros(other.data.shape.shape, self.device) else null,
+                .requires_gradient = self.requires_grad() or other.requires_gradient,
+                .device = self.device,
                 ._backward = matvecBw,
             };
             return out;
         }
 
         /// Sum of all elements in the tensor. COM.
-        pub fn sum(self: *Self, allocator: std.mem.Allocator) !*Self {
+        pub fn sum(self: *Self) !*Self {
             const sumBw = struct {
-                fn sumBwImpl(_self: NDTensor(T), _: std.mem.Allocator) !void {
+                fn sum_bw_impl(_self: NDTensor(T)) !void {
                     const children = _self.children orelse return error.NoChildren;
                     const child = children[0];
                     _ = try child.grad.?._add(_self.grad.?);
                 }
-            }.sumBwImpl;
-            return try createDependent(.{
-                .data = try self.data.sum(allocator),
+            }.sum_bw_impl;
+            return try create_dependent(.{
+                .data = try self.data.sum(self.device),
                 .op = .SUM,
                 .children = &.{self},
-                .requires_grad = self.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient,
+                .device = self.device,
                 ._backward = sumBw,
             });
         }
 
-        pub fn maxOverDim(self: *Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !*Self {
-            const maxBackward = struct {
+        pub fn max_over_dim(self: *Self, device: DeviceReference, opts: MaxOverDimOptions) !*Self {
+            const max_backward = struct {
                 // NOTE: See gather() comments, same apply here
-                fn bwImpl(_self: Self, _: std.mem.Allocator) !void {
+                fn bw_impl(_self: Self) !void {
                     const bw_children = _self.children orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
-                    const offsets: [*]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                    const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                    const offsets: []usize = std.mem.span(raw_offsets);
                     for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
+                    _self.device.mem_free(offsets);
                 }
-            }.bwImpl;
+            }.bw_impl;
 
-            const max_result = try self.data.maxOverDim(allocator, .{ .dim = opts.dim, .keep_dims = opts.keep_dims, .return_offsets = true });
+            const max_result = try self.data.max_over_dim(device, .{ .dim = opts.dim, .keep_dims = opts.keep_dims, .return_offsets = true });
             // TODO: use a null terminated allocation instead, tired rn
-            const ctx = if (self.requiresGrad()) try allocator.dupe(usize, max_result.offsets.?) else null;
+            const ctx = if (self.requires_grad()) try device.allocator.dupeZ(usize, max_result.offsets.?) else null;
+            if (max_result.offsets) |offs| device.allocator.free(offs);
 
-            return try createDependent(.{
+            return try create_dependent(.{
                 .data = max_result.values,
                 .op = null,
                 .children = &.{self},
-                .requires_grad = self.requires_grad,
-                .allocator = allocator,
-                ._backward = maxBackward,
+                .requires_gradient = self.requires_gradient,
+                .device = device,
+                ._backward = max_backward,
                 ._backward_ctx = if (ctx) |c| c.ptr else null,
             });
         }
 
-        pub fn gather(self: *Self, allocator: std.mem.Allocator, opts: GatherOptions) !*Self {
+        pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
-                fn bwImpl(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
+                fn bw_impl(bw_tensor: NDTensor(T)) !void {
                     const bw_children = bw_tensor.children orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
                     const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
                     // how am i expected to free this, unknown len
-                    // defer bw_allocator.raw(offsets); // FIXME: just occuring to me the problem with this, if bw_allocator != fwd_allocator
+                    // defer _self.device.raw(offsets); // FIXME: just occuring to me the problem with this, if _self.device != fwd_allocator
 
                     // bw_tensor must/should be the same len as indices used to index (note that offsets is a raw c ptr without a len)
                     // std.debug.assert(offsets.len == bw_tensor.data.data.len); // can make this a real check when its a  null term alloc
                     for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
                 }
-            }.bwImpl;
+            }.bw_impl;
 
-            const gather_result = try self.data.gather(allocator, .{ .indices = opts.indices.data, .dim = opts.dim, .return_offsets = true });
+            const gather_result = try self.data.gather(device, .{ .indices = opts.indices.data, .dim = opts.dim, .return_offsets = true });
             // TODO: use a null terminated allocation instead, tired rn
-            const ctx = if (self.requiresGrad()) try allocator.dupe(usize, gather_result.offsets.?) else null;
+            const ctx = if (self.requires_grad()) try device.allocator.dupe(usize, gather_result.offsets.?) else null;
 
-            return try createDependent(.{
+            return try create_dependent(.{
                 .data = gather_result.values,
                 .op = null,
                 .children = &.{self},
-                .requires_grad = self.requires_grad,
-                .allocator = allocator,
+                .requires_gradient = self.requires_gradient,
+                .device = device,
                 ._backward = gatherBackward,
                 ._backward_ctx = if (ctx) |c| c.ptr else null,
             });
@@ -841,17 +961,17 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Callback is highly dynamic so passing a reference may be a better idea for _backward callback,
         /// but committing to compiler reliance in this refactor
-        pub fn setBackward(self: *Self, backward_fn: Callback, ctx: ?*anyopaque) void {
+        pub fn set_backward(self: *Self, backward_fn: Callback, ctx: ?*anyopaque) void {
             self._backward = backward_fn;
             self._backward_ctx = ctx;
         }
 
-        pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
+        pub fn backward(self: Self) !void {
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
-            if (!self.requires_grad) return;
+            if (!self.requires_gradient) return;
             if (self._backward) |f| {
-                try f(self, allocator);
+                try f(self);
                 return;
             }
             if (self.op) |op| {
@@ -887,172 +1007,203 @@ pub fn NDTensor(comptime T: type) type {
 }
 
 test "tensor/GraphManager/sum" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, alloc);
-    _ = input.setLabel("input");
-    var sum_result = try input.sum(alloc);
-    _ = sum_result.setLabel("sum_result");
+    var input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, device);
+    _ = input.set_label("input");
+    var sum_result = try input.sum();
+    _ = sum_result.set_label("sum_result");
 
     try std.testing.expectEqualSlices(T, &[_]T{10}, sum_result.data.data);
 
+    defer {
+        input.deinit();
+        sum_result.deinit();
+    }
+
     // Backward pass
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     if (!zg.rt_grad_enabled) return error.GradNotEnabled;
-    sum_result.grad.?.fill(1.0);
-    try gm.backward(sum_result, alloc);
+    sum_result.grad.?.fill(1.0, device);
+    try gm.backward(sum_result);
 
     const expected_grad = &[_]T{ 1, 1, 1, 1 };
     try std.testing.expectEqualSlices(T, expected_grad, input.grad.?.data);
 }
 
 test "tensor/NDTensor index, add, div" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{ 2, 3 };
     const Tensor = NDTensor(f32);
 
     // 1 2 3
     // 4 5 6
-    var t1 = try Tensor.init(&[_]f32{ 1, 2, 3, 4, 5, 6 }, shape, false, alloc);
+    var t1 = try Tensor.init(&[_]f32{ 1, 2, 3, 4, 5, 6 }, shape, false, device);
 
     // 1 2 3
     // 4 5 23
     try t1.set(&[_]usize{ 1, 2 }, 1.1);
     try std.testing.expectEqual(1.1, t1.get(&.{ 1, 2 }));
 
-    const t2 = try Tensor.init(&[_]f32{ 10, 20, 30, 40, 50, 60 }, shape, false, alloc);
-    const t3 = try t1.add(t2, alloc);
-    const t4 = try t3.sub(t1, alloc);
+    const t2 = try Tensor.init(&[_]f32{ 10, 20, 30, 40, 50, 60 }, shape, false, device);
+    const t3 = try t1.add(t2);
+    const t4 = try t3.sub(t1);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+        t4.deinit();
+    }
+
     try std.testing.expectEqualSlices(f32, t2.data.data, t4.data.data);
 }
 
 test "tensor/GraphManager/addback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{1};
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var t1 = try Tensor.init(&[_]T{2}, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{3}, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{2}, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{3}, shape, true, device);
     // t3 = t1 + t2;
     // dt3/dt1 = 1, dt3/dt2 = 1
-    var t3 = try t1.add(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t3 = try t1.add(t2);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(&[_]T{1}, shape, alloc);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3);
     try std.testing.expectEqualDeep(&[_]T{1.0}, t1.grad.?.data);
     try std.testing.expectEqualDeep(&[_]T{1.0}, t2.grad.?.data);
 }
 
 test "tensor/GraphManager/mulback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{1};
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var t1 = try Tensor.init(&[_]T{2}, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{3}, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{2}, shape, true, device);
+    const t2 = try Tensor.init(&[_]T{3}, shape, true, device);
     // t3 = t1 * t2;
     // dt3/dt1 = t2, dt3/dt2 = t1
-    var t3 = try t1.mul(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t3 = try t1.mul(t2);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(&[_]T{1}, shape, alloc);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3);
     try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
     try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
 }
 
 test "tensor/GraphManager/moreback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const shape = &[_]usize{2};
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var w = try Tensor.init(&[_]f32{ 3, 2 }, shape, true, alloc);
-    var b = try Tensor.init(&[_]f32{ 1, 1 }, shape, true, alloc);
-    var x = try Tensor.init(&[_]f32{ 4, 4 }, shape, true, alloc);
+    var w = try Tensor.init(&[_]f32{ 3, 2 }, shape, true, device);
+    defer w.deinit();
+    var b = try Tensor.init(&[_]f32{ 1, 1 }, shape, true, device);
+    defer b.deinit();
+    var x = try Tensor.init(&[_]f32{ 4, 4 }, shape, true, device);
+    defer x.deinit();
 
     // h = w*x + b
     // dh/dw = x, dh/db = 1
-    var temp = try w.mul(x, alloc);
-    var h = try temp.add(b, alloc);
+    const temp = try w.mul(x);
+    defer temp.deinit();
+    const h = try temp.add(b);
+    defer h.deinit();
 
-    var backprop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const backprop_alloc = backprop_arena.allocator();
-    defer backprop_arena.deinit();
-
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    h.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
-    try gm.backward(h, backprop_alloc);
-    if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
+    h.grad.?.fill(1.0, device);
+    try gm.backward(h);
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expectEqualSlices(T, &[_]T{ 1.0, 1.0 }, b.grad.?.data);
 
     // 2 x 1
     const shape2 = &[_]usize{ 2, 1 };
-    w.grad.?.fill(0);
-    b.grad.?.fill(0);
-    x.grad.?.fill(0);
+    w.grad.?.fill(0, device);
+    b.grad.?.fill(0, device);
+    x.grad.?.fill(0, device);
     try w._reshape(shape2);
     try b._reshape(shape2);
     try x._reshape(shape2);
     // h = w*x + b
     // dh/dw = x, dh/db = 1
-    temp = try w.mul(x, alloc);
-    h = try temp.add(b, alloc);
+    const temp2 = try w.mul(x);
+    defer temp2.deinit();
+    const h2 = try temp2.add(b);
+    defer h2.deinit();
 
-    var gm2 = GraphManager(Tensor).init(alloc, .{});
+    var gm2 = GraphManager(Tensor).init(device.allocator, .{});
     defer gm2.deinit();
-    h.grad.?.fill(1);
-    try gm.backward(h, alloc);
-    if (!backprop_arena.reset(.retain_capacity)) @panic("reset failed.\n");
+    h2.grad.?.fill(1.0, device);
+    try gm2.backward(h2);
     try std.testing.expectEqualSlices(T, x.data.data, w.grad.?.data);
     try std.testing.expect(std.mem.allEqual(T, b.grad.?.data, 1));
 }
 
 test "tensor/GraphManager/divback" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{2};
 
-    var t1 = try Tensor.init(&[_]T{ 4, 9 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 2, 3 }, shape, true, alloc);
-    var t3 = try t1.div(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t1 = try Tensor.init(&[_]T{ 4, 9 }, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{ 2, 3 }, shape, true, device);
+    var t3 = try t1.div(t2);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad = try Tensor.dtype.init(&[_]T{ 1, 1 }, shape, alloc);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3);
 
     const expected_grad_t1 = &[_]T{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
     const expected_grad_t2 = &[_]T{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
@@ -1062,117 +1213,118 @@ test "tensor/GraphManager/divback" {
 }
 
 test "tensor/GraphManager/matmul_backward square" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{ 2, 2 };
 
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, device);
 
     // Case 1: No transpose
-    var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
-    defer t3.deinit();
+    var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t1.acquire();
-    t2.acquire();
-    t3.grad.?.fill(1.0);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
+    t3.grad.?.fill(1.0, device);
 
-    try gm.backward(t3, alloc);
+    try gm.backward(t3);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 2: Transpose A
-    var t3_trans_a = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+    var t3_trans_a = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
-    t3_trans_a.grad.?.fill(1.0);
+    t3_trans_a.grad.?.fill(1.0, device);
 
-    try gm.backward(t3_trans_a, alloc);
+    try gm.backward(t3_trans_a);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_a, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 3: Transpose B
-    var t3_trans_b = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = true });
+    var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
-    t3_trans_b.grad.?.fill(1.0);
-    try gm.backward(t3_trans_b, alloc);
+    t3_trans_b.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_b);
 
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_b, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 4: Transpose both A and B
-    var t3_trans_ab = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = true });
+    var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
-    t3_trans_ab.grad.?.fill(1.0);
-    try gm.backward(t3_trans_ab, alloc);
+    t3_trans_ab.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_ab);
 
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_ab, t2.grad.?.data);
-
-    t1.release();
-    t1.deinit();
-    t2.release();
-    t2.deinit();
 }
 
 test "tensor/GraphManager/matmul_backward non-square" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
     // Case 1: No transpose (t1: [2, 2, 3], t2: [2, 3, 2])
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &[_]usize{ 2, 3, 2 }, true, alloc);
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &[_]usize{ 2, 3, 2 }, true, device);
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
 
     // Case 1: No transpose
     {
-        var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+        var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
         defer t3.deinit();
         t1.acquire();
         t2.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
         try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 
-        t1.grad.?.fill(0);
-        t2.grad.?.fill(0);
+        t1.grad.?.fill(0, device);
+        t2.grad.?.fill(0, device);
     }
 
     // Case 2: Transpose A (t1: [2, 3, 2], t2: [2, 3, 2])
     {
-        var t1_case2 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, alloc);
-        var t3 = try t1_case2.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+        var t1_case2 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, device);
+        var t3 = try t1_case2.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
         defer t3.deinit();
         t1_case2.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
@@ -1181,38 +1333,38 @@ test "tensor/GraphManager/matmul_backward non-square" {
 
         t1_case2.release();
         t1_case2.deinit();
-        t2.grad.?.fill(0);
+        t2.grad.?.fill(0, device);
     }
 
     // Case 3: Transpose B (t1: [2, 2, 3], t2: [2, 2, 3])
     {
-        var t2_case3 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, alloc);
-        var t3 = try t1.bmm(t2_case3, alloc, .{ .trans_a = false, .trans_b = true });
+        var t2_case3 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, device);
+        var t3 = try t1.bmm(t2_case3, device, .{ .trans_a = false, .trans_b = true });
         defer t3.deinit();
         t2_case3.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
         try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case3.grad.?.data);
 
-        t1.grad.?.fill(0);
+        t1.grad.?.fill(0, device);
         t2_case3.release();
         t2_case3.deinit();
     }
 
     // Case 4: Transpose both A and B (t1: [2, 3, 2], t2: [2, 2, 3])
     {
-        var t1_case4 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, alloc);
-        var t2_case4 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, alloc);
-        var t3 = try t1_case4.bmm(t2_case4, alloc, .{ .trans_a = true, .trans_b = true });
+        var t1_case4 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, device);
+        var t2_case4 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, device);
+        var t3 = try t1_case4.bmm(t2_case4, device, .{ .trans_a = true, .trans_b = true });
         defer t3.deinit();
         t1_case4.acquire();
         t2_case4.acquire();
-        t3.grad.?.fill(1.0);
-        try gm.backward(t3, alloc);
+        t3.grad.?.fill(1.0, device);
+        try gm.backward(t3);
 
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
@@ -1232,65 +1384,67 @@ test "tensor/GraphManager/matmul_backward non-square" {
 }
 
 test "tensor/GraphManager/matmul_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{ 2, 2 };
 
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, alloc);
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, device);
 
     // Case 1: No transpose
-    var t3 = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = false });
+    var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
     t1.acquire();
     t2.acquire();
-    t3.grad.?.fill(1.0);
+    t3.grad.?.fill(1.0, device);
 
-    try gm.backward(t3, alloc);
+    try gm.backward(t3);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 2: Transpose A
-    var t3_trans_a = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = false });
+    var t3_trans_a = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
-    t3_trans_a.grad.?.fill(1.0);
+    t3_trans_a.grad.?.fill(1.0, device);
 
-    try gm.backward(t3_trans_a, alloc);
+    try gm.backward(t3_trans_a);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_a, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 3: Transpose B
-    var t3_trans_b = try t1.bmm(t2, alloc, .{ .trans_a = false, .trans_b = true });
+    var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
-    t3_trans_b.grad.?.fill(1.0);
-    try gm.backward(t3_trans_b, alloc);
+    t3_trans_b.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_b);
 
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2_trans_b, t2.grad.?.data);
-    t1.grad.?.fill(0);
-    t2.grad.?.fill(0);
+    t1.grad.?.fill(0, device);
+    t2.grad.?.fill(0, device);
 
     // Case 4: Transpose both A and B
-    var t3_trans_ab = try t1.bmm(t2, alloc, .{ .trans_a = true, .trans_b = true });
+    var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
-    t3_trans_ab.grad.?.fill(1.0);
-    try gm.backward(t3_trans_ab, alloc);
+    t3_trans_ab.grad.?.fill(1.0, device);
+    try gm.backward(t3_trans_ab);
 
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
@@ -1304,9 +1458,11 @@ test "tensor/GraphManager/matmul_backward" {
 }
 
 test "tensor/GraphManager/matvec_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape_mat = &[_]usize{ 2, 2 };
@@ -1317,17 +1473,19 @@ test "tensor/GraphManager/matvec_backward" {
     // grad = [1, 1]'
     // dl/dA = grad * [1, 1] = [[2, 2], [2, 2]]
     // dl/dx = A' * grad = [4, 6]'
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape_mat, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 1, 1 }, shape_vec, true, alloc);
-    var t3 = try t1.matvec(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, shape_mat, true, device);
+    var t2 = try Tensor.init(&[_]T{ 1, 1 }, shape_vec, true, device);
+    var t3 = try t1.matvec(t2);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad.?.fill(1.0);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3);
 
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 6 };
@@ -1337,24 +1495,28 @@ test "tensor/GraphManager/matvec_backward" {
 }
 
 test "tensor/GraphManager/dot_backward" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{3};
 
-    var t1 = try Tensor.init(&[_]T{ 1, 2, 3 }, shape, true, alloc);
-    var t2 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, alloc);
-    var t3 = try t1.dot(t2, alloc);
-    t1.acquire();
-    t2.acquire();
-    t3.acquire();
+    var t1 = try Tensor.init(&[_]T{ 1, 2, 3 }, shape, true, device);
+    const t2 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, device);
+    var t3 = try t1.dot(t2);
+    defer {
+        t1.deinit();
+        t2.deinit();
+        t3.deinit();
+    }
 
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
-    t3.grad.?.fill(1.0);
-    try gm.backward(t3, alloc);
+    t3.grad.?.fill(1.0, device);
+    try gm.backward(t3);
 
     const expected_grad_t1 = &[_]T{ 4, 5, 6 };
     const expected_grad_t2 = &[_]T{ 1, 2, 3 };
@@ -1363,89 +1525,99 @@ test "tensor/GraphManager/dot_backward" {
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 }
 
+// TODO: Fix memory freeing conundrum with gather() then dont use an arena here.
 test "tensor/gather" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = arena.allocator();
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
     // case 1: basic gather
     const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const input_shape = [_]usize{ 3, 3 };
-    var input = try Tensor.init(&input_data, &input_shape, true, alloc);
+    var input = try Tensor.init(&input_data, &input_shape, true, device);
     defer input.deinit();
 
     const index_data = [_]usize{ 0, 1, 1, 2, 0, 2 };
     const index_shape = [_]usize{ 3, 2 };
-    var index = try NDTensor(usize).init(&index_data, &index_shape, false, alloc);
+    var index = try NDTensor(usize).init(&index_data, &index_shape, false, device);
     defer index.deinit();
 
-    var output = try input.gather(alloc, .{ .indices = index, .dim = 1 });
+    var output = try input.gather(device, .{ .indices = index, .dim = 1 });
     defer output.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.data.data);
     try std.testing.expectEqualSlices(usize, &index_shape, output.data.shape.shape);
 
     // case 2: grad check
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
 
-    output.grad.?.fill(1.0);
-    try gm.backward(output, alloc);
+    output.grad.?.fill(1.0, device);
+    try gm.backward(output);
 
     const expected_grad = [_]T{ 1, 1, 0, 0, 1, 1, 1, 0, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
 
     // case 3: out of bounds
     try index.set(&.{ 0, 0 }, 3);
-    try std.testing.expectError(error.IndexOutOfBounds, input.gather(alloc, .{ .indices = index, .dim = 1 }));
+    try std.testing.expectError(error.IndexOutOfBounds, input.gather(device, .{ .indices = index, .dim = 1 }));
 }
 
-test "tensor/maxOverDim" {
+// TODO: Fix memory freeing conundrum with max_over_dim() then dont use an arena here.
+test "tensor/max_over_dim" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
+    const allocator = arena.allocator();
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const T = f32;
     const Tensor = NDTensor(T);
 
     // case 1: basic max over dim operation
     const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const input_shape = [_]usize{ 3, 3 };
-    var input = try Tensor.init(&input_data, &input_shape, true, alloc);
+    var input = try Tensor.init(&input_data, &input_shape, true, device);
     defer input.deinit();
 
-    var output = try input.maxOverDim(alloc, .{ .dim = 1 });
+    var output = try input.max_over_dim(device, .{ .dim = 1 });
     defer output.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 9 }, output.data.data);
     try std.testing.expectEqualSlices(usize, &[_]usize{3}, output.data.shape.shape);
 
     // case 2: gradient check
-    var gm = GraphManager(Tensor).init(alloc, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
 
-    output.grad.?.fill(1.0);
-    try gm.backward(output, alloc);
+    output.grad.?.fill(1.0, device);
+    try gm.backward(output);
 
     const expected_grad = [_]T{ 0, 0, 1, 0, 0, 1, 0, 0, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
 
     // case 3: max over different dimension
-    var output2 = try input.maxOverDim(alloc, .{ .dim = 0 });
+    var output2 = try input.max_over_dim(device, .{ .dim = 0 });
     defer output2.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 7, 8, 9 }, output2.data.data);
     try std.testing.expectEqualSlices(usize, &[_]usize{3}, output2.data.shape.shape);
 
     // reset grads
-    input.grad.?.fill(0);
-    output2.grad.?.fill(1.0);
-    try gm.backward(output2, alloc);
+    input.grad.?.fill(0, device);
+    output2.grad.?.fill(1.0, device);
+    try gm.backward(output2);
 
     const expected_grad2 = [_]T{ 0, 0, 0, 0, 0, 0, 1, 1, 1 };
     try std.testing.expectEqualSlices(T, &expected_grad2, input.grad.?.data);
 
     // case 4: invalid dimension
-    try std.testing.expectError(error.DimOutOfBounds, input.maxOverDim(alloc, .{ .dim = 2 }));
+    try std.testing.expectError(error.DimOutOfBounds, input.max_over_dim(device, .{ .dim = 2 }));
 }

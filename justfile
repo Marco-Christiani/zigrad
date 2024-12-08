@@ -68,11 +68,10 @@ example-mnist:
   apt-get update -y && apt-get install -y make curl xz-utils libopenblas-dev python3-minimal && \
   cd /workspace/examples/mnist/ && bash"
 
-pattern := 'error\(gpa\)*'
-run_pattern file:
-   zig build run -Dfile={{file}} 2>&1 \
-   | rg --passthru --color always {{pattern}} 2>&1 \
+pattern := '\[gpa\] \(err\)*'
+run_pattern:
+   zig build test 2>&1 \
    | tee /dev/tty \
-   | rg --passthru --color always --count-matches {{pattern}}
-   # | rg --passthru --color always --count-matches {{pattern}} 2&1 \
-   # | .venv/bin/python tb.py
+   | python tb.py
+   # | rg --passthru --color always --count-matches "{{pattern}}" 2>&1 \
+   # | rg --passthru --color always --count-matches {{pattern}}

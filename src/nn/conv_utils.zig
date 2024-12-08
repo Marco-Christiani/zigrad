@@ -1,8 +1,9 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 const NDArray = zg.NDArray;
+const DeviceReference = zg.DeviceReference;
 
-pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !*NDArray(T) {
+pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !*NDArray(T) {
     const batch_size = input.shape.shape[0];
     const channels = input.shape.shape[1];
     const height = input.shape.shape[2];
@@ -14,7 +15,7 @@ pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: u
     const col_height = channels * kernel_size * kernel_size;
     const col_width = output_height * output_width;
 
-    var col = try NDArray(T).empty(&[_]usize{ batch_size, col_height, col_width }, allocator);
+    var col = try NDArray(T).empty(&[_]usize{ batch_size, col_height, col_width }, device);
 
     for (0..batch_size) |b| {
         var c: usize = 0;
@@ -42,7 +43,7 @@ pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: u
     return col;
 }
 
-pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, kernel_size: usize, stride: usize, padding: usize, dilation: usize, allocator: std.mem.Allocator) !*NDArray(T) {
+pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !*NDArray(T) {
     const batch_size = input_shape[0];
     const channels = input_shape[1];
     const height = input_shape[2];
@@ -51,7 +52,7 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
     const output_height = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     const output_width = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
-    var im = try NDArray(T).empty(input_shape, allocator);
+    var im = try NDArray(T).empty(input_shape, device);
     @memset(im.data, 0);
 
     const col_height = channels * kernel_size * kernel_size;
@@ -81,7 +82,10 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
 }
 
 test "im2col col2im" {
-    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(std.testing.allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     const input_data = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     const input_shape = [_]usize{ 1, 1, 4, 4 };
     const kernel_size: usize = 3;
@@ -89,12 +93,12 @@ test "im2col col2im" {
     const padding: usize = 1;
     const dilation: usize = 1;
 
-    var input = try NDArray(f32).init(&input_data, &input_shape, allocator);
-    defer input.deinit(allocator);
+    var input = try NDArray(f32).init(&input_data, &input_shape, device);
+    defer input.deinit(device);
 
     // im2col
-    var col = try im2col(f32, input.*, kernel_size, stride, padding, dilation, allocator);
-    defer col.deinit(allocator);
+    var col = try im2col(f32, input.*, kernel_size, stride, padding, dilation, device);
+    defer col.deinit(device);
 
     const expected_col_data = [_]f32{
         0, 0, 0, 0, 0,  1,  2,  3,  0,  5,  6,  7,  0,  9,  10, 11,
@@ -114,8 +118,8 @@ test "im2col col2im" {
     try std.testing.expectEqualSlices(f32, &expected_col_data, col.data);
 
     // col2im
-    var im = try col2im(f32, col.*, &input_shape, kernel_size, stride, padding, dilation, allocator);
-    defer im.deinit(allocator);
+    var im = try col2im(f32, col.*, &input_shape, kernel_size, stride, padding, dilation, device);
+    defer im.deinit(device);
 
     const exp_im_data = [_]f32{ 4, 12, 18, 16, 30, 54, 63, 48, 54, 90, 99, 72, 52, 84, 90, 64 };
     try std.testing.expectEqualSlices(f32, &exp_im_data, im.data);
