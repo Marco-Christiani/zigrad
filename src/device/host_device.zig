@@ -264,6 +264,7 @@ pub const HostDevice = struct {
 
     pub fn deinit(self: *HostDevice) void {
         self.scratch.deinit();
+        self.cache.deinit();
         self.* = undefined;
     }
 
