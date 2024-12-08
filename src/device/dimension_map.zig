@@ -28,7 +28,7 @@ const Value = struct { ptrs: std.ArrayListUnmanaged(*anyopaque), free: Callback 
 
 const MapContext = struct {
     pub fn hash(_: MapContext, key: Key) u64 {
-        return std.hash.Wyhash.hash(0, std.mem.asBytes(&key.dims));
+        return std.hash.Wyhash.hash(0, std.mem.asBytes(key.dims));
     }
     pub fn eql(_: MapContext, a: Key, b: Key) bool {
         return a.id == b.id and std.mem.eql(usize, a.dims, b.dims);
