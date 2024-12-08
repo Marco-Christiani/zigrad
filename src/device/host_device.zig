@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
+const DimensionMap = @import("dimension_map.zig");
 
 fn host_reference(self: *HostDevice) DeviceReference {
     return self;
@@ -249,10 +250,16 @@ pub const HostDevice = struct {
 
     blas: Blas,
     scratch: ScratchMemory,
+    cache: DimensionMap,
     allocator: std.mem.Allocator,
 
     pub fn init(backing_allocator: std.mem.Allocator) HostDevice {
-        return .{ .allocator = backing_allocator, .blas = .{}, .scratch = .{} };
+        return .{
+            .allocator = backing_allocator,
+            .blas = .{},
+            .scratch = .{},
+            .cache = .{ .allocator = backing_allocator },
+        };
     }
 
     pub fn deinit(self: *HostDevice) void {
