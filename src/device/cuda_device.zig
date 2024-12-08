@@ -206,6 +206,16 @@ pub const NN = struct {
         cuda.nll_loss_1D_index_reverse(dtype(T), self.cudnn(), src_grd.ptr, trg, src_grd.ptr, src_val.len, rdxtype(reduce_type));
     }
 
+    pub fn clip_norm(self: *NN, comptime T: type, x_val: []T, x_grd: []const T, max_nrm: T, delta: T) f64 {
+        const scratch = self.parent().scratch.get(T, 1);
+        cuda.clip_norm(dtype(T), self.cublas(), x_val.ptr, x_grd.ptr, scratch.ptr, max_nrm, delta, x_val.len);
+    }
+
+    fn cublas(self: *const NN) *anyopaque {
+        const device: *const CudaDevice = @alignCast(@fieldParentPtr("nn", self));
+        return device.context.cublas;
+    }
+
     fn cudnn(self: *const NN) *anyopaque {
         const device: *const CudaDevice = @alignCast(@fieldParentPtr("nn", self));
         return device.context.cudnn;
@@ -214,6 +224,10 @@ pub const NN = struct {
     fn stream(self: *const NN) *anyopaque {
         const device: *const CudaDevice = @alignCast(@fieldParentPtr("nn", self));
         return device.context.stream;
+    }
+
+    fn parent(self: *NN) *CudaDevice {
+        return @alignCast(@fieldParentPtr("nn", self));
     }
 };
 
@@ -241,7 +255,7 @@ pub const ScratchMemory = struct {
             self.head = @intFromPtr(ptr);
             self.tail = self.head + total;
         }
-        const ptr: [*]T = @ptrFromInt(self.scratch.head);
+        const ptr: [*]T = @ptrFromInt(self.head);
         return ptr[0..n];
     }
 };

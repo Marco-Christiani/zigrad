@@ -32,7 +32,8 @@ if __name__ == "__main__":
         f'#include "{cuda_path}/include/thrust/transform.h"',
         f'#include "{cuda_path}/include/thrust/tuple.h"',
         f'#include "{cuda_path}/include/thrust/iterator/zip_iterator.h"',
-        f'#include "{cuda_path}/thrust/iterator/counting_iterator.h"',
+        f'#include "{cuda_path}/include/thrust/iterator/counting_iterator.h"',
+        f'#include "{cuda_path}/include/thrust/execution_policy.h"',
         f'#include "{cuda_path}/include/cudnn.h"',
     ]
     

@@ -88,4 +88,14 @@ EXTERN_C void nll_loss_1D_index_reverse(
   reduxtype reduxop
 );
 
+EXTERN_C void clip_norm(
+  dtype id,
+  void* cublas_handle,
+  void* x,
+  len_t n,
+  void* cur_nrm2,
+  double max_nrm2,
+  double delta
+);
+
 #endif
