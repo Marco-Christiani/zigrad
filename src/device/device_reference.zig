@@ -3,7 +3,7 @@ const HostDevice = @import("host_device.zig").HostDevice;
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
-const ShapeMap = @import("shape_map.zig");
+const DimensionMap = @import("dimension_map.zig");
 
 pub fn Blas(comptime Parent: type) type {
     return struct {
@@ -231,7 +231,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         ptrs: DevicePtrs,
         nn: NN(Self) = .{},
         blas: Blas(Self) = .{},
-        cache: *ShapeMap,
+        cache: *DimensionMap,
         allocator: std.mem.Allocator,
 
         pub fn mem_alloc(self: Self, comptime T: type, n: usize) Error![]T {

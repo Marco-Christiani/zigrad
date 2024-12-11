@@ -265,7 +265,7 @@ pub const HostDevice = struct {
     blas: Blas,
     scratch: ScratchMemory,
     cache: DimensionMap,
-    allocator: stddimension_map.zigr,
+    allocator: std.mem.Allocator,
 
     pub fn init(backing_allocator: std.mem.Allocator) HostDevice {
         return .{
