@@ -6,7 +6,7 @@ const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
 
-pub fn clipGrads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
+pub fn clip_grads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
     for (params) |param| if (param.grad) |_| param.clip_grad_norm_delta(opts);
 }
 
@@ -25,11 +25,11 @@ pub fn Optimizer(comptime T: type) type {
             const Ptr = @TypeOf(pointer);
 
             const gen = struct {
-                pub fn stepFn(ctx: *anyopaque, params: []*const NDTensor(T)) anyerror!void {
+                pub fn step_fn(ctx: *anyopaque, params: []*const NDTensor(T)) anyerror!void {
                     const self: Ptr = @ptrCast(@alignCast(ctx));
                     return self.step(params);
                 }
-                const vtable = VTable{ .step = stepFn };
+                const vtable = VTable{ .step = step_fn };
             };
             return .{
                 .vtable = &gen.vtable,
@@ -52,7 +52,7 @@ pub fn SGD(comptime T: type) type {
         grad_clip_delta: f32 = settings.grad_clip_delta,
 
         pub fn step(self: Self, params: []*const NDTensor(T)) void {
-            if (self.grad_clip_enabled) clipGrads(T, params, .{
+            if (self.grad_clip_enabled) clip_grads(T, params, .{
                 .max_norm = self.grad_clip_max_norm,
                 .delta = self.grad_clip_delta,
             });
@@ -114,7 +114,7 @@ pub fn Adam(comptime T: type) type {
         }
 
         pub fn step(self: *Self, params: []*const NDTensor(T)) !void {
-            if (self.grad_clip_enabled) clipGrads(T, params, .{
+            if (self.grad_clip_enabled) clip_grads(T, params, .{
                 .max_norm = self.grad_clip_max_norm,
                 .delta = self.grad_clip_delta,
             });

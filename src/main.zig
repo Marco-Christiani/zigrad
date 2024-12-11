@@ -5,6 +5,9 @@ const layer = zg.layer;
 pub const std_options = zg.std_options;
 
 pub fn main() !void {
-    std.debug.print("{any}\n", .{zg.settings});
-    try mnist.main();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var cpu = zg.device.HostDevice.init(gpa.allocator());
+    defer cpu.deinit();
 }
