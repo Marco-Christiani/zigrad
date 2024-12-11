@@ -285,7 +285,7 @@ pub const CudaDevice = struct {
     nn: NN,
     blas: Blas,
     cache: DimensionMap,
-    scratch: ScratchMemorydimension_map
+    scratch: ScratchMemory,
     allocator: std.mem.Allocator,
 
     pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) CudaDevice {
