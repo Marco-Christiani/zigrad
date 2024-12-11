@@ -113,7 +113,7 @@ test "im2col col2im" {
     };
 
     std.debug.print("\ncol data:\n", .{});
-    col.print();
+    col.print(cpu.reference());
 
     try std.testing.expectEqualSlices(f32, &expected_col_data, col.data);
 
@@ -125,5 +125,5 @@ test "im2col col2im" {
     try std.testing.expectEqualSlices(f32, &exp_im_data, im.data);
 
     std.debug.print("\nim data:\n", .{});
-    im.print();
+    im.print(cpu.reference());
 }

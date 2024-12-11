@@ -24,10 +24,15 @@ pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
 pub const blas = @import("backend/blas.zig");
 
-pub const device = @import("device").device;
+const device_root = @import("device");
+pub const device = device_root.device;
 pub const DeviceReference = device.DeviceReference;
-pub const backend = device.backend;
-pub const ReduceType = device.ReduceType;
+pub const backend = device_root.backend;
+pub const ReduceType = device_root.ReduceType;
+pub const RandType = device_root.RandType;
+pub const SmaxType = device_root.SmaxType;
+
+// we should make this a build option like
 
 /// lib-wide default options that can be overridden by the root file.
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
@@ -39,7 +44,6 @@ pub const Settings = struct {
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
-    /// currently only used for generating node labels when tracing the comp graph
     seed: u64 = 81761,
 };
 

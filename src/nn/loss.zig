@@ -64,14 +64,26 @@ fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
 
 /// Relies on autograd, operates on the flat data.
 pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    var diff = (try y_pred.sub(y)).set_label("diff");
-    const diff2 = (try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, device)).set_label("diff2");
+    var diff = try y_pred.sub(y);
+    try diff.set_label("diff");
+
+    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, device);
+    try diff2.set_label("diff2");
     // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
-    const sq_diff = (try diff.mul(diff2)).set_label("sq_diff");
-    const sum_sq_diff = (try sq_diff.sum()).set_label("sum_sq_diff");
+    const sq_diff = try diff.mul(diff2);
+    try sq_diff.set_label("sq_diff");
+
+    const sum_sq_diff = try sq_diff.sum();
+    try sum_sq_diff.set_label("sum_sq_diff");
+
     const coef = @as(T, @floatFromInt(y.data.data.len));
-    const coef_tensor = try NDTensor(T).init(&[_]T{coef}, null, true, device);
-    return (try sum_sq_diff.div(coef_tensor.set_label("coef"))).set_label("mse");
+    const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
+    try coef_tensor.set_label("coef");
+
+    const out = try sum_sq_diff.div(coef_tensor);
+    try out.set_label("mse");
+
+    return out;
 }
 
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
@@ -85,7 +97,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
 
     const bw_fn = struct {
         fn backward(tensor: NDTensor(T), _: DeviceReference) !void {
-            const self_children = tensor.children orelse return error.NoChildren;
+            const self_children = tensor.get_children() orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];
 
@@ -101,8 +113,8 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     }.backward;
 
     return try NDTensor(T).create_dependent(.{
-        .data = try NDArray(T).init(&[_]T{mse}, &[_]usize{1}, device),
-        .children = &[_]*const NDTensor(T){ y_pred, y },
+        .data = try NDArray(T).init(&[_]T{mse}, &.{1}, device),
+        .children = &.{ y_pred, y },
         .label = "mse",
         .requires_gradient = true,
         .device = device,
@@ -130,7 +142,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         fn backward(bw_tensor: NDTensor(T)) !void {
             const bw_ctx: *NDTensor(T) = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
             defer bw_ctx.deinit();
-            const bw_self_children = bw_tensor.children orelse return error.NoChildren;
+            const bw_self_children = bw_tensor.get_children() orelse return error.NoChildren;
             const bw_y_pred = bw_self_children[0];
             const bw_y = bw_self_children[1];
             const bw_batch_size = if (bw_y_pred.data.shape.len() > 1) try bw_y_pred.data.shape.get(0) else 1;
@@ -280,7 +292,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
 
     const bw_fn = struct {
         fn backward(tensor: NDTensor(T)) !void {
-            const self_children = tensor.children orelse return error.NoChildren;
+            const self_children = tensor.get_children() orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];
             const _bw_ctx: *T = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));

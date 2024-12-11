@@ -50,17 +50,17 @@ pub const Op = enum {
 
 pub fn NDTensor(comptime T: type) type {
     return struct {
-
-        // signature for a backwards callback
-        const Callback = *const fn (Self) anyerror!void;
-
-        pub const dtype = NDArray(T);
         const Self = @This();
+        // signature for a backwards callback
+        pub const Callback = *const fn (Self) anyerror!void;
+        pub const dtype = NDArray(T);
+        pub const Children = std.ArrayListUnmanaged(*Self);
+        pub const Label = std.ArrayListUnmanaged(u8);
 
         data: *dtype,
         op: ?Op = null,
-        children: ?[]const *Self = null,
-        label: ?[]const u8 = null,
+        children: Children = .{},
+        label: Label = .{},
         grad: ?*dtype = null,
         requires_gradient: bool,
         acquired: bool = false, // not inherited
@@ -98,6 +98,17 @@ pub fn NDTensor(comptime T: type) type {
             const self = try device.allocator.create(Self);
             self.* = Self{
                 .data = try dtype.zeros(shape, device),
+                .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
+                .requires_gradient = requires_gradient,
+                .device = device,
+            };
+            return self;
+        }
+
+        pub fn random(shape: []const usize, requires_gradient: bool, op: zg.RandType, device: DeviceReference) !*Self {
+            const self = try device.allocator.create(Self);
+            self.* = Self{
+                .data = try dtype.random(shape, device, op),
                 .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
                 .requires_gradient = requires_gradient,
                 .device = device,
@@ -143,6 +154,24 @@ pub fn NDTensor(comptime T: type) type {
             return self.grad.?.fill(fill_value orelse return, self.device);
         }
 
+        pub fn get_children(self: Self) ?[]*Self {
+            return if (self.children.items.len > 0) self.children.items else null;
+        }
+
+        pub fn set_children(self: *Self, new_children: []const *Self) !void {
+            try self.children.resize(self.device.allocator, new_children.len);
+            @memcpy(self.children.items, new_children);
+        }
+
+        pub fn get_label(self: Self) ?[]const u8 {
+            return if (self.label.items.len > 0) self.label.items else null;
+        }
+
+        pub fn set_label(self: *Self, new_label: []const u8) !void {
+            try self.label.resize(self.device.allocator, new_label.len);
+            @memcpy(self.label.items, new_label);
+        }
+
         pub const CreateDependentOpts = struct {
             data: *dtype,
             op: ?Op = null,
@@ -177,53 +206,57 @@ pub fn NDTensor(comptime T: type) type {
         pub fn create_dependent(opts: CreateDependentOpts) !*Self {
             const self = try opts.device.allocator.create(Self);
             const rg = opts.requires_gradient and zg.rt_grad_enabled;
+            var children = try Children.initCapacity(opts.device.allocator, opts.children.len);
+            children.appendSliceAssumeCapacity(opts.children);
             self.* = Self{
                 .data = opts.data,
                 .op = opts.op,
                 // TODO: How to handle not holding references if requires_grad == false??
                 // .children = if (rg) try opts.allocator.dupe(*const Self, opts.children) else null,
-                .children = try opts.device.allocator.dupe(*Self, opts.children),
-                .label = if (opts.label) |l| try opts.device.allocator.dupe(u8, l) else null,
                 .grad = if (rg) try dtype.zeros(opts.data.shape.shape, opts.device) else null,
+                .children = .{},
+                .label = .{},
                 .requires_gradient = rg,
                 .acquired = false,
                 ._backward = if (rg) opts._backward else null,
                 ._backward_ctx = if (rg) opts._backward_ctx else null,
                 .device = opts.device,
             };
+            if (opts.label) |_label| try self.set_label(_label);
+            try self.set_children(opts.children);
             return self;
         }
 
         pub fn deinit(self: *Self) void {
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-            // log.debug("deinit().data {?s}", .{self.label});
+            // log.debug("deinit().data {?s}", .{self.get_label()});
             self.data.deinit(self.device);
             if (self.grad) |g| {
-                // log.debug("deinit().grad {?s}", .{self.label});
+                // log.debug("deinit().grad {?s}", .{self.get_label()});
                 g.deinit(self.device);
             }
 
-            // TODO: verify this is heap first, possibly by checking alignment, not sure.
-            if (self.label) |l| self.device.allocator.free(l);
+            self.label.deinit(self.device.allocator);
 
             // TODO: ohhhh this is tricky...
             // if (self._backward_ctx) |ctx| {
             //     if (@hasDecl(ctx, "deinit")) ctx.deinit();
             // }
-            if (self.children) |c| self.device.allocator.free(c);
+            self.children.deinit(self.device.allocator);
+
             self.device.allocator.destroy(self);
         }
 
         pub fn teardown(self: *Self) void {
-            log.debug("START teardown {?s}", .{self.label});
+            log.debug("START teardown {?s}", .{self.get_label()});
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-            if (self.children) |children| {
+            if (self.get_children()) |children| {
                 for (children) |c| {
-                    log.debug("{?s} accessing child {?s}", .{ self.label, c.label });
-                    if (!c.acquired) c.teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.label});
+                    log.debug("{?s} accessing child {?s}", .{ self.get_label(), c.get_label() });
+                    if (!c.acquired) c.teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.get_label()});
                 }
             }
-            log.debug("ENDING teardown()->deinit() {?s}", .{self.label});
+            log.debug("ENDING teardown()->deinit() {?s}", .{self.get_label()});
             self.deinit();
         }
 
@@ -296,7 +329,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const to_device_bw = struct {
                 fn to_device_bw_impl(_self: Self) !void {
-                    const child = (_self.children orelse return error.NoChildren)[0];
+                    const child = (_self.get_children() orelse return error.NoChildren)[0];
                     to_deviceImpl(_self.grad.?.data, child.grad.?.data, self.device, child.device);
                 }
             }.to_device_bw_impl;
@@ -339,8 +372,8 @@ pub fn NDTensor(comptime T: type) type {
                 .grad = if (self.grad) |g| try g.copy(self.device) else null,
                 .requires_gradient = self.requires_grad(),
                 .op = null,
-                .children = null,
-                .label = null,
+                .children = .{},
+                .label = .{},
                 .acquired = false,
                 .device = self.device,
                 ._backward = null,
@@ -352,7 +385,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
             log.debug("{s}{s} data shape: {d} grad shape: {?d}", .{
                 if (msg) |n| n else "",
-                if (self.label) |l| l else "",
+                if (self.get_label()) |l| l else "",
                 self.data.shape.shape,
                 if (self.grad) |g| g.shape.shape else null,
             });
@@ -368,7 +401,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const reshape_bw = struct {
                 fn reshape_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const original_shape = children[0].data.shape;
                     try self.grad.?._reshape(original_shape.shape);
                     _ = try children[0].grad.?._add(self.grad.?);
@@ -394,7 +427,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn transpose(self: *Self) !*Self {
             const transpose_bw = struct {
                 fn transpose_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const gt = try self.grad.?.transpose(_self.device);
                     defer gt.deinit(_self.device);
                     _ = try children[0].grad.?._add(gt);
@@ -415,12 +448,6 @@ pub fn NDTensor(comptime T: type) type {
                 result.requires_gradient = true;
             }
             return result;
-        }
-
-        pub fn set_label(self: *Self, comptime label: []const u8) *Self {
-            if (self.label) |l| self.device.allocator.free(l);
-            self.label = self.device.allocator.dupe(u8, label) catch @panic("OOM");
-            return self;
         }
 
         pub fn fill(self: Self, val: T) void {
@@ -498,7 +525,7 @@ pub fn NDTensor(comptime T: type) type {
                 try g.print_to_writer(writer);
             }
             try writer.print(", requires_gradient={}", .{self.requires_gradient});
-            if (self.label) |l| {
+            if (self.get_label()) |l| {
                 try writer.print(" label={s}", .{l});
             }
             try writer.writeAll("}\n");
@@ -513,18 +540,13 @@ pub fn NDTensor(comptime T: type) type {
             self.grad.?.clip_norm(opts.max_norm, opts.delta, self.device);
         }
 
-        pub fn set_children(self: *Self, children: []const *Self) !void {
-            log.warn("Deprecation warning: use create_dependent.", .{});
-            self.children = try self.device.allocator.dupe(*Self, children);
-        }
-
         /// Element-wise addition. COM.
         pub fn add(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const addBw = struct {
                 fn add_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
                     const a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, _self.device);
@@ -551,7 +573,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const subBw = struct {
                 fn sub_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
 
@@ -580,7 +602,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const mulBw = struct {
                 fn mul_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
 
@@ -619,7 +641,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const divBw = struct {
                 fn div_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
 
@@ -666,7 +688,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const maxBw = struct {
                 fn max_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
                     const iptr: *i32 = @ptrCast(@alignCast(_self._backward_ctx.?));
                     self.device.blas.max_reverse(T, _self.grad.?.data.data, child.grad.?.data.data, iptr);
@@ -688,7 +710,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn exp(self: *Self) !*Self {
             const expBw = struct {
                 fn exp_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
                     for (_self.data.data, _self.grad.?.data, 0..) |exp_val, grad_val, i| {
                         child.grad.?.data[i] += exp_val * grad_val;
@@ -763,7 +785,7 @@ pub fn NDTensor(comptime T: type) type {
             const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
             defer self.device.allocator.destroy(opts);
 
-            const children = self.children orelse return error.NoChildren;
+            const children = self.get_children() orelse return error.NoChildren;
             const A = children[0].data;
             const grad_A = children[0].grad;
             const B = children[1].data;
@@ -818,7 +840,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const dotBw = struct {
                 fn dot_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
                     const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
@@ -850,7 +872,7 @@ pub fn NDTensor(comptime T: type) type {
             const matvecBw = struct {
                 /// TODO: Use accumulation
                 fn matvec_bw_impl(_self: Self) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     var A = children[0].data;
                     const x = children[1].data;
 
@@ -870,12 +892,13 @@ pub fn NDTensor(comptime T: type) type {
             out.* = Self{
                 .data = try self.data.matvec(other.data, false, self.device),
                 .op = .MATVEC,
-                .children = try self.device.allocator.dupe(*Self, &.{ self, other }),
+                .children = .{},
                 .grad = if (self.requires_grad() or other.requires_gradient) try dtype.zeros(other.data.shape.shape, self.device) else null,
                 .requires_gradient = self.requires_grad() or other.requires_gradient,
                 .device = self.device,
                 ._backward = matvecBw,
             };
+            try out.set_children(&.{ self, other });
             return out;
         }
 
@@ -883,7 +906,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn sum(self: *Self) !*Self {
             const sumBw = struct {
                 fn sum_bw_impl(_self: NDTensor(T)) !void {
-                    const children = _self.children orelse return error.NoChildren;
+                    const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
                     _ = try child.grad.?._add(_self.grad.?);
                 }
@@ -902,7 +925,7 @@ pub fn NDTensor(comptime T: type) type {
             const max_backward = struct {
                 // NOTE: See gather() comments, same apply here
                 fn bw_impl(_self: Self) !void {
-                    const bw_children = _self.children orelse return error.NoChildren;
+                    const bw_children = _self.get_children() orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
                     const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
@@ -931,7 +954,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
                 fn bw_impl(bw_tensor: NDTensor(T)) !void {
-                    const bw_children = bw_tensor.children orelse return error.NoChildren;
+                    const bw_children = bw_tensor.get_children() orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
                     const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
@@ -981,9 +1004,9 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes
         pub fn print_arrows(self: Self) void {
-            if (self.children) |children| {
+            if (self.get_children()) |children| {
                 for (children) |elem| {
-                    std.debug.print("{?s}<-{?s}", .{ self.label, elem.label });
+                    std.debug.print("{?s}<-{?s}", .{ self.get_label(), elem.get_label() });
                     const symbol = switch (self.op.?) {
                         Op.ADD => ": +",
                         Op.SUB => ": -",
@@ -1000,25 +1023,28 @@ pub fn NDTensor(comptime T: type) type {
                     elem.print_arrows();
                 }
             } else {
-                std.debug.print("{?s}\n", .{self.label});
+                std.debug.print("{?s}\n", .{self.get_label()});
             }
         }
     };
 }
 
 test "tensor/GraphManager/sum" {
-    const allocator = std.testing.allocator;
-    var cpu = zg.device.HostDevice.init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var cpu = zg.device.HostDevice.init(arena.allocator());
     defer cpu.deinit();
+
     const device = cpu.reference();
 
     const T = f32;
     const Tensor = NDTensor(T);
 
     var input = try Tensor.init(&[_]T{ 1, 2, 3, 4 }, &[_]usize{4}, true, device);
-    _ = input.set_label("input");
+    _ = try input.set_label("input");
     var sum_result = try input.sum();
-    _ = sum_result.set_label("sum_result");
+    _ = try sum_result.set_label("sum_result");
 
     try std.testing.expectEqualSlices(T, &[_]T{10}, sum_result.data.data);
 
@@ -1039,7 +1065,10 @@ test "tensor/GraphManager/sum" {
 }
 
 test "tensor/NDTensor index, add, div" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1070,7 +1099,10 @@ test "tensor/NDTensor index, add, div" {
 }
 
 test "tensor/GraphManager/addback" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1099,7 +1131,10 @@ test "tensor/GraphManager/addback" {
 }
 
 test "tensor/GraphManager/mulback" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1128,7 +1163,10 @@ test "tensor/GraphManager/mulback" {
 }
 
 test "tensor/GraphManager/moreback" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1182,7 +1220,10 @@ test "tensor/GraphManager/moreback" {
 }
 
 test "tensor/GraphManager/divback" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1213,7 +1254,10 @@ test "tensor/GraphManager/divback" {
 }
 
 test "tensor/GraphManager/matmul_backward square" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1284,7 +1328,10 @@ test "tensor/GraphManager/matmul_backward square" {
 }
 
 test "tensor/GraphManager/matmul_backward non-square" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1384,7 +1431,10 @@ test "tensor/GraphManager/matmul_backward non-square" {
 }
 
 test "tensor/GraphManager/matmul_backward" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1458,7 +1508,10 @@ test "tensor/GraphManager/matmul_backward" {
 }
 
 test "tensor/GraphManager/matvec_backward" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1495,7 +1548,10 @@ test "tensor/GraphManager/matvec_backward" {
 }
 
 test "tensor/GraphManager/dot_backward" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1530,6 +1586,7 @@ test "tensor/gather" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
@@ -1574,6 +1631,7 @@ test "tensor/max_over_dim" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();

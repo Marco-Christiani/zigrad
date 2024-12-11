@@ -38,7 +38,7 @@ pub fn GraphManager(comptime T: type) type {
         fn topo(self: *Self, node: *T) void {
             const gopr = self.visited_nodes.getOrPut(node) catch unreachable;
             if (!gopr.found_existing) {
-                if (node.children) |children| {
+                if (node.get_children()) |children| {
                     for (children) |child| {
                         self.topo(child);
                     }
@@ -62,7 +62,7 @@ pub fn GraphManager(comptime T: type) type {
                     // it just destroys the current tensor and not the children
                     if (!curr_node.acquired and self.eager_teardown) curr_node.deinit();
                 } else {
-                    log.debug("Skipping node {?s}", .{node.label});
+                    log.debug("Skipping node {?s}", .{node.get_label()});
                 }
             }
         }

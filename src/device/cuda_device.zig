@@ -1,9 +1,10 @@
 const std = @import("std");
 const log = std.log.scoped(.cuda);
 const cuda = @import("cuda").impl;
-const DataCache = @import("data_cache.zig");
+const DimensionMap = @import("dimension_map.zig");
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
+const RandType = @import("device_common.zig").RandType;
 
 pub fn dtype(comptime T: type) cuda.dtype {
     return switch (T) {
@@ -16,16 +17,23 @@ pub fn dtype(comptime T: type) cuda.dtype {
 
 pub fn rdxtype(rdx: ReduceType) cuda.dtype {
     return switch (rdx) {
-        .SUM => cuda.RDX_MAX,
-        .MEAN => cuda.RDX_MEAN,
+        .sum => cuda.RDX_MAX,
+        .mean => cuda.RDX_MEAN,
     };
 }
 
 pub fn smaxtype(op: SmaxType) cuda.dtype {
     return switch (op) {
-        .FAST => cuda.SMAX_FAST,
-        .MAX => cuda.SMAX_MAX,
-        .LOG => cuda.SMAX_LOG,
+        .fast => cuda.SMAX_FAST,
+        .max => cuda.SMAX_MAX,
+        .log => cuda.SMAX_LOG,
+    };
+}
+
+pub fn randtype(op: RandType) cuda.dtype {
+    return switch (op) {
+        .uniform => cuda.UNIFORM,
+        .normal => cuda.NORMAL,
     };
 }
 
@@ -35,7 +43,11 @@ pub const DeviceReference = @import("device_reference.zig").DeviceReference(Cuda
 // callback to replace host reference to union
 pub const HostDevice = @import("host_device.zig").HostDevice;
 pub fn host_reference(self: *HostDevice) DeviceReference {
-    return .{ .ptrs = DeviceReference.DevicePtrs{ .host = self }, .allocator = self.allocator };
+    return .{
+        .ptrs = DeviceReference.DevicePtrs{ .host = self },
+        .cache = &self.cache,
+        .allocator = self.allocator,
+    };
 }
 
 pub const Blas = struct {
@@ -272,8 +284,8 @@ pub const CudaDevice = struct {
     },
     nn: NN,
     blas: Blas,
-    cache: DataCache,
-    scratch: ScratchMemory,
+    cache: DimensionMap,
+    scratch: ScratchMemorydimension_map
     allocator: std.mem.Allocator,
 
     pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) CudaDevice {
@@ -312,17 +324,17 @@ pub const CudaDevice = struct {
     }
 
     pub fn reference(self: *CudaDevice) DeviceReference {
-        return .{ .ptrs = DeviceReference.DevicePtrs{ .aux = self }, .allocator = self.allocator };
-    }
-
-    pub fn mem_alloc_uncached(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
-        const raw_ptr = cuda.mem_alloc(n * @sizeOf(T), self.context.stream);
-        const dev_ptr: [*]T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
-        return dev_ptr[0..n];
+        return .{
+            .ptrs = DeviceReference.DevicePtrs{ .aux = self },
+            .cache = &self.cache,
+            .allocator = self.allocator,
+        };
     }
 
     pub fn mem_alloc(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
-        return self.cache.get(T, n) orelse self.mem_alloc_uncached(T, n);
+        const raw_ptr = cuda.mem_alloc(n * @sizeOf(T), self.context.stream);
+        const dev_ptr: [*]T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
+        return dev_ptr[0..n];
     }
 
     pub fn mem_dupe(self: *CudaDevice, comptime T: type, src: []const T) Error![]T {
@@ -331,30 +343,32 @@ pub const CudaDevice = struct {
         return dup;
     }
 
-    pub fn mem_free_uncached(self: *CudaDevice, slice: anytype) void {
+    pub fn mem_free(self: *CudaDevice, slice: anytype) void {
         cuda.mem_free(@constCast(slice.ptr), self.context.stream);
     }
 
-    pub fn mem_free(self: *CudaDevice, slice: anytype) void {
-        const T = std.meta.Child(@TypeOf(slice));
-        if (!self.cache.put(T, slice)) {
-            self.mem_free_uncached(slice);
-        }
-    }
-
-    pub fn mem_create(self: HostDevice, comptime T: type) Error!*T {
+    pub fn mem_create(self: CudaDevice, comptime T: type) Error!*T {
         const raw_ptr = cuda.mem_alloc(@sizeOf(T), self.context.stream);
         const dev_ptr: *T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
         return dev_ptr;
     }
 
-    pub fn mem_destroy(self: HostDevice, ptr: anytype) void {
+    pub fn mem_destroy(self: CudaDevice, ptr: anytype) void {
         cuda.mem_free(@constCast(ptr), self.context.stream);
     }
 
     pub fn mem_fill(self: CudaDevice, comptime T: type, slice: []T, value: T) void {
         var _value = value; // move from register memory
         cuda.mem_fill(dtype(T), slice.ptr, slice.len, &_value, self.context.stream);
+    }
+
+    pub fn mem_copy(self: CudaDevice, comptime T: type, src: []const T, dst: []T) void {
+        return self.mem_transfer(T, src, dst, .DtoD);
+    }
+
+    pub fn mem_random(self: CudaDevice, comptime T: type, slice: []T, op: RandType, seed: u64) void {
+        // at some point, I should put in u64 support for the device random.
+        cuda.mem_random(dtype(T), slice.ptr, slice.len, randtype(op), @truncate(seed), self.context.stream);
     }
 
     pub fn mem_sequence(self: CudaDevice, comptime T: type, slice: []T, initial: T, step: T) void {

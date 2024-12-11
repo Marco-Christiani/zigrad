@@ -2,6 +2,7 @@ const std = @import("std");
 pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 const DimensionMap = @import("dimension_map.zig");
+const RandType = @import("device_common.zig").RandType;
 
 fn host_reference(self: *HostDevice) DeviceReference {
     return self;
@@ -240,6 +241,18 @@ pub const NN = struct {
         }
     }
 
+    pub fn relu_forward(_: NN, comptime T: type, x: []const T, y: []T) void {
+        for (x, y) |x_v, *y_v| {
+            y_v.* = if (x_v > 0) x_v else 0;
+        }
+    }
+
+    pub fn relu_backward(_: NN, comptime T: type, x_val: []const T, y_grd: []const T, x_grd: []T) void {
+        for (x_val, y_grd, x_grd) |x_v, y_g, *x_g| {
+            x_g.* += if (x_v > 0) y_g else 0;
+        }
+    }
+
     fn parent(self: *const NN) *const HostDevice {
         return @alignCast(@fieldParentPtr("nn", self));
     }
@@ -248,17 +261,19 @@ pub const NN = struct {
 pub const HostDevice = struct {
     const Error = std.mem.Allocator.Error;
 
+    nn: NN,
     blas: Blas,
     scratch: ScratchMemory,
     cache: DimensionMap,
-    allocator: std.mem.Allocator,
+    allocator: stddimension_map.zigr,
 
     pub fn init(backing_allocator: std.mem.Allocator) HostDevice {
         return .{
-            .allocator = backing_allocator,
+            .nn = .{},
             .blas = .{},
             .scratch = .{},
             .cache = .{ .allocator = backing_allocator },
+            .allocator = backing_allocator,
         };
     }
 
@@ -288,8 +303,22 @@ pub const HostDevice = struct {
         return self.allocator.dupe(T, src);
     }
 
+    pub fn mem_copy(_: HostDevice, comptime T: type, src: []const T, dst: []T) void {
+        @memcpy(dst, src);
+    }
+
     pub fn mem_fill(_: HostDevice, comptime T: type, slice: []T, value: T) void {
         @memset(slice, value);
+    }
+
+    pub fn mem_random(_: HostDevice, comptime T: type, slice: []T, op: RandType, seed: u64) void {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rand = prng.random();
+        if (op == .uniform) {
+            for (slice) |*e| e.* = rand.float(T);
+        } else {
+            for (slice) |*e| e.* = rand.floatNorm(T);
+        }
     }
 
     // remove data dependencies on this to speed it up

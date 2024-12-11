@@ -157,3 +157,46 @@ extern "C" void memSequence(dtype id, void* data, len_t n, const void* init, con
     }
   }
 }
+
+template <typename T>
+struct UniformRandom {
+    unsigned seed;
+    __host__ __device__
+    T operator()(unsigned n) const {
+        thrust::default_random_engine rng(this->seed);
+        thrust::uniform_real_distribution<T> dist(T(-1), T(1));
+        rng.discard(n);
+        return dist(rng);
+    }
+};
+
+template <typename T>
+struct NormalRandom {
+    unsigned seed;
+    __host__ __device__
+    T operator()(unsigned n) const {
+        thrust::default_random_engine rng(this->seed);
+        thrust::normal_distribution<T> dist(T(0), T(1));
+        rng.discard(n);
+        return dist(rng);
+    }
+};
+
+template <typename T>
+void __mem_random(void* x, len_t n, randtype op, unsigned seed, void* stream) {
+  const auto _stream = static_cast<cudaStream_t>(stream);
+  thrust::counting_iterator<unsigned> idxs(0);
+  if (op == UNIFORM) {
+    thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs+ n, static_cast<T*>(x), UniformRandom<T>{ .seed = seed });
+  } else {
+    thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs+ n, static_cast<T*>(x), NormalRandom<T>{ .seed = seed });
+  }
+}
+
+extern "C" void memRandom(dtype id, void* x, len_t n, randtype op, unsigned seed, void* stream) {
+  if (id == SINGLE) {
+    return __mem_random<float>(x, n, op, seed, stream);
+  } else {
+    return __mem_random<double>(x, n, op, seed, stream);
+  }
+}
