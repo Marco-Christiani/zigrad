@@ -24,4 +24,8 @@ static const smaxtype SMAX_FAST = 0;
 static const smaxtype SMAX_MAX = 1;
 static const smaxtype SMAX_LOG = 2;
 
+typedef unsigned char randtype;
+static const randtype UNIFORM = 0;
+static const randtype NORMAL = 1;
+
 #endif

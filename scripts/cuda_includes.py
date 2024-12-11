@@ -34,6 +34,7 @@ if __name__ == "__main__":
         f'#include "{cuda_path}/include/thrust/iterator/zip_iterator.h"',
         f'#include "{cuda_path}/include/thrust/iterator/counting_iterator.h"',
         f'#include "{cuda_path}/include/thrust/execution_policy.h"',
+        f'#include "{cuda_path}/include/thrust/random.h"',
         f'#include "{cuda_path}/include/cudnn.h"',
     ]
     

@@ -1,2 +1,3 @@
-pub const ReduceType = enum { SUM, MEAN };
-pub const SmaxType = enum { FAST, MAX, LOG };
+pub const ReduceType = enum { sum, mean };
+pub const SmaxType = enum { fast, max, log };
+pub const RandType = enum { uniform, normal };

@@ -27,6 +27,10 @@ if __name__ == "__main__":
         "pub const Backend = enum{ HOST, CUDA };",
         f"pub const backend: Backend = .{zigrad_backend};",
         f'pub const device = @import("{roots[zigrad_backend]}");',
+        f'pub const ReduceType = @import("device_common.zig").ReduceType;',
+        f'pub const SmaxType = @import("device_common.zig").SmaxType;',
+        f'pub const RandType = @import("device_common.zig").RandType;',
+        f'pub const using_mkl = @import("host_device.zig").using_mkl;',
      ]
     
     with open(root, 'w') as file:

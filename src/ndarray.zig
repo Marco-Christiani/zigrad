@@ -63,6 +63,12 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
+        pub fn random(shape: []const usize, device: DeviceReference, op: zg.RandType) !*Self {
+            const self = try Self.empty(shape, device);
+            device.mem_random(T, self.data, op, zg.settings.seed);
+            return self;
+        }
+
         pub fn copy(self: Self, device: DeviceReference) !*Self {
             const result = try device.allocator.create(Self);
             result.* = .{
@@ -144,13 +150,12 @@ pub fn NDArray(comptime T: type) type {
             return self.data.len;
         }
 
-        pub fn print(self: Self) void {
-            // self.print_to_writer(std.io.getStdOut().writer());
-            self.print_to_writer(std.io.getStdErr().writer()) catch @panic("print failure");
+        pub fn print(self: Self, device: DeviceReference) void {
+            self.print_to_writer(std.io.getStdErr().writer(), device) catch @panic("print failure");
         }
 
         pub fn print_to_writer(self: Self, writer: anytype, device: DeviceReference) !void {
-            print_to_writer_impl(self, self.data, writer, device);
+            return print_to_writer_impl(self, self.data, writer, device);
         }
 
         fn has_transfer(comptime DT: type) bool {
@@ -901,7 +906,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn l2_norm(self: *const Self, device: DeviceReference) !*Self {
             const result = try Self.empty(&.{1}, device);
-            device.blas.nrm2(T, self.data, result.data, 1);
+            device.blas.nrm2(T, self.data, result.data);
             return result;
         }
 

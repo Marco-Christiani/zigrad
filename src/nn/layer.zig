@@ -125,8 +125,10 @@ pub fn LinearLayer(comptime T: type) type {
         pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !*Self {
             const weights_shape = [_]usize{ out_features, in_features };
             const bias_shape = [_]usize{ 1, out_features };
-            var weights = (try NDTensor(T).empty(&weights_shape, true, device)).set_label("linear_weights");
-            var bias = (try NDTensor(T).empty(&bias_shape, true, device)).set_label("linear_bias");
+            var weights = try NDTensor(T).empty(&weights_shape, true, device);
+            try weights.set_label("linear_weights");
+            var bias = try NDTensor(T).empty(&bias_shape, true, device);
+            try bias.set_label("linear_bias");
             weights.acquire();
             bias.acquire();
 
@@ -198,7 +200,7 @@ pub fn LinearLayer(comptime T: type) type {
         fn backward_manual(tensor: NDTensor(T)) !void {
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             const grad_output = tensor.grad orelse return error.NoGradient;
-            const input = tensor.children.?[0];
+            const input = tensor.get_children().?[0];
 
             const grad_W = self.weights.grad orelse return error.NoGradient;
             const grad_B = self.bias.grad orelse return error.NoGradient;
@@ -298,12 +300,10 @@ pub fn Conv2DLayer(comptime T: type) type {
         ) !*Self {
             const weights_shape = [_]usize{ out_channels, in_channels, kernel_size, kernel_size };
             const bias_shape = [_]usize{out_channels};
-            var weights = (try NDTensor(T).empty(
-                &weights_shape,
-                true,
-                device,
-            )).set_label("conv2d_weights");
-            var bias = (try NDTensor(T).empty(&bias_shape, true, device)).set_label("conv2d_bias");
+            var weights = try NDTensor(T).empty(&weights_shape, true, device);
+            try weights.set_label("conv2d_weights");
+            var bias = try NDTensor(T).empty(&bias_shape, true, device);
+            try bias.set_label("conv2d_bias");
             weights.acquire();
             bias.acquire();
             winit.he_init(T, weights);
@@ -497,8 +497,8 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         fn backward(tensor: NDTensor(T)) !void {
-            std.debug.assert(tensor.children.?.len == 1);
-            const children = tensor.children orelse return error.NoChildren;
+            const children = tensor.get_children() orelse return error.NoChildren;
+            std.debug.assert(children.len == 1);
             const grad_t = tensor.grad orelse return error.NoGradient;
             const input = children[0];
             for (input.grad.?.data, input.data.data, grad_t.data) |*grad_in, value_in, grad_out| {
@@ -520,6 +520,54 @@ pub fn ReLULayer(comptime T: type) type {
 
         pub fn as_layer(self: *Self) Layer(T) {
             return Layer(T).init(self);
+        }
+    };
+}
+
+pub fn ReLULayerCompare(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        pub fn forward(_: Self, input: *NDTensor(T)) !*NDTensor(T) {
+            const output = input.device.cache.get(NDTensor(T), input.get_shape()) orelse try input.clone();
+
+            for (input.get_data(), output.get_data()) |*x, *y| {
+                y.* = if (x.* > 0) x.* else 0;
+            }
+
+            // these probably shouldn't be on the heap.
+            output.label = null;
+
+            if (input.requires_grad()) {
+                if (output.grad) |g| {
+                    g.fill(0, input.device);
+                } else {
+                    output.grad = try NDArray(T).zeros(output.get_shape(), output.device);
+                }
+                output.requires_gradient = true;
+            }
+
+            if (output.children) |c| {
+                c[0] = input;
+            } else {
+                output.children = try input.device.allocator.dupe(*NDTensor(T), &.{input});
+            }
+
+            output.acquired = false;
+            output._backward = backward;
+            output._backward_ctx = null;
+
+            return output;
+        }
+
+        fn backward(tensor: NDTensor(T)) !void {
+            std.debug.assert(tensor.children.?.len == 1);
+            const children = tensor.children orelse return error.NoChildren;
+            const grad_t = tensor.grad orelse return error.NoGradient;
+            const input = children[0];
+            for (input.grad.?.data, input.data.data, grad_t.data) |*grad_in, value_in, grad_out| {
+                grad_in.* += if (value_in > 0) grad_out else 0;
+            }
         }
     };
 }
@@ -559,7 +607,7 @@ pub fn FlattenLayer(comptime T: type) type {
         }
 
         fn backward(tensor: NDTensor(T)) !void {
-            var input = tensor.children.?[0];
+            var input = tensor.get_children().?[0];
             try input.grad.?._reshape(input.data.shape.shape);
             @memcpy(input.grad.?.data, tensor.grad.?.data);
         }
@@ -761,9 +809,11 @@ fn train_grad_accum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !vo
     defer loss.release();
     // used to avoid reallocating
     const input = try Tensor.empty(&.{ 1, input_size }, true, device);
-    input.set_label("input").fill(0);
+    try input.set_label("input");
+    input.fill(0);
     const target = try Tensor.empty(&.{output_size}, true, device);
-    target.set_label("input").fill(0);
+    try target.set_label("input");
+    target.fill(0);
     input.acquire();
     target.acquire();
     defer input.release();
@@ -783,7 +833,8 @@ fn train_grad_accum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !vo
                 // this is the more intuitive, less performant method but this keeps all prev ones on the graph which may be req in some cases
                 // const input = try Tensor.init(row[0..input_size], &[_]usize{ input_size, output_size }, true, alloc);
                 // const target = try Tensor.init(row[input_size..row.len], null, true, alloc);
-                const output = (try layer.forward(input)).set_label("output");
+                const output = try layer.forward(input);
+                try output.set_label("output");
 
                 const curr_loss = try simple_mse_loss(f32, output, target, device);
                 _ = try loss.data._add(curr_loss.data);
@@ -844,9 +895,13 @@ fn train_batched(comptime T: type, data: [][]T, device: DeviceReference) !void {
 
     // this is a trick to avoid reallocating
     const input = try Tensor.empty(&.{ batch_size, input_size }, true, device);
-    input.set_label("input").fill(0);
+    try input.set_label("input");
+    input.fill(0);
+
     const target = try Tensor.empty(&.{ batch_size, output_size }, true, device);
-    target.set_label("input").fill(0);
+    try target.set_label("input");
+    target.fill(0);
+
     input.acquire();
     target.acquire();
 

@@ -2,6 +2,8 @@ const std = @import("std");
 const HostDevice = @import("host_device.zig").HostDevice;
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
+const RandType = @import("device_common.zig").RandType;
+const ShapeMap = @import("shape_map.zig");
 
 pub fn Blas(comptime Parent: type) type {
     return struct {
@@ -229,6 +231,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         ptrs: DevicePtrs,
         nn: NN(Self) = .{},
         blas: Blas(Self) = .{},
+        cache: *ShapeMap,
         allocator: std.mem.Allocator,
 
         pub fn mem_alloc(self: Self, comptime T: type, n: usize) Error![]T {
@@ -264,6 +267,18 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         pub fn mem_fill(self: Self, comptime T: type, slice: []T, value: T) void {
             return switch (self.ptrs) {
                 inline else => |dev| dev.mem_fill(T, slice, value),
+            };
+        }
+
+        pub fn mem_random(self: Self, comptime T: type, slice: []T, op: RandType, seed: u64) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.mem_random(T, slice, op, seed),
+            };
+        }
+
+        pub fn mem_copy(self: Self, comptime T: type, src: []const T, dst: []T) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.mem_random(T, src, dst),
             };
         }
 

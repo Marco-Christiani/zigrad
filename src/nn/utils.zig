@@ -120,16 +120,16 @@ pub fn print_d2(
         @compileError("Struct must have 'label', 'op', and 'children' fields");
     }
 
-    const node_label = try label_gen.get_or_create_label(node, node.label);
+    const node_label = try label_gen.get_or_create_label(node, node.get_label());
 
     if (visited.contains(node)) {
         return; // Skip if we've already visited this node
     }
     try visited.put(node, {});
 
-    if (node.children) |children| {
+    if (node.get_children()) |children| {
         write_loop: for (children) |elem| {
-            const elem_label = try label_gen.get_or_create_label(elem, elem.label);
+            const elem_label = try label_gen.get_or_create_label(elem, elem.get_label());
             try writer.print("{s}{s}{s}", .{ node_label, opts.arrow_symbol, elem_label });
             if (node.op) |op| {
                 const symbol = switch (op) {

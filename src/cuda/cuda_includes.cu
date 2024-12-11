@@ -11,4 +11,5 @@
 #include "/usr/local/cuda/include/thrust/iterator/zip_iterator.h"
 #include "/usr/local/cuda/include/thrust/iterator/counting_iterator.h"
 #include "/usr/local/cuda/include/thrust/execution_policy.h"
+#include "/usr/local/cuda/include/thrust/random.h"
 #include "/usr/local/cuda/include/cudnn.h"

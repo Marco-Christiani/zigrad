@@ -14,6 +14,7 @@ EXTERN_C void memcpyDtoH(void* hptr, void const* dptr, len_t N, void*);
 EXTERN_C void memcpyDtoD(void* hptr, void const* dptr, len_t N, void*);
 EXTERN_C void memFill(dtype id, void* data, len_t n, const void* value, void* stream);
 EXTERN_C void memSequence(dtype id, void* data, len_t n, const void* init, const void* step, void* stream);
+EXTERN_C void memRandom(dtype id, void* x, len_t n, randtype op, unsigned seed, void* stream);
 EXTERN_C void memFree(void* dptr, void*);
 EXTERN_C void deviceSynchronize();
 EXTERN_C void streamSynchronize(void*);
