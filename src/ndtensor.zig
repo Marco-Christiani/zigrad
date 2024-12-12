@@ -1,3 +1,4 @@
+const tracy = @import("tracy");
 // TODO: implement view(), permute(), view is sort of an ever-changing WIP (these are ndarray tasks btw).
 // TODO: migrate primitive ops to newer _backward/_backward_ctx feature.
 const std = @import("std");
@@ -82,6 +83,8 @@ pub fn NDTensor(comptime T: type) type {
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
         pub fn empty(shape: []const usize, requires_grad: bool, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/empty" });
+            defer zone.deinit();
             const self = try allocator.create(Self);
             self.* = Self{
                 .data = try dtype.empty(shape, allocator),
@@ -93,6 +96,8 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn cast(self: *Self, K: type) !*NDTensor(K) {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/cast" });
+            defer zone.deinit();
             _ = self;
             @compileError("Not implemented");
         }
@@ -233,6 +238,8 @@ pub fn NDTensor(comptime T: type) type {
         ///   - The choice to have an allocator provided is important, intended to be used for backward
         ///   - If the tensor backing `dtype` changes its allocator ownership contract, then this needs to be changed
         pub fn clone(self: Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/clone" });
+            defer zone.deinit();
             const result = try allocator.create(Self);
             errdefer allocator.destroy(result);
             result.* = Self{
@@ -261,6 +268,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// In-place, no backward.
         pub fn _reshape(self: *Self, shape: []const usize) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/_reshape" });
+            defer zone.deinit();
             try self.data._reshape(shape);
             if (self.grad) |g| try g._reshape(shape);
         }
@@ -293,6 +302,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Copies. COM.
         pub fn transpose(self: *Self) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/transpose" });
+            defer zone.deinit();
             const transpose_bw = struct {
                 fn transpose_bw_impl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -409,6 +420,8 @@ pub fn NDTensor(comptime T: type) type {
         };
 
         pub fn clip_grad_norm_delta(self: Self, opts: ClipOptions) void {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/clip_grad_norm_delta" });
+            defer zone.deinit();
             self.grad.?.clip_norm(opts.max_norm, opts.delta);
         }
 
@@ -419,6 +432,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise addition. COM.
         pub fn add(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/add" });
+            defer zone.deinit();
             const addBw = struct {
                 fn addBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -446,6 +461,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise subtraction. COM.
         pub fn sub(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/sub" });
+            defer zone.deinit();
             const subBw = struct {
                 fn subBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -473,6 +490,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise multiplication. COM.
         pub fn mul(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/mul" });
+            defer zone.deinit();
             const mulBw = struct {
                 fn mulBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -510,6 +529,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise division. COM.
         pub fn div(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/div" });
+            defer zone.deinit();
             const divBw = struct {
                 fn divBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -550,6 +571,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/max" });
+            defer zone.deinit();
             const max_val = try self.data.max(allocator);
             const maxBw = struct {
                 fn maxBwImpl(_self: Self, _: std.mem.Allocator) !void {
@@ -575,6 +598,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Element-wise exponential. COM.
         pub fn exp(self: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/exp" });
+            defer zone.deinit();
             const expBw = struct {
                 fn expBwImpl(_self: Self, _: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -599,6 +624,8 @@ pub fn NDTensor(comptime T: type) type {
         /// TODO: this should proxy to bmmAcc
         /// Matrix multiplication. COM.
         pub fn bmm(self: *Self, other: *Self, allocator: std.mem.Allocator, opts: MmOptions) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/bmm" });
+            defer zone.deinit();
             const ctx = try allocator.create(MmAccOptions);
             ctx.* = MmAccOptions{ .trans_a = opts.trans_a, .trans_b = opts.trans_b, .alpha = 1, .beta = 0 };
             const result = try createDependent(.{
@@ -623,6 +650,8 @@ pub fn NDTensor(comptime T: type) type {
             allocator: std.mem.Allocator,
             opts: MmAccOptions,
         ) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/bmmAcc" });
+            defer zone.deinit();
             _ = try self.data._bmmAcc(
                 other.data,
                 output.data,
@@ -703,6 +732,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Dot product of two tensors. COM.
         pub fn dot(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/dot" });
+            defer zone.deinit();
             const dotBw = struct {
                 fn dotBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -733,6 +764,8 @@ pub fn NDTensor(comptime T: type) type {
         ///   - Until I see more instances where this is required it will be written manually
         ///   - Edit: Think I got mixed up, this can prob be undone, but working now.
         pub fn matvec(self: *Self, other: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/matvec" });
+            defer zone.deinit();
             const matvecBw = struct {
                 fn matvecBwImpl(_self: Self, bw_allocator: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -764,6 +797,8 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Sum of all elements in the tensor. COM.
         pub fn sum(self: *Self, allocator: std.mem.Allocator) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/sum" });
+            defer zone.deinit();
             const sumBw = struct {
                 fn sumBwImpl(_self: NDTensor(T), _: std.mem.Allocator) !void {
                     const children = _self.children orelse return error.NoChildren;
@@ -782,6 +817,8 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn maxOverDim(self: *Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/maxOverDim" });
+            defer zone.deinit();
             const maxBackward = struct {
                 // NOTE: See gather() comments, same apply here
                 fn bwImpl(_self: Self, _: std.mem.Allocator) !void {
@@ -809,6 +846,8 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn gather(self: *Self, allocator: std.mem.Allocator, opts: GatherOptions) !*Self {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/gather" });
+            defer zone.deinit();
             const gatherBackward = struct {
                 fn bwImpl(bw_tensor: NDTensor(T), _: std.mem.Allocator) !void {
                     const bw_children = bw_tensor.children orelse return error.NoChildren;
@@ -847,6 +886,8 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn backward(self: Self, allocator: std.mem.Allocator) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "ndtensor/backward" });
+            defer zone.deinit();
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
             if (!self.requires_grad) return;

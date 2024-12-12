@@ -1,3 +1,4 @@
+const tracy = @import("tracy");
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 
@@ -150,6 +151,8 @@ pub fn LinearLayer(comptime T: type) type {
         // in the backward for broadcasted bias addition thats not possible if its not tracked in the op graph so theres a
         // slightly more optimized variant that explicitly handles the broadcast and unbroadcast.
         pub fn forwardAg(self: *const Self, input: *const NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/linear_ag" });
+            defer zone.deinit();
             // Labels are optional, useful if you want to render a diagram of the computational graph.
             // (W@X^T + b)^T == X@W^T + b
             return (try (try input.bmm(
@@ -163,6 +166,8 @@ pub fn LinearLayer(comptime T: type) type {
         // Zigrad figuring out the broadcast and unbroadcasting logic on the fly. This should highlight how little
         // overhead Zigrad's abstractions are
         pub fn forwardManual(self: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/linear_manual" });
+            defer zone.deinit();
             const batch_size = if (input.data.shape.len() > 1) try input.data.shape.get(0) else 1;
             const out_features = self.weights.data.shape.shape[0];
 
@@ -196,6 +201,8 @@ pub fn LinearLayer(comptime T: type) type {
         /// A custom backward impl that, technically, isnt optimized in any way aside from avoiding having
         /// to infer shape broadcasting logic which is shockingly fast in Zigrad for some reason.
         fn backwardManual(tensor: NDTensor(T), allocator: std.mem.Allocator) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/linear_manual_bw" });
+            defer zone.deinit();
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             const grad_output = tensor.grad orelse return error.NoGradient;
             const input = tensor.children.?[0];
@@ -373,6 +380,8 @@ pub fn Conv2DLayer(comptime T: type) type {
         }
 
         pub fn backward(tensor: NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/backward" });
+            defer zone.deinit();
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             std.debug.assert(tensor.children.?.len == 1);
             const input = tensor.children.?[0];
@@ -482,14 +491,19 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         pub fn forward(_: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/relu" });
+            defer zone.deinit();
             const output = try input.data.copy(allocator);
+
+            const relu_zone = tracy.initZone(@src(), .{ .name = "layer/relu_loop" });
             for (output.data) |*e| {
                 e.* = if (e.* > 0) e.* else 0;
             }
+            relu_zone.deinit();
 
             return try NDTensor(T).createDependent(.{
                 .data = output,
-                .children = &.{ input },
+                .children = &.{input},
                 .label = "relu_out",
                 .requires_grad = input.requiresGrad(),
                 .allocator = allocator,
@@ -498,6 +512,8 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         fn backward(tensor: NDTensor(T), _: std.mem.Allocator) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/relu_bw" });
+            defer zone.deinit();
             std.debug.assert(tensor.children.?.len == 1);
             const children = tensor.children orelse return error.NoChildren;
             const grad_t = tensor.grad orelse return error.NoGradient;
@@ -537,6 +553,8 @@ pub fn FlattenLayer(comptime T: type) type {
         }
 
         pub fn forward(_: *Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/flatten" });
+            defer zone.deinit();
             const batch_dim = input.data.shape.shape[0];
             const other_dims = input.data.shape.shape[1..];
             const flattened_dim = prod(other_dims);
@@ -545,7 +563,7 @@ pub fn FlattenLayer(comptime T: type) type {
             const result = try NDTensor(T).createDependent(.{
                 .data = input.data, // Reuse the same data
                 // .op = .FLATTEN,
-                .children = &.{ input },
+                .children = &.{input},
                 .label = "flattened",
                 .requires_grad = input.requires_grad,
                 .allocator = fwd_allocator,
@@ -560,6 +578,8 @@ pub fn FlattenLayer(comptime T: type) type {
         }
 
         fn backward(tensor: NDTensor(T), _: std.mem.Allocator) !void {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/flatten_bw" });
+            defer zone.deinit();
             var input = tensor.children.?[0];
             try input.grad.?._reshape(input.data.shape.shape);
             @memcpy(input.grad.?.data, tensor.grad.?.data);
@@ -658,7 +678,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
 
             return try NDTensor(T).createDependent(.{
                 .data = output,
-                .children = &.{ input },
+                .children = &.{input},
                 .label = "maxpool2d_out",
                 .requires_grad = true,
                 .allocator = fwd_allocator,
@@ -668,6 +688,8 @@ pub fn MaxPool2DLayer(comptime T: type) type {
         }
 
         pub fn backward(tensor: NDTensor(T), allocator: std.mem.Allocator) anyerror!void {
+            const zone = tracy.initZone(@src(), .{ .name = "layer/backward" });
+            defer zone.deinit();
             const indices = @as(*NDArray(usize), @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext)));
             std.debug.assert(tensor.children.?.len == 1);
             var input = tensor.children.?[0];

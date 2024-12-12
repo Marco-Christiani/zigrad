@@ -20,10 +20,12 @@ export ZG_DATA_DIR := env("ZG_DATA_DIR", "data")
 benchmark +verbose="":
   @python examples/mnist/mnist_data.py
   @echo "Running pytorch mnist"
-  python src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple \
+  # python src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple \
+  #   {{ if verbose != "" { "| tee" } else { ">" } }} /tmp/zg_mnist_torch_log.txt
+  python src/nn/tests/test_mnist_tf.py -t --batch_size=64 --num_epochs=3 --model_variant=simple --device=cpu \
     {{ if verbose != "" { "| tee" } else { ">" } }} /tmp/zg_mnist_torch_log.txt
   @echo "Compiling zigrad mnist"
-  @just build -Doptimize=ReleaseFast -Dtracy_enable=false
+  @just build -Doptimize=ReleaseFast -Dtracy_enable=true
   @echo "Running zigrad mnist"
   ./zig-out/bin/zigrad 2>\
     {{ if verbose != "" { "&1 | tee" } else { "" } }} /tmp/zg_mnist_log.txt

@@ -1,16 +1,17 @@
+import os
 import argparse
 import platform
 import time
-from enum import Enum, auto
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-physical_devices = tf.config.list_physical_devices("GPU")
-if physical_devices:
-    tf.config.experimental.set_visible_devices(physical_devices, "GPU")
-    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+# physical_devices = tf.config.list_physical_devices("GPU")
+# if physical_devices:
+#     tf.config.experimental.set_visible_devices(physical_devices, "GPU")
+#     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 # policy = mixed_precision.Policy("mixed_float16")
 # mixed_precision.set_global_policy(policy)
@@ -91,7 +92,9 @@ def main(
     model_variant: str = "simple",
     autograd: bool = False,
 ):
-    dataloader = load_mnist("/tmp/zigrad_test_mnist_train_full.csv", batch_size)
+    data_dir = Path(os.getenv("ZG_DATA_DIR", "data"))
+    csv_path = data_dir / "mnist_train_full.csv"
+    dataloader = load_mnist(csv_path, batch_size)
     print(f"train={train}")
     print(f"compile={compile}")
     print(f"batch_size={batch_size}")

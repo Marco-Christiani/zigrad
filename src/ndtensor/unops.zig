@@ -1,3 +1,4 @@
+const tracy = @import("tracy");
 const std = @import("std");
 
 const ndtensor = @import("../ndtensor.zig");
@@ -6,6 +7,8 @@ const Op = ndtensor.Op;
 
 /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
 pub fn max(T: type, self: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    const zone = tracy.initZone(@src(), .{ .name = "unops/max" });
+    defer zone.deinit();
     const max_val = try self.data.max(allocator);
     return try NDTensor(T).createDependent(.{
         .data = max_val,
@@ -31,6 +34,8 @@ fn _max_backward(T: type, self: NDTensor(T), _: std.mem.Allocator) !void {
 
 /// Element-wise exponential. COM.
 pub fn exp(T: type, self: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    const zone = tracy.initZone(@src(), .{ .name = "unops/exp" });
+    defer zone.deinit();
     return try NDTensor(T).createDependent(.{
         .data = try self.data.exp(allocator),
         .op = .EXP,
@@ -52,6 +57,8 @@ fn _exp_backward(T: type, self: NDTensor(T), _: std.mem.Allocator) !void {
 
 /// Sum of all elements in the tensor. COM.
 pub fn sum(T: type, self: *const NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
+    const zone = tracy.initZone(@src(), .{ .name = "unops/sum" });
+    defer zone.deinit();
     return try NDTensor(T).createDependent(.{
         .data = try self.data.sum(allocator),
         .op = .SUM,
@@ -68,3 +75,4 @@ fn _sum_backward(T: type, self: NDTensor(T), _: std.mem.Allocator) !void {
         _ = try child.grad.?._add(self.grad.?);
     }
 }
+
