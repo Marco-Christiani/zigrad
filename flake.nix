@@ -29,7 +29,7 @@
       in
       {
         devShells.default = pkgs.mkShell{
-          buildInputs = (defaultShell.${system} or [zigpkg]) ++ [build pkgs.vhs];
+          buildInputs = (defaultShell.${system} or [zigpkg]) ++ [build];
       };
     }
   );

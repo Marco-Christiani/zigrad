@@ -1,4 +1,3 @@
-const tracy = @import("tracy");
 const std = @import("std");
 const utils = @import("utils.zig");
 

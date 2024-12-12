@@ -22,11 +22,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install OpenBLAS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libopenblas-dev
-
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
@@ -46,6 +41,7 @@ jobs:
           git config --global user.name "$GIT_AUTHOR_NAME"
           git config --global user.email "$GIT_AUTHOR_EMAIL"
           git checkout gh-pages
+          cp ./zig-out/docs/sources.tar sources.tar
           git add sources.tar
           git commit -m "Update source files tar"
           git push origin gh-pages

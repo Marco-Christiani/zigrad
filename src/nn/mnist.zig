@@ -1,4 +1,3 @@
-const tracy = @import("tracy");
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 
@@ -273,7 +272,6 @@ pub fn runMnist(train_path: []const u8, test_path: []const u8) !void {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
-            tracy.frameMarkNamed("train-batch");
             step_timer.reset();
             const loss = try trainer.trainStep(
                 image.setLabel("image_batch"),
@@ -337,7 +335,6 @@ fn evalMnist(arena: *std.heap.ArenaAllocator, model: MnistModel, dataset: MnistD
     var correct: f32 = 0;
     var timer = try std.time.Timer.start();
     for (dataset.images, dataset.labels) |image, label| {
-        tracy.frameMarkNamed("eval-batch");
         timer.reset();
         const output = try model.model.forward(image, arena.allocator());
         const batch_n = try output.data.shape.get(0);

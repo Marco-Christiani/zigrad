@@ -1,4 +1,3 @@
-const tracy = @import("tracy");
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 
@@ -55,22 +54,12 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             fwd_allocator: std.mem.Allocator,
             bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
-            const zone = tracy.initZone(@src(), .{ .name = "trainer/train_step" });
-            defer zone.deinit();
-            const fwd_zone = tracy.initZone(@src(), .{ .name = "trainer/fwd" });
             const output = try self.model.forward(input, fwd_allocator);
-            fwd_zone.deinit();
-            const loss_zone = tracy.initZone(@src(), .{ .name = "trainer/loss" });
             const loss = try lossf(T, output, target, fwd_allocator);
-            loss_zone.deinit();
             self.model.zeroGrad();
             loss.grad.?.fill(1.0);
-            const bw_zone = tracy.initZone(@src(), .{ .name = "trainer/bw" });
             try self.graph_manager.backward(loss, bwd_allocator);
-            bw_zone.deinit();
-            const step_zone = tracy.initZone(@src(), .{ .name = "trainer/step" });
             self.optimizer.step(self.params);
-            step_zone.deinit();
             return loss;
         }
 

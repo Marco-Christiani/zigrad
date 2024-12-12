@@ -1,4 +1,3 @@
-const tracy = @import("tracy");
 const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/Shape.zig");
@@ -71,8 +70,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn cast(self: *Self, K: type, allocator: std.mem.Allocator) !*NDArray(K) {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/cast" });
-            defer zone.deinit();
             _ = allocator;
             _ = self;
             @compileError("Not implemented");
@@ -97,8 +94,6 @@ pub fn NDArray(comptime T: type) type {
 
         // TODO: make a copying reshape like tensor does
         pub fn _reshape(self: *const Self, shape: []const usize) !void {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_reshape" });
-            defer zone.deinit();
             try self.shape._reshape(shape);
         }
 
@@ -261,8 +256,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/add" });
-            defer zone.deinit();
             // TODO: standardize this shape creation logic elsewhere (its a micro-optimization)
             const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else try self.shape.copy(allocator);
             const values = try allocator.alloc(T, bshape.size());
@@ -279,8 +272,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise addition
         pub fn _add(self: *const Self, other: *const Self) !*const Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_add" });
-            defer zone.deinit();
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_add() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
@@ -291,15 +282,11 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place scalar add
         pub fn _add_scalar(self: Self, scalar: T) void {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_add_scalar" });
-            defer zone.deinit();
             for (self.data) |*val| val.* += scalar;
         }
 
         /// Element-wise subtraction
         pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/sub" });
-            defer zone.deinit();
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] - other.data[i % other.data.len];
@@ -313,8 +300,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise subtraction
         pub fn _sub(self: *const Self, other: *const Self) !*const Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_sub" });
-            defer zone.deinit();
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_sub() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
@@ -325,8 +310,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise multiplication
         pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/mul" });
-            defer zone.deinit();
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] * other.data[i % other.data.len];
@@ -340,8 +323,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise multiplication
         pub fn _mul(self: *const Self, other: *const Self) !*const Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_mul" });
-            defer zone.deinit();
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_mul() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
@@ -352,8 +333,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise division
         pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/div" });
-            defer zone.deinit();
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try allocator.alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] / other.data[i % other.data.len];
@@ -367,8 +346,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise division
         pub fn _div(self: *const Self, other: *const Self) !*const Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_div" });
-            defer zone.deinit();
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_div() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
@@ -379,8 +356,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise sum. COM.
         pub fn sum(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/sum" });
-            defer zone.deinit();
             return try Self.init(&[_]T{self.sumNoAlloc()}, &.{1}, allocator);
         }
 
@@ -393,8 +368,6 @@ pub fn NDArray(comptime T: type) type {
 
         /// COM.
         pub fn max(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/max" });
-            defer zone.deinit();
             if (self.data.len == 0) return error.EmptyArray;
             return Self.init(&[_]T{std.mem.max(T, self.data)}, null, allocator);
         }
@@ -402,8 +375,6 @@ pub fn NDArray(comptime T: type) type {
         // TODO: naive
         /// Copies. COM.
         pub fn exp(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/exp" });
-            defer zone.deinit();
             const result = try Self.empty(self.shape.shape, allocator);
             for (self.data, 0..) |val, i| {
                 result.data[i] = @exp(val);
@@ -413,23 +384,17 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place e^x
         pub fn _exp(self: *const Self) void {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_exp" });
-            defer zone.deinit();
             for (self.data) |*val| val.* = @exp(val.*);
         }
 
         /// In-place scaling
         pub fn _scale(self: *const Self, scalar: T) void {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_scale" });
-            defer zone.deinit();
             blas.blas_scale(T, scalar, self.data);
         }
 
         /// (...)-Mat-Mat: ND x KD (N,K>2) and broadcastable
         /// Simple dim rules: (M, K) x (K, N) = (M, N)
         pub fn bmm(self: *const Self, other: *const Self, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/bmm" });
-            defer zone.deinit();
             return try self._bmmAcc(other, null, 1.0, 0.0, trans_a, trans_b, allocator);
         }
 
@@ -469,8 +434,6 @@ pub fn NDArray(comptime T: type) type {
         ///   - Will probably have the same edge case issue
         ///
         pub fn _bmmAcc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/_bmmAcc" });
-            defer zone.deinit();
             if (self.shape.len() < 2) {
                 try self._reshape(&[_]usize{ 1, try self.shape.get(0) });
             }
@@ -554,8 +517,6 @@ pub fn NDArray(comptime T: type) type {
         /// If any dimension of self is larger than the corresponding dimension in other,
         /// an error.InvalidExpansion is returned.
         pub fn expandAs(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/expandAs" });
-            defer zone.deinit();
             // if shapes are identical, just return a copy.
             if (self.shape.eq(other.shape.*, .{ .strict = true })) {
                 return self.copy(allocator);
@@ -693,8 +654,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn dot(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/dot" });
-            defer zone.deinit();
             if (self.shape.len() > 1 or other.shape.len() > 1) std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
             if (self.data.len != other.data.len) std.debug.panic("Incompatible lengths for dot product: {d} and {d}\n", .{ self.data.len, other.data.len });
 
@@ -703,8 +662,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn outer(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/outer" });
-            defer zone.deinit();
             if (try self.shape.realdims() != 1 or try other.shape.realdims() != 1) {
                 std.debug.panic(
                     "Outer product only valid for 1d vectors even if there are dummy outer dimensions. Got {d} {d}\n",
@@ -732,8 +689,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn matvec(self: *const Self, other: *const Self, trans_a: bool, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/matvec" });
-            defer zone.deinit();
             // TODO: shape checks for matvec
             const M = if (trans_a) try self.shape.get(1) else try self.shape.get(0);
             const N = if (trans_a) try self.shape.get(0) else try self.shape.get(1);
@@ -758,8 +713,6 @@ pub fn NDArray(comptime T: type) type {
         };
 
         pub fn sum_along(self: *Self, allocator: std.mem.Allocator, opts: SumOpts) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/sum_along" });
-            defer zone.deinit();
             const input_shape = self.shape.shape;
             const input_dims = input_shape.len;
             if (opts.dim >= input_dims) return error.ShapeOutOfBounds;
@@ -812,8 +765,6 @@ pub fn NDArray(comptime T: type) type {
         };
 
         pub fn maxOverDim(self: *const Self, allocator: std.mem.Allocator, opts: MaxOverDimOptions) !MaxOverDimResult {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/maxOverDim" });
-            defer zone.deinit();
             const dim = opts.dim;
             const keep_dims = opts.keep_dims;
             const input_shape = self.shape.shape;
@@ -867,8 +818,6 @@ pub fn NDArray(comptime T: type) type {
         };
 
         pub fn gather(self: *const Self, allocator: std.mem.Allocator, opts: GatherOptions) !GatherResult {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/gather" });
-            defer zone.deinit();
             const indices = opts.indices;
             const dim = opts.dim;
             std.debug.assert(self.shape.len() == indices.shape.len());
@@ -901,22 +850,16 @@ pub fn NDArray(comptime T: type) type {
 
         /// COM
         pub fn take(self: *Self, offsets: *const NDArray(usize), allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/take" });
-            defer zone.deinit();
             const result = try Self.empty(&.{offsets.data.len}, allocator);
             for (result.data, offsets) |*r, o| r.* = self.data[o];
             return result;
         }
 
         pub fn l2_norm(self: *const Self) T {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/l2_norm" });
-            defer zone.deinit();
             return blas.blas_nrm2(T, self.data, 1);
         }
 
         pub fn clip_norm(self: *const Self, max_norm: T, delta: T) void {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/clip_norm" });
-            defer zone.deinit();
             const norm = self.l2_norm();
             if (norm > max_norm) {
                 const scale = max_norm / (norm + delta);
@@ -929,8 +872,6 @@ pub fn NDArray(comptime T: type) type {
         /// Unbroadcast to target shape
         /// TODO: think ab this later but could pointer swap (may give compiler more freedom to optimize)
         pub fn unbroadcast(self: *Self, target_shape: *Shape, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/unbroadcast" });
-            defer zone.deinit();
             var result: *Self = self;
 
             while (result.shape.len() > target_shape.len()) {
@@ -958,8 +899,6 @@ pub fn NDArray(comptime T: type) type {
 
         // TODO: copies. Naive, optimize. Support >2d
         pub fn transpose(self: *Self, allocator: std.mem.Allocator) !*Self {
-            const zone = tracy.initZone(@src(), .{ .name = "ndarray/transpose" });
-            defer zone.deinit();
             std.debug.assert(self.shape.len() < 3);
             if (self.shape.len() == 1) return self;
             const new_shape = [_]usize{ self.shape.shape[1], self.shape.shape[0] };

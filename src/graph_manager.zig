@@ -1,4 +1,3 @@
-const tracy = @import("tracy");
 const std = @import("std");
 const zg = @import("zigrad.zig");
 const settings = zg.settings;
@@ -49,8 +48,6 @@ pub fn GraphManager(comptime T: type) type {
 
         // Must init grad on root node before backprop
         pub fn backward(self: *Self, node: *T, alloc: std.mem.Allocator) !void {
-            const zone = tracy.initZone(@src(), .{ .name = "graph_manager/backward" });
-            defer zone.deinit();
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
             self.topo(node);
@@ -70,4 +67,3 @@ pub fn GraphManager(comptime T: type) type {
         }
     };
 }
-

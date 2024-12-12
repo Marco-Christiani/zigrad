@@ -34,20 +34,18 @@ Sleep 0.5
 Enter
 
 # build cache
-Sleep 0.5
 Hide
 Type "zig build -Doptimize=ReleaseFast"
 Enter
-Sleep 15
+Sleep 11
 Type "clear"
 Enter
-Sleep 0.5
 Show
 
 Type "make"
 Sleep 0.8
 Enter
-Sleep 7
+Sleep 6
 
 # Type "clear"
 # Sleep 0.5
