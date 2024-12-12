@@ -18,30 +18,19 @@
         };
       };
       zigpkg = zig.packages.${system}."0.13.0";
-
+      build = pkgs.writeShellScriptBin "build" ''
+          zig build -Doptimize=ReleaseFast
+      '';
       defaultShell = {
-        "aarch64-darwin" = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            zigpkg
-          ];
-        };
-        "x86_64-linux" = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            zigpkg
-            mkl
-            openblas
-          ];
-        };
-        "aarch64-linux" = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            zigpkg
-            openblas
-          ];
-        };
+        "aarch64-darwin" = with pkgs; [ zigpkg ];
+        "x86_64-linux" = with pkgs; [ zigpkg mkl openblas ];
+        "aarch64-linux" = with pkgs; [ zigpkg openblas ];
       };
       in
-    {
-        devShells.default = defaultShell.${system};
+      {
+        devShells.default = pkgs.mkShell{
+          buildInputs = (defaultShell.${system} or [zigpkg]) ++ [build];
+      };
     }
   );
 }
