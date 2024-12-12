@@ -22,8 +22,9 @@
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             zigpkg
-            just
             mkl
+            # yes, we use mkl but this needs to be installed to provide the cblas wrapper
+            openblas
           ];
         };
     }
