@@ -116,6 +116,24 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
+        pub fn from_cache(dims: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+            if (device.cache.get(Self, dims)) |self| {
+                self.requires_gradient = requires_gradient;
+                return self;
+            }
+            return Self.empty(dims, requires_gradient, device);
+        }
+
+        pub fn to_cache(self: *Self) void {
+            std.debug.assert(!self.acquired);
+            std.debug.assert(self._backward_ctx == null);
+            self._backward = null;
+            self._backward_ctx = null;
+            self.children.clearRetainingCapacity();
+            self.label.clearRetainingCapacity();
+            self.device.cache.put(self, self.get_shape());
+        }
+
         pub fn get_shape(self: Self) []const usize {
             return self.data.shape.shape;
         }
