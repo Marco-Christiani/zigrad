@@ -532,15 +532,13 @@ pub fn NDTensor(comptime T: type) type {
             self.print_to_writer(std.io.getStdErr().writer()) catch @panic("Failed to print tensor");
         }
 
-        // fn ...(
-
         pub fn print_to_writer(self: Self, writer: anytype) !void {
             try writer.print("NDTensor<{},{?s}>", .{ T, if (self.op) |o| @tagName(o) else null });
             try writer.writeAll("{data: ");
-            try self.data.print_to_writer(writer);
+            try self.data.print_to_writer(writer, self.device);
             if (self.grad) |g| {
                 try writer.writeAll(" grad: ");
-                try g.print_to_writer(writer);
+                try g.print_to_writer(writer, self.device);
             }
             try writer.print(", requires_gradient={}", .{self.requires_gradient});
             if (self.get_label()) |l| {
@@ -571,8 +569,8 @@ pub fn NDTensor(comptime T: type) type {
                     const b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, _self.device);
                     defer a_grad.deinit(_self.device);
                     defer b_grad.deinit(_self.device);
-                    _ = try a.grad.?._add(a_grad);
-                    _ = try b.grad.?._add(b_grad);
+                    _ = try a.grad.?._add(a_grad, a.device);
+                    _ = try b.grad.?._add(b_grad, b.device);
                 }
             }.add_bw_impl;
             return try create_dependent(.{
@@ -597,11 +595,12 @@ pub fn NDTensor(comptime T: type) type {
 
                     const a_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(a.grad.?.shape, _self.device);
                     const b_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(b.grad.?.shape, _self.device);
+
                     defer a_grad.deinit(_self.device);
                     defer b_grad.deinit(_self.device);
 
-                    _ = try a.grad.?._add(a_grad);
-                    _ = try b.grad.?._sub(b_grad);
+                    _ = try a.grad.?._add(a_grad, a.device);
+                    _ = try b.grad.?._sub(b_grad, b.device);
                 }
             }.sub_bw_impl;
             return try create_dependent(.{
@@ -639,8 +638,8 @@ pub fn NDTensor(comptime T: type) type {
                     defer a_grad.deinit(_self.device);
                     defer b_grad.deinit(_self.device);
 
-                    _ = try a.grad.?._add(a_grad);
-                    _ = try b.grad.?._add(b_grad);
+                    _ = try a.grad.?._add(a_grad, a.device);
+                    _ = try b.grad.?._add(b_grad, b.device);
                 }
             }.mul_bw_impl;
             return try create_dependent(.{
@@ -683,8 +682,8 @@ pub fn NDTensor(comptime T: type) type {
                     const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
                     defer b_grad.deinit(_self.device);
 
-                    _ = try a.grad.?._add(a_grad);
-                    _ = try b.grad.?._sub(b_grad);
+                    _ = try a.grad.?._add(a_grad, a.device);
+                    _ = try b.grad.?._sub(b_grad, b.device);
                 }
             }.div_bw_impl;
             return try create_dependent(.{
@@ -897,12 +896,12 @@ pub fn NDTensor(comptime T: type) type {
                     //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
                     const grad_A = try _self.grad.?.outer(x, _self.device);
                     defer grad_A.deinit(_self.device);
-                    _ = try children[0].grad.?._add(grad_A);
+                    _ = try children[0].grad.?._add(grad_A, _self.device);
 
                     //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
                     const grad_x = try A.matvec(_self.grad.?, true, _self.device);
                     defer grad_x.deinit(_self.device);
-                    _ = try children[1].grad.?._add(grad_x);
+                    _ = try children[1].grad.?._add(grad_x, _self.device);
                 }
             }.matvec_bw_impl;
 
@@ -926,7 +925,7 @@ pub fn NDTensor(comptime T: type) type {
                 fn sum_bw_impl(_self: NDTensor(T)) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
-                    _ = try child.grad.?._add(_self.grad.?);
+                    _ = try child.grad.?._add(_self.grad.?, child.device);
                 }
             }.sum_bw_impl;
             return try create_dependent(.{
@@ -949,7 +948,7 @@ pub fn NDTensor(comptime T: type) type {
                     const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
                     const offsets: []usize = std.mem.span(raw_offsets);
                     for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
-                    _self.device.mem_free(offsets);
+                    _self.device.allocator.free(offsets);
                 }
             }.bw_impl;
 
