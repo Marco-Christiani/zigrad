@@ -3,28 +3,24 @@
 
 #include "decls.h"
 
-enum UPDATE_OP {
-  UPD_SET, UPD_ADD, UPD_SUB
-};
-
-EXTERN_C void initDevice(unsigned);
-EXTERN_C void* memAlloc(len_t N, void*);
-EXTERN_C void memcpyHtoD(void* dptr, void const* hptr, len_t N, void*);
-EXTERN_C void memcpyDtoH(void* hptr, void const* dptr, len_t N, void*);
-EXTERN_C void memcpyDtoD(void* hptr, void const* dptr, len_t N, void*);
-EXTERN_C void memFill(dtype id, void* data, len_t n, const void* value, void* stream);
-EXTERN_C void memSequence(dtype id, void* data, len_t n, const void* init, const void* step, void* stream);
-EXTERN_C void memRandom(dtype id, void* x, len_t n, randtype op, unsigned seed, void* stream);
-EXTERN_C void memFree(void* dptr, void*);
-EXTERN_C void deviceSynchronize();
-EXTERN_C void streamSynchronize(void*);
-EXTERN_C void* initStream();
-EXTERN_C void deinitStream(void*);
-EXTERN_C void checkLastError();
-EXTERN_C len_t deviceTotalMemory(unsigned);
-EXTERN_C void* initCublasHandle(void* stream);
-EXTERN_C void deinitCublasHandle(void* handle);
-EXTERN_C void* initCudnnHandle(void* stream);
-EXTERN_C void deinitCudnnHandle(void* handle);
+EXTERN_C void init_device(unsigned);
+EXTERN_C void* mem_alloc(len_t N, void*);
+EXTERN_C void memcpy_HtoD(void* dptr, void const* hptr, len_t N, void*);
+EXTERN_C void memcpy_DtoH(void* hptr, void const* dptr, len_t N, void*);
+EXTERN_C void memcpy_DtoD(void* hptr, void const* dptr, len_t N, void*);
+EXTERN_C void mem_fill(dtype id, void* data, len_t n, const void* value, void* stream);
+EXTERN_C void mem_sequence(dtype id, void* data, len_t n, const void* init, const void* step, void* stream);
+EXTERN_C void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, void* stream);
+EXTERN_C void mem_free(void* dptr, void*);
+EXTERN_C void device_synchronize();
+EXTERN_C void stream_synchronize(void*);
+EXTERN_C void* init_stream();
+EXTERN_C void deinit_stream(void*);
+EXTERN_C void check_last_error();
+EXTERN_C len_t device_total_memory(unsigned);
+EXTERN_C void* init_cublas_handle(void* stream);
+EXTERN_C void deinit_cublas_handle(void* handle);
+EXTERN_C void* init_cudnn_handle(void* stream);
+EXTERN_C void deinit_cudnn_handle(void* handle);
 
 #endif
