@@ -10,7 +10,7 @@ if __name__ == "__main__":
     cuda_path = args.cuda_path
 
     here = Path(__file__).parent.resolve()
-    root = here / Path("src/cuda/cuda_includes.cu")
+    root = here.parent / Path("src/cuda/cuda_includes.cu")
 
     roots = {
         "HOST": "host_device.zig",
