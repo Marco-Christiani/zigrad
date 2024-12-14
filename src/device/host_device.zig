@@ -42,6 +42,67 @@ pub const Blas = struct {
         }
     }
 
+    pub fn dot(
+        _: Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        switch (T) {
+            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+        }
+    }
+
+    pub fn add(
+        _: Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        for (0..x.len) |i| z[i] = x[i] + y[i];
+    }
+
+    pub fn sub(
+        _: Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        for (0..x.len) |i| z[i] = x[i] - y[i];
+    }
+
+    pub fn dot(
+        _: Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        switch (T) {
+            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+        }
+    }
+
+    pub fn dot(
+        _: Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        switch (T) {
+            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
+            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+        }
+    }
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
     /// a * (M, N) x (N,) + b * (N,) = (M,)
     /// Y = aAX + bY
