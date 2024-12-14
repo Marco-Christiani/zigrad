@@ -218,7 +218,7 @@ pub fn LinearLayer(comptime T: type) type {
             );
             // similar performance to the below optimized variant and simpler. essentially the exact thing that autograd does.
             const bias_grad = try grad_output.sum_along(self.device, .{ .dim = 0 });
-            _ = try grad_B._add(bias_grad);
+            _ = try grad_B._add(bias_grad, input.device);
             // This is not really a great way to optimize this, btw. This is meant to demonstrate to a user how they can
             // implement custom functionality by accessing the underlying data directly.
             // const blas = @import("../backend/blas.zig");
@@ -481,9 +481,9 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            const output = try NDTensor(T).from_cache(input.get_shape(), input.requires_grad(), input.device);
+            const output = try NDArray(T).empty(input.get_shape(), self.device);
 
-            for (input.data, output.data) |x, *y| {
+            for (input.get_data(), output.data) |x, *y| {
                 y.* = if (x > 0) x else 0;
             }
 
@@ -793,7 +793,12 @@ fn train_grad_accum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !vo
     const layer = try LinearLayer(T).init(device, input_size, output_size);
     defer layer.deinit();
     const params = layer.get_parameters();
-    defer if (params) |p| device.mem_free(p);
+    defer {
+        if (params) |_params| {
+            for (_params) |param| param.deinit();
+            device.allocator.free(_params);
+        }
+    }
     for (params.?) |p| {
         p.fill(1);
     }
@@ -838,7 +843,7 @@ fn train_grad_accum(comptime T: type, data: [][]T, alloc: std.mem.Allocator) !vo
                 try output.set_label("output");
 
                 const curr_loss = try simple_mse_loss(f32, output, target, device);
-                _ = try loss.data._add(curr_loss.data);
+                _ = try loss.data._add(curr_loss.data, device);
                 curr_loss.grad.?.fill(1.0 / @as(T, grad_acc_steps), device);
                 try gm.backward(curr_loss);
             }

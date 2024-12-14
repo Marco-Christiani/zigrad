@@ -36,27 +36,52 @@ pub fn NLLType(comptime T: type, comptime config: NLLConfig) type {
     return if (config.target_type == .indices) NLLIndex(T, config) else @compileError("Unimplemented");
 }
 
+fn NLLEncode(comptime T: type, comptime config: NLLConfig) type {
+    return switch (config.dimensions) {
+        1 => struct {
+            pub fn score(src: *NDTensor(T), trg: *const NDTensor(T), reduce: bool) !*NDTensor {
+                const out = try NDTensor(T).empty(&.{1}, src.device);
+                src.device.nn.nll_loss_1d_encode_forward(
+                    T,
+                    src.get_data(),
+                    trg.get_data(),
+                    out.get_data(),
+                    config.input_logits,
+                    reduce,
+                    config.reduce_type,
+                );
+                return out;
+            }
+
+            //fn backward(src: *zg.NDTensor(T)) anyerror!void {
+            //    const trg: usize = @intFromPtr(src._backward_ctx.?) -| 1;
+            //    src.device.nn.nll_loss_1d_index_backward(T, src.get_data(), src.grad.?.data, trg, config.reduce_type);
+            //}
+        },
+        else => @compileError("Unsupported Dimensions for NLLIndex"),
+    };
+}
+
 fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
     return switch (config.dimensions) {
         1 => struct {
-            pub fn score(src: *NDTensor(T), trg: usize, reduce: bool) !*NDTensor {
-                const data = try NDArray(T).empty(&.{1}, src.device);
-                src.device.nn.nll_loss_1d_index_forward(T, src.get_data(), trg, data.data, config.input_logits, reduce, config.reduce_type);
-                return try NDTensor(T).create_dependent(.{
-                    .data = data,
-                    .op = .DIV,
-                    .children = &.{src},
-                    .requires_gradient = src.requires_gradient or src.requires_gradient,
-                    .device = src.device,
-                    ._backward = backward,
-                    ._backward_ctx = @ptrFromInt(trg +| 1), // prevent nullptr
-                });
+            pub fn score(src: *NDTensor(T), trg_index: usize, reduce: bool) !*NDTensor {
+                const out = try NDTensor(T).empty(&.{1}, src.device);
+                src.device.nn.nll_loss_1d_index_forward(
+                    T,
+                    src.get_data(),
+                    trg_index,
+                    out.get_data(),
+                    config.input_logits,
+                    reduce,
+                    config.reduce_type,
+                );
             }
 
-            fn backward(src: *zg.NDTensor(T)) anyerror!void {
-                const trg: usize = @intFromPtr(src._backward_ctx.?) -| 1;
-                src.device.nn.nll_loss_1d_index_backward(T, src.get_data(), src.grad.?.data, trg, config.reduce_type);
-            }
+            //fn backward(src: *zg.NDTensor(T)) anyerror!void {
+            //    const trg: usize = @intFromPtr(src._backward_ctx.?) -| 1;
+            //    src.device.nn.nll_loss_1d_index_backward(T, src.get_data(), src.grad.?.data, trg, config.reduce_type);
+            //}
         },
         else => @compileError("Unsupported Dimensions for NLLIndex"),
     };

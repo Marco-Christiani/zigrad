@@ -155,21 +155,22 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn print_to_writer(self: Self, writer: anytype, device: DeviceReference) !void {
-            return print_to_writer_impl(self, self.data, writer, device);
+            return print_to_writer_impl(self, self.data, writer, device.is_host(), device);
         }
 
-        fn has_transfer(comptime DT: type) bool {
-            return if (@typeInfo(DT) == .Struct) @hasDecl(T, "transfer") else false;
+        fn has_mem_transfer(comptime DT: type) bool {
+            return if (@typeInfo(DT) == .Struct) @hasDecl(DT, "mem_transfer") else false;
         }
 
-        fn print_to_writer_impl(self: Self, _data: []T, writer: anytype, device: DeviceReference) !void {
-            if (comptime has_transfer(@TypeOf(device))) {
-                if (!device.is_host()) {
-                    const _host_data = device.allocator.alloc(T, self.data.len);
-                    defer device.allocator.free(_host_data);
-                    device.transfer(_data, _host_data, .DtoH);
+        fn print_to_writer_impl(self: Self, _data: []T, writer: anytype, is_host: bool, device: DeviceReference) !void {
+            if (comptime has_mem_transfer(@TypeOf(device))) {
+                if (!is_host) {
                     device.sync();
-                    return self.print_to_writer_impl(_host_data, writer, device);
+                    const _host_data = try device.allocator.alloc(T, _data.len);
+                    defer device.allocator.free(_host_data);
+                    device.mem_transfer(T, _data, _host_data, .DtoH);
+                    device.sync();
+                    return self.print_to_writer_impl(_host_data, writer, true, device);
                 }
             }
 
@@ -191,7 +192,7 @@ pub fn NDArray(comptime T: type) type {
             }
             const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shapeStr[0..bytes_written] }) catch @panic("allocation failed in print");
             try writer.writeAll(preamble);
-            try utils.print_ndslice(T, self.data, self.shape.shape, writer);
+            try utils.print_ndslice(T, _data, self.shape.shape, writer);
         }
 
         /// View into contiguous slice along a single dim. Shape is allocated COM.
@@ -282,15 +283,9 @@ pub fn NDArray(comptime T: type) type {
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             // TODO: standardize this shape creation logic elsewhere (its a micro-optimization)
-            const bshape = if (self.shape.size() != other.shape.size())
-                try self.shape.broadcast(other.shape.*)
-            else
-                try self.shape.copy(device.allocator);
-
+            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else try self.shape.copy(device.allocator);
             const values = try device.mem_alloc(T, bshape.size());
-            for (0..values.len) |i| {
-                values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];
-            }
+            device.blas.add(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = values,
@@ -300,12 +295,12 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// In-place element-wise addition
-        pub fn _add(self: *const Self, other: *const Self) !*const Self {
+        pub fn _add(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_add() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
             }
-            for (0..self.data.len) |i| self.data[i] += other.data[i % other.data.len];
+            device.blas.add(T, self.data, other.data, self.data);
             return self;
         }
 
@@ -319,6 +314,7 @@ pub fn NDArray(comptime T: type) type {
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try device.mem_alloc(T, bshape.size());
             for (0..values.len) |i| values[i] = self.data[i % self.data.len] - other.data[i % other.data.len];
+            device.blas.sub(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = values,
@@ -328,12 +324,12 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// In-place element-wise subtraction
-        pub fn _sub(self: *const Self, other: *const Self) !*const Self {
+        pub fn _sub(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_sub() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
             }
-            for (0..self.data.len) |i| self.data[i] -= other.data[i % other.data.len];
+            device.blas.sub(T, self.data, other.data, self.data);
             return self;
         }
 
@@ -341,7 +337,7 @@ pub fn NDArray(comptime T: type) type {
         pub fn mul(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try device.mem_alloc(T, bshape.size());
-            for (0..values.len) |i| values[i] = self.data[i % self.data.len] * other.data[i % other.data.len];
+            device.blas.mul(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = values,
@@ -351,12 +347,12 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// In-place element-wise multiplication
-        pub fn _mul(self: *const Self, other: *const Self) !*const Self {
+        pub fn _mul(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_mul() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
             }
-            for (0..self.data.len) |i| self.data[i] *= other.data[i % other.data.len];
+            device.blas.mul(T, self.data, other.data, self.data);
             return self;
         }
 
@@ -364,7 +360,7 @@ pub fn NDArray(comptime T: type) type {
         pub fn div(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try device.mem_alloc(T, bshape.size());
-            for (0..values.len) |i| values[i] = self.data[i % self.data.len] / other.data[i % other.data.len];
+            device.blas.div(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = values,
@@ -374,12 +370,12 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// In-place element-wise division
-        pub fn _div(self: *const Self, other: *const Self) !*const Self {
+        pub fn _div(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
             if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
                 log.err("_div() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
                 return error.IncompatibleShapes;
             }
-            for (0..self.data.len) |i| self.data[i] /= other.data[i % other.data.len];
+            device.blas.div(T, self.data, other.data, self.data);
             return self;
         }
 
@@ -741,17 +737,7 @@ pub fn NDArray(comptime T: type) type {
             errdefer device.allocator.free(output);
             @memset(output, 0);
 
-            device.blas.matvec(
-                T,
-                self.data,
-                other.data,
-                output,
-                M,
-                N,
-                trans_a,
-                1,
-                0,
-            );
+            device.blas.matvec(T, self.data, other.data, output, M, N, trans_a, 1, 0);
 
             const result = try device.allocator.create(Self);
             result.* = Self{
@@ -915,15 +901,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn clip_norm(self: *const Self, max_norm: T, delta: T, device: DeviceReference) void {
-            const norm_ = device.scratch.get(T, 1);
-            device.blas.nrm2(T, self.data, norm_);
-            const norm = norm_[0];
-            if (norm > max_norm) {
-                const scale = max_norm / (norm + delta);
-                for (self.data) |*value| {
-                    value.* *= scale;
-                }
-            }
+            device.blas.clip_norm(T, self.data, max_norm, delta);
         }
 
         /// Unbroadcast to target shape

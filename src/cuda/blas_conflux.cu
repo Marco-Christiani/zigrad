@@ -9,4 +9,5 @@
 #include "blas/axpy.cu"
 #include "blas/addition.cu"
 #include "blas/subtraction.cu"
-#include "blas/hadamard.cu"
+#include "blas/multiplication.cu"
+#include "blas/division.cu"

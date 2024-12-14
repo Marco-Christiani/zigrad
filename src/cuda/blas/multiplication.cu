@@ -1,5 +1,5 @@
-#ifndef __BLAS_HADAMARD_ZIG__
-#define __BLAS_HADAMARD_ZIG__
+#ifndef __BLAS_MULTIPLY_ZIG__
+#define __BLAS_MULTIPLY_ZIG__
 
 #include "blas_utils.cu"
 
@@ -7,7 +7,7 @@
 // up to a double and then we can go back down.
 
 template <class T>
-void __hadamard(
+void __multiplication(
   void* stream,
   const void* x,
   const void* y,
@@ -28,7 +28,7 @@ void __hadamard(
   );
 }
 
-extern "C" void hadamard(
+extern "C" void multiplication(
   dtype id,
   void* stream,
   const void* x,
@@ -39,10 +39,10 @@ extern "C" void hadamard(
 
   switch (id) {
     case SINGLE: {
-        return __hadamard<f32>(stream, x, y, z, n);
+        return __multiplication<f32>(stream, x, y, z, n);
     }
     case DOUBLE: {
-        return __hadamard<f64>(stream, x, y, z, n);
+        return __multiplication<f64>(stream, x, y, z, n);
     }
   }
   CUDA_ASSERT(cudaPeekAtLastError());

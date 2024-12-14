@@ -11,7 +11,10 @@ pub fn dtype(comptime T: type) cuda.dtype {
         f16 => @compileError("f16 not current supported."),
         f32 => cuda.SINGLE,
         f64 => cuda.DOUBLE,
-        else => @compileError("Only floating points supported"),
+        // we need to expand this more, but we're currently allocating "usize"
+        // tensors as indices for functions like gather. They just can't go through
+        // a blas or nn function, so this seems appropriate for the time being.
+        else => @panic("Only supports floating point, found: " ++ @typeName(T)),
     };
 }
 
@@ -170,7 +173,15 @@ pub const Blas = struct {
         cuda.nrm2(dtype(T), self.cublas(), x.ptr, y.ptr, x.len);
     }
 
-    pub fn clip_norm(self: *const Blas, comptime T: type, x: []T, scratch: []T, max_norm: T, delta: T) f64 {
+    pub fn clip_norm(
+        self: *Blas,
+        comptime T: type,
+        x: []T,
+        max_norm: T,
+        delta: T,
+    ) void {
+        const par = self.parent();
+        const scratch = par.scratch.get(T, 1, par.context.stream);
         cuda.clip_norm(dtype(T), self.cublas(), x.ptr, scratch.ptr, x.len, max_norm, delta);
     }
 
@@ -199,7 +210,7 @@ pub const Blas = struct {
         T: type,
         x: []const T,
         y: []T,
-    ) T {
+    ) void {
         cuda.reduce_sum(dtype(T), self.cublas(), x.ptr, y.ptr, x.len);
     }
 
@@ -230,6 +241,10 @@ pub const Blas = struct {
     fn stream(self: *const Blas) *anyopaque {
         const device: *const CudaDevice = @alignCast(@fieldParentPtr("blas", self));
         return device.context.stream;
+    }
+
+    fn parent(self: *Blas) *CudaDevice {
+        return @as(*CudaDevice, @alignCast(@fieldParentPtr("blas", self)));
     }
 };
 
@@ -321,7 +336,7 @@ pub const ScratchMemory = struct {
                 cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.head)), stream);
             }
             // after a first pass through the network, we should know if we have enough memory.
-            const ptr = cuda.mem_alloc(total) orelse @panic("Cannot allocate scratch memory.");
+            const ptr = cuda.mem_alloc(total, stream) orelse @panic("Cannot allocate scratch memory.");
             self.head = @intFromPtr(ptr);
             self.tail = self.head + total;
         }

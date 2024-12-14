@@ -123,7 +123,16 @@ EXTERN_C void subtraction(
   len_t n
 );
 
-EXTERN_C void hadamard(
+EXTERN_C void multiplication(
+  dtype id,
+  void* stream,
+  const void* x,
+  const void* y,
+  void* z,
+  len_t n
+);
+
+EXTERN_C void division(
   dtype id,
   void* stream,
   const void* x,

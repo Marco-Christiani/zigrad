@@ -11,7 +11,7 @@ pub fn Blas(comptime Parent: type) type {
 
         /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
         pub fn dot(
-            self: *const Blas,
+            self: *const Self,
             T: type,
             x: []const T,
             y: []const T,
@@ -154,7 +154,7 @@ pub fn Blas(comptime Parent: type) type {
         }
 
         pub fn max_reverse(
-            self: *const Blas,
+            self: *const Self,
             T: type,
             y_grd: []const T,
             x_grd: []T,
@@ -169,9 +169,10 @@ pub fn Blas(comptime Parent: type) type {
             self: *const Self,
             T: type,
             x: []const T,
-        ) T {
+            y: []T,
+        ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.sum(T, x),
+                inline else => |dev| dev.blas.sum(T, x, y),
             };
         }
 
@@ -191,16 +192,22 @@ pub fn Blas(comptime Parent: type) type {
             comptime T: type,
             x: []const T,
             y: []T,
-            alpha: T,
+            alpha: *const T,
         ) void {
             return switch (self.parent()) {
                 inline else => |dev| dev.blas.axpy(T, x, y, alpha),
             };
         }
 
-        pub fn clip_norm(self: *const Blas, comptime T: type, x_val: []T, scratch: []T, max_norm: T, delta: T) f64 {
+        pub fn clip_norm(
+            self: *const Self,
+            comptime T: type,
+            x_val: []T,
+            max_norm: T,
+            delta: T,
+        ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.clip_norm(T, x_val, scratch, max_norm, delta),
+                inline else => |dev| dev.blas.clip_norm(T, x_val, max_norm, delta),
             };
         }
 
@@ -308,7 +315,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
 
         pub fn mem_destroy(self: Self, ptr: anytype) void {
             return switch (self.ptrs) {
-                inline else => |dev| dev.mem_free(ptr),
+                inline else => |dev| dev.mem_destroy(ptr),
             };
         }
 
@@ -356,7 +363,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn is_compatible(self: Self, other: DeviceReference) bool {
+        pub fn is_compatible(self: Self, other: Self) bool {
             if (std.meta.activeTag(self.ptrs) != std.meta.activeTag(other.ptrs)) {
                 return false;
             }

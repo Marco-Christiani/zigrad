@@ -49,7 +49,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        for (0..x.len) |i| z[i] = x[i] + y[i];
+        for (0..z.len) |i| z[i] = x[i % x.len] + y[i % y.len];
     }
 
     pub fn sub(
@@ -59,7 +59,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        for (0..x.len) |i| z[i] = x[i] - y[i];
+        for (0..z.len) |i| z[i] = x[i % x.len] - y[i % y.len];
     }
 
     pub fn mul(
@@ -69,7 +69,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        for (0..x.len) |i| z[i] = x[i] * y[i];
+        for (0..z.len) |i| z[i] = x[i % x.len] * y[i % y.len];
     }
 
     pub fn div(
@@ -79,7 +79,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        for (0..x.len) |i| z[i] = x[i] / y[i];
+        for (0..z.len) |i| z[i] = x[i % x.len] / y[i % y.len];
     }
 
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
@@ -167,12 +167,19 @@ pub const Blas = struct {
         }
     }
 
-    pub fn clip_norm(self: *const NN, comptime T: type, x_val: []T, scratch: []T, max_norm: T, delta: T) f64 {
-        nrm2(T, x_val, scratch[0..]);
+    pub fn clip_norm(
+        self: Blas,
+        comptime T: type,
+        x_val: []T,
+        max_norm: T,
+        delta: T,
+    ) void {
+        var scratch: [1]T = undefined;
+        self.nrm2(T, x_val, scratch[0..]);
         const norm = scratch[0];
         if (norm > max_norm) {
             const _scale = max_norm / (norm + delta);
-            for (self.data) |*value| {
+            for (x_val) |*value| {
                 value.* *= _scale;
             }
         }
