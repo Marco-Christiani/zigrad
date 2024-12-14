@@ -52,6 +52,8 @@ extern "C" void nll_loss_1D_index_forward(
   } else {
       __nll_loss_1D_index_reduce<f64>(cudnn_handle, src, trg, dst, n, reduxop);
   }  
+
+  CUDA_ASSERT(cudaPeekAtLastError());
 }
 
 template<typename T>

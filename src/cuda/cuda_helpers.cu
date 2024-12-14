@@ -100,3 +100,5 @@ inline cudaStream_t __cudnn_stream(void* handle) {
   CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(handle), &stream));
   return stream;
 }
+
+#endif

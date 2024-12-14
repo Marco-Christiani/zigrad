@@ -1,5 +1,6 @@
 #include "blas/dot.cu"
 #include "blas/gemm.cu"
+#include "blas/gemv.cu"
 #include "blas/ger.cu"
 #include "blas/max.cu"
 #include "blas/sum.cu"

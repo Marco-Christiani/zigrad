@@ -26,8 +26,6 @@ extern "C" void gemm(
   const int _m = static_cast<int>(m);
   const int _n = static_cast<int>(n);
   const int _k = static_cast<int>(k);
-  const auto _trans_a = (trans_a) ? CUBLAS_OP_T : CUBLAS_OP_N;
-  const auto _trans_b = (trans_b) ? CUBLAS_OP_T : CUBLAS_OP_N;
   
   switch (id) {
     case SINGLE: {
@@ -35,8 +33,8 @@ extern "C" void gemm(
       const float _beta = static_cast<float>(beta);
       return CUBLAS_ASSERT(cublasSgemm(
           get_handle(cublas_handle), 
-          _trans_b,
-          _trans_a,
+          (trans_b) ? CUBLAS_OP_T : CUBLAS_OP_N,
+          (trans_a) ? CUBLAS_OP_T : CUBLAS_OP_N,
           _k, _m, _n,
           &_alpha, 
           static_cast<const float*>(b_data), ldb,
@@ -44,12 +42,54 @@ extern "C" void gemm(
           &_beta, 
           static_cast<float*>(c_data), ldc
       ));
+
+      //if (trans_a and trans_b) {
+      //  return CUBLAS_ASSERT(cublasSgemm(
+      //      get_handle(cublas_handle), 
+      //      CUBLAS_OP_T,
+      //      CUBLAS_OP_T,
+      //      _k, _n, _m,
+      //      &_alpha, 
+      //      static_cast<const float*>(b_data), lda,
+      //      static_cast<const float*>(a_data), ldb,
+      //      &_beta, 
+      //      static_cast<float*>(c_data), ldc
+      //  ));
+      //}
+
+      //if (!trans_a and trans_b) {
+      //  return CUBLAS_ASSERT(cublasSgemm(
+      //      get_handle(cublas_handle), 
+      //      CUBLAS_OP_T,
+      //      CUBLAS_OP_N,
+      //      _k, _m, _n,
+      //      &_alpha, 
+      //      static_cast<const float*>(b_data), _n,
+      //      static_cast<const float*>(a_data), _n,
+      //      &_beta, 
+      //      static_cast<float*>(c_data), _k
+      //  ));
+      //}
+
+      //if (trans_a and !trans_b) {
+      //  return CUBLAS_ASSERT(cublasSgemm(
+      //      get_handle(cublas_handle), 
+      //      CUBLAS_OP_N,
+      //      CUBLAS_OP_T,
+      //      _k, _m, _n,
+      //      &_alpha, 
+      //      static_cast<const float*>(b_data), _n,
+      //      static_cast<const float*>(a_data), _n,
+      //      &_beta, 
+      //      static_cast<float*>(c_data), _k
+      //  ));
+      //}
     }
     case DOUBLE: {
       return CUBLAS_ASSERT(cublasDgemm(
           get_handle(cublas_handle), 
-          _trans_b,
-          _trans_a,
+          CUBLAS_OP_N,
+          CUBLAS_OP_N,
           _k, _m, _n,
           &alpha, 
           static_cast<const double*>(b_data), ldb,

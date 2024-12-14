@@ -28,8 +28,8 @@ extern "C" void clip_norm(
   dtype id,
   void* cublas_handle,
   void* x,
-  len_t n,
   void* cur_nrm,
+  len_t n,
   double max_nrm,
   double delta
 ) {

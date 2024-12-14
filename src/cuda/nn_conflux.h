@@ -88,12 +88,33 @@ EXTERN_C void nll_loss_1D_index_reverse(
   reduxtype reduxop
 );
 
+EXTERN_C void nll_loss_1D_encode_forward(
+  dtype id,
+  void* cudnn_handle,
+  void* src,
+  const void* trg,
+  void* dst,
+  len_t n,
+  bool inplace_smax,
+  reduxtype reduxop
+);
+
+EXTERN_C void nll_loss_1D_encode_reverse(
+  dtype id,
+  void* cudnn_handle,
+  const void* x_val,
+  const void* y_val,
+  void *x_grd,
+  len_t n,
+  reduxtype reduxop
+);
+
 EXTERN_C void clip_norm(
   dtype id,
   void* cublas_handle,
   void* x,
-  len_t n,
   void* cur_nrm2,
+  len_t n,
   double max_nrm2,
   double delta
 );
