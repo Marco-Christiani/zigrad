@@ -282,7 +282,11 @@ pub fn NDArray(comptime T: type) type {
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             // TODO: standardize this shape creation logic elsewhere (its a micro-optimization)
-            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else try self.shape.copy(device.allocator);
+            const bshape = if (self.shape.size() != other.shape.size())
+                try self.shape.broadcast(other.shape.*)
+            else
+                try self.shape.copy(device.allocator);
+
             const values = try device.mem_alloc(T, bshape.size());
             for (0..values.len) |i| {
                 values[i] = self.data[i % self.data.len] + other.data[i % other.data.len];

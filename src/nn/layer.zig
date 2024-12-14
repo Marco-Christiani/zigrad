@@ -481,9 +481,10 @@ pub fn ReLULayer(comptime T: type) type {
         }
 
         pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            const output = try input.data.copy(self.device);
-            for (output.data) |*e| {
-                e.* = if (e.* > 0) e.* else 0;
+            const output = try NDTensor(T).from_cache(input.get_shape(), input.requires_grad(), input.device);
+
+            for (input.data, output.data) |x, *y| {
+                y.* = if (x > 0) x else 0;
             }
 
             return try NDTensor(T).create_dependent(.{
