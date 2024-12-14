@@ -62,6 +62,46 @@ pub const Blas = struct {
         cuda.dot(dtype(T), self.cublas(), x.ptr, y.ptr, z.ptr, x.len);
     }
 
+    pub fn add(
+        self: *const Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        cuda.addition(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+    }
+
+    pub fn sub(
+        self: *const Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        cuda.subtraction(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+    }
+
+    pub fn mul(
+        self: *const Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        cuda.multiplication(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+    }
+
+    pub fn div(
+        self: *const Blas,
+        T: type,
+        x: []const T,
+        y: []const T,
+        z: []T,
+    ) void {
+        cuda.division(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+    }
+
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
     /// a * (M, N) x (N,) + b * (N,) = (M,)
     /// Y = aAX + bY
@@ -71,13 +111,13 @@ pub const Blas = struct {
         A: []const T,
         x: []const T,
         y: []T,
-        M: usize,
-        N: usize,
+        m: usize,
+        n: usize,
         trans_a: bool,
         alpha: T,
         beta: T,
     ) void {
-        cuda.gemv(dtype(T), self.cublas(), A.len, x.ptr, y.ptr, M, N, trans_a, alpha, beta);
+        cuda.gemv(dtype(T), self.cublas(), A.ptr, x.ptr, y.ptr, m, n, trans_a, alpha, beta);
     }
 
     ///  Assumes row-major.
@@ -89,18 +129,23 @@ pub const Blas = struct {
         A: []const T,
         B: []const T,
         C: []T,
-        M: usize,
-        N: usize,
-        K: usize,
+        m: usize,
+        n: usize,
+        k: usize,
         trans_a: bool,
         trans_b: bool,
-        lda: usize,
-        ldb: usize,
-        ldc: usize,
         alpha: T,
         beta: T,
     ) void {
-        cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
+        if (!trans_a and !trans_b) {
+            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, m, n, k, trans_a, trans_b, n, k, k, alpha, beta);
+        } else if (trans_a and trans_b) {
+            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, n, m, k, trans_a, trans_b, n, m, k, alpha, beta);
+        } else if (trans_a and !trans_b) {
+            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, n, m, k, trans_a, trans_b, n, k, k, alpha, beta);
+        } else {
+            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, m, n, k, trans_a, trans_b, n, n, k, alpha, beta);
+        }
     }
 
     /// Outer product: A = alpha(xy') + A
@@ -123,6 +168,10 @@ pub const Blas = struct {
         y: []T,
     ) void {
         cuda.nrm2(dtype(T), self.cublas(), x.ptr, y.ptr, x.len);
+    }
+
+    pub fn clip_norm(self: *const Blas, comptime T: type, x: []T, scratch: []T, max_norm: T, delta: T) f64 {
+        cuda.clip_norm(dtype(T), self.cublas(), x.ptr, scratch.ptr, x.len, max_norm, delta);
     }
 
     pub fn max_forward(
@@ -218,6 +267,15 @@ pub const NN = struct {
         cuda.nll_loss_1D_index_reverse(dtype(T), self.cudnn(), src_grd.ptr, trg, src_grd.ptr, src_val.len, rdxtype(reduce_type));
     }
 
+    pub fn nll_loss_1d_encode_forward(self: *const NN, comptime T: type, src: []T, trg: []const T, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+        const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
+        cuda.nll_loss_1D_index_forward(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
+    }
+
+    pub fn nll_loss_1d_encode_backward(self: *const NN, comptime T: type, src_val: []const T, trg_val: []const T, src_grd: []T, reduce_type: ReduceType) f64 {
+        cuda.nll_loss_1D_index_reverse(dtype(T), self.cudnn(), src_grd.ptr, trg_val.ptr, src_grd.ptr, src_val.len, rdxtype(reduce_type));
+    }
+
     pub fn clip_norm(self: *NN, comptime T: type, x_val: []T, x_grd: []const T, max_nrm: T, delta: T) f64 {
         const scratch = self.parent().scratch.get(T, 1);
         cuda.clip_norm(dtype(T), self.cublas(), x_val.ptr, x_grd.ptr, scratch.ptr, max_nrm, delta, x_val.len);
@@ -289,10 +347,10 @@ pub const CudaDevice = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) CudaDevice {
-        cuda.initDevice(device_number);
-        const stream = cuda.initStream() orelse unreachable;
-        const cublas = cuda.initCublasHandle(stream) orelse unreachable;
-        const cudnn = cuda.initCudnnHandle(stream) orelse unreachable;
+        cuda.init_device(device_number);
+        const stream = cuda.init_stream() orelse unreachable;
+        const cublas = cuda.init_cublas_handle(stream) orelse unreachable;
+        const cudnn = cuda.init_cudnn_handle(stream) orelse unreachable;
         return .{
             .context = .{
                 .device_number = device_number,
@@ -302,7 +360,6 @@ pub const CudaDevice = struct {
             },
             .nn = .{},
             .blas = .{},
-            .loss = .{},
             // at some point, maybe move this to unmanged
             .cache = .{ .allocator = backing_allocator },
             .scratch = .{},
@@ -311,15 +368,10 @@ pub const CudaDevice = struct {
     }
 
     pub fn deinit(self: *CudaDevice) void {
-        // free everything we own first...
-        var iter = self.cache.popping_iterator();
-        while (iter.next()) |ptr| cuda.mem_free(ptr, self.context.stream);
-        self.cache.deinit();
-
         self.sync();
-
-        cuda.deinitCublasHandle(self.context.cublas);
-        cuda.deinitStream(self.context.stream);
+        self.cache.deinit();
+        cuda.deinit_cublas_handle(self.context.cublas);
+        cuda.deinit_stream(self.context.stream);
         self.* = undefined;
     }
 
@@ -377,7 +429,7 @@ pub const CudaDevice = struct {
         cuda.mem_sequence(dtype(T), slice.ptr, slice.len, &_init, &_step, self.context.stream);
     }
 
-    const Direction = enum { HtoD, DtoH, DtoD };
+    pub const Direction = enum { HtoD, DtoH, DtoD };
 
     pub fn mem_transfer(
         self: CudaDevice,
@@ -388,14 +440,14 @@ pub const CudaDevice = struct {
     ) void {
         std.debug.assert(src.len == dst.len);
         switch (direction) {
-            .HtoD => cuda.memcpyHtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
-            .DtoH => cuda.memcpyDtoH(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
-            .DtoD => cuda.memcpyDtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
+            .HtoD => cuda.memcpy_HtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
+            .DtoH => cuda.memcpy_DtoH(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
+            .DtoD => cuda.memcpy_DtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
         }
     }
 
     pub fn sync(self: CudaDevice) void {
-        cuda.streamSynchronize(self.context.stream);
+        cuda.stream_synchronize(self.context.stream);
     }
 
     // Unlike host compatibility, this can vary. The upper-level DeviceReference

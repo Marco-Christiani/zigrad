@@ -22,6 +22,54 @@ pub fn Blas(comptime Parent: type) type {
             };
         }
 
+        pub fn add(
+            self: *const Self,
+            T: type,
+            x: []const T,
+            y: []const T,
+            z: []T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.dot(T, x, y, z),
+            };
+        }
+
+        pub fn sub(
+            self: *const Self,
+            T: type,
+            x: []const T,
+            y: []const T,
+            z: []T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.dot(T, x, y, z),
+            };
+        }
+
+        pub fn mul(
+            self: *const Self,
+            T: type,
+            x: []const T,
+            y: []const T,
+            z: []T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.mul(T, x, y, z),
+            };
+        }
+
+        pub fn div(
+            self: *const Self,
+            T: type,
+            x: []const T,
+            y: []const T,
+            z: []T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.div(T, x, y, z),
+            };
+        }
+
         /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
         /// a * (M, N) x (N,) + b * (N,) = (M,)
         /// Y = aAX + bY
@@ -147,6 +195,12 @@ pub fn Blas(comptime Parent: type) type {
         ) void {
             return switch (self.parent()) {
                 inline else => |dev| dev.blas.axpy(T, x, y, alpha),
+            };
+        }
+
+        pub fn clip_norm(self: *const Blas, comptime T: type, x_val: []T, scratch: []T, max_norm: T, delta: T) f64 {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.clip_norm(T, x_val, scratch, max_norm, delta),
             };
         }
 
@@ -302,7 +356,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn is_compatible(self: DeviceReference, other: DeviceReference) bool {
+        pub fn is_compatible(self: Self, other: DeviceReference) bool {
             if (std.meta.activeTag(self.ptrs) != std.meta.activeTag(other.ptrs)) {
                 return false;
             }
@@ -312,8 +366,8 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn is_host(self: DeviceReference) bool {
-            return self.ptrs == .HOST;
+        pub fn is_host(self: Self) bool {
+            return self.ptrs == .host;
         }
     };
 }

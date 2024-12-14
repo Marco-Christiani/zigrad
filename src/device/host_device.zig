@@ -42,20 +42,6 @@ pub const Blas = struct {
         }
     }
 
-    pub fn dot(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        z: []T,
-    ) void {
-        switch (T) {
-            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-        }
-    }
-
     pub fn add(
         _: Blas,
         T: type,
@@ -76,33 +62,26 @@ pub const Blas = struct {
         for (0..x.len) |i| z[i] = x[i] - y[i];
     }
 
-    pub fn dot(
+    pub fn mul(
         _: Blas,
         T: type,
         x: []const T,
         y: []const T,
         z: []T,
     ) void {
-        switch (T) {
-            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-        }
+        for (0..x.len) |i| z[i] = x[i] * y[i];
     }
 
-    pub fn dot(
+    pub fn div(
         _: Blas,
         T: type,
         x: []const T,
         y: []const T,
         z: []T,
     ) void {
-        switch (T) {
-            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
-        }
+        for (0..x.len) |i| z[i] = x[i] / y[i];
     }
+
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
     /// a * (M, N) x (N,) + b * (N,) = (M,)
     /// Y = aAX + bY
@@ -185,6 +164,17 @@ pub const Blas = struct {
             f32 => y[0] = c.cblas_snrm2(@intCast(x.len), x.ptr, 1),
             f64 => y[0] = c.cblas_dnrm2(@intCast(x.len), x.ptr, 1),
             else => @compileError("Unsupported type" ++ @typeName(T)),
+        }
+    }
+
+    pub fn clip_norm(self: *const NN, comptime T: type, x_val: []T, scratch: []T, max_norm: T, delta: T) f64 {
+        nrm2(T, x_val, scratch[0..]);
+        const norm = scratch[0];
+        if (norm > max_norm) {
+            const _scale = max_norm / (norm + delta);
+            for (self.data) |*value| {
+                value.* *= _scale;
+            }
         }
     }
 
@@ -289,19 +279,6 @@ pub const ScratchMemory = struct {
 };
 
 pub const NN = struct {
-    pub fn clip_norm(self: *const NN, comptime T: type, x_val: []T, max_norm: T, delta: T) f64 {
-        var nrm: [1]T = undefined;
-        self.parent().blas.nrm2(T, x_val, nrm[0..]);
-
-        const norm = nrm[0];
-        if (norm > max_norm) {
-            const scale = max_norm / (norm + delta);
-            for (self.data) |*value| {
-                value.* *= scale;
-            }
-        }
-    }
-
     pub fn relu_forward(_: NN, comptime T: type, x: []const T, y: []T) void {
         for (x, y) |x_v, *y_v| {
             y_v.* = if (x_v > 0) x_v else 0;
