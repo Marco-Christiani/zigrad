@@ -14,7 +14,7 @@ pub fn init(shape: []const usize, allocator: std.mem.Allocator) !*Self {
     self.* = Self{
         .alloc = allocator,
         .shape = try allocator.dupe(usize, shape),
-        .strides = try calculateStrides(shape, allocator),
+        .strides = try calculate_strides(shape, allocator),
     };
     return self;
 }
@@ -55,7 +55,7 @@ pub fn broadcast(self: Self, other: Self) !*Self {
     result.* = Self{
         .shape = result_shape,
         .alloc = self.alloc,
-        .strides = try calculateStrides(result_shape, self.alloc),
+        .strides = try calculate_strides(result_shape, self.alloc),
     };
     return result;
 }
@@ -97,7 +97,8 @@ pub fn _squeeze(self: *Self) !void {
     }
     self.alloc.free(self.shape);
     self.shape = newshape;
-    self.strides = try calculateStrides(newshape, self.alloc);
+    self.alloc.free(self.strides);
+    self.strides = try calculate_strides(newshape, self.alloc);
 }
 
 pub fn _unsqueeze(self: *Self) !void {
@@ -107,7 +108,8 @@ pub fn _unsqueeze(self: *Self) !void {
     newshape[0] = 1;
     self.alloc.free(self.shape);
     self.shape = newshape;
-    self.strides = try calculateStrides(newshape, self.alloc);
+    self.alloc.free(self.strides);
+    self.strides = try calculate_strides(newshape, self.alloc);
 }
 
 pub fn _reshape(self: *Self, shape: []const usize) !void {
@@ -119,7 +121,8 @@ pub fn _reshape(self: *Self, shape: []const usize) !void {
     }
     self.alloc.free(self.shape);
     self.shape = try self.alloc.dupe(usize, shape);
-    self.strides = try calculateStrides(self.shape, self.alloc);
+    self.alloc.free(self.strides);
+    self.strides = try calculate_strides(self.shape, self.alloc);
 }
 
 pub fn get(self: Self, dim: usize) !usize {
@@ -139,10 +142,10 @@ const EqualOptions = struct {
 };
 
 pub fn eq(a: Self, b: Self, options: EqualOptions) bool {
-    return eqRaw(a.shape, b.shape, options);
+    return eq_raw(a.shape, b.shape, options);
 }
 
-pub fn eqRaw(a: []usize, b: []usize, options: EqualOptions) bool {
+pub fn eq_raw(a: []usize, b: []usize, options: EqualOptions) bool {
     if (options.strict) return std.mem.eql(usize, a, b);
     const dims = @max(a.len, b.len);
     var i: usize = 0;
@@ -154,7 +157,7 @@ pub fn eqRaw(a: []usize, b: []usize, options: EqualOptions) bool {
     return true;
 }
 
-fn calculateStrides(shape: []const usize, allocator: std.mem.Allocator) ![]usize {
+fn calculate_strides(shape: []const usize, allocator: std.mem.Allocator) ![]usize {
     var strides = try allocator.alloc(usize, shape.len);
     errdefer allocator.free(strides);
     const n = shape.len;

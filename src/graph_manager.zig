@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad.zig");
 const settings = zg.settings;
+const DeviceReference = zg.DeviceReference;
 const log = std.log.scoped(.zg_graphmanager);
 
 /// Manages the overall graph, allows for a more memory efficient abstraction
@@ -37,7 +38,7 @@ pub fn GraphManager(comptime T: type) type {
         fn topo(self: *Self, node: *T) void {
             const gopr = self.visited_nodes.getOrPut(node) catch unreachable;
             if (!gopr.found_existing) {
-                if (node.children) |children| {
+                if (node.get_children()) |children| {
                     for (children) |child| {
                         self.topo(child);
                     }
@@ -47,7 +48,7 @@ pub fn GraphManager(comptime T: type) type {
         }
 
         // Must init grad on root node before backprop
-        pub fn backward(self: *Self, node: *T, alloc: std.mem.Allocator) !void {
+        pub fn backward(self: *Self, node: *T) !void {
             self.sorted_nodes.clearRetainingCapacity();
             self.visited_nodes.clearRetainingCapacity();
             self.topo(node);
@@ -55,13 +56,13 @@ pub fn GraphManager(comptime T: type) type {
 
             for (0..nodes.len) |i| {
                 var curr_node = nodes[nodes.len - i - 1];
-                if (curr_node.requiresGrad()) {
-                    try curr_node.backward(alloc);
+                if (curr_node.requires_grad()) {
+                    try curr_node.backward();
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children
                     if (!curr_node.acquired and self.eager_teardown) curr_node.deinit();
                 } else {
-                    log.debug("Skipping node {?s}", .{node.label});
+                    log.debug("Skipping node {?s}", .{node.get_label()});
                 }
             }
         }
