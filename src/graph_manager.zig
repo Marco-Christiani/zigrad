@@ -68,3 +68,135 @@ pub fn GraphManager(comptime T: type) type {
         }
     };
 }
+
+test "GraphManager eager teardown reuse 1" {
+    const T = f32;
+    const Tensor = zg.NDTensor(T);
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+    zg.rt_grad_enabled = true;
+
+    // This pattern tries to create a graph with multiple valid paths
+    // F   B   A
+    //  \ / \ /
+    //   D   C
+    //    \ /
+    //     E
+
+    var A = try Tensor.init(&[_]T{2.0}, null, true, device);
+    var B = try Tensor.init(&[_]T{3.0}, null, true, device);
+    var F = try Tensor.init(&[_]T{1.5}, null, true, device);
+
+    // Acquire leaf tensors
+    A.acquire();
+    B.acquire();
+    F.acquire();
+
+    var C = try B.mul(A);
+
+    const D = try B.add(F);
+
+    var E = try C.mul(D);
+
+    // Setup graph manager with eager teardown
+    var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
+    defer gm.deinit();
+
+    // Initialize root gradient
+    E.grad.?.fill(1.0, device);
+
+    // Run backward pass
+    try gm.backward(E);
+
+    // The tricky part: B's value is needed for both C and D's backward pass
+    // If B is freed too early, we'll get a use-after-free or crash
+
+    // Clean up
+    A.release();
+    B.release();
+    F.release();
+    A.deinit();
+    B.deinit();
+    F.deinit();
+}
+
+test "GraphManager eager teardown reuse 2" {
+    const T = f32;
+    const Tensor = zg.NDTensor(T);
+    const allocator = std.testing.allocator;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+    zg.rt_grad_enabled = true;
+
+    // Create a case where a grad needs to accumulate multiple times
+    //   C = A * B
+    //   D = A * C  (reuses A)
+    //   E = D + C  (reuses C)
+    //
+    //       A  B
+    //     / \ /
+    //    |   C
+    //    \  / \
+    //     D   |
+    //      \ /
+    //       E
+
+    var A = try Tensor.init(&[_]T{2.0}, null, true, device);
+    const B = try Tensor.init(&[_]T{3.0}, null, true, device);
+
+    // Acquire leaf tensors
+    A.acquire();
+    B.acquire();
+
+    const C = try A.mul(B);
+    var D = try A.mul(C);
+    var E = try D.add(C);
+
+    var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
+    defer gm.deinit();
+
+    E.grad.?.fill(1.0, device);
+    try gm.backward(E);
+
+    // Clean up leaves
+    A.release();
+    B.release();
+    A.deinit();
+    B.deinit();
+}
+
+test "GraphManager x*x" {
+    const T = f32;
+    const Tensor = zg.NDTensor(T);
+    const allocator = std.testing.allocator;
+    zg.rt_grad_enabled = true;
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
+    var A = try Tensor.init(&[_]T{2.0}, null, true, device);
+    const B = try Tensor.init(&[_]T{3.0}, null, true, device);
+    var C = try A.mul(B);
+    var E = try C.mul(C);
+
+    // Acquire leaf tensors
+    A.acquire();
+    B.acquire();
+
+    var gm = GraphManager(Tensor).init(allocator, .{ .eager_teardown = true });
+    defer gm.deinit();
+
+    E.grad.?.fill(1.0, device);
+    try gm.backward(E);
+    A.print();
+    B.print();
+
+    // Clean up leaves
+    A.release();
+    B.release();
+    A.deinit();
+    B.deinit();
+}
