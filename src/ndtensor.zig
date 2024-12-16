@@ -239,7 +239,7 @@ pub fn NDTensor(comptime T: type) type {
                 // TODO: How to handle not holding references if requires_grad == false??
                 // .children = if (rg) try opts.allocator.dupe(*const Self, opts.children) else null,
                 .grad = if (rg) try dtype.zeros(opts.data.shape.shape, opts.device) else null,
-                .children = .{},
+                .children = children,
                 .label = .{},
                 .requires_gradient = rg,
                 .acquired = false,
@@ -248,7 +248,6 @@ pub fn NDTensor(comptime T: type) type {
                 .device = opts.device,
             };
             if (opts.label) |_label| try self.set_label(_label);
-            try self.set_children(opts.children);
             return self;
         }
 
