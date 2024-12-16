@@ -44,7 +44,22 @@ pub const Settings = struct {
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
+    caching_policy: ?CachingPolicy = null,
     seed: u64 = 81761,
+};
+
+/// Enables setting up boundaries for how caching
+/// behaves. If caching is turned off if it is not
+/// initialized by the user (null default value).
+/// If all values are null, it's completely
+/// permissive and will cache everything.
+pub const CachingPolicy = struct {
+    /// Sets a floor on how big a tensor must be
+    /// in bytes to be eligible for caching.
+    min_byte_size: ?usize = null,
+    /// Sets a ceiling on how big a tensor must be
+    /// in bytes to be eligible for caching.
+    max_byte_size: ?usize = null,
 };
 
 /// Global flag for enabling/disabling gradient tracking.

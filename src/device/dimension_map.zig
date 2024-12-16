@@ -39,8 +39,10 @@ const MapType = std.HashMapUnmanaged(Key, Value, MapContext, std.hash_map.defaul
 
 map: MapType = .{},
 allocator: std.mem.Allocator,
+clearing: bool = false,
 
 pub fn deinit(self: *Self) void {
+    self.clearing = true;
     var iter = self.map.iterator();
     while (iter.next()) |entry| {
         const free = entry.value_ptr.free;
@@ -49,10 +51,13 @@ pub fn deinit(self: *Self) void {
         self.allocator.free(entry.key_ptr.dims);
     }
     self.map.deinit(self.allocator);
+    self.* = undefined;
 }
 
 // clear the cached items but keep the keys and ptr stacks
 pub fn clear(self: *Self) void {
+    self.clearing = true;
+    defer self.clearing = false;
     var iter = self.map.iterator();
     while (iter.next()) |entry| {
         const free = entry.value_ptr.free;
@@ -67,12 +72,14 @@ pub fn get(self: *Self, comptime T: type, dims: []const usize) ?*T {
     return @ptrCast(@alignCast(ptr));
 }
 
-pub fn put(self: *Self, ptr: anytype, dims: []const usize) void {
+pub fn put(self: *Self, ptr: anytype, dims: []const usize) bool {
     const P = @TypeOf(ptr);
 
     if (comptime !is_non_const_pointer(P)) {
         @compileError("Dimension map requires non-const pointer types");
     }
+
+    if (self.clearing) return false;
 
     const result = self.map.getOrPut(self.allocator, .{ .id = type_id(P), .dims = dims }) catch @panic("Failed to make hash entry.");
 
@@ -93,6 +100,8 @@ pub fn put(self: *Self, ptr: anytype, dims: []const usize) void {
     }
 
     result.value_ptr.ptrs.append(self.allocator, ptr) catch @panic("Failed to append pointer.");
+
+    return true;
 }
 
 test {
