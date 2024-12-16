@@ -12,6 +12,7 @@ const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
 const log = std.log.scoped(.zg_tensor);
+const use_cache = zg.settings.caching_policy != null;
 
 pub const MaxOverDimOptions = struct {
     dim: usize,
@@ -70,68 +71,74 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Values and shape are allocated. COM.
         pub fn init(values: []const T, shape: ?[]const usize, requires_gradient: bool, device: DeviceReference) !*Self {
-            const self_shape = shape orelse &[_]usize{values.len};
-            const self = try device.allocator.create(Self);
-            self.* = Self{
-                .data = try dtype.init(values, self_shape, device),
-                .grad = if (requires_gradient) try dtype.zeros(self_shape, device) else null,
-                .requires_gradient = requires_gradient,
-                .device = device,
-            };
+            const self = try Self.empty(shape orelse &.{values.len}, requires_gradient, device);
+            device.mem_copy(T, values, self.get_data());
             return self;
         }
 
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
         pub fn empty(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+            if (comptime use_cache) {
+                if (try from_cache(shape, requires_gradient, device)) |cached| return cached;
+            }
             const self = try device.allocator.create(Self);
             self.* = Self{
                 .data = try dtype.empty(shape, device),
-                .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
+                .grad = if (requires_gradient and zg.rt_grad_enabled) try dtype.zeros(shape, device) else null,
                 .requires_gradient = requires_gradient,
                 .device = device,
+                .acquired = false,
+                ._backward = null,
+                ._backward_ctx = null,
+                .children = .{},
+                .label = .{},
+                .op = null,
             };
             return self;
         }
 
         pub fn zeros(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
-            const self = try device.allocator.create(Self);
-            self.* = Self{
-                .data = try dtype.zeros(shape, device),
-                .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
-                .requires_gradient = requires_gradient,
-                .device = device,
-            };
+            const self = try Self.empty(shape, requires_gradient, device);
+            self.fill(0);
             return self;
         }
 
         pub fn random(shape: []const usize, requires_gradient: bool, op: zg.RandType, device: DeviceReference) !*Self {
-            const self = try device.allocator.create(Self);
-            self.* = Self{
-                .data = try dtype.random(shape, device, op),
-                .grad = if (requires_gradient) try dtype.zeros(shape, device) else null,
-                .requires_gradient = requires_gradient,
-                .device = device,
-            };
+            const self = try Self.empty(shape, requires_gradient, device);
+            device.mem_random(T, self.get_data(), op, zg.settings.seed);
             return self;
         }
 
-        pub fn from_cache(dims: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+        pub fn from_cache(dims: []const usize, requires_gradient: bool, device: DeviceReference) !?*Self {
             if (device.cache.get(Self, dims)) |self| {
                 self.requires_gradient = requires_gradient;
+                if (requires_gradient and zg.rt_grad_enabled) {
+                    try self.setup_grad(0);
+                }
                 return self;
             }
-            return Self.empty(dims, requires_gradient, device);
+            return null;
         }
 
-        pub fn to_cache(self: *Self) void {
+        pub fn to_cache(self: *Self) bool {
             std.debug.assert(!self.acquired);
             std.debug.assert(self._backward_ctx == null);
+            if (zg.settings.caching_policy) |policy| {
+                if (policy.min_byte_size) |min_bs| {
+                    if (self.get_size() < min_bs) return false;
+                }
+                if (policy.max_byte_size) |max_bs| {
+                    if (self.get_size() > max_bs) return false;
+                }
+            } else {
+                return false;
+            }
             self._backward = null;
             self._backward_ctx = null;
             self.children.clearRetainingCapacity();
             self.label.clearRetainingCapacity();
-            self.device.cache.put(self, self.get_shape());
+            return self.device.cache.put(self, self.get_shape());
         }
 
         pub fn get_shape(self: Self) []const usize {
@@ -247,6 +254,11 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn deinit(self: *Self) void {
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
+
+            if (comptime use_cache) {
+                if (self.to_cache()) return;
+            }
+
             // log.debug("deinit().data {?s}", .{self.get_label()});
             self.data.deinit(self.device);
             if (self.grad) |g| {
