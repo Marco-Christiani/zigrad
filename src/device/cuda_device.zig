@@ -132,23 +132,31 @@ pub const Blas = struct {
         A: []const T,
         B: []const T,
         C: []T,
-        m: usize,
-        n: usize,
-        k: usize,
+        M: usize,
+        N: usize,
+        K: usize,
         trans_a: bool,
         trans_b: bool,
+        lda: usize,
+        ldb: usize,
+        ldc: usize,
         alpha: T,
         beta: T,
     ) void {
-        if (!trans_a and !trans_b) {
-            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, m, n, k, trans_a, trans_b, n, k, k, alpha, beta);
-        } else if (trans_a and trans_b) {
-            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, n, m, k, trans_a, trans_b, n, m, k, alpha, beta);
-        } else if (trans_a and !trans_b) {
-            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, n, m, k, trans_a, trans_b, n, k, k, alpha, beta);
-        } else {
-            cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, m, n, k, trans_a, trans_b, n, n, k, alpha, beta);
-        }
+        cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
+
+        // NOTE: These are the transformations to the sizes and leading dimensions that have to happen. Please do not
+        // remove the commented out code until we have decided how to support columnwise backends (cuda is columnwise).
+
+        //if (!trans_a and !trans_b) {
+        //    cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, m, n, k, trans_a, trans_b, n, k, k, alpha, beta);
+        //} else if (trans_a and trans_b) {
+        //    cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, n, m, k, trans_a, trans_b, n, m, k, alpha, beta);
+        //} else if (trans_a and !trans_b) {
+        //    cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, n, m, k, trans_a, trans_b, n, k, k, alpha, beta);
+        //} else {
+        //    cuda.gemm(dtype(T), self.cublas(), A.ptr, B.ptr, C.ptr, m, n, k, trans_a, trans_b, n, n, k, alpha, beta);
+        //}
     }
 
     /// Outer product: A = alpha(xy') + A
