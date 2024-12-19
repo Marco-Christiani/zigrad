@@ -72,7 +72,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        cuda.addition(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+        cuda.addition(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len, y.len, z.len);
     }
 
     pub fn sub(
@@ -82,7 +82,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        cuda.subtraction(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+        cuda.subtraction(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len, y.len, z.len);
     }
 
     pub fn mul(
@@ -92,7 +92,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        cuda.multiplication(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+        cuda.multiplication(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len, y.len, z.len);
     }
 
     pub fn div(
@@ -102,7 +102,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        cuda.division(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len);
+        cuda.division(dtype(T), self.stream(), x.ptr, y.ptr, z.ptr, x.len, y.len, z.len);
     }
 
     /// Computes mat-vec assuming a stride of 1 for the vec and row-major.

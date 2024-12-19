@@ -111,7 +111,9 @@ EXTERN_C void addition(
   const void* x,
   const void* y,
   void* z,
-  len_t n
+  len_t x_len,
+  len_t y_len,
+  len_t z_len
 );
 
 EXTERN_C void subtraction(
@@ -120,7 +122,9 @@ EXTERN_C void subtraction(
   const void* x,
   const void* y,
   void* z,
-  len_t n
+  len_t x_len,
+  len_t y_len,
+  len_t z_len
 );
 
 EXTERN_C void multiplication(
@@ -129,7 +133,9 @@ EXTERN_C void multiplication(
   const void* x,
   const void* y,
   void* z,
-  len_t n
+  len_t x_len,
+  len_t y_len,
+  len_t z_len
 );
 
 EXTERN_C void division(
@@ -138,7 +144,9 @@ EXTERN_C void division(
   const void* x,
   const void* y,
   void* z,
-  len_t n
+  len_t x_len,
+  len_t y_len,
+  len_t z_len
 );
 
 #endif
