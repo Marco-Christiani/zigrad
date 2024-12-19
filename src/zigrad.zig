@@ -23,6 +23,16 @@ pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
 
+const device_root = @import("device");
+pub const device = device_root.device;
+pub const DeviceReference = device.DeviceReference;
+pub const backend = device_root.backend;
+pub const ReduceType = device_root.ReduceType;
+pub const RandType = device_root.RandType;
+pub const SmaxType = device_root.SmaxType;
+
+// we should make this a build option like
+
 /// lib-wide default options that can be overridden by the root file.
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
 /// E.g. in your main file `const zigrad_settings = .{ .gradEnabled = true };`
@@ -33,8 +43,22 @@ pub const Settings = struct {
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
-    /// currently only used for generating node labels when tracing the comp graph
+    caching_policy: ?CachingPolicy = null,
     seed: u64 = 81761,
+};
+
+/// Enables setting up boundaries for how caching
+/// behaves. If caching is turned off if it is not
+/// initialized by the user (null default value).
+/// If all values are null, it's completely
+/// permissive and will cache everything.
+pub const CachingPolicy = struct {
+    /// Sets a floor on how big a tensor must be
+    /// in bytes to be eligible for caching.
+    min_byte_size: ?usize = null,
+    /// Sets a ceiling on how big a tensor must be
+    /// in bytes to be eligible for caching.
+    max_byte_size: ?usize = null,
 };
 
 /// Global flag for enabling/disabling gradient tracking.
