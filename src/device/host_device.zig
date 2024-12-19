@@ -49,16 +49,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-
-        // a b c   x y z
-        // d e f +        = ?
-        // g h i
-
-        for (0..z.len) |i| {
-            const x_i = if (i < x.len) i else 0;
-            const y_i = if (i < y.len) i else 0;
-            z[i] = x[x_i] + y[y_i];
-        }
+        for (0..z.len) |i| z[i] = x[i % x.len] + y[i % y.len];
     }
 
     pub fn sub(
