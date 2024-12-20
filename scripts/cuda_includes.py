@@ -36,6 +36,7 @@ if __name__ == "__main__":
         f'#include "{cuda_path}/include/thrust/execution_policy.h"',
         f'#include "{cuda_path}/include/thrust/random.h"',
         f'#include "{cuda_path}/include/cudnn.h"',
+        f'#include "{cuda_path}/include/cutensor.h"',
     ]
     
     with open(root, 'w') as file:
