@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include "cuda_utils.h"
-
 #include "cuda_helpers.cu"
+#include <iterator>
 
 extern "C" void* mem_alloc(len_t N, void* stream) {
   CUstream _stream = get_stream(stream);
@@ -118,6 +118,18 @@ extern "C" void* init_cudnn_handle(void* stream) {
 
 extern "C" void deinit_cudnn_handle(void* handle) {
   CUDNN_ASSERT(cudnnDestroy(static_cast<cudnnHandle_t>(handle)));
+}
+
+#include "cutensor_utils.cu"
+
+extern "C" CutensorWrapper init_cutensor(void* stream) {
+  CutensorBackend* backend = new CutensorBackend(stream);
+  return CutensorBackend::wrap(backend);
+}
+
+extern "C" void deinit_cutensor(CutensorWrapper wrapper) {
+  CutensorBackend* backend = CutensorBackend::unwrap(wrapper);
+  delete backend;
 }
 
 extern "C" void mem_fill(dtype id, void* data, len_t n, const void* value, void* stream) {

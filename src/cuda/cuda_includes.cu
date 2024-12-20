@@ -13,3 +13,4 @@
 #include "/usr/local/cuda/include/thrust/execution_policy.h"
 #include "/usr/local/cuda/include/thrust/random.h"
 #include "/usr/local/cuda/include/cudnn.h"
+#include "/usr/local/cuda/include/cutensor.h"
