@@ -362,6 +362,7 @@ pub const CudaDevice = struct {
         stream: *anyopaque,
         cublas: *anyopaque,
         cudnn: *anyopaque,
+        cutensor: cuda.CutensorWrapper,
     },
     nn: NN,
     blas: Blas,

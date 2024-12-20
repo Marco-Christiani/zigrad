@@ -1,6 +1,7 @@
 #ifndef __CUDA_HELPERS_ZIG__
 #define __CUDA_HELPERS_ZIG__
 
+#include <cutensor/types.h>
 #include <stdio.h>
 #include "/usr/local/cuda/include/cuda.h"
 #include "/usr/local/cuda/include/cublas_v2.h"
@@ -64,6 +65,16 @@ inline void handleCudnnError(cudnnStatus_t err, const char *file, int line)
   }
 }
 
+#define CUTENSOR_ASSERT(err) (handleCutensorStatus(err, __FILE__, __LINE__ ))
+inline void handleCutensorStatus(cutensorStatus_t status, const char *file, int line)
+{
+  // TODO: Report better cublas errors
+  if (status != CUTENSOR_STATUS_SUCCESS) {
+      printf("%s in %s at line %d\n", cutensorGetErrorString(status), file, line);
+    exit(EXIT_FAILURE);
+  }
+}
+
 template <typename T>
 T* __alloc_scalar(cudaStream_t stream) {
   CUdeviceptr dptr;
@@ -101,4 +112,21 @@ inline cudaStream_t __cudnn_stream(void* handle) {
   return stream;
 }
 
+#define CHECK_INVARIANT(b, msg) (CheckInvariant(b, msg, __FILE__, __LINE__ ))
+inline void CheckInvariant(bool check, const char* message, const char *file, int line)
+{
+  if (!(check)) {
+    printf("%s in %s at line %d\n", (message), file, line);
+    exit(EXIT_FAILURE);
+  }
+}
+
+#define SYSTEM_EXIT(msg) (SystemExit(msg, __FILE__, __LINE__ ))
+inline void SystemExit(const char* message, const char *file, int line)
+{
+  printf("%s in %s at line %d\n", (message), file, line);
+  exit(EXIT_FAILURE);
+}
+
 #endif
+

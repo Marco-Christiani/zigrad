@@ -13,6 +13,7 @@ typedef unsigned char dtype;
 static const dtype SINGLE = 0;
 static const dtype DOUBLE = 1;
 
+typedef struct { void* ptr; } CutensorWrapper;
 
 typedef unsigned char reduxtype;
 static const reduxtype RDX_NONE = 0;
