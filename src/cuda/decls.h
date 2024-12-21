@@ -29,4 +29,6 @@ typedef unsigned char randtype;
 static const randtype UNIFORM = 0;
 static const randtype NORMAL = 1;
 
+typedef enum { ADD, MIN, MAX } BINARY_OP;
+
 #endif

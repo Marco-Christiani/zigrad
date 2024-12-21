@@ -122,12 +122,12 @@ extern "C" void deinit_cudnn_handle(void* handle) {
 
 #include "cutensor_utils.cu"
 
-extern "C" CutensorWrapper init_cutensor(void* stream) {
+extern "C" CutensorWrapper init_cutensor_handle(void* stream) {
   CutensorBackend* backend = new CutensorBackend(stream);
   return CutensorBackend::wrap(backend);
 }
 
-extern "C" void deinit_cutensor(CutensorWrapper wrapper) {
+extern "C" void deinit_cutensor_handle(CutensorWrapper wrapper) {
   CutensorBackend* backend = CutensorBackend::unwrap(wrapper);
   delete backend;
 }

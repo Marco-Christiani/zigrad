@@ -5,6 +5,7 @@ const DimensionMap = @import("dimension_map.zig");
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
+const BinaryOp = @import("device_common.zig").BinaryOp;
 
 pub fn dtype(comptime T: type) cuda.dtype {
     return switch (T) {
@@ -15,6 +16,14 @@ pub fn dtype(comptime T: type) cuda.dtype {
         // tensors as indices for functions like gather. They just can't go through
         // a blas or nn function, so this seems appropriate for the time being.
         else => @panic("Only supports floating point, found: " ++ @typeName(T)),
+    };
+}
+
+pub fn binary_op(rdx: BinaryOp) cuda.BINARY_OP {
+    return switch (rdx) {
+        .add => cuda.ADD,
+        .min => cuda.MIN,
+        .max => cuda.MAX,
     };
 }
 
@@ -213,6 +222,40 @@ pub const Blas = struct {
         cuda.max_reverse(dtype(T), self.cublas(), y_grd.ptr, x_grd.ptr, idx);
     }
 
+    pub fn reduce(
+        self: *Blas,
+        T: type,
+        x_vals: []const T,
+        x_dims: []const usize,
+        y_vals: []T,
+        y_dims: []const usize,
+        dim_idxs: []const usize,
+        alpha: T,
+        beta: T,
+        comptime op: BinaryOp,
+    ) void {
+        const par = self.parent();
+        const _alpha = alpha;
+        const _beta = beta;
+        cuda.reduce(
+            dtype(T),
+            par.context.cutensor,
+            x_vals.ptr,
+            x_dims.ptr,
+            x_dims.len,
+            y_vals.ptr,
+            y_dims.ptr,
+            y_dims.len,
+            &par.scratch.start,
+            &par.scratch.total,
+            dim_idxs.ptr,
+            dim_idxs.len,
+            &_alpha,
+            &_beta,
+            binary_op(op),
+        );
+    }
+
     pub fn sum(
         self: *const Blas,
         T: type,
@@ -325,11 +368,11 @@ pub const NN = struct {
 };
 
 pub const ScratchMemory = struct {
-    head: usize = 0,
-    tail: usize = 0,
+    start: usize = 0,
+    total: usize = 0,
     pub fn deinit(self: *ScratchMemory, stream: *anyopaque) void {
-        if (self.head != 0) {
-            cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.head)), stream);
+        if (self.start != 0) {
+            cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.start)), stream);
         }
         self.* = undefined;
     }
@@ -339,16 +382,16 @@ pub const ScratchMemory = struct {
     pub fn get(self: *ScratchMemory, comptime T: type, n: usize, stream: *anyopaque) []T {
         const total: usize = @sizeOf(T) * n;
         // check if we have enough scratch to provide a payload
-        if (self.tail < (self.head + total)) {
-            if (self.head != 0) {
-                cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.head)), stream);
+        if (self.total < total) {
+            if (self.start != 0) {
+                cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.start)), stream);
             }
             // after a first pass through the network, we should know if we have enough memory.
             const ptr = cuda.mem_alloc(total, stream) orelse @panic("Cannot allocate scratch memory.");
-            self.head = @intFromPtr(ptr);
-            self.tail = self.head + total;
+            self.start = @intFromPtr(ptr);
+            self.total = total;
         }
-        const ptr: [*]T = @ptrFromInt(self.head);
+        const ptr: [*]T = @ptrFromInt(self.start);
         return ptr[0..n];
     }
 };
@@ -375,12 +418,14 @@ pub const CudaDevice = struct {
         const stream = cuda.init_stream() orelse unreachable;
         const cublas = cuda.init_cublas_handle(stream) orelse unreachable;
         const cudnn = cuda.init_cudnn_handle(stream) orelse unreachable;
+        const cutensor = cuda.init_cutensor_handle(stream);
         return .{
             .context = .{
                 .device_number = device_number,
                 .stream = stream,
                 .cublas = cublas,
                 .cudnn = cudnn,
+                .cutensor = cutensor,
             },
             .nn = .{},
             .blas = .{},
@@ -394,7 +439,9 @@ pub const CudaDevice = struct {
     pub fn deinit(self: *CudaDevice) void {
         self.sync();
         self.cache.deinit();
+        cuda.deinit_cudnn_handle(self.context.cudnn);
         cuda.deinit_cublas_handle(self.context.cublas);
+        cuda.deinit_cutensor_handle(self.context.cutensor);
         cuda.deinit_stream(self.context.stream);
         self.* = undefined;
     }

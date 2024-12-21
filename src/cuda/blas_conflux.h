@@ -149,4 +149,23 @@ EXTERN_C void division(
   len_t z_len
 );
 
+EXTERN_C void reduce(
+    dtype id,
+    CutensorWrapper wrapper,
+    const void* x_vals,
+    const len_t* x_dims,
+    len_t x_dims_len,
+    void* y_vals,
+    const len_t* y_dims,
+    len_t y_dims_len,
+    len_t* scratch,
+    len_t* scratch_len,
+    const len_t* rdx_idxs,
+    len_t rdx_idxs_len,
+    const void* alpha,
+    const void* beta,
+    BINARY_OP op
+);
+
+
 #endif
