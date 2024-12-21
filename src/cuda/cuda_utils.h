@@ -22,7 +22,7 @@ EXTERN_C void* init_cublas_handle(void* stream);
 EXTERN_C void deinit_cublas_handle(void* handle);
 EXTERN_C void* init_cudnn_handle(void* stream);
 EXTERN_C void deinit_cudnn_handle(void* handle);
-EXTERN_C CutensorWrapper init_cutensor(void* stream);
-EXTERN_C void deinit_cutensor(CutensorWrapper);
+EXTERN_C CutensorWrapper init_cutensor_handle(void* stream);
+EXTERN_C void deinit_cutensor_handle(CutensorWrapper);
 
 #endif

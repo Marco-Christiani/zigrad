@@ -11,3 +11,4 @@
 #include "blas/subtraction.cu"
 #include "blas/multiplication.cu"
 #include "blas/division.cu"
+#include "blas/reduce.cu"

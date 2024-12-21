@@ -9,6 +9,17 @@
 #include "decls.h"
 #include "cuda_helpers.cu"
 
+cutensorOperator_t cutensor_op_type(BINARY_OP op) {
+  switch (op) {
+    case BINARY_OP::ADD: return cutensorOperator_t::CUTENSOR_OP_ADD;
+    case BINARY_OP::MIN: return cutensorOperator_t::CUTENSOR_OP_MIN;
+    case BINARY_OP::MAX: return cutensorOperator_t::CUTENSOR_OP_MAX;
+    default: 
+      SYSTEM_EXIT("Invalid reduce operation");
+      return {}; // silence warning
+  }
+}
+
 cutensorDataType_t cutensor_data_type(dtype id) {
   switch (id) {
     case SINGLE: return cutensorDataType_t::CUTENSOR_R_32F;
@@ -112,8 +123,6 @@ class CutensorBackend {
 
     cudaStream_t stream{nullptr};
     cutensorHandle_t handle{nullptr};
-    CutensorPlanMap reduce_sum_map{};
-    CutensorPlanMap reduce_max_map{};
 
     static CutensorBackend* unwrap(CutensorWrapper wrapper) {
       return static_cast<CutensorBackend*>(wrapper.ptr);
@@ -131,29 +140,39 @@ class CutensorBackend {
       CUTENSOR_ASSERT(cutensorDestroy(this->handle));
     }
 
-    cutensorPlan_t get_sum_over_dim_plan(
+    cutensorPlan_t get_reduce_plan(
       dtype id,
-      const len_t* dims,
-      len_t dim_len,
-      len_t rdx_dim,
-      void** scratch,
-      len_t* scratch_len
+      const len_t* src_dims,
+      len_t src_dims_len,
+      const len_t* rdx_idxs,
+      len_t rdx_idxs_len,
+      len_t* scratch,
+      len_t* scratch_len,
+      BINARY_OP op
     ) {
-      return this->get_reduce_plan(id, dims, dim_len, &rdx_dim, 1, scratch, scratch_len, this->reduce_sum_map, CUTENSOR_OP_ADD);
-    }
-
-    cutensorPlan_t get_max_over_dim_plan(
-      dtype id,
-      const len_t* dims,
-      len_t dim_len,
-      len_t rdx_dim,
-      void** scratch,
-      len_t* scratch_len
-    ) {
-      return this->get_reduce_plan(id, dims, dim_len, &rdx_dim, 1, scratch, scratch_len, this->reduce_max_map, CUTENSOR_OP_MAX);
+      switch (op) {
+        case BINARY_OP::ADD: 
+          return this->get_reduce_plan(
+            id, src_dims, src_dims_len, rdx_idxs, rdx_idxs_len, scratch, scratch_len, this->reduce_sum_map, CUTENSOR_OP_ADD
+          );
+        case BINARY_OP::MIN: 
+          return this->get_reduce_plan(
+            id, src_dims, src_dims_len, rdx_idxs, rdx_idxs_len, scratch, scratch_len, this->reduce_min_map, CUTENSOR_OP_MIN
+          );
+        case BINARY_OP::MAX: 
+          return this->get_reduce_plan(
+            id, src_dims, src_dims_len, rdx_idxs, rdx_idxs_len, scratch, scratch_len, this->reduce_max_map, CUTENSOR_OP_MAX
+          );
+        default:
+          SYSTEM_EXIT("Invalid Binary Operation");
+          return nullptr;
+      }      
     }
 
   private:
+    CutensorPlanMap reduce_sum_map{};
+    CutensorPlanMap reduce_max_map{};
+    CutensorPlanMap reduce_min_map{};
   
     cutensorPlan_t get_reduce_plan(
       dtype id,
@@ -161,12 +180,12 @@ class CutensorBackend {
       len_t src_dims_len,
       const len_t* rdx_idxs,
       len_t rdx_idxs_len,
-      void** scratch,
+      len_t* scratch,
       len_t* scratch_len,
       CutensorPlanMap& plan_map,
       cutensorOperator_t redux
     ) {
-      CHECK_INVARIANT(rdx_idxs_len <= src_dims_len, "Reduction dimension out of bounds");
+      CHECK_INVARIANT(rdx_idxs_len < src_dims_len, "Reduction dimension out of bounds");
       CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to reduce");
       CHECK_INVARIANT(0 < rdx_idxs_len, "Zero length dimensions passed to reduce");
   
@@ -209,12 +228,8 @@ class CutensorBackend {
   
             b_dims.append(static_cast<i64>(src_dims[i]));
             b_syms.append(sym);
-          }
-  
-          a_dims.append(1);
-          b_dims.append(1);
-          a_syms.append('z');
-          b_syms.append('z');
+          }  
+
           a_dims.reverse();
           b_dims.reverse();
           a_syms.reverse();
@@ -274,12 +289,21 @@ class CutensorBackend {
        * Query workspace estimate
        **********************/
   
+      len_t new_scratch_len = 0;
       CUTENSOR_ASSERT(cutensorEstimateWorkspaceSize(
                   this->handle,
                   desc,
                   plan_preference,
                   CUTENSOR_WORKSPACE_DEFAULT,
-                  scratch_len));
+                  &new_scratch_len));
+
+      if (new_scratch_len > *scratch_len) {
+          CUdeviceptr new_mem;
+          CURESULT_ASSERT(cuMemFreeAsync(static_cast<CUdeviceptr>(*scratch), this->stream));
+          CURESULT_ASSERT(cuMemAllocAsync(&new_mem, new_scratch_len, this->stream));
+          *scratch = static_cast<len_t>(new_mem);
+          *scratch_len = new_scratch_len;
+      }
   
       cutensorPlan_t plan;
       CUTENSOR_ASSERT(cutensorCreatePlan(

@@ -5,43 +5,23 @@ const layer = zg.layer;
 pub const std_options = zg.std_options;
 
 pub const zigrad_settings: zg.Settings = .{
-    .caching_policy = .{},
+    .caching_policy = null,
 };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
+    var gpu = zg.device.CudaDevice.init(0, gpa.allocator());
+    defer gpu.deinit();
 
-    var cpu = zg.device.HostDevice.init(gpa.allocator());
-    defer cpu.deinit();
+    const reference = gpu.reference();
 
-    const reference = cpu.reference();
+    const A = try zg.NDTensor(f32).empty(&.{ 3, 64, 64 }, false, reference);
+    const x = try zg.NDTensor(f32).empty(&.{ 3, 64 }, false, reference);
+    gpu.mem_sequence(f32, A.get_data(), 0.0, 1.0);
 
-    var total: f64 = 0.0;
+    gpu.blas.reduce(f32, A.get_data(), A.get_shape(), x.get_data(), x.get_shape(), &.{1}, 1.0, 0.0, .add);
 
-    for (0..10_000) |i| {
-        var start = try std.time.Timer.start();
-        const x = try zg.NDTensor(f32).empty(&.{ 64, 1024 }, true, reference);
-        x.deinit();
-
-        const y = try zg.NDTensor(f32).empty(&.{ 64, 1024 }, true, reference);
-        y.deinit();
-
-        const z = try zg.NDTensor(f32).empty(&.{ 64, 1024 }, true, reference);
-        z.deinit();
-
-        const elapsed = start.lap();
-
-        if (i != 0) {
-            // skip the warmup round to make things fair
-            total += @floatFromInt(elapsed);
-        }
-
-        _ = arena.reset(.retain_capacity);
-    }
-
-    std.debug.print("Elapsed: {d:.10}\n", .{total / 10_000.0});
+    x.print();
 }
