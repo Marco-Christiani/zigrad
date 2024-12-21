@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 
+const DeviceReference = zg.DeviceReference;
 const GraphManager = zg.GraphManager;
 const NDTensor = zg.NDTensor;
 const Model = zg.Model;
@@ -33,9 +34,9 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
         ) Self {
             return .{
                 .model = model,
-                .params = model.getParameters(),
+                .params = model.get_parameters(),
                 .optimizer = optimizer,
-                .graph_manager = GraphManager(NDTensor(T)).init(model.allocator, graph_config),
+                .graph_manager = GraphManager(NDTensor(T)).init(model.device.allocator, graph_config),
             };
         }
 
@@ -43,22 +44,20 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             log.info("deinit gm", .{});
             self.graph_manager.deinit();
             log.info("free params ref", .{});
-            self.model.allocator.free(self.params);
+            self.model.device.allocator.free(self.params);
             self.* = undefined;
         }
 
-        pub fn trainStep(
+        pub fn train_step(
             self: *Self,
             input: *NDTensor(T),
             target: *NDTensor(T),
-            fwd_allocator: std.mem.Allocator,
-            bwd_allocator: std.mem.Allocator,
         ) !*NDTensor(T) {
-            const output = try self.model.forward(input, fwd_allocator);
-            const loss = try lossf(T, output, target, fwd_allocator);
-            self.model.zeroGrad();
-            loss.grad.?.fill(1.0);
-            try self.graph_manager.backward(loss, bwd_allocator);
+            const output = try self.model.forward(input);
+            const loss = try lossf(T, output, target);
+            self.model.zero_grad();
+            try loss.setup_grad(0);
+            try self.graph_manager.backward(loss);
             self.optimizer.step(self.params);
             return loss;
         }
@@ -72,7 +71,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             // for (0..epochs) |epoch| {
             //     var total_loss: T = 0;
             //     for (inputs, targets) |input, target| {
-            //         const loss = try self.trainStep(input, target);
+            //         const loss = try self.train_step(input, target);
             //         total_loss += loss;
             //     }
             //     const avg_loss = total_loss / @as(T, @floatFromInt(inputs.len));
@@ -80,7 +79,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             // }
         }
 
-        fn logData(msg: []const u8, data: []T) void {
+        fn log_data(msg: []const u8, data: []T) void {
             var i: usize = 0;
             const max_n = @min(data.len, 20);
             while (i < max_n) : (i += 10) {

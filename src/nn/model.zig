@@ -2,6 +2,7 @@ const std = @import("std");
 const zg = @import("../zigrad.zig");
 const Layer = zg.layer.Layer;
 const NDTensor = zg.NDTensor;
+const DeviceReference = zg.DeviceReference;
 
 const log = std.log.scoped(.zg_model);
 
@@ -9,12 +10,12 @@ pub fn Model(comptime T: type) type {
     return struct {
         const Self = @This();
         layers: std.ArrayList(Layer(T)),
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
 
-        pub fn init(allocator: std.mem.Allocator) !Self {
+        pub fn init(device: DeviceReference) !Self {
             return Self{
-                .layers = std.ArrayList(Layer(T)).init(allocator),
-                .allocator = allocator,
+                .layers = std.ArrayList(Layer(T)).init(device.allocator),
+                .device = device,
             };
         }
 
@@ -28,30 +29,30 @@ pub fn Model(comptime T: type) type {
             for (self.layers.items) |layer| layer.release();
         }
 
-        pub fn addLayer(self: *Self, layer: Layer(T)) !void {
+        pub fn add_layer(self: *Self, layer: Layer(T)) !void {
             try self.layers.append(layer);
         }
 
-        pub fn forward(self: Self, input: *NDTensor(T), fwd_allocator: std.mem.Allocator) !*NDTensor(T) {
+        pub fn forward(self: Self, input: *NDTensor(T)) !*NDTensor(T) {
             var output = input;
-            for (self.layers.items) |layer| output = try layer.forward(output, fwd_allocator);
+            for (self.layers.items) |layer| output = try layer.forward(output);
             return output;
         }
 
         /// COM.
-        pub fn getParameters(self: Self) []*NDTensor(T) {
-            var params = std.ArrayList(*NDTensor(T)).init(self.allocator);
+        pub fn get_parameters(self: Self) []*NDTensor(T) {
+            var params = std.ArrayList(*NDTensor(T)).init(self.device.allocator);
             defer params.deinit();
             for (self.layers.items) |layer| {
-                if (layer.getParameters()) |layer_params| {
+                if (layer.get_parameters()) |layer_params| {
                     for (layer_params) |p| params.append(p) catch unreachable;
                 }
             }
             return params.toOwnedSlice() catch unreachable;
         }
 
-        pub fn zeroGrad(self: Self) void {
-            for (self.layers.items) |layer| layer.zeroGrad();
+        pub fn zero_grad(self: Self) void {
+            for (self.layers.items) |layer| layer.zero_grad();
         }
     };
 }
