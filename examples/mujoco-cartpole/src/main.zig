@@ -1,4 +1,6 @@
 pub fn main() !void {
-    // try @import("headless.zig").main();
-    try @import("dqn_train.zig").trainDQN();
+    // try @import("dqn_train.zig").trainDQN();
+    // try @import("render.zig").main();
+    // try @import("render_buffer.zig").main();
+    try @import("cartpole.zig").main();
 }

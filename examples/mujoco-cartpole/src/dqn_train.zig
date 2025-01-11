@@ -1,6 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const CartPole = @import("headless.zig").CartPoleMj;
+const CartPole = @import("cartpole.zig").CartPoleMj;
 const DQNAgent = @import("dqn_agent.zig").DQNAgent;
 const tb = @import("tensorboard");
 const T = f32;
