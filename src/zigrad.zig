@@ -22,6 +22,7 @@ pub const utils = @import("nn/utils.zig");
 pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
+pub const blas = @import("backend/blas.zig");
 
 /// lib-wide default options that can be overridden by the root file.
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
