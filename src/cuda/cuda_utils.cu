@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include "cuda_utils.h"
 #include "cuda_helpers.cu"
-#include <iterator>
+#include "device_properties.cu"
 
 extern "C" void* mem_alloc(len_t N, void* stream) {
   CUstream _stream = get_stream(stream);
@@ -44,7 +44,7 @@ extern "C" void device_synchronize() {
   CUDA_ASSERT(cudaDeviceSynchronize());
 }
 
-extern "C" void init_device(unsigned device_number) {
+extern "C" DevicePropertiesWrapper init_device(unsigned device_number) {
 
     CURESULT_ASSERT(cuInit(device_number));
 
@@ -54,13 +54,21 @@ extern "C" void init_device(unsigned device_number) {
 
     CURESULT_ASSERT(cuDeviceGetCount(&device_count));
 
-    if (device_count <= device_number) {
-        fprintf(stderr, "Error: no devices supporting CUDA\n");
-        exit(-1);
-    }
+    CHECK_INVARIANT(device_count > 0, "Device count came back as zero");
+    CHECK_INVARIANT(device_count <= device_number, "Device ID greater than number of devices");
 
     CURESULT_ASSERT(cuDeviceGet(&device, device_number));
     CURESULT_ASSERT(cuCtxCreate(&context, 0, device));
+
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, device);
+
+    return DeviceProperties::wrap(new DeviceProperties(deviceProp));
+}
+
+extern "C" void deinit_device(DevicePropertiesWrapper wrapper) {
+    auto properties = DeviceProperties::unwrap(wrapper);
+    delete properties;
 }
 
 // Convenience wrapper for cudaGetLastError.

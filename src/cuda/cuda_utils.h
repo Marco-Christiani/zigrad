@@ -3,7 +3,7 @@
 
 #include "decls.h"
 
-EXTERN_C void init_device(unsigned);
+EXTERN_C DevicePropertiesWrapper init_device(unsigned);
 EXTERN_C void* mem_alloc(len_t N, void*);
 EXTERN_C void memcpy_HtoD(void* dptr, void const* hptr, len_t N, void*);
 EXTERN_C void memcpy_DtoH(void* hptr, void const* dptr, len_t N, void*);

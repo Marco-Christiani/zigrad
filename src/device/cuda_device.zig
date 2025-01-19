@@ -402,6 +402,7 @@ pub const CudaDevice = struct {
     // keep these out of the user api
     context: struct {
         device_number: u32,
+        properties: cuda.DevicePropertiesWrapper,
         stream: *anyopaque,
         cublas: *anyopaque,
         cudnn: *anyopaque,
@@ -414,7 +415,7 @@ pub const CudaDevice = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) CudaDevice {
-        cuda.init_device(device_number);
+        const properties = cuda.init_device(device_number);
         const stream = cuda.init_stream() orelse unreachable;
         const cublas = cuda.init_cublas_handle(stream) orelse unreachable;
         const cudnn = cuda.init_cudnn_handle(stream) orelse unreachable;
@@ -422,6 +423,7 @@ pub const CudaDevice = struct {
         return .{
             .context = .{
                 .device_number = device_number,
+                .properties = properties,
                 .stream = stream,
                 .cublas = cublas,
                 .cudnn = cudnn,
