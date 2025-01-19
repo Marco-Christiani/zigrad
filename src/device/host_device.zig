@@ -2,6 +2,7 @@ const std = @import("std");
 pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 const DimensionMap = @import("dimension_map.zig");
+const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
 
 fn host_reference(self: *HostDevice) DeviceReference {
@@ -251,6 +252,30 @@ pub const Blas = struct {
             f64 => c.cblas_daxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
             else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
         }
+    }
+
+    pub fn reduce(
+        self: Blas,
+        T: type,
+        x_vals: []const T,
+        x_dims: []const usize,
+        y_vals: []T,
+        y_dims: []const usize,
+        dim_idxs: []const usize,
+        alpha: T,
+        beta: T,
+        comptime op: BinaryOp,
+    ) void {
+        _ = self;
+        _ = x_vals;
+        _ = x_dims;
+        _ = y_vals;
+        _ = y_dims;
+        _ = dim_idxs;
+        _ = alpha;
+        _ = beta;
+        _ = op;
+        // TODO
     }
 
     const bmm = if (using_mkl) bmm_impl else void;
