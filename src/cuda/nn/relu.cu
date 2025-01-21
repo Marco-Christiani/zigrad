@@ -37,6 +37,9 @@ extern "C" void relu_forward(
       );
       return;
     }
+    default: {
+      SYSTEM_EXIT("Unsupported data type");
+    }
   }
 }
 

@@ -11,6 +11,8 @@
 typedef float f32;
 typedef double f64;
 
+#define WARP_SIZE 32
+
 inline CUstream get_stream(void* context) {
   return static_cast<CUstream>(context);
 }
