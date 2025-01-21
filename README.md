@@ -144,7 +144,7 @@ A lot is planned and hoping for support from the Zig community so we can accompl
 
 ## Contributing
 
-- [Join the discord](https://discord.gg/cvVjYZ6x) and into the dev channels
+- [Join the discord](https://discord.gg/JWSSfWj3Uf) and into the dev channels
 - In addition to the above list, anything in in [docs/roadmap.norg](docs/roadmap.norg) is planned
 - Any open issue is available for development, just leave a comment mentioning your interest and I can provide support to help get you started if necessary
 - Otherwise, **please open an issue first, before working on a PR**
