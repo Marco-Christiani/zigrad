@@ -48,5 +48,11 @@ jobs:
           git checkout gh-pages
           mv -f zig-out/docs/sources.tar .
           git add sources.tar
-          git commit -m "Update source files tar"
-          git push origin gh-pages
+
+          # Only commit if there are staged changes
+          if ! git diff --cached --quiet; then
+            git commit -m "Update source files tar"
+            git push origin gh-pages
+          else
+            echo "No changes in sources.tar to commit"
+          fi
