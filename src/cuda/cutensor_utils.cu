@@ -246,9 +246,6 @@ public:
     }
     return static_cast<T*>(itr->second.data);
   }
-  MapType::iterator find_plan(MapKey const& k) {
-    return this->map.find(k);
-  }
 
   template<class T>
   void insert(MapKey key, T val) {
@@ -556,7 +553,7 @@ class CutensorBackend {
   
       this->manager.insert(
         key,
-        BinaryPlan{
+        PermutatePlan{
           .plan = plan,
           .plan_pref = plan_pref,
           .x_desc = x_desc,
@@ -671,7 +668,7 @@ class CutensorBackend {
   
       this->manager.insert(
         key,
-        ReducePlan{
+        BinaryPlan{
           .plan = plan,
           .plan_pref = plan_pref,
           .x_desc = x_desc,
