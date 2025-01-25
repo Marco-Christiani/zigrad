@@ -256,6 +256,50 @@ pub const Blas = struct {
         );
     }
 
+    // V1 API Parity
+    pub fn transpose(
+        self: *Blas,
+        T: type,
+        x_vals: []const T,
+        x_dims: []const usize,
+        y_vals: []T,
+        y_dims: []const usize,
+        alpha: T,
+    ) void {
+        self.permutate(T, x_vals, x_dims, "ij", y_vals, y_dims, "ji", alpha);
+    }
+
+    /// can perform broadcasting of the sort:hi
+    pub fn permutate(
+        self: *Blas,
+        T: type,
+        x_vals: []const T,
+        x_dims: []const usize,
+        x_syms: []const u8,
+        y_vals: []T,
+        y_dims: []const usize,
+        y_syms: []const u8,
+        alpha: T,
+    ) void {
+        const par = self.parent();
+        const _alpha = alpha;
+        cuda.permutate(
+            dtype(T),
+            par.context.cutensor,
+            x_vals.ptr,
+            x_dims.ptr,
+            x_syms.ptr,
+            x_dims.len,
+            y_vals.ptr,
+            y_dims.ptr,
+            y_syms.ptr,
+            y_dims.len,
+            &par.scratch.start,
+            &par.scratch.total,
+            &_alpha,
+        );
+    }
+
     pub fn sum(
         self: *const Blas,
         T: type,
