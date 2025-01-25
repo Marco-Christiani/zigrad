@@ -12,7 +12,6 @@ const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
 const log = std.log.scoped(.zg_tensor);
-const use_cache = zg.settings.caching_policy != null;
 
 pub const MaxOverDimOptions = struct {
     dim: usize,
@@ -79,9 +78,6 @@ pub fn NDTensor(comptime T: type) type {
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
         pub fn empty(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
-            if (comptime use_cache) {
-                if (try from_cache(shape, requires_gradient, device)) |cached| return cached;
-            }
             const self = try device.allocator.create(Self);
             self.* = Self{
                 .data = try dtype.empty(shape, device),
@@ -253,10 +249,6 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn deinit(self: *Self) void {
             if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-
-            if (comptime use_cache) {
-                if (self.to_cache()) return;
-            }
 
             // log.debug("deinit().data {?s}", .{self.get_label()});
             self.data.deinit(self.device);
