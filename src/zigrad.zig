@@ -43,7 +43,6 @@ pub const Settings = struct {
     grad_clip_max_norm: f32 = 10.0,
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
-    caching_policy: ?CachingPolicy = null,
     seed: u64 = 81761,
 };
 
