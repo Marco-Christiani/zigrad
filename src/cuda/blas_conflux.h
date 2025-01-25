@@ -167,5 +167,13 @@ EXTERN_C void reduce(
     BINARY_OP op
 );
 
+EXTERN_C void permutate(
+  dtype id,
+  CutensorWrapper wrapper,
+  const void* x_vals, const len_t* x_dims, const unsigned char* x_syms, len_t x_dims_len,
+        void* y_vals, const len_t* y_dims, const unsigned char* y_syms, len_t y_dims_len,
+  len_t* scratch, len_t* scratch_len,
+  const void* alpha
+);
 
 #endif

@@ -12,3 +12,4 @@
 #include "blas/multiplication.cu"
 #include "blas/division.cu"
 #include "blas/reduce.cu"
+#include "blas/permutate.cu"

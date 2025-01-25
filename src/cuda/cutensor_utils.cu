@@ -332,27 +332,10 @@ class CutensorBackend {
       CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to reduce");
       CHECK_INVARIANT(0 < rdx_idxs_len, "Zero length dimensions passed to reduce");
   
-      const auto data_type = cutensor_data_type(id);
-      const auto op_type = cutensor_op_type(op);
+      BoundedArray<len_t> dst_dims;
+      BoundedArray<u8> src_syms;
+      BoundedArray<u8> dst_syms;
 
-      auto key = this->manager.make_key<ReducePlan>(
-        data_type,
-        {
-          __seq_hash(src_dims, src_dims_len),
-          __seq_hash(rdx_idxs, rdx_idxs_len),
-          static_cast<std::size_t>(op_type),                    
-        }
-      );
-
-      if (auto entry = this->manager.find<ReducePlan>(key); entry) {
-        return entry->plan.ptr;
-      }
-  
-      BoundedArray<i64> a_dims;
-      BoundedArray<i64> b_dims;
-      BoundedArray<i32> a_syms;
-      BoundedArray<i32> b_syms;
-  
       BoundedArray<len_t> r_idxs(rdx_idxs, rdx_idxs_len);
       r_idxs.sort();
   
@@ -360,10 +343,8 @@ class CutensorBackend {
           i32 sym = 'i';
           len_t r_pos = 0;
   
-          for (len_t i = 0; i < src_dims_len; ++i, ++sym) {
-  
-            a_dims.append(static_cast<i64>(src_dims[i]));
-            a_syms.append(sym);
+          for (len_t i = 0; i < src_dims_len; ++i, ++sym) {  
+            src_syms.append(sym);
   
             // skip every index indicated for reduction...
             if (r_pos < r_idxs.size && i == r_idxs.data[r_pos]) {
@@ -371,16 +352,62 @@ class CutensorBackend {
               continue;
             };
   
-            b_dims.append(static_cast<i64>(src_dims[i]));
-            b_syms.append(sym);
+            dst_dims.append(src_dims[i]);
+            dst_syms.append(sym);
           }  
+      }  
 
-          a_dims.reverse();
-          b_dims.reverse();
-          a_syms.reverse();
-          b_syms.reverse();
-      }
+      return this->get_reduce_plan(
+        id,
+        src_dims,
+        src_syms.ptr(),
+        src_dims_len, 
+        dst_dims.ptr(),
+        dst_syms.ptr(),
+        dst_dims.size,
+        scratch,
+        scratch_len,
+        op
+      );
+    } 
+
+    cutensorPlan_t get_reduce_plan(
+      dtype id,
+      const len_t* src_dims,
+      const u8* src_syms,
+      len_t src_dims_len,
+      const len_t* dst_dims,
+      const u8* dst_syms,
+      len_t dst_dims_len,
+      len_t* scratch,
+      len_t* scratch_len,
+      BINARY_OP op
+    ) {
+      CHECK_INVARIANT(0 < dst_dims_len, "Zero length dimensions passed to reduce");
+      CHECK_INVARIANT(src_dims_len > dst_dims_len, "Reduction dimension out of bounds");
   
+      const auto data_type = cutensor_data_type(id);
+      const auto op_type = cutensor_op_type(op);
+
+      auto key = this->manager.make_key<PermutatePlan>(
+        data_type,
+        {
+          __seq_hash(src_dims, src_dims_len),
+          __seq_hash(src_syms, src_dims_len),
+          __seq_hash(dst_dims, src_dims_len),
+          __seq_hash(dst_syms, src_dims_len),
+        }
+      );
+
+      if (auto entry = this->manager.find<PermutatePlan>(key); entry) {
+        return entry->plan.ptr;
+      }
+
+      BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
+      BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
+      BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
+      BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
+
       cutensorTensorDescriptor_t x_desc;
       CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
                   this->handle,
@@ -457,12 +484,13 @@ class CutensorBackend {
       return plan;
     } 
 
+
     // syms and dims must be same length
     cutensorPlan_t get_permutate_plan(
       dtype id,
       const len_t* src_dims,
-      len_t src_dims_len,
       const u8* src_syms,
+      len_t src_dims_len,
       const len_t* dst_dims,
       const u8* dst_syms,
       len_t dst_dims_len,
@@ -587,7 +615,7 @@ class CutensorBackend {
       const auto data_type = cutensor_data_type(id);
       const auto op_type = cutensor_op_type(op);
 
-      auto key = this->manager.make_key<PermutatePlan>(
+      auto key = this->manager.make_key<BinaryPlan>(
         data_type,
         {
           __seq_hash(src_dims, src_dims_len),
