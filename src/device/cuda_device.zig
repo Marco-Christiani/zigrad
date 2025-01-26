@@ -168,6 +168,90 @@ pub const Blas = struct {
         //}
     }
 
+    fn _bmm_arg(comptime str: []const u8, tran: bool) []const u8 {
+        return switch (str.len) {
+            2 => if (tran) &.{ str[1], str[0] } else str,
+            3 => if (tran) &.{ str[0], str[2], str[1] } else str,
+        };
+    }
+
+    fn _bmm_out(comptime str: []const u8, size: usize) []const u8 {
+        return if (str.len > size) str[1..] else str;
+    }
+
+    const BmmSet = struct {
+        A: []const u8,
+        B: []const u8,
+        C: []const u8,
+    };
+
+    fn find_remove(T: type, v: []T, x: T) usize {
+        var i: usize = 0;
+        var j: usize = 0;
+        while (j < v.len) : ({
+            j += 1;
+        }) {
+            if (v[j] == x)
+                continue;
+            v[i] = v[j];
+            i += 1;
+        }
+        return i;
+    }
+
+    pub fn bmm_acc(
+        self: *Blas,
+        T: type,
+        A: []const T,
+        A_sizes: []const usize,
+        B: []const T,
+        B_sizes: []const usize,
+        C: []T,
+        C_sizes: []const usize,
+        trans_a: bool,
+        trans_b: bool,
+        _: usize,
+        _: usize,
+        _: usize,
+        alpha: T,
+        beta: T,
+    ) void {
+        var A_modes = std.BoundedArray(u8, 8).fromSlice(if (trans_a) "ikj" else "ijk") catch unreachable;
+        var B_modes = std.BoundedArray(u8, 8).fromSlice(if (trans_b) "lmk" else "lkm") catch unreachable;
+        var C_modes = std.BoundedArray(u8, 8).fromSlice("iljm") catch unreachable;
+
+        if (A_sizes.len < 3) { // remove "i"
+            A_modes.len = @intCast(find_remove(u8, A_modes.slice(), 'i'));
+            A_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'i'));
+        }
+        if (B_sizes.len < 3) { // remove "l"
+            B_modes.len = @intCast(find_remove(u8, B_modes.slice(), 'l'));
+            C_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'l'));
+        }
+        if (A_sizes.len < 2) { // remove "j"
+            A_modes.len = @intCast(find_remove(u8, A_modes.slice(), 'j'));
+            A_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'j'));
+        }
+        if (B_sizes.len < 2) { // remove "m"
+            B_modes.len = @intCast(find_remove(u8, B_modes.slice(), 'm'));
+            C_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'm'));
+        }
+        const par = self.parent();
+        const _alpha = alpha;
+        const _gamma = beta;
+
+        // zig fmt: off
+        cuda.contraction(
+            dtype(T), par.context.cutensor,
+            A.ptr, A_sizes.ptr, &A_modes.buffer[0], A_sizes.len,
+            B.ptr, B_sizes.ptr, &B_modes.buffer[0], B_sizes.len,
+            C.ptr, C_sizes.ptr, &C_modes.buffer[0], C_sizes.len,
+            &par.scratch.start, &par.scratch.total,
+            &_alpha, &_gamma,
+        );
+        // zig fmt: on
+    }
+
     /// Outer product: A = alpha(xy') + A
     /// A: (M, N)
     pub fn outer(
@@ -222,21 +306,18 @@ pub const Blas = struct {
         cuda.max_reverse(dtype(T), self.cublas(), y_grd.ptr, x_grd.ptr, idx);
     }
 
-    pub fn reduce(
+    pub fn sum_along(
         self: *Blas,
         T: type,
         x_vals: []const T,
         x_dims: []const usize,
         y_vals: []T,
-        y_dims: []const usize,
-        dim_idxs: []const usize,
-        alpha: T,
-        beta: T,
-        comptime op: BinaryOp,
+        dim_idx: usize,
     ) void {
+        const dim_arr: [1]usize = .{dim_idx};
         const par = self.parent();
-        const _alpha = alpha;
-        const _beta = beta;
+        const _alpha: T = 1.0;
+        const _beta: T = 0.0;
         cuda.reduce(
             dtype(T),
             par.context.cutensor,
@@ -244,15 +325,42 @@ pub const Blas = struct {
             x_dims.ptr,
             x_dims.len,
             y_vals.ptr,
-            y_dims.ptr,
-            y_dims.len,
             &par.scratch.start,
             &par.scratch.total,
-            dim_idxs.ptr,
-            dim_idxs.len,
+            &dim_arr[0],
+            dim_arr.len,
             &_alpha,
             &_beta,
-            binary_op(op),
+            cuda.ADD,
+        );
+    }
+
+    pub fn max_along(
+        self: *Blas,
+        T: type,
+        x_vals: []const T,
+        x_dims: []const usize,
+        y_vals: []T,
+        dim_idx: usize,
+    ) void {
+        const dim_arr: [1]usize = .{dim_idx};
+        const par = self.parent();
+        const _alpha: T = 1.0;
+        const _beta: T = 0.0;
+        cuda.reduce(
+            dtype(T),
+            par.context.cutensor,
+            x_vals.ptr,
+            x_dims.ptr,
+            x_dims.len,
+            y_vals.ptr,
+            &par.scratch.start,
+            &par.scratch.total,
+            &dim_arr[0],
+            dim_arr.len,
+            &_alpha,
+            &_beta,
+            cuda.MAX,
         );
     }
 

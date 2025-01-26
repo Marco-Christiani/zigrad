@@ -15,13 +15,23 @@ pub fn main() !void {
     var gpu = zg.device.CudaDevice.init(0, gpa.allocator());
     defer gpu.deinit();
 
-    const reference = gpu.reference();
+    const A_host = [_]f32{ 1, 2, 3, 4, 1, 2, 3, 4 };
+    const B_host = [_]f32{ 1, 2, 3, 4, 1, 2, 3, 4 };
 
-    const A = try zg.NDTensor(f32).empty(&.{ 3, 64, 64 }, false, reference);
-    const x = try zg.NDTensor(f32).empty(&.{ 3, 64 }, false, reference);
-    gpu.mem_sequence(f32, A.get_data(), 0.0, 1.0);
+    const A = try zg.NDTensor(f32).empty(&.{ 2, 2, 2 }, false, gpu.reference());
+    defer A.deinit();
 
-    gpu.blas.reduce(f32, A.get_data(), A.get_shape(), x.get_data(), x.get_shape(), &.{1}, 1.0, 0.0, .add);
+    const x = try zg.NDTensor(f32).empty(&.{ 2, 2, 2 }, false, gpu.reference());
+    defer A.deinit();
 
-    x.print();
+    gpu.mem_transfer(f32, A_host[0..], A.get_data(), .HtoD);
+    gpu.mem_transfer(f32, B_host[0..], x.get_data(), .HtoD);
+
+    const y = try A.bmm(x, .{
+        .trans_a = false,
+        .trans_b = false,
+    });
+    defer y.deinit();
+
+    y.print();
 }

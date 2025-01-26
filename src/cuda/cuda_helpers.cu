@@ -82,43 +82,6 @@ inline void handleCutensorStatus(cutensorStatus_t status, const char *file, int 
   }
 }
 
-template <typename T>
-T* __alloc_scalar(cudaStream_t stream) {
-  CUdeviceptr dptr;
-  const CUstream _stream = static_cast<CUstream>(stream);
-  CURESULT_ASSERT(cuMemAllocAsync(&dptr, sizeof(T), _stream));
-  return reinterpret_cast<T*>(dptr);
-}
-
-template <typename T>
-inline void __free_scalar(cudaStream_t stream, T* s) {
-  CUstream _stream = static_cast<CUstream>(stream);
-  CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(s);
-  CURESULT_ASSERT(cuMemFreeAsync(dptr, _stream));
-}
-
-template <typename T>
-T __transfer_scalar(cudaStream_t stream, T* s) {
-  T result;
-  CUstream _stream = static_cast<CUstream>(stream);
-  CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(s);
-  CURESULT_ASSERT(cuMemcpyDtoHAsync(&result, dptr, sizeof(T), _stream));
-  CURESULT_ASSERT(cuStreamSynchronize(_stream));
-  return result;
-}
-
-inline cudaStream_t __cublas_stream(void* handle) {
-  cudaStream_t stream;
-  CUBLAS_ASSERT(cublasGetStream(static_cast<cublasHandle_t>(handle), &stream));
-  return stream;
-}
-
-inline cudaStream_t __cudnn_stream(void* handle) {
-  cudaStream_t stream;
-  CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(handle), &stream));
-  return stream;
-}
-
 #define CHECK_INVARIANT(b, msg) (CheckInvariant(b, msg, __FILE__, __LINE__ ))
 inline void CheckInvariant(bool check, const char* message, const char *file, int line)
 {
@@ -133,6 +96,80 @@ inline void SystemExit(const char* message, const char *file, int line)
 {
   printf("%s in %s at line %d\n", (message), file, line);
   exit(EXIT_FAILURE);
+}
+
+template <typename T>
+T* __alloc(cudaStream_t stream, len_t n, const char* file, int line) {
+  CUdeviceptr dptr;
+  const CUstream _stream = static_cast<CUstream>(stream);
+  handleCuresultError(cuMemAllocAsync(&dptr, n * sizeof(T), _stream), file, line);
+  return reinterpret_cast<T*>(dptr);
+}
+
+template <typename T>
+inline void __free(cudaStream_t stream, T* s, const char* file, int line) {
+  CUstream _stream = static_cast<CUstream>(stream);
+  CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(s);
+  handleCuresultError(cuMemFreeAsync(dptr, _stream), file, line);
+}
+
+template <typename T>
+void __ensure_scratch(
+  cudaStream_t stream,
+  len_t* mem,
+  len_t* cap,
+  len_t new_cap,
+  const char* file,
+  int line
+) {
+  if (new_cap <= *cap)
+    return;
+
+  if (*cap > 0) {
+    __free(stream, reinterpret_cast<T*>(*mem), file, line);
+  }
+  *mem = reinterpret_cast<len_t>(__alloc<T>(stream, new_cap, file, line));
+  *cap = new_cap;
+}
+
+void __ensure_scratch(
+  dtype id,
+  cudaStream_t stream,
+  len_t* mem,
+  len_t* cap,
+  len_t new_cap,
+  const char* file,
+  int line
+) {
+  switch (id) {
+    case SINGLE: return __ensure_scratch<f32>(stream, mem, cap, new_cap, file, line);
+    case DOUBLE: return __ensure_scratch<f64>(stream, mem, cap, new_cap, file, line);
+    default: SYSTEM_EXIT("Unsupported datatype");
+  }
+}
+
+#define ENSURE_SCRATCH(id, stream, mem, cap, new_cap)                    \
+  (__ensure_scratch(id, stream, mem, cap, new_cap, __FILE__, __LINE__ )) \
+
+
+inline cudaStream_t __cublas_stream(void* handle) {
+  cudaStream_t stream;
+  CUBLAS_ASSERT(cublasGetStream(static_cast<cublasHandle_t>(handle), &stream));
+  return stream;
+}
+
+inline cudaStream_t __cudnn_stream(void* handle) {
+  cudaStream_t stream;
+  CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(handle), &stream));
+  return stream;
+}
+
+inline len_t __product(const len_t* dims, len_t size) {
+  len_t res = 1;
+  for (len_t i = 0; i < size; ++i) {
+    res *= dims[i];
+  }
+  return res;
 }
 
 #endif

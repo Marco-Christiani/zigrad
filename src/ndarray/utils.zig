@@ -10,8 +10,7 @@ pub fn prod(dims: []const usize) usize {
 pub fn calculate_broadcasted_shape(shape1: []const usize, shape2: []const usize, allocator: std.mem.Allocator) ![]usize {
     const dims = @max(shape1.len, shape2.len);
     const result_shape = try allocator.alloc(usize, dims);
-    var i: usize = 0;
-    while (i < dims) : (i += 1) {
+    for (0..dims) |i| {
         const dimA = if (i < shape1.len) shape1[shape1.len - 1 - i] else 1;
         const dimB = if (i < shape2.len) shape2[shape2.len - 1 - i] else 1;
         if (dimA != dimB and dimA != 1 and dimB != 1) {

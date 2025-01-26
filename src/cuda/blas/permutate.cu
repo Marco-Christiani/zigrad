@@ -45,7 +45,6 @@ extern "C" void permutate_backwards(
         id,
         x_dims, x_syms, x_dims_len,
         y_dims, y_syms, y_dims_len,
-        scratch, scratch_len,
         BINARY_OP::ADD
       );
 
