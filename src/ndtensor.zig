@@ -13,7 +13,7 @@ const NDArray = ndarray.NDArray;
 const GraphManager = @import("graph_manager.zig").GraphManager;
 const log = std.log.scoped(.zg_tensor);
 
-pub const MaxOverDimOptions = struct {
+pub const MaxAlongOptions = struct {
     dim: usize,
     keep_dims: bool = false,
 };
@@ -751,16 +751,16 @@ pub fn NDTensor(comptime T: type) type {
 
         /// TODO: this should proxy to bmm_acc
         /// Matrix multiplication. COM.
-        pub fn bmm(self: *Self, other: *Self, device: DeviceReference, opts: MmOptions) !*Self {
+        pub fn bmm(self: *Self, other: *Self, opts: MmOptions) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-            const ctx = try device.allocator.create(MmAccOptions);
+            const ctx = try self.device.allocator.create(MmAccOptions);
             ctx.* = MmAccOptions{ .trans_a = opts.trans_a, .trans_b = opts.trans_b, .alpha = 1, .beta = 0 };
             const result = try create_dependent(.{
-                .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, device),
+                .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, self.device),
                 .children = &.{ self, other },
                 .requires_gradient = self.requires_gradient or other.requires_gradient,
-                .device = device,
+                .device = self.device,
                 ._backward = bw_bmm_acc,
                 ._backward_ctx = ctx,
             });
@@ -941,35 +941,39 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        pub fn max_over_dim(self: *Self, device: DeviceReference, opts: MaxOverDimOptions) !*Self {
-            const max_backward = struct {
-                // NOTE: See gather() comments, same apply here
-                fn bw_impl(_self: Self) !void {
-                    const bw_children = _self.get_children() orelse return error.NoChildren;
-                    const bw_input = bw_children[0];
-                    if (bw_input.grad == null) return;
-                    const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
-                    const offsets: []usize = std.mem.span(raw_offsets);
-                    for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
-                    _self.device.allocator.free(offsets);
-                }
-            }.bw_impl;
+        //pub fn max_along(self: *Self, device: DeviceReference, opts: MaxAlongOptions) !*Self {
+        //    const max_backward = struct {
+        //        // NOTE: See gather() comments, same apply here
+        //        fn bw_impl(_self: Self) !void {
+        //            const bw_children = _self.get_children() orelse return error.NoChildren;
+        //            const bw_input = bw_children[0];
+        //            if (bw_input.grad == null) return;
+        //            const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+        //            const offsets: []usize = std.mem.span(raw_offsets);
+        //            for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
+        //            _self.device.allocator.free(offsets);
+        //        }
+        //    }.bw_impl;
 
-            const max_result = try self.data.max_over_dim(device, .{ .dim = opts.dim, .keep_dims = opts.keep_dims, .return_offsets = true });
-            // TODO: use a null terminated allocation instead, tired rn
-            const ctx = if (self.requires_grad()) try device.allocator.dupeZ(usize, max_result.offsets.?) else null;
-            if (max_result.offsets) |offs| device.allocator.free(offs);
+        //    const max_result = try self.data.max_over_dim(device, .{
+        //        .dim = opts.dim,
+        //        .keep_dims = opts.keep_dims,
+        //        .return_offsets = true,
+        //    });
+        //    // TODO: use a null terminated allocation instead, tired rn
+        //    const ctx = if (self.requires_grad()) try device.allocator.dupeZ(usize, max_result.offsets.?) else null;
+        //    if (max_result.offsets) |offs| device.allocator.free(offs);
 
-            return try create_dependent(.{
-                .data = max_result.values,
-                .op = null,
-                .children = &.{self},
-                .requires_gradient = self.requires_gradient,
-                .device = device,
-                ._backward = max_backward,
-                ._backward_ctx = if (ctx) |c| c.ptr else null,
-            });
-        }
+        //    return try create_dependent(.{
+        //        .data = max_result.values,
+        //        .op = null,
+        //        .children = &.{self},
+        //        .requires_gradient = self.requires_gradient,
+        //        .device = device,
+        //        ._backward = max_backward,
+        //        ._backward_ctx = if (ctx) |c| c.ptr else null,
+        //    });
+        //}
 
         pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
@@ -1290,7 +1294,7 @@ test "tensor/GraphManager/matmul_backward square" {
     var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, device);
 
     // Case 1: No transpose
-    var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
+    var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
 
     var gm = GraphManager(Tensor).init(device.allocator, .{});
     defer gm.deinit();
@@ -1310,7 +1314,7 @@ test "tensor/GraphManager/matmul_backward square" {
     t2.grad.?.fill(0, device);
 
     // Case 2: Transpose A
-    var t3_trans_a = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
+    var t3_trans_a = try t1.bmm(t2, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
     t3_trans_a.grad.?.fill(1.0, device);
 
@@ -1323,7 +1327,7 @@ test "tensor/GraphManager/matmul_backward square" {
     t2.grad.?.fill(0, device);
 
     // Case 3: Transpose B
-    var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
+    var t3_trans_b = try t1.bmm(t2, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
     t3_trans_b.grad.?.fill(1.0, device);
     try gm.backward(t3_trans_b);
@@ -1336,7 +1340,7 @@ test "tensor/GraphManager/matmul_backward square" {
     t2.grad.?.fill(0, device);
 
     // Case 4: Transpose both A and B
-    var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
+    var t3_trans_ab = try t1.bmm(t2, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
     t3_trans_ab.grad.?.fill(1.0, device);
     try gm.backward(t3_trans_ab);
@@ -1368,7 +1372,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
 
     // Case 1: No transpose
     {
-        var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
+        var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
         defer t3.deinit();
         t1.acquire();
         t2.acquire();
@@ -1387,7 +1391,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
     // Case 2: Transpose A (t1: [2, 3, 2], t2: [2, 3, 2])
     {
         var t1_case2 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, device);
-        var t3 = try t1_case2.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
+        var t3 = try t1_case2.bmm(t2, .{ .trans_a = true, .trans_b = false });
         defer t3.deinit();
         t1_case2.acquire();
         t3.grad.?.fill(1.0, device);
@@ -1406,7 +1410,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
     // Case 3: Transpose B (t1: [2, 2, 3], t2: [2, 2, 3])
     {
         var t2_case3 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, device);
-        var t3 = try t1.bmm(t2_case3, device, .{ .trans_a = false, .trans_b = true });
+        var t3 = try t1.bmm(t2_case3, .{ .trans_a = false, .trans_b = true });
         defer t3.deinit();
         t2_case3.acquire();
         t3.grad.?.fill(1.0, device);
@@ -1426,7 +1430,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
     {
         var t1_case4 = try Tensor.init(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, true, device);
         var t2_case4 = try Tensor.init(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, true, device);
-        var t3 = try t1_case4.bmm(t2_case4, device, .{ .trans_a = true, .trans_b = true });
+        var t3 = try t1_case4.bmm(t2_case4, .{ .trans_a = true, .trans_b = true });
         defer t3.deinit();
         t1_case4.acquire();
         t2_case4.acquire();
@@ -1467,7 +1471,7 @@ test "tensor/GraphManager/matmul_backward" {
     var t2 = try Tensor.init(&[_]T{ 1, 0, 0, 1 }, shape, true, device);
 
     // Case 1: No transpose
-    var t3 = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = false });
+    var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
     var gm = GraphManager(Tensor).init(device.allocator, .{});
@@ -1485,7 +1489,7 @@ test "tensor/GraphManager/matmul_backward" {
     t2.grad.?.fill(0, device);
 
     // Case 2: Transpose A
-    var t3_trans_a = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = false });
+    var t3_trans_a = try t1.bmm(t2, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
     t3_trans_a.grad.?.fill(1.0, device);
 
@@ -1498,7 +1502,7 @@ test "tensor/GraphManager/matmul_backward" {
     t2.grad.?.fill(0, device);
 
     // Case 3: Transpose B
-    var t3_trans_b = try t1.bmm(t2, device, .{ .trans_a = false, .trans_b = true });
+    var t3_trans_b = try t1.bmm(t2, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
     t3_trans_b.grad.?.fill(1.0, device);
     try gm.backward(t3_trans_b);
@@ -1511,7 +1515,7 @@ test "tensor/GraphManager/matmul_backward" {
     t2.grad.?.fill(0, device);
 
     // Case 4: Transpose both A and B
-    var t3_trans_ab = try t1.bmm(t2, device, .{ .trans_a = true, .trans_b = true });
+    var t3_trans_ab = try t1.bmm(t2, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
     t3_trans_ab.grad.?.fill(1.0, device);
     try gm.backward(t3_trans_ab);
@@ -1647,55 +1651,55 @@ test "tensor/gather" {
 }
 
 // TODO: Fix memory freeing conundrum with max_over_dim() then dont use an arena here.
-test "tensor/max_over_dim" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var cpu = zg.device.HostDevice.init(allocator);
-    defer cpu.deinit();
-    const device = cpu.reference();
-
-    const T = f32;
-    const Tensor = NDTensor(T);
-
-    // case 1: basic max over dim operation
-    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
-    const input_shape = [_]usize{ 3, 3 };
-    var input = try Tensor.init(&input_data, &input_shape, true, device);
-    defer input.deinit();
-
-    var output = try input.max_over_dim(device, .{ .dim = 1 });
-    defer output.deinit();
-
-    try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 9 }, output.data.data);
-    try std.testing.expectEqualSlices(usize, &[_]usize{3}, output.data.shape.shape);
-
-    // case 2: gradient check
-    var gm = GraphManager(Tensor).init(device.allocator, .{});
-    defer gm.deinit();
-
-    output.grad.?.fill(1.0, device);
-    try gm.backward(output);
-
-    const expected_grad = [_]T{ 0, 0, 1, 0, 0, 1, 0, 0, 1 };
-    try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
-
-    // case 3: max over different dimension
-    var output2 = try input.max_over_dim(device, .{ .dim = 0 });
-    defer output2.deinit();
-
-    try std.testing.expectEqualSlices(T, &[_]T{ 7, 8, 9 }, output2.data.data);
-    try std.testing.expectEqualSlices(usize, &[_]usize{3}, output2.data.shape.shape);
-
-    // reset grads
-    input.grad.?.fill(0, device);
-    output2.grad.?.fill(1.0, device);
-    try gm.backward(output2);
-
-    const expected_grad2 = [_]T{ 0, 0, 0, 0, 0, 0, 1, 1, 1 };
-    try std.testing.expectEqualSlices(T, &expected_grad2, input.grad.?.data);
-
-    // case 4: invalid dimension
-    try std.testing.expectError(error.DimOutOfBounds, input.max_over_dim(device, .{ .dim = 2 }));
-}
+//test "tensor/max_over_dim" {
+//    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//    defer arena.deinit();
+//    const allocator = arena.allocator();
+//
+//    var cpu = zg.device.HostDevice.init(allocator);
+//    defer cpu.deinit();
+//    const device = cpu.reference();
+//
+//    const T = f32;
+//    const Tensor = NDTensor(T);
+//
+//    // case 1: basic max over dim operation
+//    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+//    const input_shape = [_]usize{ 3, 3 };
+//    var input = try Tensor.init(&input_data, &input_shape, true, device);
+//    defer input.deinit();
+//
+//    var output = try input.max_over_dim(device, .{ .dim = 1 });
+//    defer output.deinit();
+//
+//    try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 9 }, output.data.data);
+//    try std.testing.expectEqualSlices(usize, &[_]usize{3}, output.data.shape.shape);
+//
+//    // case 2: gradient check
+//    var gm = GraphManager(Tensor).init(device.allocator, .{});
+//    defer gm.deinit();
+//
+//    output.grad.?.fill(1.0, device);
+//    try gm.backward(output);
+//
+//    const expected_grad = [_]T{ 0, 0, 1, 0, 0, 1, 0, 0, 1 };
+//    try std.testing.expectEqualSlices(T, &expected_grad, input.grad.?.data);
+//
+//    // case 3: max over different dimension
+//    var output2 = try input.max_over_dim(device, .{ .dim = 0 });
+//    defer output2.deinit();
+//
+//    try std.testing.expectEqualSlices(T, &[_]T{ 7, 8, 9 }, output2.data.data);
+//    try std.testing.expectEqualSlices(usize, &[_]usize{3}, output2.data.shape.shape);
+//
+//    // reset grads
+//    input.grad.?.fill(0, device);
+//    output2.grad.?.fill(1.0, device);
+//    try gm.backward(output2);
+//
+//    const expected_grad2 = [_]T{ 0, 0, 0, 0, 0, 0, 1, 1, 1 };
+//    try std.testing.expectEqualSlices(T, &expected_grad2, input.grad.?.data);
+//
+//    // case 4: invalid dimension
+//    try std.testing.expectError(error.DimOutOfBounds, input.max_over_dim(device, .{ .dim = 2 }));
+//}

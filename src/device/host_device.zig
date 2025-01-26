@@ -191,27 +191,28 @@ pub const Blas = struct {
         T: type,
         src: []const T,
         dst: []T,
-        idx: *i32,
-        incX: usize,
     ) void {
         const _idx = switch (T) {
-            f32 => c.cblas_isamax(@intCast(src.len), src.ptr, incX),
-            f64 => c.cblas_idamax(@intCast(src.len), src.ptr, incX),
+            f32 => c.cblas_isamax(@intCast(src.len), src.ptr, 1),
+            f64 => c.cblas_idamax(@intCast(src.len), src.ptr, 1),
             else => @compileError("Unsupported type for BLAS max"),
         };
-        idx.* = @intCast(_idx);
         dst[0] = src[_idx];
     }
 
     pub fn max_reverse(
         _: Blas,
         T: type,
-        y_grd: []const T,
+        x_val: []const T,
         x_grd: []T,
-        idx: *i32,
+        y_val: []const T,
+        y_grd: []const T,
     ) void {
-        const _idx: usize = @intCast(idx.*);
-        x_grd[_idx] += y_grd[0];
+        const val = y_val[0];
+        const grd = y_grd[0];
+        for (x_val, x_grd) |x, *g| {
+            if (val == x) g.* += grd;
+        }
     }
 
     pub fn sum(
@@ -224,6 +225,128 @@ pub const Blas = struct {
             f32 => y[0] = c.cblas_sasum(@intCast(x.len), x.ptr, 1),
             f64 => y[0] = c.cblas_dasum(@intCast(x.len), x.ptr, 1),
             else => @compileError("Unsupported type for BLAS sum"),
+        }
+    }
+
+    pub fn sum_along(
+        _: Blas,
+        T: type,
+        src_vals: []const T,
+        src_sizes: []const usize,
+        dst_vals: []T,
+        rdx_idx: usize,
+    ) void {
+        const sum_dim_size = src_sizes[rdx_idx];
+
+        var slice_size: usize = 1;
+        for (rdx_idx + 1..src_sizes.len) |i| {
+            slice_size *= src_sizes[i];
+        }
+
+        var num_slices: usize = 1;
+        for (0..rdx_idx) |i| {
+            num_slices *= src_sizes[i];
+        }
+
+        for (0..dst_vals.len) |i| {
+            var total: T = 0;
+            const base_idx = (i / slice_size) * (slice_size * sum_dim_size) + (i % slice_size);
+            for (0..sum_dim_size) |j| {
+                const curr_idx = base_idx + j * slice_size;
+                total += src_vals[curr_idx];
+            }
+            dst_vals[i] = total;
+        }
+    }
+
+    pub fn max_along(
+        _: Blas,
+        T: type,
+        src_vals: []const T,
+        src_sizes: []const usize,
+        dst_vals: []T,
+        rdx_idx: usize,
+    ) void {
+        const max_dim_size = src_sizes[rdx_idx];
+        var slice_size: usize = 1;
+
+        for (rdx_idx + 1..src_sizes.len) |i| {
+            slice_size *= src_sizes[i];
+        }
+
+        for (0..dst_vals.len) |i| {
+            var max_val: T = -std.math.inf(T);
+            const base_offs = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
+            for (0..max_dim_size) |j| { // can be optimized if the view along this dim is contiguous (just check dim stride)
+                const curr_offs = base_offs + j * slice_size;
+                const curr_val = src_vals[curr_offs];
+                if (curr_val > max_val) {
+                    max_val = curr_val;
+                }
+            }
+            dst_vals[i] = max_val;
+        }
+    }
+
+    // copy pasta
+    pub fn prod(dims: []const usize) usize {
+        if (dims.len == 0) return 0;
+        var s: usize = 1;
+        for (dims) |f| s *= f;
+        return s;
+    }
+    pub fn bmm_acc(
+        self: Blas,
+        T: type,
+        A: []const T,
+        A_sizes: []const usize,
+        B: []const T,
+        B_sizes: []const usize,
+        C: []T,
+        C_sizes: []const usize,
+        trans_a: bool,
+        trans_b: bool,
+        lda: usize,
+        ldb: usize,
+        ldc: usize,
+        alpha: T,
+        beta: T,
+    ) void {
+        const n_batches_a = A_sizes[0];
+        const n_batches_b = B_sizes[0];
+        const n_batches_c = C_sizes[0];
+        const A_chunk = A_sizes[1] * A_sizes[2];
+        const B_chunk = B_sizes[1] * B_sizes[2];
+        const C_chunk = C_sizes[1] * C_sizes[2];
+
+        for (0..n_batches_c) |i| {
+            const a_index = i % n_batches_a;
+            const b_index = i % n_batches_b;
+
+            const a_start = a_index * A_chunk;
+            const b_start = b_index * B_chunk;
+            const c_start = i * C_chunk;
+
+            const a_slice = A[a_start .. a_start + A_chunk];
+            const b_slice = B[b_start .. b_start + B_chunk];
+            const c_slice = C[c_start .. c_start + C_chunk];
+
+            self.matmul(
+                T,
+                a_slice,
+                b_slice,
+                c_slice,
+                C_sizes[1],
+                C_sizes[2],
+                A_sizes[2],
+                trans_a,
+                trans_b,
+                lda,
+                ldb,
+                ldc,
+                alpha,
+                beta,
+            );
         }
     }
 
@@ -277,10 +400,6 @@ pub const Blas = struct {
         _ = op;
         // TODO
     }
-
-    const bmm = if (using_mkl) bmm_impl else void;
-
-    fn bmm_impl(comptime _: type) void {}
 };
 
 pub const ScratchMemory = struct {

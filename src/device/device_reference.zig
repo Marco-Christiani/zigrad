@@ -30,7 +30,7 @@ pub fn Blas(comptime Parent: type) type {
             z: []T,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.dot(T, x, y, z),
+                inline else => |dev| dev.blas.add(T, x, y, z),
             };
         }
 
@@ -42,7 +42,7 @@ pub fn Blas(comptime Parent: type) type {
             z: []T,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.dot(T, x, y, z),
+                inline else => |dev| dev.blas.sub(T, x, y, z),
             };
         }
 
@@ -115,6 +115,27 @@ pub fn Blas(comptime Parent: type) type {
             };
         }
 
+        pub fn bmm_acc(
+            self: *const Self,
+            T: type,
+            A: []const T,
+            A_sizes: []const usize,
+            B: []const T,
+            B_sizes: []const usize,
+            C: []T,
+            C_sizes: []const usize,
+            trans_a: bool,
+            trans_b: bool,
+            lda: usize,
+            ldb: usize,
+            ldc: usize,
+            alpha: T,
+            beta: T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.bmm_acc(T, A, A_sizes, B, B_sizes, C, C_sizes, trans_a, trans_b, lda, ldb, ldc, alpha, beta),
+            };
+        }
         /// Outer product: A = alpha(xy') + A
         /// A: (M, N)
         pub fn outer(
@@ -173,6 +194,32 @@ pub fn Blas(comptime Parent: type) type {
         ) void {
             return switch (self.parent()) {
                 inline else => |dev| dev.blas.sum(T, x, y),
+            };
+        }
+
+        pub fn sum_along(
+            self: *const Self,
+            T: type,
+            src_vals: []const T,
+            src_sizes: []const usize,
+            dst_vals: []T,
+            rdx_idx: usize,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.sum_along(T, src_vals, src_sizes, dst_vals, rdx_idx),
+            };
+        }
+
+        pub fn max_along(
+            self: *const Self,
+            T: type,
+            src_vals: []const T,
+            src_sizes: []const usize,
+            dst_vals: []T,
+            rdx_idx: usize,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.max_along(T, src_vals, src_sizes, dst_vals, rdx_idx),
             };
         }
 
@@ -339,7 +386,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
 
         pub fn mem_copy(self: Self, comptime T: type, src: []const T, dst: []T) void {
             return switch (self.ptrs) {
-                inline else => |dev| dev.mem_random(T, src, dst),
+                inline else => |dev| dev.mem_copy(T, src, dst),
             };
         }
 

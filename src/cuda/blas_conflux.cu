@@ -13,3 +13,4 @@
 #include "blas/division.cu"
 #include "blas/reduce.cu"
 #include "blas/permutate.cu"
+#include "blas/contraction.cu"

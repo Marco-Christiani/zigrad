@@ -218,6 +218,7 @@ pub fn LinearLayer(comptime T: type) type {
             );
             // similar performance to the below optimized variant and simpler. essentially the exact thing that autograd does.
             const bias_grad = try grad_output.sum_along(self.device, .{ .dim = 0 });
+
             _ = try grad_B._add(bias_grad, input.device);
             // This is not really a great way to optimize this, btw. This is meant to demonstrate to a user how they can
             // implement custom functionality by accessing the underlying data directly.

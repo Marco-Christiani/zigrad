@@ -152,14 +152,16 @@ EXTERN_C void division(
 EXTERN_C void reduce(
     dtype id,
     CutensorWrapper wrapper,
+    // x_tensor //
     const void* x_vals,
     const len_t* x_dims,
     len_t x_dims_len,
+    // y_tensor //
     void* y_vals,
-    const len_t* y_dims,
-    len_t y_dims_len,
+    // scratch //
     len_t* scratch,
     len_t* scratch_len,
+    // reduce idxs //
     const len_t* rdx_idxs,
     len_t rdx_idxs_len,
     const void* alpha,
@@ -174,6 +176,31 @@ EXTERN_C void permutate(
         void* y_vals, const len_t* y_dims, const unsigned char* y_syms, len_t y_dims_len,
   len_t* scratch, len_t* scratch_len,
   const void* alpha
+);
+
+EXTERN_C void contraction(
+  dtype id,
+  CutensorWrapper wrapper,
+  // A tensor //
+  const void* A_vals,
+  const len_t* A_dims,
+  const unsigned char* A_syms,
+  len_t A_dims_len,
+  // x tensor //
+  const void* x_vals,
+  const len_t* x_dims,
+  const unsigned char* x_syms,
+  len_t x_dims_len,
+  // y tensor //
+         void* y_vals,
+  const len_t* y_dims,
+  const unsigned char* y_syms,
+  len_t y_dims_len,
+  // scratch //
+  len_t* scratch,
+  len_t* scratch_len,
+  const void* alpha,
+  const void* gamma
 );
 
 #endif

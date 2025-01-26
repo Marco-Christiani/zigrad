@@ -7,10 +7,9 @@ const zg = @import("zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 const backend = zg.backend;
 
-pub const MaxOverDimOptions = struct {
+pub const MaxAlongOptions = struct {
     dim: usize,
     keep_dims: bool = false,
-    return_offsets: bool = false,
 };
 
 pub const GatherOptions = struct {
@@ -283,7 +282,11 @@ pub fn NDArray(comptime T: type) type {
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             // TODO: standardize this shape creation logic elsewhere (its a micro-optimization)
-            const bshape = if (self.shape.size() != other.shape.size()) try self.shape.broadcast(other.shape.*) else try self.shape.copy(device.allocator);
+            const bshape = if (self.shape.size() != other.shape.size())
+                try self.shape.broadcast(other.shape.*)
+            else
+                try self.shape.copy(device.allocator);
+
             const values = try device.mem_alloc(T, bshape.size());
             device.blas.add(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
@@ -313,7 +316,6 @@ pub fn NDArray(comptime T: type) type {
         pub fn sub(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
             const bshape = try self.shape.broadcast(other.shape.*);
             const values = try device.mem_alloc(T, bshape.size());
-            for (0..values.len) |i| values[i] = self.data[i % self.data.len] - other.data[i % other.data.len];
             device.blas.sub(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
             result.* = Self{
@@ -387,11 +389,11 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// Element-wise sum.
-        pub fn sum_no_alloc(self: *const Self) T {
-            var s: T = 0;
-            for (0..self.data.len) |i| s += self.data[i];
-            return s;
-        }
+        //pub fn sum_no_alloc(self: *const Self) T {
+        //    var s: T = 0;
+        //    for (0..self.data.len) |i| s += self.data[i];
+        //    return s;
+        //}
 
         /// COM.
         pub fn max(self: *const Self, device: DeviceReference) !*Self {
@@ -465,29 +467,33 @@ pub fn NDArray(comptime T: type) type {
         ///
         pub fn _bmm_acc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, device: DeviceReference) !*Self {
 
-            //if (comptime @TypeOf(device.bmm) != void) {
-            //    return device.bmm(....);
-            //}
-
+            // vectors get unsqueezed to rank-2 tensors
             if (self.shape.len() < 2) {
-                try self._reshape(&[_]usize{ 1, try self.shape.get(0) });
+                try self._reshape(&.{ 1, try self.shape.get(0) });
             }
             if (other.shape.len() < 2) {
-                try other._reshape(&[_]usize{ 1, try other.shape.get(0) });
+                try other._reshape(&.{ 1, try other.shape.get(0) });
             }
 
-            const a_matrix_dims = self.shape.shape[self.shape.len() - 2 ..];
-            const b_matrix_dims = other.shape.shape[other.shape.len() - 2 ..];
-            const a_batch_dims = if (self.shape.len() > 2) self.shape.shape[0 .. self.shape.len() - 2] else &[_]usize{1};
-            const b_batch_dims = if (other.shape.len() > 2) other.shape.shape[0 .. other.shape.len() - 2] else &[_]usize{1};
+            const a_batch_dims = if (self.shape.len() > 2)
+                self.shape.shape[0 .. self.shape.len() - 2]
+            else
+                &[_]usize{1};
+            const b_batch_dims = if (other.shape.len() > 2)
+                other.shape.shape[0 .. other.shape.len() - 2]
+            else
+                &[_]usize{1};
 
             // Even if nothing needs broadcasting and we have two 2d inputs, we still get a 3d shape w a batch of 1
             // in that case, we dont have any extra broadcasted batch dims
             const broadcast_batch_dims = blk: {
-                if (self.shape.len() == 2 and other.shape.len() == 2) break :blk try device.allocator.alloc(usize, 0);
+                if (self.shape.len() == 2 and other.shape.len() == 2) break :blk &[_]usize{};
                 break :blk try utils.calculate_broadcasted_shape(a_batch_dims, b_batch_dims, device.allocator);
             };
             defer device.allocator.free(broadcast_batch_dims);
+
+            const a_matrix_dims = self.shape.shape[self.shape.len() - 2 ..];
+            const b_matrix_dims = other.shape.shape[other.shape.len() - 2 ..];
 
             const a_rows = a_matrix_dims[0];
             const a_cols = a_matrix_dims[1];
@@ -507,11 +513,14 @@ pub fn NDArray(comptime T: type) type {
             const n_batch_dims = broadcast_batch_dims.len;
             var output_shape = try device.allocator.alloc(usize, n_batch_dims + 2);
             defer device.allocator.free(output_shape);
-            if (n_batch_dims > 0) @memcpy(output_shape[0..n_batch_dims], broadcast_batch_dims);
+
+            if (n_batch_dims > 0)
+                @memcpy(output_shape[0..n_batch_dims], broadcast_batch_dims);
+
             output_shape[n_batch_dims] = M;
             output_shape[n_batch_dims + 1] = N;
 
-            const n_batches = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
+            const n_batches_c = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
             var result: *Self = blk: {
                 if (accumulator) |acc| {
                     if (!Shape.eq_raw(acc.shape.shape, output_shape, .{ .strict = true })) {
@@ -530,20 +539,37 @@ pub fn NDArray(comptime T: type) type {
             const ldb = b_cols;
             const ldc = N;
 
-            for (0..n_batches) |i| {
-                const a_index = i % n_batches_a;
-                const b_index = i % n_batches_b;
+            device.blas.bmm_acc(
+                T,
+                self.data,
+                &.{ n_batches_a, M, K },
+                other.data,
+                &.{ n_batches_b, K, N },
+                result.data,
+                &.{ n_batches_c, M, N },
+                trans_a,
+                trans_b,
+                lda,
+                ldb,
+                ldc,
+                alpha,
+                beta,
+            );
 
-                const a_start = a_index * a_rows * a_cols;
-                const b_start = b_index * b_rows * b_cols;
-                const out_start = i * M * N;
+            //for (0..n_batches_c) |i| {
+            //    const a_index = i % n_batches_a;
+            //    const b_index = i % n_batches_b;
 
-                const a_slice = self.data[a_start .. a_start + a_rows * a_cols];
-                const b_slice = other.data[b_start .. b_start + b_rows * b_cols];
-                const out_slice = result.data[out_start .. out_start + M * N];
+            //    const a_start = a_index * a_rows * a_cols;
+            //    const b_start = b_index * b_rows * b_cols;
+            //    const out_start = i * M * N;
 
-                device.blas.matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
-            }
+            //    const a_slice = self.data[a_start .. a_start + a_rows * a_cols];
+            //    const b_slice = other.data[b_start .. b_start + b_rows * b_cols];
+            //    const out_slice = result.data[out_start .. out_start + M * N];
+
+            //    device.blas.matmul(T, a_slice, b_slice, out_slice, M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
+            //}
             return result;
         }
 
@@ -753,102 +779,53 @@ pub fn NDArray(comptime T: type) type {
         };
 
         pub fn sum_along(self: *Self, device: DeviceReference, opts: SumOpts) !*Self {
-            const input_shape = self.shape.shape;
-            const input_dims = input_shape.len;
-            if (opts.dim >= input_dims) return error.ShapeOutOfBounds;
+            std.debug.assert(self.shape.shape.len <= 8);
 
-            // TODO: rm alloc
-            var output_shape = try device.allocator.alloc(usize, if (opts.keep_dims) input_dims else input_dims - 1);
-            defer device.allocator.free(output_shape);
-            var idx: usize = 0;
-            for (0..input_dims) |i| {
+            const input_shape = self.shape.shape;
+            if (opts.dim >= input_shape.len) return error.ShapeOutOfBounds;
+
+            var output_shape: std.BoundedArray(usize, 8) = .{};
+
+            for (0..input_shape.len) |i| {
                 if (i != opts.dim) {
-                    output_shape[idx] = input_shape[i];
-                    idx += 1;
+                    try output_shape.append(input_shape[i]);
                 } else if (opts.keep_dims) {
-                    output_shape[idx] = 1;
-                    idx += 1;
+                    try output_shape.append(1);
                 }
             }
-            const output = try Self.zeros(output_shape, device);
+
+            const output = try Self.zeros(output_shape.slice(), device);
             errdefer output.deinit(device);
 
-            const sum_dim_size = input_shape[opts.dim];
-
-            var slice_size: usize = 1;
-            for (opts.dim + 1..input_dims) |i| {
-                slice_size *= input_shape[i];
-            }
-
-            var num_slices: usize = 1;
-            for (0..opts.dim) |i| {
-                num_slices *= input_shape[i];
-            }
-
-            for (0..output.data.len) |i| {
-                var total: T = 0;
-                const base_idx = (i / slice_size) * (slice_size * sum_dim_size) + (i % slice_size);
-                for (0..sum_dim_size) |j| {
-                    const curr_idx = base_idx + j * slice_size;
-                    total += self.data[curr_idx];
-                }
-                output.data[i] = total;
-            }
+            device.blas.sum_along(T, self.data, self.shape.shape, output.data, opts.dim);
 
             return output;
         }
 
-        pub const MaxOverDimResult = struct {
-            values: *Self,
-            offsets: ?[]usize,
-        };
+        pub fn max_along(self: *const Self, device: DeviceReference, opts: MaxAlongOptions) !*Self {
+            std.debug.assert(self.shape.shape.len <= 8);
 
-        pub fn max_over_dim(self: *const Self, device: DeviceReference, opts: MaxOverDimOptions) !MaxOverDimResult {
             const dim = opts.dim;
-            const keep_dims = opts.keep_dims;
             const input_shape = self.shape.shape;
             const input_dims = input_shape.len;
             if (dim >= input_dims) return error.DimOutOfBounds;
 
-            var output_shape = try device.allocator.alloc(usize, if (keep_dims) input_dims else input_dims - 1);
-            defer device.allocator.free(output_shape);
-            var idx: usize = 0;
-            for (0..input_dims) |i| {
-                if (i != dim) {
-                    output_shape[idx] = input_shape[i];
-                    idx += 1;
-                } else if (keep_dims) {
-                    output_shape[idx] = 1;
-                    idx += 1;
+            var output_shape: std.BoundedArray(usize, 8) = .{};
+
+            for (0..input_shape.len) |i| {
+                if (i != opts.dim) {
+                    try output_shape.append(input_shape[i]);
+                } else if (opts.keep_dims) {
+                    try output_shape.append(1);
                 }
             }
-            const output = try Self.empty(output_shape, device);
+
+            const output = try Self.empty(output_shape.slice(), device);
             errdefer output.deinit(device);
-            const offsets = if (opts.return_offsets) try device.allocator.alloc(usize, output.size()) else null;
-            errdefer if (offsets) |o| device.allocator.free(o);
 
-            const max_dim_size = input_shape[dim];
-            var slice_size: usize = 1;
-            for (dim + 1..input_dims) |i| {
-                slice_size *= input_shape[i];
-            }
+            device.blas.max_along(T, self.data, self.shape.shape, output.data, opts.dim);
 
-            for (0..output.data.len) |i| {
-                var max_val: T = -std.math.inf(T);
-                var max_offs: usize = 0;
-                const base_offs = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
-                for (0..max_dim_size) |j| { // can be optimized if the view along this dim is contiguous (just check dim stride)
-                    const curr_offs = base_offs + j * slice_size;
-                    const curr_val = self.data[curr_offs];
-                    if (curr_val > max_val) {
-                        max_val = curr_val;
-                        max_offs = curr_offs;
-                    }
-                }
-                output.data[i] = max_val;
-                if (offsets) |o| o[i] = max_offs;
-            }
-            return .{ .values = output, .offsets = offsets };
+            return output;
         }
 
         pub const GatherResult = struct {
@@ -1271,7 +1248,7 @@ test "NDArray.sum_along" {
     try std.testing.expect(a2.shape.eq(expected1.shape.*, .{}));
 }
 
-test "NDArray.max_over_dim" {
+test "NDArray.max_along" {
     const allocator = std.testing.allocator;
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
@@ -1298,7 +1275,7 @@ test "NDArray.max_over_dim" {
     defer array.deinit(device);
 
     // max over dim 0
-    var result1 = (try array.max_over_dim(device, .{ .dim = 0, .keep_dims = true })).values;
+    var result1 = try array.max_along(device, .{ .dim = 0, .keep_dims = true });
     defer result1.deinit(device);
     const expected1 = try Array.init(&[_]T{
         13, 14, 15, 16,
@@ -1309,7 +1286,7 @@ test "NDArray.max_over_dim" {
     try std.testing.expectEqualDeep(expected1, result1);
 
     // max over dim 1
-    const result2 = (try array.max_over_dim(device, .{ .dim = 1, .keep_dims = false })).values;
+    const result2 = try array.max_along(device, .{ .dim = 1, .keep_dims = false });
     defer result2.deinit(device);
     const expected2 = try Array.init(&[_]T{
         9,  10, 11, 12,
@@ -1319,7 +1296,7 @@ test "NDArray.max_over_dim" {
     try std.testing.expectEqualDeep(expected2, result2);
 
     // max over dim 2
-    const result3 = (try array.max_over_dim(device, .{ .dim = 2, .keep_dims = true })).values;
+    const result3 = try array.max_along(device, .{ .dim = 2, .keep_dims = true });
     defer result3.deinit(device);
     const expected3 = try Array.init(&[_]T{
         4,  8,  12,
