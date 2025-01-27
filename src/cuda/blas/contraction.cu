@@ -36,7 +36,7 @@ EXTERN_C void contraction(
   auto plan = backend->get_contraction_plan(
     id,
     A_dims, A_syms, A_dims_len,
-    x_dims, x_syms, y_dims_len,
+    x_dims, x_syms, x_dims_len,
     y_dims, y_syms, y_dims_len,
     scratch, scratch_len
   );

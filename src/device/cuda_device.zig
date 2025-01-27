@@ -7,7 +7,7 @@ const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
 const BinaryOp = @import("device_common.zig").BinaryOp;
 
-pub fn dtype(comptime T: type) cuda.dtype {
+pub fn dtype(T: type) cuda.dtype {
     return switch (T) {
         f16 => @compileError("f16 not current supported."),
         f32 => cuda.SINGLE,
@@ -216,26 +216,11 @@ pub const Blas = struct {
         alpha: T,
         beta: T,
     ) void {
-        var A_modes = std.BoundedArray(u8, 8).fromSlice(if (trans_a) "ikj" else "ijk") catch unreachable;
-        var B_modes = std.BoundedArray(u8, 8).fromSlice(if (trans_b) "lmk" else "lkm") catch unreachable;
-        var C_modes = std.BoundedArray(u8, 8).fromSlice("iljm") catch unreachable;
+        std.debug.assert(A_sizes.len == 3 and B_sizes.len == 3);
+        const A_modes: []const u8 = if (trans_a) "ikj" else "ijk";
+        const B_modes: []const u8 = if (trans_b) "imk" else "ikm";
+        const C_modes: []const u8 = "ijm";
 
-        if (A_sizes.len < 3) { // remove "i"
-            A_modes.len = @intCast(find_remove(u8, A_modes.slice(), 'i'));
-            A_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'i'));
-        }
-        if (B_sizes.len < 3) { // remove "l"
-            B_modes.len = @intCast(find_remove(u8, B_modes.slice(), 'l'));
-            C_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'l'));
-        }
-        if (A_sizes.len < 2) { // remove "j"
-            A_modes.len = @intCast(find_remove(u8, A_modes.slice(), 'j'));
-            A_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'j'));
-        }
-        if (B_sizes.len < 2) { // remove "m"
-            B_modes.len = @intCast(find_remove(u8, B_modes.slice(), 'm'));
-            C_modes.len = @intCast(find_remove(u8, C_modes.slice(), 'm'));
-        }
         const par = self.parent();
         const _alpha = alpha;
         const _gamma = beta;
@@ -243,9 +228,9 @@ pub const Blas = struct {
         // zig fmt: off
         cuda.contraction(
             dtype(T), par.context.cutensor,
-            A.ptr, A_sizes.ptr, &A_modes.buffer[0], A_sizes.len,
-            B.ptr, B_sizes.ptr, &B_modes.buffer[0], B_sizes.len,
-            C.ptr, C_sizes.ptr, &C_modes.buffer[0], C_sizes.len,
+            A.ptr, A_sizes.ptr, A_modes.ptr, A_sizes.len,
+            B.ptr, B_sizes.ptr, B_modes.ptr, B_sizes.len,
+            C.ptr, C_sizes.ptr, C_modes.ptr, C_sizes.len,
             &par.scratch.start, &par.scratch.total,
             &_alpha, &_gamma,
         );
@@ -276,7 +261,7 @@ pub const Blas = struct {
 
     pub fn clip_norm(
         self: *Blas,
-        comptime T: type,
+        T: type,
         x: []T,
         max_norm: T,
         delta: T,
@@ -428,7 +413,7 @@ pub const Blas = struct {
 
     pub fn axpy(
         self: *const Blas,
-        comptime T: type,
+        T: type,
         x: []const T,
         y: []T,
         alpha: *const T,
@@ -452,49 +437,49 @@ pub const Blas = struct {
 };
 
 pub const NN = struct {
-    pub fn relu_forward(self: *const NN, comptime T: type, x: []const T, y: []T) void {
+    pub fn relu_forward(self: *const NN, T: type, x: []const T, y: []T) void {
         cuda.relu_forward(dtype(T), self.stream(), x.ptr, y.ptr, x.len);
     }
 
-    pub fn relu_backward(self: *const NN, comptime T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
+    pub fn relu_backward(self: *const NN, T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
         cuda.relu_reverse(dtype(T), self.stream(), x.ptr, y_grd.ptr, x_grd.ptr, x.len);
     }
 
-    pub fn smax_vec_forward(self: *const NN, comptime T: type, x: []const T, y: []T, op: SmaxType) void {
+    pub fn smax_vec_forward(self: *const NN, T: type, x: []const T, y: []T, op: SmaxType) void {
         cuda.smax_vec_forward(dtype(T), self.cudnn(), x.ptr, y.ptr, x.len, smaxtype(op));
     }
 
-    pub fn smax_vec_backward(self: *const NN, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
+    pub fn smax_vec_backward(self: *const NN, T: type, y_val: []const T, y_grd: []const T, x_grd: []T, op: SmaxType) void {
         cuda.smax_vec_reverse(dtype(T), self.cudnn(), y_val.ptr, y_grd.ptr, x_grd.ptr, y_val.len, smaxtype(op));
     }
 
-    pub fn smax_row_forward(self: *const NN, comptime T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
+    pub fn smax_row_forward(self: *const NN, T: type, X: []const T, Y: []T, m: usize, n: usize, op: SmaxType) void {
         cuda.smax_2D_row_forward(dtype(T), self.cudnn(), X.ptr, Y.ptr, m, n, op);
     }
 
-    pub fn smax_row_backward(self: *const NN, comptime T: type, y_val: []const T, y_grd: []const T, x_grd: []T, m: usize, n: usize, op: SmaxType) void {
+    pub fn smax_row_backward(self: *const NN, T: type, y_val: []const T, y_grd: []const T, x_grd: []T, m: usize, n: usize, op: SmaxType) void {
         cuda.smax_2D_row_reverse(dtype(T), self.cudnn(), y_val.ptr, y_grd.ptr, x_grd.ptr, m, n, smaxtype(op));
     }
 
-    pub fn nll_loss_1d_index_forward(self: *const NN, comptime T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+    pub fn nll_loss_1d_index_forward(self: *const NN, T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
         const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
         cuda.nll_loss_1D_index_forward(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
     }
 
-    pub fn nll_loss_1d_index_backward(self: *const NN, comptime T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
+    pub fn nll_loss_1d_index_backward(self: *const NN, T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
         cuda.nll_loss_1D_index_reverse(dtype(T), self.cudnn(), src_grd.ptr, trg, src_grd.ptr, src_val.len, rdxtype(reduce_type));
     }
 
-    pub fn nll_loss_1d_encode_forward(self: *const NN, comptime T: type, src: []T, trg: []const T, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+    pub fn nll_loss_1d_encode_forward(self: *const NN, T: type, src: []T, trg: []const T, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
         const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
         cuda.nll_loss_1D_index_forward(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
     }
 
-    pub fn nll_loss_1d_encode_backward(self: *const NN, comptime T: type, src_val: []const T, trg_val: []const T, src_grd: []T, reduce_type: ReduceType) f64 {
+    pub fn nll_loss_1d_encode_backward(self: *const NN, T: type, src_val: []const T, trg_val: []const T, src_grd: []T, reduce_type: ReduceType) f64 {
         cuda.nll_loss_1D_index_reverse(dtype(T), self.cudnn(), src_grd.ptr, trg_val.ptr, src_grd.ptr, src_val.len, rdxtype(reduce_type));
     }
 
-    pub fn clip_norm(self: *NN, comptime T: type, x_val: []T, x_grd: []const T, max_nrm: T, delta: T) f64 {
+    pub fn clip_norm(self: *NN, T: type, x_val: []T, x_grd: []const T, max_nrm: T, delta: T) f64 {
         const scratch = self.parent().scratch.get(T, 1);
         cuda.clip_norm(dtype(T), self.cublas(), x_val.ptr, x_grd.ptr, scratch.ptr, max_nrm, delta, x_val.len);
     }
@@ -531,7 +516,7 @@ pub const ScratchMemory = struct {
     // Each device has it's own scratch memory because streams work
     // like queues. It's safe if the same queue tries to access its
     // own memory, but dangerous if streams can use other scratch.
-    pub fn get(self: *ScratchMemory, comptime T: type, n: usize, stream: *anyopaque) []T {
+    pub fn get(self: *ScratchMemory, T: type, n: usize, stream: *anyopaque) []T {
         const total: usize = @sizeOf(T) * n;
         // check if we have enough scratch to provide a payload
         if (self.total < total) {
@@ -545,6 +530,60 @@ pub const ScratchMemory = struct {
         }
         const ptr: [*]T = @ptrFromInt(self.start);
         return ptr[0..n];
+    }
+};
+
+const ExecutionGraph = struct {
+    graph: ?struct {
+        wrapper: cuda.GraphWrapper,
+        saved: bool,
+    } = null,
+
+    pub const RunError = error{
+        CaptureInProgress,
+        UndefinedCapture,
+    };
+
+    pub fn run(self: *ExecutionGraph) RunError!void {
+        if (self.graph) |graph| {
+            if (!graph.saved) {
+                return error.CaptureInProgress;
+            }
+            cuda.run_capture(graph.wrapper, self.stream());
+        }
+        return error.UndefinedCapture;
+    }
+    pub fn open(self: *ExecutionGraph, config: struct {}) void {
+        _ = config; // fill this out later
+        self.free();
+        cuda.stream_synchronize(self.stream());
+        self.graph = .{
+            .wrapper = cuda.open_capture(self.stream()),
+            .saved = false,
+        };
+    }
+    pub fn save(self: *ExecutionGraph) void {
+        if (self.graph) |*graph| {
+            if (!graph.saved) {
+                cuda.save_capture(graph.wrapper, self.stream());
+                graph.saved = true;
+            }
+        }
+    }
+    pub fn free(self: *ExecutionGraph) void {
+        self.save();
+        if (self.graph) |*graph| {
+            cuda.stream_synchronize(self.stream());
+            cuda.free_capture(graph.wrapper, self.stream());
+            self.graph = null;
+        }
+    }
+    pub fn empty(self: ExecutionGraph) bool {
+        return self.graph == null;
+    }
+    fn stream(self: *ExecutionGraph) *anyopaque {
+        const parent: *const CudaDevice = @alignCast(@fieldParentPtr("capture", self));
+        return parent.context.stream;
     }
 };
 
@@ -564,6 +603,7 @@ pub const CudaDevice = struct {
     blas: Blas,
     cache: DimensionMap,
     scratch: ScratchMemory,
+    capture: ExecutionGraph,
     allocator: std.mem.Allocator,
 
     pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) CudaDevice {
@@ -586,12 +626,14 @@ pub const CudaDevice = struct {
             // at some point, maybe move this to unmanged
             .cache = .{ .allocator = backing_allocator },
             .scratch = .{},
+            .capture = .{},
             .allocator = backing_allocator,
         };
     }
 
     pub fn deinit(self: *CudaDevice) void {
         self.sync();
+        self.capture.free();
         self.cache.deinit();
         cuda.deinit_cudnn_handle(self.context.cudnn);
         cuda.deinit_cublas_handle(self.context.cublas);
@@ -608,13 +650,13 @@ pub const CudaDevice = struct {
         };
     }
 
-    pub fn mem_alloc(self: *CudaDevice, comptime T: type, n: usize) Error![]T {
+    pub fn mem_alloc(self: *CudaDevice, T: type, n: usize) Error![]T {
         const raw_ptr = cuda.mem_alloc(n * @sizeOf(T), self.context.stream);
         const dev_ptr: [*]T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
         return dev_ptr[0..n];
     }
 
-    pub fn mem_dupe(self: *CudaDevice, comptime T: type, src: []const T) Error![]T {
+    pub fn mem_dupe(self: *CudaDevice, T: type, src: []const T) Error![]T {
         const dup = try self.mem_alloc(T, src.len);
         self.mem_transfer(T, src, dup, .DtoD);
         return dup;
@@ -624,7 +666,7 @@ pub const CudaDevice = struct {
         cuda.mem_free(@constCast(slice.ptr), self.context.stream);
     }
 
-    pub fn mem_create(self: CudaDevice, comptime T: type) Error!*T {
+    pub fn mem_create(self: CudaDevice, T: type) Error!*T {
         const raw_ptr = cuda.mem_alloc(@sizeOf(T), self.context.stream);
         const dev_ptr: *T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
         return dev_ptr;
@@ -634,31 +676,36 @@ pub const CudaDevice = struct {
         cuda.mem_free(@constCast(ptr), self.context.stream);
     }
 
-    pub fn mem_fill(self: CudaDevice, comptime T: type, slice: []T, value: T) void {
+    pub fn mem_fill(self: CudaDevice, T: type, slice: []T, value: T) void {
         var _value = value; // move from register memory
         cuda.mem_fill(dtype(T), slice.ptr, slice.len, &_value, self.context.stream);
     }
 
-    pub fn mem_copy(self: CudaDevice, comptime T: type, src: []const T, dst: []T) void {
+    pub fn mem_copy(self: CudaDevice, T: type, src: []const T, dst: []T) void {
         return self.mem_transfer(T, src, dst, .DtoD);
     }
 
-    pub fn mem_random(self: CudaDevice, comptime T: type, slice: []T, op: RandType, seed: u64) void {
+    pub fn mem_random(self: CudaDevice, T: type, slice: []T, op: RandType, seed: u64) void {
         // at some point, I should put in u64 support for the device random.
         cuda.mem_random(dtype(T), slice.ptr, slice.len, randtype(op), @truncate(seed), self.context.stream);
     }
 
-    pub fn mem_sequence(self: CudaDevice, comptime T: type, slice: []T, initial: T, step: T) void {
+    pub fn mem_sequence(self: CudaDevice, T: type, slice: []T, initial: T, step: T) void {
         var _init = initial; // move from register memory
         var _step = step; // move from register memory
         cuda.mem_sequence(dtype(T), slice.ptr, slice.len, &_init, &_step, self.context.stream);
+    }
+
+    pub fn mem_take(self: CudaDevice, T: type, src: []const T, idxs: []const usize, dst: []T) void {
+        std.debug.assert(dst.len >= idxs.len);
+        cuda.mem_take(dtype(T), src.ptr, src.len, idxs.ptr, idxs.len, dst.ptr, self.context.stream);
     }
 
     pub const Direction = enum { HtoD, DtoH, DtoD };
 
     pub fn mem_transfer(
         self: CudaDevice,
-        comptime T: type,
+        T: type,
         src: []const T,
         dst: []T,
         direction: Direction,

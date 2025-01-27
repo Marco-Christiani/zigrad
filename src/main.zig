@@ -4,34 +4,45 @@ const mnist = zg.mnist;
 const layer = zg.layer;
 pub const std_options = zg.std_options;
 
-pub const zigrad_settings: zg.Settings = .{
-    .caching_policy = null,
+const Model = struct {
+    pub fn forward(_: anytype) void {}
 };
+
+const Tensor = zg.NDTensor(f32);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var gpu = zg.device.CudaDevice.init(0, gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+
+    var gpu = zg.device.CudaDevice.init(0, arena.allocator());
     defer gpu.deinit();
 
-    const A_host = [_]f32{ 1, 2, 3, 4, 1, 2, 3, 4 };
-    const B_host = [_]f32{ 1, 2, 3, 4, 1, 2, 3, 4 };
-
-    const A = try zg.NDTensor(f32).empty(&.{ 2, 2, 2 }, false, gpu.reference());
+    const A = try Tensor.sequence(0.0, 1.0, &.{ 1, 2, 2 }, false, gpu.reference());
     defer A.deinit();
 
-    const x = try zg.NDTensor(f32).empty(&.{ 2, 2, 2 }, false, gpu.reference());
-    defer A.deinit();
+    const B = try Tensor.sequence(0.0, 1.0, &.{ 1, 2, 2 }, false, gpu.reference());
+    defer B.deinit();
 
-    gpu.mem_transfer(f32, A_host[0..], A.get_data(), .HtoD);
-    gpu.mem_transfer(f32, B_host[0..], x.get_data(), .HtoD);
+    A.print();
+    B.print();
 
-    const y = try A.bmm(x, .{
+    gpu.capture.open(.{});
+
+    const C = try A.bmm(B, .{
         .trans_a = false,
         .trans_b = false,
     });
-    defer y.deinit();
 
-    y.print();
+    defer C.deinit();
+
+    gpu.capture.save();
+
+    std.time.sleep(std.time.ns_per_s * 3);
+
+    try gpu.capture.run();
+
+    //C.print();
 }

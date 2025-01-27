@@ -55,7 +55,7 @@ extern "C" DevicePropertiesWrapper init_device(unsigned device_number) {
     CURESULT_ASSERT(cuDeviceGetCount(&device_count));
 
     CHECK_INVARIANT(device_count > 0, "Device count came back as zero");
-    CHECK_INVARIANT(device_count <= device_number, "Device ID greater than number of devices");
+    CHECK_INVARIANT(device_count > device_number, "Device ID greater than number of devices");
 
     CURESULT_ASSERT(cuDeviceGet(&device, device_number));
     CURESULT_ASSERT(cuCtxCreate(&context, 0, device));
@@ -202,6 +202,37 @@ struct NormalRandom {
     }
 };
 
+struct GraphBackend {
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t instance = nullptr;
+};
+
+extern "C" GraphWrapper open_capture(void* stream) {
+    CUDA_ASSERT(cudaStreamBeginCapture(static_cast<cudaStream_t>(stream), cudaStreamCaptureModeGlobal));
+    return GraphWrapper{ .ptr = new GraphBackend() };
+}
+
+extern "C" void save_capture(GraphWrapper wrapper, void* stream) {
+    auto backend = static_cast<GraphBackend*>(wrapper.ptr);
+    auto _stream = static_cast<cudaStream_t>(stream); 
+    CUDA_ASSERT(cudaStreamEndCapture(_stream, &backend->graph));
+    // TODO: Check out these "NULL, NULL, 0" arguments
+    CUDA_ASSERT(cudaGraphInstantiate(&backend->instance, backend->graph, NULL, NULL, 0));
+}
+
+extern "C" void free_capture(GraphWrapper wrapper, void* stream) {
+    auto backend = static_cast<GraphBackend*>(wrapper.ptr);
+    CUDA_ASSERT(cudaGraphExecDestroy(backend->instance));
+    CUDA_ASSERT(cudaGraphDestroy(backend->graph));
+    delete backend;
+}
+
+extern "C" void run_capture(GraphWrapper wrapper, void* stream) {
+    auto backend = static_cast<GraphBackend*>(wrapper.ptr);
+    auto _stream = static_cast<cudaStream_t>(stream); 
+    CUDA_ASSERT(cudaGraphLaunch(backend->instance, _stream));
+}
+
 template <typename T>
 void __mem_random(void* x, len_t n, randtype op, unsigned seed, void* stream) {
   const auto _stream = static_cast<cudaStream_t>(stream);
@@ -214,9 +245,49 @@ void __mem_random(void* x, len_t n, randtype op, unsigned seed, void* stream) {
 }
 
 extern "C" void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, void* stream) {
-  if (id == SINGLE) {
-    return __mem_random<float>(x, n, op, seed, stream);
-  } else {
-    return __mem_random<double>(x, n, op, seed, stream);
+  switch (id) {
+    case SINGLE: return __mem_random<f32>(x, n, op, seed, stream);
+    case DOUBLE: return __mem_random<f64>(x, n, op, seed, stream);
+    default: SYSTEM_EXIT("Unsupported data type");
+  }
+}
+
+template <typename T>
+void __mem_take(
+  const void* src,
+  len_t src_len,
+  const len_t* idxs,
+  len_t idxs_len,
+  void* dst,
+  void* stream
+){
+  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto src_itr = static_cast<const T*>(src);
+  const auto dst_itr = static_cast<T*>(dst);
+  thrust::counting_iterator<len_t> stencil(0);
+  thrust::transform(
+    thrust::cuda::par.on(_stream),
+    stencil,
+    stencil + idxs_len,
+    dst_itr,
+    [=]__device__(len_t i) -> T {
+      return src_itr[idxs[i]];
+    });
+}
+
+// assumes idx_len <= dst_len
+extern "C" void mem_take(
+  dtype id,
+  const void* src,
+  len_t src_len,
+  const len_t* idxs,
+  len_t idxs_len,
+  void* dst,
+  void* stream
+) {  
+  switch (id) {
+    case SINGLE: return __mem_take<f32>(src, src_len, idxs, idxs_len, dst, stream);
+    case DOUBLE: return __mem_take<f64>(src, src_len, idxs, idxs_len, dst, stream);
+    default: SYSTEM_EXIT("Unsupported data type");
   }
 }

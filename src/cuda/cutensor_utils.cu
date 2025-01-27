@@ -4,12 +4,15 @@
 #include <array>
 #include <algorithm>
 #include <cutensor/types.h>
+#include <type_traits>
 #include <unordered_map>
 #include <initializer_list>
 
 #include "decls.h"
 #include "cuda_helpers.cu"
 #include <typeinfo>
+
+#include <variant>
 
 static const u32 cutensor_alignment = 128; // Alignment of the global-memory device poi32ers (bytes)
 
@@ -159,6 +162,14 @@ template<class T>
 struct ManagedComponent {
   T ptr;
   ManagedComponent(T _ptr = nullptr) : ptr{_ptr} {}
+  ManagedComponent(ManagedComponent const&) = delete;
+  ManagedComponent& operator=(const ManagedComponent&) = delete;
+  ManagedComponent(ManagedComponent&& other) noexcept {
+    this->ptr = std::exchange(other.ptr, nullptr);
+  };
+  ManagedComponent& operator=(ManagedComponent&& other) noexcept {
+    this->ptr = std::exchange(other.ptr, nullptr);
+  };
   ~ManagedComponent() {
     if (this->ptr) {
       destroy(this->ptr);
@@ -174,30 +185,59 @@ typedef ManagedComponent<cutensorOperationDescriptor_t> ManagedOperationDescript
 /////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////
 
-struct MapPtr {
-  void* data = nullptr;
-  void (*memo)(MapPtr);
-
-  MapPtr() = default;
-  MapPtr(const MapPtr&) = default;
-  MapPtr(MapPtr&&) noexcept = default;
-
-  template <class T>
-  MapPtr(T _data) {
-    this->memo = +[](MapPtr self) {
-      delete static_cast<T*>(self.data);
-    };
-    this->data = new T{_data};
-  }
-  ~MapPtr() {
-    if (this->data) {
-      this->memo(*this);
-    }
-  }
+struct ReducePlan {
+  ManagedPlan plan;
+  ManagedPlanPreference plan_pref;
+  ManagedOperationDescriptor op_desc;
+  ManagedTensorDescriptor x_desc;
+  ManagedTensorDescriptor y_desc;
+  BoundedArray<i64> x_dims;
+  BoundedArray<i64> y_dims;
+  BoundedArray<i32> x_syms;
+  BoundedArray<i32> y_syms;
 };
 
-/////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////
+struct PermutatePlan {
+  ManagedPlan plan;
+  ManagedPlanPreference plan_pref;
+  ManagedOperationDescriptor op_desc;
+  ManagedTensorDescriptor x_desc;
+  ManagedTensorDescriptor y_desc;
+  BoundedArray<i64> x_dims;
+  BoundedArray<i64> y_dims;
+  BoundedArray<i32> x_syms;
+  BoundedArray<i32> y_syms;
+};
+
+struct ContractionPlan {
+  ManagedPlan plan;
+  ManagedPlanPreference plan_pref;
+  ManagedOperationDescriptor op_desc;
+  ManagedTensorDescriptor x_desc;
+  ManagedTensorDescriptor y_desc;
+  ManagedTensorDescriptor z_desc;
+};
+
+struct BinaryPlan {
+  ManagedPlan plan;
+  ManagedPlanPreference plan_pref;
+  ManagedOperationDescriptor op_desc;
+  ManagedTensorDescriptor x_desc;
+  ManagedTensorDescriptor y_desc;
+  BoundedArray<i64> x_dims;
+  BoundedArray<i64> y_dims;
+  BoundedArray<i32> x_syms;
+  BoundedArray<i32> y_syms;
+};
+
+typedef std::variant<
+  BinaryPlan,
+  ContractionPlan,
+  PermutatePlan,
+  ReducePlan
+> PlanVariant;
+
+typedef std::shared_ptr<PlanVariant> MapPtr;
 
 class PlanManager {
 private:
@@ -245,58 +285,13 @@ public:
     if (itr == this->map.end()) {
       return nullptr;
     }
-    return static_cast<T*>(itr->second.data);
+    return &std::get<T>(*itr->second);
   }
 
   template<class T>
-  void insert(MapKey key, T val) {
-    this->map.insert(std::make_pair(key, MapPtr(val)));
+  void insert(MapKey key, T&& val) {
+    this->map.insert(std::make_pair(key, std::make_shared<PlanVariant>(std::move(val))));
   }
-};
-
-struct ReducePlan {
-  ManagedPlan plan;
-  ManagedPlanPreference plan_pref;
-  ManagedOperationDescriptor op_desc;
-  ManagedTensorDescriptor x_desc;
-  ManagedTensorDescriptor y_desc;
-  BoundedArray<i64> x_dims;
-  BoundedArray<i64> y_dims;
-  BoundedArray<i32> x_syms;
-  BoundedArray<i32> y_syms;
-};
-
-struct PermutatePlan {
-  ManagedPlan plan;
-  ManagedPlanPreference plan_pref;
-  ManagedOperationDescriptor op_desc;
-  ManagedTensorDescriptor x_desc;
-  ManagedTensorDescriptor y_desc;
-  BoundedArray<i64> x_dims;
-  BoundedArray<i64> y_dims;
-  BoundedArray<i32> x_syms;
-  BoundedArray<i32> y_syms;
-};
-
-struct ContractionPlan {
-  ManagedPlan plan;
-  ManagedPlanPreference plan_pref;
-  ManagedOperationDescriptor op_desc;
-  ManagedTensorDescriptor x_desc;
-  ManagedTensorDescriptor y_desc;
-  ManagedTensorDescriptor z_desc;
-};
-
-struct BinaryPlan {
-  ManagedPlan plan;
-  ManagedPlanPreference plan_pref;
-  ManagedOperationDescriptor op_desc;
-  ManagedTensorDescriptor x_desc;
-  ManagedTensorDescriptor y_desc;
-  BoundedArray<i64> x_dims;
-  BoundedArray<i64> y_dims;
-  BoundedArray<i32> x_syms;
-  BoundedArray<i32> y_syms;
 };
 
 /////////////////////////////////////////////////////////////
@@ -542,8 +537,10 @@ class CutensorBackend {
 
       BoundedArray<i64> a_dims(x_dims, x_dims_len, true);
       BoundedArray<i32> a_syms(x_syms, x_dims_len, true);
+
       BoundedArray<i64> b_dims(y_dims, y_dims_len, true);
       BoundedArray<i32> b_syms(y_syms, y_dims_len, true);
+
       BoundedArray<i64> c_dims(z_dims, z_dims_len, true);
       BoundedArray<i32> c_syms(z_syms, z_dims_len, true);
   
@@ -579,8 +576,8 @@ class CutensorBackend {
                   this->handle, &op_desc,
                   x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
                   y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
-                  z_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
-                  z_desc, b_syms.data,
+                  z_desc, c_syms.data, CUTENSOR_OP_IDENTITY,
+                  z_desc, c_syms.data,
                   cutensor_compute_type(id)));
   
       const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
