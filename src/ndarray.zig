@@ -867,7 +867,7 @@ pub fn NDArray(comptime T: type) type {
         /// COM
         pub fn take(self: *Self, offsets: *const NDArray(usize), device: DeviceReference) !*Self {
             const result = try Self.empty(&.{offsets.data.len}, device);
-            for (result.data, offsets) |*r, o| r.* = self.data[o];
+            device.mem_take(T, self.data, offsets.data, result.data);
             return result;
         }
 

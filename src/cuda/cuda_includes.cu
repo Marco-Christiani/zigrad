@@ -7,6 +7,7 @@
 #include "/usr/local/cuda/include/thrust/fill.h"
 #include "/usr/local/cuda/include/thrust/sequence.h"
 #include "/usr/local/cuda/include/thrust/transform.h"
+#include "/usr/local/cuda/include/thrust/copy.h"
 #include "/usr/local/cuda/include/thrust/tuple.h"
 #include "/usr/local/cuda/include/thrust/iterator/zip_iterator.h"
 #include "/usr/local/cuda/include/thrust/iterator/counting_iterator.h"

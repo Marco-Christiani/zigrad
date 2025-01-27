@@ -390,6 +390,12 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
+        pub fn mem_sequence(self: Self, T: type, dst: []T, initial: T, step: T) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.mem_sequence(T, dst, initial, step),
+            };
+        }
+
         pub fn mem_transfer(
             self: Self,
             comptime T: type,
@@ -400,6 +406,12 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             return switch (self.ptrs) {
                 .aux => |dev| dev.mem_transfer(T, src, dst, direction),
                 .host => @memcpy(dst, src),
+            };
+        }
+
+        pub fn mem_take(self: Self, T: type, src: []const T, idxs: []const usize, dst: []T) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.mem_take(T, src, idxs, dst),
             };
         }
 

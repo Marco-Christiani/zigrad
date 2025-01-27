@@ -518,6 +518,10 @@ pub const HostDevice = struct {
             current += step;
         }
     }
+    pub fn mem_take(_: HostDevice, T: type, src: []const T, idxs: []const usize, dst: []T) void {
+        std.debug.assert(dst.len >= idxs.len);
+        for (dst, idxs) |*d, i| d.* = src[i];
+    }
 
     pub fn sync(_: HostDevice) void {}
 

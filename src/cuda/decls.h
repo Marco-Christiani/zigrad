@@ -16,6 +16,7 @@ static const dtype DOUBLE = 1;
 // Wrappers for zig interface
 typedef struct { void* ptr; } CutensorWrapper;
 typedef struct { void* ptr; } DevicePropertiesWrapper;
+typedef struct { void* ptr; } GraphWrapper;
 
 typedef unsigned char reduxtype;
 static const reduxtype RDX_NONE = 0;

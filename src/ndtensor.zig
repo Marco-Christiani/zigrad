@@ -106,6 +106,12 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
+        pub fn sequence(start: T, step: T, shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+            const self = try Self.empty(shape, requires_gradient, device);
+            device.mem_sequence(T, self.get_data(), start, step);
+            return self;
+        }
+
         pub fn from_cache(dims: []const usize, requires_gradient: bool, device: DeviceReference) !?*Self {
             if (device.cache.get(Self, dims)) |self| {
                 self.requires_gradient = requires_gradient;
