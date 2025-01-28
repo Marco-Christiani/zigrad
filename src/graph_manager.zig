@@ -73,8 +73,10 @@ test "GraphManager eager teardown reuse 1" {
     const T = f32;
     const Tensor = zg.NDTensor(T);
     const allocator = std.testing.allocator;
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
+
     const device = cpu.reference();
     zg.rt_grad_enabled = true;
 
@@ -94,11 +96,14 @@ test "GraphManager eager teardown reuse 1" {
     B.acquire();
     F.acquire();
 
-    var C = try B.mul(A);
+    const C = try B.mul(A);
+    //defer C.deinit();
 
     const D = try B.add(F);
+    //defer D.deinit();
 
-    var E = try C.mul(D);
+    const E = try C.mul(D);
+    //defer E.deinit();
 
     // Setup graph manager with eager teardown
     var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
@@ -117,6 +122,7 @@ test "GraphManager eager teardown reuse 1" {
     A.release();
     B.release();
     F.release();
+
     A.deinit();
     B.deinit();
     F.deinit();
@@ -173,14 +179,16 @@ test "GraphManager x*x" {
     const Tensor = zg.NDTensor(T);
     const allocator = std.testing.allocator;
     zg.rt_grad_enabled = true;
+
     var cpu = zg.device.HostDevice.init(allocator);
     defer cpu.deinit();
     const device = cpu.reference();
 
-    var A = try Tensor.init(&[_]T{2.0}, null, true, device);
+    const A = try Tensor.init(&[_]T{2.0}, null, true, device);
     const B = try Tensor.init(&[_]T{3.0}, null, true, device);
-    var C = try A.mul(B);
-    var E = try C.mul(C);
+
+    const C = try A.mul(B);
+    const E = try C.mul(C);
 
     // Acquire leaf tensors
     A.acquire();

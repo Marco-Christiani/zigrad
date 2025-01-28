@@ -170,7 +170,7 @@ pub const Blas = struct {
 
     pub fn clip_norm(
         self: Blas,
-        comptime T: type,
+        T: type,
         x_val: []T,
         max_norm: T,
         delta: T,
@@ -365,7 +365,7 @@ pub const Blas = struct {
 
     pub fn axpy(
         _: Blas,
-        comptime T: type,
+        T: type,
         x: []const T,
         y: []T,
         alpha: *const T,
@@ -413,7 +413,7 @@ pub const ScratchMemory = struct {
         }
         self.* = undefined;
     }
-    pub fn get(self: *ScratchMemory, comptime T: type, n: usize) []T {
+    pub fn get(self: *ScratchMemory, T: type, n: usize) []T {
         const total: usize = @sizeOf(T) * n;
         // check if we have enough scratch to provide a payload
         if (self.tail < (self.head + total)) {
@@ -430,13 +430,13 @@ pub const ScratchMemory = struct {
 };
 
 pub const NN = struct {
-    pub fn relu_forward(_: NN, comptime T: type, x: []const T, y: []T) void {
+    pub fn relu_forward(_: NN, T: type, x: []const T, y: []T) void {
         for (x, y) |x_v, *y_v| {
             y_v.* = if (x_v > 0) x_v else 0;
         }
     }
 
-    pub fn relu_backward(_: NN, comptime T: type, x_val: []const T, y_grd: []const T, x_grd: []T) void {
+    pub fn relu_backward(_: NN, T: type, x_val: []const T, y_grd: []const T, x_grd: []T) void {
         for (x_val, y_grd, x_grd) |x_v, y_g, *x_g| {
             x_g.* += if (x_v > 0) y_g else 0;
         }
@@ -472,7 +472,7 @@ pub const HostDevice = struct {
         self.* = undefined;
     }
 
-    pub fn mem_alloc(self: HostDevice, comptime T: type, n: usize) Error![]T {
+    pub fn mem_alloc(self: HostDevice, T: type, n: usize) Error![]T {
         return self.allocator.alloc(T, n);
     }
 
@@ -480,7 +480,7 @@ pub const HostDevice = struct {
         return self.allocator.free(slice);
     }
 
-    pub fn mem_create(self: HostDevice, comptime T: type) Error!*T {
+    pub fn mem_create(self: HostDevice, T: type) Error!*T {
         return self.allocator.create(T);
     }
 
@@ -488,19 +488,19 @@ pub const HostDevice = struct {
         return self.allocator.destroy(slice);
     }
 
-    pub fn mem_dupe(self: HostDevice, comptime T: type, src: []const T) Error![]T {
+    pub fn mem_dupe(self: HostDevice, T: type, src: []const T) Error![]T {
         return self.allocator.dupe(T, src);
     }
 
-    pub fn mem_copy(_: HostDevice, comptime T: type, src: []const T, dst: []T) void {
+    pub fn mem_copy(_: HostDevice, T: type, src: []const T, dst: []T) void {
         @memcpy(dst, src);
     }
 
-    pub fn mem_fill(_: HostDevice, comptime T: type, slice: []T, value: T) void {
+    pub fn mem_fill(_: HostDevice, T: type, slice: []T, value: T) void {
         @memset(slice, value);
     }
 
-    pub fn mem_random(_: HostDevice, comptime T: type, slice: []T, op: RandType, seed: u64) void {
+    pub fn mem_random(_: HostDevice, T: type, slice: []T, op: RandType, seed: u64) void {
         var prng = std.Random.DefaultPrng.init(seed);
         const rand = prng.random();
         if (op == .uniform) {
@@ -511,7 +511,7 @@ pub const HostDevice = struct {
     }
 
     // remove data dependencies on this to speed it up
-    pub fn mem_sequence(_: HostDevice, comptime T: type, slice: []T, initial: T, step: T) void {
+    pub fn mem_sequence(_: HostDevice, T: type, slice: []T, initial: T, step: T) void {
         var current = initial; // move from register memory
         for (slice) |*x| {
             x.* = current;
@@ -520,7 +520,7 @@ pub const HostDevice = struct {
     }
     pub fn mem_take(_: HostDevice, T: type, src: []const T, idxs: []const usize, dst: []T) void {
         std.debug.assert(dst.len >= idxs.len);
-        for (dst, idxs) |*d, i| d.* = src[i];
+        for (idxs, 0..) |i, j| dst[j] = src[i];
     }
 
     pub fn sync(_: HostDevice) void {}
