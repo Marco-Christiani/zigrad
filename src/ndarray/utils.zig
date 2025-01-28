@@ -7,21 +7,6 @@ pub fn prod(dims: []const usize) usize {
     return s;
 }
 
-pub fn calculate_broadcasted_shape(shape1: []const usize, shape2: []const usize, allocator: std.mem.Allocator) ![]usize {
-    const dims = @max(shape1.len, shape2.len);
-    const result_shape = try allocator.alloc(usize, dims);
-    for (0..dims) |i| {
-        const dimA = if (i < shape1.len) shape1[shape1.len - 1 - i] else 1;
-        const dimB = if (i < shape2.len) shape2[shape2.len - 1 - i] else 1;
-        if (dimA != dimB and dimA != 1 and dimB != 1) {
-            allocator.free(result_shape);
-            return error.Unbroadcastable;
-        }
-        result_shape[dims - 1 - i] = @max(dimA, dimB);
-    }
-    return result_shape;
-}
-
 /// Flexibly select index allowing for indices.len > shape.len
 /// Effectively mocks batch dimensions (e.g. shape=(2,2), indices=(0, 0) == indices=(1, 0, 0) == indices= (..., 0, 0))
 fn flex_select_offset(shape: []const usize, indices: []const usize) !usize {
@@ -96,30 +81,6 @@ test print_ndslice {
         try print_ndslice(f64, &arr2, &shape2, buffer2.writer());
         try std.testing.expectEqualStrings("[[[1], [2]], [[3], [4]], [[5], [6]]]", buffer2.items);
     }
-}
-
-test "calculate_broadcasted_shape" {
-    const shape1 = [_]usize{ 5, 3, 4, 2 };
-    const shape2 = [_]usize{ 4, 2 };
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var result_shape = try calculate_broadcasted_shape(&shape1, &shape2, alloc);
-    try std.testing.expectEqualSlices(usize, &shape1, result_shape);
-
-    result_shape = try calculate_broadcasted_shape(&shape2, &shape1, alloc);
-    try std.testing.expectEqualSlices(usize, &shape1, result_shape);
-
-    result_shape = try calculate_broadcasted_shape(&shape1, &shape1, alloc);
-    try std.testing.expectEqualSlices(usize, &shape1, result_shape);
-
-    result_shape = try calculate_broadcasted_shape(&shape2, &shape2, alloc);
-    try std.testing.expectEqualSlices(usize, &shape2, result_shape);
-
-    try std.testing.expectError(error.Unbroadcastable, calculate_broadcasted_shape(&shape1, &[_]usize{ 4, 3 }, alloc));
-    try std.testing.expectError(error.Unbroadcastable, calculate_broadcasted_shape(&shape1, &[_]usize{ 3, 2 }, alloc));
-    try std.testing.expectError(error.Unbroadcastable, calculate_broadcasted_shape(&shape1, &[_]usize{ 3, 3 }, alloc));
 }
 
 test "flex_pos_to_index" {

@@ -268,6 +268,12 @@ pub fn NN(comptime Parent: type) type {
     return struct {
         const Self = @This();
 
+        pub fn exp(self: *const Self, comptime T: type, x: []const T, y: []T) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.nn.exp(T, x, y),
+            };
+        }
+
         pub fn relu_forward(self: *const Self, comptime T: type, x: []const T, y: []T) void {
             return switch (self.parent()) {
                 inline else => |dev| dev.nn.relu_forward(T, x, y),

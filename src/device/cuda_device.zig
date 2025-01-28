@@ -437,6 +437,10 @@ pub const Blas = struct {
 };
 
 pub const NN = struct {
+    pub fn exp(self: *const NN, T: type, x: []const T, y: []T) void {
+        cuda.pow_exp(dtype(T), self.stream(), x.ptr, y.ptr, x.len);
+    }
+
     pub fn relu_forward(self: *const NN, T: type, x: []const T, y: []T) void {
         cuda.relu_forward(dtype(T), self.stream(), x.ptr, y.ptr, x.len);
     }

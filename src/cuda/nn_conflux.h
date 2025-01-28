@@ -119,4 +119,12 @@ EXTERN_C void clip_norm(
   double delta
 );
 
+EXTERN_C void pow_exp(
+  dtype id,
+  void* stream,
+  const void* x,
+  void* y,
+  len_t n
+);
+
 #endif

@@ -5,3 +5,4 @@
 #include "nn/nll_loss_1d_index.cu"
 #include "nn/nll_loss_1d_encode.cu"
 #include "nn/clip_norm.cu"
+#include "nn/exp.cu"

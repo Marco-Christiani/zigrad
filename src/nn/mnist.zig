@@ -291,7 +291,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             const loss = try trainer.train_step(image, label);
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
-            total_loss += loss.get(&[_]usize{0});
+            total_loss += loss.data.data[0];
             log.info("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]", .{
                 loss.data.data[0],
                 i,
@@ -351,7 +351,7 @@ fn eval_mnist(
     for (dataset.images, dataset.labels) |image, label| {
         timer.reset();
         const output = try model.model.forward(image);
-        const batch_n = try output.data.shape.get(0);
+        const batch_n = output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;
             const end = start + 10;

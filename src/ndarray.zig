@@ -1,6 +1,6 @@
 const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
-pub const Shape = @import("ndarray/Shape.zig");
+pub const Shape = @import("ndarray/shape.zig");
 // const blas = @import("backend/blas.zig");
 const log = std.log.scoped(.zg_ndarray);
 const zg = @import("zigrad.zig");
@@ -22,36 +22,38 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
-        shape: *Shape,
+        shape: Shape,
         data: []T,
         view: bool = false,
 
         /// Values and shape are copied. COM.
         pub fn init(values: []const T, shape: ?[]const usize, device: DeviceReference) !*Self {
+            const _shape = Shape.init(shape orelse &.{values.len});
+
+            const n = _shape.size();
+            if (n != values.len or n == 0 or values.len == 0) {
+                log.err("Invalid shape: result.shape.size()={} result.data.len={}", .{ _shape.size(), values.len });
+                return error.InvalidShape;
+            }
             const result = try device.allocator.create(Self);
             result.* = Self{
                 .data = try device.mem_dupe(T, values),
-                .shape = try Shape.init(shape orelse &.{values.len}, device.allocator),
+                .shape = _shape,
             };
-            if (result.shape.size() != result.data.len) {
-                log.err("Invalid shape: result.shape.size()={d} result.data.len={d}", .{ result.shape.size(), result.data.len });
-                return error.InvalidShape;
-            }
             return result;
         }
 
         pub fn deinit(self: *Self, device: DeviceReference) void {
             if (!self.view) device.mem_free(self.data);
-            self.shape.deinit();
             device.allocator.destroy(self);
         }
 
         pub fn empty(shape: []const usize, device: DeviceReference) !*Self {
             const result = try device.allocator.create(Self);
-            const empty_shape = try Shape.init(shape, device.allocator);
+            const _shape = Shape.init(shape);
             result.* = .{
-                .data = try device.mem_alloc(T, empty_shape.size()),
-                .shape = empty_shape,
+                .data = try device.mem_alloc(T, _shape.size()),
+                .shape = _shape,
             };
             return result;
         }
@@ -72,7 +74,7 @@ pub fn NDArray(comptime T: type) type {
             const result = try device.allocator.create(Self);
             result.* = .{
                 .data = try device.mem_dupe(T, self.data),
-                .shape = try self.shape.copy(device.allocator),
+                .shape = self.shape,
             };
             return result;
         }
@@ -93,57 +95,59 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
-            log.debug("{s} shape: {d}", .{
-                if (msg) |n| n else "",
-                self.shape.shape,
-            });
+            log.debug("{s} shape: {}", .{ if (msg) |n| n else "", self.shape.slice() });
         }
 
         // TODO: make a copying reshape like tensor does
-        pub fn _reshape(self: *const Self, shape: []const usize) !void {
-            try self.shape._reshape(shape);
+        pub fn _reshape(self: *Self, shape: []const usize) void {
+            const _shape = Shape.init(shape);
+            std.debug.assert(_shape.size() == self.size());
+            self.shape = _shape;
         }
 
-        pub fn get(self: Self, indices: []const usize) T {
-            return self.data[self.pos_to_offset(indices)];
-        }
+        // TODO: This cannot directly touch device memory
+        //pub fn get(self: Self, indices: []const usize) T {
+        //    return self.data[self.shape.strides().pos_to_offset(indices)];
+        //}
 
-        pub fn set(self: Self, indices: []const usize, value: T) !void {
-            if (indices.len != self.shape.len()) return error.InvalidShape;
-            std.debug.assert(indices.len == self.shape.len());
-            self.data[self.pos_to_offset(indices)] = value;
-        }
+        // TODO: This cannot directly touch device memory
+        //pub fn set(self: Self, indices: []const usize, value: T) !void {
+        //    if (indices.len != self.shape.len) return error.InvalidShape;
+        //    std.debug.assert(indices.len == self.shape.len);
+        //    self.data[self.shape.strides().pos_to_offset(indices)] = value;
+        //}
 
-        pub fn pos_to_offset(self: Self, indices: []const usize) usize {
-            if (indices.len < self.shape.len()) log.warn("Hope you know what you are doing.", .{});
-            std.debug.assert(indices.len >= self.shape.len());
-            var index: usize = 0;
-            var stride: usize = 1;
-            for (0..self.shape.len()) |i| {
-                const dim = self.shape.len() - i - 1;
-                const dimSize = self.shape.get(dim) catch unreachable;
-                const idx = indices[dim];
-                std.debug.assert(idx < dimSize);
+        // USE: Shape.strides() -> creates offset helper
+        //pub fn pos_to_offset(self: Self, indices: []const usize) usize {
+        //    if (indices.len < self.shape.len) log.warn("Hope you know what you are doing.", .{});
+        //    std.debug.assert(indices.len >= self.shape.len);
+        //    var index: usize = 0;
+        //    var stride: usize = 1;
+        //    for (0..self.shape.len) |i| {
+        //        const dim = self.shape.len - i - 1;
+        //        const dimSize = self.shape.get(dim) catch unreachable;
+        //        const idx = indices[dim];
+        //        std.debug.assert(idx < dimSize);
 
-                index += idx * stride;
-                stride *= dimSize;
-            }
-            return index;
-        }
+        //        index += idx * stride;
+        //        stride *= dimSize;
+        //    }
+        //    return index;
+        //}
 
-        pub fn offset_to_pos(self: Self, offset: usize, device: DeviceReference) ![]usize {
-            const n = self.shape.len();
-            const pos = try device.allocator.alloc(usize, n);
-            errdefer device.allocator.free(pos);
+        //pub fn offset_to_pos(self: Self, offset: usize, device: DeviceReference) ![]usize {
+        //    const n = self.shape.len;
+        //    const pos = try device.allocator.alloc(usize, n);
+        //    errdefer device.allocator.free(pos);
 
-            var remaining_index = offset;
-            for (0..n) |i| {
-                pos[i] = remaining_index / self.shape.strides[i];
-                remaining_index %= self.shape.strides[i];
-            }
+        //    var remaining_index = offset;
+        //    for (0..n) |i| {
+        //        pos[i] = remaining_index / self.shape.strides[i];
+        //        remaining_index %= self.shape.strides[i];
+        //    }
 
-            return pos;
-        }
+        //    return pos;
+        //}
 
         pub fn size(self: Self) usize {
             return self.data.len;
@@ -174,30 +178,30 @@ pub fn NDArray(comptime T: type) type {
             }
 
             const alloc = std.heap.page_allocator;
-            var shapeStr: []u8 = alloc.alloc(u8, self.shape.len() * @sizeOf(usize)) catch @panic("allocation failed in print");
-            defer alloc.free(shapeStr);
+            const shape_str: []u8 = alloc.alloc(u8, @as(usize, self.shape.len) * @sizeOf(usize)) catch @panic("allocation failed in print");
+            defer alloc.free(shape_str);
             var j: usize = 0;
             var bytes_written: usize = 0;
-            for (self.shape.shape, 0..) |s, i| {
-                const b = std.fmt.formatIntBuf(shapeStr[bytes_written..shapeStr.len], s, 10, .lower, .{});
+            for (self.shape.slice(), 0..) |s, i| {
+                const b = std.fmt.formatIntBuf(shape_str[bytes_written..shape_str.len], s, 10, .lower, .{});
                 bytes_written += b;
-                if (i < self.shape.len() - 1 and j + b < shapeStr.len - 1) {
-                    shapeStr[j + b] = 'x';
+                if (i < self.shape.len - 1 and j + b < shape_str.len - 1) {
+                    shape_str[j + b] = 'x';
                     bytes_written += 1;
                 } else {
                     break;
                 }
                 j += 2;
             }
-            const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shapeStr[0..bytes_written] }) catch @panic("allocation failed in print");
+            const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shape_str[0..bytes_written] }) catch @panic("allocation failed in print");
             try writer.writeAll(preamble);
-            try utils.print_ndslice(T, _data, self.shape.shape, writer);
+            try utils.print_ndslice(T, _data, self.shape.slice(), writer);
         }
 
         /// View into contiguous slice along a single dim. Shape is allocated COM.
         pub fn slice(self: Self, dim: usize, start: usize, end: usize) !Self {
-            var new_shape = try self.shape.copy(self.shape.alloc);
-            new_shape.shape[dim] = end - start;
+            var new_shape = self.shape;
+            new_shape.set(dim, end - start);
             return .{
                 .shape = new_shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
@@ -217,7 +221,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// View into a raw contiguous slice along a single dim.
         pub fn slice_raw_no_alloc(self: Self, dim: usize, start: usize, end: usize) ![]T {
-            if (start > end or end > self.shape.shape[dim]) {
+            if (start > end or end > self.shape.get(dim)) {
                 return error.RangeOutOfBounds;
             }
 
@@ -230,63 +234,59 @@ pub fn NDArray(comptime T: type) type {
 
         /// Yields an arbitrary view into a an array. May be non-contiguous. Shape is allocated COM.
         pub fn slice_ranges(self: Self, ranges: []const Range) !Self {
-            if (ranges.len != self.shape.len()) {
+            if (ranges.len != self.shape.len) {
                 return error.InvalidShape;
             }
-            if (ranges.len > self.shape.len()) {
+            if (ranges.len > self.shape.len) {
                 return error.RangeOutOfBounds;
             }
 
-            var buf: [64]usize = undefined; // imposing max ndim here to avoid alloc.
-            var new_shape = buf[0..self.shape.len()];
+            var buf: [8]usize = undefined; // imposing max ndim here to avoid alloc.
+            var new_shape = buf[0..self.shape.len];
             var start_index: usize = 0;
             var total_elements: usize = 1;
             var stride: usize = 1;
 
             for (ranges, 0..) |range, i| {
-                if (range.end > self.shape.shape[i]) {
+                if (range.end > self.shape.get(i)) {
                     return error.IndexOutOfBounds;
                 }
                 new_shape[i] = range.end - range.start;
                 total_elements *= new_shape[i];
                 start_index += range.start * stride;
-                stride *= self.shape.shape[i];
+                stride *= self.shape.get(i);
             }
 
             return .{
-                .shape = try Shape.init(new_shape, self.shape.alloc),
+                .shape = Shape.init(new_shape),
                 .data = self.data[start_index .. start_index + total_elements],
                 .view = true,
             };
         }
 
+        // TODO: Check device support
         /// Should be analogous to: https://pytorch.org/docs/stable/generated/torch.slice_scatter.html#torch.slice_scatter
-        pub fn set_slice_ranges(self: Self, ranges: []const Range, values: Self) !void {
-            const slice_ = try self.slice_ranges(ranges);
-            defer slice_.shape.deinit();
-            if (!slice_.shape.eq(values.shape.*, .{ .strict = true })) {
-                return error.IncompatibleShapes;
-            }
+        //pub fn set_slice_ranges(self: Self, ranges: []const Range, values: Self) !void {
+        //    const slice_ = try self.slice_ranges(ranges);
+        //    if (!slice_.shape.equal(values.shape)) {
+        //        return error.IncompatibleShapes;
+        //    }
+        //    var i: usize = 0;
+        //    while (i < slice_.data.len) : (i += 1) {
+        //        slice_.data[i] = values.data[i];
+        //    }
+        //}
 
-            var i: usize = 0;
-            while (i < slice_.data.len) : (i += 1) {
-                slice_.data[i] = values.data[i];
-            }
-        }
-
+        // this function is somewhat expensive. Try to calculate
+        // strides once and use the repeatedly in your work load.
         pub fn get_stride(self: Self, dim: usize) !usize {
-            if (dim >= self.shape.len()) return error.DimOutOfBounds;
-            return self.shape.strides[dim];
+            if (dim >= self.shape.len) return error.DimOutOfBounds;
+            return self.shape.strides().get(dim);
         }
 
         /// Element-wise addition
         pub fn add(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
-            // TODO: standardize this shape creation logic elsewhere (its a micro-optimization)
-            const bshape = if (self.shape.size() != other.shape.size())
-                try self.shape.broadcast(other.shape.*)
-            else
-                try self.shape.copy(device.allocator);
-
+            const bshape = try self.shape.broadcast(other.shape);
             const values = try device.mem_alloc(T, bshape.size());
             device.blas.add(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
@@ -298,23 +298,23 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// In-place element-wise addition
-        pub fn _add(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("_add() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+        pub fn _add(self: *Self, other: *const Self, device: DeviceReference) !*const Self {
+            if (!self.shape.compatible(other.shape) or other.size() > self.size()) {
+                log.err("_add() self.shape={} other.shape={}", .{ self.shape, other.shape });
                 return error.IncompatibleShapes;
             }
             device.blas.add(T, self.data, other.data, self.data);
             return self;
         }
 
-        /// In-place scalar add
-        pub fn _add_scalar(self: Self, scalar: T) void {
-            for (self.data) |*val| val.* += scalar;
-        }
+        // TODO: add device support
+        //pub fn _add_scalar(self: Self, scalar: T) void {
+        //    for (self.data) |*val| val.* += scalar;
+        //}
 
         /// Element-wise subtraction
         pub fn sub(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
-            const bshape = try self.shape.broadcast(other.shape.*);
+            const bshape = try self.shape.broadcast(other.shape);
             const values = try device.mem_alloc(T, bshape.size());
             device.blas.sub(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
@@ -326,9 +326,9 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// In-place element-wise subtraction
-        pub fn _sub(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("_sub() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+        pub fn _sub(self: *Self, other: *const Self, device: DeviceReference) !*const Self {
+            if (!self.shape.compatible(other.shape) or other.size() > self.size()) {
+                log.err("_sub() self.shape={} other.shape={}", .{ self.shape, other.shape });
                 return error.IncompatibleShapes;
             }
             device.blas.sub(T, self.data, other.data, self.data);
@@ -337,7 +337,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise multiplication
         pub fn mul(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
-            const bshape = try self.shape.broadcast(other.shape.*);
+            const bshape = try self.shape.broadcast(other.shape);
             const values = try device.mem_alloc(T, bshape.size());
             device.blas.mul(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
@@ -350,8 +350,8 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise multiplication
         pub fn _mul(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("_mul() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+            if (!self.shape.compatible(other.shape) or other.size() > self.size()) {
+                log.err("_mul() self.shape={} other.shape={}", .{ self.shape, other.shape });
                 return error.IncompatibleShapes;
             }
             device.blas.mul(T, self.data, other.data, self.data);
@@ -360,7 +360,7 @@ pub fn NDArray(comptime T: type) type {
 
         /// Element-wise division
         pub fn div(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
-            const bshape = try self.shape.broadcast(other.shape.*);
+            const bshape = try self.shape.broadcast(other.shape);
             const values = try device.mem_alloc(T, bshape.size());
             device.blas.div(T, self.data, other.data, values);
             const result = try device.allocator.create(Self);
@@ -373,8 +373,8 @@ pub fn NDArray(comptime T: type) type {
 
         /// In-place element-wise division
         pub fn _div(self: *const Self, other: *const Self, device: DeviceReference) !*const Self {
-            if (!Shape.eq(self.shape.*, other.shape.*, .{}) or other.shape.size() > self.shape.size()) {
-                log.err("_div() self.shape={d} other.shape={d}", .{ self.shape.shape, other.shape.shape });
+            if (!self.shape.compatible(other.shape) or other.size() > self.size()) {
+                log.err("_div() self.shape={} other.shape={}", .{ self.shape, other.shape });
                 return error.IncompatibleShapes;
             }
             device.blas.div(T, self.data, other.data, self.data);
@@ -388,13 +388,6 @@ pub fn NDArray(comptime T: type) type {
             return sum_arr;
         }
 
-        /// Element-wise sum.
-        //pub fn sum_no_alloc(self: *const Self) T {
-        //    var s: T = 0;
-        //    for (0..self.data.len) |i| s += self.data[i];
-        //    return s;
-        //}
-
         /// COM.
         pub fn max(self: *const Self, device: DeviceReference) !*Self {
             const max_arr = try Self.empty(&.{1}, device);
@@ -407,16 +400,14 @@ pub fn NDArray(comptime T: type) type {
         // TODO: naive
         /// Copies. COM.
         pub fn exp(self: *const Self, device: DeviceReference) !*Self {
-            const result = try Self.empty(self.shape.shape, device);
-            for (self.data, 0..) |val, i| {
-                result.data[i] = @exp(val);
-            }
+            const result = try Self.empty(self.shape.slice(), device);
+            device.nn.exp(T, self.data, result.data);
             return result;
         }
 
         /// In-place e^x
-        pub fn _exp(self: *const Self) void {
-            for (self.data) |*val| val.* = @exp(val.*);
+        pub fn _exp(self: *const Self, device: DeviceReference) void {
+            device.nn.exp(T, self.data, self.data);
         }
 
         /// In-place scaling
@@ -466,35 +457,27 @@ pub fn NDArray(comptime T: type) type {
         ///   - Will probably have the same edge case issue
         ///
         pub fn _bmm_acc(self: *const Self, other: *const Self, accumulator: ?*Self, alpha: T, beta: T, trans_a: bool, trans_b: bool, device: DeviceReference) !*Self {
+            var a_shape = self.shape;
+            var b_shape = other.shape;
 
             // vectors get unsqueezed to rank-2 tensors
-            if (self.shape.len() < 2) {
-                try self._reshape(&.{ 1, try self.shape.get(0) });
-            }
-            if (other.shape.len() < 2) {
-                try other._reshape(&.{ 1, try other.shape.get(0) });
-            }
+            if (a_shape.len < 2) a_shape._unsqueeze();
+            if (b_shape.len < 2) b_shape._unsqueeze();
 
-            const a_batch_dims = if (self.shape.len() > 2)
-                self.shape.shape[0 .. self.shape.len() - 2]
-            else
-                &[_]usize{1};
-            const b_batch_dims = if (other.shape.len() > 2)
-                other.shape.shape[0 .. other.shape.len() - 2]
-            else
-                &[_]usize{1};
+            const a_batch_dims = Shape.init(if (a_shape.len > 2) a_shape.crop(0, 2) else &.{1});
+            const b_batch_dims = Shape.init(if (b_shape.len > 2) b_shape.crop(0, 2) else &.{1});
 
             // Even if nothing needs broadcasting and we have two 2d inputs, we still get a 3d shape w a batch of 1
             // in that case, we dont have any extra broadcasted batch dims
             const broadcast_batch_dims = blk: {
-                if (self.shape.len() == 2 and other.shape.len() == 2) break :blk &[_]usize{};
-                break :blk try utils.calculate_broadcasted_shape(a_batch_dims, b_batch_dims, device.allocator);
+                if (a_shape.len == 2 and b_shape.len == 2)
+                    break :blk Shape.empty
+                else
+                    break :blk try a_batch_dims.broadcast(b_batch_dims);
             };
-            defer device.allocator.free(broadcast_batch_dims);
 
-            const a_matrix_dims = self.shape.shape[self.shape.len() - 2 ..];
-            const b_matrix_dims = other.shape.shape[other.shape.len() - 2 ..];
-
+            const a_matrix_dims = a_shape.tail(2);
+            const b_matrix_dims = b_shape.tail(2);
             const a_rows = a_matrix_dims[0];
             const a_cols = a_matrix_dims[1];
             const b_rows = b_matrix_dims[0];
@@ -505,36 +488,27 @@ pub fn NDArray(comptime T: type) type {
             const N = if (trans_b) b_rows else b_cols;
 
             if ((if (trans_a) a_rows else a_cols) != (if (trans_b) b_cols else b_rows)) {
-                std.debug.panic("Incompatible matrix dimensions for matmul: {}x{} and {}x{} bcasted batch dims {d} (trans_a={}, trans_b={})", .{
+                std.debug.panic("Incompatible matrix dimensions for matmul: {}x{} and {}x{} bcasted batch dims {} (trans_a={}, trans_b={})", .{
                     a_rows, a_cols, b_rows, b_cols, broadcast_batch_dims, trans_a, trans_b,
                 });
             }
 
-            const n_batch_dims = broadcast_batch_dims.len;
-            var output_shape = try device.allocator.alloc(usize, n_batch_dims + 2);
-            defer device.allocator.free(output_shape);
+            const output_shape = Shape.merge(&.{ broadcast_batch_dims.slice(), &.{ M, N } });
 
-            if (n_batch_dims > 0)
-                @memcpy(output_shape[0..n_batch_dims], broadcast_batch_dims);
-
-            output_shape[n_batch_dims] = M;
-            output_shape[n_batch_dims + 1] = N;
-
-            const n_batches_c = if (n_batch_dims > 0) utils.prod(broadcast_batch_dims) else 1;
             var result: *Self = blk: {
                 if (accumulator) |acc| {
-                    if (!Shape.eq_raw(acc.shape.shape, output_shape, .{ .strict = true })) {
-                        log.err("Expected accumulator shape {d} but got {d}", .{ output_shape, acc.shape.shape });
+                    if (!acc.shape.equal(output_shape)) {
+                        log.err("Expected accumulator shape {} but got {}", .{ output_shape, acc.shape });
                         return error.IncompatibleAccumulatorShape;
                     }
                     break :blk acc;
-                } else break :blk try Self.zeros(output_shape, device);
+                } else break :blk try Self.empty(output_shape.slice(), device);
             };
             errdefer if (accumulator == null) result.deinit(device);
 
-            const n_batches_a = utils.prod(a_batch_dims);
-            const n_batches_b = utils.prod(b_batch_dims);
-
+            const n_batches_a = a_batch_dims.size();
+            const n_batches_b = b_batch_dims.size();
+            const n_batches_c = broadcast_batch_dims.size();
             const lda = a_cols;
             const ldb = b_cols;
             const ldc = N;
@@ -572,7 +546,7 @@ pub fn NDArray(comptime T: type) type {
         //    const bshape = try self.shape.broadcast(other.shape.*);
         //    defer bshape.deinit();
 
-        //    for (0..@min(self.shape.len(), other.shape.len())) |i| {
+        //    for (0..@min(self.shape.len, other.shape.len)) |i| {
         //        if (self.shape.shape[i] > other.shape.shape[i]) return error.InvalidExpansion;
         //    }
 
@@ -699,63 +673,54 @@ pub fn NDArray(comptime T: type) type {
         //    // const C = try A.expand_as(B, alloc);
         //}
 
-        pub fn dot(self: *Self, other: *const Self, device: DeviceReference) !*Self {
-            if (self.shape.len() > 1 or other.shape.len() > 1) std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
-            if (self.data.len != other.data.len) std.debug.panic("Incompatible lengths for dot product: {d} and {d}\n", .{ self.data.len, other.data.len });
+        pub fn dot(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
+            if (self.shape.len > 1 or other.shape.len > 1)
+                std.debug.panic("Dot product only valid for 1d vectors even if there are dummy outer dimensions.\n", .{});
+            if (self.data.len != other.data.len)
+                std.debug.panic("Incompatible lengths for dot product: {} and {}\n", .{ self.data.len, other.data.len });
             const out_arr = try Self.empty(&.{1}, device);
             device.blas.dot(T, self.data, other.data, out_arr.data);
             return out_arr;
         }
 
         pub fn outer(self: *const Self, other: *const Self, device: DeviceReference) !*Self {
-            if (try self.shape.realdims() != 1 or try other.shape.realdims() != 1) {
+            if (self.shape.realdims() != 1 or other.shape.realdims() != 1) {
                 std.debug.panic(
-                    "Outer product only valid for 1d vectors even if there are dummy outer dimensions. Got {d} {d}\n",
-                    .{ self.shape.shape, other.shape.shape },
+                    "Outer product only valid for 1d vectors even if there are dummy outer dimensions. Got {} {}\n",
+                    .{ self.shape, other.shape },
                 );
             }
-            if (self.shape.len() != 1 or other.shape.len() != 1) {
-                try self.shape._squeeze();
-                try other.shape._squeeze();
+            var a_shape = self.shape;
+            var b_shape = other.shape;
+
+            if (self.shape.len != 1 or other.shape.len != 1) {
+                a_shape._squeeze();
+                b_shape._squeeze();
             }
-            const M: usize = try self.shape.get(0);
-            const N: usize = try other.shape.get(0);
 
-            // ALIGNMENT: we should have a policy about allocation alignment
-            const output: []T = try device.allocator.alignedAlloc(T, null, M * N);
-            errdefer device.allocator.free(output);
-            @memset(output, 0);
+            const M: usize = a_shape.get(0);
+            const N: usize = b_shape.get(0);
 
-            device.blas.outer(T, self.data, other.data, output, 1);
+            const output = try Self.empty(&.{ M, N }, device);
+            errdefer output.deinit(device);
 
-            const result = try device.allocator.create(Self);
-            result.* = Self{
-                .data = output,
-                .shape = try Shape.init(&[_]usize{ M, N }, device.allocator),
-            };
-            return result;
+            device.blas.outer(T, self.data, other.data, output.data, 1);
+
+            return output;
         }
 
         pub fn matvec(self: *const Self, other: *const Self, trans_a: bool, device: DeviceReference) !*Self {
             // TODO: shape checks for matvec
-            const M = if (trans_a) try self.shape.get(1) else try self.shape.get(0);
-            const N = if (trans_a) try self.shape.get(0) else try self.shape.get(1);
+            const M = if (trans_a) self.shape.get(1) else self.shape.get(0);
+            const N = if (trans_a) self.shape.get(0) else self.shape.get(1);
             std.debug.assert(N == other.shape.size());
 
-            // ALIGNMENT: we should have a policy about allocation alignment
-            const output: []T = try device.allocator.alignedAlloc(T, null, M);
+            const output = try Self.empty(&.{M}, device);
+            errdefer output.deinit(device);
 
-            errdefer device.allocator.free(output);
-            @memset(output, 0);
+            device.blas.matvec(T, self.data, other.data, output.data, M, N, trans_a, 1, 0);
 
-            device.blas.matvec(T, self.data, other.data, output, M, N, trans_a, 1, 0);
-
-            const result = try device.allocator.create(Self);
-            result.* = Self{
-                .data = output,
-                .shape = try Shape.init(&.{M}, device.allocator),
-            };
-            return result;
+            return output;
         }
 
         pub const SumOpts = struct {
@@ -764,51 +729,45 @@ pub fn NDArray(comptime T: type) type {
         };
 
         pub fn sum_along(self: *Self, device: DeviceReference, opts: SumOpts) !*Self {
-            std.debug.assert(self.shape.shape.len <= 8);
+            std.debug.assert(self.shape.len <= 8);
 
-            const input_shape = self.shape.shape;
-            if (opts.dim >= input_shape.len) return error.ShapeOutOfBounds;
+            if (opts.dim >= self.shape.len)
+                return error.ShapeOutOfBounds;
 
-            var output_shape: std.BoundedArray(usize, 8) = .{};
+            var output_shape = self.shape;
 
-            for (0..input_shape.len) |i| {
-                if (i != opts.dim) {
-                    try output_shape.append(input_shape[i]);
-                } else if (opts.keep_dims) {
-                    try output_shape.append(1);
-                }
+            if (opts.keep_dims) {
+                output_shape.set(opts.dim, 1);
+            } else {
+                output_shape.remove(opts.dim);
             }
 
             const output = try Self.zeros(output_shape.slice(), device);
             errdefer output.deinit(device);
 
-            device.blas.sum_along(T, self.data, self.shape.shape, output.data, opts.dim);
+            device.blas.sum_along(T, self.data, self.shape.slice(), output.data, opts.dim);
 
             return output;
         }
 
         pub fn max_along(self: *const Self, device: DeviceReference, opts: MaxAlongOptions) !*Self {
-            std.debug.assert(self.shape.shape.len <= 8);
+            std.debug.assert(self.shape.len <= 8);
 
-            const dim = opts.dim;
-            const input_shape = self.shape.shape;
-            const input_dims = input_shape.len;
-            if (dim >= input_dims) return error.DimOutOfBounds;
+            if (opts.dim >= self.shape.len)
+                return error.ShapeOutOfBounds;
 
-            var output_shape: std.BoundedArray(usize, 8) = .{};
+            var output_shape = self.shape;
 
-            for (0..input_shape.len) |i| {
-                if (i != opts.dim) {
-                    try output_shape.append(input_shape[i]);
-                } else if (opts.keep_dims) {
-                    try output_shape.append(1);
-                }
+            if (opts.keep_dims) {
+                output_shape.set(opts.dim, 1);
+            } else {
+                output_shape.remove(opts.dim);
             }
 
-            const output = try Self.empty(output_shape.slice(), device);
+            const output = try Self.zeros(output_shape.slice(), device);
             errdefer output.deinit(device);
 
-            device.blas.max_along(T, self.data, self.shape.shape, output.data, opts.dim);
+            device.blas.max_along(T, self.data, self.shape.slice(), output.data, opts.dim);
 
             return output;
         }
@@ -828,8 +787,8 @@ pub fn NDArray(comptime T: type) type {
             const indices = opts.indices;
             const dim = opts.dim;
 
-            std.debug.assert(self.shape.len() == indices.shape.len());
-            for (self.shape.shape, indices.shape.shape, 0..) |src_dim, idx_dim, i| {
+            std.debug.assert(self.shape.len == indices.shape.len);
+            for (self.shape.slice(), indices.shape.slice(), 0..) |src_dim, idx_dim, i| {
                 if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
             }
             // to-owned-slice allows us to properly free regardless of exit, otherwise
@@ -837,20 +796,20 @@ pub fn NDArray(comptime T: type) type {
             var offsets = try device.allocator.alloc(usize, indices.data.len);
             defer if (!opts.return_offsets) device.allocator.free(offsets);
 
-            const values = try Self.empty(indices.shape.shape, device);
+            const values = try Self.empty(indices.shape.slice(), device);
+            const idx_strides = indices.shape.strides();
+            const src_strides = self.shape.strides();
 
             for (0..indices.data.len) |i| {
-                const idx_coord = try indices.offset_to_pos(i, device);
-                defer device.allocator.free(idx_coord);
+                const idx_coord = idx_strides.offset_to_pos(i);
 
-                const src_coord = try device.allocator.dupe(usize, idx_coord);
-                defer device.allocator.free(src_coord);
+                var src_coord = idx_coord;
+                src_coord.set(dim, indices.data[i]);
 
-                src_coord[dim] = indices.data[i];
-                if (src_coord[dim] >= self.shape.shape[dim]) return error.IndexOutOfBounds;
+                if (src_coord.get(dim) >= self.shape.get(dim))
+                    return error.IndexOutOfBounds;
 
-                const src_offset = self.pos_to_offset(src_coord);
-                offsets[i] = src_offset;
+                offsets[i] = src_strides.pos_to_offset(src_coord);
             }
 
             device.mem_take(T, self.data, offsets, values.data);
@@ -881,10 +840,10 @@ pub fn NDArray(comptime T: type) type {
 
         /// Unbroadcast to target shape
         /// TODO: think ab this later but could pointer swap (may give compiler more freedom to optimize)
-        pub fn unbroadcast(self: *Self, target_shape: *Shape, device: DeviceReference) !*Self {
+        pub fn unbroadcast(self: *Self, target_shape: Shape, device: DeviceReference) !*Self {
             var result: *Self = self;
 
-            while (result.shape.len() > target_shape.len()) {
+            while (result.shape.len > target_shape.len) {
                 const temp = result;
                 result = try temp.sum_along(device, .{ .dim = 0 });
                 if (temp != result) {
@@ -892,9 +851,9 @@ pub fn NDArray(comptime T: type) type {
                 }
             }
 
-            if (result.shape.len() == target_shape.len()) {
-                for (target_shape.shape, 0..) |s, dimi| {
-                    if (s == 1 and result.shape.shape[dimi] != 1) {
+            if (result.shape.len == target_shape.len) {
+                for (target_shape.slice(), 0..) |s, dimi| {
+                    if (s == 1 and result.shape.get(dimi) != 1) {
                         const temp = result;
                         result = try temp.sum_along(device, .{ .dim = dimi, .keep_dims = true });
                         if (temp != self) {
@@ -911,8 +870,8 @@ pub fn NDArray(comptime T: type) type {
 
         // TODO: copies. Naive, optimize. Support >2d
         pub fn transpose(self: *Self, device: DeviceReference) !*Self {
-            std.debug.assert(self.shape.len() < 3);
-            if (self.shape.len() == 1) return self;
+            std.debug.assert(self.shape.len < 3);
+            if (self.shape.len == 1) return self;
             const new_shape = [_]usize{ self.shape.shape[1], self.shape.shape[0] };
             var result = try Self.empty(&new_shape, device);
             for (0..self.shape.shape[0]) |i| {
@@ -945,7 +904,7 @@ test "NDArray.clip_norm" {
 
     const initial_norm_ndarray = try array.l2_norm(device.reference());
     try std.testing.expectEqual(1, initial_norm_ndarray.size());
-    const initial_norm = initial_norm_ndarray.get(&.{0});
+    const initial_norm = initial_norm_ndarray.data[0];
     try std.testing.expectEqual(@as(T, 5.0), initial_norm);
 
     const max_norm: T = 4.0;
@@ -954,7 +913,7 @@ test "NDArray.clip_norm" {
     array.clip_norm(max_norm, delta, device.reference());
 
     const clipped_norm_ndarray = try array.l2_norm(device.reference());
-    const clipped_norm = clipped_norm_ndarray.get(&.{0});
+    const clipped_norm = clipped_norm_ndarray.data[0];
     try std.testing.expect(clipped_norm <= max_norm);
 
     const expected_values = &[_]T{
@@ -969,24 +928,27 @@ test "NDArray.clip_norm" {
     }
 }
 
-test "NDArray.reshape" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var cpu = zg.device.HostDevice.init(allocator);
-    defer cpu.deinit();
-    const device = cpu.reference();
-    const T = f64;
-    const Array = NDArray(T);
+// We need to support cross device scalar transfer for this
+// first. This is doable, but needs to be discussed.
 
-    var A = try Array.init(&[_]T{ 1, 2, 3, 4, 5, 6 }, null, device);
-    try A._reshape(&[_]usize{ 2, 3 });
-    try std.testing.expectError(error.ShapeOutOfBounds, A._reshape(&[_]usize{9}));
-    const v1 = A.get(&[_]usize{ 0, 0 });
-    try A._reshape(&[_]usize{ 2, 3 });
-    const v2 = A.get(&[_]usize{ 0, 0 });
-    try std.testing.expectEqual(v1, v2);
-}
+//test "NDArray.reshape" {
+//    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+//    defer arena.deinit();
+//    const allocator = arena.allocator();
+//    var cpu = zg.device.HostDevice.init(allocator);
+//    defer cpu.deinit();
+//    const device = cpu.reference();
+//    const T = f64;
+//    const Array = NDArray(T);
+//
+//    var A = try Array.init(&[_]T{ 1, 2, 3, 4, 5, 6 }, null, device);
+//    A._reshape(&.{ 2, 3 });
+//    try std.testing.expectError(error.ShapeOutOfBounds, A._reshape(&[_]usize{9}));
+//    const v1 = A.get(&[_]usize{ 0, 0 });
+//    try A._reshape(&[_]usize{ 2, 3 });
+//    const v2 = A.get(&[_]usize{ 0, 0 });
+//    try std.testing.expectEqual(v1, v2);
+//}
 
 test "NDArray.add" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -997,15 +959,15 @@ test "NDArray.add" {
     const device = cpu.reference();
     const T = f64;
     const Array = NDArray(T);
-    const a = try Array.init(@constCast(&[_]T{1}), null, device);
-    const b = try Array.init(@constCast(&[_]T{ 1, 1, 1 }), null, device);
+    const a = try Array.init(&[_]T{1}, null, device);
+    const b = try Array.init(&[_]T{ 1, 1, 1 }, null, device);
     const sum = try a.add(b, device);
     try std.testing.expectEqualSlices(T, &[_]T{ 2, 2, 2 }, sum.data);
-    const b2 = try Array.init(@constCast(&[_]T{3}), null, device);
+    const b2 = try Array.init(&[_]T{3}, null, device);
     const sum2 = try a.add(b2, device);
     try std.testing.expectEqualSlices(T, &[_]T{4}, sum2.data);
 
-    const b3 = try Array.init(@constCast(&[_]T{ 3, 2, 1 }), null, device);
+    const b3 = try Array.init(&[_]T{ 3, 2, 1 }, null, device);
     const diff = try a.sub(b3, device);
     try std.testing.expectEqualSlices(T, &[_]T{ -2, -1, 0 }, diff.data);
 }
@@ -1057,7 +1019,7 @@ test "NDArray.matmul" {
         const C1 = try A1.bmm(B1, false, false, device);
         const expected1 = try Array.init(&.{ 3, 3, 1, 1 }, &[_]usize{ 2, 2 }, device);
         try std.testing.expectEqualDeep(expected1.data, C1.data);
-        try std.testing.expectEqualDeep(expected1.shape.shape, C1.shape.shape);
+        try std.testing.expectEqualDeep(expected1.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected1, C1);
     }
 
@@ -1073,7 +1035,7 @@ test "NDArray.matmul" {
         const C2 = try A2.bmm(B2, false, false, device);
         const expected2 = try Array.init(&.{ 1, 2, 4, 5 }, &[_]usize{ 2, 2 }, device);
         try std.testing.expectEqualDeep(expected2.data, C2.data);
-        try std.testing.expectEqualDeep(expected2.shape.shape, C2.shape.shape);
+        try std.testing.expectEqualDeep(expected2.shape.slice(), C2.shape.slice());
         try std.testing.expectEqualDeep(expected2, C2);
     }
 
@@ -1084,7 +1046,7 @@ test "NDArray.matmul" {
         const C3 = try A3.bmm(B3, false, false, device);
         const expected3 = try Array.init(&.{ 22, 28, 49, 64 }, &[_]usize{ 1, 2, 2 }, device);
         try std.testing.expectEqualDeep(expected3.data, C3.data);
-        try std.testing.expectEqualDeep(expected3.shape.shape, C3.shape.shape);
+        try std.testing.expectEqualDeep(expected3.shape.slice(), C3.shape.slice());
         try std.testing.expectEqualDeep(expected3, C3);
     }
 
@@ -1095,7 +1057,7 @@ test "NDArray.matmul" {
         const C4 = try A4.bmm(B4, false, false, device);
         const expected4 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334 }, &[_]usize{ 2, 2, 2 }, device);
         try std.testing.expectEqualDeep(expected4.data, C4.data);
-        try std.testing.expectEqualDeep(expected4.shape.shape, C4.shape.shape);
+        try std.testing.expectEqualDeep(expected4.shape.slice(), C4.shape.slice());
         try std.testing.expectEqualDeep(expected4, C4);
     }
 
@@ -1106,7 +1068,7 @@ test "NDArray.matmul" {
         const C5 = try A5.bmm(B5, false, false, device);
         const expected5 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, device);
         try std.testing.expectEqualDeep(expected5.data, C5.data);
-        try std.testing.expectEqualDeep(expected5.shape.shape, C5.shape.shape);
+        try std.testing.expectEqualDeep(expected5.shape.slice(), C5.shape.slice());
         try std.testing.expectEqualDeep(expected5, C5);
     }
 
@@ -1117,7 +1079,7 @@ test "NDArray.matmul" {
         const C6 = try A6.bmm(B6, false, false, device);
         const expected6 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, device);
         try std.testing.expectEqualDeep(expected6.data, C6.data);
-        try std.testing.expectEqualDeep(expected6.shape.shape, C6.shape.shape);
+        try std.testing.expectEqualDeep(expected6.shape.slice(), C6.shape.slice());
         try std.testing.expectEqualDeep(expected6, C6);
     }
 
@@ -1128,15 +1090,15 @@ test "NDArray.matmul" {
         const C7 = try A7.bmm(B7, false, false, device);
         const expected7 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 1, 2, 2, 2 }, device);
         try std.testing.expectEqualDeep(expected7.data, C7.data);
-        try std.testing.expectEqualDeep(expected7.shape.shape, C7.shape.shape);
+        try std.testing.expectEqualDeep(expected7.shape.slice(), C7.shape.slice());
         try std.testing.expectEqualDeep(expected7, C7);
 
         // NOTE: This is different behavior than torch which treats this as a different case in broadcasting
         const expected7b = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 1, 2, 2 }, device);
-        try A7._reshape(&.{ 2, 1, 2, 3 });
+        A7._reshape(&.{ 2, 1, 2, 3 });
         const C7b = try A7.bmm(B7, false, false, device);
         try std.testing.expectEqualDeep(expected7b.data, C7b.data);
-        try std.testing.expectEqualDeep(expected7b.shape.shape, C7b.shape.shape);
+        try std.testing.expectEqualDeep(expected7b.shape.slice(), C7b.shape.slice());
         try std.testing.expectEqualDeep(expected7b, C7b);
     }
 
@@ -1147,7 +1109,7 @@ test "NDArray.matmul" {
         const C8 = try A8.bmm(B8, false, false, device);
         const expected8 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334, 130, 172, 157, 208, 544, 604, 625, 694 }, &[_]usize{ 2, 2, 2, 2 }, device);
         try std.testing.expectEqualDeep(expected8.data, C8.data);
-        try std.testing.expectEqualDeep(expected8.shape.shape, C8.shape.shape);
+        try std.testing.expectEqualDeep(expected8.shape.slice(), C8.shape.slice());
         try std.testing.expectEqualDeep(expected8, C8);
     }
 
@@ -1197,11 +1159,11 @@ test "NDArray.matmul with accumulation" {
         const expected = try Array.init(&.{ 41, 47, 89, 103 }, &[_]usize{ 2, 2 }, cpu.reference());
 
         try std.testing.expectEqualDeep(expected.data, result.data);
-        try std.testing.expectEqualDeep(expected.shape.shape, result.shape.shape);
+        try std.testing.expectEqualDeep(expected.shape.slice(), result.shape.slice());
 
         // Check that C was modified in-place
         try std.testing.expectEqualDeep(expected.data, C.data);
-        try std.testing.expectEqualDeep(expected.shape.shape, C.shape.shape);
+        try std.testing.expectEqualDeep(expected.shape.slice(), C.shape.slice());
     }
 }
 
@@ -1216,10 +1178,11 @@ test "NDArray.matvec" {
     // multiply a 2x2 and a 2x to get a 2x
     // [[1, 2]  * [[1]  = [[13]
     //  [0, 1]]    [6]]    [6]]
-    const A1 = try Array.init(@constCast(&[_]T{ 1, 2, 0, 1 }), &[_]usize{ 2, 2 }, cpu.reference());
-    const X1 = try Array.init(@constCast(&[_]T{ 1, 6 }), null, cpu.reference());
+    const A1 = try Array.init(&.{ 1, 2, 0, 1 }, &.{ 2, 2 }, cpu.reference());
+    const X1 = try Array.init(&.{ 1, 6 }, null, cpu.reference());
     const Y1 = try A1.matvec(X1, false, cpu.reference());
-    const expected1 = Array.init(&[_]T{ 13, 6 }, null, cpu.reference());
+
+    const expected1 = try Array.init(&.{ 13, 6 }, null, cpu.reference());
     try std.testing.expectEqualDeep(expected1, Y1);
 }
 
@@ -1242,7 +1205,7 @@ test "NDArray.sum_along" {
     const expected1 = try Array.init(&[_]T{ 7, 3 }, null, device);
     defer expected1.deinit(device);
     try std.testing.expectEqualDeep(expected1, a2);
-    try std.testing.expect(a2.shape.eq(expected1.shape.*, .{}));
+    try std.testing.expect(a2.shape.equal(expected1.shape));
 }
 
 test "NDArray.max_along" {
@@ -1338,11 +1301,11 @@ test "NDArray.gather" {
     defer output.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.values.data);
-    try std.testing.expectEqualSlices(usize, &index_shape, output.values.shape.shape);
+    try std.testing.expectEqualSlices(usize, &index_shape, output.values.shape.slice());
 
     // Case 2: out of bounds
-    try index.set(&.{ 0, 0 }, 3);
-    try std.testing.expectError(error.IndexOutOfBounds, input.gather(cpu.reference(), .{ .indices = index, .dim = 1 }));
+    //try index.set(&.{ 0, 0 }, 3);
+    //try std.testing.expectError(error.IndexOutOfBounds, input.gather(cpu.reference(), .{ .indices = index, .dim = 1 }));
 
     // // Case 3: wrong shape
     // const invalid_index_shape = [_]usize{4};
@@ -1352,23 +1315,25 @@ test "NDArray.gather" {
     // try std.testing.expectError(error.InvalidIndexShape, input.gather(invalid_index, 1, alloc));
 }
 
-test "NDArray.slice" {
-    var cpu = zg.device.HostDevice.init(std.testing.allocator);
-    var arr = try NDArray(f32).init(&[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &[_]usize{ 3, 3 }, cpu.reference());
-    defer arr.deinit(cpu.reference());
-
-    // get 2x2 slice from the top-left corner
-    var slice = try arr.slice_ranges(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } });
-    defer slice.shape.deinit();
-
-    // mutate
-    const new_values = try NDArray(f32).init(&[_]f32{ 10, 20, 30, 40 }, &[_]usize{ 2, 2 }, cpu.reference());
-    defer new_values.deinit(cpu.reference());
-    try slice.set_slice_ranges(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } }, new_values.*);
-    const exp = try NDArray(f32).init(&[_]f32{ 10, 20, 30, 40, 5, 6, 7, 8, 9 }, &[_]usize{ 3, 3 }, cpu.reference());
-    defer exp.deinit(cpu.reference());
-    try std.testing.expectEqualDeep(exp, arr);
-}
+//test "NDArray.slice" {
+//    var cpu = zg.device.HostDevice.init(std.testing.allocator);
+//    var arr = try NDArray(f32).init(&[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &[_]usize{ 3, 3 }, cpu.reference());
+//    defer arr.deinit(cpu.reference());
+//
+//    // get 2x2 slice from the top-left corner
+//    var slice = try arr.slice_ranges(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } });
+//
+//    // mutate
+//    const new_values = try NDArray(f32).init(&[_]f32{ 10, 20, 30, 40 }, &[_]usize{ 2, 2 }, cpu.reference());
+//    defer new_values.deinit(cpu.reference());
+//
+//    try slice.set_slice_ranges(&[_]Range{ Range{ .start = 0, .end = 2 }, Range{ .start = 0, .end = 2 } }, new_values.*);
+//
+//    const exp = try NDArray(f32).init(&[_]f32{ 10, 20, 30, 40, 5, 6, 7, 8, 9 }, &[_]usize{ 3, 3 }, cpu.reference());
+//    defer exp.deinit(cpu.reference());
+//
+//    try std.testing.expectEqualDeep(exp, arr);
+//}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
