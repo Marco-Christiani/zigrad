@@ -4,10 +4,10 @@ const NDArray = zg.NDArray;
 const DeviceReference = zg.DeviceReference;
 
 pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !*NDArray(T) {
-    const batch_size = input.shape.shape[0];
-    const channels = input.shape.shape[1];
-    const height = input.shape.shape[2];
-    const width = input.shape.shape[3];
+    const batch_size = input.shape.get(0);
+    const channels = input.shape.get(1);
+    const height = input.shape.get(2);
+    const width = input.shape.get(3);
 
     const output_height = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     const output_width = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;

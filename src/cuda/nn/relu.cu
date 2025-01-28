@@ -33,7 +33,7 @@ extern "C" void relu_forward(
           x_iter,  
           x_iter + n,
           y_iter,
-          [] __device__ (double a) -> float { return (a > 0.0) ? a : 0.0; }
+          [] __device__ (double a) -> double { return (a > 0.0) ? a : 0.0; }
       );
       return;
     }

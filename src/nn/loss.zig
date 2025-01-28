@@ -92,7 +92,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     var diff = try y_pred.sub(y);
     try diff.set_label("diff");
 
-    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.shape, true, device);
+    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.slice(), true, device);
     try diff2.set_label("diff2");
     // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
     const sq_diff = try diff.mul(diff2);
@@ -101,7 +101,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     const sum_sq_diff = try sq_diff.sum();
     try sum_sq_diff.set_label("sum_sq_diff");
 
-    const coef = @as(T, @floatFromInt(y.data.data.len));
+    const coef = @as(T, @floatFromInt(y.get_size()));
     const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
     try coef_tensor.set_label("coef");
 
@@ -112,7 +112,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
 }
 
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    const n = @as(T, @floatFromInt(y.data.data.len));
+    const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
         const diff = pred - target;
@@ -126,7 +126,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
             const _y_pred = self_children[0];
             const _y = self_children[1];
 
-            const _n = @as(T, @floatFromInt(_y.data.data.len));
+            const _n = @as(T, @floatFromInt(_y.get_size()));
             const scale = @as(T, 2) / _n;
 
             if (_y_pred.grad) |grad| {
@@ -151,9 +151,9 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
 pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     var sum_loss: T = 0;
     const epsilon: T = 1e-7;
-    if (y_pred.data.shape.len() > 2) return error.NotSupported;
-    const batch_size = if (y_pred.data.shape.len() > 1) try y_pred.data.shape.get(0) else 1;
-    const last_dim = if (y_pred.data.shape.len() > 1) y_pred.data.shape.shape.len - 1 else 0;
+    if (y_pred.data.shape.len > 2) return error.NotSupported;
+    const batch_size = if (y_pred.data.shape.len > 1) y_pred.data.shape.get(0) else 1;
+    const last_dim = if (y_pred.data.shape.len > 1) y_pred.data.shape.len - 1 else 0;
     const sm_preds = try _softmax_fwd(T, y_pred, last_dim);
 
     for (sm_preds.data.data, 0..) |pred, i| {
@@ -170,8 +170,8 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
             const bw_self_children = bw_tensor.get_children() orelse return error.NoChildren;
             const bw_y_pred = bw_self_children[0];
             const bw_y = bw_self_children[1];
-            const bw_batch_size = if (bw_y_pred.data.shape.len() > 1) try bw_y_pred.data.shape.get(0) else 1;
-            // const bw_n = @as(T, @floatFromInt(bw_y.data.data.len));
+            const bw_batch_size = if (bw_y_pred.data.shape.len > 1) bw_y_pred.data.shape.get(0) else 1;
+            // const bw_n = @as(T, @floatFromInt(bw_y.get_size()));
             if (bw_y_pred.grad) |bw_grad| {
                 for (bw_grad.data, bw_ctx.data.data, bw_y.data.data) |*bw_grad_val, bw_sm_val, bw_target_val| {
                     bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
@@ -203,11 +203,11 @@ pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
 // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
 // mutate a view into result by directly operating on the backing ndarray
 fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
-    const shape = input.data.shape.shape;
+    const shape = input.data.shape.slice();
     if (dim >= shape.len) return error.InvalidDimension;
 
     const dim_size = shape[dim];
-    const total_size = input.data.data.len;
+    const total_size = input.get_size();
     const outer_size = @divExact(total_size, dim_size);
 
     var result = try input.clone();
@@ -264,9 +264,8 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
             const bw_dim = bw_ctx.*;
             defer bw_device.allocator.destroy(bw_ctx);
 
-            const bw_shape = bw_tensor.data.shape.shape;
-            const bw_dim_size = bw_shape[bw_dim];
-            const bw_total_size = bw_tensor.data.data.len;
+            const bw_dim_size = bw_tensor.data.shape.get(bw_dim);
+            const bw_total_size = bw_tensor.get_size();
             const bw_outer_size = @divExact(bw_total_size, bw_dim_size);
 
             var bw_outer_idx: usize = 0;
@@ -301,7 +300,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
 }
 
 pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, device: DeviceReference) !*NDTensor(T) {
-    const n = @as(T, @floatFromInt(y.data.data.len));
+    const n = @as(T, @floatFromInt(y.get_size()));
     var sum_loss: T = 0;
 
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -324,7 +323,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
             defer tensor.device.mem_destroy(_bw_ctx);
             const _beta = _bw_ctx.*;
 
-            const _n = @as(T, @floatFromInt(_y.data.data.len));
+            const _n = @as(T, @floatFromInt(_y.get_size()));
 
             if (_y_pred.grad) |grad| {
                 for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {

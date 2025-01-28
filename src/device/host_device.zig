@@ -50,6 +50,7 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
+        //        std.debug.print("NOTICE ME PLEASE x: {any}, y: {any}, z {any}\n", .{ x, y, z });
         for (0..z.len) |i| z[i] = x[i % x.len] + y[i % y.len];
     }
 
@@ -430,6 +431,10 @@ pub const ScratchMemory = struct {
 };
 
 pub const NN = struct {
+    pub fn exp(_: NN, T: type, x: []const T, y: []T) void {
+        for (0..x.len) |i| y[i] = @exp(x[i]);
+    }
+
     pub fn relu_forward(_: NN, T: type, x: []const T, y: []T) void {
         for (x, y) |x_v, *y_v| {
             y_v.* = if (x_v > 0) x_v else 0;
