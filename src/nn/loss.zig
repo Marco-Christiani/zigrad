@@ -185,10 +185,10 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         .op = null,
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
-        .requires_gradient = true,
         .device = y_pred.device,
         ._backward = bw_fn,
         ._backward_ctx = sm_preds, // no need to copy
+        ._requires_grad = true,
     });
 }
 
@@ -293,9 +293,9 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
         .children = &.{input},
         .label = "softmax",
         .device = device,
-        .requires_gradient = true,
         ._backward = bw_fn,
         ._backward_ctx = ctx,
+        ._requires_grad = true,
     });
 }
 
@@ -345,10 +345,10 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
         .data = try NDArray(T).init(&.{loss}, &.{1}, device),
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
-        .requires_gradient = true,
         .device = device,
         ._backward = bw_fn,
         ._backward_ctx = beta_ctx,
+        ._requires_grad = true,
     });
 }
 // TODO: move this since refactor this file was renamed to loss.zig

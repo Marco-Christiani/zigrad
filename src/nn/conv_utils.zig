@@ -3,7 +3,7 @@ const zg = @import("../zigrad.zig");
 const NDArray = zg.NDArray;
 const DeviceReference = zg.DeviceReference;
 
-pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !*NDArray(T) {
+pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !NDArray(T) {
     const batch_size = input.shape.get(0);
     const channels = input.shape.get(1);
     const height = input.shape.get(2);
@@ -43,7 +43,7 @@ pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: u
     return col;
 }
 
-pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !*NDArray(T) {
+pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !NDArray(T) {
     const batch_size = input_shape[0];
     const channels = input_shape[1];
     const height = input_shape[2];
@@ -97,7 +97,7 @@ test "im2col col2im" {
     defer input.deinit(device);
 
     // im2col
-    var col = try im2col(f32, input.*, kernel_size, stride, padding, dilation, device);
+    var col = try im2col(f32, input, kernel_size, stride, padding, dilation, device);
     defer col.deinit(device);
 
     const expected_col_data = [_]f32{
@@ -118,7 +118,7 @@ test "im2col col2im" {
     try std.testing.expectEqualSlices(f32, &expected_col_data, col.data);
 
     // col2im
-    var im = try col2im(f32, col.*, &input_shape, kernel_size, stride, padding, dilation, device);
+    var im = try col2im(f32, col, &input_shape, kernel_size, stride, padding, dilation, device);
     defer im.deinit(device);
 
     const exp_im_data = [_]f32{ 4, 12, 18, 16, 30, 54, 63, 48, 54, 90, 99, 72, 52, 84, 90, 64 };

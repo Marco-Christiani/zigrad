@@ -107,7 +107,7 @@ pub fn Layer(comptime T: type) type {
         fn _set_grad(self: Self, enabled: bool) void {
             if (self.get_parameters()) |params| {
                 for (params) |param| {
-                    param.requires_gradient = enabled; // NOTE: could possibly destroy grad here depending on aggressiveness
+                    param._requires_grad = enabled; // NOTE: could possibly destroy grad here depending on aggressiveness
                 }
             }
         }
@@ -176,22 +176,23 @@ pub fn LinearLayer(comptime T: type) type {
 
             _ = try input.data._bmm_acc(
                 self.weights.data,
-                result_nd,
+                &result_nd,
                 1.0,
                 1.0,
                 false,
                 true,
                 self.device,
             );
+            const rg = input.requires_grad() or self.weights.requires_grad() or self.bias.requires_grad();
             // Hook up the custom backward function.
             return try NDTensor(T).create_dependent(.{
                 .data = result_nd,
                 .label = "lin_fwdman",
                 .children = &.{ input, self.weights, self.bias },
-                .requires_gradient = input.requires_gradient or self.weights.requires_gradient or self.bias.requires_gradient,
                 .device = self.device,
                 ._backward = backward_manual,
                 ._backward_ctx = self,
+                ._requires_grad = rg,
             });
         }
 
@@ -202,14 +203,14 @@ pub fn LinearLayer(comptime T: type) type {
             const grad_output = tensor.grad orelse return error.NoGradient;
             const input = tensor.get_children().?[0];
 
-            const grad_W = self.weights.grad orelse return error.NoGradient;
-            const grad_B = self.bias.grad orelse return error.NoGradient;
-            const grad_input = input.grad orelse return error.NoGradient;
+            var grad_W = self.weights.grad orelse return error.NoGradient;
+            var grad_B = self.bias.grad orelse return error.NoGradient;
+            var grad_input = input.grad orelse return error.NoGradient;
 
             // weights grad
             _ = try grad_output._bmm_acc(
                 input.data,
-                grad_W,
+                &grad_W,
                 1.0,
                 1.0,
                 true, // grad_output^T * input
@@ -237,7 +238,7 @@ pub fn LinearLayer(comptime T: type) type {
             // input gradient
             _ = try grad_output._bmm_acc(
                 self.weights.data,
-                grad_input,
+                &grad_input,
                 1.0,
                 1.0,
                 false, // grad_output * weights^T
@@ -366,7 +367,7 @@ pub fn Conv2DLayer(comptime T: type) type {
                 .data = output,
                 .children = &[_]*const NDTensor(T){input},
                 .label = "conv2d_out",
-                .requires_gradient = true,
+                ._requires_grad = true,
                 .device = self.device,
                 ._backward = backward,
                 ._backward_ctx = self,
@@ -492,7 +493,7 @@ pub fn ReLULayer(comptime T: type) type {
                 .data = output,
                 .children = &.{input},
                 .label = "relu_out",
-                .requires_gradient = input.requires_grad(),
+                ._requires_grad = input.requires_grad(),
                 .device = self.device,
                 ._backward = backward,
             });
@@ -546,7 +547,7 @@ pub fn ReLULayerCompare(comptime T: type) type {
                 } else {
                     output.grad = try NDArray(T).zeros(output.get_shape(), output.device);
                 }
-                output.requires_gradient = true;
+                output._requires_grad = true;
             }
 
             if (output.children) |c| {
@@ -596,14 +597,14 @@ pub fn FlattenLayer(comptime T: type) type {
                 // .op = .FLATTEN,
                 .children = &.{input},
                 .label = "flattened",
-                .requires_gradient = input.requires_gradient,
+                ._requires_grad = input._requires_grad,
                 .device = self.device,
                 ._backward = backward,
             });
 
             const new_shape = &.{ batch_dim, flattened_dim };
             result.data._reshape(new_shape);
-            if (result.grad) |g| g._reshape(new_shape);
+            if (result.grad) |*g| g._reshape(new_shape);
 
             return result;
         }
@@ -709,7 +710,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
                 .data = output,
                 .children = &.{input},
                 .label = "maxpool2d_out",
-                .requires_gradient = true,
+                ._requires_grad = true,
                 .allocator = self.device,
                 ._backward = backward,
                 ._backward_ctx = indices,

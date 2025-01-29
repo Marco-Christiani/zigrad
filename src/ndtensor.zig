@@ -53,38 +53,41 @@ pub fn NDTensor(comptime T: type) type {
         const Self = @This();
         // signature for a backwards callback
         pub const Callback = *const fn (Self) anyerror!void;
-        pub const dtype = NDArray(T);
+        pub const DataType = NDArray(T);
         // 8 children is a lot but... oh well...
         pub const Children = std.BoundedArray(*Self, 8);
         // TODO: How big should a label be?
         pub const Label = std.BoundedArray(u8, 32);
 
-        data: *dtype,
+        data: DataType,
         op: ?Op = null,
         children: Children = .{},
         label: Label = .{},
-        grad: ?*dtype = null,
-        requires_gradient: bool,
+        grad: ?DataType = null,
         acquired: bool = false, // not inherited
         device: DeviceReference,
+        // TODO: Wrap these in a proper backwards context.
+        // It should have a small buffer for objects about
+        // the size of a slice.
         _backward: ?Callback = null, // see notes below
         _backward_ctx: ?*anyopaque = null,
+        _requires_grad: bool,
 
         /// Values and shape are allocated. COM.
-        pub fn init(values: []const T, shape: ?[]const usize, requires_gradient: bool, device: DeviceReference) !*Self {
-            const self = try Self.empty(shape orelse &.{values.len}, requires_gradient, device);
+        pub fn init(values: []const T, shape: ?[]const usize, _requires_grad: bool, device: DeviceReference) !*Self {
+            const self = try Self.empty(shape orelse &.{values.len}, _requires_grad, device);
             device.mem_copy(T, values, self.get_data());
             return self;
         }
 
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
-        pub fn empty(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
+        pub fn empty(shape: []const usize, _requires_grad: bool, device: DeviceReference) !*Self {
             const self = try device.allocator.create(Self);
             self.* = Self{
-                .data = try dtype.empty(shape, device),
-                .grad = if (requires_gradient and zg.rt_grad_enabled) try dtype.zeros(shape, device) else null,
-                .requires_gradient = requires_gradient,
+                .data = try DataType.empty(shape, device),
+                .grad = if (_requires_grad and zg.rt_grad_enabled) try DataType.zeros(shape, device) else null,
+                ._requires_grad = _requires_grad,
                 .device = device,
                 .acquired = false,
                 ._backward = null,
@@ -96,28 +99,28 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
-        pub fn zeros(shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
-            const self = try Self.empty(shape, requires_gradient, device);
+        pub fn zeros(shape: []const usize, _requires_grad: bool, device: DeviceReference) !*Self {
+            const self = try Self.empty(shape, _requires_grad, device);
             self.fill(0);
             return self;
         }
 
-        pub fn random(shape: []const usize, requires_gradient: bool, op: zg.RandType, device: DeviceReference) !*Self {
-            const self = try Self.empty(shape, requires_gradient, device);
+        pub fn random(shape: []const usize, _requires_grad: bool, op: zg.RandType, device: DeviceReference) !*Self {
+            const self = try Self.empty(shape, _requires_grad, device);
             device.mem_random(T, self.get_data(), op, zg.settings.seed);
             return self;
         }
 
-        pub fn sequence(start: T, step: T, shape: []const usize, requires_gradient: bool, device: DeviceReference) !*Self {
-            const self = try Self.empty(shape, requires_gradient, device);
+        pub fn sequence(start: T, step: T, shape: []const usize, _requires_grad: bool, device: DeviceReference) !*Self {
+            const self = try Self.empty(shape, _requires_grad, device);
             device.mem_sequence(T, self.get_data(), start, step);
             return self;
         }
 
-        pub fn from_cache(dims: []const usize, requires_gradient: bool, device: DeviceReference) !?*Self {
+        pub fn from_cache(dims: []const usize, _requires_grad: bool, device: DeviceReference) !?*Self {
             if (device.cache.get(Self, dims)) |self| {
-                self.requires_gradient = requires_gradient;
-                if (requires_gradient and zg.rt_grad_enabled) {
+                self._requires_grad = _requires_grad;
+                if (_requires_grad and zg.rt_grad_enabled) {
                     try self.setup_grad(0);
                 }
                 return self;
@@ -173,12 +176,12 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn requires_grad(self: Self) bool {
-            return self.requires_gradient and zg.rt_grad_enabled;
+            return self._requires_grad and zg.rt_grad_enabled;
         }
 
         pub fn setup_grad(self: *Self, fill_value: ?T) !void {
             if (self.grad == null) {
-                self.grad = try dtype.empty(self.get_shape(), self.device);
+                self.grad = try DataType.empty(self.get_shape(), self.device);
             }
             return self.grad.?.fill(fill_value orelse return, self.device);
         }
@@ -202,14 +205,14 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub const CreateDependentOpts = struct {
-            data: *dtype,
+            data: DataType,
             op: ?Op = null,
             children: []const *Self,
             label: ?[]const u8 = null,
-            requires_gradient: bool,
             device: DeviceReference,
             _backward: ?Callback = null,
             _backward_ctx: ?*anyopaque = null,
+            _requires_grad: bool,
         };
 
         // interesting opportunity for dynamic behavior where this could be run on an instance, making self an default dep of result
@@ -226,14 +229,14 @@ pub fn NDTensor(comptime T: type) type {
         ///
         /// # ADR
         ///   1. Intended for creating intermediates hence alloc/no-alloc specifications.
-        ///   2. To support graph usage without the intention of backprop, requires_gradient=false will not allocate a grad.
+        ///   2. To support graph usage without the intention of backprop, _requires_grad=false will not allocate a grad.
         ///   3. The only foreseen situation to init with a specific `grad` value would be at the tail of a graph for backprop.
         ///      This is a cold operation and thus should be done explicitly, hence no support provided here. This drives support
         ///      for mutable `grad` pointer, so the caller can move the reference (Warning: this pattern is a red flag).
         ///   4. Should this respect the global `grad_enabled` flag and override the flag parameter? Tbd.
         ///      UPDATE: Changed my mind, overrides.
         pub fn create_dependent(opts: CreateDependentOpts) !*Self {
-            const rg = opts.requires_gradient and zg.rt_grad_enabled;
+            const rg = opts._requires_grad and zg.rt_grad_enabled;
 
             const self = try opts.device.allocator.create(Self);
             errdefer opts.device.allocator.destroy(self);
@@ -243,10 +246,10 @@ pub fn NDTensor(comptime T: type) type {
                 .op = opts.op,
                 // TODO: How to handle not holding references if requires_grad == false??
                 // .children = if (rg) try opts.allocator.dupe(*const Self, opts.children) else null,
-                .grad = if (rg) try dtype.zeros(opts.data.shape.slice(), opts.device) else null,
+                .grad = if (rg) try DataType.zeros(opts.data.shape.slice(), opts.device) else null,
                 .children = try Children.fromSlice(opts.children),
                 .label = try Label.fromSlice(opts.label orelse ""),
-                .requires_gradient = rg,
+                ._requires_grad = rg,
                 .acquired = false,
                 ._backward = if (rg) opts._backward else null,
                 ._backward_ctx = if (rg) opts._backward_ctx else null,
@@ -260,7 +263,7 @@ pub fn NDTensor(comptime T: type) type {
 
             // log.debug("deinit().data {?s}", .{self.get_label()});
             self.data.deinit(self.device);
-            if (self.grad) |g| {
+            if (self.grad) |*g| {
                 // log.debug("deinit().grad {?s}", .{self.get_label()});
                 g.deinit(self.device);
             }
@@ -289,16 +292,16 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Values are not allocated, grad_shape is allocated. COM.
-        pub fn from_zarray(values: *dtype, requires_gradient: bool, grad_shape: ?Shape, device: DeviceReference) !*Self {
+        pub fn from_zarray(values: *DataType, _requires_grad: bool, grad_shape: ?Shape, device: DeviceReference) !*Self {
             log.warn("Consider create_dependent() if you are about to set children. This may be deprecated.", .{});
             const result = try device.allocator.create(Self);
-            const grad: ?*dtype = blk: {
-                if (requires_gradient) {
+            const grad: ?*DataType = blk: {
+                if (_requires_grad) {
                     if (grad_shape) |s| {
                         log.warn("`grad_shape` may be deprecated.", .{});
-                        break :blk try dtype.zeros(s.shape, device);
+                        break :blk try DataType.zeros(s.shape, device);
                     } else {
-                        break :blk (try dtype.zeros(values.shape.shape, device));
+                        break :blk (try DataType.zeros(values.shape.shape, device));
                     }
                 } else {
                     break :blk null;
@@ -307,7 +310,7 @@ pub fn NDTensor(comptime T: type) type {
             result.* = Self{
                 .data = values,
                 .grad = grad,
-                .requires_gradient = requires_gradient,
+                ._requires_grad = _requires_grad,
                 .device = device,
             };
             return result;
@@ -354,7 +357,7 @@ pub fn NDTensor(comptime T: type) type {
                 }
             }.to_device_bw_impl;
 
-            const data = try dtype.empty(self.data.shape, device);
+            const data = try DataType.empty(self.data.shape, device);
 
             to_device_impl(self.data.data, data.data, self.device, device);
 
@@ -363,34 +366,34 @@ pub fn NDTensor(comptime T: type) type {
                 .op = .TRANSFER,
                 .children = &.{self},
                 .label = null,
-                .requires_gradient = false,
+                ._requires_grad = false,
                 .device = self.device,
                 ._backward = to_device_bw,
             });
 
             errdefer result.deinit();
             if (self.requires_grad()) { // need to make this call, not check the attribute flag
-                result.grad = try dtype.zeros(self.data.shape, device);
-                result.requires_gradient = true;
+                result.grad = try DataType.zeros(self.data.shape, device);
+                result._requires_grad = true;
             }
             return result;
         }
 
         // NOTE: Check callsites and see if we can fix the comments here
-        /// Only data and grad are copied. Child references and other metadata is not retained aside from requires_gradient.
+        /// Only data and grad are copied. Child references and other metadata is not retained aside from _requires_grad.
         /// Passed allocator used for allocations, not the owned one (i.e. not `@This()` one).
         ///
         /// ---
         /// # ADR
         ///   - The choice to have an allocator provided is important, intended to be used for backward
-        ///   - If the tensor backing `dtype` changes its allocator ownership contract, then this needs to be changed
+        ///   - If the tensor backing `DataType` changes its allocator ownership contract, then this needs to be changed
         pub fn clone(self: Self) !*Self {
             const result = try self.device.allocator.create(Self);
             errdefer self.device.allocator.destroy(result);
             result.* = Self{
                 .data = try self.data.copy(self.device),
                 .grad = if (self.grad) |g| try g.copy(self.device) else null,
-                .requires_gradient = self.requires_grad(),
+                ._requires_grad = self.requires_grad(),
                 .op = null,
                 .children = .{},
                 .label = .{},
@@ -414,7 +417,7 @@ pub fn NDTensor(comptime T: type) type {
         /// In-place, no backward.
         pub fn _reshape(self: *Self, shape: []const usize) !void {
             self.data._reshape(shape);
-            if (self.grad) |g| g._reshape(shape);
+            if (self.grad) |*g| g._reshape(shape);
         }
 
         /// Copies. COM.
@@ -433,7 +436,7 @@ pub fn NDTensor(comptime T: type) type {
                 .op = .RESHAPE,
                 .children = &.{self},
                 .label = null,
-                .requires_gradient = self.requires_gradient,
+                ._requires_grad = self._requires_grad,
                 .device = self.device,
                 ._backward = reshape_bw,
             });
@@ -458,14 +461,14 @@ pub fn NDTensor(comptime T: type) type {
                 .op = .TRANSPOSE,
                 .children = &.{self},
                 .label = null,
-                .requires_gradient = false, // we will set grad ourselves for efficiency
+                ._requires_grad = false, // we will set grad ourselves for efficiency
                 .device = self.device,
                 ._backward = transpose_bw,
             });
             errdefer result.deinit();
             if (self.requires_grad()) { // need to make this call, not check the attribute flag
                 result.grad = try self.grad.?.transpose(self.device);
-                result.requires_gradient = true;
+                result._requires_grad = true;
             }
             return result;
         }
@@ -510,7 +513,7 @@ pub fn NDTensor(comptime T: type) type {
             return Self{
                 .data = sliced_data,
                 .grad = if (self.requires_grad()) try self.grad.?.slice_ranges(ranges) else null,
-                .requires_gradient = self.requires_grad(),
+                ._requires_grad = self.requires_grad(),
                 .op = null,
                 .children = null,
                 .label = null,
@@ -544,7 +547,7 @@ pub fn NDTensor(comptime T: type) type {
                 try writer.writeAll(" grad: ");
                 try g.print_to_writer(writer, self.device);
             }
-            try writer.print(", requires_gradient={}", .{self.requires_gradient});
+            try writer.print(", _requires_grad={}", .{self._requires_grad});
             if (self.get_label()) |l| {
                 try writer.print(" label={s}", .{l});
             }
@@ -569,10 +572,13 @@ pub fn NDTensor(comptime T: type) type {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
-                    const a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, _self.device);
-                    const b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, _self.device);
+
+                    var a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, _self.device);
                     defer a_grad.deinit(_self.device);
+
+                    var b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, _self.device);
                     defer b_grad.deinit(_self.device);
+
                     _ = try a.grad.?._add(a_grad, a.device);
                     _ = try b.grad.?._add(b_grad, b.device);
                 }
@@ -581,7 +587,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.add(other.data, self.device),
                 .op = .ADD,
                 .children = &.{ self, other },
-                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                ._requires_grad = self._requires_grad or other._requires_grad,
                 .device = self.device,
                 ._backward = addBw,
             });
@@ -597,10 +603,10 @@ pub fn NDTensor(comptime T: type) type {
                     const a = children[0];
                     const b = children[1];
 
-                    const a_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(a.grad.?.shape, _self.device);
-                    const b_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(b.grad.?.shape, _self.device);
-
+                    var a_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(a.grad.?.shape, _self.device);
                     defer a_grad.deinit(_self.device);
+
+                    var b_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(b.grad.?.shape, _self.device);
                     defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad, a.device);
@@ -611,7 +617,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.sub(other.data, self.device),
                 .op = .SUB,
                 .children = &.{ self, other },
-                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                ._requires_grad = self._requires_grad or other._requires_grad,
                 .device = self.device,
                 ._backward = subBw,
             });
@@ -630,16 +636,17 @@ pub fn NDTensor(comptime T: type) type {
                     // TODO: can remove a copy here
 
                     // (dL/dy) * (dy/da), (dL/dy) * (dy/db)
-                    const a_grad_value = try b.data.mul(_self.grad.?, _self.device);
-                    const b_grad_value = try a.data.mul(_self.grad.?, _self.device);
-
+                    var a_grad_value = try b.data.mul(_self.grad.?, _self.device);
                     defer a_grad_value.deinit(_self.device);
+
+                    var b_grad_value = try a.data.mul(_self.grad.?, _self.device);
                     defer b_grad_value.deinit(_self.device);
 
-                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
-                    const b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
-
+                    // TODO: Do we need to do this here? _add automatically broadcasts
+                    var a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
                     defer a_grad.deinit(_self.device);
+
+                    var b_grad = try b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
                     defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad, a.device);
@@ -650,7 +657,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.mul(other.data, self.device),
                 .op = .MUL,
                 .children = &.{ self, other },
-                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                ._requires_grad = self._requires_grad or other._requires_grad,
                 .device = self.device,
                 ._backward = mulBw,
             });
@@ -669,21 +676,22 @@ pub fn NDTensor(comptime T: type) type {
                     // TODO: can remove at least one copy here right?
 
                     // (dL/dy) * (dy/da) and (dL/dy) * (dy/db)
-                    const a_grad_value = try _self.grad.?.div(b.data, _self.device);
-                    const b_grad_value = try _self.grad.?.mul(a.data, _self.device);
-
+                    var a_grad_value = try _self.grad.?.div(b.data, _self.device);
                     defer a_grad_value.deinit(_self.device);
+
+                    var b_grad_value = try _self.grad.?.mul(a.data, _self.device);
                     defer b_grad_value.deinit(_self.device);
 
-                    const bsq = try b.data.mul(b.data, _self.device);
-                    const neg_b_grad_value = try b_grad_value.div(bsq, _self.device);
-
+                    var bsq = try b.data.mul(b.data, _self.device);
                     defer bsq.deinit(_self.device);
+
+                    var neg_b_grad_value = try b_grad_value.div(bsq, _self.device);
                     defer neg_b_grad_value.deinit(_self.device);
 
-                    const a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
+                    var a_grad = try a_grad_value.unbroadcast(a.grad.?.shape, _self.device);
                     defer a_grad.deinit(_self.device);
-                    const b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
+
+                    var b_grad = try neg_b_grad_value.unbroadcast(b.grad.?.shape, _self.device);
                     defer b_grad.deinit(_self.device);
 
                     _ = try a.grad.?._add(a_grad, a.device);
@@ -694,7 +702,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.div(other.data, self.device),
                 .op = .DIV,
                 .children = &.{ self, other },
-                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                ._requires_grad = self._requires_grad or other._requires_grad,
                 .device = self.device,
                 ._backward = divBw,
             });
@@ -702,7 +710,7 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *Self) !*Self {
-            const max_mem = try dtype.empty(&.{1}, self.device);
+            const max_mem = try DataType.empty(&.{1}, self.device);
             const max_idx = try self.device.mem_create(i32);
 
             self.device.blas.max_forward(T, self.get_data(), max_mem.data, max_idx);
@@ -721,7 +729,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = max_mem,
                 .op = .MAX,
                 .children = &.{self},
-                .requires_gradient = self.requires_gradient,
+                ._requires_grad = self._requires_grad,
                 .device = self.device,
                 ._backward = maxBw,
             });
@@ -742,7 +750,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.exp(self.device),
                 .op = .EXP,
                 .children = &[_]*const Self{self},
-                .requires_gradient = self.requires_gradient,
+                ._requires_grad = self._requires_grad,
                 .device = self.device,
                 ._backward = expBw,
             });
@@ -760,7 +768,7 @@ pub fn NDTensor(comptime T: type) type {
             const result = try create_dependent(.{
                 .data = try self.data.bmm(other.data, opts.trans_a, opts.trans_b, self.device),
                 .children = &.{ self, other },
-                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                ._requires_grad = self._requires_grad or other._requires_grad,
                 .device = self.device,
                 ._backward = bw_bmm_acc,
                 ._backward_ctx = ctx,
@@ -789,14 +797,14 @@ pub fn NDTensor(comptime T: type) type {
                 opts.trans_b,
             );
 
-            const requires_gradient = zg.rt_grad_enabled and (self.requires_gradient or other.requires_gradient or output.requires_gradient);
-            if (requires_gradient) {
+            const _requires_grad = zg.rt_grad_enabled and (self._requires_grad or other._requires_grad or output._requires_grad);
+            if (_requires_grad) {
                 const ctx = try self.device.allocator.create(MmAccOptions);
                 ctx.* = opts;
                 output.children = try self.device.allocator.dupe(*NDTensor(T), &.{ self, other });
                 output._backward = bw_bmm_acc;
                 output._backward_ctx = ctx;
-                output.requires_gradient = true;
+                output._requires_grad = true;
             }
         }
 
@@ -808,9 +816,9 @@ pub fn NDTensor(comptime T: type) type {
 
             const children = self.get_children() orelse return error.NoChildren;
             const A = children[0].data;
-            const grad_A = children[0].grad;
             const B = children[1].data;
-            const grad_B = children[1].grad;
+            var grad_A = children[0].grad.?;
+            var grad_B = children[1].grad.?;
 
             if (self.op) |op| {
                 switch (op) {
@@ -819,36 +827,36 @@ pub fn NDTensor(comptime T: type) type {
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B'
-                        _ = try grad_C._bmm_acc(B, grad_A, 1.0, 1.0, false, true, self.device);
+                        _ = try grad_C._bmm_acc(B, &grad_A, 1.0, 1.0, false, true, self.device);
                         // grad_B += A' * grad_C
-                        _ = try A._bmm_acc(grad_C, grad_B, 1.0, 1.0, true, false, self.device);
+                        _ = try A._bmm_acc(grad_C, &grad_B, 1.0, 1.0, true, false, self.device);
                     },
                     .MATMUL_AtB => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., k, n)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B * grad_C'
-                        _ = try B._bmm_acc(self.grad.?, grad_A, 1.0, 1.0, false, true, self.device);
+                        _ = try B._bmm_acc(self.grad.?, &grad_A, 1.0, 1.0, false, true, self.device);
                         // grad_B += A * grad_C
-                        _ = try A._bmm_acc(self.grad.?, grad_B, 1.0, 1.0, false, false, self.device);
+                        _ = try A._bmm_acc(self.grad.?, &grad_B, 1.0, 1.0, false, false, self.device);
                     },
                     .MATMUL_ABt => {
                         // A Shape: (..., m, k)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += grad_C * B
-                        _ = try grad_C._bmm_acc(B, grad_A, 1.0, 1.0, false, false, self.device);
+                        _ = try grad_C._bmm_acc(B, &grad_A, 1.0, 1.0, false, false, self.device);
                         // grad_B += grad_C' * A
-                        _ = try grad_C._bmm_acc(A, grad_B, 1.0, 1.0, true, false, self.device);
+                        _ = try grad_C._bmm_acc(A, &grad_B, 1.0, 1.0, true, false, self.device);
                     },
                     .MATMUL_AtBt => {
                         // A Shape: (..., k, m)
                         // B Shape: (..., n, k)
                         // grad_C Shape: (..., m, n)
                         // grad_A += B' * grad_C'
-                        _ = try B._bmm_acc(grad_C, grad_A, 1.0, 1.0, true, true, self.device);
+                        _ = try B._bmm_acc(grad_C, &grad_A, 1.0, 1.0, true, true, self.device);
                         // grad_B += grad_C * A'
-                        _ = try grad_C._bmm_acc(A, grad_B, 1.0, 1.0, false, true, self.device);
+                        _ = try grad_C._bmm_acc(A, &grad_B, 1.0, 1.0, false, true, self.device);
                     },
                     else => std.debug.panic("Op {s} is not yet implemented.", .{@tagName(op)}),
                 }
@@ -874,7 +882,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.dot(other.data, self.device),
                 .op = .DOT,
                 .children = &.{ self, other },
-                .requires_gradient = self.requires_gradient or other.requires_gradient,
+                ._requires_grad = self._requires_grad or other._requires_grad,
                 .device = self.device,
                 ._backward = dotBw,
             });
@@ -898,12 +906,12 @@ pub fn NDTensor(comptime T: type) type {
                     const x = children[1].data;
 
                     //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
-                    const grad_A = try _self.grad.?.outer(x, _self.device);
+                    var grad_A = try _self.grad.?.outer(x, _self.device);
                     defer grad_A.deinit(_self.device);
                     _ = try children[0].grad.?._add(grad_A, _self.device);
 
                     //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
-                    const grad_x = try A.matvec(_self.grad.?, true, _self.device);
+                    var grad_x = try A.matvec(_self.grad.?, true, _self.device);
                     defer grad_x.deinit(_self.device);
                     _ = try children[1].grad.?._add(grad_x, _self.device);
                 }
@@ -913,7 +921,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.matvec(other.data, false, self.device),
                 .op = .MATVEC,
                 .children = &.{ self, other },
-                .requires_gradient = true, // self.requires_grad() or other.requires_grad(),
+                ._requires_grad = true, // self.requires_grad() or other.requires_grad(),
                 .device = self.device,
                 ._backward = matvecBw,
             });
@@ -932,7 +940,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.sum(self.device),
                 .op = .SUM,
                 .children = &.{self},
-                .requires_gradient = self.requires_gradient,
+                ._requires_grad = self._requires_grad,
                 .device = self.device,
                 ._backward = sumBw,
             });
@@ -965,7 +973,7 @@ pub fn NDTensor(comptime T: type) type {
         //        .data = max_result.values,
         //        .op = null,
         //        .children = &.{self},
-        //        .requires_gradient = self.requires_gradient,
+        //        ._requires_grad = self._requires_grad,
         //        .device = device,
         //        ._backward = max_backward,
         //        ._backward_ctx = if (ctx) |c| c.ptr else null,
@@ -996,7 +1004,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = gather_result.values,
                 .op = null,
                 .children = &.{self},
-                .requires_gradient = self.requires_gradient,
+                ._requires_grad = self._requires_grad,
                 .device = device,
                 ._backward = gatherBackward,
                 ._backward_ctx = if (ctx) |c| c.ptr else null,
@@ -1013,7 +1021,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn backward(self: Self) !void {
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
-            if (!self.requires_gradient) return;
+            if (!self._requires_grad) return;
             if (self._backward) |f| {
                 try f(self);
                 return;
