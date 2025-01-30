@@ -1,11 +1,20 @@
 const std = @import("std");
 const log = std.log.scoped(.cuda);
 const cuda = @import("cuda").impl;
-const DimensionMap = @import("dimension_map.zig");
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
 const BinaryOp = @import("device_common.zig").BinaryOp;
+const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(CudaMalloc);
+
+pub const CudaMalloc = struct {
+    pub fn raw_alloc(n: usize, stream: *anyopaque) ?[*]u8 {
+        return @ptrCast(@alignCast(cuda.mem_alloc(n, stream)));
+    }
+    pub fn raw_free(ptr: ?*anyopaque, stream: *anyopaque) void {
+        cuda.mem_free(ptr, stream);
+    }
+};
 
 pub fn dtype(T: type) cuda.dtype {
     return switch (T) {
@@ -276,19 +285,19 @@ pub const Blas = struct {
         T: type,
         src: []const T,
         dst: []T,
-        idx: *i32,
     ) void {
-        cuda.max_forward(dtype(T), self.cublas(), src.ptr, dst.ptr, idx, src.len);
+        cuda.max_forward(dtype(T), self.stream(), src.ptr, dst.ptr, src.len);
     }
 
     pub fn max_backward(
         self: *const Blas,
         T: type,
+        x_val: []const T,
+        y_val: []const T,
         y_grd: []const T,
         x_grd: []T,
-        idx: *i32,
     ) void {
-        cuda.max_reverse(dtype(T), self.cublas(), y_grd.ptr, x_grd.ptr, idx);
+        cuda.max_reverse(dtype(T), self.stream(), x_val.ptr, y_val.ptr, y_grd.ptr, x_grd.ptr, x_val.len);
     }
 
     pub fn sum_along(
@@ -605,7 +614,7 @@ pub const CudaDevice = struct {
     },
     nn: NN,
     blas: Blas,
-    cache: DimensionMap,
+    cache: CachingAllocator,
     scratch: ScratchMemory,
     capture: ExecutionGraph,
     allocator: std.mem.Allocator,
@@ -628,7 +637,7 @@ pub const CudaDevice = struct {
             .nn = .{},
             .blas = .{},
             // at some point, maybe move this to unmanged
-            .cache = .{ .allocator = backing_allocator },
+            .cache = CachingAllocator.init(.{}),
             .scratch = .{},
             .capture = .{},
             .allocator = backing_allocator,
@@ -654,30 +663,18 @@ pub const CudaDevice = struct {
         };
     }
 
-    pub fn mem_alloc(self: *CudaDevice, T: type, n: usize) Error![]T {
-        const raw_ptr = cuda.mem_alloc(n * @sizeOf(T), self.context.stream);
-        const dev_ptr: [*]T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
-        return dev_ptr[0..n];
+    pub fn mem_alloc(self: *CudaDevice, T: type, n: usize) ![]T {
+        return self.cache.alloc(T, n, self.context.stream);
     }
 
-    pub fn mem_dupe(self: *CudaDevice, T: type, src: []const T) Error![]T {
+    pub fn mem_dupe(self: *CudaDevice, T: type, src: []const T) ![]T {
         const dup = try self.mem_alloc(T, src.len);
         self.mem_transfer(T, src, dup, .DtoD);
         return dup;
     }
 
     pub fn mem_free(self: *CudaDevice, slice: anytype) void {
-        cuda.mem_free(@constCast(slice.ptr), self.context.stream);
-    }
-
-    pub fn mem_create(self: CudaDevice, T: type) Error!*T {
-        const raw_ptr = cuda.mem_alloc(@sizeOf(T), self.context.stream);
-        const dev_ptr: *T = @ptrCast(@alignCast(raw_ptr orelse return Error.OutOfMemory));
-        return dev_ptr;
-    }
-
-    pub fn mem_destroy(self: CudaDevice, ptr: anytype) void {
-        cuda.mem_free(@constCast(ptr), self.context.stream);
+        return self.cache.free(slice, self.context.stream);
     }
 
     pub fn mem_fill(self: CudaDevice, T: type, slice: []T, value: T) void {

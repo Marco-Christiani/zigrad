@@ -1,9 +1,18 @@
 const std = @import("std");
 pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
-const DimensionMap = @import("dimension_map.zig");
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
+const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
+
+pub const HostMalloc = struct {
+    pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
+        return @ptrCast(@alignCast(std.c.malloc(n) orelse return null));
+    }
+    pub fn raw_free(ptr: ?*anyopaque, _: *anyopaque) void {
+        return std.c.free(ptr);
+    }
+};
 
 fn host_reference(self: *HostDevice) DeviceReference {
     return self;
@@ -453,12 +462,12 @@ pub const NN = struct {
 };
 
 pub const HostDevice = struct {
-    const Error = std.mem.Allocator.Error;
+    const Error = CachingAllocator.Error;
 
     nn: NN,
     blas: Blas,
     scratch: ScratchMemory,
-    cache: DimensionMap,
+    cache: CachingAllocator,
     allocator: std.mem.Allocator,
 
     pub fn init(backing_allocator: std.mem.Allocator) HostDevice {
@@ -466,35 +475,29 @@ pub const HostDevice = struct {
             .nn = .{},
             .blas = .{},
             .scratch = .{},
-            .cache = .{ .allocator = backing_allocator },
+            .cache = CachingAllocator.init(.{}),
             .allocator = backing_allocator,
         };
     }
 
     pub fn deinit(self: *HostDevice) void {
+        self.cache.deinit(undefined);
         self.scratch.deinit();
-        self.cache.deinit();
         self.* = undefined;
     }
 
-    pub fn mem_alloc(self: HostDevice, T: type, n: usize) Error![]T {
-        return self.allocator.alloc(T, n);
+    pub fn mem_alloc(self: *HostDevice, T: type, n: usize) ![]T {
+        return self.cache.alloc(T, n, undefined);
     }
 
-    pub fn mem_free(self: HostDevice, slice: anytype) void {
-        return self.allocator.free(slice);
+    pub fn mem_free(self: *HostDevice, slice: anytype) void {
+        return self.cache.free(slice, undefined);
     }
 
-    pub fn mem_create(self: HostDevice, T: type) Error!*T {
-        return self.allocator.create(T);
-    }
-
-    pub fn mem_destroy(self: HostDevice, slice: anytype) void {
-        return self.allocator.destroy(slice);
-    }
-
-    pub fn mem_dupe(self: HostDevice, T: type, src: []const T) Error![]T {
-        return self.allocator.dupe(T, src);
+    pub fn mem_dupe(self: *HostDevice, T: type, src: []const T) ![]T {
+        const dst = try self.cache.alloc(T, src.len, undefined);
+        self.mem_copy(T, src, dst);
+        return dst;
     }
 
     pub fn mem_copy(_: HostDevice, T: type, src: []const T, dst: []T) void {

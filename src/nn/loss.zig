@@ -320,7 +320,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
             const _y_pred = self_children[0];
             const _y = self_children[1];
             const _bw_ctx: *T = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
-            defer tensor.device.mem_destroy(_bw_ctx);
+            defer tensor.device.allocator.destroy(_bw_ctx);
             const _beta = _bw_ctx.*;
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
