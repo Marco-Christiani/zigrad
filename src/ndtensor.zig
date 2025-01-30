@@ -711,17 +711,14 @@ pub fn NDTensor(comptime T: type) type {
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *Self) !*Self {
             const max_mem = try DataType.empty(&.{1}, self.device);
-            const max_idx = try self.device.mem_create(i32);
 
-            self.device.blas.max_forward(T, self.get_data(), max_mem.data, max_idx);
+            self.device.blas.max_forward(T, self.get_data(), max_mem.data);
 
             const maxBw = struct {
                 fn max_bw_impl(_self: Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
-                    const iptr: *i32 = @ptrCast(@alignCast(_self._backward_ctx.?));
-                    self.device.blas.max_reverse(T, _self.grad.?.data.data, child.grad.?.data.data, iptr);
-                    self.device.mem_destroy(iptr);
+                    self.device.blas.max_reverse(T, _self.grad.?.data.data, child.grad.?.data.data);
                 }
             }.max_bw_impl;
 
@@ -729,7 +726,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = max_mem,
                 .op = .MAX,
                 .children = &.{self},
-                ._requires_grad = self._requires_grad,
+                ._requires_grad = self.requires_grad(),
                 .device = self.device,
                 ._backward = maxBw,
             });

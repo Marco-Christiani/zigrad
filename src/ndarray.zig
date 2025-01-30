@@ -380,9 +380,7 @@ pub fn NDArray(comptime T: type) type {
         /// COM.
         pub fn max(self: Self, device: DeviceReference) !Self {
             const max_arr = try Self.empty(&.{1}, device);
-            const max_idx = try device.mem_create(i32);
-            defer device.mem_destroy(max_idx);
-            device.blas.max_forward(T, self.data, max_arr.data, max_idx);
+            device.blas.max_forward(T, self.data, max_arr.data);
             return max_arr;
         }
 

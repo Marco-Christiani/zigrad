@@ -167,10 +167,9 @@ pub fn Blas(comptime Parent: type) type {
             T: type,
             src: []const T,
             dst: []T,
-            idx: *i32,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.max_forward(T, self.cublas(), src.ptr, dst.ptr, idx),
+                inline else => |dev| dev.blas.max_forward(T, self.cublas(), src.ptr, dst.ptr),
             };
         }
 
@@ -179,10 +178,9 @@ pub fn Blas(comptime Parent: type) type {
             T: type,
             y_grd: []const T,
             x_grd: []T,
-            idx: *i32,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.max_reverse(T, self.cublas(), y_grd.ptr, x_grd.ptr, idx),
+                inline else => |dev| dev.blas.max_reverse(T, self.cublas(), y_grd.ptr, x_grd.ptr),
             };
         }
 
@@ -357,18 +355,6 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         pub fn mem_free(self: Self, slice: anytype) void {
             return switch (self.ptrs) {
                 inline else => |dev| dev.mem_free(slice),
-            };
-        }
-
-        pub fn mem_create(self: Self, comptime T: type) Error!*T {
-            return switch (self.ptrs) {
-                inline else => |dev| dev.mem_create(T),
-            };
-        }
-
-        pub fn mem_destroy(self: Self, ptr: anytype) void {
-            return switch (self.ptrs) {
-                inline else => |dev| dev.mem_destroy(ptr),
             };
         }
 

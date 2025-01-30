@@ -65,19 +65,20 @@ EXTERN_C void nrm2(
 
 EXTERN_C void max_forward(
   dtype id,
-  void* cublas_handle,
+  void* stream,
   const void* x,
   void* y,
-  int* idx,
   len_t n
 );
 
 EXTERN_C void max_reverse(
   dtype id,
-  void* cublas_handle,
+  void * stream,
+  const void* x_val,
+  void const* y_val,
   const void* y_grd,
-  void* x_grd,
-  int* idx
+        void* x_grd,
+  len_t n
 );
 
 EXTERN_C void reduce_sum(
