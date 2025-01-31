@@ -478,7 +478,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         // this needs to get audited for device safety
-        pub fn get(self: Self, idx: usize) !void {
+        pub fn get(self: Self, idx: usize) T {
             return self.data.data[idx];
         }
 

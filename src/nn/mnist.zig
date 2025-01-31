@@ -228,29 +228,20 @@ const MnistDataset = struct {
 };
 
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
+    _ = test_path; // autofix
     // TODO: When we get caching finalized for the HostDevice
     // and ensure freeing on the backward pass, we can
     // move these to a single HostDevice. Right now, multiple
     // device instances are created as a hack to for support.
-    var model_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-    defer model_arena.deinit();
 
-    var model_cpu = zg.device.HostDevice.init(model_arena.allocator());
-    defer model_cpu.deinit();
+    var cpu = zg.device.HostDevice.init(std.heap.raw_c_allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
 
-    var fw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-    defer fw_arena.deinit();
+    var model = try MnistModel.init_simple(device);
+    defer model.deinit();
 
-    var dataset_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-    defer dataset_arena.deinit();
-
-    var dataset_cpu = zg.device.HostDevice.init(dataset_arena.allocator());
-    defer dataset_cpu.deinit();
-
-    // bw_arena is torn down before eval
-    var bw_arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-
-    var model = try MnistModel.init_simple(model_cpu.reference()); // 109_386
+    // var model = try MnistModel.init_simple(model_cpu.reference()); // 109_386
     // var model = try MnistModel.init_simple2(model_arena.allocator()); // 717_210
     // var model = try MnistModel.init_conv(model_arena.allocator()); // 44_426
     // var model = try MnistModel.init_conv2(model_arena.allocator()); // 155_324
@@ -258,7 +249,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     log.info("Loading train data...", .{});
     const batch_size = 64;
-    const train_dataset = try MnistDataset.load(dataset_cpu.reference(), train_path, batch_size);
+    const train_dataset = try MnistDataset.load(device, train_path, batch_size);
     const n = train_dataset.images.len;
 
     var trainer = Trainer(T, .ce).init(
@@ -269,7 +260,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             .grad_clip_delta = 1e-6,
             .grad_clip_enabled = false,
         },
-        .{},
+        .{ .eager_teardown = true },
     );
 
     defer {
@@ -280,24 +271,27 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     var step_timer = try std.time.Timer.start();
     var timer = try std.time.Timer.start();
     log.info("Training...", .{});
-    const num_epochs = 3;
+    const num_epochs = 1;
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
             step_timer.reset();
+            image.acquire();
+            label.acquire();
             try image.set_label("image_batch");
             try label.set_label("label_batch");
             const loss = try trainer.train_step(image, label);
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
-            total_loss += loss.data.data[0];
+            total_loss += loss.get(0);
             log.info("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]", .{
-                loss.data.data[0],
+                loss.get(0),
                 i,
                 n,
                 ms_per_sample,
             });
+            loss.deinit();
             // Optional: Render a trace of the graph and look at the raw data
             // if (epoch == 0 and i == 0) {
             //     try zg.utils.render_d2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph.svg");
@@ -308,34 +302,34 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             //     std.debug.print("\n", .{});
             // }
 
-            if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
-            if (!fw_arena.reset(.retain_capacity)) log.warn("Issue in fw arena reset", .{});
+            // if (!bw_arena.reset(.retain_capacity)) log.warn("Issue in bw arena reset", .{});
+            // if (!fw_arena.reset(.retain_capacity)) log.warn("Issue in fw arena reset", .{});
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         log.info("Epoch {d}: Avg Loss = {d:.4}", .{ epoch + 1, avg_loss });
     }
-    bw_arena.deinit();
+    // bw_arena.deinit();
     const train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     log.info("Training complete ({d} epochs). [{d}ms]", .{ num_epochs, train_time_ms });
 
     // model.model.eval() // TODO: model.eval()
-    const train_eval = try eval_mnist(&fw_arena, model, train_dataset);
-    const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
-    const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
-    log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
-    train_dataset.deinit();
-
-    log.info("Loading test data...", .{});
-    const test_dataset = try MnistDataset.load(dataset_cpu.reference(), test_path, batch_size);
-    defer test_dataset.deinit();
-    timer.reset();
-    const test_eval = try eval_mnist(&fw_arena, model, test_dataset);
-    const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
-    const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
-    log.info("Test acc: {d:.2} (n={d}) [{d}ms]", .{ test_acc * 100, test_eval.n, eval_test_time_ms });
+    // const train_eval = try eval_mnist(&fw_arena, model, train_dataset);
+    // const train_acc = train_eval.correct / @as(f32, @floatFromInt(train_eval.n));
+    // const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+    // log.info("Train acc: {d:.2} (n={d}) [{d}ms]", .{ train_acc * 100, train_eval.n, eval_train_time_ms });
+    // train_dataset.deinit();
+    //
+    // log.info("Loading test data...", .{});
+    // const test_dataset = try MnistDataset.load(dataset_cpu.reference(), test_path, batch_size);
+    // defer test_dataset.deinit();
+    // timer.reset();
+    // const test_eval = try eval_mnist(&fw_arena, model, test_dataset);
+    // const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+    // const test_acc = test_eval.correct / @as(f32, @floatFromInt(test_eval.n));
+    // log.info("Test acc: {d:.2} (n={d}) [{d}ms]", .{ test_acc * 100, test_eval.n, eval_test_time_ms });
     log.info("Train: {d}ms", .{train_time_ms});
-    log.info("Eval train: {d}ms", .{eval_train_time_ms});
-    log.info("Eval test: {d}ms", .{eval_test_time_ms});
+    // log.info("Eval train: {d}ms", .{eval_train_time_ms});
+    // log.info("Eval test: {d}ms", .{eval_test_time_ms});
 }
 
 fn eval_mnist(
