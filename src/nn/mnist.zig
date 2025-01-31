@@ -236,6 +236,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     var cpu = zg.device.HostDevice.init(std.heap.raw_c_allocator);
     defer cpu.deinit();
+
     const device = cpu.reference();
 
     var model = try MnistModel.init_simple(device);
@@ -262,16 +263,13 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
         },
         .{ .eager_teardown = true },
     );
-
-    defer {
-        trainer.deinit();
-        model.deinit();
-    }
+    defer trainer.deinit();
 
     var step_timer = try std.time.Timer.start();
     var timer = try std.time.Timer.start();
     log.info("Training...", .{});
-    const num_epochs = 1;
+
+    const num_epochs = 2;
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop
@@ -279,12 +277,15 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             step_timer.reset();
             image.acquire();
             label.acquire();
+
             try image.set_label("image_batch");
             try label.set_label("label_batch");
+
             const loss = try trainer.train_step(image, label);
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
             total_loss += loss.get(0);
+
             log.info("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]", .{
                 loss.get(0),
                 i,
@@ -292,6 +293,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
                 ms_per_sample,
             });
             loss.deinit();
+
             // Optional: Render a trace of the graph and look at the raw data
             // if (epoch == 0 and i == 0) {
             //     try zg.utils.render_d2(loss, zg.utils.PrintOptions.plain, fw_arena.allocator(), "./docs/comp_graph.svg");
