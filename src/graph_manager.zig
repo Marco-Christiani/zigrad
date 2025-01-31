@@ -60,7 +60,11 @@ pub fn GraphManager(comptime T: type) type {
                     try curr_node.backward();
                     // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
                     // it just destroys the current tensor and not the children
-                    if (!curr_node.acquired and self.eager_teardown) curr_node.deinit();
+                    if (!curr_node.acquired and self.eager_teardown) {
+                        log.warn("destroying node {?s}", .{curr_node.get_label()});
+                        curr_node.deinit();
+                        log.warn("  ->destroyed", .{});
+                    }
                 } else {
                     log.debug("Skipping node {?s}", .{node.get_label()});
                 }
