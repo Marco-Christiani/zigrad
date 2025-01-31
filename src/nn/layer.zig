@@ -593,11 +593,11 @@ pub fn FlattenLayer(comptime T: type) type {
 
             // view of input tensor with new shape
             const result = try NDTensor(T).create_dependent(.{
-                .data = input.data, // Reuse the same data
+                .data = try input.data.copy(input.device), // Reuse the same data
                 // .op = .FLATTEN,
                 .children = &.{input},
                 .label = "flattened",
-                ._requires_grad = input._requires_grad,
+                ._requires_grad = input.requires_grad(),
                 .device = self.device,
                 ._backward = backward,
             });
