@@ -1,0 +1,14 @@
+.{
+    .name = "zigrad_tests",
+    .version = "0.0.0",
+    .dependencies = .{
+        .zigrad = .{
+            .path = "../../",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
