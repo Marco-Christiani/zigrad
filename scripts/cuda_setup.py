@@ -94,8 +94,8 @@ def compile_cuda(
         "-ccbin",
         "/usr/bin/gcc",
         "-o",
-        str(here / "libamalgamate.so"),
-        str(here / "amalgamate.cu"),
+        str(here.parent / "src/cuda/libamalgamate.so"),
+        str(here.parent / "src/cuda/amalgamate.cu"),
         "-O3",
         compute_arch,
         "--expt-extended-lambda",
@@ -342,54 +342,53 @@ def main():
     parser.add_argument('--rebuild', action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
-    print("REBUILD ", args.rebuild);
+    here = Path(__file__).parent.resolve()
+    LIBRARY_PATHS_CACHE = here.parent / "src/cuda/.library_paths.cache"
+    INCLUDE_PATHS_CACHE = here.parent / "src/cuda/.include_paths.cache"
+    AMALGAMATE_LIBRARY = here.parent / "src/cuda/amalgamate.so"
 
-    print("")
-    print("############################################################")
-    print("#### LOCATING CUDA INSTALLATION PATHS (THIS IS A PAIN) #####")
-    print("""
-    This is an alpha version of this utility and probably sucks.
-          
-    We will try to locate the required files to install CUDA.
-    This will create a "cuda_paths.zig" file that will include
-    the minimum set of paths required to install CUDA. You can
-    edit that file whenever you want. If you have already done
-    this, proceeding will overwrite that file.
-    """)
+    # probably the first time building...
+    if not os.path.exists(AMALGAMATE_LIBRARY):
+        print("")
+        print("############################################################")
+        print("#### LOCATING CUDA INSTALLATION PATHS (THIS IS A PAIN) #####")
+        print("""
+        This is an alpha version of this utility and probably sucks.
+              
+        We will try to locate the required files to install CUDA.
+        This will create a "cuda_paths.zig" file that will include
+        the minimum set of paths required to install CUDA. You can
+        edit that file whenever you want. If you have already done
+        this, proceeding will overwrite that file.
+        """)
 
-    response = input(f"Do you wish to continue? (y/n): ").strip().lower()
+        response = input(f"Do you wish to continue? (y/n): ").strip().lower()
 
-    if response != 'y':
-        return
+        if response != 'y':
+            return
     
     # Step 1: Check if nvcc is installed and working.
     check_nvcc()
 
-    here = Path(__file__).parent.resolve()
-    LIBRARY_PATHS_CACHE = here / ".library_paths.cache"
-    INCLUDE_PATHS_CACHE = here / ".include_paths.cache"
-    AMALGAMATE_LIBRARY = here / "amalgamate.so"
-
 
     if not args.rebuild and os.path.exists(LIBRARY_PATHS_CACHE):
-        print("")
-        print("############################################################")
-        print("#### LOCATING LIBRARY INSTALLATION PATHS ###################")
         with open(LIBRARY_PATHS_CACHE, "r") as file:
             library_paths = json.load(file)
     else:
+        print("")
+        print("############################################################")
+        print("#### LOCATING LIBRARY INSTALLATION PATHS ###################")
         library_paths = locate_library_paths(library_paths_to_check)
         with open(LIBRARY_PATHS_CACHE, "w") as file:
             file.write(json.dumps(library_paths))
-
         
     if not args.rebuild and os.path.exists(INCLUDE_PATHS_CACHE):
-        print("")
-        print("############################################################")
-        print("#### LOCATING INCLUDE INSTALLATION PATHS ###################")
         with open(INCLUDE_PATHS_CACHE, "r") as file:
             include_paths = json.load(file)
     else:
+        print("")
+        print("############################################################")
+        print("#### LOCATING INCLUDE INSTALLATION PATHS ###################")
         include_paths = locate_include_paths(include_paths_to_check)
         with open(INCLUDE_PATHS_CACHE, "w") as file:
             file.write(json.dumps(include_paths))
@@ -405,7 +404,6 @@ def main():
             minimal_path_set(include_paths),
             minimal_path_set(library_paths),
         )
-    
     
         
 if __name__ == '__main__':
