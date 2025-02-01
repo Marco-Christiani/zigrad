@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import argparse
 import subprocess
 import sys
 import os
 import json
+
+def ends_with(path: Path, tail: str) -> bool:
+    return str(path).endswith(tail)
 
 def get_cuda_compute() -> str:    
     """
@@ -81,12 +85,17 @@ def compile_cuda(
     #const gpu_architecture = std.mem.join(b.allocator, "", &.{ "--gpu-architecture=", gpu_arch }) catch unreachable;
     compute_arch = f'--gpu-architecture={choose_gpu(get_cuda_compute())}'
 
+    here = Path(__file__).parent.resolve()
+
     nvcc_args = [
         "nvcc",
         "--shared",
+        "-allow-unsupported-compiler",
+        "-ccbin",
+        "/usr/bin/gcc",
         "-o",
-        "libamalgomate.so",
-        "amalgomate.cu",
+        str(here / "libamalgamate.so"),
+        str(here / "amalgamate.cu"),
         "-O3",
         compute_arch,
         "--expt-extended-lambda",
@@ -186,7 +195,8 @@ def locate_library_paths(library_names):
 
         # Search each line for the library name.
         for line in ldconfig_lines:
-            if lib in line:
+            # Search exact for ending - controls which version of a library we are looking for
+            if ends_with(line, lib):
                 # ldconfig output lines are typically formatted like:
                 # "    libcudart.so.10.1 (libc6,x86-64) => /usr/local/cuda-10.1/targets/x86_64-linux/lib/libcudart.so.10.1"
                 if "=>" in line:
@@ -241,7 +251,7 @@ def locate_include_paths(header_files, search_dirs=None):
     """
     if search_dirs is None:
         # These are common ubuntu directories
-        search_dirs = ["/usr/include", "/usr/local/include", "/opt"]
+        search_dirs = ["/usr/include", "/usr/local/", "/opt"]
 
     found_headers = {}
 
@@ -328,6 +338,11 @@ include_paths_to_check = [
 ]
 
 def main():
+    parser = argparse.ArgumentParser(description='Process some strings.')    
+    parser.add_argument('--rebuild', action=argparse.BooleanOptionalAction)
+    args = parser.parse_args()
+
+    print("REBUILD ", args.rebuild);
 
     print("")
     print("############################################################")
@@ -353,34 +368,31 @@ def main():
     here = Path(__file__).parent.resolve()
     LIBRARY_PATHS_CACHE = here / ".library_paths.cache"
     INCLUDE_PATHS_CACHE = here / ".include_paths.cache"
+    AMALGAMATE_LIBRARY = here / "amalgamate.so"
 
-    print("")
-    print("############################################################")
-    print("#### LOCATING LIBRARY INSTALLATION PATHS ###################")
 
-    if os.path.exists(LIBRARY_PATHS_CACHE):
+    if not args.rebuild and os.path.exists(LIBRARY_PATHS_CACHE):
+        print("")
+        print("############################################################")
+        print("#### LOCATING LIBRARY INSTALLATION PATHS ###################")
         with open(LIBRARY_PATHS_CACHE, "r") as file:
             library_paths = json.load(file)
     else:
         library_paths = locate_library_paths(library_paths_to_check)
-        
-    print("")
-    print("############################################################")
-    print("#### LOCATING INCLUDE INSTALLATION PATHS ###################")
+        with open(LIBRARY_PATHS_CACHE, "w") as file:
+            file.write(json.dumps(library_paths))
 
-    if os.path.exists(INCLUDE_PATHS_CACHE):
+        
+    if not args.rebuild and os.path.exists(INCLUDE_PATHS_CACHE):
+        print("")
+        print("############################################################")
+        print("#### LOCATING INCLUDE INSTALLATION PATHS ###################")
         with open(INCLUDE_PATHS_CACHE, "r") as file:
             include_paths = json.load(file)
     else:
         include_paths = locate_include_paths(include_paths_to_check)
-
-    ### CACHE OUR LOCATED PATHS TO SEE IF WE NEED RELOADING ###
-
-    with open(LIBRARY_PATHS_CACHE, "w") as file:
-        file.write(json.dumps(library_paths))
-
-    with open(INCLUDE_PATHS_CACHE, "w") as file:
-        file.write(json.dumps(include_paths))
+        with open(INCLUDE_PATHS_CACHE, "w") as file:
+            file.write(json.dumps(include_paths))
 
     ### GENERATE CUDA INCLUDES FROM LOCATED INCLUDE PATHS ###
 
@@ -388,10 +400,11 @@ def main():
     with open(here / "cuda_includes.cu", 'w') as file:
         file.write("\n".join((f'#include "{h}"' for h in include_paths.values())))
 
-    compile_cuda(
-        minimal_path_set(include_paths),
-        minimal_path_set(library_paths),
-    )
+    if args.rebuild or not os.path.exists(AMALGAMATE_LIBRARY):
+        compile_cuda(
+            minimal_path_set(include_paths),
+            minimal_path_set(library_paths),
+        )
     
     
         
