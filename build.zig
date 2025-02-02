@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) !void {
     );
 
     const rebuild = b.option(bool, "rebuild", "force backend to recompile") orelse false;
-    const device_module = buildDeviceModule(b, target, rebuild);
+    const device_module = build_device_module(b, target, rebuild);
 
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
@@ -121,14 +121,14 @@ fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
     exe.linkLibCpp();
 }
 
-pub fn buildDeviceModule(b: *std.Build, target: std.Build.ResolvedTarget, rebuild: bool) *std.Build.Module {
-    // const new_backend = getBackend(b);
+pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebuild: bool) *std.Build.Module {
+    //const new_backend = get_backend(b);
     const new_backend: Backend = .HOST;
 
     const here = b.path(".").getPath(b);
 
     if (backend != new_backend) {
-        runCommand(b, &.{ "python3", b.pathJoin(&.{ here, "scripts", "backend.py" }), @tagName(new_backend) });
+        run_command(b, &.{ "python3", b.pathJoin(&.{ here, "scripts", "backend.py" }), @tagName(new_backend) });
     }
 
     const device = b.createModule(.{
@@ -152,89 +152,28 @@ pub fn buildDeviceModule(b: *std.Build, target: std.Build.ResolvedTarget, rebuil
             .link_libc = true,
         });
 
-        const info = getCudaInfo(b);
+        const exists = amalgamate_exists(b);
+
+        if (rebuild or !exists) {
+            run_command(b, &.{
+                "python3",
+                b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
+                if (rebuild or !exists) "y" else "n",
+            });
+        }
 
         cuda.addIncludePath(b.path("src/cuda/"));
         cuda.addLibraryPath(b.path("src/cuda/"));
-        cuda.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ info.cuda_path, "lib64" }) });
-
-        switch (builtin.os.tag) {
-            .linux => cuda.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ info.cuda_path, "targets/x86_64-linux/lib/stubs" }) }),
-            else => @panic("Windows OS is currently unsupported by Zigrad."),
-        }
-
-        cuda.linkSystemLibrary("cuda", .{});
-        cuda.linkSystemLibrary("cudart", .{});
-        cuda.linkSystemLibrary("nvrtc", .{});
-        cuda.linkSystemLibrary("cublas", .{});
-        cuda.linkSystemLibrary("cudnn", .{});
-
-        if (rebuild or !amalgomateExists(b)) {
-            runCommand(b, &.{ "python3", b.pathJoin(&.{ here, "scripts", "cuda_includes.py" }), info.cuda_path });
-            compileCuda(b, info.cuda_path, info.gpu_arch);
-        }
-
-        // this is created by the compile cuda step
-        cuda.linkSystemLibrary("amalgomate", .{});
-
+        cuda.linkSystemLibrary("amalgamate", .{});
         device.addImport("cuda", cuda);
     }
 
     return device;
 }
 
-pub fn compileCuda(
-    b: *std.Build,
-    cuda_path: []const u8,
-    gpu_arch: []const u8,
-) void {
-    std.log.info("Compiling libamalgomate.so...\n", .{});
-
-    const cuda_nvcc_path = b.pathJoin(&.{ cuda_path, "bin", "nvcc" });
-    const cuda_include_path = b.pathJoin(&.{ "-I", cuda_path, "include" });
-    const cuda_library_path = b.pathJoin(&.{ "-L", cuda_path, "lib64" });
-    const gpu_architecture = std.mem.join(b.allocator, "", &.{ "--gpu-architecture=", gpu_arch }) catch unreachable;
-
+fn amalgamate_exists(b: *std.Build) bool {
     const here = b.path(".").getPath(b);
-    const source_path = b.pathJoin(&.{ here, "src", "cuda", "amalgomate.cu" });
-    const target_path = b.pathJoin(&.{ here, "src", "cuda", "libamalgomate.so" });
-
-    const libgen_utils_argv: []const []const u8 = &.{
-        cuda_nvcc_path,
-        "--shared",
-        "-o",
-        target_path,
-        source_path,
-        "-O3",
-        gpu_architecture,
-        "--expt-extended-lambda",
-        "--compiler-options",
-        "-fPIC",
-        cuda_include_path,
-        cuda_library_path,
-        "-lcudart",
-        "-lcuda",
-        "-lcublas",
-        "-lcudnn",
-    };
-
-    const result = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = libgen_utils_argv,
-    }) catch |e| {
-        std.log.err("Error: {}", .{e});
-        @panic("Failed to create amalgomate.so");
-    };
-
-    if (result.stderr.len != 0) {
-        std.log.err("Error: {s}", .{result.stderr});
-        @panic("Failed to create amalgomate.so");
-    }
-}
-
-fn amalgomateExists(b: *std.Build) bool {
-    const here = b.path(".").getPath(b);
-    const path = b.pathJoin(&.{ here, "src", "cuda", "libamalgomate.so" });
+    const path = b.pathJoin(&.{ here, "src", "cuda", "libamalgamate.so" });
     var file = std.fs.openFileAbsolute(path, .{});
     if (file) |*_file| {
         _file.close();
@@ -244,7 +183,7 @@ fn amalgomateExists(b: *std.Build) bool {
     }
 }
 
-fn getBackend(b: *std.Build) Backend {
+fn get_backend(b: *std.Build) Backend {
     const env_backend = std.process.getEnvVarOwned(b.allocator, "ZIGRAD_BACKEND") catch {
         @panic("Environment variable 'ZIGRAD_BACKEND' not found.");
     };
@@ -253,23 +192,7 @@ fn getBackend(b: *std.Build) Backend {
     };
 }
 
-fn getCudaInfo(b: *std.Build) struct {
-    cuda_path: []const u8,
-    gpu_arch: []const u8,
-} {
-    const env_cuda_path = std.process.getEnvVarOwned(b.allocator, "ZIGRAD_CUDA_PATH") catch {
-        @panic("Environment variable 'ZIGRAD_CUDA_PATH' not found.");
-    };
-    const env_gpu_arch = std.process.getEnvVarOwned(b.allocator, "ZIGRAD_GPU_ARCH") catch {
-        @panic("Environment variable 'ZIGRAD_GPU_ARCH' not found.");
-    };
-    return .{
-        .cuda_path = env_cuda_path,
-        .gpu_arch = env_gpu_arch,
-    };
-}
-
-pub fn runCommand(b: *std.Build, args: []const []const u8) void {
+pub fn run_command(b: *std.Build, args: []const []const u8) void {
     const output = b.run(args);
 
     if (output.len > 0)
