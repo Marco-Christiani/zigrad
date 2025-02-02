@@ -1,7 +1,7 @@
 set unstable
 
 default:
-  @just --choose
+  @just mnist
 
 alias b := build
 alias bt := test
@@ -17,6 +17,13 @@ run +opts="":
   zig build run {{opts}}
 
 export ZG_DATA_DIR := env("ZG_DATA_DIR", "data")
+mnist:
+  @python examples/mnist/mnist_data.py
+  @echo "Compiling zigrad mnist"
+  @just build -Doptimize=ReleaseFast -Dtracy_enable=false
+  @echo "Running zigrad mnist"
+  ./zig-out/bin/zigrad
+
 benchmark +verbose="":
   @python examples/mnist/mnist_data.py
   @echo "Running pytorch mnist"
