@@ -11,24 +11,23 @@ const Model = struct {
 const Tensor = zg.NDTensor(f32);
 
 pub fn main() !void {
-    try mnist.main();
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // defer _ = gpa.deinit();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
     //
-    // var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    // defer arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
     //
-    // var gpu = zg.device.CudaDevice.init(0, arena.allocator());
-    // defer gpu.deinit();
-    //
-    // const A = try Tensor.sequence(0.0, 1.0, &.{ 1, 2, 2 }, false, gpu.reference());
-    // defer A.deinit();
-    //
-    // const B = try Tensor.sequence(0.0, 1.0, &.{ 1, 2, 2 }, false, gpu.reference());
-    // defer B.deinit();
-    //
-    // A.print();
-    // B.print();
+    var gpu = zg.device.CudaDevice.init(0, arena.allocator());
+    defer gpu.deinit();
+
+    const A = try Tensor.sequence(0.0, 1.0, &.{ 1, 2, 2 }, false, gpu.reference());
+    defer A.deinit();
+
+    const B = try Tensor.sequence(0.0, 1.0, &.{ 1, 2, 2 }, false, gpu.reference());
+    defer B.deinit();
+
+    A.print();
+    B.print();
     //
     // gpu.capture.open(.{});
     //
