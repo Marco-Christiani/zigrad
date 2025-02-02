@@ -7,6 +7,8 @@
     #define EXTERN_C extern
 #endif
 
+#include <stddef.h>
+#include <stdlib.h>
 #include <stdbool.h> // bool
 typedef unsigned long len_t;
 typedef unsigned char dtype;

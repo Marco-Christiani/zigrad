@@ -1,17 +1,14 @@
 #ifndef __CUTENSOR_UTILS_ZIG__
 #define __CUTENSOR_UTILS_ZIG__
+#include "decls.h"
+#include "cuda_helpers.cu"
+#include <cutensor/types.h>
 
 #include <array>
 #include <algorithm>
-#include <cutensor/types.h>
-#include <type_traits>
 #include <unordered_map>
 #include <initializer_list>
-
-#include "decls.h"
-#include "cuda_helpers.cu"
 #include <typeinfo>
-
 #include <variant>
 
 static const u32 cutensor_alignment = 128; // Alignment of the global-memory device poi32ers (bytes)

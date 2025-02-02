@@ -3,7 +3,6 @@ const HostDevice = @import("host_device.zig").HostDevice;
 const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
-const DimensionMap = @import("dimension_map.zig");
 
 pub fn Blas(comptime Parent: type) type {
     return struct {
@@ -343,10 +342,9 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         ptrs: DevicePtrs,
         nn: NN(Self) = .{},
         blas: Blas(Self) = .{},
-        cache: *DimensionMap,
         allocator: std.mem.Allocator,
 
-        pub fn mem_alloc(self: Self, comptime T: type, n: usize) Error![]T {
+        pub fn mem_alloc(self: Self, comptime T: type, n: usize) ![]T {
             return switch (self.ptrs) {
                 inline else => |dev| dev.mem_alloc(T, n),
             };
@@ -358,7 +356,7 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn mem_dupe(self: Self, T: type, slice: anytype) Error![]T {
+        pub fn mem_dupe(self: Self, T: type, slice: anytype) ![]T {
             return switch (self.ptrs) {
                 inline else => |dev| dev.mem_dupe(T, slice),
             };
@@ -404,6 +402,12 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         pub fn mem_take(self: Self, T: type, src: []const T, idxs: []const usize, dst: []T) void {
             return switch (self.ptrs) {
                 inline else => |dev| dev.mem_take(T, src, idxs, dst),
+            };
+        }
+
+        pub fn clear_cache(self: Self) void {
+            return switch (self.ptrs) {
+                inline else => |dev| dev.clear_cache(),
             };
         }
 

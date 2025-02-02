@@ -531,6 +531,10 @@ pub const HostDevice = struct {
         for (idxs, 0..) |i, j| dst[j] = src[i];
     }
 
+    pub fn clear_cache(self: *HostDevice) void {
+        self.cache.clear(undefined);
+    }
+
     pub fn sync(_: HostDevice) void {}
 
     // since host is it's own reference when compiling for HOST only,
