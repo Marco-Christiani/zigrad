@@ -1,0 +1,178 @@
+const std = @import("std");
+const zg = @import("zigrad");
+
+const Tensor = zg.NDTensor(f32);
+
+// It is expected to have some epsilon between the
+// device and the host. Floating point is not associative
+// and the GPU does perform oprations in the same order.
+const epsilon: f32 = 1e-3;
+pub fn similar(x: *Tensor, y: *Tensor) error{ NotSimilar, WrongSize }!void {
+    if (x.get_size() != y.get_size()) {
+        return error.WrongSize;
+    }
+    for (x.get_data(), y.get_data()) |u, v| {
+        if (@abs(u - v) > epsilon) return error.NotSimilar;
+    }
+}
+
+pub fn main() !void {
+    if (comptime zg.backend != .CUDA) {
+        @compileError("Zigrad backend must be targeted at CUDA to run cuda_tests.zig");
+    }
+    //var prng = std.Random.DefaultPrng.init(zg.settings.seed);
+    //const rand = prng.random();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+
+    var cpu = zg.device.HostDevice.init(arena.allocator());
+    defer cpu.deinit();
+
+    var gpu = zg.device.CudaDevice.init(0, arena.allocator());
+    defer gpu.deinit();
+
+    { // MEMORY TRANSFER //
+        std.log.info("TESTING: MEMORY TRANSFER", .{});
+        const x = try Tensor.random(&.{256}, false, .uniform, cpu.reference());
+        defer x.deinit();
+
+        const y = try x.to_device(gpu.reference());
+        defer y.deinit();
+
+        const z = try y.to_device(cpu.reference());
+        defer z.deinit();
+
+        gpu.sync();
+
+        try similar(x, z);
+    }
+
+    { // ELEMENTWISE OPS //
+        const a = try Tensor.random(&.{256}, false, .uniform, cpu.reference());
+        defer a.deinit();
+        const b = try Tensor.random(&.{256}, false, .uniform, cpu.reference());
+        defer b.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+        const y = try b.to_device(gpu.reference());
+        defer y.deinit();
+
+        { // ADDITION //
+            std.log.info("TESTING: ELEMENTWISE ADD", .{});
+            const c = try a.add(b);
+            defer c.deinit();
+
+            const z = try x.add(y);
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            gpu.sync();
+
+            try similar(c, d);
+        }
+
+        { // SUBTRACTION //
+            std.log.info("TESTING: ELEMENTWISE SUB", .{});
+            const c = try a.sub(b);
+            defer c.deinit();
+
+            const z = try x.sub(y);
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            gpu.sync();
+
+            try similar(c, d);
+        }
+
+        { // MULTIPLICATION //
+            std.log.info("TESTING: ELEMENTWISE MUL", .{});
+            const c = try a.mul(b);
+            defer c.deinit();
+
+            const z = try x.mul(y);
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            gpu.sync();
+
+            try similar(c, d);
+        }
+    }
+
+    cpu.clear_cache();
+    gpu.clear_cache();
+
+    { // BATCH MATRIX MUL //
+        std.log.info("TESTING: BATCH MATRIX MUL", .{});
+        const a = try Tensor.random(&.{ 3, 256, 256 }, false, .normal, cpu.reference());
+        defer a.deinit();
+        const b = try Tensor.random(&.{ 3, 256, 256 }, false, .normal, cpu.reference());
+        defer b.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+        const y = try b.to_device(gpu.reference());
+        defer y.deinit();
+
+        for (
+            &[_]bool{ true, true, false, false },
+            &[_]bool{ true, false, true, false },
+        ) |trans_a, trans_b| {
+            const c = try a.bmm(b, .{
+                .trans_a = trans_a,
+                .trans_b = trans_b,
+            });
+            defer c.deinit();
+
+            const z = try x.bmm(y, .{
+                .trans_a = trans_a,
+                .trans_b = trans_b,
+            });
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            try similar(c, d);
+        }
+    }
+
+    cpu.clear_cache();
+    gpu.clear_cache();
+
+    { // MATRIX VECTOR OP //
+        std.log.info("TESTING: MATRIX VECTOR MUL", .{});
+        const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
+        defer a.deinit();
+        const b = try Tensor.random(&.{256}, false, .normal, cpu.reference());
+        defer b.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+        const y = try b.to_device(gpu.reference());
+        defer y.deinit();
+
+        const c = try a.matvec(b);
+        defer c.deinit();
+
+        const z = try x.matvec(y);
+        defer z.deinit();
+
+        const d = try z.to_device(cpu.reference());
+        defer d.deinit();
+
+        try similar(c, d);
+    }
+}

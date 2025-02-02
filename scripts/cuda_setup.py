@@ -6,6 +6,109 @@ import sys
 import os
 import json
 
+# root of this path
+HERE = Path(__file__).parent.resolve()
+
+library_paths_to_check = [
+    "libcudart.so",
+    "libcublas.so", 
+    "libcutensor.so",
+    "libcudnn.so",
+    "libnvrtc.so",
+]
+
+include_paths_to_check = [
+    "cuda.h",
+    "cublas_v2.h",
+    "thrust/device_ptr.h",
+    "thrust/functional.h",
+    "thrust/reduce.h",
+    "thrust/inner_product.h",
+    "thrust/fill.h",
+    "thrust/sequence.h",
+    "thrust/transform.h",
+    "thrust/copy.h",
+    "thrust/tuple.h",
+    "thrust/iterator/zip_iterator.h",
+    "thrust/iterator/counting_iterator.h",
+    "thrust/execution_policy.h",
+    "thrust/random.h",
+    "cudnn.h",
+    "cutensor.h",
+]
+
+def remaining_paths(found: dict[str, str], total: list[str]) -> list[str]:
+    remaining = []
+    for path in total:
+        if path not in found:
+            remaining.append(path)
+    return remaining
+
+def check_path_variable():
+    # Get PATH from the environment
+    path_env = os.environ.get("PATH", "")
+    if not path_env:
+        print("PATH environment variable is empty.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Split PATH into directories (using ':' on Linux)
+    dirs = path_env.split(os.pathsep)
+    
+    # Filter directories that contain "cuda" (case-insensitive)
+    cuda_dirs = list(set([d for d in dirs if "cuda" in d.lower()]))
+    
+    # Raise error if not exactly one is found
+    if len(cuda_dirs) == 0:
+        print("No CUDA directory found in PATH.", file=sys.stderr)
+        sys.exit(1)
+    if len(cuda_dirs) > 1:
+        print("Multiple CUDA directories found in PATH:", file=sys.stderr)
+        print(", ".join(cuda_dirs), file=sys.stderr)
+        sys.exit(1)
+    
+    candidate = cuda_dirs[0]
+    
+    # Split the candidate into path components.
+    # Note: if the candidate is an absolute path, the first element may be empty.
+    parts = candidate.split(os.path.sep)
+    
+    # Find the first component that starts with "cuda" (ignoring case)
+    cuda_index = None
+    for i, part in enumerate(parts):
+        if part.lower().startswith("cuda"):
+            cuda_index = i
+            break
+    if cuda_index is None:
+        # This is unlikely since we filtered on "cuda" but it is here for safety.
+        print(f"Found candidate '{candidate}' does not have a directory component starting with 'cuda'.", file=sys.stderr)
+        return None
+    
+    # Rebuild the path up to and including the cuda directory.
+    truncated = os.path.sep.join(parts[:cuda_index+1])
+    
+    # Ensure the result ends with a trailing slash.
+    if not truncated.endswith(os.path.sep):
+        truncated += os.path.sep
+
+    return truncated
+
+
+###################################################################
+#### CUDA SEARCH UTILITY ##########################################
+###################################################################
+
+def ordered_path_set(full_paths: dict[str, str], check_paths: list[str]) -> list[str]:    
+    # we have to preserve order otherwise nvcc will
+    # complain things are not defined (like size_t).
+    result = []
+    for key in check_paths:
+        value = full_paths[key]
+        trimmed = value[0:max(value.find(key) - 1, 1)]
+        if trimmed not in result:
+            result.append(trimmed)
+    return result
+
+
 def ends_with(path: Path, tail: str) -> bool:
     return str(path).endswith(tail)
 
@@ -75,8 +178,8 @@ def choose_gpu(gpu_list):
 
 
 def compile_cuda(
-    include_paths: set[str],
-    library_paths: set[str],
+    include_paths: list[str],
+    library_paths: list[str],
 ) -> None:
     """
     Compile code for CUDA amalgamate library.
@@ -90,9 +193,6 @@ def compile_cuda(
     nvcc_args = [
         "nvcc",
         "--shared",
-        "-allow-unsupported-compiler",
-        "-ccbin",
-        "/usr/bin/gcc",
         "-o",
         str(here.parent / "src/cuda/libamalgamate.so"),
         str(here.parent / "src/cuda/amalgamate.cu"),
@@ -111,6 +211,7 @@ def compile_cuda(
         "-lcuda",
         "-lcublas",
         "-lcudnn",
+        "-lcutensor"
     ])
 
     print(nvcc_args)
@@ -125,6 +226,7 @@ def compile_cuda(
             text=True,
             check=True
         )
+        print("Compilation: Success...")
         print(result.stdout)
     except FileNotFoundError:
         print("\nError: nvcc was not found. Please ensure that the NVIDIA CUDA toolkit is installed and nvcc is in your PATH.", end='\n\n')
@@ -158,6 +260,37 @@ def check_nvcc():
         print("\nError: nvcc did not run correctly. Details:", end='\n\n')
         print(e.stderr)
         sys.exit(1)
+
+
+
+def get_user_option(options, prompt: str):
+
+    if len(options) == 1:
+        return options[0]
+
+    options.sort()
+
+    print(prompt)
+    # Display the options numbered starting from 1
+    for index, option in enumerate(options):
+        print(f"  [{index}] {option}")
+    
+    while True:
+        # Prompt the user for input
+        user_input = input("Please choose an option by entering its number: ")
+        
+        try:
+            # Try to convert the input to an integer
+            choice = int(user_input)
+            
+            # Check if the choice is within the valid range
+            if 0 <= choice <= len(options):
+                return options[choice]
+            else:
+                print(f"Invalid choice. Please enter a number between 0 and {len(options)}.")
+        except ValueError:
+            # If conversion fails, the input wasn't numeric
+            print("Invalid input. Only numeric inputs are allowed. Please try again.")
 
 
 def locate_library_paths(library_names):
@@ -205,34 +338,24 @@ def locate_library_paths(library_names):
                         candidate_paths.append(parts[1].strip())
 
         if candidate_paths:
-            print(f"\nFound candidate paths for '{lib}':")
-            confirmed = None
-            # Ask the user to confirm one of the candidate paths.
-            for path in candidate_paths:
-                response = input(f"Use this library path for '{lib}'? {path} (y/n): ").strip().lower()
-                if response == 'y':
-                    confirmed = path
-                    break
-            # If no candidate was accepted, ask for manual input.
-            if confirmed is None:
-                manual = input(f"No candidate accepted for '{lib}'. Please enter the library path manually (or leave blank to skip): ").strip()
-                if manual:
-                    confirmed = manual
+            confirmed = get_user_option(candidate_paths, f"Select path for: {lib}")
         else:
             print(f"\nNo candidate paths found for '{lib}' using ldconfig.")
             confirmed = input(f"Please enter the library path for '{lib}' manually (or leave blank to skip): ").strip()
+
             if not confirmed:
-                confirmed = None
+                sys.exit(1)
 
         if confirmed:
             found_paths[lib] = confirmed
+
         else:
             print(f"Library '{lib}' was not configured.")
     
     return found_paths
 
 
-def locate_include_paths(header_files, search_dirs=None):
+def locate_include_paths(header_files):
     """
     Attempts to locate header (.h) files for each header in the list by recursively scanning
     through common include directories.
@@ -248,17 +371,20 @@ def locate_include_paths(header_files, search_dirs=None):
     
     Returns:
         dict: A mapping of header file names (as provided) to confirmed full file paths.
-    """
-    if search_dirs is None:
-        # These are common ubuntu directories
-        search_dirs = ["/usr/include", "/usr/local/", "/opt"]
+    """    
+    search_dirs = []
+    
+    if (path_env := check_path_variable()) is not None:
+        search_dirs.append(path_env)
 
-    found_headers = {}
+    # pick some obvious candidates to check first
+    search_dirs.extend(['/usr/local', "/usr/include", "/opt"])
+
+    found_headers = dict()
 
     for header in header_files:
-        candidate_paths = []
-        print(f"\nSearching for header file '{header}' in directories: {', '.join(search_dirs)}")
-        
+        candidate_paths = []        
+
         # Walk through each provided search directory.
         for base in search_dirs:
             for root, dirs, files in os.walk(base):
@@ -282,20 +408,13 @@ def locate_include_paths(header_files, search_dirs=None):
         candidate_paths = list(set(candidate_paths))
         
         if candidate_paths:
-            print(f"\nFound candidate paths for '{header}':")
-            confirmed = None
-            # Ask the user to confirm one of the candidate paths.
-            for candidate in candidate_paths:
-                response = input(f"Use this header path for '{header}'? {candidate} (y/n): ").strip().lower()
-                if response == 'y':
-                    confirmed = candidate
-                    break
-            if confirmed is None:
-                manual = input(f"No candidate accepted for '{header}'. Please enter the header path manually (or leave blank to skip): ").strip()
-                confirmed = manual if manual else None
+            confirmed = get_user_option(candidate_paths, f"Select path for: {header}")
         else:
-            print(f"\nNo candidate paths found for '{header}' using standard include directories.")
-            confirmed = input(f"Please enter the header path for '{header}' manually (or leave blank to skip): ").strip() or None
+            print(f"\nNo candidate paths found for '{header}'.")
+            confirmed = input(f"Please enter the path for '{header}' manually (or leave blank to skip): ").strip()
+
+            if not confirmed:
+                sys.exit(1)
 
         if confirmed:
             found_headers[header] = confirmed
@@ -305,73 +424,51 @@ def locate_include_paths(header_files, search_dirs=None):
     return found_headers
 
 
-def minimal_path_set(headers: dict[str, str]) -> list[str]:    
-    return set((value[0:max(value.find(key) - 1, 1)] for key,value in headers.items()))
+def check_config() -> tuple[list[str], list[str]]:
+    global HERE
 
+    CONFIG_PATH = HERE / "cuda_config.json"
 
-library_paths_to_check = [
-    "libcudart.so",
-    "libcublas.so", 
-    "libcutensor.so",
-    "libcudnn.so",
-    "libnvrtc.so",
-]
+    if not os.path.exists(CONFIG_PATH):
+        return None
 
-include_paths_to_check = [
-    "cuda.h",
-    "cublas_v2.h",
-    "thrust/device_ptr.h",
-    "thrust/functional.h",
-    "thrust/reduce.h",
-    "thrust/inner_product.h",
-    "thrust/fill.h",
-    "thrust/sequence.h",
-    "thrust/transform.h",
-    "thrust/copy.h",
-    "thrust/tuple.h",
-    "thrust/iterator/zip_iterator.h",
-    "thrust/iterator/counting_iterator.h",
-    "thrust/execution_policy.h",
-    "thrust/random.h",
-    "cudnn.h",
-    "cutensor.h",
-]
+    with open(CONFIG_PATH, 'r') as file:
+        config = json.load(file)
+
+    include_paths = list(set([ value for key,value in config.items() if 'include' in key ]))
+    library_paths = list(set([ value for key,value in config.items() if 'library' in key ]))
+
+    return (include_paths, library_paths)
+    
+    
 
 def main():
+    global HERE
+    
     parser = argparse.ArgumentParser(description='Process some strings.')    
-    parser.add_argument('--rebuild', action=argparse.BooleanOptionalAction)
+    parser.add_argument('rebuild', type=str)
     args = parser.parse_args()
 
-    here = Path(__file__).parent.resolve()
-    LIBRARY_PATHS_CACHE = here.parent / "src/cuda/.library_paths.cache"
-    INCLUDE_PATHS_CACHE = here.parent / "src/cuda/.include_paths.cache"
-    AMALGAMATE_LIBRARY = here.parent / "src/cuda/amalgamate.so"
+    rebuild = args.rebuild == 'y'
+    AMALGAMATE_LIBRARY = HERE.parent / "src/cuda/amalgamate.so"
 
-    # probably the first time building...
-    if not os.path.exists(AMALGAMATE_LIBRARY):
-        print("")
-        print("############################################################")
-        print("#### LOCATING CUDA INSTALLATION PATHS (THIS IS A PAIN) #####")
-        print("""
-        This is an alpha version of this utility and probably sucks.
-              
-        We will try to locate the required files to install CUDA.
-        This will create a "cuda_paths.zig" file that will include
-        the minimum set of paths required to install CUDA. You can
-        edit that file whenever you want. If you have already done
-        this, proceeding will overwrite that file.
-        """)
+    # we've already built the amalgamate.so and aren't rebuilding
+    if not rebuild and os.path.exists(AMALGAMATE_LIBRARY):
+        return
 
-        response = input(f"Do you wish to continue? (y/n): ").strip().lower()
-
-        if response != 'y':
-            return
-    
+    # CHECK IF WE HAVE A CONFIGURED SET OF PATHS #
+    if (config := check_config()) is not None:
+        print("Compiling amalgamate.so from provided cuda_conifg.json...")
+        compile_cuda(config[0], config[1])
+        return
+        
+    LIBRARY_PATHS_CACHE = HERE.parent / "src/cuda/.library_paths.cache"
+    INCLUDE_PATHS_CACHE = HERE.parent / "src/cuda/.include_paths.cache"
+        
     # Step 1: Check if nvcc is installed and working.
     check_nvcc()
 
-
-    if not args.rebuild and os.path.exists(LIBRARY_PATHS_CACHE):
+    if not rebuild and os.path.exists(LIBRARY_PATHS_CACHE):
         with open(LIBRARY_PATHS_CACHE, "r") as file:
             library_paths = json.load(file)
     else:
@@ -382,7 +479,7 @@ def main():
         with open(LIBRARY_PATHS_CACHE, "w") as file:
             file.write(json.dumps(library_paths))
         
-    if not args.rebuild and os.path.exists(INCLUDE_PATHS_CACHE):
+    if not rebuild and os.path.exists(INCLUDE_PATHS_CACHE):
         with open(INCLUDE_PATHS_CACHE, "r") as file:
             include_paths = json.load(file)
     else:
@@ -396,15 +493,12 @@ def main():
     ### GENERATE CUDA INCLUDES FROM LOCATED INCLUDE PATHS ###
 
     print("\nWriting includes to 'cuda_includes.cu'\n")
-    with open(here / "cuda_includes.cu", 'w') as file:
+    with open(HERE / "cuda_includes.cu", 'w') as file:
         file.write("\n".join((f'#include "{h}"' for h in include_paths.values())))
 
-    if args.rebuild or not os.path.exists(AMALGAMATE_LIBRARY):
-        compile_cuda(
-            minimal_path_set(include_paths),
-            minimal_path_set(library_paths),
-        )
-    
+    compile_cuda(ordered_path_set(include_paths), ordered_path_set(library_paths))
+
         
 if __name__ == '__main__':
     main()
+    

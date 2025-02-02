@@ -3,7 +3,7 @@
     .version = "0.0.0",
     .dependencies = .{
         .zigrad = .{
-            .path = "../../",
+            .path = "../",
         },
     },
     .paths = .{
