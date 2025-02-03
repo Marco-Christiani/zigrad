@@ -66,7 +66,6 @@ pub const HostDevice = @import("host_device.zig").HostDevice;
 pub fn host_reference(self: *HostDevice) DeviceReference {
     return .{
         .ptrs = DeviceReference.DevicePtrs{ .host = self },
-        .cache = &self.cache,
         .allocator = self.allocator,
     };
 }
@@ -647,7 +646,7 @@ pub const CudaDevice = struct {
     pub fn deinit(self: *CudaDevice) void {
         self.sync();
         self.capture.free();
-        self.cache.deinit();
+        self.cache.deinit(self.context.stream);
         cuda.deinit_cudnn_handle(self.context.cudnn);
         cuda.deinit_cublas_handle(self.context.cublas);
         cuda.deinit_cutensor_handle(self.context.cutensor);
@@ -658,7 +657,6 @@ pub const CudaDevice = struct {
     pub fn reference(self: *CudaDevice) DeviceReference {
         return .{
             .ptrs = DeviceReference.DevicePtrs{ .aux = self },
-            .cache = &self.cache,
             .allocator = self.allocator,
         };
     }
@@ -717,6 +715,10 @@ pub const CudaDevice = struct {
             .DtoH => cuda.memcpy_DtoH(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
             .DtoD => cuda.memcpy_DtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
         }
+    }
+
+    pub fn clear_cache(self: *CudaDevice) void {
+        self.cache.clear(self.context.stream);
     }
 
     pub fn sync(self: CudaDevice) void {

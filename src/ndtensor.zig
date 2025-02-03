@@ -298,18 +298,20 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(!src_device.is_compatible(dst_device));
 
             if (src_device.is_host()) {
+                dst_device.sync();
                 dst_device.mem_transfer(T, src, dst, .HtoD);
             } else {
+                src_device.sync();
                 src_device.mem_transfer(T, src, dst, .DtoH);
             }
         }
 
         pub fn _to_device(self: *Self, device: DeviceReference) !void {
             if (self.device.is_compatible(device))
-                return self;
+                return;
 
             const data = try device.mem_alloc(T, self.data.data.len);
-            to_device_impl(self.data.data, data, self.device, device);
+            try to_device_impl(self.data.data, data, self.device, device);
             self.device.mem_free(self.data.data);
             self.data.data = data;
             self.device = device;
@@ -322,27 +324,30 @@ pub fn NDTensor(comptime T: type) type {
             const to_device_bw = struct {
                 fn to_device_bw_impl(_self: Self) !void {
                     const child = (_self.get_children() orelse return error.NoChildren)[0];
-                    to_device_impl(_self.grad.?.data, child.grad.?.data, self.device, child.device);
+                    try to_device_impl(_self.grad.?.data, child.grad.?.data, _self.device, child.device);
                 }
             }.to_device_bw_impl;
 
-            const data = try DataType.empty(self.data.shape, device);
-
-            to_device_impl(self.data.data, data.data, self.device, device);
+            const data = try device.mem_alloc(T, self.data.data.len);
+            try to_device_impl(self.data.data, data, self.device, device);
 
             var result = try create_dependent(.{
-                .data = data,
+                .data = .{
+                    .data = data,
+                    .shape = self.data.shape,
+                    .view = false,
+                },
                 .op = .TRANSFER,
                 .children = &.{self},
                 .label = null,
-                ._requires_grad = false,
-                .device = self.device,
+                .device = device,
                 ._backward = to_device_bw,
+                ._requires_grad = false,
             });
 
             errdefer result.deinit();
             if (self.requires_grad()) { // need to make this call, not check the attribute flag
-                result.grad = try DataType.zeros(self.data.shape, device);
+                result.grad = try DataType.zeros(self.get_shape(), device);
                 result._requires_grad = true;
             }
             return result;
