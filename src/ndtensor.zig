@@ -903,7 +903,7 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        /// Performs `self = alpha*self + other` in place.
+        /// Performs `self = alpha*other + self` in place.
         pub fn _axpy(self: Self, other: Self, alpha: T) void {
             std.debug.assert(self.device.is_compatible(other.device));
             self.data._axpy(other, alpha, self.device);
