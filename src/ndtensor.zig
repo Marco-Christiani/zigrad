@@ -849,14 +849,13 @@ pub fn NDTensor(comptime T: type) type {
                     const children = _self.get_children() orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
-                    // TODO: refactor unsafe access after device API accepts scalars as pointers
                     const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
                     // In forward: c = dot(a, b) aka _self = dot(self, other)
                     // Note that c' is a scalar. axpy performs y += a*x.
                     // a' += c'*b
-                    _self.device.blas.axpy(T, gscalar.*, b.get_data(), a.grad.?.data);
+                    _self.device.blas.axpy(T, b.get_data(), a.grad.?.data, gscalar);
                     // b' += c'*a
-                    _self.device.blas.axpy(T, gscalar.*, a.get_data(), b.grad.?.data);
+                    _self.device.blas.axpy(T, a.get_data(), b.grad.?.data, gscalar);
                 }
             }.dot_bw_impl;
 
