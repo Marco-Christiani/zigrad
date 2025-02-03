@@ -122,8 +122,8 @@ fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
 }
 
 pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebuild: bool) *std.Build.Module {
-    const new_backend = get_backend(b);
-    //const new_backend: Backend = .HOST;
+    //const new_backend = get_backend(b);
+    const new_backend: Backend = .HOST;
 
     const here = b.path(".").getPath(b);
 
