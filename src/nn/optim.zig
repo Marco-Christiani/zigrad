@@ -1,7 +1,6 @@
 const std = @import("std");
 const math = std.math;
 
-const blas = @import("../backend/blas.zig");
 const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
@@ -57,7 +56,11 @@ pub fn SGD(comptime T: type) type {
                 .delta = self.grad_clip_delta,
             });
             const nlr = -self.lr;
-            for (params) |param| blas.blas_axpy(T, param.data.data.len, nlr, param.grad.?.data, 1, param.data.data, 1);
+            // for (params) |param| blas.blas_axpy(T, param.data.data.len, nlr, param.grad.?.data, 1, param.data.data, 1);
+            // I suppose the idiomatic way would be to use the method
+            // for (params) |param| param.data._axpy(param.grad.?, nlr, param.device);
+            // But, can use direct access to skip the shape checks
+            for (params) |param| param.device.blas.axpy(T, nlr, param.get_data(), param.grad.?.data);
         }
 
         pub fn optimizer(self: *Self) Optimizer(T) {
