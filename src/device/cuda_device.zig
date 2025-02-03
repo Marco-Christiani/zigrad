@@ -176,37 +176,6 @@ pub const Blas = struct {
         //}
     }
 
-    fn _bmm_arg(comptime str: []const u8, tran: bool) []const u8 {
-        return switch (str.len) {
-            2 => if (tran) &.{ str[1], str[0] } else str,
-            3 => if (tran) &.{ str[0], str[2], str[1] } else str,
-        };
-    }
-
-    fn _bmm_out(comptime str: []const u8, size: usize) []const u8 {
-        return if (str.len > size) str[1..] else str;
-    }
-
-    const BmmSet = struct {
-        A: []const u8,
-        B: []const u8,
-        C: []const u8,
-    };
-
-    fn find_remove(T: type, v: []T, x: T) usize {
-        var i: usize = 0;
-        var j: usize = 0;
-        while (j < v.len) : ({
-            j += 1;
-        }) {
-            if (v[j] == x)
-                continue;
-            v[i] = v[j];
-            i += 1;
-        }
-        return i;
-    }
-
     pub fn bmm_acc(
         self: *Blas,
         T: type,

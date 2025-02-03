@@ -2,16 +2,20 @@ const std = @import("std");
 const zg = @import("zigrad");
 
 const Tensor = zg.NDTensor(f32);
+const Array = zg.NDArray(f32);
 
 // It is expected to have some epsilon between the
 // device and the host. Floating point is not associative
 // and the GPU does perform oprations in the same order.
 const epsilon: f32 = 1e-3;
-pub fn similar(x: *Tensor, y: *Tensor) error{ NotSimilar, WrongSize }!void {
-    if (x.get_size() != y.get_size()) {
+pub fn similar(x: *Tensor, y: *Tensor) !void {
+    return similar_slice(x.get_data(), y.get_data());
+}
+pub fn similar_slice(x: []const f32, y: []const f32) error{ NotSimilar, WrongSize }!void {
+    if (x.len != y.len) {
         return error.WrongSize;
     }
-    for (x.get_data(), y.get_data()) |u, v| {
+    for (x, y) |u, v| {
         if (@abs(u - v) > epsilon) return error.NotSimilar;
     }
 }
@@ -174,5 +178,49 @@ pub fn main() !void {
         defer d.deinit();
 
         try similar(c, d);
+    }
+
+    { // SUM ALONG - TODO: Move this to NDArray testing file //
+        std.log.info("TESTING: SUM ALONG", .{});
+        const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
+        defer a.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+
+        var c = try a.data.sum_along(cpu.reference(), .{ .dim = 0 });
+        defer c.deinit(cpu.reference());
+
+        var z = try x.data.sum_along(gpu.reference(), .{ .dim = 0 });
+        defer z.deinit(gpu.reference());
+
+        const dst = try cpu.mem_alloc(f32, 256);
+        defer cpu.mem_free(dst);
+
+        gpu.mem_transfer(f32, z.data, dst, .DtoH);
+
+        try similar_slice(c.data, dst);
+    }
+
+    { // SUM ALONG - TODO: Move this to NDArray testing file //
+        std.log.info("TESTING: MAX ALONG", .{});
+        const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
+        defer a.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+
+        var c = try a.data.max_along(cpu.reference(), .{ .dim = 0 });
+        defer c.deinit(cpu.reference());
+
+        var z = try x.data.max_along(gpu.reference(), .{ .dim = 0 });
+        defer z.deinit(gpu.reference());
+
+        const dst = try cpu.mem_alloc(f32, 256);
+        defer cpu.mem_free(dst);
+
+        gpu.mem_transfer(f32, z.data, dst, .DtoH);
+
+        try similar_slice(c.data, dst);
     }
 }

@@ -337,7 +337,7 @@ class CutensorBackend {
       len_t* scratch_len,
       BINARY_OP op
     ) {
-      CHECK_INVARIANT(rdx_idxs_len < src_dims_len, "Reduction dimension out of bounds");
+      CHECK_INVARIANT(rdx_idxs_len <= src_dims_len, "Reduction dimension out of bounds");
       CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to reduce");
       CHECK_INVARIANT(0 < rdx_idxs_len, "Zero length dimensions passed to reduce");
   
@@ -364,7 +364,7 @@ class CutensorBackend {
             dst_dims.append(src_dims[i]);
             dst_syms.append(sym);
           }  
-      }  
+      }
 
       return this->get_reduce_plan(
         id,
@@ -391,13 +391,13 @@ class CutensorBackend {
       len_t* scratch_len,
       BINARY_OP op
     ) {
-      CHECK_INVARIANT(0 < dst_dims_len, "Zero length dimensions passed to reduce");
+      CHECK_INVARIANT(0 <= dst_dims_len, "Zero length dimensions passed to reduce");
       CHECK_INVARIANT(src_dims_len > dst_dims_len, "Reduction dimension out of bounds");
   
       const auto data_type = cutensor_data_type(id);
       const auto op_type = cutensor_op_type(op);
 
-      auto key = this->manager.make_key<PermutatePlan>(
+      auto key = this->manager.make_key<ReducePlan>(
         data_type,
         {
           __seq_hash(src_dims, src_dims_len),
@@ -407,14 +407,14 @@ class CutensorBackend {
         }
       );
 
-      if (auto entry = this->manager.find<PermutatePlan>(key); entry) {
+      if (auto entry = this->manager.find<ReducePlan>(key); entry) {
         return entry->plan.ptr;
       }
 
       BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
       BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
-      BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
-      BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
+      BoundedArray<i64> b_dims(dst_dims, dst_dims_len, true);
+      BoundedArray<i32> b_syms(dst_syms, dst_dims_len, true);
 
       cutensorTensorDescriptor_t x_desc;
       CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
