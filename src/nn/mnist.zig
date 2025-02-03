@@ -194,7 +194,8 @@ const MnistDataset = struct {
             }
 
             for (0..784) |i| {
-                const pixel_value = try std.fmt.parseFloat(T, values.next().?);
+                var pixel_value = try std.fmt.parseFloat(T, values.next().?);
+                pixel_value /= 255; // NOTE: Zigrad does NOT need this, but since torch does, we will scale it so its the same
                 batch_images[batch_count * 784 + i] = pixel_value;
             }
 
@@ -236,6 +237,10 @@ const MnistDataset = struct {
 };
 
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
+    comptime {
+        @setFloatMode(.optimized);
+    }
+
     var cpu = zg.device.HostDevice.init(std.heap.raw_c_allocator);
     defer cpu.deinit();
 
