@@ -145,20 +145,25 @@ pub fn LinearLayer(comptime T: type) type {
             return self;
         }
         pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            // return try forward_ag(self, input, fwd_device);
+            // return try forward_ag(self, input);
             return try forward_manual(self, input);
         }
 
         // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
         // in the backward for broadcasted bias addition thats not possible if its not tracked in the op graph so theres a
         // slightly more optimized variant that explicitly handles the broadcast and unbroadcast.
-        pub fn forward_ag(self: *const Self, input: *const NDTensor(T)) !*NDTensor(T) {
+        pub fn forward_ag(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
             // Labels are optional, useful if you want to render a diagram of the computational graph.
             // (W@X^T + b)^T == X@W^T + b
-            return (try (try input.bmm(
-                self.weights,
-                .{ .trans_b = true },
-            )).set_label("lin_fwd1").add(self.bias)).set_label("lin_fwd2");
+            // var out1 = try input.bmm(
+            //     self.weights,
+            //     .{ .trans_b = true },
+            // );
+            // try out1.set_label("lin_fwd1");
+            // var out2 = try out1.add(self.bias);
+            // try out2.set_label("lin_fwd2");
+            // return out2;
+            return (try (try input.bmm(self.weights, .{ .trans_b = true })).add(self.bias));
         }
 
         // Implement the forward and backward passes manually. The only benefit to this is not paying the cost of
@@ -222,8 +227,7 @@ pub fn LinearLayer(comptime T: type) type {
 
             _ = try grad_B._add(bias_grad, input.device);
             // This is not really a great way to optimize this, btw. This is meant to demonstrate to a user how they can
-            // implement custom functionality by accessing the underlying data directly.
-            // const blas = @import("../backend/blas.zig");
+            // implement custom functionality.
             // const batch_size = grad_output.shape.shape[0];
             // const out_features = grad_output.shape.shape[1];
             // const grad_B_data = grad_B.data;
