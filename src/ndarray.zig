@@ -719,11 +719,11 @@ pub fn NDArray(comptime T: type) type {
             return output;
         }
 
-        /// Performs `self = alpha*self + other` in place.
+        /// Performs `self = alpha*other + self` in place.
         /// Shapes must match (although practically the op is possible under other conditions)
         pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
             std.debug.assert(self.shape.equal(other.shape));
-            device.blas.axpy(T, alpha, self.data, other.data);
+            device.blas.axpy(T, alpha, other.data, self.data);
         }
 
         pub const SumOpts = struct {

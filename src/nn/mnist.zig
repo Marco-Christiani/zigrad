@@ -194,8 +194,8 @@ const MnistDataset = struct {
             }
 
             for (0..784) |i| {
-                var pixel_value = try std.fmt.parseFloat(T, values.next().?);
-                pixel_value /= 255; // NOTE: Zigrad does NOT need this, but since torch does, we will scale it so its the same
+                const pixel_value = try std.fmt.parseFloat(T, values.next().?);
+                // pixel_value = pixel_value / 255; // NOTE: Zigrad does NOT need this, but since torch does, ironically adding it messes w convergence here.
                 batch_images[batch_count * 784 + i] = pixel_value;
             }
 

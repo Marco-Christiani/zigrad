@@ -60,7 +60,7 @@ pub fn SGD(comptime T: type) type {
             // I suppose the idiomatic way would be to use the method
             // for (params) |param| param.data._axpy(param.grad.?, nlr, param.device);
             // But, can use direct access to skip the shape checks
-            for (params) |param| param.device.blas.axpy(T, nlr, param.get_data(), param.grad.?.data);
+            for (params) |param| param.device.blas.axpy(T, nlr, param.grad.?.data, param.get_data());
         }
 
         pub fn optimizer(self: *Self) Optimizer(T) {
