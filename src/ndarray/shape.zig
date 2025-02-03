@@ -1,3 +1,4 @@
+//! A SIMD accelerated shape abstraction.
 const std = @import("std");
 
 const Shape = @This();

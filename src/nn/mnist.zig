@@ -274,10 +274,10 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
         var total_loss: f64 = 0;
         // TODO: impl/use trainer loop
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
-            step_timer.reset();
             try image.set_label("image_batch");
             try label.set_label("label_batch");
 
+            step_timer.reset();
             const loss = try trainer.train_step(image, label);
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
