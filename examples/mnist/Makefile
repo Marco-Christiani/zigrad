@@ -27,8 +27,8 @@ $(RESET)
 endef
 export PROJECT_LOGO
 
-.PHONY: all intro ensure-zig clean build run-simple run-timing help
-all: intro run-simple
+.PHONY: all intro ensure-zig clean build run help
+all: intro run
 
 intro:
 	@echo "$$PROJECT_LOGO"
@@ -79,21 +79,16 @@ clean:
 	@rm -rf $(ZG_DATA_DIR)
 	@echo "$(GREEN)✓ Done$(RESET)"
 
-./zig-out/bin/timing ./zig-out/bin/simple: build.zig ensure-zig
+./zig-out/bin/main: build.zig ensure-zig
 	@echo "$(CYAN)$(BOLD)Building MNIST example BUILD_MODE=$(BUILD_MODE)...$(RESET)"
 	@ZG_DATA_DIR=$(ZG_DATA_DIR) zig build -Doptimize=$(BUILD_MODE)
 	@echo "$(GREEN)✓ Done$(RESET)"
 
-build: ./zig-out/bin/timing ./zig-out/bin/simple
+build: ./zig-out/bin/main
 
-run-timing: $(ZG_DATA_DIR) ./zig-out/bin/timing
-	@echo "$(CYAN)$(BOLD)Running MNIST with timing...$(RESET)"
-	@ZG_DATA_DIR=$(ZG_DATA_DIR) ./zig-out/bin/timing
-	@echo "$(GREEN)✓ Done$(RESET)"
-
-run-simple: $(ZG_DATA_DIR) ./zig-out/bin/simple
+run: $(ZG_DATA_DIR) ./zig-out/bin/main
 	@echo "$(CYAN)$(BOLD)Running MNIST...$(RESET)"
-	@ZG_DATA_DIR=$(ZG_DATA_DIR) ./zig-out/bin/simple
+	@ZG_DATA_DIR=$(ZG_DATA_DIR) ./zig-out/bin/main
 	@echo "$(GREEN)✓ Done$(RESET)"
 
 help:
@@ -103,11 +98,10 @@ help:
 	@echo "  Zig  - will be installed automatically if missing"
 	@echo "  BLAS - see readme if the build fails due to missing BLAS"
 	@echo "\n$(CYAN)Available commands:$(RESET)"
-	@echo "  $(YELLOW)make$(RESET) [BUILD_MODE=<mode>]            - Setup environment and run simple demo"
+	@echo "  $(YELLOW)make$(RESET) [BUILD_MODE=<mode>]            - Setup environment and run demo"
 	@echo "  $(YELLOW)make build$(RESET) [BUILD_MODE=<mode>]      - Build both MNIST examples"
-	@echo "  $(YELLOW)make run-simple$(RESET) [BUILD_MODE=<mode>] - Build if needed and run basic MNIST training"
-	@echo "  $(YELLOW)make run-timing$(RESET) [BUILD_MODE=<mode>] - Build if needed and run MNIST with timing info"
-	@echo "  $(YELLOW)make clean$(RESET)                          - Clean up virtual environment and build artifacts"
+	@echo "  $(YELLOW)make run$(RESET) [BUILD_MODE=<mode>]        - Build if needed and run basic MNIST training"
+	@echo "  $(YELLOW)make clean$(RESET)                          - Clean up build artifacts"
 	@echo "\n$(CYAN)Environment variables:$(RESET)"
 	@echo "  $(YELLOW)ZG_DATA_DIR$(RESET) - Set custom data directory (default: 'data')"
 	@echo "  $(YELLOW)BUILD_MODE$(RESET)  - Set build optimization mode (default: ReleaseFast)"
@@ -116,5 +110,5 @@ help:
 	@echo "$(DIM)  ReleaseSmall - Size optimized$(RESET)"
 	@echo "$(DIM)  ReleaseFast  - Maximum performance, minimal runtime checks, minimal logging$(RESET)"
 	@echo "\n$(BOLD)First time? Start with:$(RESET)"
-	@echo "  $(GREEN)make$(RESET) [BUILD_MODE=<mode>] - This will set up everything and run the simple demo"
-	@echo "$(DIM)(The setup process will create a python virtual environment and download MNIST data)$(RESET)"
+	@echo "  $(GREEN)make$(RESET) [BUILD_MODE=<mode>] - This will set up everything and run the demo"
+	@echo "$(DIM)(The setup process will use python to download MNIST data)$(RESET)"

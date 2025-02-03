@@ -5,35 +5,36 @@ const Model = zg.Model;
 const LinearLayer = zg.layer.LinearLayer;
 const ReLULayer = zg.layer.ReLULayer;
 const FlattenLayer = zg.layer.FlattenLayer;
+const DeviceReference = zg.DeviceReference;
 
 pub fn MnistModel(comptime T: type) type {
     return struct {
         const Self = @This();
         model: Model(T),
-        allocator: std.mem.Allocator,
+        device: DeviceReference,
 
-        pub fn init(allocator: std.mem.Allocator) !Self {
+        pub fn init(device: DeviceReference) !Self {
             var self = Self{
-                .allocator = allocator,
-                .model = try Model(T).init(allocator),
+                .device = device,
+                .model = try Model(T).init(device),
             };
 
-            var reshape = try FlattenLayer(T).init(allocator);
-            var fc1 = try LinearLayer(T).init(allocator, 28 * 28, 128);
-            var relu1 = try ReLULayer(T).init(allocator);
-            var fc2 = try LinearLayer(T).init(allocator, 128, 64);
-            var relu2 = try ReLULayer(T).init(allocator);
-            var fc3 = try LinearLayer(T).init(allocator, 64, 10);
+            var reshape = try FlattenLayer(T).init(device);
+            var fc1 = try LinearLayer(T).init(device, 28 * 28, 128);
+            var relu1 = try ReLULayer(T).init(device);
+            var fc2 = try LinearLayer(T).init(device, 128, 64);
+            var relu2 = try ReLULayer(T).init(device);
+            var fc3 = try LinearLayer(T).init(device, 64, 10);
 
-            try self.model.addLayer(reshape.asLayer());
+            try self.model.add_layer(reshape.as_layer());
 
-            try self.model.addLayer(fc1.asLayer());
-            try self.model.addLayer(relu1.asLayer());
+            try self.model.add_layer(fc1.as_layer());
+            try self.model.add_layer(relu1.as_layer());
 
-            try self.model.addLayer(fc2.asLayer());
-            try self.model.addLayer(relu2.asLayer());
+            try self.model.add_layer(fc2.as_layer());
+            try self.model.add_layer(relu2.as_layer());
 
-            try self.model.addLayer(fc3.asLayer());
+            try self.model.add_layer(fc3.as_layer());
             return self;
         }
 
@@ -44,8 +45,8 @@ pub fn MnistModel(comptime T: type) type {
 
         pub fn countParams(self: Self) usize {
             var total: usize = 0;
-            const params = self.model.getParameters();
-            defer self.model.allocator.free(params);
+            const params = self.model.get_parameters();
+            defer self.model.device.allocator.free(params);
             for (params) |p| {
                 total += p.grad.?.size();
             }
