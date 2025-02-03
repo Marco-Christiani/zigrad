@@ -4,4 +4,6 @@ const mnist = zg.mnist;
 const layer = zg.layer;
 pub const std_options = zg.std_options;
 
-pub fn main() !void {}
+pub fn main() !void {
+    try mnist.main();
+}
