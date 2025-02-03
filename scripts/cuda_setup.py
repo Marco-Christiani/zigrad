@@ -60,11 +60,11 @@ def check_path_variable():
     # Raise error if not exactly one is found
     if len(cuda_dirs) == 0:
         print("No CUDA directory found in PATH.", file=sys.stderr)
-        sys.exit(1)
+        return None
     if len(cuda_dirs) > 1:
         print("Multiple CUDA directories found in PATH:", file=sys.stderr)
         print(", ".join(cuda_dirs), file=sys.stderr)
-        sys.exit(1)
+        return None
     
     candidate = cuda_dirs[0]
     
@@ -97,16 +97,10 @@ def check_path_variable():
 #### CUDA SEARCH UTILITY ##########################################
 ###################################################################
 
-def ordered_path_set(full_paths: dict[str, str], check_paths: list[str]) -> list[str]:    
+def ordered_path_set(full_paths: dict[str, str]) -> list[str]:
     # we have to preserve order otherwise nvcc will
     # complain things are not defined (like size_t).
-    result = []
-    for key in check_paths:
-        value = full_paths[key]
-        trimmed = value[0:max(value.find(key) - 1, 1)]
-        if trimmed not in result:
-            result.append(trimmed)
-    return result
+    return list(set([value[0:max(value.find(key) - 1, 1)] for key,value in full_paths.items()]))
 
 
 def ends_with(path: Path, tail: str) -> bool:
@@ -198,7 +192,9 @@ def compile_cuda(
         str(here.parent / "src/cuda/amalgamate.cu"),
         "-O3",
         compute_arch,
+        "--std=c++20",
         "--expt-extended-lambda",
+        "--expt-relaxed-constexpr",
         "--compiler-options",
         "-fPIC",
     ]
@@ -493,7 +489,7 @@ def main():
     ### GENERATE CUDA INCLUDES FROM LOCATED INCLUDE PATHS ###
 
     print("\nWriting includes to 'cuda_includes.cu'\n")
-    with open(HERE / "cuda_includes.cu", 'w') as file:
+    with open(HERE.parent / "src/cuda/cuda_includes.cu", 'w') as file:
         file.write("\n".join((f'#include "{h}"' for h in include_paths.values())))
 
     compile_cuda(ordered_path_set(include_paths), ordered_path_set(library_paths))

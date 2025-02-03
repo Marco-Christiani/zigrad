@@ -391,7 +391,7 @@ class CutensorBackend {
       len_t* scratch_len,
       BINARY_OP op
     ) {
-      CHECK_INVARIANT(0 <= dst_dims_len, "Zero length dimensions passed to reduce");
+      CHECK_INVARIANT(0 < dst_dims_len, "Zero length dimensions passed to reduce");
       CHECK_INVARIANT(src_dims_len > dst_dims_len, "Reduction dimension out of bounds");
   
       const auto data_type = cutensor_data_type(id);

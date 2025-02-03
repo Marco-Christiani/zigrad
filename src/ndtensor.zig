@@ -692,7 +692,13 @@ pub fn NDTensor(comptime T: type) type {
                 fn max_bw_impl(_self: Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
-                    self.device.blas.max_reverse(T, _self.grad.?.data.data, child.grad.?.data.data);
+                    _self.device.blas.max_backward(
+                        T,
+                        child.get_data(),
+                        _self.get_data(),
+                        _self.grad.?.data,
+                        child.grad.?.data,
+                    );
                 }
             }.max_bw_impl;
 
