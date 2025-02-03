@@ -523,7 +523,7 @@ pub fn NDTensor(comptime T: type) type {
             }
             try writer.print(", _requires_grad={}", .{self._requires_grad});
             if (self.get_label()) |l| {
-                try writer.print(" label={s}", .{l});
+                try writer.print(", label={s}", .{l});
             }
             try writer.writeAll("}\n");
         }

@@ -18,34 +18,40 @@ pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
     const T = f32;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer switch (gpa.deinit()) {
+        .ok => {},
+        .leak => @panic("Leaked"),
+    };
+
+    var cpu = zg.device.HostDevice.init(std.heap.raw_c_allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
 
     try stdout.print("Creating layer\n", .{});
 
     // 2 -> 1
-    var layer = try zg.layer.LinearLayer(T).init(alloc, 2, 1);
+    var layer = try zg.layer.LinearLayer(T).init(device, 2, 1);
     layer.weights.fill(2);
 
     // 1x2 input
-    const input = try zg.NDTensor(T).init(&.{ 3, 3 }, &.{ 1, 2 }, true, alloc);
+    const input = try zg.NDTensor(T).init(&.{ 3, 3 }, &.{ 1, 2 }, true, device);
 
     try stdout.print("Forward pass\n", .{});
-    const output = try layer.forward(input, alloc);
-    output.grad.?.fill(1.0);
+    const output = try layer.forward(input);
+    try output.setup_grad(0);
 
-    var gm = zg.GraphManager(zg.NDTensor(T)).init(alloc, .{});
+    var gm = zg.GraphManager(zg.NDTensor(T)).init(gpa.allocator(), .{});
     defer gm.deinit();
     try stdout.print("Backward pass\n", .{});
-    try gm.backward(output, alloc);
+    try gm.backward(output);
 
-    std.debug.assert(12 == output.get(&.{ 0, 0 }));
-    try output.printToWriter(stdout);
-    try input.grad.?.printToWriter(stdout);
+    std.debug.assert(12 == output.get(0));
+    try output.print_to_writer(stdout);
+    try input.print_to_writer(stdout);
 
-    try stdout.print("\nSuccess\n", .{});
+    try stdout.print("Success\n", .{});
 
     try bw.flush();
 }
