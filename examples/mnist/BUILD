@@ -4,7 +4,7 @@
 genrule(
     name = "build",
     srcs = glob(["src/**/*.zig", "build.zig", "build.zig.zon"]),
-    outs = ["simple", "timing"],
+    outs = ["main"],
     cmd = """
     ZG_DATA_DIR=$$(dirname $$(echo $(locations :mnist_data) | cut -d' ' -f1)) \
     ZIG_LOCAL_CACHE_DIR=$$(pwd)/zig-cache \

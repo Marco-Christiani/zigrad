@@ -5,8 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const configs = .{
-        .{ "src/main-simple.zig", "simple" },
-        .{ "src/main-timing.zig", "timing" },
+        .{ "src/main-simple.zig", "main" },
     };
 
     const zigrad_dep = b.dependency("zigrad", .{
