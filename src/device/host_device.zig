@@ -376,14 +376,14 @@ pub const Blas = struct {
     pub fn axpy(
         _: Blas,
         T: type,
+        alpha: T,
         x: []const T,
         y: []T,
-        alpha: *const T,
     ) void {
         switch (T) {
-            f32 => c.cblas_saxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
-            f64 => c.cblas_daxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
-            else => @compileError("Unsupported type for blas_axpy: " ++ @typeName(T)),
+            f32 => c.cblas_saxpy(@intCast(x.len), alpha, x.ptr, 1, y.ptr, 1),
+            f64 => c.cblas_daxpy(@intCast(x.len), alpha, x.ptr, 1, y.ptr, 1),
+            else => @compileError("Unsupported type for BLAS axpy: " ++ @typeName(T)),
         }
     }
 

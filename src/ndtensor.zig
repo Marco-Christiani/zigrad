@@ -117,37 +117,6 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
-        pub fn from_cache(dims: []const usize, _requires_grad: bool, device: DeviceReference) !?*Self {
-            if (device.cache.get(Self, dims)) |self| {
-                self._requires_grad = _requires_grad;
-                if (_requires_grad and zg.rt_grad_enabled) {
-                    try self.setup_grad(0);
-                }
-                return self;
-            }
-            return null;
-        }
-
-        pub fn to_cache(self: *Self) bool {
-            std.debug.assert(!self.acquired);
-            std.debug.assert(self._backward_ctx == null);
-            if (zg.settings.caching_policy) |policy| {
-                if (policy.min_byte_size) |min_bs| {
-                    if (self.get_size() < min_bs) return false;
-                }
-                if (policy.max_byte_size) |max_bs| {
-                    if (self.get_size() > max_bs) return false;
-                }
-            } else {
-                return false;
-            }
-            self._backward = null;
-            self._backward_ctx = null;
-            self.children.resize(0) catch unreachable;
-            self.label.resize(0) catch unreachable;
-            return self.device.cache.put(self, self.get_shape());
-        }
-
         pub fn get_shape(self: Self) []const usize {
             return self.data.shape.slice();
         }
@@ -869,9 +838,14 @@ pub fn NDTensor(comptime T: type) type {
                     const children = _self.get_children() orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
+                    // TODO: refactor unsafe access after device API accepts scalars as pointers
                     const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
-                    _self.device.blas.axpy(T, b.get_data(), a.grad.?.data, gscalar);
-                    _self.device.blas.axpy(T, a.get_data(), b.grad.?.data, gscalar);
+                    // In forward: c = dot(a, b) aka _self = dot(self, other)
+                    // Note that c' is a scalar. axpy performs y += a*x.
+                    // a' += c'*b
+                    _self.device.blas.axpy(T, gscalar.*, b.get_data(), a.grad.?.data);
+                    // b' += c'*a
+                    _self.device.blas.axpy(T, gscalar.*, a.get_data(), b.grad.?.data);
                 }
             }.dot_bw_impl;
 
@@ -922,6 +896,12 @@ pub fn NDTensor(comptime T: type) type {
                 .device = self.device,
                 ._backward = matvecBw,
             });
+        }
+
+        /// Performs `self = alpha*self + other` in place.
+        pub fn _axpy(self: Self, other: Self, alpha: T) void {
+            std.debug.assert(self.device.is_compatible(other.device));
+            self.data._axpy(other, alpha, self.device);
         }
 
         /// Sum of all elements in the tensor. COM.

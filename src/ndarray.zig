@@ -1,7 +1,6 @@
 const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/shape.zig");
-// const blas = @import("backend/blas.zig");
 const log = std.log.scoped(.zg_ndarray);
 const zg = @import("zigrad.zig");
 const DeviceReference = zg.DeviceReference;
@@ -22,8 +21,16 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
+
+        /// Can be safely accessed. See `Shape`
         shape: Shape,
+
+        /// Cannot be safely accessed. Despite its appearance, the data may lie
+        /// on device memory. Therefore, direct access is unsafe unless data is
+        /// known to reside on host memory.
         data: []T,
+
+        /// Whether `data` is a view into another array.
         view: bool = false,
 
         /// Values and shape are copied. COM.
@@ -710,6 +717,13 @@ pub fn NDArray(comptime T: type) type {
             device.blas.matvec(T, self.data, other.data, output.data, M, N, trans_a, 1, 0);
 
             return output;
+        }
+
+        /// Performs `self = alpha*self + other` in place.
+        /// Shapes must match (although practically the op is possible under other conditions)
+        pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
+            std.debug.assert(self.shape.equal(other.shape));
+            device.blas.axpy(T, alpha, self.data, other.data);
         }
 
         pub const SumOpts = struct {
