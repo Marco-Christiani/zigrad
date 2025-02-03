@@ -1,3 +1,6 @@
+//! BLAS ops for host device, CPU or Apple Silicon.
+//! Important: strides are assumed to be 1 for many ops now.
+//! This assumption is fine until slicing support comes along.
 const std = @import("std");
 pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
@@ -48,7 +51,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
             f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+            else => @compileError("Unsupported type for BLAS dot" ++ @typeName(T)),
         }
     }
 
@@ -59,7 +62,6 @@ pub const Blas = struct {
         y: []const T,
         z: []T,
     ) void {
-        //        std.debug.print("NOTICE ME PLEASE x: {any}, y: {any}, z {any}\n", .{ x, y, z });
         for (0..z.len) |i| z[i] = x[i % x.len] + y[i % y.len];
     }
 
@@ -113,7 +115,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => c.cblas_sgemv(c.CblasRowMajor, @intCast(ta), @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), x.ptr, 1, beta, y.ptr, 1),
             f64 => c.cblas_dgemv(c.CblasRowMajor, @intCast(ta), @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), x.ptr, 1, beta, y.ptr, 1),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+            else => @compileError("Unsupported type for BLAS matvec" ++ @typeName(T)),
         }
     }
 
@@ -142,7 +144,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
             f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+            else => @compileError("Unsupported type for BLAS matmul" ++ @typeName(T)),
         }
     }
 
@@ -159,7 +161,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => c.cblas_sger(c.CblasRowMajor, @intCast(x.len), @intCast(y.len), alpha, x.ptr, 1, y.ptr, 1, A.ptr, @intCast(y.len)),
             f64 => c.cblas_dger(c.CblasRowMajor, @intCast(x.len), @intCast(y.len), alpha, x.ptr, 1, y.ptr, 1, A.ptr, @intCast(y.len)),
-            else => std.debug.panic("Unsupported type {}\n", .{@typeName(T)}),
+            else => @compileError("Unsupported type for BLAS outer" ++ @typeName(T)),
         }
     }
 
@@ -174,7 +176,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => y[0] = c.cblas_snrm2(@intCast(x.len), x.ptr, 1),
             f64 => y[0] = c.cblas_dnrm2(@intCast(x.len), x.ptr, 1),
-            else => @compileError("Unsupported type" ++ @typeName(T)),
+            else => @compileError("Unsupported type for BLAS nrm2" ++ @typeName(T)),
         }
     }
 
@@ -205,7 +207,7 @@ pub const Blas = struct {
         const _idx = switch (T) {
             f32 => c.cblas_isamax(@intCast(src.len), src.ptr, 1),
             f64 => c.cblas_idamax(@intCast(src.len), src.ptr, 1),
-            else => @compileError("Unsupported type for BLAS max"),
+            else => @compileError("Unsupported type for BLAS max" ++ @typeName(T)),
         };
         dst[0] = src[_idx];
     }
@@ -234,7 +236,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => y[0] = c.cblas_sasum(@intCast(x.len), x.ptr, 1),
             f64 => y[0] = c.cblas_dasum(@intCast(x.len), x.ptr, 1),
-            else => @compileError("Unsupported type for BLAS sum"),
+            else => @compileError("Unsupported type for BLAS sum" ++ @typeName(T)),
         }
     }
 
@@ -305,6 +307,7 @@ pub const Blas = struct {
         for (dims) |f| s *= f;
         return s;
     }
+
     pub fn bmm_acc(
         self: Blas,
         T: type,
@@ -369,7 +372,7 @@ pub const Blas = struct {
         switch (T) {
             f32 => c.cblas_sscal(@intCast(x.len), alpha, x.ptr, 1),
             f64 => c.cblas_dscal(@intCast(x.len), alpha, x.ptr, 1),
-            else => @compileError("Unsupported type for BLAS scale"),
+            else => @compileError("Unsupported type for BLAS scale" ++ @typeName(T)),
         }
     }
 
