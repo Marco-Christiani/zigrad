@@ -212,13 +212,13 @@ pub const Blas = struct {
         dst[0] = src[_idx];
     }
 
-    pub fn max_reverse(
+    pub fn max_backward(
         _: Blas,
         T: type,
         x_val: []const T,
-        x_grd: []T,
         y_val: []const T,
         y_grd: []const T,
+        x_grd: []T,
     ) void {
         const val = y_val[0];
         const grd = y_grd[0];
@@ -379,13 +379,13 @@ pub const Blas = struct {
     pub fn axpy(
         _: Blas,
         T: type,
-        alpha: T,
         x: []const T,
         y: []T,
+        alpha: *const T,
     ) void {
         switch (T) {
-            f32 => c.cblas_saxpy(@intCast(x.len), alpha, x.ptr, 1, y.ptr, 1),
-            f64 => c.cblas_daxpy(@intCast(x.len), alpha, x.ptr, 1, y.ptr, 1),
+            f32 => c.cblas_saxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
+            f64 => c.cblas_daxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
             else => @compileError("Unsupported type for BLAS axpy: " ++ @typeName(T)),
         }
     }
