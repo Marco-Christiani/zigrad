@@ -96,6 +96,11 @@ On linux (or intel mac) you have some options,
   - See https://github.com/OpenMathLib/OpenBLAS/wiki/Precompiled-installation-packages
   - Likely available through your package manager as `libopenblas-dev` or `openblas-devel`
 
+NOTE: Zigrad currently expects libblas.so and cblas.h to be in your system library and include paths, respectively. If you are using the shell script installer for MKL found on Intel's website, you will need to setup these symlinks manually or else the build will fail:
+
+    sudo ln -s /path/to/libmkl_rt.so /usr/lib64/libblas.so
+    sudo ln -s /path/to/mkl_cblas.h /usr/include/cblas.h
+
 ### Apple Silicon
 
 - Nothing :)
