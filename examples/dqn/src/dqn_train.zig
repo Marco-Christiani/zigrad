@@ -1,3 +1,5 @@
+///! NOTE: The underlying device abstractions have changed and this example has not yet been migrated
+/// please disregard code surround allocators in this example until its migrated, everything else is fine.
 const std = @import("std");
 const zg = @import("zigrad");
 const CartPole = @import("CartPole.zig");
@@ -6,20 +8,20 @@ const tb = @import("tensorboard");
 const T = f32;
 
 pub fn trainDQN() !void {
-    // Use ArenaAllocator for bulk allocations
+    // Use ArenaAllocator for bulk allocations (old)
     var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Separate pool for intermediate tensors
+    // Separate pool for intermediate tensors (old)
     var im_pool = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer im_pool.deinit();
     const im_alloc = im_pool.allocator();
 
-    // Initialize environment and logger
+    // Initialize environment and logger (old)
     const s = std.crypto.random.int(usize);
     var env = CartPole.init(s);
-    var tb_logger = try tb.TensorBoardLogger.init("/tmp/dqn_logs", allocator);
+    var tb_logger = try tb.TensorBoardLogger.init("/tmp/", allocator);
     defer tb_logger.deinit();
 
     const max_steps = 200;
@@ -87,7 +89,7 @@ pub fn trainDQN() !void {
             }
 
             total_steps += 1;
-            _ = im_pool.reset(.retain_capacity);
+            _ = im_pool.reset(.retain_capacity); // (old)
 
             if (step_result.done > 0 or steps >= max_steps) break;
         }

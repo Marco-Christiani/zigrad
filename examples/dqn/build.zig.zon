@@ -3,9 +3,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .zigrad = .{
-            .path = "../../",
-            // .url = "git+https://github.com/Marco-Christiani/zigrad/#16a4e9a7a7b23a78439d3fc6d3530a48ba452f27",
-            // .hash = "1220927514691662cd094116bfa685b6449ddf7e37cc0eb6636b608794e06521c2ad",
+            .url = "git+https://github.com/Marco-Christiani/zigrad/#70003c6ac0398de555302a7876876393f97dde50",
+            .hash = "1220950360cc9b32128e360234310c7eb8c0707ae4f4dda74955f075b8451f4ad82e",
         },
         .tensorboard = .{
             .path = "../../tensorboard/",

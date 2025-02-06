@@ -1,3 +1,5 @@
+///! NOTE: In the incoming device api it is illegal to directly mutate memory in the manner
+/// shown here. There will be small changes to use methods instead of direct access.
 const std = @import("std");
 const tb = @import("tensorboard");
 const zg = @import("zigrad");
@@ -54,6 +56,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             defer policy_net.allocator.free(policy_params);
             defer target_net.allocator.free(target_params);
             for (policy_params, target_params) |policy_param, target_param| {
+                // NOTE: this is illegal in the incoming device api
                 @memcpy(target_param.data.data, policy_param.data.data);
             }
             target_net.eval();
@@ -97,6 +100,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
 
             std.debug.assert(try q_values.data.shape.realdims() == 1);
             std.debug.assert(q_values.data.shape.len() == 2);
+            // NOTE: this is illegal in the incoming device api
             return if (q_values.data.data[0] > q_values.data.data[1]) 0 else 1;
         }
 
@@ -111,6 +115,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             // soft update
             for (policy_params, target_params) |policy_param, target_param| {
                 std.debug.assert(policy_param.data.shape.eq(target_param.data.shape.*, .{ .strict = true }));
+                // NOTE: this is illegal in the incoming device api
                 for (policy_param.data.data, target_param.data.data) |policy_value, *target_value| {
                     target_value.* = (1 - tau) * target_value.* + tau * policy_value;
                 }
@@ -158,6 +163,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             // clip Q-values
             const q_max: T = 100.0;
             const q_min: T = -100.0;
+            // NOTE: this is illegal in the incoming device api
             for (all_next_q_values.data.data) |*q| q.* = std.math.clamp(q.*, q_min, q_max);
 
             const max_next_q_values = try all_next_q_values.maxOverDim(allocator, .{ .dim = 1, .keep_dims = false });
@@ -182,6 +188,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             _ = targets.setLabel("targets");
 
             // clip targets
+            // NOTE: this is illegal in the incoming device api
             for (targets.data.data) |*t| t.* = std.math.clamp(t.*, q_min, q_max);
 
             // enable gradients for policy forward pass and loss
@@ -191,6 +198,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             _ = all_q_values.setLabel("all_q_values");
 
             // clip predicted Q-values
+            // NOTE: this is illegal in the incoming device api
             for (all_q_values.data.data) |*q| q.* = std.math.clamp(q.*, q_min, q_max);
 
             const q_values = try all_q_values.gather(allocator, .{ .indices = actions, .dim = 1 });
@@ -202,6 +210,7 @@ pub fn DQNAgent(comptime T: type, buffer_capacity: usize) type {
             defer loss.deinit();
 
             // log metrics
+            // NOTE: this is illegal in the incoming device api
             try tb_logger.addHistogram("training/q_values", q_values.data.data, @intCast(self.steps_done));
             try tb_logger.addHistogram("training/target_values", targets.data.data, @intCast(self.steps_done));
             try tb_logger.addScalar("training/loss", loss.get(&.{0}), @intCast(self.steps_done));
