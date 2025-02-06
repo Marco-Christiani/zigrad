@@ -8,6 +8,8 @@
 	<img src="https://img.shields.io/github/languages/count/Marco-Christiani/zigrad?style=flat" alt="repo-language-count">
 	<img src="https://img.shields.io/github/languages/top/Marco-Christiani/zigrad?style=flat&color=F7A41D" alt="repo-top-language">
 	<!-- <img src="https://img.shields.io/badge/Zig-F7A41D.svg?style=flat&logo=Zig&logoColor=white" alt="Zig"> -->
+	<!-- 1325584101809324113 -->
+	<img alt="Discord" src="https://img.shields.io/discord/1325584101809324113?style=flat">
 </p>
 <br>
 
@@ -48,9 +50,8 @@ But wait, there's more..
 
 - Tiny binaries: binaries for the MNIST tests shown are under 400kb in `ReleaseFast` mode and under 200kb in `ReleaseSmall`.
 - Graph tracing
-- Tensorboard integration*
+- Tensorboard integration
 - Cross platform
-- Statically linked executables
 - Minimal and transparent heap allocations
 <!-- Scalar API -->
 
@@ -123,25 +124,27 @@ make
 
 A lot is planned and hoping for support from the Zig community so we can accomplish some of the more ambitious goals.
 
-- More comprehensive MKL support
-- More parallelization (e.g. activation functions)
-- CUDA support
+- More comprehensive MKL support (in progress)
+- Standardized benchmarking procedures (always an ongoing effort)
+- CUDA support (in progress)
 - Lazy tensors
 - Static graph optimization
 - Dynamic graph compiler
 - MLIR
 - Support for popular formats like ONNX and ggml.
 - ZML translation for inference
+- Apache TVM integration. [Github](https://github.com/apache/tvm/) [Homepage](https://tvm.apache.org)
+- More examples like LLMs, physics and robotic control, etc.
 
 ## Known Issues and Limitations
 
 - Lack of GPU support for now
 - Effort has been directed towards performant primitives, not many layer types have been implemented
   - e.g. conv, pooling, etc are test implementations for verification, they are slow and unoptimized, I would not use them
-  - 
 
 ## Contributing
 
+- [Join the discord](https://discord.gg/JWSSfWj3Uf) and into the dev channels
 - In addition to the above list, anything in in [docs/roadmap.norg](docs/roadmap.norg) is planned
 - Any open issue is available for development, just leave a comment mentioning your interest and I can provide support to help get you started if necessary
 - Otherwise, **please open an issue first, before working on a PR**
