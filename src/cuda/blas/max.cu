@@ -2,6 +2,7 @@
 #define __BLAS_MAX_ZIG__
 
 #include "blas_utils.cu"
+#include <limits>
 
 template <typename T>
 void __global__ __max_bwd(
@@ -29,7 +30,7 @@ void __global__ __max_fwd(
 ) {  
   auto src = static_cast<const T*>(x_val);
   auto dst = static_cast<T*>(y_val);
-  *dst = *thrust::max_element(thrust::device, src, src + n);
+  *dst = thrust::reduce(thrust::device, src, src + n, std::numeric_limits<T>::lowest(), thrust::maximum<T>());
 }
 
 extern "C" void max_forward(

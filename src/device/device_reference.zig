@@ -168,18 +168,20 @@ pub fn Blas(comptime Parent: type) type {
             dst: []T,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.max_forward(T, self.cublas(), src.ptr, dst.ptr),
+                inline else => |dev| dev.blas.max_forward(T, src, dst),
             };
         }
 
-        pub fn max_reverse(
+        pub fn max_backward(
             self: *const Self,
             T: type,
+            x_val: []const T,
+            y_val: []const T,
             y_grd: []const T,
             x_grd: []T,
         ) void {
             return switch (self.parent()) {
-                inline else => |dev| dev.blas.max_reverse(T, self.cublas(), y_grd.ptr, x_grd.ptr),
+                inline else => |dev| dev.blas.max_backward(T, x_val, y_val, y_grd, x_grd),
             };
         }
 

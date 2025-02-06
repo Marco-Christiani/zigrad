@@ -181,6 +181,26 @@ pub fn main() !void {
     }
 
     { // SUM ALONG - TODO: Move this to NDArray testing file //
+        std.log.info("TESTING: MAX", .{});
+        const a = try Tensor.random(&.{256}, false, .normal, cpu.reference());
+        defer a.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+
+        var c = try a.max();
+        defer c.deinit();
+
+        var z = try x.max();
+        defer z.deinit();
+
+        const d = try z.to_device(cpu.reference());
+        defer d.deinit();
+
+        try similar(c, d);
+    }
+
+    { // SUM ALONG - TODO: Move this to NDArray testing file //
         std.log.info("TESTING: SUM ALONG", .{});
         const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
         defer a.deinit();
