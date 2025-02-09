@@ -1,47 +1,42 @@
 ---
 sidebar_position: 1
 ---
-
-# Tutorial Intro
-
-Let's discover **Docusaurus in less than 5 minutes**.
-
 ## Getting Started
 
-Get started by **creating a new site**.
+Only dependency is a BLAS library.
 
-Or **try Docusaurus immediately** with **[docusaurus.new](https://docusaurus.new)**.
+### Linux
 
-### What you'll need
+On linux you have some options,
 
-- [Node.js](https://nodejs.org/en/download/) version 18.0 or above:
-  - When installing Node.js, you are recommended to check all checkboxes related to dependencies.
+- MKL (recommended for best performance)
+  - See https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-download.html
+  - Reccommend a system installation for simplicity although this can work with `conda` for example, just make sure you adjust the library paths as necessary.
+- OpenBLAS
+  - See https://github.com/OpenMathLib/OpenBLAS/wiki/Precompiled-installation-packages
+  - Likely available through your package manager as `libopenblas-dev` or `openblas-devel`
 
-## Generate a new site
+### Apple
 
-Generate a new Docusaurus site using the **classic template**.
+- Nothing :)
 
-The classic template will automatically be added to your project after you run the command:
+### Examples
 
-```bash
-npm init docusaurus@latest my-website classic
+The `examples/` directory has some standalone templates you can take and modify, the zon files are pinned to commit hashes.
+
+Hello world example shows how to run a backward pass using the `GraphManager.` Note that in this very simple example, we do not need the `GraphManager` and the script could be simplified but this is designed to get you familiar with the workflow.
+
+```shell
+git clone https://github.com/Marco-Christiani/zigrad/
+cd zigrad/examples/hello-world
+zig build run
 ```
 
-You can type this command into Command Prompt, Powershell, Terminal, or any other integrated terminal of your code editor.
+Run the mnist demo
 
-The command also installs all necessary dependencies you need to run Docusaurus.
-
-## Start your site
-
-Run the development server:
-
-```bash
-cd my-website
-npm run start
+```shell
+cd zigrad/examples/mnist
+make help
+make
 ```
 
-The `cd` command changes the directory you're working with. In order to work with your newly created Docusaurus site, you'll need to navigate the terminal there.
-
-The `npm run start` command builds your website locally and serves it through a development server, ready for you to view at http://localhost:3000/.
-
-Open `docs/intro.md` (this page) and edit some lines: the site **reloads automatically** and displays your changes.
