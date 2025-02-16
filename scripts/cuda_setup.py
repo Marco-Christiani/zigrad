@@ -40,7 +40,7 @@ def get_all_cuda_devices():
             }
             gpu_list.append(gpu_info)
 
-    return list(set(gpu_list))
+    return gpu_list
 
 
 def get_cuda_compute() -> str:
