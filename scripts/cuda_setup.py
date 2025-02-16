@@ -72,11 +72,8 @@ def get_cuda_compute() -> str:
 def main():
     parser = argparse.ArgumentParser()    
     parser.add_argument('cuda_rebuild', type=str)
-    parser.add_argument('cuda_arch', type=str)
     args = parser.parse_args()
-
     cuda_rebuild = args.cuda_rebuild == 'y'
-    cuda_arch = args.cuda_arch
 
     HERE = Path(__file__).parent.resolve()
     CUDA_SRC = HERE.parent / 'src' / 'cuda'
@@ -93,8 +90,6 @@ def main():
         if cuda_rebuild or not os.path.exists(CUDA_SRC / "build" / "Makefile"):
             subprocess.run(['cmake', '..'], check=True)
 
-        compute = cuda_arch if bool(cuda_arch) else get_cuda_compute()
-        subprocess.run(['cmake', f'-DGPU_ARCHITECTURE={compute}', '..'], check=True)
         subprocess.run(['cmake', '--build', '.'], check=True)
 
         

@@ -125,7 +125,6 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std
     //const new_backend: Backend = .HOST;
 
     const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
-    const cuda_arch: []const u8 = b.option([]const u8, "cuda_arch", "desired cuda compute capability") orelse "";
 
     const here = b.path(".").getPath(b);
 
@@ -161,7 +160,6 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std
                 "python3",
                 b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
                 if (cuda_rebuild) "y" else "n",
-                cuda_arch,
             });
         }
 
