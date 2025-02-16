@@ -16,8 +16,7 @@ pub fn build(b: *std.Build) !void {
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
-    const rebuild = b.option(bool, "rebuild", "force backend to recompile") orelse false;
-    const device_module = build_device_module(b, target, rebuild);
+    const device_module = build_device_module(b, target);
 
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
@@ -121,9 +120,14 @@ fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
     exe.linkLibCpp();
 }
 
-pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebuild: bool) *std.Build.Module {
-    //const new_backend = get_backend(b);
-    const new_backend: Backend = .HOST;
+pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const new_backend = get_backend(b);
+    //const new_backend: Backend = .HOST;
+
+    const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
+    const cuda_arch: []const u8 = b.option([]const u8, "cuda_arch", "desired cuda compute capability") orelse "";
+
+    std.debug.print("{s}\n", .{cuda_arch});
 
     const here = b.path(".").getPath(b);
 
@@ -154,11 +158,12 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebu
 
         const exists = amalgamate_exists(b);
 
-        if (rebuild or !exists) {
+        if (cuda_rebuild or !exists) {
             run_command(b, &.{
                 "python3",
                 b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
-                if (rebuild or !exists) "y" else "n",
+                if (cuda_rebuild) "y" else "n",
+                cuda_arch,
             });
         }
 
