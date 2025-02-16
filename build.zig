@@ -127,8 +127,6 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std
     const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
     const cuda_arch: []const u8 = b.option([]const u8, "cuda_arch", "desired cuda compute capability") orelse "";
 
-    std.debug.print("{s}\n", .{cuda_arch});
-
     const here = b.path(".").getPath(b);
 
     if (backend != new_backend) {
@@ -168,7 +166,7 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std
         }
 
         cuda.addIncludePath(b.path("src/cuda/"));
-        cuda.addLibraryPath(b.path("src/cuda/"));
+        cuda.addLibraryPath(b.path("src/cuda/build"));
         cuda.linkSystemLibrary("amalgamate", .{});
         device.addImport("cuda", cuda);
     }
@@ -178,7 +176,7 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std
 
 fn amalgamate_exists(b: *std.Build) bool {
     const here = b.path(".").getPath(b);
-    const path = b.pathJoin(&.{ here, "src", "cuda", "libamalgamate.so" });
+    const path = b.pathJoin(&.{ here, "src", "cuda", "build", "libamalgamate.so" });
     var file = std.fs.openFileAbsolute(path, .{});
     if (file) |*_file| {
         _file.close();
