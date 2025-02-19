@@ -782,10 +782,11 @@ pub fn NDArray(comptime T: type) type {
             pub fn deinit(self: *GatherResult) void {
                 self.values.deinit(self.device);
                 if (self.offsets) |o|
-                    self.device.allocator.free(o);
+                    self.device.allocator.free(o); // TODO: cache?
             }
         };
 
+        // TODO: proper gather backend kernel.
         pub fn gather(self: Self, device: DeviceReference, opts: GatherOptions) !GatherResult {
             const indices = opts.indices;
             const dim = opts.dim;
@@ -796,8 +797,8 @@ pub fn NDArray(comptime T: type) type {
             }
             // to-owned-slice allows us to properly free regardless of exit, otherwise
             // we could try to free on error and because the user didn't ask for offsets
-            var offsets = try device.allocator.alloc(usize, indices.data.len);
-            defer if (!opts.return_offsets) device.allocator.free(offsets);
+            var offsets = try device.allocator.alloc(usize, indices.data.len); // TODO: cache?
+            defer if (!opts.return_offsets) device.allocator.free(offsets); // TODO: cache?
 
             const values = try Self.empty(indices.shape.slice(), device);
             const idx_strides = indices.shape.strides();
@@ -839,6 +840,17 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn _clip_norm(self: Self, max_norm: T, delta: T, device: DeviceReference) void {
             device.blas.clip_norm(T, self.data, max_norm, delta);
+        }
+
+        pub fn _clamp(self: Self, vmin: T, vmax: T, device: DeviceReference) void {
+            std.debug.assert(vmin <= vmax);
+            device.blas.clamp(T, self.data, vmin, vmax);
+        }
+
+        /// Clamps values in place and writes a mask of 1/0 indicating whether an entry was clamped.
+        pub fn _clamp_with_mask(self: Self, vmin: T, vmax: T, dst_mask: []u1, device: DeviceReference) void {
+            std.debug.assert(vmin <= vmax);
+            device.blas.clamp_with_mask(T, self.data, vmin, vmax, dst_mask);
         }
 
         /// Unbroadcast to target shape
@@ -933,6 +945,25 @@ test "NDArray._clip_norm,l2_norm" {
     for (0..array.data.len) |i| {
         try std.testing.expectApproxEqAbs(expected_values[i], array.data[i], 1e-5);
     }
+}
+
+test "NDArray._clamp" {
+    const allocator = std.testing.allocator;
+    var device = zg.device.HostDevice.init(allocator);
+    defer device.deinit();
+    const shape = &[_]usize{5};
+    const T = f64;
+    const Array = NDArray(T);
+    // [-2, -1, 0, 1, 2] -> [-1, -1, 0, 1, 1]
+    var array = try Array.init(&[_]T{ -2, -1, 0, 1, 2 }, shape, device.reference());
+    defer array.deinit(device.reference());
+
+    var expected = try Array.init(&[_]T{ -1, -1, 0, 1, 1 }, shape, device.reference());
+    defer expected.deinit(device.reference());
+    const vmin = -1;
+    const vmax = 1;
+    array._clamp(vmin, vmax, device.reference());
+    try std.testing.expectEqualSlices(T, expected.data, array.data);
 }
 
 // We need to support cross device scalar transfer for this
