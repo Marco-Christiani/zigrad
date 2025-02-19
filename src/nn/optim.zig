@@ -6,7 +6,7 @@ const NDTensor = zg.NDTensor;
 const settings = zg.settings;
 
 pub fn clip_grads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
-    for (params) |param| if (param.grad) |_| param.clip_grad_norm_delta(opts);
+    for (params) |param| if (param.grad) |_| param._clip_grad_norm(opts);
 }
 
 pub fn Optimizer(comptime T: type) type {

@@ -837,7 +837,7 @@ pub fn NDArray(comptime T: type) type {
             return result;
         }
 
-        pub fn clip_norm(self: Self, max_norm: T, delta: T, device: DeviceReference) void {
+        pub fn _clip_norm(self: Self, max_norm: T, delta: T, device: DeviceReference) void {
             device.blas.clip_norm(T, self.data, max_norm, delta);
         }
 
@@ -898,10 +898,8 @@ pub const Range = struct {
     end: usize,
 };
 
-test "NDArray.clip_norm" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+test "NDArray._clip_norm,l2_norm" {
+    const allocator = std.testing.allocator;
     var device = zg.device.HostDevice.init(allocator);
     defer device.deinit();
     const shape = &[_]usize{ 2, 2 };
@@ -919,7 +917,7 @@ test "NDArray.clip_norm" {
     const max_norm: T = 4.0;
     const delta: T = 1e-6;
 
-    array.clip_norm(max_norm, delta, device.reference());
+    array._clip_norm(max_norm, delta, device.reference());
 
     const clipped_norm_ndarray = try array.l2_norm(device.reference());
     const clipped_norm = clipped_norm_ndarray.data[0];

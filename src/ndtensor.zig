@@ -533,8 +533,9 @@ pub fn NDTensor(comptime T: type) type {
             delta: f32 = settings.grad_clip_delta,
         };
 
-        pub fn clip_grad_norm_delta(self: Self, opts: ClipOptions) void {
-            self.grad.?.clip_norm(opts.max_norm, opts.delta, self.device);
+        pub fn _clip_grad_norm(self: Self, opts: ClipOptions) void {
+            self.grad.?._clip_norm(opts.max_norm, opts.delta, self.device);
+        }
         }
 
         /// Element-wise addition. COM.
