@@ -198,6 +198,32 @@ pub const Blas = struct {
         }
     }
 
+    pub fn clamp(
+        _: Blas,
+        T: type,
+        src_vals: []T,
+        vmin: T,
+        vmax: T,
+    ) void {
+        for (src_vals) |*value| value.* = @min(vmax, @max(vmin, value.*));
+    }
+
+    pub fn clamp_with_mask(
+        _: Blas,
+        T: type,
+        src_vals: []T,
+        vmin: T,
+        vmax: T,
+        dst_mask: []u1,
+    ) void {
+        for (src_vals, dst_mask) |*value, *mask| {
+            // Great ILP
+            const clamped = @min(vmax, @max(vmin, value.*));
+            mask.* = @intFromBool(value.* == clamped);
+            value.* = clamped;
+        }
+    }
+
     pub fn max_forward(
         _: Blas,
         T: type,
