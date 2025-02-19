@@ -257,6 +257,31 @@ pub fn Blas(comptime Parent: type) type {
             };
         }
 
+        pub fn clamp(
+            self: *const Self,
+            comptime T: type,
+            src_vals: []T,
+            vmin: T,
+            vmax: T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.clamp(T, src_vals, vmin, vmax),
+            };
+        }
+
+        pub fn clamp_with_mask(
+            self: *const Self,
+            comptime T: type,
+            src_vals: []T,
+            vmin: T,
+            vmax: T,
+            dst_mask: []u1,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.clamp_with_mask(T, src_vals, vmin, vmax, dst_mask),
+            };
+        }
+
         fn parent(self: *const Self) Parent.DevicePtrs {
             return @as(*const Parent, @alignCast(@fieldParentPtr("blas", self))).ptrs;
         }
