@@ -279,7 +279,7 @@ pub fn NDTensor(comptime T: type) type {
             result.* = Self{
                 .data = values,
                 .grad = grad,
-                ._requires_grad = _requires_grad,
+                ._requires_grad = _requires_grad and zg.rt_grad_enabled,
                 .device = device,
             };
             return result;
@@ -536,6 +536,57 @@ pub fn NDTensor(comptime T: type) type {
         pub fn _clip_grad_norm(self: Self, opts: ClipOptions) void {
             self.grad.?._clip_norm(opts.max_norm, opts.delta, self.device);
         }
+
+        /// Direct modification. Clamps the underlying data, as with all in place ops you must know what you are doing.
+        /// This operation is not tracked in the computation graph.
+        /// *Will not notify you of an improper gradient calculation.*
+        pub fn _clamp(self: Self, vmin: T, vmax: T) void {
+            self.data._clamp(vmin, vmax, self.device);
+        }
+
+        /// Direct modification. Clamps the underlying grad, as with all in place ops you must know what you are doing.
+        /// This operation is not tracked in the computation graph.
+        /// *Will not notify you of an improper gradient calculation.*
+        /// Grad must exist.
+        pub fn _clamp_grad(self: Self, vmin: T, vmax: T) .NoGradient!void {
+            (self.grad orelse return error.NoGradient)._clamp(vmin, vmax, self.device);
+        }
+
+        /// Differentiable
+        pub fn clamp(self: *Self, vmin: T, vmax: T) !*Self {
+            // TODO: implement differentiable clamp()
+            // if grad is required, use data._clamp_with_mask() so we can save for backward
+            // otherwise regular clamp
+            std.debug.assert(vmin <= vmax);
+
+            var result_data = try self.data.copy(self.device);
+            const mask = try self.device.mem_alloc(u1, self.get_size());
+            result_data._clamp_with_mask(vmin, vmax, mask, self.device);
+
+            const clampBw = struct {
+                fn clamp_bw_impl(_self: Self) !void {
+                    const ctx: [*]u1 = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                    const children = _self.get_children() orelse return error.NoChildren;
+                    const input = children[0];
+
+                    const _mask = ctx[0..input.get_size()];
+
+                    // mask gradient, zero out grad for entries that were clamped
+                    // FIXME: problem here, _mask is []u1 but mul expects []T
+                    _self.device.blas.mul(T, _mask, _self.grad.?.data, input.grad.?.data);
+                    _self.device.mem_free(ctx);
+                }
+            }.clamp_bw_impl;
+
+            return create_dependent(.{
+                .data = result_data,
+                .op = null, // TODO: clamp op type
+                .children = &.{self},
+                ._requires_grad = self._requires_grad,
+                .device = self.device,
+                ._backward = clampBw,
+                ._backward_ctx = @ptrCast(mask),
+            });
         }
 
         /// Element-wise addition. COM.
@@ -707,12 +758,13 @@ pub fn NDTensor(comptime T: type) type {
                 .data = max_mem,
                 .op = .MAX,
                 .children = &.{self},
-                ._requires_grad = self.requires_grad(),
+                ._requires_grad = self._requires_grad,
                 .device = self.device,
                 ._backward = maxBw,
             });
         }
 
+        /// TODO: exp bw backend
         /// Element-wise exponential. COM.
         pub fn exp(self: *Self) !*Self {
             const expBw = struct {
@@ -1044,6 +1096,37 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
     };
+}
+
+test "ndtensor/clamp fw,bw" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var cpu = zg.device.HostDevice.init(arena.allocator());
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    const T = f32;
+    const Tensor = NDTensor(T);
+
+    const vmin: f32 = -1.0;
+    const vmax: f32 = 1.0;
+
+    var x = try Tensor.init(&.{ -2.0, -0.5, 0.5, 2.0 }, null, true, device);
+    defer x.deinit();
+
+    var y = try x.clamp(vmin, vmax);
+    defer y.deinit();
+
+    try y.setup_grad(1.0);
+    try y.backward();
+
+    const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
+    const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
+
+    try std.testing.expectEqualSlices(T, expected_output, y.get_data());
+    try std.testing.expectEqualSlices(T, expected_grad, y.grad.?.data);
 }
 
 test "tensor/GraphManager/sum" {
