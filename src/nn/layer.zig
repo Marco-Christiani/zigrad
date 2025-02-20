@@ -146,7 +146,8 @@ pub fn LinearLayer(comptime T: type) type {
         }
         pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
             // return try forward_ag(self, input);
-            return try forward_manual(self, input);
+            const out = try forward_manual(self, input);
+            return out;
         }
 
         // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
@@ -203,7 +204,7 @@ pub fn LinearLayer(comptime T: type) type {
 
         /// A custom backward impl that, technically, isnt optimized in any way aside from avoiding having
         /// to infer shape broadcasting logic which is shockingly fast in Zigrad for some reason.
-        fn backward_manual(tensor: NDTensor(T)) !void {
+        fn backward_manual(tensor: *const NDTensor(T)) !void {
             const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
             const grad_output = tensor.grad orelse return error.NoGradient;
             const input = tensor.get_children().?[0];
@@ -503,7 +504,7 @@ pub fn ReLULayer(comptime T: type) type {
             });
         }
 
-        fn backward(tensor: NDTensor(T)) !void {
+        fn backward(tensor: *const NDTensor(T)) !void {
             const children = tensor.get_children() orelse return error.NoChildren;
             std.debug.assert(children.len == 1);
             const grad_t = tensor.grad orelse return error.NoGradient;
@@ -567,7 +568,7 @@ pub fn ReLULayerCompare(comptime T: type) type {
             return output;
         }
 
-        fn backward(tensor: NDTensor(T)) !void {
+        fn backward(tensor: *const NDTensor(T)) !void {
             std.debug.assert(tensor.children.?.len == 1);
             const children = tensor.children orelse return error.NoChildren;
             const grad_t = tensor.grad orelse return error.NoGradient;
@@ -613,7 +614,7 @@ pub fn FlattenLayer(comptime T: type) type {
             return result;
         }
 
-        fn backward(tensor: NDTensor(T)) !void {
+        fn backward(tensor: *const NDTensor(T)) !void {
             var input = tensor.get_children().?[0];
             input.grad.?._reshape(input.data.shape.slice());
             @memcpy(input.grad.?.data, tensor.grad.?.data);
@@ -721,7 +722,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
             });
         }
 
-        pub fn backward(tensor: NDTensor(T)) anyerror!void {
+        pub fn backward(tensor: *const NDTensor(T)) anyerror!void {
             const indices = @as(*NDArray(usize), @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext)));
             std.debug.assert(tensor.children.?.len == 1);
             var input = tensor.children.?[0];

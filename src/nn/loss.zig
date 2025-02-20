@@ -121,7 +121,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     const mse = sum_sq_diff / n;
 
     const bw_fn = struct {
-        fn backward(tensor: NDTensor(T), _: DeviceReference) !void {
+        fn backward(tensor: *const NDTensor(T), _: DeviceReference) !void {
             const self_children = tensor.get_children() orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];
@@ -164,7 +164,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     const mean_loss = sum_loss / @as(T, @floatFromInt(batch_size));
 
     const bw_fn = struct {
-        fn backward(bw_tensor: NDTensor(T)) !void {
+        fn backward(bw_tensor: *const NDTensor(T)) !void {
             const bw_ctx: *NDTensor(T) = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
             defer bw_ctx.deinit();
             const bw_self_children = bw_tensor.get_children() orelse return error.NoChildren;
@@ -256,7 +256,7 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
 pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
     const result = try _softmax_fwd(T, input, dim, device);
     const bw_fn = struct {
-        fn backward(bw_tensor: NDTensor(T), bw_device: DeviceReference) !void {
+        fn backward(bw_tensor: *const NDTensor(T), bw_device: DeviceReference) !void {
             const bw_self_children = bw_tensor.children orelse return error.NoChildren;
             const bw_input = bw_self_children[0];
             if (bw_input.grad == null) return;
@@ -315,7 +315,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     const loss = sum_loss / n;
 
     const bw_fn = struct {
-        fn backward(tensor: NDTensor(T)) !void {
+        fn backward(tensor: *const NDTensor(T)) !void {
             const self_children = tensor.get_children() orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];
