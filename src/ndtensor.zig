@@ -52,7 +52,7 @@ pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
         // signature for a backwards callback
-        pub const Callback = *const fn (Self) anyerror!void;
+        pub const Callback = *const fn (*const Self) anyerror!void;
         pub const DataType = NDArray(T);
         // 8 children is a lot but... oh well...
         pub const Children = std.BoundedArray(*Self, 8);
@@ -117,19 +117,19 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
-        pub fn get_shape(self: Self) []const usize {
+        pub fn get_shape(self: *const Self) []const usize {
             return self.data.shape.slice();
         }
 
-        pub fn get_size(self: Self) usize {
+        pub fn get_size(self: *const Self) usize {
             return self.data.data.len;
         }
 
-        pub fn get_strides(self: Self) Shape.Strides {
+        pub fn get_strides(self: *const Self) Shape.Strides {
             return self.data.shape.strides();
         }
 
-        pub fn get_data(self: Self) []T {
+        pub fn get_data(self: *const Self) []T {
             return self.data.data;
         }
 
@@ -144,7 +144,7 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
-        pub fn requires_grad(self: Self) bool {
+        pub fn requires_grad(self: *const Self) bool {
             return self._requires_grad and zg.rt_grad_enabled;
         }
 
@@ -322,7 +322,7 @@ pub fn NDTensor(comptime T: type) type {
                 return self;
 
             const to_device_bw = struct {
-                fn to_device_bw_impl(_self: Self) !void {
+                fn to_device_bw_impl(_self: *const Self) !void {
                     const child = (_self.get_children() orelse return error.NoChildren)[0];
                     try to_device_impl(_self.grad.?.data, child.grad.?.data, _self.device, child.device);
                 }
@@ -361,7 +361,7 @@ pub fn NDTensor(comptime T: type) type {
         /// # ADR
         ///   - The choice to have an allocator provided is important, intended to be used for backward
         ///   - If the tensor backing `DataType` changes its allocator ownership contract, then this needs to be changed
-        pub fn clone(self: Self) !*Self {
+        pub fn clone(self: *const Self) !*Self {
             const result = try self.device.allocator.create(Self);
             errdefer self.device.allocator.destroy(result);
             result.* = Self{
@@ -379,7 +379,7 @@ pub fn NDTensor(comptime T: type) type {
             return result;
         }
 
-        pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
+        pub fn log_shape(self: *const Self, comptime msg: ?[]const u8) void {
             log.debug("{s}{s} data shape: {d} grad shape: {?d}", .{
                 if (msg) |n| n else "",
                 if (self.get_label()) |l| l else "",
@@ -397,7 +397,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const reshape_bw = struct {
-                fn reshape_bw_impl(_self: Self) !void {
+                fn reshape_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const original_shape = children[0].data.shape;
                     try self.grad.?._reshape(original_shape.shape);
@@ -423,7 +423,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn transpose(self: *Self) !*Self {
             const transpose_bw = struct {
-                fn transpose_bw_impl(_self: Self) !void {
+                fn transpose_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const gt = try self.grad.?.transpose(_self.device);
                     defer gt.deinit(_self.device);
@@ -447,30 +447,30 @@ pub fn NDTensor(comptime T: type) type {
             return result;
         }
 
-        pub fn fill(self: Self, val: T) void {
+        pub fn fill(self: *const Self, val: T) void {
             self.data.fill(val, self.device);
         }
 
         // this needs to get audited for device safety
-        pub fn get(self: Self, idx: usize) T {
+        pub fn get(self: *const Self, idx: usize) T {
             return self.data.data[idx];
         }
 
         // this needs to get audited for device safety
-        pub fn set(self: Self, idx: usize, value: T) !void {
+        pub fn set(self: *const Self, idx: usize, value: T) !void {
             self.data.data[idx] = value;
         }
 
-        fn pos_to_index(self: Self, indices: []const usize) usize {
+        fn pos_to_index(self: *const Self, indices: []const usize) usize {
             return self.data.pos_to_offset(indices);
         }
 
-        fn flex_pos_to_index(self: Self, indices: []const usize) error.InvalidIndex!usize {
+        fn flex_pos_to_index(self: *const Self, indices: []const usize) error.InvalidIndex!usize {
             return self.data.flexPosToOffset(indices);
         }
 
         /// COM
-        fn index_to_pos(self: Self, index: usize) []const usize {
+        fn index_to_pos(self: *const Self, index: usize) []const usize {
             return self.data.offset_to_pos(index, self.device.allocator);
         }
 
@@ -481,7 +481,7 @@ pub fn NDTensor(comptime T: type) type {
         ///   - It is assumed the caller wants a temporary mutable view, return by copy.
         ///   - This creates a complex situation, there is no backward for this operation and it returns a mutable view.
         ///   - Caller must set backward
-        pub fn slice_ranges(self: Self, ranges: []const Range) !Self {
+        pub fn slice_ranges(self: *const Self, ranges: []const Range) !Self {
             log.err("WIP", .{});
             const sliced_data = try self.data.slice_ranges(ranges);
             return Self{
@@ -498,7 +498,7 @@ pub fn NDTensor(comptime T: type) type {
             };
         }
 
-        pub fn set_slice(self: Self, ranges: []const Range, values: Self) !void {
+        pub fn set_slice(self: *const Self, ranges: []const Range, values: Self) !void {
             if (self.requires_grad()) {
                 // need to create a new operation
                 @compileError("Not implemented");
@@ -508,12 +508,12 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
 
-        pub fn print(self: Self) void {
+        pub fn print(self: *const Self) void {
             // self.print_to_writer(std.io.getStdOut().writer());
             self.print_to_writer(std.io.getStdErr().writer()) catch @panic("Failed to print tensor");
         }
 
-        pub fn print_to_writer(self: Self, writer: anytype) !void {
+        pub fn print_to_writer(self: *const Self, writer: anytype) !void {
             try writer.print("NDTensor<{},{?s}>", .{ T, if (self.op) |o| @tagName(o) else null });
             try writer.writeAll("{data: ");
             try self.data.print_to_writer(writer, self.device);
@@ -533,14 +533,14 @@ pub fn NDTensor(comptime T: type) type {
             delta: f32 = settings.grad_clip_delta,
         };
 
-        pub fn _clip_grad_norm(self: Self, opts: ClipOptions) void {
+        pub fn _clip_grad_norm(self: *const Self, opts: ClipOptions) void {
             self.grad.?._clip_norm(opts.max_norm, opts.delta, self.device);
         }
 
         /// Direct modification. Clamps the underlying data, as with all in place ops you must know what you are doing.
         /// This operation is not tracked in the computation graph.
         /// *Will not notify you of an improper gradient calculation.*
-        pub fn _clamp(self: Self, vmin: T, vmax: T) void {
+        pub fn _clamp(self: *const Self, vmin: T, vmax: T) void {
             self.data._clamp(vmin, vmax, self.device);
         }
 
@@ -548,7 +548,7 @@ pub fn NDTensor(comptime T: type) type {
         /// This operation is not tracked in the computation graph.
         /// *Will not notify you of an improper gradient calculation.*
         /// Grad must exist.
-        pub fn _clamp_grad(self: Self, vmin: T, vmax: T) .NoGradient!void {
+        pub fn _clamp_grad(self: *const Self, vmin: T, vmax: T) .NoGradient!void {
             (self.grad orelse return error.NoGradient)._clamp(vmin, vmax, self.device);
         }
 
@@ -594,7 +594,7 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const addBw = struct {
-                fn add_bw_impl(_self: Self) !void {
+                fn add_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -624,7 +624,7 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const subBw = struct {
-                fn sub_bw_impl(_self: Self) !void {
+                fn sub_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -654,7 +654,7 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const mulBw = struct {
-                fn mul_bw_impl(_self: Self) !void {
+                fn mul_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -694,7 +694,7 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const divBw = struct {
-                fn div_bw_impl(_self: Self) !void {
+                fn div_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const a = children[0];
                     const b = children[1];
@@ -741,7 +741,7 @@ pub fn NDTensor(comptime T: type) type {
             self.device.blas.max_forward(T, self.get_data(), max_mem.data);
 
             const maxBw = struct {
-                fn max_bw_impl(_self: Self) !void {
+                fn max_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
                     _self.device.blas.max_backward(
@@ -768,7 +768,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Element-wise exponential. COM.
         pub fn exp(self: *Self) !*Self {
             const expBw = struct {
-                fn exp_bw_impl(_self: Self) !void {
+                fn exp_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
                     for (_self.data.data, _self.grad.?.data, 0..) |exp_val, grad_val, i| {
@@ -838,7 +838,7 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
 
-        fn bw_bmm_acc(self: NDTensor(T)) !void {
+        fn bw_bmm_acc(self: *const NDTensor(T)) !void {
             const grad_C = self.grad orelse return error.NoGradient;
 
             const opts: *MmAccOptions = @ptrCast(@alignCast(self._backward_ctx orelse return error.NoBackwardContext));
@@ -898,7 +898,7 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const dotBw = struct {
-                fn dot_bw_impl(_self: Self) !void {
+                fn dot_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     var a = children[0];
                     var b = children[1];
@@ -934,7 +934,7 @@ pub fn NDTensor(comptime T: type) type {
 
             const matvecBw = struct {
                 /// TODO: Use accumulation
-                fn matvec_bw_impl(_self: Self) !void {
+                fn matvec_bw_impl(_self: *const Self) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const A = children[0].data;
                     const x = children[1].data;
@@ -962,7 +962,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Performs `self = alpha*other + self` in place.
-        pub fn _axpy(self: Self, other: Self, alpha: T) void {
+        pub fn _axpy(self: *const Self, other: Self, alpha: T) void {
             std.debug.assert(self.device.is_compatible(other.device));
             self.data._axpy(other, alpha, self.device);
         }
@@ -970,7 +970,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Sum of all elements in the tensor. COM.
         pub fn sum(self: *Self) !*Self {
             const sumBw = struct {
-                fn sum_bw_impl(_self: NDTensor(T)) !void {
+                fn sum_bw_impl(_self: *const NDTensor(T)) !void {
                     const children = _self.get_children() orelse return error.NoChildren;
                     const child = children[0];
                     _ = try child.grad.?._add(_self.grad.?, child.device);
@@ -1022,7 +1022,7 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {
             const gatherBackward = struct {
-                fn bw_impl(bw_tensor: NDTensor(T)) !void {
+                fn bw_impl(bw_tensor: *const NDTensor(T)) !void {
                     const bw_children = bw_tensor.get_children() orelse return error.NoChildren;
                     const bw_input = bw_children[0];
                     if (bw_input.grad == null) return;
@@ -1058,7 +1058,7 @@ pub fn NDTensor(comptime T: type) type {
             self._backward_ctx = ctx;
         }
 
-        pub fn backward(self: Self) !void {
+        pub fn backward(self: *const Self) !void {
             // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
             if (!zg.rt_grad_enabled) return error.GradNotEnabled;
             if (!self._requires_grad) return;
@@ -1072,7 +1072,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes
-        pub fn print_arrows(self: Self) void {
+        pub fn print_arrows(self: *const Self) void {
             if (self.get_children()) |children| {
                 for (children) |elem| {
                     std.debug.print("{?s}<-{?s}", .{ self.get_label(), elem.get_label() });
