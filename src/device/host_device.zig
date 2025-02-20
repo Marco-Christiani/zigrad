@@ -214,12 +214,12 @@ pub const Blas = struct {
         src_vals: []T,
         vmin: T,
         vmax: T,
-        dst_mask: []u1,
+        dst_mask: []T,
     ) void {
         for (src_vals, dst_mask) |*value, *mask| {
             // Great ILP
             const clamped = @min(vmax, @max(vmin, value.*));
-            mask.* = @intFromBool(value.* == clamped);
+            mask.* = @floatFromInt(@intFromBool(value.* == clamped)); // TODO: not necessarily a float, for the time being this is fine until we use other types.
             value.* = clamped;
         }
     }
