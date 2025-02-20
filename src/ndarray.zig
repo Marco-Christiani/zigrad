@@ -848,7 +848,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         /// Clamps values in place and writes a mask of 1/0 indicating whether an entry was clamped.
-        pub fn _clamp_with_mask(self: Self, vmin: T, vmax: T, dst_mask: []u1, device: DeviceReference) void {
+        pub fn _clamp_with_mask(self: Self, vmin: T, vmax: T, dst_mask: []T, device: DeviceReference) void {
             std.debug.assert(vmin <= vmax);
             device.blas.clamp_with_mask(T, self.data, vmin, vmax, dst_mask);
         }

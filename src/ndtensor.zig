@@ -560,12 +560,12 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(vmin <= vmax);
 
             var result_data = try self.data.copy(self.device);
-            const mask = try self.device.mem_alloc(u1, self.get_size());
+            const mask = try self.device.mem_alloc(T, self.get_size());
             result_data._clamp_with_mask(vmin, vmax, mask, self.device);
 
             const clampBw = struct {
-                fn clamp_bw_impl(_self: Self) !void {
-                    const ctx: [*]u1 = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
+                fn clamp_bw_impl(_self: *const Self) !void {
+                    const ctx: [*]T = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
                     const children = _self.get_children() orelse return error.NoChildren;
                     const input = children[0];
 
@@ -574,7 +574,7 @@ pub fn NDTensor(comptime T: type) type {
                     // mask gradient, zero out grad for entries that were clamped
                     // FIXME: problem here, _mask is []u1 but mul expects []T
                     _self.device.blas.mul(T, _mask, _self.grad.?.data, input.grad.?.data);
-                    _self.device.mem_free(ctx);
+                    _self.device.mem_free(_mask);
                 }
             }.clamp_bw_impl;
 
@@ -1110,6 +1110,9 @@ test "ndtensor/clamp fw,bw" {
     const T = f32;
     const Tensor = NDTensor(T);
 
+    var gm = GraphManager(Tensor).init(device.allocator, .{});
+    defer gm.deinit();
+
     const vmin: f32 = -1.0;
     const vmax: f32 = 1.0;
 
@@ -1120,13 +1123,13 @@ test "ndtensor/clamp fw,bw" {
     defer y.deinit();
 
     try y.setup_grad(1.0);
-    try y.backward();
+    try gm.backward(y);
 
     const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
     const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
 
     try std.testing.expectEqualSlices(T, expected_output, y.get_data());
-    try std.testing.expectEqualSlices(T, expected_grad, y.grad.?.data);
+    try std.testing.expectEqualSlices(T, expected_grad, x.grad.?.data);
 }
 
 test "tensor/GraphManager/sum" {
