@@ -12,9 +12,7 @@
 	<img alt="Discord" src="https://img.shields.io/discord/1325584101809324113?style=flat">
 </p>
 <br>
-
-# Zigrad
-#### Supporting AI innovation from ideation to results.
+<p align="center" class="markdown-heading"><strong><i>Supporting AI innovation from ideation to results.</i></strong></p>
 
 AI frameworks optimized for rapid research iteration do not seamlessly transition into the infrastructure required for large-scale training. This fragmented pipeline creates redundant engineering effort and slows iteration cycles. Zigrad provides a path to performance that preserves the natural development workflow researchers prefer; bridging research and engineering. Using Zigrad you can:
 
