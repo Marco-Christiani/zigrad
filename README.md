@@ -14,17 +14,22 @@
 <br>
 
 # Zigrad
-#### A deep learning framework built on an autograd engine with high level abstractions and low level control.
+#### Supporting AI innovation from ideation to results.
+
+AI frameworks optimized for rapid research iteration do not seamlessly transition into the infrastructure required for large-scale training. This fragmented pipeline creates redundant engineering effort and slows iteration cycles. Zigrad provides a path to performance that preserves the natural development workflow researchers prefer; bridging research and engineering. Using Zigrad you can:
+
+  - Experiment using high-level, PyTorch-like abstractions
+  - Gradually opt into fine-grained control and performance optimizations
+  - Access low-level primitives and assert control--without switching frameworks, code translation, or building complex extensions.
+  - Quickly transition research to high performance training
 
 
 https://github.com/user-attachments/assets/3842aa72-9b16-4c25-8789-eac7159e3768
 
-
-
 **Fast**
 <!-- benchmarks -->
 
-2.5x+ speedup over a compiled PyTorch model on Apple Silicon, 1.5x on x86. Expect similar performance gains across more architectures and platforms as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.*
+2.5x+ speedup over a compiled PyTorch model on Apple Silicon, 1.5x on x86. Expect similar performance gains across more architectures and platforms as MKL/CUDA support improves and Zigrad's ML graph compiler is operational.
 <!-- link to a benchmarking page -->
 <!-- only need one of the bm plots, probably fast vs fast since that requires the least explanation -->
 
@@ -35,27 +40,28 @@ https://github.com/user-attachments/assets/3842aa72-9b16-4c25-8789-eac7159e3768
 </picture>
 <!-- ![](./docs/zg_mnist_zg_torch_perf_0_speedupzigrad_pytorch_plotly.svg) -->
 
-<sub>*Tensorflow excluded for scaling purposes (too slow). A hermetic, reproducible benchmarking pipeline built on Bazel will allow testing across more platforms (in progress, testers needed).</sub>
+<sub>*Tensorflow excluded for scaling purposes (too slow).</sub>
 
-**Built for specialized optimization**
+**Flexible**
+Zigrad supports research workflows with high level abstractions for rapid prototyping, and integrations like Tensorboard and Mujoco. Zigrad supports the transition of research code to training infrastructure. 
 
-Zigrad's design enables deep control and customization
+Zigrad supports research through,
 
-- Fine-grained control over memory management
-- Flexible tradeoffs between performance characteristics like latency vs throughput
-- Optimize for your specific hardware, use case, and system requirements
-- No abstraction layers or build systems that make aggressive optimizations challenging or complex
+- Easy to use torch-like ergonomics
+- A general purpose automatic differentiation system for n-dimensional data
+- Eager execution and dynamic computation graph by default
+- Computation graph tracing and visualization
+- A design that naturally allows for custom differentiable operations
 
-But wait, there's more..
+Zigrad supports engineering through,
 
-- Tiny binaries: binaries for the MNIST tests shown are under 400kb in `ReleaseFast` mode and under 200kb in `ReleaseSmall`.
-- Graph tracing
-- Tensorboard integration
-- Cross platform
-- Minimal and transparent heap allocations
+- An architecture that enables deep control and customization through opt-in complexity,
+- Offering flexible tradeoffs between performance characteristics like latency vs throughput
+- Hardware-aware optimizations tailored to specific use cases and system requirements
+- Fine-grained memory management and allocation control
+- Cross-platform compatibility without compromising performance
+- A streamlined design that avoids abstraction layers or build systems that hinder aggressive optimizations
 <!-- Scalar API -->
-
-<sub>*Not yet merged</sub>
 
 ## Features
 
@@ -124,28 +130,26 @@ make
 
 A lot is planned and hoping for support from the Zig community so we can accomplish some of the more ambitious goals.
 
-- More comprehensive MKL support (in progress)
+- More comprehensive MKL and CUDA support (in progress)
+- Support for popular formats like ONNX and ggml.
 - Standardized benchmarking procedures (always an ongoing effort)
-- CUDA support (in progress)
 - Lazy tensors
 - Static graph optimization
 - Dynamic graph compiler
 - MLIR
-- Support for popular formats like ONNX and ggml.
 - ZML translation for inference
 - Apache TVM integration. [Github](https://github.com/apache/tvm/) [Homepage](https://tvm.apache.org)
 - More examples like LLMs, physics and robotic control, etc.
 
 ## Known Issues and Limitations
 
-- Lack of GPU support for now
+- Documentation. As the API stabilizes more documentation will be added. For now, the examples are designed to be quickstart guides.
 - Effort has been directed towards performant primitives, not many layer types have been implemented
   - e.g. conv, pooling, etc are test implementations for verification, they are slow and unoptimized, I would not use them
 
 ## Contributing
 
 - [Join the discord](https://discord.gg/JWSSfWj3Uf) and into the dev channels
-- In addition to the above list, anything in in [docs/roadmap.norg](docs/roadmap.norg) is planned
 - Any open issue is available for development, just leave a comment mentioning your interest and I can provide support to help get you started if necessary
 - Otherwise, **please open an issue first, before working on a PR**
 - If you are interested in contributing but do not know where to start then open an issue or leave a comment
