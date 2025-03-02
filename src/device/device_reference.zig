@@ -275,10 +275,22 @@ pub fn Blas(comptime Parent: type) type {
             src_vals: []T,
             vmin: T,
             vmax: T,
-            dst_mask: []u1,
+            dst_mask: []T,
         ) void {
             return switch (self.parent()) {
                 inline else => |dev| dev.blas.clamp_with_mask(T, src_vals, vmin, vmax, dst_mask),
+            };
+        }
+
+        pub fn clamp_backward(
+            self: Blas,
+            T: type,
+            src: []T,
+            mask: []T,
+            dst: []T,
+        ) void {
+            return switch (self.parent()) {
+                inline else => |dev| dev.blas.clamp_backward(T, src, mask, dst),
             };
         }
 

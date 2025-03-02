@@ -55,7 +55,7 @@ RUN wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
     rm -rf /var/lib/apt/lists/*
 
 # cutensor, cudnn
-RUN apt-get update && apt get install -y \
+RUN apt-get update && apt-get install -y \
     libcutensor2 \
     libcutensor2-dev \
     cudnn9-cuda-12 \

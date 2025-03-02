@@ -224,6 +224,17 @@ pub const Blas = struct {
         }
     }
 
+    pub fn clamp_backward(
+        self: Blas,
+        T: type,
+        src: []T,
+        mask: []T,
+        dst: []T,
+    ) void {
+        self.mul(T, src, mask, mask); // NOTE: we write into the mask because it wont be reused
+        self.add(T, mask, dst, dst);
+    }
+
     pub fn max_forward(
         _: Blas,
         T: type,
@@ -233,7 +244,7 @@ pub const Blas = struct {
         const _idx = switch (T) {
             f32 => c.cblas_isamax(@intCast(src.len), src.ptr, 1),
             f64 => c.cblas_idamax(@intCast(src.len), src.ptr, 1),
-            else => @compileError("Unsupported type for BLAS max" ++ @typeName(T)),
+            else => @compileError("Unsupported type for BLAS amax" ++ @typeName(T)),
         };
         dst[0] = src[_idx];
     }

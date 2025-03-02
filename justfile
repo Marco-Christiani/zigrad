@@ -4,8 +4,11 @@ default:
   @just mnist
 
 alias b := build
+alias bf := build-fast
 alias bt := test
 alias r := run
+
+export ZIGRAD_BACKEND := env("ZIGRAD_BACKEND", "HOST")
 
 test +opts="":
   zig build test {{opts}}
@@ -13,8 +16,17 @@ test +opts="":
 build +opts="":
   zig build {{opts}}
 
+build-fast +opts="":
+  zig build -Doptimize=ReleaseFast {{opts}}
+
 run +opts="":
   zig build run {{opts}}
+
+cuda_compile:
+  pushd src/cuda/ && \
+   mkdir build && cd build && \
+   cmake .. && make -j$(nproc) && \
+   popd
 
 export ZG_DATA_DIR := env("ZG_DATA_DIR", "data")
 mnist:
