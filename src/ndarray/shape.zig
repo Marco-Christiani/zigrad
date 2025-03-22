@@ -110,6 +110,11 @@ pub fn init(values: Slice) Shape {
     return Shape.empty.overlay(values);
 }
 
+pub fn init_from_bytes(values: []const u8) Shape {
+    std.debug.assert(values.len % @sizeOf(u64) == 0);
+    var empty = Shape.empty;
+}
+
 pub fn merge(slices: []const Slice) Shape {
     var tmp = Shape.empty;
     for (slices) |s| {
