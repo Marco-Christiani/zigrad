@@ -37,7 +37,6 @@ pub const Op = enum {
     MATMUL_AtB,
     MATMUL_ABt,
     MATMUL_AtBt,
-    CLAMP,
     DOT,
     MATVEC,
     SUM,

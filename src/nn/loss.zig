@@ -163,18 +163,10 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     }
     const mean_loss = sum_loss / @as(T, @floatFromInt(batch_size));
 
-<<<<<<< HEAD
-    const bw_fn = struct {
-        fn backward(bw_tensor: *const NDTensor(T)) !void {
-            const bw_ctx: *NDTensor(T) = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-            defer bw_ctx.deinit();
-=======
     const CceBwd = struct {
         sm_preds: *NDTensor(T),
         pub fn callback(bw_tensor: *NDTensor(T), ctx: *@This()) !void {
             defer ctx.sm_preds.deinit();
-
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             const bw_self_children = bw_tensor.get_children() orelse return error.NoChildren;
             const bw_y_pred = bw_self_children[0];
             const bw_y = bw_self_children[1];
@@ -261,14 +253,9 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
 
 pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
     const result = try _softmax_fwd(T, input, dim, device);
-<<<<<<< HEAD
-    const bw_fn = struct {
-        fn backward(bw_tensor: *const NDTensor(T), bw_device: DeviceReference) !void {
-=======
     const SmaxBwd = struct {
         dim: usize,
         pub fn callback(bw_tensor: *NDTensor(T), ctx: *@This()) !void {
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             const bw_self_children = bw_tensor.children orelse return error.NoChildren;
             const bw_input = bw_self_children[0];
             if (bw_input.grad == null) return;
@@ -318,14 +305,9 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     }
     const loss = sum_loss / n;
 
-<<<<<<< HEAD
-    const bw_fn = struct {
-        fn backward(tensor: *const NDTensor(T)) !void {
-=======
     const Sl1LossBwd = struct {
         beta: T,
         pub fn callback(tensor: *NDTensor(T), ctx: *@This()) !void {
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             const self_children = tensor.get_children() orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];

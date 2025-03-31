@@ -597,7 +597,6 @@ pub fn NDArray(comptime T: type) type {
                 .alpha = config.alpha,
                 .beta = config.beta,
             });
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
         }
 
         pub fn unbroadcast(self: *const Self, new_shape: Shape, device: DeviceReference) !Self {
