@@ -46,9 +46,7 @@ pub const Op = enum {
     MAX,
     EXP,
     TRANSFER,
-<<<<<<< HEAD
     CLAMP,
-=======
 
     fn matmul_tag(trans_a: bool, trans_b: bool) Op {
         return if (!trans_a and !trans_b)
@@ -60,7 +58,6 @@ pub const Op = enum {
         else
             .MATMUL_AtBt;
     }
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
 };
 
 pub fn NDTensor(comptime T: type) type {
@@ -384,12 +381,6 @@ pub fn NDTensor(comptime T: type) type {
             if (self.device.is_compatible(device))
                 return self;
 
-<<<<<<< HEAD
-            const to_device_bw = struct {
-                fn to_device_bw_impl(_self: *const Self) !void {
-                    const child = (_self.get_children() orelse return error.NoChildren)[0];
-                    try to_device_impl(_self.grad.?.data, child.grad.?.data, _self.device, child.device);
-=======
             const ToDeviceBwd = struct {
                 fn callback(y: *Self) !void {
                     const x = y.backward_child(0) orelse return;
@@ -399,7 +390,6 @@ pub fn NDTensor(comptime T: type) type {
                         y.device,
                         x.device,
                     );
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -467,21 +457,12 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Copies. COM.
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
-<<<<<<< HEAD
-            const reshape_bw = struct {
-                fn reshape_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const original_shape = children[0].data.shape;
-                    try self.grad.?._reshape(original_shape.shape);
-                    _ = try children[0].grad.?._add(self.grad.?);
-=======
             const ReshapeBwd = struct {
                 fn callback(y: *Self) !void {
                     const x = y.backward_child(0) orelse return;
                     const x_grad = try x.ensure_grad(0);
                     y.assume_grad()._reshape(x.data.shape.slice());
                     try x_grad._add(y.assume_grad().*);
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -500,14 +481,6 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Copies. COM.
         pub fn transpose(self: *Self) !*Self {
-<<<<<<< HEAD
-            const transpose_bw = struct {
-                fn transpose_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const gt = try self.grad.?.transpose(_self.device);
-                    defer gt.deinit(_self.device);
-                    _ = try children[0].grad.?._add(gt);
-=======
             const TransposeBwd = struct {
                 pub fn callback(y: *Self) !void {
                     const x = y.backward_child(0) orelse return;
@@ -518,7 +491,6 @@ pub fn NDTensor(comptime T: type) type {
                         .n = self.shape.get(1),
                         .alpha = 1.0,
                     });
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -640,35 +612,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn clamp(self: *Self, vmin: T, vmax: T) !*Self {
             std.debug.assert(vmin <= vmax);
 
-<<<<<<< HEAD
-            const rg = self._requires_grad and zg.rt_grad_enabled;
-
-            var result_data = try self.data.copy(self.device);
-            const mask = blk: {
-                if (rg) {
-                    const mask = try self.device.mem_alloc(T, self.get_size());
-                    result_data._clamp_with_mask(vmin, vmax, mask, self.device);
-                    break :blk mask;
-                } else {
-                    // we dont need the masking logic
-                    result_data._clamp(vmin, vmax, self.device);
-                    break :blk null;
-                }
-            };
-
-            const clampBw = struct {
-                fn clamp_bw_impl(_self: *const Self) !void {
-                    const ctx: [*]T = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const input = children[0];
-                    const _mask = ctx[0..input.get_size()];
-                    const grad_output = (_self.grad orelse return error.NoGradient).data;
-                    const grad_input = (input.grad orelse return error.NoGradient).data;
-
-                    // mask gradient, zero out grad for entries that were clamped
-                    _self.device.blas.clamp_backward(T, grad_output, _mask, grad_input);
-                    _self.device.mem_free(_mask);
-=======
             const ClampBwd = struct {
                 _min: T,
                 _max: T,
@@ -681,27 +624,15 @@ pub fn NDTensor(comptime T: type) type {
                         .min = ctx._min,
                         .max = ctx._max,
                     });
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
-<<<<<<< HEAD
-            return create_dependent(.{
-                .data = result_data,
-                .op = .CLAMP,
-                .children = &.{self},
-                ._requires_grad = rg,
-                .device = self.device,
-                ._backward = clampBw,
-                ._backward_ctx = if (mask == null) null else @ptrCast(mask),
-=======
             return create_dependent(ClampBwd, .{
                 .data = try self.data.clamp(vmin, vmax, self.device),
                 .children = &.{self},
                 .device = self.device,
                 .callback = .{ ._min = vmin, ._max = vmax },
                 .op = .CLAMP,
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             });
         }
 
@@ -709,22 +640,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn add(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-<<<<<<< HEAD
-            const addBw = struct {
-                fn add_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const a = children[0];
-                    const b = children[1];
-
-                    var a_grad = try _self.grad.?.unbroadcast(a.grad.?.shape, _self.device);
-                    defer a_grad.deinit(_self.device);
-
-                    var b_grad = try _self.grad.?.unbroadcast(b.grad.?.shape, _self.device);
-                    defer b_grad.deinit(_self.device);
-
-                    _ = try a.grad.?._add(a_grad, a.device);
-                    _ = try b.grad.?._add(b_grad, b.device);
-=======
             const AddBwd = struct {
                 pub fn callback(c: *Self) !void {
                     scope: {
@@ -735,7 +650,6 @@ pub fn NDTensor(comptime T: type) type {
                         const b = c.backward_child(1) orelse break :scope;
                         try c.assume_grad().unbroadcast_(try b.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
                     }
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -777,22 +691,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn sub(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-<<<<<<< HEAD
-            const subBw = struct {
-                fn sub_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const a = children[0];
-                    const b = children[1];
-
-                    var a_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(a.grad.?.shape, _self.device);
-                    defer a_grad.deinit(_self.device);
-
-                    var b_grad = try (try _self.grad.?.copy(_self.device)).unbroadcast(b.grad.?.shape, _self.device);
-                    defer b_grad.deinit(_self.device);
-
-                    _ = try a.grad.?._add(a_grad, a.device);
-                    _ = try b.grad.?._sub(b_grad, b.device);
-=======
             const SubBwd = struct {
                 pub fn callback(c: *Self) !void {
                     scope: {
@@ -803,7 +701,6 @@ pub fn NDTensor(comptime T: type) type {
                         const b = c.backward_child(1) orelse break :scope;
                         try c.assume_grad().unbroadcast_(try b.ensure_grad(0), c.device, .{ .alpha = -1.0, .beta = 1.0 });
                     }
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -820,19 +717,11 @@ pub fn NDTensor(comptime T: type) type {
         pub fn mul(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-<<<<<<< HEAD
-            const mulBw = struct {
-                fn mul_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const a = children[0];
-                    const b = children[1];
-=======
             const MulBwd = struct {
                 pub fn callback(c: *Self) !void {
                     scope: {
                         const a = c.backward_child(0) orelse break :scope;
                         const b = c.get_child(1);
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
 
                         var bc_grad = try b.data.mul(c.assume_grad().*, c.device);
                         defer bc_grad.deinit(c.device);
@@ -864,19 +753,11 @@ pub fn NDTensor(comptime T: type) type {
         pub fn div(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-<<<<<<< HEAD
-            const divBw = struct {
-                fn div_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const a = children[0];
-                    const b = children[1];
-=======
             const DivBwd = struct {
                 pub fn callback(c: *Self) !void {
                     scope: {
                         const a = c.backward_child(0) orelse break :scope;
                         const b = c.get_child(1);
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
 
                         var bc_grad = try c.assume_grad().div(b.data, c.device);
                         defer bc_grad.deinit(c.device);
@@ -912,23 +793,6 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *Self) !*Self {
-<<<<<<< HEAD
-            const max_mem = try DataType.empty(&.{1}, self.device);
-
-            self.device.blas.max_forward(T, self.get_data(), max_mem.data);
-
-            const maxBw = struct {
-                fn max_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const child = children[0];
-                    _self.device.blas.max_backward(
-                        T,
-                        child.get_data(),
-                        _self.get_data(),
-                        _self.grad.?.data,
-                        child.grad.?.data,
-                    );
-=======
             const MaxBwd = struct {
                 pub fn callback(y: *Self) !void {
                     const x = y.backward_child(0) orelse return;
@@ -938,7 +802,6 @@ pub fn NDTensor(comptime T: type) type {
                         .y = y.get_data(),
                         .y_g = y.assume_grad_data(),
                     });
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -954,15 +817,6 @@ pub fn NDTensor(comptime T: type) type {
         /// TODO: exp bw backend
         /// Element-wise exponential. COM.
         pub fn exp(self: *Self) !*Self {
-<<<<<<< HEAD
-            const expBw = struct {
-                fn exp_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const child = children[0];
-                    for (_self.data.data, _self.grad.?.data, 0..) |exp_val, grad_val, i| {
-                        child.grad.?.data[i] += exp_val * grad_val;
-                    }
-=======
             const ExpBwd = struct {
                 pub fn callback(y: *Self) !void {
                     const x = y.backward_child(0) orelse return;
@@ -971,7 +825,6 @@ pub fn NDTensor(comptime T: type) type {
                         .y = y.get_data(),
                         .y_g = y.assume_grad_data(),
                     });
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
             return create_dependent(ExpBwd, .{
@@ -1027,10 +880,6 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-<<<<<<< HEAD
-        fn bw_bmm_acc(self: *const NDTensor(T)) !void {
-            const grad_C = self.grad orelse return error.NoGradient;
-=======
         pub fn bmm_acc_(self: *Self, other: *Self, out: *Self, config: BmmConfig) !*Self {
             try self.data.bmm_acc_(other.data, &out.data, self.device, .{
                 .trans_a = config.trans_a,
@@ -1038,7 +887,6 @@ pub fn NDTensor(comptime T: type) type {
                 .alpha = 1.0,
                 .beta = 0.0,
             });
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
 
             return create_dependent(BmmAccBwd, .{
                 .data = out.data,
@@ -1100,20 +948,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn dot(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-<<<<<<< HEAD
-            const dotBw = struct {
-                fn dot_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    var a = children[0];
-                    var b = children[1];
-                    const gscalar: *const T = @ptrCast(_self.grad.?.data.ptr);
-                    // In forward: c = dot(a, b) aka _self = dot(self, other)
-                    // Note that c' is a scalar. axpy performs y += a*x.
-                    // a' += c'*b
-                    _self.device.blas.axpy(T, b.get_data(), a.grad.?.data, gscalar);
-                    // b' += c'*a
-                    _self.device.blas.axpy(T, a.get_data(), b.grad.?.data, gscalar);
-=======
             const DotBwd = struct {
                 pub fn callback(c: *Self) !void {
                     scope: {
@@ -1132,7 +966,6 @@ pub fn NDTensor(comptime T: type) type {
                             .alpha = @ptrCast(c.assume_grad_data().ptr),
                         });
                     }
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -1149,24 +982,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn matvec(self: *Self, other: *Self, trans_a: bool) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
-<<<<<<< HEAD
-            const matvecBw = struct {
-                /// TODO: Use accumulation
-                fn matvec_bw_impl(_self: *const Self) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const A = children[0].data;
-                    const x = children[1].data;
-
-                    //  L(y), y = Ax, dL/dA = (dL/dy)(dy/dA) = (dL/dy)x'
-                    var grad_A = try _self.grad.?.outer(x, _self.device);
-                    defer grad_A.deinit(_self.device);
-                    _ = try children[0].grad.?._add(grad_A, _self.device);
-
-                    //  L(y), y = Ax, dL/dx = (dL/dy)(dy/dx) = A'(dL/dy)
-                    var grad_x = try A.matvec(_self.grad.?, true, _self.device);
-                    defer grad_x.deinit(_self.device);
-                    _ = try children[1].grad.?._add(grad_x, _self.device);
-=======
             const MatvecBwd = struct {
                 _trans_a: bool,
                 pub fn callback(y: *Self, ctx: *@This()) !void {
@@ -1195,7 +1010,6 @@ pub fn NDTensor(comptime T: type) type {
                             .beta = 1.0,
                         });
                     }
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
 
@@ -1208,21 +1022,6 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-<<<<<<< HEAD
-        /// Performs `self = alpha*other + self` in place.
-        pub fn _axpy(self: *const Self, other: Self, alpha: T) void {
-            std.debug.assert(self.device.is_compatible(other.device));
-            self.data._axpy(other, alpha, self.device);
-        }
-
-        /// Sum of all elements in the tensor. COM.
-        pub fn sum(self: *Self) !*Self {
-            const sumBw = struct {
-                fn sum_bw_impl(_self: *const NDTensor(T)) !void {
-                    const children = _self.get_children() orelse return error.NoChildren;
-                    const child = children[0];
-                    _ = try child.grad.?._add(_self.grad.?, child.device);
-=======
         /// Sum of all elements in the tensor. COM.
         pub fn sum(self: *Self) !*Self {
             const SumBwd = struct {
@@ -1230,7 +1029,6 @@ pub fn NDTensor(comptime T: type) type {
                     const x = y.backward_child(0) orelse return;
                     const x_grad = try x.ensure_grad(0);
                     try x_grad._add(y.assume_grad().*, y.device);
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
                 }
             };
             return create_dependent(SumBwd, .{
@@ -1276,17 +1074,6 @@ pub fn NDTensor(comptime T: type) type {
         //    });
         //}
 
-<<<<<<< HEAD
-        pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {
-            const gatherBackward = struct {
-                fn bw_impl(bw_tensor: *const NDTensor(T)) !void {
-                    const bw_children = bw_tensor.get_children() orelse return error.NoChildren;
-                    const bw_input = bw_children[0];
-                    if (bw_input.grad == null) return;
-                    const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-                    // how am i expected to free this, unknown len
-                    // defer _self.device.raw(offsets); // FIXME: just occuring to me the problem with this, if _self.device != fwd_allocator
-=======
         //pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {;;
         //    const gatherBackward = struct {;;
         //        fn bw_impl(bw_tensor: NDTensor(T)) !void {
@@ -1296,8 +1083,6 @@ pub fn NDTensor(comptime T: type) type {
         //            const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
         //            // how am i expected to free this, unknown len
         //            // defer _self.device.raw(offsets); // FIXME: just occuring to me the problem with this, if _self.device != fwd_allocator
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
-
         //            // bw_tensor must/should be the same len as indices used to index (note that offsets is a raw c ptr without a len)
         //            // std.debug.assert(offsets.len == bw_tensor.data.data.len); // can make this a real check when its a  null term alloc
         //            for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
@@ -1319,32 +1104,11 @@ pub fn NDTensor(comptime T: type) type {
         //    });
         //}
 
-<<<<<<< HEAD
-        /// Callback is highly dynamic so passing a reference may be a better idea for _backward callback,
-        /// but committing to compiler reliance in this refactor
-        pub fn set_backward(self: *Self, backward_fn: Callback, ctx: ?*anyopaque) void {
-            self._backward = backward_fn;
-            self._backward_ctx = ctx;
-        }
-
-        pub fn backward(self: *const Self) !void {
-            // hypothetically, we could check for children. This is treating self as detached, tbd if this is a good idea.
-            if (!zg.rt_grad_enabled) return error.GradNotEnabled;
-            if (!self._requires_grad) return;
-            if (self._backward) |f| {
-                try f(self);
-                return;
-            }
-            if (self.op) |op| {
-                std.debug.panic("Op {s} backward not implemented.", .{@tagName(op)});
-            }
-=======
         pub fn backward(self: *Self) !void {
             std.debug.assert(zg.rt_grad_enabled);
             const ctx = &(self._backward_ctx orelse return);
             try ctx.call(self, self.device);
             self._backward_ctx = null;
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
         }
 
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes
@@ -1402,20 +1166,7 @@ test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
     const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
 
     try std.testing.expectEqualSlices(T, expected_output, y.get_data());
-<<<<<<< HEAD
-    try std.testing.expectEqualSlices(T, expected_grad, x.grad.?.data);
-
-    var z = try Tensor.init(&.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, true, device);
-    defer z.deinit();
-    z._clamp(0, 1.0);
-    try std.testing.expectEqualSlices(T, &.{ 0, 0, 0.5, 1 }, z.get_data());
-
-    z.grad.?.fill(9, device);
-    try z._clamp_grad(0, 1.0);
-    try std.testing.expectEqualSlices(T, &.{ 1, 1, 1, 1 }, z.grad.?.data);
-=======
     try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
->>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
 }
 
 test "tensor/GraphManager/sum" {

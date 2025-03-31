@@ -556,12 +556,6 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.clamp_fwd(T){ .x = self.data, .y = self.data, .max = vmax, .min = vmin });
         }
 
-<<<<<<< HEAD
-        /// Clamps values in place and writes a mask of 1/0 indicating whether an entry was clamped.
-        pub fn _clamp_with_mask(self: Self, vmin: T, vmax: T, dst_mask: []T, device: DeviceReference) void {
-            std.debug.assert(vmin <= vmax);
-            device.blas.clamp_with_mask(T, self.data, vmin, vmax, dst_mask);
-=======
         // TODO: Maybe we should standardize things in this way:
         //    fn name -> returns value
         //    fn _name -> modifies this value
