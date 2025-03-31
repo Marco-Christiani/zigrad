@@ -33,37 +33,45 @@ void __global__ __max_fwd(
   *dst = thrust::reduce(thrust::device, src, src + n, std::numeric_limits<T>::lowest(), thrust::maximum<T>());
 }
 
-extern "C" void max_forward(
+extern "C" void max_fwd(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
-  switch (id) {
-    case SINGLE: return __max_fwd<f32><<<1,1,0,_stream>>>(x, y, n);
-    case DOUBLE: return __max_fwd<f64><<<1,1,0,_stream>>>(x, y, n);
-    default: SYSTEM_EXIT("Unsupported data type");
+  const auto _stream = __cast_stream(w);
+
+  if (id == SINGLE) {
+    __max_fwd<f32><<<1,1,0,_stream>>>(x, y, n);
+  } else if (id == DOUBLE) {
+    __max_fwd<f64><<<1,1,0,_stream>>>(x, y, n);
+  } else {
+    SYSTEM_EXIT("Unsupported data type");
   }
+
   CUDA_ASSERT(cudaPeekAtLastError());
 }
 
-extern "C" void max_reverse(
+extern "C" void max_bwd(
   dtype id,
-  void * stream,
+  StreamWrapper w,
   const void* x_val,
   void const* y_val,
   const void* y_grd,
         void* x_grd,
   len_t n
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
-  switch (id) {
-    case SINGLE: return __max_bwd<f32><<<1,1,0,_stream>>>(x_val, y_val, y_grd, x_grd, n);
-    case DOUBLE: return __max_bwd<f64><<<1,1,0,_stream>>>(x_val, y_val, y_grd, x_grd, n);
-    default: SYSTEM_EXIT("Unsupported data type");
+  const auto _stream = __cast_stream(w);
+
+  if (id == SINGLE) {
+    __max_bwd<f32><<<1,1,0,_stream>>>(x_val, y_val, y_grd, x_grd, n);
+  } else if (id == DOUBLE) {
+    __max_bwd<f64><<<1,1,0,_stream>>>(x_val, y_val, y_grd, x_grd, n);
+  } else {
+    SYSTEM_EXIT("Unsupported data type");
   }
+
   CUDA_ASSERT(cudaPeekAtLastError());
 }
 

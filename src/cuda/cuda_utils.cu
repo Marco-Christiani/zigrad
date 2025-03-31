@@ -3,40 +3,40 @@
 #include "cuda_helpers.cu"
 #include "device_properties.cu"
 
-extern "C" void* mem_alloc(len_t N, void* stream) {
-  CUstream _stream = get_stream(stream);
+extern "C" void* mem_alloc(len_t N, StreamWrapper stream) {
+  CUstream _stream = __cast_stream(stream);
   CUdeviceptr dptr;
   CURESULT_ASSERT(cuMemAllocAsync(&dptr, N, _stream));
   return (void*)dptr;
 }
 
-extern "C" void memcpy_HtoD(void* dev_ptr, const void* cpu_ptr, len_t N, void* stream) {
-  CUstream _stream = get_stream(stream);
+extern "C" void memcpy_HtoD(void* dev_ptr, const void* cpu_ptr, len_t N, StreamWrapper stream) {
+  CUstream _stream = __cast_stream(stream);
   CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(dev_ptr);
   CURESULT_ASSERT(cuMemcpyHtoDAsync(dptr, cpu_ptr, N, _stream));
 }
 
-extern "C" void memcpy_DtoH(void* cpu_ptr, void const* dev_ptr, len_t N, void* stream) {
-  CUstream _stream = get_stream(stream);
+extern "C" void memcpy_DtoH(void* cpu_ptr, void const* dev_ptr, len_t N, StreamWrapper stream) {
+  CUstream _stream = __cast_stream(stream);
   CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(dev_ptr);
   CURESULT_ASSERT(cuMemcpyDtoHAsync(cpu_ptr, dptr, N, _stream));
 }
 
-extern "C" void memcpy_DtoD(void* dst_ptr, void const* src_ptr, len_t N, void* stream) {
-  CUstream _stream = get_stream(stream);
+extern "C" void memcpy_DtoD(void* dst_ptr, void const* src_ptr, len_t N, StreamWrapper stream) {
+  CUstream _stream = __cast_stream(stream);
   CUdeviceptr dst = reinterpret_cast<CUdeviceptr>(dst_ptr);
   CUdeviceptr src = reinterpret_cast<CUdeviceptr>(src_ptr);
   CURESULT_ASSERT(cuMemcpyDtoDAsync(dst, src, N, _stream));
 }
 
-extern "C" void mem_free(void* dev_ptr, void* stream) {
-  CUstream _stream = get_stream(stream);
+extern "C" void mem_free(void* dev_ptr, StreamWrapper stream) {
+  CUstream _stream = __cast_stream(stream);
   CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(dev_ptr);
   CURESULT_ASSERT(cuMemFreeAsync(dptr, _stream));
 }
 
-extern "C" void stream_synchronize(void* stream) {
-  CUstream _stream = get_stream(stream);
+extern "C" void stream_synchronize(StreamWrapper stream) {
+  CUstream _stream = __cast_stream(stream);
   CURESULT_ASSERT(cuStreamSynchronize(_stream));
 }
 
@@ -88,50 +88,50 @@ extern "C" len_t device_total_memory(unsigned device) {
   return total;
 }
 
-extern "C" void* init_stream() {
+extern "C" StreamWrapper init_stream() {
   cudaStream_t cuda_stream = nullptr;
 
   // REMINDER: For multi-device support, we need to add a call to:
   //    CUresult cuCtxGetDevice ( CUdevice* device ) 
 
   CURESULT_ASSERT(cuStreamCreate(&cuda_stream, CU_STREAM_DEFAULT));
-  return reinterpret_cast<void*>(cuda_stream);
+  return { .ptr = cuda_stream };
 }
 
-extern "C" void deinit_stream(void* stream) {
+extern "C" void deinit_stream(StreamWrapper stream) {
   // TODO: If devices get set, it's probably a good idea to capture
   //       which device a stream was created on and put that in the
   //       void* object. Research if it's required to deinit
   //       streams on the correct device.
-  CURESULT_ASSERT(cuStreamDestroy(get_stream(stream)));
+  CURESULT_ASSERT(cuStreamDestroy(__cast_stream(stream)));
 }
 
-extern "C" void* init_cublas_handle(void* stream) {
+extern "C" CublasWrapper init_cublas_handle(StreamWrapper stream) {
   cublasHandle_t blas_handle = nullptr;
   CUBLAS_ASSERT(cublasCreate(&blas_handle));
-  CUBLAS_ASSERT(cublasSetStream(blas_handle, get_stream(stream)));
-  return reinterpret_cast<void*>(blas_handle);
+  CUBLAS_ASSERT(cublasSetStream(blas_handle, __cast_stream(stream)));
+  return { .ptr = blas_handle };
 }
 
-extern "C" void deinit_cublas_handle(void* handle) {
-  CUBLAS_ASSERT(cublasDestroy(get_handle(handle)));
+extern "C" void deinit_cublas_handle(CublasWrapper w) {
+  CUBLAS_ASSERT(cublasDestroy(__cast_cublas(w)));
 }
 
-extern "C" void* init_cudnn_handle(void* stream) {
+extern "C" CudnnWrapper init_cudnn_handle(StreamWrapper stream) {
   cudnnHandle_t cudnn_handle = nullptr;
   CUDNN_ASSERT(cudnnCreate(&cudnn_handle));
-  CUDNN_ASSERT(cudnnSetStream(cudnn_handle, get_stream(stream)));
-  return reinterpret_cast<void*>(cudnn_handle);
+  CUDNN_ASSERT(cudnnSetStream(cudnn_handle, __cast_stream(stream)));
+  return { .ptr = cudnn_handle };
 }
 
-extern "C" void deinit_cudnn_handle(void* handle) {
-  CUDNN_ASSERT(cudnnDestroy(static_cast<cudnnHandle_t>(handle)));
+extern "C" void deinit_cudnn_handle(CudnnWrapper w) {
+  CUDNN_ASSERT(cudnnDestroy(__cast_cudnn(w)));
 }
 
 #include "cutensor_utils.cu"
 
-extern "C" CutensorWrapper init_cutensor_handle(void* stream) {
-  CutensorBackend* backend = new CutensorBackend(stream);
+extern "C" CutensorWrapper init_cutensor_handle(StreamWrapper stream) {
+  CutensorBackend* backend = new CutensorBackend(__cast_stream(stream));
   return CutensorBackend::wrap(backend);
 }
 
@@ -140,9 +140,9 @@ extern "C" void deinit_cutensor_handle(CutensorWrapper wrapper) {
   delete backend;
 }
 
-extern "C" void mem_fill(dtype id, void* data, len_t n, const void* value, void* stream) {
+extern "C" void mem_fill(dtype id, void* data, len_t n, const void* value, StreamWrapper stream) {
   
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(stream);
 
   switch (id) {
     case SINGLE: {
@@ -158,9 +158,9 @@ extern "C" void mem_fill(dtype id, void* data, len_t n, const void* value, void*
   }
 }
 
-extern "C" void mem_sequence(dtype id, void* data, len_t n, const void* init, const void* step, void* stream) {
+extern "C" void mem_sequence(dtype id, void* data, len_t n, const void* init, const void* step, StreamWrapper stream) {
   
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(stream);
 
   switch (id) {
     case SINGLE: {
@@ -207,35 +207,35 @@ struct GraphBackend {
   cudaGraphExec_t instance = nullptr;
 };
 
-extern "C" GraphWrapper open_capture(void* stream) {
-    CUDA_ASSERT(cudaStreamBeginCapture(static_cast<cudaStream_t>(stream), cudaStreamCaptureModeGlobal));
+extern "C" GraphWrapper open_capture(StreamWrapper stream) {
+    CUDA_ASSERT(cudaStreamBeginCapture(__cast_stream(stream), cudaStreamCaptureModeGlobal));
     return GraphWrapper{ .ptr = new GraphBackend() };
 }
 
-extern "C" void save_capture(GraphWrapper wrapper, void* stream) {
+extern "C" void save_capture(GraphWrapper wrapper, StreamWrapper stream) {
+    auto _stream = __cast_stream(stream); 
     auto backend = static_cast<GraphBackend*>(wrapper.ptr);
-    auto _stream = static_cast<cudaStream_t>(stream); 
     CUDA_ASSERT(cudaStreamEndCapture(_stream, &backend->graph));
     // TODO: Check out these "NULL, NULL, 0" arguments
     CUDA_ASSERT(cudaGraphInstantiate(&backend->instance, backend->graph, NULL, NULL, 0));
 }
 
-extern "C" void free_capture(GraphWrapper wrapper, void* stream) {
+extern "C" void free_capture(GraphWrapper wrapper, StreamWrapper stream) {
     auto backend = static_cast<GraphBackend*>(wrapper.ptr);
     CUDA_ASSERT(cudaGraphExecDestroy(backend->instance));
     CUDA_ASSERT(cudaGraphDestroy(backend->graph));
     delete backend;
 }
 
-extern "C" void run_capture(GraphWrapper wrapper, void* stream) {
+extern "C" void run_capture(GraphWrapper wrapper, StreamWrapper stream) {
+    auto _stream = __cast_stream(stream);
     auto backend = static_cast<GraphBackend*>(wrapper.ptr);
-    auto _stream = static_cast<cudaStream_t>(stream); 
     CUDA_ASSERT(cudaGraphLaunch(backend->instance, _stream));
 }
 
 template <typename T>
-void __mem_random(void* x, len_t n, randtype op, unsigned seed, void* stream) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
+void __mem_random(void* x, len_t n, randtype op, unsigned seed, StreamWrapper stream) {
+  const auto _stream = __cast_stream(stream);
   thrust::counting_iterator<unsigned> idxs(0);
   if (op == UNIFORM) {
     thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs+ n, static_cast<T*>(x), UniformRandom<T>{ .seed = seed });
@@ -244,7 +244,7 @@ void __mem_random(void* x, len_t n, randtype op, unsigned seed, void* stream) {
   }
 }
 
-extern "C" void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, void* stream) {
+extern "C" void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, StreamWrapper stream) {
   switch (id) {
     case SINGLE: return __mem_random<f32>(x, n, op, seed, stream);
     case DOUBLE: return __mem_random<f64>(x, n, op, seed, stream);
@@ -259,9 +259,9 @@ void __mem_take(
   const len_t* idxs,
   len_t idxs_len,
   void* dst,
-  void* stream
+  StreamWrapper stream
 ){
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(stream);
   const auto src_itr = static_cast<const T*>(src);
   const auto dst_itr = static_cast<T*>(dst);
   thrust::counting_iterator<len_t> stencil(0);
@@ -283,7 +283,7 @@ extern "C" void mem_take(
   const len_t* idxs,
   len_t idxs_len,
   void* dst,
-  void* stream
+  StreamWrapper stream
 ) {  
   switch (id) {
     case SINGLE: return __mem_take<f32>(src, src_len, idxs, idxs_len, dst, stream);

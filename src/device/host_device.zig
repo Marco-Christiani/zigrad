@@ -7,21 +7,11 @@ const builtin = @import("builtin");
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
 const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
+const TransferDirection = @import("device_common.zig").TransferDirection;
+const ByteMask = std.bit_set.IntegerBitSet(8);
+pub const HostDevice = @This();
 
-pub const HostMalloc = struct {
-    pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
-        return @ptrCast(@alignCast(std.c.malloc(n) orelse return null));
-    }
-    pub fn raw_free(ptr: ?*anyopaque, _: *anyopaque) void {
-        return std.c.free(ptr);
-    }
-};
-
-fn host_reference(self: *HostDevice) DeviceReference {
-    return self;
-}
-
-pub const DeviceReference = *HostDevice;
+const opspec = @import("opspec.zig");
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -39,418 +29,553 @@ const c = switch (builtin.target.os.tag) {
     else => @compileError("Unsupported os"),
 };
 
-pub const Blas = struct {
-    /// Computes dot product assuming a stride of 1 and row-major. (N,) x (N,) = (1,)
-    pub fn dot(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        z: []T,
-    ) void {
-        switch (T) {
-            f32 => z[0] = c.cblas_sdot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            f64 => z[0] = c.cblas_ddot(@intCast(x.len), x.ptr, 1, y.ptr, 1),
-            else => @compileError("Unsupported type for BLAS dot" ++ @typeName(T)),
-        }
+pub const HostMalloc = struct {
+    pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
+        return @ptrCast(@alignCast(std.c.malloc(n) orelse return null));
     }
-
-    pub fn add(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        z: []T,
-    ) void {
-        for (0..z.len) |i| z[i] = x[i % x.len] + y[i % y.len];
-    }
-
-    pub fn sub(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        z: []T,
-    ) void {
-        for (0..z.len) |i| z[i] = x[i % x.len] - y[i % y.len];
-    }
-
-    pub fn mul(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        z: []T,
-    ) void {
-        for (0..z.len) |i| z[i] = x[i % x.len] * y[i % y.len];
-    }
-
-    pub fn div(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        z: []T,
-    ) void {
-        for (0..z.len) |i| z[i] = x[i % x.len] / y[i % y.len];
-    }
-
-    /// Computes mat-vec assuming a stride of 1 for the vec and row-major.
-    /// a * (M, N) x (N,) + b * (N,) = (M,)
-    /// Y = aAX + bY
-    pub fn matvec(
-        _: Blas,
-        T: type,
-        A: []const T,
-        x: []const T,
-        y: []T,
-        M: usize,
-        N: usize,
-        trans_a: bool,
-        alpha: T,
-        beta: T,
-    ) void {
-        const lda = N;
-        const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
-        switch (T) {
-            f32 => c.cblas_sgemv(c.CblasRowMajor, @intCast(ta), @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), x.ptr, 1, beta, y.ptr, 1),
-            f64 => c.cblas_dgemv(c.CblasRowMajor, @intCast(ta), @intCast(M), @intCast(N), alpha, A.ptr, @intCast(lda), x.ptr, 1, beta, y.ptr, 1),
-            else => @compileError("Unsupported type for BLAS matvec" ++ @typeName(T)),
-        }
-    }
-
-    /// Assumes row-major.
-    /// (M, K) x (K, N) = (M, N)
-    /// C := alpha*op(A)*op(B) + beta*C
-    pub fn matmul(
-        _: Blas,
-        T: type,
-        A: []const T,
-        B: []const T,
-        C: []T,
-        M: usize,
-        N: usize,
-        K: usize,
-        trans_a: bool,
-        trans_b: bool,
-        lda: usize,
-        ldb: usize,
-        ldc: usize,
-        alpha: T,
-        beta: T,
-    ) void {
-        const ta = if (trans_a) c.CblasTrans else c.CblasNoTrans;
-        const tb = if (trans_b) c.CblasTrans else c.CblasNoTrans;
-        switch (T) {
-            f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
-            f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(M), @intCast(N), @intCast(K), alpha, A.ptr, @intCast(lda), B.ptr, @intCast(ldb), beta, C.ptr, @intCast(ldc)),
-            else => @compileError("Unsupported type for BLAS matmul" ++ @typeName(T)),
-        }
-    }
-
-    /// Outer product: A = alpha(xy') + A
-    /// A: (M, N)
-    pub fn outer(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []const T,
-        A: []T,
-        alpha: T,
-    ) void {
-        switch (T) {
-            f32 => c.cblas_sger(c.CblasRowMajor, @intCast(x.len), @intCast(y.len), alpha, x.ptr, 1, y.ptr, 1, A.ptr, @intCast(y.len)),
-            f64 => c.cblas_dger(c.CblasRowMajor, @intCast(x.len), @intCast(y.len), alpha, x.ptr, 1, y.ptr, 1, A.ptr, @intCast(y.len)),
-            else => @compileError("Unsupported type for BLAS outer" ++ @typeName(T)),
-        }
-    }
-
-    /// L2 Norm: A = alpha(xy') + A
-    /// A: (M, N)
-    pub fn nrm2(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []T,
-    ) void {
-        switch (T) {
-            f32 => y[0] = c.cblas_snrm2(@intCast(x.len), x.ptr, 1),
-            f64 => y[0] = c.cblas_dnrm2(@intCast(x.len), x.ptr, 1),
-            else => @compileError("Unsupported type for BLAS nrm2" ++ @typeName(T)),
-        }
-    }
-
-    pub fn clip_norm(
-        self: Blas,
-        T: type,
-        x_val: []T,
-        max_norm: T,
-        delta: T,
-    ) void {
-        var scratch: [1]T = undefined;
-        self.nrm2(T, x_val, scratch[0..]);
-        const norm = scratch[0];
-        if (norm > max_norm) {
-            const _scale = max_norm / (norm + delta);
-            for (x_val) |*value| {
-                value.* *= _scale;
-            }
-        }
-    }
-
-    pub fn clamp(
-        _: Blas,
-        T: type,
-        src_vals: []T,
-        vmin: T,
-        vmax: T,
-    ) void {
-        for (src_vals) |*value| value.* = @min(vmax, @max(vmin, value.*));
-    }
-
-    pub fn clamp_with_mask(
-        _: Blas,
-        T: type,
-        src_vals: []T,
-        vmin: T,
-        vmax: T,
-        dst_mask: []T,
-    ) void {
-        for (src_vals, dst_mask) |*value, *mask| {
-            // Great ILP
-            const clamped = @min(vmax, @max(vmin, value.*));
-            mask.* = @floatFromInt(@intFromBool(value.* == clamped)); // TODO: not necessarily a float, for the time being this is fine until we use other types.
-            value.* = clamped;
-        }
-    }
-
-    pub fn clamp_backward(
-        self: Blas,
-        T: type,
-        src: []T,
-        mask: []T,
-        dst: []T,
-    ) void {
-        self.mul(T, src, mask, mask); // NOTE: we write into the mask because it wont be reused
-        self.add(T, mask, dst, dst);
-    }
-
-    pub fn max_forward(
-        _: Blas,
-        T: type,
-        src: []const T,
-        dst: []T,
-    ) void {
-        const _idx = switch (T) {
-            f32 => c.cblas_isamax(@intCast(src.len), src.ptr, 1),
-            f64 => c.cblas_idamax(@intCast(src.len), src.ptr, 1),
-            else => @compileError("Unsupported type for BLAS amax" ++ @typeName(T)),
-        };
-        dst[0] = src[_idx];
-    }
-
-    pub fn max_backward(
-        _: Blas,
-        T: type,
-        x_val: []const T,
-        y_val: []const T,
-        y_grd: []const T,
-        x_grd: []T,
-    ) void {
-        const val = y_val[0];
-        const grd = y_grd[0];
-        for (x_val, x_grd) |x, *g| {
-            if (val == x) g.* += grd;
-        }
-    }
-
-    pub fn sum(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []T,
-    ) void {
-        switch (T) {
-            f32 => y[0] = c.cblas_sasum(@intCast(x.len), x.ptr, 1),
-            f64 => y[0] = c.cblas_dasum(@intCast(x.len), x.ptr, 1),
-            else => @compileError("Unsupported type for BLAS sum" ++ @typeName(T)),
-        }
-    }
-
-    pub fn sum_along(
-        _: Blas,
-        T: type,
-        src_vals: []const T,
-        src_sizes: []const usize,
-        dst_vals: []T,
-        rdx_idx: usize,
-    ) void {
-        const sum_dim_size = src_sizes[rdx_idx];
-
-        var slice_size: usize = 1;
-        for (rdx_idx + 1..src_sizes.len) |i| {
-            slice_size *= src_sizes[i];
-        }
-
-        var num_slices: usize = 1;
-        for (0..rdx_idx) |i| {
-            num_slices *= src_sizes[i];
-        }
-
-        for (0..dst_vals.len) |i| {
-            var total: T = 0;
-            const base_idx = (i / slice_size) * (slice_size * sum_dim_size) + (i % slice_size);
-            for (0..sum_dim_size) |j| {
-                const curr_idx = base_idx + j * slice_size;
-                total += src_vals[curr_idx];
-            }
-            dst_vals[i] = total;
-        }
-    }
-
-    pub fn max_along(
-        _: Blas,
-        T: type,
-        src_vals: []const T,
-        src_sizes: []const usize,
-        dst_vals: []T,
-        rdx_idx: usize,
-    ) void {
-        const max_dim_size = src_sizes[rdx_idx];
-        var slice_size: usize = 1;
-
-        for (rdx_idx + 1..src_sizes.len) |i| {
-            slice_size *= src_sizes[i];
-        }
-
-        for (0..dst_vals.len) |i| {
-            var max_val: T = -std.math.inf(T);
-            const base_offs = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
-            for (0..max_dim_size) |j| { // can be optimized if the view along this dim is contiguous (just check dim stride)
-                const curr_offs = base_offs + j * slice_size;
-                const curr_val = src_vals[curr_offs];
-                if (curr_val > max_val) {
-                    max_val = curr_val;
-                }
-            }
-            dst_vals[i] = max_val;
-        }
-    }
-
-    // copy pasta
-    pub fn prod(dims: []const usize) usize {
-        if (dims.len == 0) return 0;
-        var s: usize = 1;
-        for (dims) |f| s *= f;
-        return s;
-    }
-
-    pub fn bmm_acc(
-        self: Blas,
-        T: type,
-        A: []const T,
-        A_sizes: []const usize,
-        B: []const T,
-        B_sizes: []const usize,
-        C: []T,
-        C_sizes: []const usize,
-        trans_a: bool,
-        trans_b: bool,
-        lda: usize,
-        ldb: usize,
-        ldc: usize,
-        alpha: T,
-        beta: T,
-    ) void {
-        const n_batches_a = A_sizes[0];
-        const n_batches_b = B_sizes[0];
-        const n_batches_c = C_sizes[0];
-        const A_chunk = A_sizes[1] * A_sizes[2];
-        const B_chunk = B_sizes[1] * B_sizes[2];
-        const C_chunk = C_sizes[1] * C_sizes[2];
-
-        for (0..n_batches_c) |i| {
-            const a_index = i % n_batches_a;
-            const b_index = i % n_batches_b;
-
-            const a_start = a_index * A_chunk;
-            const b_start = b_index * B_chunk;
-            const c_start = i * C_chunk;
-
-            const a_slice = A[a_start .. a_start + A_chunk];
-            const b_slice = B[b_start .. b_start + B_chunk];
-            const c_slice = C[c_start .. c_start + C_chunk];
-
-            self.matmul(
-                T,
-                a_slice,
-                b_slice,
-                c_slice,
-                C_sizes[1],
-                C_sizes[2],
-                A_sizes[2],
-                trans_a,
-                trans_b,
-                lda,
-                ldb,
-                ldc,
-                alpha,
-                beta,
-            );
-        }
-    }
-
-    pub fn scale(
-        _: Blas,
-        T: type,
-        x: []T,
-        alpha: T,
-    ) void {
-        switch (T) {
-            f32 => c.cblas_sscal(@intCast(x.len), alpha, x.ptr, 1),
-            f64 => c.cblas_dscal(@intCast(x.len), alpha, x.ptr, 1),
-            else => @compileError("Unsupported type for BLAS scale" ++ @typeName(T)),
-        }
-    }
-
-    pub fn axpy(
-        _: Blas,
-        T: type,
-        x: []const T,
-        y: []T,
-        alpha: *const T,
-    ) void {
-        switch (T) {
-            f32 => c.cblas_saxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
-            f64 => c.cblas_daxpy(@intCast(x.len), alpha.*, x.ptr, 1, y.ptr, 1),
-            else => @compileError("Unsupported type for BLAS axpy: " ++ @typeName(T)),
-        }
-    }
-
-    pub fn reduce(
-        self: Blas,
-        T: type,
-        x_vals: []const T,
-        x_dims: []const usize,
-        y_vals: []T,
-        y_dims: []const usize,
-        dim_idxs: []const usize,
-        alpha: T,
-        beta: T,
-        comptime op: BinaryOp,
-    ) void {
-        _ = self;
-        _ = x_vals;
-        _ = x_dims;
-        _ = y_vals;
-        _ = y_dims;
-        _ = dim_idxs;
-        _ = alpha;
-        _ = beta;
-        _ = op;
-        // TODO
+    pub fn raw_free(ptr: ?*anyopaque, _: *anyopaque) void {
+        return std.c.free(ptr);
     }
 };
+
+/////////////////////////////
+// Host Device Implementation
+
+const Self = @This();
+const Error = CachingAllocator.Error;
+pub const DeviceReference = *Self;
+
+scratch: ScratchMemory,
+cache: CachingAllocator,
+allocator: std.mem.Allocator,
+
+pub fn init(backing_allocator: std.mem.Allocator) Self {
+    return .{
+        .scratch = .{},
+        .cache = CachingAllocator.init(.{}),
+        .allocator = backing_allocator,
+    };
+}
+
+pub fn deinit(self: *Self) void {
+    self.cache.deinit(undefined);
+    self.scratch.deinit();
+    self.* = undefined;
+}
+
+// TODO: Move this to a universal backend? Probably.
+pub const dispatch = if (backend == .HOST)
+    _dispatch
+else
+    @compileError("Dispatch only available on device reference");
+
+fn _dispatch(self: *Self, params: anytype) void {
+    const P = @TypeOf(params);
+    if (comptime !@hasDecl(Self, P.__name__)) {
+        @panic("Unimplemented: " ++ @typeName(Self) ++ ", " ++ P.__name__);
+    } else {
+        @field(Self, P.__name__)(self, P.__type__, params);
+    }
+}
+
+fn host_reference(self: *Self) DeviceReference {
+    return self;
+}
+
+pub const reference = switch (backend) {
+    .HOST => host_reference,
+    .CUDA => @import("cuda_device.zig").host_reference,
+};
+
+///////////////////
+// element wise ops
+pub fn add(_: *const Self, T: type, p: opspec.add(T)) void {
+    return elwise(T, p.x, p.y, p.z, add_op);
+}
+
+pub fn sub(_: *const Self, T: type, p: opspec.sub(T)) void {
+    return elwise(T, p.x, p.y, p.z, sub_op);
+}
+
+pub fn mul(_: *const Self, T: type, p: opspec.mul(T)) void {
+    return elwise(T, p.x, p.y, p.z, mul_op);
+}
+
+pub fn div(_: *const Self, T: type, p: opspec.div(T)) void {
+    return elwise(T, p.x, p.y, p.z, div_op);
+}
+
+/////////////////////////////////
+// linear algebra ops
+
+pub fn dot(_: *const Self, T: type, p: opspec.dot(T)) void {
+    switch (T) {
+        f32 => p.z[0] = c.cblas_sdot(@intCast(p.x.len), p.x.ptr, 1, p.y.ptr, 1),
+        f64 => p.z[0] = c.cblas_ddot(@intCast(p.x.len), p.x.ptr, 1, p.y.ptr, 1),
+        else => @compileError("Unsupported type for BLAS dot" ++ @typeName(T)),
+    }
+}
+
+pub fn matvec(_: *const Self, T: type, p: opspec.matvec(T)) void {
+    const lda = p.n;
+    const ta = if (p.trans_a) c.CblasTrans else c.CblasNoTrans;
+    switch (T) {
+        f32 => c.cblas_sgemv(c.CblasRowMajor, @intCast(ta), @intCast(p.m), @intCast(p.n), p.alpha, p.A.ptr, @intCast(lda), p.x.ptr, 1, p.beta, p.y.ptr, 1),
+        f64 => c.cblas_dgemv(c.CblasRowMajor, @intCast(ta), @intCast(p.m), @intCast(p.n), p.alpha, p.A.ptr, @intCast(lda), p.x.ptr, 1, p.beta, p.y.ptr, 1),
+        else => @compileError("Unsupported type for BLAS matvec" ++ @typeName(T)),
+    }
+}
+
+pub fn matmul(_: *const Self, T: type, p: opspec.matmul(T)) void {
+    const ta = if (p.trans_a) c.CblasTrans else c.CblasNoTrans;
+    const tb = if (p.trans_b) c.CblasTrans else c.CblasNoTrans;
+    switch (T) {
+        f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(p.m), @intCast(p.n), @intCast(p.k), p.alpha, p.A.ptr, @intCast(p.lda), p.B.ptr, @intCast(p.ldb), p.beta, p.C.ptr, @intCast(p.ldc)),
+        f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(p.m), @intCast(p.n), @intCast(p.k), p.alpha, p.A.ptr, @intCast(p.lda), p.B.ptr, @intCast(p.ldb), p.beta, p.C.ptr, @intCast(p.ldc)),
+        else => @compileError("Unsupported type for BLAS matmul" ++ @typeName(T)),
+    }
+}
+
+pub fn outer(_: *const Self, T: type, p: opspec.outer(T)) void {
+    switch (T) {
+        f32 => c.cblas_sger(c.CblasRowMajor, @intCast(p.x.len), @intCast(p.y.len), p.alpha, p.x.ptr, 1, p.y.ptr, 1, p.A.ptr, @intCast(p.y.len)),
+        f64 => c.cblas_dger(c.CblasRowMajor, @intCast(p.x.len), @intCast(p.y.len), p.alpha, p.x.ptr, 1, p.y.ptr, 1, p.A.ptr, @intCast(p.y.len)),
+        else => @compileError("Unsupported type for BLAS outer" ++ @typeName(T)),
+    }
+}
+
+// TODO: extend to greater than 2D and optimize this
+pub fn transpose(_: *const Self, T: type, p: opspec.transpose(T)) void {
+    for (0..p.m) |i| {
+        for (0..p.n[1]) |j| {
+            p.B[j * p.m + i] = p.A[i * p.n + j] + p.alpha * p.B[j * p.m + i];
+        }
+    }
+}
+
+pub fn axpy(_: *const Self, T: type, p: opspec.axpy(T)) void {
+    switch (T) {
+        f32 => c.cblas_saxpy(@intCast(p.x.len), p.alpha.*, p.x.ptr, 1, p.y.ptr, 1),
+        f64 => c.cblas_daxpy(@intCast(p.x.len), p.alpha.*, p.x.ptr, 1, p.y.ptr, 1),
+        else => @compileError("Unsupported type for BLAS axpy: " ++ @typeName(T)),
+    }
+}
+
+pub fn bmm_acc(self: *const Self, T: type, p: opspec.bmm_acc(T)) void {
+    const n_batches_a = p.A_shape[0];
+    const n_batches_b = p.B_shape[0];
+    const n_batches_c = p.C_shape[0];
+    const A_chunk = p.A_shape[1] * p.A_shape[2];
+    const B_chunk = p.B_shape[1] * p.B_shape[2];
+    const C_chunk = p.C_shape[1] * p.C_shape[2];
+
+    for (0..n_batches_c) |i| {
+        const a_index = i % n_batches_a;
+        const b_index = i % n_batches_b;
+
+        const a_start = a_index * A_chunk;
+        const b_start = b_index * B_chunk;
+        const c_start = i * C_chunk;
+
+        const a_slice = p.A[a_start .. a_start + A_chunk];
+        const b_slice = p.B[b_start .. b_start + B_chunk];
+        const c_slice = p.C[c_start .. c_start + C_chunk];
+
+        self.matmul(T, .{
+            .A = a_slice,
+            .B = b_slice,
+            .C = c_slice,
+            .m = p.C_shape[1],
+            .n = p.C_shape[2],
+            .k = p.A_shape[2],
+            .trans_a = p.trans_a,
+            .trans_b = p.trans_b,
+            .lda = p.lda,
+            .ldb = p.ldb,
+            .ldc = p.ldc,
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    }
+}
+
+pub fn sum(_: *const Self, T: type, p: opspec.sum(T)) void {
+    switch (T) {
+        f32 => p.y[0] = c.cblas_sasum(@intCast(p.x.len), p.x.ptr, 1),
+        f64 => p.y[0] = c.cblas_dasum(@intCast(p.x.len), p.x.ptr, 1),
+        else => @compileError("Unsupported type for BLAS sum" ++ @typeName(T)),
+    }
+}
+
+pub fn scale(_: *const Self, T: type, p: opspec.scale(T)) void {
+    switch (T) {
+        f32 => c.cblas_sscal(@intCast(p.x.len), p.alpha, p.x.ptr, 1),
+        f64 => c.cblas_dscal(@intCast(p.x.len), p.alpha, p.x.ptr, 1),
+        else => @compileError("Unsupported type for BLAS scale" ++ @typeName(T)),
+    }
+}
+
+pub fn nrm2(_: *const Self, T: type, p: opspec.nrm2(T)) void {
+    switch (T) {
+        f32 => p.y[0] = c.cblas_snrm2(@intCast(p.x.len), p.x.ptr, 1),
+        f64 => p.y[0] = c.cblas_dnrm2(@intCast(p.x.len), p.x.ptr, 1),
+        else => @compileError("Unsupported type for BLAS nrm2" ++ @typeName(T)),
+    }
+}
+
+pub fn clip_nrm2(self: *const Self, T: type, p: opspec.clip_nrm2(T)) void {
+    var scratch: [1]T = undefined;
+    self.nrm2(T, .{ .x = p.x, .y = scratch[0..] });
+    const norm = scratch[0];
+    if (norm > p.max_norm) {
+        self.scale(T, .{ .x = p.x, .alpha = p.max_norm / (norm + p.delta) });
+    }
+}
+
+/////////////////////////////////
+// non-linear ops
+
+pub fn exp_fwd(_: *const Self, T: type, p: opspec.exp_fwd(T)) void {
+    for (p.x, p.y) |x, *y| y.* = @exp(x);
+}
+
+pub fn exp_bwd(_: *const Self, T: type, p: opspec.exp_bwd(T)) void {
+    for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += y * y_g;
+}
+
+pub fn relu_fwd(_: *const Self, T: type, p: opspec.relu_fwd(T)) void {
+    for (p.x, p.y) |x, *y| y.* = @max(x, 0);
+}
+
+pub fn relu_bwd(_: *const Self, T: type, p: opspec.relu_bwd(T)) void {
+    for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| x_g.* += if (x > 0) y_g else 0;
+}
+
+pub fn max_fwd(_: *const Self, T: type, p: opspec.max_fwd(T)) void {
+    const idx = switch (T) {
+        f32 => c.cblas_isamax(@intCast(p.x.len), p.x.ptr, 1),
+        f64 => c.cblas_idamax(@intCast(p.x.len), p.x.ptr, 1),
+        else => @compileError("Unsupported type for BLAS max" ++ @typeName(T)),
+    };
+    p.y[0] = p.x[idx];
+}
+
+pub fn max_bwd(_: *const Self, T: type, p: opspec.max_bwd(T)) void {
+    const val = p.y[0];
+    const grd = p.y_g[0];
+    for (p.x, p.x_g) |x, *x_g| {
+        if (val == x) x_g.* += grd;
+    }
+}
+
+pub fn clamp_fwd(_: *const Self, T: type, p: opspec.clamp_fwd(T)) void {
+    for (p.x, p.y) |x, *y| y.* = @min(p.max, @max(p.min, x));
+}
+
+pub fn clamp_bwd(_: *const Self, T: type, p: opspec.clamp_bwd(T)) void {
+    for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| {
+        if (p.min < x and x < p.max) x_g.* += y_g;
+    }
+}
+
+pub fn clamp_mask_fwd(_: *const Self, T: type, p: opspec.clamp_mask_fwd(T)) void {
+    var vals_idx: usize = 0;
+    var byte_idx: usize = 0;
+    const chunks: usize = @divFloor(p.x.len, 8);
+
+    for (0..chunks) |_| {
+        var bits: ByteMask = .{ .mask = 0 };
+        inline for (0..8) |b| {
+            const x = p.x[vals_idx];
+            const clamped = @min(p.max, @max(p.min, x));
+            bits.setValue(b, x != clamped);
+            p.y[vals_idx] = x;
+            vals_idx += 1;
+        }
+        p.mask[byte_idx] = @bitCast(bits.mask);
+        byte_idx += 1;
+    }
+
+    if (vals_idx == p.x.len) return;
+
+    var bits: ByteMask = .{ .mask = 0 };
+    for (vals_idx..p.x.len, 0..8) |i, b| {
+        const x = p.x[i];
+        const clamped = @min(p.max, @max(p.min, x));
+        bits.setValue(b, x != clamped);
+        p.y[vals_idx] = x;
+    }
+    p.mask[byte_idx] = @bitCast(bits.mask);
+}
+
+pub fn clamp_mask_bwd(_: *const Self, T: type, p: opspec.clamp_mask_bwd(T)) void {
+    var vals_idx: usize = 0;
+    var byte_idx: usize = 0;
+    const chunks: usize = @divFloor(p.x.len, 8);
+
+    for (0..chunks) |_| {
+        var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
+        inline for (0..8) |b| {
+            if (bits.isSet(b)) p.x_g[vals_idx] += p.y_g[vals_idx];
+            vals_idx += 1;
+        }
+        byte_idx += 1;
+    }
+
+    if (vals_idx == p.x.len) return;
+
+    var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
+    for (vals_idx..p.x.len, 0..8) |i, b| {
+        if (bits.isSet(b)) p.x_g[i] += p.y_g[i];
+    }
+}
+
+fn _prod(sizes: []const usize) usize {
+    var n: usize = 1;
+    for (sizes) |m| n *= m;
+    return n;
+}
+
+pub fn unbroadcast(self: *Self, T: type, p: opspec.unbroadcast(T)) void {
+    const local = @import("reduce.zig");
+    const Array = std.BoundedArray(usize, 8);
+
+    if (p.x.len == p.y.len) {
+        return local.scaled_copy(T, .{
+            .x = p.x,
+            .y = p.y,
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    }
+
+    // remove any leading ones because they contribute nothing to the reduction
+    var x_shape = blk: {
+        const trimmed = std.mem.trimLeft(usize, p.x_shape, &.{1});
+        break :blk Array.fromSlice(trimmed) catch unreachable;
+    };
+
+    var y_shape = blk: {
+        const trimmed = std.mem.trim(usize, p.y_shape, &.{1});
+        break :blk Array.fromSlice(trimmed) catch unreachable;
+    };
+
+    // check if we have to deal with any body reductions
+    var ones = std.mem.count(usize, y_shape.slice(), &.{1});
+
+    if (x_shape.len > y_shape.len) {
+        const dif = x_shape.len - y_shape.len;
+
+        local.fold_rows(T, .{
+            .x = p.x,
+            .y = if (ones == 0) p.y else p.scratch,
+            .row = _prod(x_shape.slice()[0..dif]),
+            .col = _prod(x_shape.slice()[dif..]),
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+
+        if (ones == 0) return;
+
+        // remove the indices we just reduced for next round
+        x_shape = Array.fromSlice(x_shape.slice()[dif..]) catch unreachable;
+    }
+
+    var i: usize = 0;
+    while (ones > 0 and i < x_shape.len) {
+        if (y_shape.get(i) == 1 and x_shape.get(i) != 1) {
+            // TODO: optimize this by detecting streams of 1's in the y_shape
+            // and reduce all of those together in one move.
+
+            const x_data = if (x_shape.len == p.x_shape.len) p.x else p.scratch;
+            const y_data = if (ones == 1) p.y else p.scratch;
+
+            self.sum_along(T, .{
+                .x = x_data,
+                .x_shape = x_shape.slice(),
+                .y = y_data,
+                .dim = i,
+                .alpha = p.alpha,
+                .beta = p.beta,
+            });
+
+            _ = x_shape.orderedRemove(i);
+            _ = y_shape.orderedRemove(i);
+            ones -= 1;
+            continue;
+        }
+        i += 1; // only increment if didn't remove an index
+    }
+}
+
+pub fn broadcast(_: *const Self, T: type, p: opspec.broadcast(T)) void {
+    const local = @import("reduce.zig");
+    if (p.x.len == p.y.len) {
+        local.scaled_copy(T, .{
+            .x = p.x,
+            .y = p.y,
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    }
+
+    // TODO: make a better broadcast
+    for (0..p.y.len) |i| p.y[i] = p.alpha * p.x[i % p.x.len] + p.beta * p.y[i % p.y.len];
+}
+
+// TODO: Replace this with general reduce
+pub fn sum_along(_: *const Self, T: type, p: opspec.sum_along(T)) void {
+    std.debug.assert(0 < p.x_shape.len);
+    std.debug.assert(p.dim < p.x_shape.len);
+    const local = @import("reduce.zig");
+
+    // flat, head, and tail reduce base cases
+    if (p.y.len == 1) {
+        return local.flat_reduce(T, .{
+            .x = p.x,
+            .y = p.y,
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    } else if (p.dim == 0) {
+        return local.fold_rows(T, .{
+            .x = p.x,
+            .y = p.y,
+            .row = p.x_shape[0],
+            .col = _prod(p.x_shape[1..]),
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    } else if (p.dim + 1 == p.x_shape.len) {
+        return local.fold_cols(T, .{
+            .x = p.x,
+            .y = p.y,
+            .row = _prod(p.x_shape[0..p.dim]),
+            .col = p.x_shape[p.dim],
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    }
+    // body reduction - we can always imagine that we have an ijk
+    // tensor where j is the value we want to reduce. This works
+    // because we require flat and symmetric memory layout.
+    const n_chunks = _prod(p.x_shape[0..p.dim]);
+    const y_chunk_size = _prod(p.x_shape[p.dim + 1 ..]);
+    const x_chunk_size = p.x_shape[p.dim] * y_chunk_size;
+
+    for (0..n_chunks) |n| {
+        local.fold_rows(T, .{
+            .x = p.x[x_chunk_size * n ..][0..x_chunk_size],
+            .y = p.y[y_chunk_size * n ..][0..y_chunk_size],
+            .row = p.x_shape[p.dim],
+            .col = y_chunk_size,
+            .alpha = p.alpha,
+            .beta = p.beta,
+        });
+    }
+}
+
+// TODO: Should this ever be mixed with reduce? Seems like a bad idea
+// because certain optimizations actually have extra data that general
+// reduce (using addiction) doesn't have.
+pub fn max_along(_: *const Self, T: type, p: opspec.max_along(T)) void {
+    std.debug.assert(p.dim < p.x_shape.len);
+
+    const max_dim_size = p.x_shape[p.dim];
+
+    var slice_size: usize = 1;
+    for (p.dim + 1..p.x_shape.len) |i| {
+        slice_size *= p.x_shape[i];
+    }
+
+    for (0..p.y.len) |i| {
+        var max_val: T = -std.math.inf(T);
+        const base_offs = (i / slice_size) * (slice_size * max_dim_size) + (i % slice_size);
+        for (0..max_dim_size) |j| { // can be optimized if the view along this dim is contiguous (just check dim stride)
+            const curr_offs = base_offs + j * slice_size;
+            const curr_val = p.x[curr_offs];
+            if (curr_val > max_val) {
+                max_val = curr_val;
+            }
+        }
+        p.y[i] = max_val;
+    }
+}
+
+pub fn mem_alloc(self: *Self, T: type, n: usize) ![]T {
+    if (n == 0) return &.{};
+    return self.cache.alloc(T, n, undefined);
+}
+
+pub fn mem_alloc_byte_mask(self: *Self, n: usize) ![]u8 {
+    return self.mem_alloc(u8, @divFloor(n - 1, 8) + 1);
+}
+
+pub fn mem_free(self: *Self, slice: anytype) void {
+    if (slice.len == 0) return;
+    return self.cache.free(slice, undefined);
+}
+
+pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
+    const dst = try self.cache.alloc(T, src.len, undefined);
+    self.mem_copy(T, src, dst);
+    return dst;
+}
+
+pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
+    return self.scratch.get(T, n);
+}
+
+pub fn mem_copy(_: *const Self, T: type, src: []const T, dst: []T) void {
+    @memcpy(dst, src);
+}
+
+pub fn mem_transfer(_: *const Self, T: type, src: []const T, dst: []T, _: TransferDirection) void {
+    @memcpy(dst, src);
+}
+
+pub fn mem_fill(_: *const Self, T: type, slice: []T, value: T) void {
+    @memset(slice, value);
+}
+
+pub fn mem_random(_: *const Self, T: type, slice: []T, op: RandType, seed: u64) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+    if (op == .uniform) {
+        for (slice) |*e| e.* = rand.float(T);
+    } else {
+        for (slice) |*e| e.* = rand.floatNorm(T);
+    }
+}
+
+// remove data dependencies on this to speed it up
+pub fn mem_sequence(_: *const Self, T: type, slice: []T, initial: T, step: T) void {
+    var current = initial; // move from register memory
+    for (slice) |*x| {
+        x.* = current;
+        current += step;
+    }
+}
+pub fn mem_take(_: *const Self, T: type, src: []const T, idxs: []const usize, dst: []T) void {
+    std.debug.assert(dst.len >= idxs.len);
+    for (idxs, 0..) |i, j| dst[j] = src[i];
+}
+
+pub fn clear_cache(self: *Self) void {
+    self.cache.clear(undefined);
+}
+
+pub fn sync(_: *const Self) void {}
+
+// since host is it's own reference when compiling for HOST only,
+// this is always trivially true. Only for debug compatibility.
+pub inline fn is_compatible(_: *const Self, _: *const Self) bool {
+    return true;
+}
+
+pub fn is_host(_: DeviceReference) bool {
+    return true;
+}
 
 pub const ScratchMemory = struct {
     head: usize = 0,
@@ -464,6 +589,8 @@ pub const ScratchMemory = struct {
         self.* = undefined;
     }
     pub fn get(self: *ScratchMemory, T: type, n: usize) []T {
+        if (n == 0) return &.{};
+
         const total: usize = @sizeOf(T) * n;
         // check if we have enough scratch to provide a payload
         if (self.tail < (self.head + total)) {
@@ -479,116 +606,87 @@ pub const ScratchMemory = struct {
     }
 };
 
-pub const NN = struct {
-    pub fn exp(_: NN, T: type, x: []const T, y: []T) void {
-        for (0..x.len) |i| y[i] = @exp(x[i]);
-    }
+inline fn add_op(x: anytype, y: anytype) @TypeOf(x, y) {
+    return x + y;
+}
+inline fn sub_op(x: anytype, y: anytype) @TypeOf(x, y) {
+    return x - y;
+}
+inline fn mul_op(x: anytype, y: anytype) @TypeOf(x, y) {
+    return x * y;
+}
+inline fn div_op(x: anytype, y: anytype) @TypeOf(x, y) {
+    return x / y;
+}
 
-    pub fn relu_forward(_: NN, T: type, x: []const T, y: []T) void {
-        for (x, y) |x_v, *y_v| {
-            y_v.* = if (x_v > 0) x_v else 0;
+pub fn elwise(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+    if (x.len == 1 or y.len == 1)
+        return _elwise_scalar_dispatch(T, x, y, z, op);
+
+    const min_size = @min(x.len, y.len);
+    const x_step = if (x.len == z.len) min_size else 0;
+    const y_step = if (y.len == z.len) min_size else 0;
+    const z_step = min_size;
+    var _x, var _y, var _z = .{ x, y, z };
+    while (0 < _z.len) {
+        _elwise_equal_len(T, _x[0..min_size], _y[0..min_size], _z[0..min_size], op);
+        _x = _x[x_step..];
+        _y = _y[y_step..];
+        _z = _z[z_step..];
+    }
+}
+
+fn _elwise_scalar_dispatch(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+    std.debug.assert(x.len == 1 or y.len == 1);
+    if (z.len == 1) {
+        z[0] = op(x[0], y[0]);
+    } else if (x.len == 1) {
+        _elwise_scalar_lhs(T, x[0], y, z, op);
+    } else {
+        _elwise_scalar_rhs(T, x, y[0], z, op);
+    }
+}
+
+fn _elwise_equal_len(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+    std.debug.assert(x.len == y.len and y.len == z.len);
+
+    var val_idx: usize = 0;
+    if (std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        while (val_idx + N <= z.len) : (val_idx += N) {
+            z[val_idx..][0..N].* = op(@as(V, x[val_idx..][0..N].*), @as(V, y[val_idx..][0..N].*));
         }
     }
+    // clean up remainder
+    while (val_idx < z.len) : (val_idx += 1) {
+        z[val_idx] = op(x[val_idx], y[val_idx]);
+    }
+}
 
-    pub fn relu_backward(_: NN, T: type, x_val: []const T, y_grd: []const T, x_grd: []T) void {
-        for (x_val, y_grd, x_grd) |x_v, y_g, *x_g| {
-            x_g.* += if (x_v > 0) y_g else 0;
+fn _elwise_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype) void {
+    var i: usize = 0;
+    if (std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        const xv: V = @splat(x);
+        while ((i + N) <= z.len) : (i += N) {
+            z[i..][0..N].* = op(xv, @as(V, y[i..][0..N].*));
         }
     }
-
-    fn parent(self: *const NN) *const HostDevice {
-        return @alignCast(@fieldParentPtr("nn", self));
+    for (i..z.len) |j| {
+        z[j] = op(x, y[j]);
     }
-};
+}
 
-pub const HostDevice = struct {
-    const Error = CachingAllocator.Error;
-
-    nn: NN,
-    blas: Blas,
-    scratch: ScratchMemory,
-    cache: CachingAllocator,
-    allocator: std.mem.Allocator,
-
-    pub fn init(backing_allocator: std.mem.Allocator) HostDevice {
-        return .{
-            .nn = .{},
-            .blas = .{},
-            .scratch = .{},
-            .cache = CachingAllocator.init(.{}),
-            .allocator = backing_allocator,
-        };
-    }
-
-    pub fn deinit(self: *HostDevice) void {
-        self.cache.deinit(undefined);
-        self.scratch.deinit();
-        self.* = undefined;
-    }
-
-    pub fn mem_alloc(self: *HostDevice, T: type, n: usize) ![]T {
-        return self.cache.alloc(T, n, undefined);
-    }
-
-    pub fn mem_free(self: *HostDevice, slice: anytype) void {
-        return self.cache.free(slice, undefined);
-    }
-
-    pub fn mem_dupe(self: *HostDevice, T: type, src: []const T) ![]T {
-        const dst = try self.cache.alloc(T, src.len, undefined);
-        self.mem_copy(T, src, dst);
-        return dst;
-    }
-
-    pub fn mem_copy(_: HostDevice, T: type, src: []const T, dst: []T) void {
-        @memcpy(dst, src);
-    }
-
-    pub fn mem_fill(_: HostDevice, T: type, slice: []T, value: T) void {
-        @memset(slice, value);
-    }
-
-    pub fn mem_random(_: HostDevice, T: type, slice: []T, op: RandType, seed: u64) void {
-        var prng = std.Random.DefaultPrng.init(seed);
-        const rand = prng.random();
-        if (op == .uniform) {
-            for (slice) |*e| e.* = rand.float(T);
-        } else {
-            for (slice) |*e| e.* = rand.floatNorm(T);
+fn _elwise_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
+    var i: usize = 0;
+    if (std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        const yv: V = @splat(y);
+        while ((i + N) <= z.len) : (i += N) {
+            z[i..][0..N].* = op(@as(V, x[i..][0..N].*), yv);
         }
     }
-
-    // remove data dependencies on this to speed it up
-    pub fn mem_sequence(_: HostDevice, T: type, slice: []T, initial: T, step: T) void {
-        var current = initial; // move from register memory
-        for (slice) |*x| {
-            x.* = current;
-            current += step;
-        }
+    for (i..z.len) |j| {
+        z[j] = op(x[j], y);
     }
-    pub fn mem_take(_: HostDevice, T: type, src: []const T, idxs: []const usize, dst: []T) void {
-        std.debug.assert(dst.len >= idxs.len);
-        for (idxs, 0..) |i, j| dst[j] = src[i];
-    }
-
-    pub fn clear_cache(self: *HostDevice) void {
-        self.cache.clear(undefined);
-    }
-
-    pub fn sync(_: HostDevice) void {}
-
-    // since host is it's own reference when compiling for HOST only,
-    // this is always trivially true. Only for debug compatibility.
-    pub inline fn is_compatible(_: *const HostDevice, _: *const HostDevice) bool {
-        return true;
-    }
-
-    pub fn is_host(_: DeviceReference) bool {
-        return true;
-    }
-
-    pub const reference = switch (backend) {
-        .HOST => host_reference,
-        .CUDA => @import("cuda_device.zig").host_reference,
-    };
-};
+}

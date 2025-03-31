@@ -3,6 +3,8 @@ const Backend = @import("src/device/root.zig").Backend;
 const backend = @import("src/device/root.zig").backend;
 const builtin = @import("builtin");
 
+// this is a comment
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -36,13 +38,13 @@ pub fn build(b: *std.Build) !void {
         else => @panic("Os not supported."),
     }
 
-    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
-    const tracy = b.lazyDependency("tracy", .{
-        .target = target,
-        .optimize = optimize,
-        .tracy_enable = tracy_enable,
-    });
-    if (tracy_enable) zigrad.addImport("tracy", tracy.?.module("tracy"));
+    //const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
+    //const tracy = b.lazyDependency("tracy", .{
+    //    .target = target,
+    //    .optimize = optimize,
+    //    .tracy_enable = tracy_enable,
+    //});
+    //if (tracy_enable) zigrad.addImport("tracy", tracy.?.module("tracy"));
 
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
@@ -53,7 +55,7 @@ pub fn build(b: *std.Build) !void {
     lib.root_module.addImport("build_options", build_options_module);
     lib.root_module.addImport("device", device_module);
     link(target, lib);
-    if (tracy_enable) add_tracy(lib, tracy.?);
+    //if (tracy_enable) add_tracy(lib, tracy.?);
     b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
@@ -65,7 +67,7 @@ pub fn build(b: *std.Build) !void {
 
     exe.root_module.addImport("zigrad", zigrad);
     link(target, exe);
-    if (tracy_enable) add_tracy(exe, tracy.?);
+    // if (tracy_enable) add_tracy(exe, tracy.?);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -87,7 +89,7 @@ pub fn build(b: *std.Build) !void {
     unit_tests.root_module.addImport("device", device_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
-    if (tracy_enable) add_tracy(unit_tests, tracy.?);
+    // if (tracy_enable) add_tracy(unit_tests, tracy.?);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
@@ -114,11 +116,11 @@ fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
     }
 }
 
-fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
-    exe.root_module.addImport("tracy", tracy.module("tracy"));
-    exe.linkLibrary(tracy.artifact("tracy"));
-    exe.linkLibCpp();
-}
+//fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
+//    exe.root_module.addImport("tracy", tracy.module("tracy"));
+//    exe.linkLibrary(tracy.artifact("tracy"));
+//    exe.linkLibCpp();
+//}
 
 pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
     const new_backend = get_backend(b);

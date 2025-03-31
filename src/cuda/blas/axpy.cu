@@ -6,9 +6,9 @@
 // we're using double because every float can cast
 // up to a double and then we can go back down.
 
-extern "C" void axpy(
+void __axpy(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* x,
   void* y,
   len_t n, 
@@ -19,7 +19,7 @@ extern "C" void axpy(
   switch (id) {
     case SINGLE: {
       return CUBLAS_ASSERT(cublasSaxpy(
-          get_handle(cublas_handle),  
+          __cast_cublas(w),
           _n, 
           static_cast<const float*>(alpha),
           static_cast<const float*>(x), 1,
@@ -28,14 +28,28 @@ extern "C" void axpy(
     }
     case DOUBLE: {
       return CUBLAS_ASSERT(cublasDaxpy(
-          get_handle(cublas_handle),  
+          __cast_cublas(w),
           _n,
           static_cast<const double*>(alpha),
           static_cast<const double*>(x), 1,
           static_cast<double*>(y), 1
       ));
     }
+    default:
+      SYSTEM_EXIT("Unsupported data type");
   }
+}
+
+extern "C" void axpy(
+  dtype id,
+  CublasWrapper w,
+  const void* x,
+  void* y,
+  len_t n, 
+  const void* alpha
+) {
+  __axpy(id, w, x, y, n, alpha);
+  CUDA_ASSERT(cudaPeekAtLastError());
 }
 
 #endif

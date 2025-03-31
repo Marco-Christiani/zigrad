@@ -163,32 +163,38 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     }
     const mean_loss = sum_loss / @as(T, @floatFromInt(batch_size));
 
+<<<<<<< HEAD
     const bw_fn = struct {
         fn backward(bw_tensor: *const NDTensor(T)) !void {
             const bw_ctx: *NDTensor(T) = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
             defer bw_ctx.deinit();
+=======
+    const CceBwd = struct {
+        sm_preds: *NDTensor(T),
+        pub fn callback(bw_tensor: *NDTensor(T), ctx: *@This()) !void {
+            defer ctx.sm_preds.deinit();
+
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             const bw_self_children = bw_tensor.get_children() orelse return error.NoChildren;
             const bw_y_pred = bw_self_children[0];
             const bw_y = bw_self_children[1];
             const bw_batch_size = if (bw_y_pred.data.shape.len > 1) bw_y_pred.data.shape.get(0) else 1;
-            // const bw_n = @as(T, @floatFromInt(bw_y.get_size()));
+
             if (bw_y_pred.grad) |bw_grad| {
-                for (bw_grad.data, bw_ctx.data.data, bw_y.data.data) |*bw_grad_val, bw_sm_val, bw_target_val| {
+                for (bw_grad.data, ctx.sm_preds.get_data(), bw_y.data.data) |*bw_grad_val, bw_sm_val, bw_target_val| {
                     bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
                 }
             }
         }
-    }.backward;
+    };
 
-    return try NDTensor(T).create_dependent(.{
+    return try NDTensor(T).create_dependent(CceBwd, .{
         .data = try NDArray(T).init(&.{mean_loss}, &.{1}, y_pred.device),
         .op = null,
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
         .device = y_pred.device,
-        ._backward = bw_fn,
-        ._backward_ctx = sm_preds, // no need to copy
-        ._requires_grad = true,
+        .callback = .{ .sm_preds = sm_preds },
     });
 }
 
@@ -255,16 +261,19 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
 
 pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
     const result = try _softmax_fwd(T, input, dim, device);
+<<<<<<< HEAD
     const bw_fn = struct {
         fn backward(bw_tensor: *const NDTensor(T), bw_device: DeviceReference) !void {
+=======
+    const SmaxBwd = struct {
+        dim: usize,
+        pub fn callback(bw_tensor: *NDTensor(T), ctx: *@This()) !void {
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             const bw_self_children = bw_tensor.children orelse return error.NoChildren;
             const bw_input = bw_self_children[0];
             if (bw_input.grad == null) return;
-            const bw_ctx: *usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-            const bw_dim = bw_ctx.*;
-            defer bw_device.allocator.destroy(bw_ctx);
 
-            const bw_dim_size = bw_tensor.data.shape.get(bw_dim);
+            const bw_dim_size = bw_tensor.data.shape.get(ctx.dim);
             const bw_total_size = bw_tensor.get_size();
             const bw_outer_size = @divExact(bw_total_size, bw_dim_size);
 
@@ -283,19 +292,14 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
                 }
             }
         }
-    }.backward;
+    };
 
-    const ctx = try device.allocator.create(usize);
-    ctx.* = dim;
-
-    return try NDTensor(T).create_dependent(.{
+    return try NDTensor(T).create_dependent(SmaxBwd, .{
         .data = result.data,
         .children = &.{input},
         .label = "softmax",
         .device = device,
-        ._backward = bw_fn,
-        ._backward_ctx = ctx,
-        ._requires_grad = true,
+        .callback = .{ .dim = dim },
     });
 }
 
@@ -314,14 +318,18 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     }
     const loss = sum_loss / n;
 
+<<<<<<< HEAD
     const bw_fn = struct {
         fn backward(tensor: *const NDTensor(T)) !void {
+=======
+    const Sl1LossBwd = struct {
+        beta: T,
+        pub fn callback(tensor: *NDTensor(T), ctx: *@This()) !void {
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             const self_children = tensor.get_children() orelse return error.NoChildren;
             const _y_pred = self_children[0];
             const _y = self_children[1];
-            const _bw_ctx: *T = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
-            defer tensor.device.allocator.destroy(_bw_ctx);
-            const _beta = _bw_ctx.*;
+            const _beta = ctx.beta;
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
 
@@ -336,19 +344,14 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
                 }
             }
         }
-    }.backward;
+    };
 
-    const beta_ctx = try device.allocator.create(T);
-    beta_ctx.* = beta;
-
-    return try NDTensor(T).create_dependent(.{
+    return try NDTensor(T).create_dependent(Sl1LossBwd, .{
         .data = try NDArray(T).init(&.{loss}, &.{1}, device),
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
+        .callback = .{ .beta = beta },
         .device = device,
-        ._backward = bw_fn,
-        ._backward_ctx = beta_ctx,
-        ._requires_grad = true,
     });
 }
 // TODO: move this since refactor this file was renamed to loss.zig

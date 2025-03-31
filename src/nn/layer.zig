@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
+const opspec = zg.opspec;
 
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
@@ -117,6 +118,8 @@ pub fn Layer(comptime T: type) type {
 pub fn LinearLayer(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Tensor = NDTensor(T);
+        const Array = Tensor.DataType;
         weights: *NDTensor(T),
         bias: *NDTensor(T),
         device: DeviceReference,
@@ -144,6 +147,7 @@ pub fn LinearLayer(comptime T: type) type {
             };
             return self;
         }
+<<<<<<< HEAD
         pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
             // return try forward_ag(self, input);
             const out = try forward_manual(self, input);
@@ -250,6 +254,14 @@ pub fn LinearLayer(comptime T: type) type {
                 false,
                 self.device,
             );
+=======
+
+        pub fn forward(self: *Self, x: *NDTensor(T)) !*NDTensor(T) {
+            const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
+            const n_features = self.weights.data.shape.get(0);
+            const b_y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
+            return self.bias.add_(b_y);
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
         }
 
         pub fn get_parameters(self: *Self) ?[]*NDTensor(T) {
@@ -477,6 +489,7 @@ pub fn Conv2DLayer(comptime T: type) type {
 pub fn ReLULayer(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Tensor = NDTensor(T);
         device: DeviceReference,
 
         pub fn init(device: DeviceReference) !*Self {
@@ -487,23 +500,24 @@ pub fn ReLULayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            const output = try NDArray(T).empty(input.get_shape(), self.device);
+        pub fn forward(self: *Self, x: *NDTensor(T)) !*NDTensor(T) {
+            const y = try NDArray(T).empty(x.get_shape(), self.device);
 
-            for (input.get_data(), output.data) |x, *y| {
-                y.* = if (x > 0) x else 0;
-            }
+            self.device.dispatch(opspec.relu_fwd(T){
+                .x = x.get_data(),
+                .y = y.data,
+            });
 
-            return try NDTensor(T).create_dependent(.{
-                .data = output,
-                .children = &.{input},
-                .label = "relu_out",
-                ._requires_grad = input.requires_grad(),
+            return Tensor.create_dependent(*Self, .{
+                .data = y,
+                .children = &.{x},
                 .device = self.device,
-                ._backward = backward,
+                .callback = self,
+                .label = "relu_out",
             });
         }
 
+<<<<<<< HEAD
         fn backward(tensor: *const NDTensor(T)) !void {
             const children = tensor.get_children() orelse return error.NoChildren;
             std.debug.assert(children.len == 1);
@@ -512,6 +526,15 @@ pub fn ReLULayer(comptime T: type) type {
             for (input.grad.?.data, input.data.data, grad_t.data) |*grad_in, value_in, grad_out| {
                 grad_in.* += if (value_in > 0) grad_out else 0;
             }
+=======
+        pub fn callback(y: *NDTensor(T)) !void {
+            const x = y.backward_child(0) orelse return;
+            y.device.dispatch(opspec.relu_bwd(T){
+                .x = x.get_data(),
+                .x_g = try x.ensure_grad_data(0),
+                .y_g = y.assume_grad_data(),
+            });
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
         }
 
         pub fn get_parameters(_: *Self) ?[]*NDTensor(T) {
@@ -532,6 +555,7 @@ pub fn ReLULayer(comptime T: type) type {
     };
 }
 
+<<<<<<< HEAD
 pub fn ReLULayerCompare(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -580,6 +604,8 @@ pub fn ReLULayerCompare(comptime T: type) type {
     };
 }
 
+=======
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
 pub fn FlattenLayer(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -597,14 +623,12 @@ pub fn FlattenLayer(comptime T: type) type {
             const flattened_dim = prod(other_dims);
 
             // view of input tensor with new shape
-            const result = try NDTensor(T).create_dependent(.{
+            const result = try NDTensor(T).create_dependent(*Self, .{
                 .data = try input.data.copy(input.device), // Reuse the same data
-                // .op = .FLATTEN,
                 .children = &.{input},
                 .label = "flattened",
-                ._requires_grad = input.requires_grad(),
+                .callback = self,
                 .device = self.device,
-                ._backward = backward,
             });
 
             const new_shape = &.{ batch_dim, flattened_dim };
@@ -614,7 +638,11 @@ pub fn FlattenLayer(comptime T: type) type {
             return result;
         }
 
+<<<<<<< HEAD
         fn backward(tensor: *const NDTensor(T)) !void {
+=======
+        pub fn callback(tensor: *NDTensor(T)) !void {
+>>>>>>> 4d88a58 (redoing zigrad backend, updating cuda, optimizing reductions, straightening out syntax)
             var input = tensor.get_children().?[0];
             input.grad.?._reshape(input.data.shape.slice());
             @memcpy(input.grad.?.data, tensor.grad.?.data);

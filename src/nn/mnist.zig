@@ -178,7 +178,7 @@ const MnistDataset = struct {
         var images = std.ArrayList(*NDTensor(T)).init(device.allocator);
         var labels = std.ArrayList(*NDTensor(T)).init(device.allocator);
 
-        var lines = std.mem.split(u8, file_contents, "\n");
+        var lines = std.mem.splitScalar(u8, file_contents, '\n');
         var batch_images = try device.allocator.alloc(T, batch_size * 784);
         defer device.allocator.free(batch_images);
         var batch_labels = try device.allocator.alloc(T, batch_size * 10);
@@ -187,7 +187,7 @@ const MnistDataset = struct {
 
         while (lines.next()) |line| {
             if (line.len == 0) continue; // skip empty lines
-            var values = std.mem.split(u8, line, ",");
+            var values = std.mem.splitScalar(u8, line, ',');
 
             for (0..10) |i| {
                 batch_labels[batch_count * 10 + i] = @as(T, @floatFromInt(try std.fmt.parseUnsigned(u8, values.next().?, 10)));

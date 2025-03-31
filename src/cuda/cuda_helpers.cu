@@ -18,14 +18,6 @@ typedef uint32_t u32;
 
 #define WARP_SIZE 32
 
-inline CUstream get_stream(void* context) {
-  return static_cast<CUstream>(context);
-}
-
-inline cublasHandle_t get_handle(void* context) {
-  return static_cast<cublasHandle_t>(context);
-}
-
 #define CUDA_ASSERT(err) (HandleCudaError( err, __FILE__, __LINE__ ))
 inline void HandleCudaError(cudaError_t err, const char *file, int line)
 {
@@ -152,15 +144,32 @@ void __ensure_scratch(
   (__ensure_scratch(id, stream, mem, cap, new_cap, __FILE__, __LINE__ )) \
 
 
-inline cudaStream_t __cublas_stream(void* handle) {
+
+inline CUstream __cast_custream(StreamWrapper w) {
+  return static_cast<CUstream>(w.ptr);
+}
+
+inline cudnnHandle_t __cast_cudnn(CudnnWrapper w) {
+  return static_cast<cudnnHandle_t>(w.ptr);
+}
+
+inline cublasHandle_t __cast_cublas(CublasWrapper w) {
+  return static_cast<cublasHandle_t>(w.ptr);
+}
+
+inline cudaStream_t __cast_stream(StreamWrapper w) {
+  return static_cast<cudaStream_t>(w.ptr);
+}
+
+inline cudaStream_t __cast_stream(CublasWrapper w) {
   cudaStream_t stream;
-  CUBLAS_ASSERT(cublasGetStream(static_cast<cublasHandle_t>(handle), &stream));
+  CUBLAS_ASSERT(cublasGetStream(__cast_cublas(w), &stream));
   return stream;
 }
 
-inline cudaStream_t __cudnn_stream(void* handle) {
+inline cudaStream_t __cast_stream(CudnnWrapper w) {
   cudaStream_t stream;
-  CUDNN_ASSERT(cudnnGetStream(static_cast<cudnnHandle_t>(handle), &stream));
+  CUDNN_ASSERT(cudnnGetStream(__cast_cudnn(w), &stream));
   return stream;
 }
 

@@ -112,9 +112,6 @@ test "im2col col2im" {
         6, 7, 8, 0, 10, 11, 12, 0,  14, 15, 16, 0,  0,  0,  0,  0,
     };
 
-    std.debug.print("\ncol data:\n", .{});
-    col.print(cpu.reference());
-
     try std.testing.expectEqualSlices(f32, &expected_col_data, col.data);
 
     // col2im
@@ -123,7 +120,4 @@ test "im2col col2im" {
 
     const exp_im_data = [_]f32{ 4, 12, 18, 16, 30, 54, 63, 48, 54, 90, 99, 72, 52, 84, 90, 64 };
     try std.testing.expectEqualSlices(f32, &exp_im_data, im.data);
-
-    std.debug.print("\nim data:\n", .{});
-    im.print(cpu.reference());
 }

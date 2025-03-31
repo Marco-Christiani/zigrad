@@ -1,5 +1,6 @@
 .{
-    .name = "zigrad_tests",
+    .name = .zigrad_tests,
+    .fingerprint = 0x397d8aaf4513631b,
     .version = "0.0.0",
     .dependencies = .{
         .zigrad = .{

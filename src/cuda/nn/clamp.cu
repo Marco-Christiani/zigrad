@@ -6,14 +6,14 @@
 
 template<typename T>
 void __clamp(
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n,
   T lower,
   T upper
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(w);
   const auto x_iter = static_cast<const T*>(x);
   const auto y_iter = static_cast<T*>(y);
   thrust::transform(
@@ -27,7 +27,7 @@ void __clamp(
 
 extern "C" void clamp(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n,
@@ -36,10 +36,13 @@ extern "C" void clamp(
 ) {
   switch (id) {
     case SINGLE: {
-      return __clamp<f32>(stream, x, y, n, static_cast<f32>(lower), static_cast<f32>(upper));
+      return __clamp<f32>(w, x, y, n, static_cast<f32>(lower), static_cast<f32>(upper));
     }
     case DOUBLE: {
-      return __clamp<f64>(stream, x, y, n, lower, upper);
+      return __clamp<f64>(w, x, y, n, lower, upper);
+    }
+    default: {
+      SYSTEM_EXIT("Unsupported data type");
     }
   }
 }

@@ -26,6 +26,7 @@ pub const blas = @import("backend/blas.zig");
 
 const device_root = @import("device");
 pub const device = device_root.device;
+pub const opspec = device_root.opspec;
 pub const DeviceReference = device.DeviceReference;
 pub const backend = device_root.backend;
 pub const ReduceType = device_root.ReduceType;
@@ -52,7 +53,7 @@ pub const Settings = struct {
 /// more optimizations tbd if it will be added back in the future.
 pub var rt_grad_enabled: bool = true;
 
-var prng = std.rand.DefaultPrng.init(settings.seed);
+var prng = std.Random.DefaultPrng.init(settings.seed);
 /// currently only used for generating node labels when tracing the comp graph
 pub const random = prng.random();
 

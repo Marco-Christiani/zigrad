@@ -6,9 +6,9 @@
 // we're using double because every float can cast
 // up to a double and then we can go back down.
 
-extern "C" void gemm(
+void __gemm(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* a_data,
   const void* b_data,
   void* c_data,
@@ -32,7 +32,7 @@ extern "C" void gemm(
       const float _alpha = static_cast<float>(alpha);
       const float _beta = static_cast<float>(beta);
       return CUBLAS_ASSERT(cublasSgemm(
-          get_handle(cublas_handle), 
+          __cast_cublas(w),
           (trans_b) ? CUBLAS_OP_T : CUBLAS_OP_N,
           (trans_a) ? CUBLAS_OP_T : CUBLAS_OP_N,
           _k, _m, _n,
@@ -45,7 +45,7 @@ extern "C" void gemm(
     }
     case DOUBLE: {
       return CUBLAS_ASSERT(cublasDgemm(
-          get_handle(cublas_handle), 
+          __cast_cublas(w),
           (trans_b) ? CUBLAS_OP_T : CUBLAS_OP_N,
           (trans_a) ? CUBLAS_OP_T : CUBLAS_OP_N,
           _k, _m, _n,
@@ -56,7 +56,30 @@ extern "C" void gemm(
           static_cast<double*>(c_data), ldc
       ));
     }
+    default:
+      SYSTEM_EXIT("Unsupported data type");
   }
+}
+
+extern "C" void gemm(
+  dtype id,
+  CublasWrapper w,
+  const void* a_data,
+  const void* b_data,
+  void* c_data,
+  len_t m, 
+  len_t n, 
+  len_t k,
+  bool trans_a,
+  bool trans_b, 
+  len_t lda,
+  len_t ldb,
+  len_t ldc,
+  double alpha,
+  double beta
+) {
+  __gemm(id, w, a_data, b_data, c_data, m, n, k, trans_a, trans_b, lda, ldb, ldc, alpha, beta);
+  CUDA_ASSERT(cudaPeekAtLastError());
 }
 
 #endif

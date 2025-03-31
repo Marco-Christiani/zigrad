@@ -3,14 +3,14 @@
 
 #include "nn_utils.cu"
 
-extern "C" void relu_forward(
+extern "C" void relu_fwd(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(w);
 
   switch (id) {
     case SINGLE: {
@@ -51,15 +51,15 @@ struct ReluBwdFunctor {
     }
 };
 
-extern "C" void relu_reverse(
+extern "C" void relu_bwd(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y_grd,
   void* x_grd,
   len_t n
 ) {
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(w);
 
   switch (id) {
     case SINGLE: {
@@ -92,6 +92,8 @@ extern "C" void relu_reverse(
       );
       return;
     }
+    default:
+      SYSTEM_EXIT("Unsupported data type");
   }
 }
 

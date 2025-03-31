@@ -57,7 +57,7 @@ pub fn Trainer(comptime T: type, comptime loss_fn: LossFns) type {
             const loss = try lossf(T, output, target);
             loss.acquire();
             self.model.zero_grad();
-            try loss.setup_grad(0);
+            try loss.setup_grad(1);
             try self.graph_manager.backward(loss);
             self.optimizer.step(self.params);
             loss.release();

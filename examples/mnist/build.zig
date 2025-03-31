@@ -11,7 +11,6 @@ pub fn build(b: *std.Build) void {
     const zigrad_dep = b.dependency("zigrad", .{
         .target = target,
         .optimize = optimize,
-        .tracy_enable = false,
     });
 
     inline for (configs) |cfg| {
