@@ -575,17 +575,24 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.data.ptr != out.data.ptr);
             std.debug.assert(out.mode != .view);
 
-            const scratch = blk: {
+            const scratch: []T = outer: {
+                const delta = self.shape.len - out.shape.len;
                 // we need enough scratch memory for at least the first reduce
                 // but if that yields the same size as the out.shape, then we know only
                 // one reduce is required and we can write directly to the out memory (zero scratch)
-                const coef: u64 = if (self.shape.mismatch(out.shape)) |mm|
-                    if (mm.a_pos != mm.b_pos) Shape.slice_size(self.shape.crop(0, mm.a_pos)) else self.shape.get(mm.a_pos)
-                else
-                    Shape.slice_size(self.shape.head(self.shape.len - out.shape.len));
+                const coef: u64 = inner: {
+                    if (0 < delta) // always reduce the outer dimensions
+                        break :inner Shape.slice_size(self.shape.head(delta));
 
+                    // there is no difference - unbroadcast dispatches to scaled copy
+                    const mm = self.shape.mismatch(out.shape) orelse break :outer &.{};
+
+                    // we only need the size of the first reduced dimension
+                    break :inner self.shape.get(mm.a_pos);
+                };
                 const n = out.data.len * coef;
-                break :blk try device.mem_scratch(T, if (n == self.data.len) 0 else n);
+
+                break :outer try device.mem_scratch(T, if (n == self.data.len) 0 else n);
             };
 
             device.dispatch(opspec.unbroadcast(T){
