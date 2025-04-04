@@ -280,13 +280,12 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
+            if (self.acquired)
+                std.debug.panic("Attempt to deinit an acquired tensor.", .{});
 
-            // log.debug("deinit().data {?s}", .{self.get_label()});
             self.data.deinit(self.device);
 
             if (self.grad) |*g| {
-                // log.debug("deinit().grad {?s}", .{self.get_label()});
                 g.deinit(self.device);
             }
 

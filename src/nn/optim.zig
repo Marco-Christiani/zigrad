@@ -80,7 +80,7 @@ pub fn SGD(comptime T: type) type {
                 .alpha = &nlr,
             });
 
-            try param.setup_grad(0);
+            param.assume_grad().fill(0, param.device);
         }
 
         pub fn optimizer(self: *Self) Optimizer(T) {

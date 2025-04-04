@@ -79,6 +79,10 @@ pub fn NDArray(comptime T: type) type {
             return .{ .data = try device.mem_dupe(T, self.data), .shape = self.shape };
         }
 
+        pub fn share(self: Self) Self {
+            return .{ .data = self.data, .shape = self.shape, .mode = .shared };
+        }
+
         pub fn cast(self: *Self, K: type, _: DeviceReference) !NDArray(K) {
             _ = self;
             @compileError("Not implemented");
