@@ -8,32 +8,38 @@ pub const std_options = zg.std_options;
 pub fn main() !void {
     const Tensor = zg.NDTensor(f32);
 
+    var optim = zg.optim.SGD(f32){
+        .lr = 0.1,
+    };
+
     var cpu = zg.device.HostDevice.init(std.heap.smp_allocator);
     defer cpu.deinit();
 
     var gm = zg.GraphManager(Tensor).init(std.heap.smp_allocator, .{
-        .eager_teardown = true,
+        .eager_teardown = false,
     });
     defer gm.deinit();
 
-    var lyr = try LinearLayer(f32).init(cpu.reference(), 5, 5);
-    defer lyr.deinit();
-
     ///////////////////////////////////////////////////////////////////////
 
-    const x = try Tensor.sequence(1.0, 1.0, &.{5}, true, cpu.reference());
+    const x = try Tensor.ones(&.{10}, true, cpu.reference());
     defer x.deinit();
 
-    const out = try lyr.forward(x);
-    try out.setup_grad(1.0);
+    const y = try Tensor.zeros(&.{10}, false, cpu.reference());
+    defer y.deinit();
 
-    try gm.backward(out);
+    try optim.attach(x);
 
-    std.debug.print("W DATA: {any}\n\n", .{lyr.weights.get_data()});
-    std.debug.print("W GRAD: {any}\n\n", .{lyr.weights.assume_grad()});
+    y.set(0, 1);
 
-    std.debug.print("B DATA: {any}\n\n", .{lyr.bias.get_data()});
-    std.debug.print("B GRAD: {any}\n\n", .{lyr.bias.assume_grad()});
+    for (0..100) |_| {
+        const loss = try zg.loss.softmax_cross_entropy_loss(f32, x, y);
+        std.debug.print("LOSS: {}\n\n", .{loss.get(0)});
+        try gm.backward(loss);
+    }
+
+    std.debug.print("X GRAD: {any}\n\n", .{x.assume_grad_data()});
+
     /////////////////
     //var ts: [5]*Tensor = undefined;
 

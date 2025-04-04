@@ -186,7 +186,6 @@ pub fn NDTensor(comptime T: type) type {
         // This function can allocate a gradient if one is not present.
         pub fn ensure_grad(self: *Self, fill_value: ?T) !*DataType {
             if (self.grad) |*grd| {
-                // std.debug.print("FOUND GRAD\n", .{});
                 return grd;
             } else {
                 try self.setup_grad(fill_value);
@@ -275,7 +274,7 @@ pub fn NDTensor(comptime T: type) type {
                 .acquired = false,
                 .device = opts.device,
                 ._requires_grad = rg,
-                ._backward_ctx = if (rg) try BackwardsContext.init(BwdCallback, opts.callback, opts.device) else null,
+                ._backward_ctx = if (rg) try BackwardsContext.init(BwdCallback, opts.callback, false, opts.device) else null,
             };
             return self;
         }
@@ -285,10 +284,16 @@ pub fn NDTensor(comptime T: type) type {
 
             // log.debug("deinit().data {?s}", .{self.get_label()});
             self.data.deinit(self.device);
+
             if (self.grad) |*g| {
                 // log.debug("deinit().grad {?s}", .{self.get_label()});
                 g.deinit(self.device);
             }
+
+            if (self._backward_ctx) |*ctx| {
+                ctx.deinit(self.device);
+            }
+
             self.device.allocator.destroy(self);
         }
 
@@ -481,7 +486,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         // this needs to get audited for device safety
-        pub fn set(self: *const Self, idx: usize, value: T) !void {
+        pub fn set(self: *const Self, idx: usize, value: T) void {
             self.data.data[idx] = value;
         }
 
@@ -1076,8 +1081,7 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(zg.rt_grad_enabled);
             //_ = try self.ensure_grad(1.0);
             const ctx = &(self._backward_ctx orelse return);
-            try ctx.call(self, self.device);
-            self._backward_ctx = null;
+            try ctx.call(self);
         }
 
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes

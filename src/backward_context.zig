@@ -46,24 +46,42 @@ fn ContextArgType(comptime callable: anytype) type {
     }
 }
 
+const ClosurePointer = struct {
+    held: *anyopaque,
+    free: *const fn (*anyopaque, std.mem.Allocator) void,
+    fn init(T: type, ptr: *T) ClosurePointer {
+        const free = struct {
+            pub fn impl(_ptr: *anyopaque, allocator: std.mem.Allocator) void {
+                allocator.destroy(@ptrCast(@alignCast(_ptr)));
+            }
+        }.free;
+        return .{ .held = ptr, .free = free };
+    }
+    fn deinit(self: *ClosurePointer, allocator: std.mem.Allocator) void {
+        self.free(self.held, allocator);
+        self.* = undefined;
+    }
+};
+
 pub fn BackwardContext(PrimaryType: type) type {
     return struct {
         const Self = @This();
         const ContextPtr = ?*anyopaque;
-        const ContextFunction = *const fn (*Self, *PrimaryType, DeviceReference) anyerror!void;
+        const ContextFunction = *const fn (*Self, *PrimaryType) anyerror!void;
         // small-buffer-optimized context object
         const SmallBuffer = [4]usize;
 
         debug_id: if (debug) usize else void,
         callable: ContextFunction,
+        persist: bool = false,
         storage: union(enum) {
             none: void,
             buf: SmallBuffer,
-            ptr: *anyopaque,
+            ptr: ClosurePointer,
             ref: *anyopaque,
         } = .none,
 
-        pub fn init(CtxType: type, context: CtxType, device: DeviceReference) !Self {
+        pub fn init(CtxType: type, context: CtxType, persist: bool, device: DeviceReference) !Self {
             const is_ref = (@typeInfo(CtxType) == .pointer);
             const ArgType = if (is_ref) std.meta.Child(CtxType) else CtxType;
 
@@ -72,14 +90,13 @@ pub fn BackwardContext(PrimaryType: type) type {
             }
 
             const callback = struct {
-                pub fn wrapper(_self: *Self, x: *PrimaryType, _device: DeviceReference) anyerror!void {
+                pub fn wrapper(_self: *Self, x: *PrimaryType) anyerror!void {
                     switch (comptime arity(ArgType.callback)) {
                         1 => {
                             try ArgType.callback(x);
                         },
                         2 => {
                             try ArgType.callback(x, _self.cast(ArgType));
-                            _self.release(ArgType, _device);
                         },
                         else => {
                             @compileError("backward callback must have artiy within [1,2]");
@@ -93,12 +110,14 @@ pub fn BackwardContext(PrimaryType: type) type {
                     .callable = callback,
                     .storage = .{ .ref = context },
                     .debug_id = if (debug) type_id(ArgType) else {},
+                    .persist = persist,
                 };
             }
 
             var tmp: Self = .{
                 .callable = callback,
                 .debug_id = if (debug) type_id(ArgType) else {},
+                .persist = persist,
             };
 
             const arg_size = @sizeOf(ArgType);
@@ -115,24 +134,24 @@ pub fn BackwardContext(PrimaryType: type) type {
             } else {
                 const ptr = try device.allocator.create(ArgType);
                 ptr.* = context;
-                tmp.storage = .{ .ptr = ptr };
+                tmp.storage = .{ .ptr = ClosurePointer.init(ArgType, ptr) };
             }
 
             return tmp;
         }
 
-        pub fn deinit(self: *Self) void {
-            std.debug.assert(self.storage == .none);
+        pub fn deinit(self: *Self, device: DeviceReference) void {
+            self.release(device);
             self.* = undefined;
         }
 
-        pub fn call(self: *Self, tensor: *PrimaryType, device: DeviceReference) anyerror!void {
-            return self.callable(self, tensor, device);
+        pub fn call(self: *Self, tensor: *PrimaryType) anyerror!void {
+            return self.callable(self, tensor);
         }
 
-        pub fn release(self: *Self, T: type, device: DeviceReference) void {
+        pub fn release(self: *Self, device: DeviceReference) void {
             if (self.storage == .ptr) {
-                device.allocator.destroy(self.cast(T));
+                self.storage.ptr.deinit(device.allocator);
             }
             self.storage = .none;
         }
@@ -144,7 +163,7 @@ pub fn BackwardContext(PrimaryType: type) type {
 
             const address = switch (self.storage) {
                 .buf => |*buf| @intFromPtr(buf),
-                .ptr => |ptr| @intFromPtr(ptr),
+                .ptr => |ptr| @intFromPtr(ptr.held),
                 .ref => |ref| @intFromPtr(ref),
                 .none => @panic("Cannot cast from empty storage."),
             };
