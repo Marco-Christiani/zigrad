@@ -38,7 +38,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     // Train -------------------------------------------------------------------
     std.debug.print("Training...\n", .{});
-    const num_epochs = 3;
+    const num_epochs = 1;
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
@@ -55,9 +55,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
                 i,
                 train_dataset.images.len,
             });
-            try loss.setup_grad(0);
             try gm.backward(loss);
-            return;
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });

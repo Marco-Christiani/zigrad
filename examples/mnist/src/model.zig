@@ -59,7 +59,7 @@ pub fn LinearLayer(comptime T: type) type {
             var weights = try Tensor.empty(&.{ out_features, in_features }, true, device);
             errdefer weights.deinit();
 
-            var bias = try Tensor.empty(&.{ 1, out_features }, true, device);
+            var bias = try Tensor.zeroes(&.{ 1, out_features }, true, device);
             errdefer bias.deinit();
 
             try weights.set_label("linear_weights");
@@ -69,7 +69,6 @@ pub fn LinearLayer(comptime T: type) type {
             bias.acquire();
 
             winit.he_init(T, weights);
-            bias.fill(0.0);
 
             return .{ .weights = weights, .bias = bias };
         }
