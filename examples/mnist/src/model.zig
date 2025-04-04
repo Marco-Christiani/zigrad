@@ -39,12 +39,23 @@ pub fn MnistModel(comptime T: type, Optimizer: type) type {
         }
 
         pub fn forward(self: *Self, x: *Tensor) !*Tensor {
-            var out = try self.flatten.forward(x);
-            for (&self.linear_layers) |*linear_layer| {
-                out = try linear_layer.forward(out);
-                out = try self.relu.forward(out);
-            }
-            return out;
+            const flat = try self.flatten.forward(x);
+            errdefer flat.deinit();
+
+            const f0 = try self.linear_layers[0].forward(flat);
+            errdefer f0.deinit();
+            const a0 = try self.relu.forward(f0);
+            errdefer a0.deinit();
+
+            const f1 = try self.linear_layers[1].forward(a0);
+            errdefer f1.deinit();
+            const a1 = try self.relu.forward(f1);
+            errdefer a1.deinit();
+
+            const f2 = try self.linear_layers[2].forward(a1);
+            errdefer f2.deinit();
+
+            return try self.relu.forward(f2);
         }
     };
 }
@@ -59,7 +70,7 @@ pub fn LinearLayer(comptime T: type) type {
             var weights = try Tensor.empty(&.{ out_features, in_features }, true, device);
             errdefer weights.deinit();
 
-            var bias = try Tensor.zeroes(&.{ 1, out_features }, true, device);
+            var bias = try Tensor.zeros(&.{ 1, out_features }, true, device);
             errdefer bias.deinit();
 
             try weights.set_label("linear_weights");

@@ -16,7 +16,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const device = cpu.reference();
 
     var optim: Optimizer = .{
-        .lr = 0.1,
+        .lr = 0.01,
         .grad_clip_max_norm = 10.0,
         .grad_clip_delta = 1e-6,
         .grad_clip_enabled = false,
@@ -30,15 +30,13 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     var model = try MnistModel.init(device, &optim); // 109_386
     defer model.deinit();
 
-    //try stdout.print("n params = {}\n", .{model.countParams()});
-
     std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
     const train_dataset = try MnistDataset(T).load(device, train_path, batch_size);
 
     // Train -------------------------------------------------------------------
     std.debug.print("Training...\n", .{});
-    const num_epochs = 1;
+    const num_epochs = 3;
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
@@ -50,11 +48,14 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             const loss = try zg.loss.softmax_cross_entropy_loss(f32, output, label);
             total_loss += loss.get(0);
 
+            //return loss.print_arrows();
+
             std.debug.print("train_loss: {d:<5.5} [{d}/{d}]\n", .{
                 loss.get(0),
                 i,
                 train_dataset.images.len,
             });
+
             try gm.backward(loss);
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
