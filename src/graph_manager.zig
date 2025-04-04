@@ -101,20 +101,12 @@ test "GraphManager eager teardown reuse 1" {
     F.acquire();
 
     const C = try B.mul(A);
-    //defer C.deinit();
-
     const D = try B.add(F);
-    //defer D.deinit();
-
     const E = try C.mul(D);
-    //defer E.deinit();
 
     // Setup graph manager with eager teardown
     var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
     defer gm.deinit();
-
-    // Initialize root gradient
-    E.grad.?.fill(1.0, device);
 
     // Run backward pass
     try gm.backward(E);
@@ -162,13 +154,12 @@ test "GraphManager eager teardown reuse 2" {
     B.acquire();
 
     const C = try A.mul(B);
-    var D = try A.mul(C);
-    var E = try D.add(C);
+    const D = try A.mul(C);
+    const E = try D.add(C);
 
     var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
     defer gm.deinit();
 
-    E.grad.?.fill(1.0, device);
     try gm.backward(E);
 
     // Clean up leaves
@@ -201,10 +192,7 @@ test "GraphManager x*x" {
     var gm = GraphManager(Tensor).init(allocator, .{ .eager_teardown = true });
     defer gm.deinit();
 
-    E.grad.?.fill(1.0, device);
     try gm.backward(E);
-    A.print();
-    B.print();
 
     // Clean up leaves
     A.release();

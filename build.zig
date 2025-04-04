@@ -123,8 +123,8 @@ fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
 //}
 
 pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
-    const new_backend = get_backend(b);
-    //const new_backend: Backend = .HOST;
+    //const new_backend = get_backend(b);
+    const new_backend: Backend = .HOST;
 
     const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
 

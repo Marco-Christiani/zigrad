@@ -154,7 +154,7 @@ const MnistModel = struct {
         const params = self.model.get_parameters();
         defer self.model.device.allocator.free(params);
         for (params) |p| {
-            total += p.grad.?.size();
+            total += if (p.grad) |*g| g.size() else 0;
         }
         return total;
     }

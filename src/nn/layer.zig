@@ -13,7 +13,6 @@ const NDArray = zg.NDArray;
 const prod = zg.arrayutils.prod;
 const conv_utils = zg.conv_utils;
 const simple_mse_loss = zg.loss.ag_mse_1d;
-const winit = zg.winit;
 
 const log = std.log.scoped(.zg_layer);
 
@@ -132,6 +131,7 @@ pub fn LinearLayer(comptime T: type) type {
             try weights.set_label("linear_weights");
             var bias = try NDTensor(T).empty(&bias_shape, true, device);
             try bias.set_label("linear_bias");
+
             weights.acquire();
             bias.acquire();
 
@@ -152,7 +152,7 @@ pub fn LinearLayer(comptime T: type) type {
             const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
             const n_features = self.weights.data.shape.get(0);
             const b_y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
-            return self.bias.add_(b_y);
+            return self.bias.add(b_y);
         }
 
         pub fn get_parameters(self: *Self) ?[]*NDTensor(T) {
@@ -160,8 +160,8 @@ pub fn LinearLayer(comptime T: type) type {
         }
 
         pub fn zero_grad(self: *Self) void {
-            self.weights.grad.?.fill(0, self.device);
-            self.bias.grad.?.fill(0, self.device);
+            self.weights.setup_grad(0) catch unreachable;
+            self.bias.setup_grad(0) catch unreachable;
         }
 
         pub fn deinit(self: *Self) void {
@@ -250,13 +250,14 @@ pub fn Conv2DLayer(comptime T: type) type {
 
             // broadcasted mm for batching
             var output = try self.weights.data.bmm(col, false, false);
+            errdefer output.deinit();
 
             // reshape to 4D
             try output._reshape(&.{ batch_size, self.out_channels, out_height, out_width });
 
             // bias
             try self.bias.data._reshape(&.{ 1, self.out_channels, 1, 1 });
-            _ = try output._add(self.bias.data);
+            try output._add(self.bias.data);
 
             defer {
                 // restore weights shape after forward (TODO: this can be optimized out later?)
@@ -307,18 +308,18 @@ pub fn Conv2DLayer(comptime T: type) type {
             defer grad_weights.deinit();
 
             // grad_weights should be (out_channels, in_channels * kernel_size * kernel_size)
-            try grad_weights._reshape(&[_]usize{
+            try grad_weights._reshape(&.{
                 self.out_channels,
                 self.in_channels,
                 self.kernel_size,
                 self.kernel_size,
             });
-            _ = try self.weights.grad.?._add(grad_weights);
+            try grad_weights.add_(try self.weights.ensure_grad(0));
 
             // w.r.t. bias
             const bias_grad = try tensor.grad.?.sum(tensor.device);
             defer bias_grad.deinit(tensor.device);
-            _ = try self.bias.grad.?._add(bias_grad);
+            try bias_grad.add_(try self.bias.ensure_grad(0));
 
             // w.r.t. input
             var weights_copy = try self.weights.data.copy(self.device);
@@ -636,6 +637,7 @@ pub fn main() !void {
 
     std.debug.print("Reading data\n", .{});
     const data = try read_csv(T, "/tmp/data.csv", alloc);
+
     std.debug.print("data.len={}\n", .{data.len});
     try train_grad_accum(T, data, alloc);
 }
@@ -799,8 +801,8 @@ fn train_batched(comptime T: type, data: [][]T, device: DeviceReference) !void {
             const loss = try simple_mse_loss(f32, output, target, device);
             epoch_loss += loss.data.data[0];
 
-            loss.grad.?.fill(1.0, device);
             layer.zero_grad();
+
             try gm.backward(loss);
             optimizer.step(params.?);
         }
@@ -834,8 +836,6 @@ test "LinearLayer forward and backward" {
     var cpu = zg.device.HostDevice.init(arena.allocator());
     defer cpu.deinit();
 
-    const device = cpu.reference();
-
     const T = f32;
     zg.rt_grad_enabled = true;
     // input 2, output 2
@@ -845,10 +845,10 @@ test "LinearLayer forward and backward" {
     const input_shape = &[_]usize{ 1, 2 };
     const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, cpu.reference());
     const output = try layer.forward(input);
-    output.grad.?.fill(1.0, device);
 
     var gm = GraphManager(NDTensor(T)).init(cpu.allocator, .{});
     defer gm.deinit();
+
     try gm.backward(output);
 
     //try std.testing.expectEqual(12, output.get(&.{ 0, 0 }));

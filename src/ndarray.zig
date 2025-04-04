@@ -91,6 +91,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn fill(self: Self, val: T, device: DeviceReference) void {
+            // std.debug.print("FILLING: {}\n", .{val});
             device.mem_fill(T, self.data, val);
         }
 
@@ -231,48 +232,63 @@ pub fn NDArray(comptime T: type) type {
             return self.shape.strides().get(dim);
         }
 
-        inline fn elwise(x: *const Self, y: Self, device: DeviceReference, Op: type) !Self {
-            const bshape = try x.shape.broadcast(y.shape);
-            const values = try device.mem_alloc(T, bshape.size());
-            device.dispatch(Op{ .x = x.data, .y = y.data, .z = values });
-            return .{ .data = values, .shape = bshape };
-        }
-
-        inline fn _elwise(self: *Self, other: Self, device: DeviceReference, Op: type) !void {
-            std.debug.assert(self.mode != .view);
-            if (!self.shape.compatible(other.shape) or other.size() > other.size()) {
-                log.err("_" ++ Op.__name__ ++ "() self.shape={} other.shape={}", .{ self.shape, other.shape });
+        inline fn elwise(x: *const Self, y: *const Self, z: *Self, device: DeviceReference, Op: type) !void {
+            std.debug.assert(z.mode != .view);
+            if (builtin.mode == .Debug and !x.shape.compatible(y.shape)) {
+                log.err("_" ++ Op.__name__ ++ "() self.shape={} other.shape={}", .{ x.shape, y.shape });
                 return error.IncompatibleShapes;
             }
-            device.dispatch(Op{ .x = self.data, .y = other.data, .z = self.data });
+            device.dispatch(Op{ .x = x.data, .y = y.data, .z = z.data });
+        }
+
+        inline fn elwise_alloc(x: *const Self, y: *const Self, device: DeviceReference, Op: type) !Self {
+            const z_shape = try x.shape.broadcast(y.shape);
+            var z = try Self.empty(z_shape.slice(), device);
+            errdefer z.deinit(device);
+            try elwise(x, y, &z, device, Op);
+            return z;
         }
 
         // element wise operations (broadcasting)
         pub fn add(self: *const Self, other: Self, device: DeviceReference) !Self {
-            return elwise(self, other, device, opspec.add(T));
+            return elwise_alloc(self, &other, device, opspec.add(T));
         }
         pub fn sub(self: *const Self, other: Self, device: DeviceReference) !Self {
-            return elwise(self, other, device, opspec.sub(T));
+            return elwise_alloc(self, &other, device, opspec.sub(T));
         }
         pub fn mul(self: *const Self, other: Self, device: DeviceReference) !Self {
-            return elwise(self, other, device, opspec.mul(T));
+            return elwise_alloc(self, &other, device, opspec.mul(T));
         }
         pub fn div(self: *const Self, other: Self, device: DeviceReference) !Self {
-            return elwise(self, other, device, opspec.div(T));
+            return elwise_alloc(self, &other, device, opspec.div(T));
         }
 
         // inplace element wise operations (broadcasting)
         pub fn _add(self: *Self, other: Self, device: DeviceReference) !void {
-            return _elwise(self, other, device, opspec.add(T));
+            return elwise(self, &other, self, device, opspec.add(T));
         }
         pub fn _sub(self: *Self, other: Self, device: DeviceReference) !void {
-            return _elwise(self, other, device, opspec.sub(T));
+            return elwise(self, &other, self, device, opspec.sub(T));
         }
         pub fn _mul(self: *Self, other: Self, device: DeviceReference) !void {
-            return _elwise(self, other, device, opspec.mul(T));
+            return elwise(self, &other, self, device, opspec.mul(T));
         }
         pub fn _div(self: *Self, other: Self, device: DeviceReference) !void {
-            return _elwise(self, other, device, opspec.div(T));
+            return elwise(self, &other, self, device, opspec.div(T));
+        }
+
+        // inplace element wise operations (broadcasting)
+        pub fn add_(self: *const Self, other: *Self, device: DeviceReference) !void {
+            return elwise(self, other, other, device, opspec.add(T));
+        }
+        pub fn sub_(self: *const Self, other: *Self, device: DeviceReference) !void {
+            return elwise(self, other, other, device, opspec.sub(T));
+        }
+        pub fn mul_(self: *const Self, other: *Self, device: DeviceReference) !void {
+            return elwise(self, other, other, device, opspec.mul(T));
+        }
+        pub fn div_(self: *const Self, other: *Self, device: DeviceReference) !void {
+            return elwise(self, other, other, device, opspec.div(T));
         }
 
         pub fn sum(self: Self, device: DeviceReference) !Self {
@@ -355,6 +371,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn bmm_acc(self: *const Self, other: Self, out_shape: Shape, device: DeviceReference, config: BmmConfig) !Self {
             var out = try Self.empty(out_shape.slice(), device);
+            errdefer out.deinit(device);
             try self.bmm_acc_(other, &out, device, config);
             return out;
         }
@@ -487,43 +504,43 @@ pub fn NDArray(comptime T: type) type {
         };
 
         // TODO: proper gather backend kernel.
-        pub fn gather(self: Self, device: DeviceReference, opts: GatherOptions) !GatherResult {
-            const indices = opts.indices;
-            const dim = opts.dim;
+        //pub fn gather(self: Self, device: DeviceReference, opts: GatherOptions) !GatherResult {
+        //    const indices = opts.indices;
+        //    const dim = opts.dim;
 
-            std.debug.assert(self.shape.len == indices.shape.len);
-            for (self.shape.slice(), indices.shape.slice(), 0..) |src_dim, idx_dim, i| {
-                if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
-            }
-            // to-owned-slice allows us to properly free regardless of exit, otherwise
-            // we could try to free on error and because the user didn't ask for offsets
-            var offsets = try device.allocator.alloc(usize, indices.data.len); // TODO: cache?
-            defer if (!opts.return_offsets) device.allocator.free(offsets); // TODO: cache?
+        //    std.debug.assert(self.shape.len == indices.shape.len);
+        //    for (self.shape.slice(), indices.shape.slice(), 0..) |src_dim, idx_dim, i| {
+        //        if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
+        //    }
+        //    // to-owned-slice allows us to properly free regardless of exit, otherwise
+        //    // we could try to free on error and because the user didn't ask for offsets
+        //    var offsets = try device.allocator.alloc(usize, indices.data.len); // TODO: cache?
+        //    defer if (!opts.return_offsets) device.allocator.free(offsets); // TODO: cache?
 
-            const values = try Self.empty(indices.shape.slice(), device);
-            const idx_strides = indices.shape.strides();
-            const src_strides = self.shape.strides();
+        //    const values = try Self.empty(indices.shape.slice(), device);
+        //    const idx_strides = indices.shape.strides();
+        //    const src_strides = self.shape.strides();
 
-            for (0..indices.data.len) |i| {
-                const idx_coord = idx_strides.offset_to_pos(i);
+        //    for (0..indices.data.len) |i| {
+        //        const idx_coord = idx_strides.offset_to_pos(i);
 
-                var src_coord = idx_coord;
-                src_coord.set(dim, indices.data[i]);
+        //        var src_coord = idx_coord;
+        //        src_coord.set(dim, indices.data[i]);
 
-                if (src_coord.get(dim) >= self.shape.get(dim))
-                    return error.IndexOutOfBounds;
+        //        if (src_coord.get(dim) >= self.shape.get(dim))
+        //            return error.IndexOutOfBounds;
 
-                offsets[i] = src_strides.pos_to_offset(src_coord);
-            }
+        //        offsets[i] = src_strides.pos_to_offset(src_coord);
+        //    }
 
-            device.mem_take(T, self.data, offsets, values.data);
+        //    device.mem_take(T, self.data, offsets, values.data);
 
-            return .{
-                .values = values,
-                .offsets = if (opts.return_offsets) offsets else null,
-                .device = device,
-            };
-        }
+        //    return .{
+        //        .values = values,
+        //        .offsets = if (opts.return_offsets) offsets else null,
+        //        .device = device,
+        //    };
+        //}
 
         /// COM
         pub fn take(self: Self, offsets: []const usize, device: DeviceReference) !Self {
@@ -747,7 +764,7 @@ fn bmm_acc_impl(
     if (builtin.mode == .Debug) {
         if (accumulator) |_| {
             std.debug.assert(C.mode != .view);
-            if (!C.shape.equal(C_shape)) {
+            if (!C.shape.compatible(C_shape)) {
                 std.debug.panic("Expected accumulator shape {} but got {}", .{ C_shape, C.shape });
             }
         }

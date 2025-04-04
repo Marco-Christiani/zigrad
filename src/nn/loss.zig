@@ -165,17 +165,16 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
 
     const CceBwd = struct {
         sm_preds: *NDTensor(T),
-        pub fn callback(bw_tensor: *NDTensor(T), ctx: *@This()) !void {
+        pub fn callback(loss: *NDTensor(T), ctx: *@This()) !void {
             defer ctx.sm_preds.deinit();
-            const bw_self_children = bw_tensor.get_children() orelse return error.NoChildren;
-            const bw_y_pred = bw_self_children[0];
-            const bw_y = bw_self_children[1];
-            const bw_batch_size = if (bw_y_pred.data.shape.len > 1) bw_y_pred.data.shape.get(0) else 1;
+            const preds = loss.backward_child(0) orelse return;
+            const label = loss.get_child(1);
+            const bw_batch_size = if (preds.data.shape.len > 1) loss.data.shape.get(0) else 1;
 
-            if (bw_y_pred.grad) |bw_grad| {
-                for (bw_grad.data, ctx.sm_preds.get_data(), bw_y.data.data) |*bw_grad_val, bw_sm_val, bw_target_val| {
-                    bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
-                }
+            std.debug.print("CCE BWD\n", .{});
+
+            for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
+                bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
             }
         }
     };
