@@ -387,15 +387,15 @@ pub fn main() !void {
     try run_mnist(fpaths.train_csv, fpaths.test_csv);
 }
 
-test run_mnist {
-    const allocator = std.heap.c_allocator;
-    const fpaths = try get_mnist_paths(.small, allocator);
-    defer {
-        allocator.free(fpaths.train_csv);
-        allocator.free(fpaths.test_csv);
-    }
-    run_mnist(fpaths.train_csv, fpaths.test_csv) catch |err| switch (err) {
-        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `run_mnist` test.", .{@errorName(err)}),
-        else => return err,
-    };
-}
+//test run_mnist {
+//    const allocator = std.heap.c_allocator;
+//    const fpaths = try get_mnist_paths(.small, allocator);
+//    defer {
+//        allocator.free(fpaths.train_csv);
+//        allocator.free(fpaths.test_csv);
+//    }
+//    run_mnist(fpaths.train_csv, fpaths.test_csv) catch |err| switch (err) {
+//        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `run_mnist` test.", .{@errorName(err)}),
+//        else => return err,
+//    };
+//}

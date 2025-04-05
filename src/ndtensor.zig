@@ -62,21 +62,52 @@ pub const Op = enum {
 pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
-        // signature for a backwards callback
-        pub const Callback = *const fn (*const Self) anyerror!void;
         pub const DataType = NDArray(T);
         pub const Children = std.BoundedArray(*Self, 8);
         pub const Label = std.BoundedArray(u8, 32);
         pub const BackwardsContext = @import("backward_context.zig").BackwardContext(Self);
 
+        /// Core NDArray that holds the values and shape.
+        /// Use this member directly when you want to perform
+        /// ops that will not be tracked by the graph.
         data: DataType,
-        op: ?Op = null,
-        children: Children = .{},
-        label: Label = .{},
+        /// The gradient calculated by calling "backward".
+        /// Gradients are lazily initialized.
         grad: ?DataType = null,
-        acquired: bool = false, // not inherited
+        /// The device field is a reference to a stateful
+        /// object that provides memory and compute resources.
         device: DeviceReference,
+        /// Marking a tensor as acquired signals to the
+        /// backwards process that this tensor should
+        /// not be freed. Set by using the "acquire" and
+        /// "release" functions.
+        acquired: bool = false,
+        /// An attached tensor can be traversed through
+        /// in the backward process. If the tensor is
+        /// unattached, the reversal process will not
+        /// continue through that tensor. Set by using
+        /// the "attach" and "detach" functions.
+        attached: bool = true,
+        /// When a tensor is created as the result of
+        /// an op, the tensor arguments of that op are
+        /// the children of the resulting output.
+        children: Children = .{},
+        /// Optional label for naming tensors. This is
+        /// useful for printing graphs and diagrams.
+        label: Label = .{},
+        /// Optional op tag - TODO: do we need to
+        /// continue to support this?
+        op: ?Op = null,
+        /// Opaque object that acts like a closure for
+        /// backwards function calls. The backwards context
+        /// can allocate state if the arguments provided
+        /// exceed its internal buffer.
         _backward_ctx: ?BackwardsContext = null,
+        /// The requires grad field tells the backwards
+        /// process if it ought to initialize a gradient.
+        /// This field should not be used directly
+        /// because runtime gradients may be deactivated.
+        /// Use the "requires_grad" function instead.
         _requires_grad: bool,
 
         /// Values and shape are allocated. COM.
@@ -127,6 +158,14 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
+        pub fn attach(self: *Self) void {
+            self.attached = true;
+        }
+
+        pub fn detach(self: *Self) void {
+            self.attached = false;
+        }
+
         pub fn get_shape(self: *const Self) []const usize {
             return self.data.shape.slice();
         }
@@ -167,7 +206,7 @@ pub fn NDTensor(comptime T: type) type {
                 self.grad = try DataType.empty(self.get_shape(), self.device);
                 self.grad.?.mode = self.data.mode;
             }
-            return self.grad.?.fill(fill_value orelse return, self.device);
+            return self.assume_grad().fill(fill_value orelse return, self.device);
         }
 
         pub fn assume_grad(self: *Self) *DataType {
@@ -1078,9 +1117,13 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn backward(self: *Self) !void {
             std.debug.assert(zg.rt_grad_enabled);
-            //_ = try self.ensure_grad(1.0);
-            const ctx = &(self._backward_ctx orelse return);
-            try ctx.call(self);
+            // TODO: In the future, make sure this works with
+            // quantization. The 1 element is a tensor's gradient
+            // with respect to itself.
+            _ = try self.ensure_grad(1);
+            if (self._backward_ctx) |*ctx| {
+                try ctx.call(self);
+            }
         }
 
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes

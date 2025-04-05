@@ -508,43 +508,43 @@ pub fn NDArray(comptime T: type) type {
         };
 
         // TODO: proper gather backend kernel.
-        //pub fn gather(self: Self, device: DeviceReference, opts: GatherOptions) !GatherResult {
-        //    const indices = opts.indices;
-        //    const dim = opts.dim;
+        pub fn gather(self: Self, device: DeviceReference, opts: GatherOptions) !GatherResult {
+            const indices = opts.indices;
+            const dim = opts.dim;
 
-        //    std.debug.assert(self.shape.len == indices.shape.len);
-        //    for (self.shape.slice(), indices.shape.slice(), 0..) |src_dim, idx_dim, i| {
-        //        if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
-        //    }
-        //    // to-owned-slice allows us to properly free regardless of exit, otherwise
-        //    // we could try to free on error and because the user didn't ask for offsets
-        //    var offsets = try device.allocator.alloc(usize, indices.data.len); // TODO: cache?
-        //    defer if (!opts.return_offsets) device.allocator.free(offsets); // TODO: cache?
+            std.debug.assert(self.shape.len == indices.shape.len);
+            for (self.shape.slice(), indices.shape.slice(), 0..) |src_dim, idx_dim, i| {
+                if (i != dim and idx_dim > src_dim) return error.InvalidIndexShape;
+            }
+            // to-owned-slice allows us to properly free regardless of exit, otherwise
+            // we could try to free on error and because the user didn't ask for offsets
+            var offsets = try device.allocator.alloc(usize, indices.data.len); // TODO: cache?
+            defer if (!opts.return_offsets) device.allocator.free(offsets); // TODO: cache?
 
-        //    const values = try Self.empty(indices.shape.slice(), device);
-        //    const idx_strides = indices.shape.strides();
-        //    const src_strides = self.shape.strides();
+            const values = try Self.empty(indices.shape.slice(), device);
+            const idx_strides = indices.shape.strides();
+            const src_strides = self.shape.strides();
 
-        //    for (0..indices.data.len) |i| {
-        //        const idx_coord = idx_strides.offset_to_pos(i);
+            for (0..indices.data.len) |i| {
+                const idx_coord = idx_strides.offset_to_pos(i);
 
-        //        var src_coord = idx_coord;
-        //        src_coord.set(dim, indices.data[i]);
+                var src_coord = idx_coord;
+                src_coord.set(dim, indices.data[i]);
 
-        //        if (src_coord.get(dim) >= self.shape.get(dim))
-        //            return error.IndexOutOfBounds;
+                if (src_coord.get(dim) >= self.shape.get(dim))
+                    return error.IndexOutOfBounds;
 
-        //        offsets[i] = src_strides.pos_to_offset(src_coord);
-        //    }
+                offsets[i] = src_strides.pos_to_offset(src_coord);
+            }
 
-        //    device.mem_take(T, self.data, offsets, values.data);
+            device.mem_take(T, self.data, offsets, values.data);
 
-        //    return .{
-        //        .values = values,
-        //        .offsets = if (opts.return_offsets) offsets else null,
-        //        .device = device,
-        //    };
-        //}
+            return .{
+                .values = values,
+                .offsets = if (opts.return_offsets) offsets else null,
+                .device = device,
+            };
+        }
 
         /// COM
         pub fn take(self: Self, offsets: []const usize, device: DeviceReference) !Self {

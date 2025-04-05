@@ -40,6 +40,7 @@ pub fn GraphManager(comptime T: type) type {
             if (!gopr.found_existing) {
                 if (node.get_children()) |children| {
                     for (children) |child| {
+                        if (!child.attached) continue;
                         self.topo(child);
                     }
                 }
@@ -199,4 +200,67 @@ test "GraphManager x*x" {
     B.release();
     A.deinit();
     B.deinit();
+}
+
+test "GraphManager subgraphs/detach" {
+    const T = f32;
+    const Tensor = zg.NDTensor(T);
+    const allocator = std.testing.allocator;
+    zg.rt_grad_enabled = true;
+
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    // subgraph 1
+    const a = try Tensor.init(&.{2.0}, null, true, device);
+    defer a.deinit();
+
+    const b = try Tensor.init(&.{3.0}, null, true, device);
+    defer b.deinit();
+
+    const c = try a.add(b);
+    defer c.deinit();
+
+    c.detach();
+
+    // subgraph 2
+    const d = try Tensor.init(&.{4.0}, null, true, device);
+    defer d.deinit();
+
+    const e = try c.add(d);
+    defer e.deinit();
+
+    /////////////////////////////
+    //
+    //      a   b
+    //       \ /
+    //        c
+    //        .
+    //        .  <----- detached
+    //        .
+    //        c   d
+    //         \ /
+    //          e
+
+    var gm = GraphManager(Tensor).init(allocator, .{ .eager_teardown = false });
+    defer gm.deinit();
+
+    try gm.backward(e);
+    // gradients should be collected by all
+    // children that require a gradient
+    try std.testing.expect(e.grad != null);
+    try std.testing.expect(d.grad != null);
+    try std.testing.expect(c.grad != null);
+    // traversal should have stopped at the
+    // detached child node (c)
+    try std.testing.expect(a.grad == null);
+    try std.testing.expect(b.grad == null);
+
+    try gm.backward(c);
+    // traversal should happen to the atached
+    // children of the parent node.
+    try std.testing.expect(a.grad != null);
+    try std.testing.expect(b.grad != null);
 }
