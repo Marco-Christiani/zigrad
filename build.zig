@@ -1,11 +1,13 @@
 const std = @import("std");
 const Backend = @import("src/device/root.zig").Backend;
 const backend = @import("src/device/root.zig").backend;
-const builtin = @import("builtin");
+const Build = std.Build;
+const Module = Build.Module;
+const OptimizeMode = std.builtin.OptimizeMode;
 
 // this is a comment
 
-pub fn build(b: *std.Build) !void {
+pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -38,14 +40,6 @@ pub fn build(b: *std.Build) !void {
         else => @panic("Os not supported."),
     }
 
-    //const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
-    //const tracy = b.lazyDependency("tracy", .{
-    //    .target = target,
-    //    .optimize = optimize,
-    //    .tracy_enable = tracy_enable,
-    //});
-    //if (tracy_enable) zigrad.addImport("tracy", tracy.?.module("tracy"));
-
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
         .root_source_file = zigrad.root_source_file.?,
@@ -55,7 +49,6 @@ pub fn build(b: *std.Build) !void {
     lib.root_module.addImport("build_options", build_options_module);
     lib.root_module.addImport("device", device_module);
     link(target, lib);
-    //if (tracy_enable) add_tracy(lib, tracy.?);
     b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
@@ -67,7 +60,6 @@ pub fn build(b: *std.Build) !void {
 
     exe.root_module.addImport("zigrad", zigrad);
     link(target, exe);
-    // if (tracy_enable) add_tracy(exe, tracy.?);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -89,7 +81,6 @@ pub fn build(b: *std.Build) !void {
     unit_tests.root_module.addImport("device", device_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
-    // if (tracy_enable) add_tracy(unit_tests, tracy.?);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
@@ -103,9 +94,16 @@ pub fn build(b: *std.Build) !void {
 
     const docs = b.step("docs", "Generate documentation");
     docs.dependOn(&docs_step.step);
+
+    // Tracy -------------------------------------------------------------------
+    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
+    if (tracy_enable) {
+        const tracy = build_tracy(b, target).?;
+        inline for (.{ zigrad, exe.root_module, unit_tests.root_module }) |e| e.addImport("tracy", tracy);
+    }
 }
 
-fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
+fn link(target: Build.ResolvedTarget, exe: *Build.Step.Compile) void {
     switch (target.result.os.tag) {
         .linux => {
             exe.linkSystemLibrary("blas");
@@ -116,15 +114,47 @@ fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
     }
 }
 
-//fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
-//    exe.root_module.addImport("tracy", tracy.module("tracy"));
-//    exe.linkLibrary(tracy.artifact("tracy"));
-//    exe.linkLibCpp();
-//}
+pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
+    const optimize: OptimizeMode = b.option(OptimizeMode, "tracy_optimize_mode", "Defaults to ReleaseFast") orelse .ReleaseFast;
+    const options = b.addOptions();
+    const enable = true; // HACK: lazy
+    options.addOption(bool, "enable_tracy", enable);
+    options.addOption(bool, "enable_tracy_allocation", false);
+    options.addOption(bool, "enable_tracy_callstack", true);
+    options.addOption(usize, "tracy_callstack_depth", 10);
 
-pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const tracy = b.addModule("tracy", .{
+        .root_source_file = b.path("src/tracy.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+
+    const tracy_src = b.lazyDependency("tracy", .{}) orelse return null;
+    const tracy_c_flags = &.{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
+    tracy.addCSourceFile(.{ .file = tracy_src.path("public/TracyClient.cpp"), .flags = tracy_c_flags });
+    tracy.addOptions("build_options", options);
+
+    const unit_tests = b.addTest(.{
+        .root_module = tracy,
+    });
+    const test_step = b.step("tracy_test", "Run unit tests");
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
+
+    const exe = b.addExecutable(.{
+        .name = "tracy_demo",
+        .root_module = tracy,
+    });
+    const run_step = b.step("tracy_demo", "");
+    const run_demo = b.addRunArtifact(exe);
+    run_step.dependOn(&run_demo.step);
+    return tracy;
+}
+
+pub fn build_device_module(b: *Build, target: Build.ResolvedTarget) *Build.Module {
     const new_backend = get_backend(b);
-    //const new_backend: Backend = .HOST;
 
     const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
 
@@ -174,7 +204,7 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget) *std
     return device;
 }
 
-fn amalgamate_exists(b: *std.Build) bool {
+fn amalgamate_exists(b: *Build) bool {
     const here = b.path(".").getPath(b);
     const path = b.pathJoin(&.{ here, "src", "cuda", "build", "libamalgamate.so" });
     var file = std.fs.openFileAbsolute(path, .{});
@@ -186,7 +216,7 @@ fn amalgamate_exists(b: *std.Build) bool {
     }
 }
 
-fn get_backend(b: *std.Build) Backend {
+fn get_backend(b: *Build) Backend {
     const env_backend = std.process.getEnvVarOwned(b.allocator, "ZIGRAD_BACKEND") catch {
         @panic("Environment variable 'ZIGRAD_BACKEND' not found.");
     };
@@ -195,7 +225,7 @@ fn get_backend(b: *std.Build) Backend {
     };
 }
 
-pub fn run_command(b: *std.Build, args: []const []const u8) void {
+pub fn run_command(b: *Build, args: []const []const u8) void {
     const output = b.run(args);
 
     if (output.len > 0)

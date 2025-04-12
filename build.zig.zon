@@ -2,6 +2,12 @@
     .name = .zigrad,
     .fingerprint = 0x48e4161bbfcbaf8a,
     .version = "0.0.1",
+    .dependencies = .{
+        .tracy = .{
+            .url = "git+https://github.com/wolfpld/tracy/?ref=v0.11.0#075395620a504c0cdcaf9bab3d196db16a043de7",
+            .hash = "N-V-__8AAMBnlQHsQavelHMK9wG6naFro_ELt9C2Kgt_3r4Q",
+        },
+    },
     .paths = .{""},
     //.dependencies = .{
     //    .tracy = .{
