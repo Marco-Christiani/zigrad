@@ -37,6 +37,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     // Train -------------------------------------------------------------------
     std.debug.print("Training...\n", .{});
     const num_epochs = 3;
+    var timer = try std.time.Timer.start();
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
@@ -61,20 +62,26 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
     }
-    std.debug.print("Training complete ({d} epochs)]\n", .{num_epochs});
+    const train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
 
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
     const train_eval = try eval_mnist(&model, train_dataset);
-    std.debug.print("Train acc: {d:.2} (n={d})\n", .{ train_eval.acc * 100, train_eval.n });
+    const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
 
     // Eval on test set
     std.debug.print("Loading test data...\n", .{});
     const test_dataset = try MnistDataset(T).load(device, test_path, batch_size);
     defer test_dataset.deinit();
+    timer.reset();
     const test_eval = try eval_mnist(&model, test_dataset);
+    const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     std.debug.print("Test acc: {d:.2} (n={d})\n", .{ test_eval.acc * 100, test_eval.n });
+
+    std.debug.print("Training complete ({d} epochs). [{d}ms]\n", .{ num_epochs, train_time_ms });
+    std.debug.print("Eval train: {d:.2} (n={d}) [{d}ms]\n", .{ train_eval.acc * 100, train_eval.n, eval_train_time_ms });
+    std.debug.print("Eval test: {d:.2} (n={d}) {d}ms\n", .{ test_eval.acc * 100, test_eval.n, eval_test_time_ms });
 }
 
 fn eval_mnist(model: *MnistModel, dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {

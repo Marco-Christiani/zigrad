@@ -54,8 +54,7 @@ pub fn MnistModel(comptime T: type, Optimizer: type) type {
 
             const f2 = try self.linear_layers[2].forward(a1);
             errdefer f2.deinit();
-
-            return try self.relu.forward(f2);
+            return f2;
         }
     };
 }
