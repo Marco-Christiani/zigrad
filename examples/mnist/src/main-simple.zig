@@ -49,10 +49,13 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             const output = try model.forward(image);
             const loss = try zg.loss.softmax_cross_entropy_loss(f32, output, label);
             const loss_val = loss.get(0);
+            // Optional: Render an svg of the traced graph
+            // if (epoch == 0 and i == 0) {
+            //     try zg.utils.render_d2(loss, zg.utils.PrintOptions.plain, cpu.allocator, "./docs/comp_graph_mnist.svg");
+            // }
             try gm.backward(loss);
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
-            //return loss.print_arrows();
             total_loss += loss_val;
 
             std.debug.print("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]\n", .{

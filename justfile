@@ -28,13 +28,13 @@ cuda_compile:
    cmake .. && make -j$(nproc) && \
    popd
 
-export ZG_DATA_DIR := env("ZG_DATA_DIR", "data")
+export ZG_DATA_DIR := env("ZG_DATA_DIR", "examples/mnist/data")
 mnist:
   @python examples/mnist/mnist_data.py
-  @echo "Compiling zigrad mnist"
-  @just build -Doptimize=ReleaseFast -Dtracy_enable=false
-  @echo "Running zigrad mnist"
-  ./zig-out/bin/zigrad
+  @echo "Compiling zigrad mnist example"
+  @cd examples/mnist && zig build -Doptimize=ReleaseFast
+  @echo "Running zigrad mnist example"
+  examples/mnist/zig-out/bin/main
 
 benchmark +verbose="":
   @python examples/mnist/mnist_data.py
