@@ -42,9 +42,7 @@ pub fn build(b: *Build) !void {
 
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
-        .root_source_file = zigrad.root_source_file.?,
-        .target = target,
-        .optimize = optimize,
+        .root_module = zigrad,
     });
     lib.root_module.addImport("build_options", build_options_module);
     lib.root_module.addImport("device", device_module);
@@ -52,13 +50,17 @@ pub fn build(b: *Build) !void {
     b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
-        .name = "zigrad",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .name = "main",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigrad", .module = zigrad },
+            },
+        }),
     });
 
-    exe.root_module.addImport("zigrad", zigrad);
     link(target, exe);
     b.installArtifact(exe);
 

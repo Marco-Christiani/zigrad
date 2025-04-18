@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("../zigrad.zig");
+const zg = @import("zigrad");
 const DeviceReference = zg.DeviceReference;
 
 const Model = zg.Model;
