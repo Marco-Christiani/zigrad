@@ -5,7 +5,7 @@
 
 EXTERN_C void dot(
   dtype id,
-  void* stream,
+  CublasWrapper w,
   const void* a_data,
   const void* b_data,
   void* result,
@@ -14,7 +14,7 @@ EXTERN_C void dot(
 
 EXTERN_C void gemv(
     dtype id, 
-    void* cublas_handle,
+    CublasWrapper w,
     const void* a_data, 
     const void* b_data, 
     void* c_data, 
@@ -27,7 +27,7 @@ EXTERN_C void gemv(
 
 EXTERN_C void gemm(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* a_data,
   const void* b_data,
   void* c_data,
@@ -45,7 +45,7 @@ EXTERN_C void gemm(
 
 EXTERN_C void ger(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* a_data,
   const void* b_data,
   void* c_data,
@@ -57,23 +57,33 @@ EXTERN_C void ger(
 
 EXTERN_C void nrm2(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* x,
   void* y,
   len_t n
 );
 
-EXTERN_C void max_forward(
+EXTERN_C void clip_nrm2(
   dtype id,
-  void* stream,
+  CublasWrapper w,
+  void* x,
+  void* cur_nrm2,
+  len_t n,
+  double max_nrm2,
+  double delta
+);
+
+EXTERN_C void max_fwd(
+  dtype id,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n
 );
 
-EXTERN_C void max_reverse(
+EXTERN_C void max_bwd(
   dtype id,
-  void * stream,
+  StreamWrapper w,
   const void* x_val,
   void const* y_val,
   const void* y_grd,
@@ -83,7 +93,7 @@ EXTERN_C void max_reverse(
 
 EXTERN_C void reduce_sum(
   dtype id,
-  void* stream,
+  CublasWrapper w,
   const void* a_data,
   void* result,
   len_t n
@@ -91,7 +101,7 @@ EXTERN_C void reduce_sum(
 
 EXTERN_C void scale(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   void* a_data,
   len_t n,
   double alpha
@@ -99,7 +109,7 @@ EXTERN_C void scale(
 
 EXTERN_C void axpy(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* x,
   void* y,
   len_t n, 
@@ -108,7 +118,7 @@ EXTERN_C void axpy(
 
 EXTERN_C void addition(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -119,7 +129,7 @@ EXTERN_C void addition(
 
 EXTERN_C void subtraction(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -130,7 +140,7 @@ EXTERN_C void subtraction(
 
 EXTERN_C void multiplication(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -141,7 +151,7 @@ EXTERN_C void multiplication(
 
 EXTERN_C void division(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,

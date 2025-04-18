@@ -114,7 +114,7 @@ pub fn print_d2(
 ) !void {
     const T = @TypeOf(node);
     const info = @typeInfo(T);
-    const S = info.Pointer.child;
+    const S = info.pointer.child;
 
     if (!@hasField(S, "label") or !@hasField(S, "op") or !@hasField(S, "children")) {
         @compileError("Struct must have 'label', 'op', and 'children' fields");

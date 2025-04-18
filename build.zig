@@ -1,23 +1,27 @@
 const std = @import("std");
 const Backend = @import("src/device/root.zig").Backend;
 const backend = @import("src/device/root.zig").backend;
-const builtin = @import("builtin");
+const Build = std.Build;
+const Module = Build.Module;
+const OptimizeMode = std.builtin.OptimizeMode;
 
-pub fn build(b: *std.Build) !void {
+// this is a comment
+
+pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const build_options = b.addOptions();
     build_options.step.name = "Zigrad build options";
     const build_options_module = build_options.createModule();
+
     build_options.addOption(
         std.log.Level,
         "log_level",
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
-    const rebuild = b.option(bool, "rebuild", "force backend to recompile") orelse false;
-    const device_module = build_device_module(b, target, rebuild);
+    const device_module = build_device_module(b, target);
 
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
@@ -37,36 +41,28 @@ pub fn build(b: *std.Build) !void {
         else => @panic("Os not supported."),
     }
 
-    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
-    const tracy = b.lazyDependency("tracy", .{
-        .target = target,
-        .optimize = optimize,
-        .tracy_enable = tracy_enable,
-    });
-    if (tracy_enable) zigrad.addImport("tracy", tracy.?.module("tracy"));
-
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
-        .root_source_file = zigrad.root_source_file.?,
-        .target = target,
-        .optimize = optimize,
+        .root_module = zigrad,
     });
     lib.root_module.addImport("build_options", build_options_module);
     lib.root_module.addImport("device", device_module);
     link(target, lib);
-    if (tracy_enable) add_tracy(lib, tracy.?);
     b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
-        .name = "zigrad",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .name = "main",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigrad", .module = zigrad },
+            },
+        }),
     });
 
-    exe.root_module.addImport("zigrad", zigrad);
     link(target, exe);
-    if (tracy_enable) add_tracy(exe, tracy.?);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -88,7 +84,6 @@ pub fn build(b: *std.Build) !void {
     unit_tests.root_module.addImport("device", device_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
-    if (tracy_enable) add_tracy(unit_tests, tracy.?);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
@@ -102,9 +97,16 @@ pub fn build(b: *std.Build) !void {
 
     const docs = b.step("docs", "Generate documentation");
     docs.dependOn(&docs_step.step);
+
+    // Tracy -------------------------------------------------------------------
+    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse false;
+    if (tracy_enable) {
+        const tracy = build_tracy(b, target).?;
+        inline for (.{ zigrad, exe.root_module, unit_tests.root_module }) |e| e.addImport("tracy", tracy);
+    }
 }
 
-fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
+fn link(target: Build.ResolvedTarget, exe: *Build.Step.Compile) void {
     switch (target.result.os.tag) {
         .linux => {
             exe.linkSystemLibrary("blas");
@@ -115,15 +117,52 @@ fn link(target: std.Build.ResolvedTarget, exe: *std.Build.Step.Compile) void {
     }
 }
 
-fn add_tracy(exe: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
-    exe.root_module.addImport("tracy", tracy.module("tracy"));
-    exe.linkLibrary(tracy.artifact("tracy"));
-    exe.linkLibCpp();
+pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
+    const optimize: OptimizeMode = b.option(OptimizeMode, "tracy_optimize_mode", "Defaults to ReleaseFast") orelse .ReleaseFast;
+    const options = b.addOptions();
+    const enable = true; // HACK: lazy
+    options.addOption(bool, "tracy_enable", enable);
+    options.addOption(bool, "tracy_allocation_enable", false);
+    options.addOption(bool, "tracy_callstack_enable", true);
+    options.addOption(usize, "tracy_callstack_depth", 10);
+
+    const tracy = b.addModule("tracy", .{
+        .root_source_file = b.path("src/tracy.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+        .imports = &.{
+            .{ .name = "tracy_build_options", .module = options.createModule() },
+        },
+    });
+
+    const tracy_src = b.lazyDependency("tracy", .{}) orelse return null;
+    const tracy_c_flags = &.{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
+    tracy.addCSourceFile(.{ .file = tracy_src.path("public/TracyClient.cpp"), .flags = tracy_c_flags });
+
+    const unit_tests = b.addTest(.{
+        .name = "tracy_test",
+        .root_module = tracy,
+    });
+    const test_step = b.step("tracy_test", "Run unit tests");
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
+
+    const exe = b.addExecutable(.{
+        .name = "tracy_demo",
+        .root_module = tracy,
+    });
+    const run_step = b.step("tracy_demo", "");
+    const run_demo = b.addRunArtifact(exe);
+    run_step.dependOn(&run_demo.step);
+    return tracy;
 }
 
-pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebuild: bool) *std.Build.Module {
-    //const new_backend = get_backend(b);
-    const new_backend: Backend = .HOST;
+pub fn build_device_module(b: *Build, target: Build.ResolvedTarget) *Build.Module {
+    const new_backend = get_backend(b);
+
+    const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
 
     const here = b.path(".").getPath(b);
 
@@ -154,16 +193,16 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebu
 
         const exists = amalgamate_exists(b);
 
-        if (rebuild or !exists) {
+        if (cuda_rebuild or !exists) {
             run_command(b, &.{
                 "python3",
                 b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
-                if (rebuild or !exists) "y" else "n",
+                if (cuda_rebuild) "y" else "n",
             });
         }
 
         cuda.addIncludePath(b.path("src/cuda/"));
-        cuda.addLibraryPath(b.path("src/cuda/"));
+        cuda.addLibraryPath(b.path("src/cuda/build"));
         cuda.linkSystemLibrary("amalgamate", .{});
         device.addImport("cuda", cuda);
     }
@@ -171,9 +210,9 @@ pub fn build_device_module(b: *std.Build, target: std.Build.ResolvedTarget, rebu
     return device;
 }
 
-fn amalgamate_exists(b: *std.Build) bool {
+fn amalgamate_exists(b: *Build) bool {
     const here = b.path(".").getPath(b);
-    const path = b.pathJoin(&.{ here, "src", "cuda", "libamalgamate.so" });
+    const path = b.pathJoin(&.{ here, "src", "cuda", "build", "libamalgamate.so" });
     var file = std.fs.openFileAbsolute(path, .{});
     if (file) |*_file| {
         _file.close();
@@ -183,7 +222,7 @@ fn amalgamate_exists(b: *std.Build) bool {
     }
 }
 
-fn get_backend(b: *std.Build) Backend {
+fn get_backend(b: *Build) Backend {
     const env_backend = std.process.getEnvVarOwned(b.allocator, "ZIGRAD_BACKEND") catch {
         @panic("Environment variable 'ZIGRAD_BACKEND' not found.");
     };
@@ -192,7 +231,7 @@ fn get_backend(b: *std.Build) Backend {
     };
 }
 
-pub fn run_command(b: *std.Build, args: []const []const u8) void {
+pub fn run_command(b: *Build, args: []const []const u8) void {
     const output = b.run(args);
 
     if (output.len > 0)

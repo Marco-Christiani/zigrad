@@ -3,9 +3,9 @@
 
 #include "blas_utils.cu"
 
-extern "C" void gemv(
+void __gemv(
     dtype id, 
-    void* cublas_handle,
+    CublasWrapper w,
     const void* A, 
     const void* x, 
     void* y, 
@@ -24,7 +24,7 @@ extern "C" void gemv(
       const float _alpha = static_cast<float>(alpha);
       const float _beta = static_cast<float>(beta);
       return CUBLAS_ASSERT(cublasSgemv(
-        get_handle(cublas_handle), 
+        __cast_cublas(w),
         _trans_a,
         _n, _m,
         &_alpha,
@@ -36,7 +36,7 @@ extern "C" void gemv(
     }
     case DOUBLE: {
       return CUBLAS_ASSERT(cublasDgemv(
-        get_handle(cublas_handle), 
+        __cast_cublas(w),
         _trans_a,
         _n, _m,
         &alpha,
@@ -46,7 +46,24 @@ extern "C" void gemv(
         static_cast<double*>(y), 1
       ));
     }
+    default:
+      SYSTEM_EXIT("Unsupported data type");
   }
 }
 
+extern "C" void gemv(
+    dtype id, 
+    CublasWrapper w,
+    const void* A, 
+    const void* x, 
+    void* y, 
+    len_t m,
+    len_t n,
+    bool trans_a,
+    double alpha,
+    double beta
+) {
+  __gemv(id, w, A, x, y, m, n, trans_a, alpha, beta);
+  CUDA_ASSERT(cudaPeekAtLastError());
+}
 #endif

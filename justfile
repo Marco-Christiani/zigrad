@@ -4,8 +4,11 @@ default:
   @just mnist
 
 alias b := build
+alias bf := build-fast
 alias bt := test
 alias r := run
+
+export ZIGRAD_BACKEND := env("ZIGRAD_BACKEND", "HOST")
 
 test +opts="":
   zig build test {{opts}}
@@ -13,16 +16,25 @@ test +opts="":
 build +opts="":
   zig build {{opts}}
 
+build-fast +opts="":
+  zig build -Doptimize=ReleaseFast {{opts}}
+
 run +opts="":
   zig build run {{opts}}
 
-export ZG_DATA_DIR := env("ZG_DATA_DIR", "data")
+cuda_compile:
+  pushd src/cuda/ && \
+   mkdir build && cd build && \
+   cmake .. && make -j$(nproc) && \
+   popd
+
+export ZG_DATA_DIR := env("ZG_DATA_DIR", "examples/mnist/data")
 mnist:
   @python examples/mnist/mnist_data.py
-  @echo "Compiling zigrad mnist"
-  @just build -Doptimize=ReleaseFast -Dtracy_enable=false
-  @echo "Running zigrad mnist"
-  ./zig-out/bin/zigrad
+  @echo "Compiling zigrad mnist example"
+  @cd examples/mnist && zig build -Doptimize=ReleaseFast
+  @echo "Running zigrad mnist example"
+  examples/mnist/zig-out/bin/main
 
 benchmark +verbose="":
   @python examples/mnist/mnist_data.py
@@ -30,9 +42,9 @@ benchmark +verbose="":
   python src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple \
     {{ if verbose != "" { "| tee" } else { ">" } }} /tmp/zg_mnist_torch_log.txt
   @echo "Compiling zigrad mnist"
-  @just build -Doptimize=ReleaseFast -Dtracy_enable=false
+  @cd examples/mnist && zig build -Doptimize=ReleaseFast #-Dtracy_enable=false
   @echo "Running zigrad mnist"
-  ./zig-out/bin/zigrad 2>\
+  examples/mnist/zig-out/bin/main 2>\
     {{ if verbose != "" { "&1 | tee" } else { "" } }} /tmp/zg_mnist_log.txt
   @echo "Comparing results"
   python scripts/mnist_compare.py

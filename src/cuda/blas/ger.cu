@@ -6,9 +6,9 @@
 // we're using double because every float can cast
 // up to a double and then we can go back down.
 
-extern "C" void ger(
+void __ger(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* a_data,
   const void* b_data,
   void* c_data,
@@ -25,7 +25,7 @@ extern "C" void ger(
     case SINGLE: {
       const float _alpha = static_cast<float>(alpha);
       return CUBLAS_ASSERT(cublasSger(
-          get_handle(cublas_handle),  
+          __cast_cublas(w),
           _m, _n,
           &_alpha,
           static_cast<const float*>(a_data), 1,
@@ -35,7 +35,7 @@ extern "C" void ger(
     }
     case DOUBLE: {
       return CUBLAS_ASSERT(cublasDger(
-          get_handle(cublas_handle),  
+          __cast_cublas(w),
           _m, _n,
           &alpha,
           static_cast<const double*>(a_data), 1,
@@ -43,7 +43,23 @@ extern "C" void ger(
           static_cast<double*>(c_data), _ldc
       ));
     }
+    default:
+      SYSTEM_EXIT("Unsupported data type");
   }
 }
 
+extern "C" void ger(
+  dtype id,
+  CublasWrapper w,
+  const void* a_data,
+  const void* b_data,
+  void* c_data,
+  len_t m,
+  len_t n, 
+  len_t ldc,
+  double alpha
+) {
+  __ger(id, w, a_data, b_data, c_data, m, n, ldc, alpha);
+  CUDA_ASSERT(cudaPeekAtLastError());
+}
 #endif

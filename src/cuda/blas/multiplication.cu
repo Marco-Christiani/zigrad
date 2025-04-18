@@ -23,7 +23,7 @@ struct WrappingMul {
 
 template <class T>
 void __multiplication(
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -31,7 +31,7 @@ void __multiplication(
   len_t y_len,
   len_t z_len
 ) {  
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(w);
   const auto counter = thrust::make_counting_iterator<len_t>(0ul);
   const auto iter_z = static_cast<T*>(z);
   thrust::transform(
@@ -50,7 +50,7 @@ void __multiplication(
 
 extern "C" void multiplication(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -61,10 +61,10 @@ extern "C" void multiplication(
 
   switch (id) {
     case SINGLE: {
-        return __multiplication<f32>(stream, x, y, z, x_len, y_len, z_len);
+        return __multiplication<f32>(w, x, y, z, x_len, y_len, z_len);
     }
     case DOUBLE: {
-        return __multiplication<f64>(stream, x, y, z, x_len, y_len, z_len);
+        return __multiplication<f64>(w, x, y, z, x_len, y_len, z_len);
     }
   }
   CUDA_ASSERT(cudaPeekAtLastError());

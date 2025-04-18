@@ -1,11 +1,18 @@
 .{
-    .name = "zigrad",
+    .name = .zigrad,
+    .fingerprint = 0x48e4161bbfcbaf8a,
     .version = "0.0.1",
-    .paths = .{""},
     .dependencies = .{
         .tracy = .{
-            .url = "https://github.com/Marco-Christiani/zig-tracy/archive/refs/tags/v0.0.3b.tar.gz",
-            .hash = "1220847a8e1395c15ac39e200227a1f102c5a93be2ef12528d4ff97dd79ce164906a",
+            .url = "git+https://github.com/wolfpld/tracy/?ref=v0.11.0#075395620a504c0cdcaf9bab3d196db16a043de7",
+            .hash = "N-V-__8AAMBnlQHsQavelHMK9wG6naFro_ELt9C2Kgt_3r4Q",
         },
     },
+    .paths = .{""},
+    //.dependencies = .{
+    //    .tracy = .{
+    //        .url = "https://github.com/Marco-Christiani/zig-tracy/archive/refs/tags/v0.0.3b.tar.gz",
+    //        .hash = "1220847a8e1395c15ac39e200227a1f102c5a93be2ef12528d4ff97dd79ce164906a",
+    //    },
+    //},
 }

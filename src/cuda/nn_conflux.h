@@ -3,53 +3,53 @@
 
 #include "decls.h"
 
-EXTERN_C void relu_forward(
+EXTERN_C void relu_fwd(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n
 );
 
-EXTERN_C void relu_reverse(
+EXTERN_C void relu_bwd(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y_grd,
   void* x_grd,
   len_t n
 );
 
-EXTERN_C void smax_vec_forward(
+EXTERN_C void smax_vec_fwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* x,
   void* y,
   len_t n,
   smaxtype smaxop
 );
 
-EXTERN_C void smax_vec_reverse(
+EXTERN_C void smax_vec_bwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* y_val,
   const void* y_grd,
   void* x_grd,
   len_t n
 );
 
-EXTERN_C void smax_2D_row_forward(
+EXTERN_C void smax_2D_row_fwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* x,
   void* y,
   len_t m,
   len_t n
 );
 
-EXTERN_C void softmax_2D_row_reverse(
+EXTERN_C void smax_2D_row_bwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* y_val,
   const void* y_grd,
   void* x_grd,
@@ -59,7 +59,7 @@ EXTERN_C void softmax_2D_row_reverse(
 
 EXTERN_C void clamp(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n,
@@ -67,9 +67,9 @@ EXTERN_C void clamp(
   double upper
 );
 
-EXTERN_C void nll_loss_1D_index_forward(
+EXTERN_C void nll_loss_1D_index_fwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   void* src,
   len_t trg,
   void* dst,
@@ -78,9 +78,9 @@ EXTERN_C void nll_loss_1D_index_forward(
   reduxtype reduxop
 );
 
-EXTERN_C void nll_loss_1D_index_reverse(
+EXTERN_C void nll_loss_1D_index_bwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* x_val,
   void *x_grd,
   len_t trg,
@@ -88,9 +88,9 @@ EXTERN_C void nll_loss_1D_index_reverse(
   reduxtype reduxop
 );
 
-EXTERN_C void nll_loss_1D_encode_forward(
+EXTERN_C void nll_loss_1D_encode_fwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   void* src,
   const void* trg,
   void* dst,
@@ -99,9 +99,9 @@ EXTERN_C void nll_loss_1D_encode_forward(
   reduxtype reduxop
 );
 
-EXTERN_C void nll_loss_1D_encode_reverse(
+EXTERN_C void nll_loss_1D_encode_bwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* x_val,
   const void* y_val,
   void *x_grd,
@@ -109,19 +109,9 @@ EXTERN_C void nll_loss_1D_encode_reverse(
   reduxtype reduxop
 );
 
-EXTERN_C void clip_norm(
-  dtype id,
-  void* cublas_handle,
-  void* x,
-  void* cur_nrm2,
-  len_t n,
-  double max_nrm2,
-  double delta
-);
-
 EXTERN_C void pow_exp(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n

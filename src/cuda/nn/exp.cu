@@ -5,12 +5,12 @@
 
 template <class T>
 void __pow_exp(
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n
 ) {
-    const auto _stream = static_cast<cudaStream_t>(stream);
+    const auto _stream = __cast_stream(w);
     const auto x_iter = static_cast<const T*>(x);
     const auto y_iter = static_cast<T*>(y);
     thrust::transform(
@@ -24,14 +24,14 @@ void __pow_exp(
 
 extern "C" void pow_exp(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   void* y,
   len_t n
 ) {
   switch (id) {
-    case SINGLE: return __pow_exp<f32>(stream, x, y, n);
-    case DOUBLE: return __pow_exp<f64>(stream, x, y, n);
+    case SINGLE: return __pow_exp<f32>(w, x, y, n);
+    case DOUBLE: return __pow_exp<f64>(w, x, y, n);
     default: SYSTEM_EXIT("Unsupported data type");
   }
 }

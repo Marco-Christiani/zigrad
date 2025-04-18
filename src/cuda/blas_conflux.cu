@@ -14,3 +14,4 @@
 #include "blas/reduce.cu"
 #include "blas/permutate.cu"
 #include "blas/contraction.cu"
+#include "blas/clip_nrm2.cu"

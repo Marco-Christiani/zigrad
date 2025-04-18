@@ -38,26 +38,26 @@ pub const Indices = struct {
 
 pub fn decay(T: type) type {
     return switch (@typeInfo(T)) {
-        .Pointer => |ptr| ptr.child,
+        .pointer => |ptr| ptr.child,
         else => T,
     };
 }
 pub fn is_tuple(T: type) bool {
     return switch (@typeInfo(T)) {
-        .Struct => |s| s.is_tuple,
+        .@"struct" => |s| s.is_tuple,
         else => false,
     };
 }
 
 pub fn get_len(T: type) u64 {
     switch (@typeInfo(T)) {
-        .Struct => |s| {
+        .@"struct" => |s| {
             if (T == Indices or T == Shape) {
                 return capacity;
             }
             return s.fields.len;
         },
-        .Array => |arr| arr.len,
+        .array => |arr| arr.len,
         else => undefined,
     }
 }
@@ -71,7 +71,7 @@ pub const Strides = struct {
         const N: u64 = comptime get_len(T);
         const V = @Vector(N, u64);
 
-        if (comptime @typeInfo(decay(T)) == .Struct) {
+        if (comptime @typeInfo(decay(T)) == .@"struct") {
             if (@hasField(T, "buffer")) {
                 return @reduce(ReduceOp.Add, @as(V, indices.buffer[0..N].*) * self.simd(N));
             }
@@ -266,6 +266,53 @@ pub fn crop(self: anytype, lhs: u64, rhs: u64) MatchedSlice(@TypeOf(&self.buffer
         self.buffer[lhs..@max(lhs, self.len - rhs)]
     else
         &.{};
+}
+
+/// This is an aligned mismatch - useful for comparing likewise
+/// modes. Consider the following cases:
+///
+/// These two shapes are equivalent for expressing the same tensor, but naive
+/// mismatch will say that index 0 is different.
+///
+///      s1: (5,5,5), s2: (1,5,5,5) -> null
+///
+/// These two shapes do not express the same tensor, but naive mismatch would
+/// assume they the same because every element of s1 matches indicially to s2.
+///
+///      s1: (5,5,5,6), s2: (5,5,5) -> { a_pos = 3, b_pos = 2 };
+///
+/// To access the Shape value, use the following:
+///
+///    const mm = Shape.modal_mismatch(a,b) orelse .. // same as a.modal_mismatch(b)
+///
+///    _ = a.get(mm.a_pos);
+///    _ = b.get(mm.b_pos);
+///
+///    if (mm.a_pos != mm.b_pos) ... // check if a realignment occured
+///
+pub fn mismatch(a: Shape, b: Shape) ?struct {
+    a_pos: SizeType,
+    b_pos: SizeType,
+} {
+    const a_shift: SizeType = if (a.len > b.len) a.len - b.len else 0;
+    const b_shift: SizeType = if (b.len > a.len) b.len - a.len else 0;
+
+    const index: SizeType = for (a.crop(a_shift, 0), b.crop(b_shift, 0), 0..) |m, n, i| {
+        if (m != n) break @intCast(i);
+    } else return null;
+
+    return .{
+        .a_pos = a_shift + index,
+        .b_pos = b_shift + index,
+    };
+}
+
+// this is fairly helpful for shape slices so I'm putting it here
+pub fn slice_size(sizes: []const usize) usize {
+    var n: usize = 1;
+    return for (sizes) |m| {
+        n *= m;
+    } else n;
 }
 
 fn _suffix_scan(self: Shape) SimdType {

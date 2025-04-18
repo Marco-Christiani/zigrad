@@ -40,6 +40,7 @@ pub fn GraphManager(comptime T: type) type {
             if (!gopr.found_existing) {
                 if (node.get_children()) |children| {
                     for (children) |child| {
+                        if (!child.attached) continue;
                         self.topo(child);
                     }
                 }
@@ -101,20 +102,12 @@ test "GraphManager eager teardown reuse 1" {
     F.acquire();
 
     const C = try B.mul(A);
-    //defer C.deinit();
-
     const D = try B.add(F);
-    //defer D.deinit();
-
     const E = try C.mul(D);
-    //defer E.deinit();
 
     // Setup graph manager with eager teardown
     var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
     defer gm.deinit();
-
-    // Initialize root gradient
-    E.grad.?.fill(1.0, device);
 
     // Run backward pass
     try gm.backward(E);
@@ -162,13 +155,12 @@ test "GraphManager eager teardown reuse 2" {
     B.acquire();
 
     const C = try A.mul(B);
-    var D = try A.mul(C);
-    var E = try D.add(C);
+    const D = try A.mul(C);
+    const E = try D.add(C);
 
     var gm = GraphManager(Tensor).init(device.allocator, .{ .eager_teardown = true });
     defer gm.deinit();
 
-    E.grad.?.fill(1.0, device);
     try gm.backward(E);
 
     // Clean up leaves
@@ -201,14 +193,74 @@ test "GraphManager x*x" {
     var gm = GraphManager(Tensor).init(allocator, .{ .eager_teardown = true });
     defer gm.deinit();
 
-    E.grad.?.fill(1.0, device);
     try gm.backward(E);
-    A.print();
-    B.print();
 
     // Clean up leaves
     A.release();
     B.release();
     A.deinit();
     B.deinit();
+}
+
+test "GraphManager subgraphs/detach" {
+    const T = f32;
+    const Tensor = zg.NDTensor(T);
+    const allocator = std.testing.allocator;
+    zg.rt_grad_enabled = true;
+
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    // subgraph 1
+    const a = try Tensor.init(&.{2.0}, null, true, device);
+    defer a.deinit();
+
+    const b = try Tensor.init(&.{3.0}, null, true, device);
+    defer b.deinit();
+
+    const c = try a.add(b);
+    defer c.deinit();
+
+    c.detach();
+
+    // subgraph 2
+    const d = try Tensor.init(&.{4.0}, null, true, device);
+    defer d.deinit();
+
+    const e = try c.add(d);
+    defer e.deinit();
+
+    /////////////////////////////
+    //
+    //      a   b
+    //       \ /
+    //        c
+    //        .
+    //        .  <----- detached
+    //        .
+    //        c   d
+    //         \ /
+    //          e
+
+    var gm = GraphManager(Tensor).init(allocator, .{ .eager_teardown = false });
+    defer gm.deinit();
+
+    try gm.backward(e);
+    // gradients should be collected by all
+    // children that require a gradient
+    try std.testing.expect(e.grad != null);
+    try std.testing.expect(d.grad != null);
+    try std.testing.expect(c.grad != null);
+    // traversal should have stopped at the
+    // detached child node (c)
+    try std.testing.expect(a.grad == null);
+    try std.testing.expect(b.grad == null);
+
+    try gm.backward(c);
+    // traversal should happen to the atached
+    // children of the parent node.
+    try std.testing.expect(a.grad != null);
+    try std.testing.expect(b.grad != null);
 }

@@ -3,9 +3,9 @@
 
 #include "blas_utils.cu"
 
-extern "C" void nrm2(
+void __nrm2(
   dtype id,
-  void* cublas_handle,
+  CublasWrapper w,
   const void* x,
   void* y,
   len_t n
@@ -15,7 +15,7 @@ extern "C" void nrm2(
   switch (id) {
     case SINGLE: {
       return CUBLAS_ASSERT(cublasSnrm2(
-          get_handle(cublas_handle),  
+          __cast_cublas(w),
           _n,
           static_cast<const float*>(x), 1,
           static_cast<float*>(y)
@@ -23,13 +23,27 @@ extern "C" void nrm2(
     }
     case DOUBLE: {
       return CUBLAS_ASSERT(cublasDnrm2(
-          get_handle(cublas_handle),  
+          __cast_cublas(w),
           _n,
           static_cast<const double*>(x), 1,
           static_cast<double*>(y)
       ));
     }
+    default:
+      SYSTEM_EXIT("Unsupported data type");
   }
+}
+
+
+extern "C" void nrm2(
+  dtype id,
+  CublasWrapper w,
+  const void* x,
+  void* y,
+  len_t n
+) {
+  __nrm2(id, w, x, y, n);
+  CUDA_ASSERT(cudaPeekAtLastError());
 }
 
 #endif

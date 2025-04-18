@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
+const opspec = zg.opspec;
 
 const NDTensor = zg.NDTensor;
 const GraphManager = zg.GraphManager;
@@ -12,7 +13,6 @@ const NDArray = zg.NDArray;
 const prod = zg.arrayutils.prod;
 const conv_utils = zg.conv_utils;
 const simple_mse_loss = zg.loss.ag_mse_1d;
-const winit = zg.winit;
 
 const log = std.log.scoped(.zg_layer);
 
@@ -117,6 +117,8 @@ pub fn Layer(comptime T: type) type {
 pub fn LinearLayer(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Tensor = NDTensor(T);
+        const Array = Tensor.DataType;
         weights: *NDTensor(T),
         bias: *NDTensor(T),
         device: DeviceReference,
@@ -129,6 +131,7 @@ pub fn LinearLayer(comptime T: type) type {
             try weights.set_label("linear_weights");
             var bias = try NDTensor(T).empty(&bias_shape, true, device);
             try bias.set_label("linear_bias");
+
             weights.acquire();
             bias.acquire();
 
@@ -144,111 +147,12 @@ pub fn LinearLayer(comptime T: type) type {
             };
             return self;
         }
-        pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            // return try forward_ag(self, input);
-            return try forward_manual(self, input);
-        }
 
-        // Autograd version with much the performance of the optimized one, but requires an unbroadcast that Zigrad handles
-        // in the backward for broadcasted bias addition thats not possible if its not tracked in the op graph so theres a
-        // slightly more optimized variant that explicitly handles the broadcast and unbroadcast.
-        pub fn forward_ag(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            // Labels are optional, useful if you want to render a diagram of the computational graph.
-            // (W@X^T + b)^T == X@W^T + b
-            // var out1 = try input.bmm(
-            //     self.weights,
-            //     .{ .trans_b = true },
-            // );
-            // try out1.set_label("lin_fwd1");
-            // var out2 = try out1.add(self.bias);
-            // try out2.set_label("lin_fwd2");
-            // return out2;
-            return (try (try input.bmm(self.weights, .{ .trans_b = true })).add(self.bias));
-        }
-
-        // Implement the forward and backward passes manually. The only benefit to this is not paying the cost of
-        // Zigrad figuring out the broadcast and unbroadcasting logic on the fly. This should highlight how little
-        // overhead Zigrad's abstractions are
-        pub fn forward_manual(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            const batch_size = if (input.data.shape.len > 1) input.data.shape.get(0) else 1;
-            const out_features = self.weights.data.shape.get(0);
-
-            var result_nd = try NDArray(T).empty(&[_]usize{ batch_size, out_features }, self.device);
-            const bd = self.bias.data.data;
-            for (0..batch_size) |i| {
-                @memcpy(result_nd.data[i * out_features .. (i + 1) * out_features], bd);
-            }
-
-            _ = try input.data._bmm_acc(
-                self.weights.data,
-                &result_nd,
-                1.0,
-                1.0,
-                false,
-                true,
-                self.device,
-            );
-            const rg = input.requires_grad() or self.weights.requires_grad() or self.bias.requires_grad();
-            // Hook up the custom backward function.
-            return try NDTensor(T).create_dependent(.{
-                .data = result_nd,
-                .label = "lin_fwdman",
-                .children = &.{ input, self.weights, self.bias },
-                .device = self.device,
-                ._backward = backward_manual,
-                ._backward_ctx = self,
-                ._requires_grad = rg,
-            });
-        }
-
-        /// A custom backward impl that, technically, isnt optimized in any way aside from avoiding having
-        /// to infer shape broadcasting logic which is shockingly fast in Zigrad for some reason.
-        fn backward_manual(tensor: NDTensor(T)) !void {
-            const self: *Self = @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext));
-            const grad_output = tensor.grad orelse return error.NoGradient;
-            const input = tensor.get_children().?[0];
-
-            var grad_W = self.weights.grad orelse return error.NoGradient;
-            var grad_B = self.bias.grad orelse return error.NoGradient;
-            var grad_input = input.grad orelse return error.NoGradient;
-
-            // weights grad
-            _ = try grad_output._bmm_acc(
-                input.data,
-                &grad_W,
-                1.0,
-                1.0,
-                true, // grad_output^T * input
-                false,
-                self.device,
-            );
-            // similar performance to the below optimized variant and simpler. essentially the exact thing that autograd does.
-            const bias_grad = try grad_output.sum_along(self.device, .{ .dim = 0 });
-
-            _ = try grad_B._add(bias_grad, input.device);
-            // This is not really a great way to optimize this, btw. This is meant to demonstrate to a user how they can
-            // implement custom functionality.
-            // const batch_size = grad_output.shape.shape[0];
-            // const out_features = grad_output.shape.shape[1];
-            // const grad_B_data = grad_B.data;
-            // const grad_output_data = grad_output.data;
-            // // grad_B with the first batch
-            // blas.blas_axpy(T, out_features, 1.0, grad_output_data, 1, grad_B_data, 1);
-            // // sum over the remaining batches
-            // for (1..batch_size) |i| {
-            //     blas.blas_axpy(T, out_features, 1.0, grad_output_data[i * out_features ..], 1, grad_B_data, 1);
-            // }
-
-            // input gradient
-            _ = try grad_output._bmm_acc(
-                self.weights.data,
-                &grad_input,
-                1.0,
-                1.0,
-                false, // grad_output * weights^T
-                false,
-                self.device,
-            );
+        pub fn forward(self: *Self, x: *NDTensor(T)) !*NDTensor(T) {
+            const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
+            const n_features = self.weights.data.shape.get(0);
+            const b_y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
+            return self.bias.add(b_y);
         }
 
         pub fn get_parameters(self: *Self) ?[]*NDTensor(T) {
@@ -256,8 +160,8 @@ pub fn LinearLayer(comptime T: type) type {
         }
 
         pub fn zero_grad(self: *Self) void {
-            self.weights.grad.?.fill(0, self.device);
-            self.bias.grad.?.fill(0, self.device);
+            self.weights.setup_grad(0) catch unreachable;
+            self.bias.setup_grad(0) catch unreachable;
         }
 
         pub fn deinit(self: *Self) void {
@@ -346,13 +250,14 @@ pub fn Conv2DLayer(comptime T: type) type {
 
             // broadcasted mm for batching
             var output = try self.weights.data.bmm(col, false, false);
+            errdefer output.deinit();
 
             // reshape to 4D
             try output._reshape(&.{ batch_size, self.out_channels, out_height, out_width });
 
             // bias
             try self.bias.data._reshape(&.{ 1, self.out_channels, 1, 1 });
-            _ = try output._add(self.bias.data);
+            try output._add(self.bias.data);
 
             defer {
                 // restore weights shape after forward (TODO: this can be optimized out later?)
@@ -403,18 +308,18 @@ pub fn Conv2DLayer(comptime T: type) type {
             defer grad_weights.deinit();
 
             // grad_weights should be (out_channels, in_channels * kernel_size * kernel_size)
-            try grad_weights._reshape(&[_]usize{
+            try grad_weights._reshape(&.{
                 self.out_channels,
                 self.in_channels,
                 self.kernel_size,
                 self.kernel_size,
             });
-            _ = try self.weights.grad.?._add(grad_weights);
+            try grad_weights.add_(try self.weights.ensure_grad(0));
 
             // w.r.t. bias
             const bias_grad = try tensor.grad.?.sum(tensor.device);
             defer bias_grad.deinit(tensor.device);
-            _ = try self.bias.grad.?._add(bias_grad);
+            try bias_grad.add_(try self.bias.ensure_grad(0));
 
             // w.r.t. input
             var weights_copy = try self.weights.data.copy(self.device);
@@ -476,6 +381,7 @@ pub fn Conv2DLayer(comptime T: type) type {
 pub fn ReLULayer(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Tensor = NDTensor(T);
         device: DeviceReference,
 
         pub fn init(device: DeviceReference) !*Self {
@@ -486,31 +392,30 @@ pub fn ReLULayer(comptime T: type) type {
             return self;
         }
 
-        pub fn forward(self: *Self, input: *NDTensor(T)) !*NDTensor(T) {
-            const output = try NDArray(T).empty(input.get_shape(), self.device);
+        pub fn forward(self: *Self, x: *NDTensor(T)) !*NDTensor(T) {
+            const y = try NDArray(T).empty(x.get_shape(), self.device);
 
-            for (input.get_data(), output.data) |x, *y| {
-                y.* = if (x > 0) x else 0;
-            }
+            self.device.dispatch(opspec.relu_fwd(T){
+                .x = x.get_data(),
+                .y = y.data,
+            });
 
-            return try NDTensor(T).create_dependent(.{
-                .data = output,
-                .children = &.{input},
-                .label = "relu_out",
-                ._requires_grad = input.requires_grad(),
+            return Tensor.create_dependent(*Self, .{
+                .data = y,
+                .children = &.{x},
                 .device = self.device,
-                ._backward = backward,
+                .callback = self,
+                .label = "relu_out",
             });
         }
 
-        fn backward(tensor: NDTensor(T)) !void {
-            const children = tensor.get_children() orelse return error.NoChildren;
-            std.debug.assert(children.len == 1);
-            const grad_t = tensor.grad orelse return error.NoGradient;
-            const input = children[0];
-            for (input.grad.?.data, input.data.data, grad_t.data) |*grad_in, value_in, grad_out| {
-                grad_in.* += if (value_in > 0) grad_out else 0;
-            }
+        pub fn callback(y: *NDTensor(T)) !void {
+            const x = y.backward_child(0) orelse return;
+            y.device.dispatch(opspec.relu_bwd(T){
+                .x = x.get_data(),
+                .x_g = try x.ensure_grad_data(0),
+                .y_g = y.assume_grad_data(),
+            });
         }
 
         pub fn get_parameters(_: *Self) ?[]*NDTensor(T) {
@@ -527,54 +432,6 @@ pub fn ReLULayer(comptime T: type) type {
 
         pub fn as_layer(self: *Self) Layer(T) {
             return Layer(T).init(self);
-        }
-    };
-}
-
-pub fn ReLULayerCompare(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        pub fn forward(_: Self, input: *NDTensor(T)) !*NDTensor(T) {
-            const output = input.device.cache.get(NDTensor(T), input.get_shape()) orelse try input.clone();
-
-            for (input.get_data(), output.get_data()) |*x, *y| {
-                y.* = if (x.* > 0) x.* else 0;
-            }
-
-            // these probably shouldn't be on the heap.
-            output.label = null;
-
-            if (input.requires_grad()) {
-                if (output.grad) |g| {
-                    g.fill(0, input.device);
-                } else {
-                    output.grad = try NDArray(T).zeros(output.get_shape(), output.device);
-                }
-                output._requires_grad = true;
-            }
-
-            if (output.children) |c| {
-                c[0] = input;
-            } else {
-                output.children = try input.device.allocator.dupe(*NDTensor(T), &.{input});
-            }
-
-            output.acquired = false;
-            output._backward = backward;
-            output._backward_ctx = null;
-
-            return output;
-        }
-
-        fn backward(tensor: NDTensor(T)) !void {
-            std.debug.assert(tensor.children.?.len == 1);
-            const children = tensor.children orelse return error.NoChildren;
-            const grad_t = tensor.grad orelse return error.NoGradient;
-            const input = children[0];
-            for (input.grad.?.data, input.data.data, grad_t.data) |*grad_in, value_in, grad_out| {
-                grad_in.* += if (value_in > 0) grad_out else 0;
-            }
         }
     };
 }
@@ -596,14 +453,12 @@ pub fn FlattenLayer(comptime T: type) type {
             const flattened_dim = prod(other_dims);
 
             // view of input tensor with new shape
-            const result = try NDTensor(T).create_dependent(.{
+            const result = try NDTensor(T).create_dependent(*Self, .{
                 .data = try input.data.copy(input.device), // Reuse the same data
-                // .op = .FLATTEN,
                 .children = &.{input},
                 .label = "flattened",
-                ._requires_grad = input.requires_grad(),
+                .callback = self,
                 .device = self.device,
-                ._backward = backward,
             });
 
             const new_shape = &.{ batch_dim, flattened_dim };
@@ -613,7 +468,7 @@ pub fn FlattenLayer(comptime T: type) type {
             return result;
         }
 
-        fn backward(tensor: NDTensor(T)) !void {
+        pub fn callback(tensor: *NDTensor(T)) !void {
             var input = tensor.get_children().?[0];
             input.grad.?._reshape(input.data.shape.slice());
             @memcpy(input.grad.?.data, tensor.grad.?.data);
@@ -721,7 +576,7 @@ pub fn MaxPool2DLayer(comptime T: type) type {
             });
         }
 
-        pub fn backward(tensor: NDTensor(T)) anyerror!void {
+        pub fn backward(tensor: *const NDTensor(T)) anyerror!void {
             const indices = @as(*NDArray(usize), @ptrCast(@alignCast(tensor._backward_ctx orelse return error.NoBackwardContext)));
             std.debug.assert(tensor.children.?.len == 1);
             var input = tensor.children.?[0];
@@ -782,6 +637,7 @@ pub fn main() !void {
 
     std.debug.print("Reading data\n", .{});
     const data = try read_csv(T, "/tmp/data.csv", alloc);
+
     std.debug.print("data.len={}\n", .{data.len});
     try train_grad_accum(T, data, alloc);
 }
@@ -945,8 +801,8 @@ fn train_batched(comptime T: type, data: [][]T, device: DeviceReference) !void {
             const loss = try simple_mse_loss(f32, output, target, device);
             epoch_loss += loss.data.data[0];
 
-            loss.grad.?.fill(1.0, device);
             layer.zero_grad();
+
             try gm.backward(loss);
             optimizer.step(params.?);
         }
@@ -980,8 +836,6 @@ test "LinearLayer forward and backward" {
     var cpu = zg.device.HostDevice.init(arena.allocator());
     defer cpu.deinit();
 
-    const device = cpu.reference();
-
     const T = f32;
     zg.rt_grad_enabled = true;
     // input 2, output 2
@@ -991,10 +845,10 @@ test "LinearLayer forward and backward" {
     const input_shape = &[_]usize{ 1, 2 };
     const input = try NDTensor(T).init(&[_]T{ 3, 3 }, input_shape, true, cpu.reference());
     const output = try layer.forward(input);
-    output.grad.?.fill(1.0, device);
 
     var gm = GraphManager(NDTensor(T)).init(cpu.allocator, .{});
     defer gm.deinit();
+
     try gm.backward(output);
 
     //try std.testing.expectEqual(12, output.get(&.{ 0, 0 }));

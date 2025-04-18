@@ -21,22 +21,22 @@ __global__ void __nll_loss_1D_index_reduce_kernel(
 
 template<typename T>
 void __nll_loss_1D_index_reduce(
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* x,
   len_t trg,
   void* y,
   len_t n,
   reduxtype reduxop
 ) {
-  const auto stream = __cudnn_stream(cudnn_handle);
+  const auto stream = __cast_stream(w);
   const auto _src = static_cast<const T*>(x);
   const auto _dst = static_cast<T*>(y);
   __nll_loss_1D_index_reduce_kernel<T><<<1,1,0,stream>>>(_src, trg, _dst, n, reduxop);
 }
 
-extern "C" void nll_loss_1D_index_forward(
+extern "C" void nll_loss_1D_index_fwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   void* src,
   len_t trg,
   void* dst,
@@ -45,13 +45,15 @@ extern "C" void nll_loss_1D_index_forward(
   reduxtype reduxop
 ) {
   if (inplace_smax) {
-    smax_vec_forward(id, cudnn_handle, src, src, n, SMAX_LOG);
+    smax_vec_fwd(id, w, src, src, n, SMAX_LOG);
   }
   if (id == SINGLE) {
-      __nll_loss_1D_index_reduce<f32>(cudnn_handle, src, trg, dst, n, reduxop);
+      __nll_loss_1D_index_reduce<f32>(w, src, trg, dst, n, reduxop);
+  } else if (id == DOUBLE){
+      __nll_loss_1D_index_reduce<f64>(w, src, trg, dst, n, reduxop);
   } else {
-      __nll_loss_1D_index_reduce<f64>(cudnn_handle, src, trg, dst, n, reduxop);
-  }  
+     SYSTEM_EXIT("Unsupported data type");
+  }
 
   CUDA_ASSERT(cudaPeekAtLastError());
 }
@@ -70,15 +72,15 @@ struct NLLBwdFunctor {
 };
 
 template<typename T>
-void __nll_loss_1D_index_reverse(
-  void* cudnn_handle,
+void __nll_loss_1D_index_bwd(
+  CudnnWrapper w,
   const void* x_val,
   void *x_grd,
   len_t trg,
   len_t n,
   reduxtype reduxop
 ) {
-  const auto stream = __cudnn_stream(cudnn_handle);
+  const auto stream = __cast_stream(w);
   const auto idx_iter = thrust::make_counting_iterator(0UL);
   const auto _x_val_iter = static_cast<const T*>(x_val);
   const auto _x_grd_iter = static_cast<T*>(x_grd);
@@ -93,9 +95,9 @@ void __nll_loss_1D_index_reverse(
   );
 }
 
-extern "C" void nll_loss_1D_index_reverse(
+extern "C" void nll_loss_1D_index_bwd(
   dtype id,
-  void* cudnn_handle,
+  CudnnWrapper w,
   const void* x_val,
   void *x_grd,
   len_t trg,
@@ -104,9 +106,11 @@ extern "C" void nll_loss_1D_index_reverse(
 ) {
 
   if (id == SINGLE) {
-      __nll_loss_1D_index_reverse<f32>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
+      __nll_loss_1D_index_bwd<f32>(w, x_val, x_grd, trg, n, reduxop);
+  } else if (id == DOUBLE){
+      __nll_loss_1D_index_bwd<f64>(w, x_val, x_grd, trg, n, reduxop);
   } else {
-      __nll_loss_1D_index_reverse<f64>(cudnn_handle, x_val, x_grd, trg, n, reduxop);
+     SYSTEM_EXIT("Unsupported data type");
   }
 
   CUDA_ASSERT(cudaPeekAtLastError());

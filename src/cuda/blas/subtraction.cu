@@ -23,7 +23,7 @@ struct WrappingSub {
 
 template <class T>
 void __subtraction(
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -31,7 +31,7 @@ void __subtraction(
   len_t y_len,
   len_t z_len
 ) {  
-  const auto _stream = static_cast<cudaStream_t>(stream);
+  const auto _stream = __cast_stream(w);
   const auto counter = thrust::make_counting_iterator<len_t>(0ul);
   const auto iter_z = static_cast<T*>(z);
   thrust::transform(
@@ -50,7 +50,7 @@ void __subtraction(
 
 extern "C" void subtraction(
   dtype id,
-  void* stream,
+  StreamWrapper w,
   const void* x,
   const void* y,
   void* z,
@@ -58,13 +58,12 @@ extern "C" void subtraction(
   len_t y_len,
   len_t z_len
 ) {
-
   switch (id) {
     case SINGLE: {
-        return __subtraction<f32>(stream, x, y, z, x_len, y_len, z_len);
+        return __subtraction<f32>(w, x, y, z, x_len, y_len, z_len);
     }
     case DOUBLE: {
-        return __subtraction<f64>(stream, x, y, z, x_len, y_len, z_len);
+        return __subtraction<f64>(w, x, y, z, x_len, y_len, z_len);
     }
   }
   CUDA_ASSERT(cudaPeekAtLastError());

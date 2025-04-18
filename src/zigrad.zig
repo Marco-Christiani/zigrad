@@ -15,17 +15,17 @@ pub const Op = @import("ndtensor.zig").Op;
 pub const loss = @import("nn/loss.zig");
 pub const mnist = @import("nn/mnist.zig");
 pub const GraphManager = @import("graph_manager.zig").GraphManager;
-pub const Trainer = @import("nn/trainer.zig").Trainer;
-pub const Model = @import("nn/model.zig").Model;
+//pub const Trainer = @import("nn/trainer.zig").Trainer;
+//pub const Model = @import("nn/model.zig").Model;
 pub const conv_utils = @import("nn/conv_utils.zig");
 pub const utils = @import("nn/utils.zig");
-pub const layer = @import("nn/layer.zig");
+//pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
-pub const blas = @import("backend/blas.zig");
 
 const device_root = @import("device");
 pub const device = device_root.device;
+pub const opspec = device_root.opspec;
 pub const DeviceReference = device.DeviceReference;
 pub const backend = device_root.backend;
 pub const ReduceType = device_root.ReduceType;
@@ -52,7 +52,7 @@ pub const Settings = struct {
 /// more optimizations tbd if it will be added back in the future.
 pub var rt_grad_enabled: bool = true;
 
-var prng = std.rand.DefaultPrng.init(settings.seed);
+var prng = std.Random.DefaultPrng.init(settings.seed);
 /// currently only used for generating node labels when tracing the comp graph
 pub const random = prng.random();
 

@@ -4,9 +4,10 @@ const math = std.math;
 const zg = @import("../zigrad.zig");
 const NDTensor = zg.NDTensor;
 const settings = zg.settings;
+const opspec = zg.opspec;
 
-pub fn clip_grads(T: type, params: []*const NDTensor(T), opts: NDTensor(T).ClipOptions) void {
-    for (params) |param| if (param.grad) |_| param.clip_grad_norm_delta(opts);
+pub fn clip_grads(T: type, params: []*NDTensor(T), opts: NDTensor(T).ClipOptions) void {
+    for (params) |param| if (param.grad) |_| param._clip_grad_norm(opts);
 }
 
 pub fn Optimizer(comptime T: type) type {
@@ -24,7 +25,7 @@ pub fn Optimizer(comptime T: type) type {
             const Ptr = @TypeOf(pointer);
 
             const gen = struct {
-                pub fn step_fn(ctx: *anyopaque, params: []*const NDTensor(T)) anyerror!void {
+                pub fn step_fn(ctx: *anyopaque, params: []*NDTensor(T)) anyerror!void {
                     const self: Ptr = @ptrCast(@alignCast(ctx));
                     return self.step(params);
                 }
@@ -36,7 +37,7 @@ pub fn Optimizer(comptime T: type) type {
             };
         }
 
-        pub fn step(self: Self, params: []*const NDTensor(T)) anyerror!void {
+        pub fn step(self: Self, params: []*NDTensor(T)) anyerror!void {
             return try self.vtable.step(self.ptr, params);
         }
     };
@@ -45,22 +46,41 @@ pub fn Optimizer(comptime T: type) type {
 pub fn SGD(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Tensor = NDTensor(T);
         lr: T,
         grad_clip_enabled: bool = settings.grad_clip_enabled,
         grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
         grad_clip_delta: f32 = settings.grad_clip_delta,
 
-        pub fn step(self: Self, params: []*const NDTensor(T)) void {
-            if (self.grad_clip_enabled) clip_grads(T, params, .{
+        pub fn step(self: Self, params: []*NDTensor) void {
+            for (params) |param| callback(param, self);
+        }
+
+        pub fn attach(self: *Self, param: *Tensor) !void {
+            std.debug.assert(param._backward_ctx == null);
+            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, true, param.device);
+        }
+
+        pub fn callback(param: *Tensor, self: *Self) !void {
+            // std.debug.print("IN SGD BACKWARD\n", .{});
+
+            if (self.grad_clip_enabled) param._clip_grad_norm(.{
                 .max_norm = self.grad_clip_max_norm,
                 .delta = self.grad_clip_delta,
             });
+
             const nlr = -self.lr;
             // for (params) |param| blas.blas_axpy(T, param.data.data.len, nlr, param.grad.?.data, 1, param.data.data, 1);
             // I suppose the idiomatic way would be to use the method
             // for (params) |param| param.data._axpy(param.grad.?, nlr, param.device);
             // But, can use direct access to skip the shape checks
-            for (params) |param| param.device.blas.axpy(T, param.grad.?.data, param.get_data(), &nlr);
+            param.device.dispatch(opspec.axpy(T){
+                .x = param.assume_grad_data(),
+                .y = param.get_data(),
+                .alpha = &nlr,
+            });
+
+            param.assume_grad().fill(0, param.device);
         }
 
         pub fn optimizer(self: *Self) Optimizer(T) {
@@ -92,8 +112,8 @@ pub fn Adam(comptime T: type) type {
                 .beta2 = beta2,
                 .epsilon = epsilon,
                 .t = 0,
-                .m = std.AutoHashMap(*const NDTensor(T), []T).init(allocator),
-                .v = std.AutoHashMap(*const NDTensor(T), []T).init(allocator),
+                .m = std.AutoHashMap(*NDTensor(T), []T).init(allocator),
+                .v = std.AutoHashMap(*NDTensor(T), []T).init(allocator),
                 .allocator = allocator,
             };
         }
@@ -116,7 +136,7 @@ pub fn Adam(comptime T: type) type {
             return Optimizer(T).init(self);
         }
 
-        pub fn step(self: *Self, params: []*const NDTensor(T)) !void {
+        pub fn step(self: *Self, params: []*NDTensor(T)) !void {
             if (self.grad_clip_enabled) clip_grads(T, params, .{
                 .max_norm = self.grad_clip_max_norm,
                 .delta = self.grad_clip_delta,
