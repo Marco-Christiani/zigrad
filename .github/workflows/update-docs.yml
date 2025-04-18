@@ -33,6 +33,8 @@ jobs:
           version: ${{ inputs.zig-version || '0.14.0' }}
 
       - name: Build docs
+        env:
+          ZIGRAD_BACKEND: HOST
         run: |
           zig build docs
 
