@@ -38,26 +38,32 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     std.debug.print("Training...\n", .{});
     const num_epochs = 3;
     var timer = try std.time.Timer.start();
+    var step_timer = try std.time.Timer.start();
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
             try image.set_label("image_batch");
             try label.set_label("label_batch");
 
+            step_timer.reset();
             const output = try model.forward(image);
-
             const loss = try zg.loss.softmax_cross_entropy_loss(f32, output, label);
-            total_loss += loss.get(0);
+            const loss_val = loss.get(0);
+            // Optional: Render an svg of the traced graph
+            // if (epoch == 0 and i == 0) {
+            //     try zg.utils.render_d2(loss, zg.utils.PrintOptions.plain, cpu.allocator, "./docs/comp_graph_mnist.svg");
+            // }
+            try gm.backward(loss);
+            const t1 = @as(f64, @floatFromInt(step_timer.read()));
+            const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
+            total_loss += loss_val;
 
-            //return loss.print_arrows();
-
-            std.debug.print("train_loss: {d:<5.5} [{d}/{d}]\n", .{
-                loss.get(0),
+            std.debug.print("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]\n", .{
+                loss_val,
                 i,
                 train_dataset.images.len,
+                ms_per_sample,
             });
-
-            try gm.backward(loss);
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
