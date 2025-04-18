@@ -14,6 +14,7 @@ pub fn build(b: *Build) !void {
     const build_options = b.addOptions();
     build_options.step.name = "Zigrad build options";
     const build_options_module = build_options.createModule();
+
     build_options.addOption(
         std.log.Level,
         "log_level",
@@ -120,9 +121,9 @@ pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
     const optimize: OptimizeMode = b.option(OptimizeMode, "tracy_optimize_mode", "Defaults to ReleaseFast") orelse .ReleaseFast;
     const options = b.addOptions();
     const enable = true; // HACK: lazy
-    options.addOption(bool, "enable_tracy", enable);
-    options.addOption(bool, "enable_tracy_allocation", false);
-    options.addOption(bool, "enable_tracy_callstack", true);
+    options.addOption(bool, "tracy_enable", enable);
+    options.addOption(bool, "tracy_allocation_enable", false);
+    options.addOption(bool, "tracy_callstack_enable", true);
     options.addOption(usize, "tracy_callstack_depth", 10);
 
     const tracy = b.addModule("tracy", .{
@@ -131,14 +132,17 @@ pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
         .optimize = optimize,
         .link_libc = true,
         .link_libcpp = true,
+        .imports = &.{
+            .{ .name = "tracy_build_options", .module = options.createModule() },
+        },
     });
 
     const tracy_src = b.lazyDependency("tracy", .{}) orelse return null;
     const tracy_c_flags = &.{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
     tracy.addCSourceFile(.{ .file = tracy_src.path("public/TracyClient.cpp"), .flags = tracy_c_flags });
-    tracy.addOptions("build_options", options);
 
     const unit_tests = b.addTest(.{
+        .name = "tracy_test",
         .root_module = tracy,
     });
     const test_step = b.step("tracy_test", "Run unit tests");

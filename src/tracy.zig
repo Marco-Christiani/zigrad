@@ -1,11 +1,11 @@
 //! Adapted from ziglang's tracy.zig
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
+const build_options = @import("tracy_build_options");
 
-pub const enable = if (builtin.is_test) false else build_options.enable_tracy;
-pub const enable_allocation = enable and build_options.enable_tracy_allocation;
-pub const enable_callstack = enable and build_options.enable_tracy_callstack;
+pub const enable = if (builtin.is_test) false else build_options.tracy_enable;
+pub const enable_allocation = enable and build_options.tracy_allocation_enable;
+pub const enable_callstack = enable and build_options.tracy_callstack_enable;
 pub const callstack_depth = if (enable_callstack and build_options.tracy_callstack_depth > 0) build_options.tracy_callstack_depth else 10;
 
 pub fn main() !void {
