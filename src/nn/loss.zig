@@ -14,7 +14,7 @@ const GraphManager = zg.GraphManager;
 // This is for c-compatibility and this value is instead traded for null.
 
 // nll entry point
-pub fn nll(comptime T: type, comptime config: NLLConfig) NLLType(T, config) {
+pub fn nll(T: type, comptime config: NLLConfig) NLLType(T, config) {
     return .{};
 }
 
@@ -32,11 +32,11 @@ pub const NLLConfig = struct {
 };
 
 // negative log likelihood
-pub fn NLLType(comptime T: type, comptime config: NLLConfig) type {
+pub fn NLLType(T: type, comptime config: NLLConfig) type {
     return if (config.target_type == .indices) NLLIndex(T, config) else @compileError("Unimplemented");
 }
 
-fn NLLEncode(comptime T: type, comptime config: NLLConfig) type {
+fn NLLEncode(T: type, comptime config: NLLConfig) type {
     return switch (config.dimensions) {
         1 => struct {
             pub fn score(src: *NDTensor(T), trg: *const NDTensor(T), reduce: bool) !*NDTensor {
@@ -62,7 +62,7 @@ fn NLLEncode(comptime T: type, comptime config: NLLConfig) type {
     };
 }
 
-fn NLLIndex(comptime T: type, comptime config: NLLConfig) type {
+fn NLLIndex(T: type, comptime config: NLLConfig) type {
     return switch (config.dimensions) {
         1 => struct {
             pub fn score(src: *NDTensor(T), trg_index: usize, reduce: bool) !*NDTensor {
@@ -138,7 +138,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     }.backward;
 
     return try NDTensor(T).create_dependent(.{
-        .data = try NDArray(T).init(&[_]T{mse}, &.{1}, device),
+        .data = try NDArray(T).init(&.{mse}, &.{1}, device),
         .children = &.{ y_pred, y },
         .label = "mse",
         .requires_gradient = true,
@@ -165,10 +165,10 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
 
     const CceBwd = struct {
         sm_preds: *NDTensor(T),
-        pub fn callback(loss: *NDTensor(T), ctx: *@This()) !void {
+        pub fn callback(loss: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
             defer ctx.sm_preds.deinit();
-            const preds = loss.backward_child(0) orelse return;
-            const label = loss.get_child(1);
+            const preds = children.get_bwd(0) orelse return;
+            const label = children.get(1);
             const bw_batch_size = if (preds.data.shape.len > 1) loss.data.shape.get(0) else 1;
 
             for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
@@ -252,13 +252,13 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
     const result = try _softmax_fwd(T, input, dim, device);
     const SmaxBwd = struct {
         dim: usize,
-        pub fn callback(bw_tensor: *NDTensor(T), ctx: *@This()) !void {
-            const bw_self_children = bw_tensor.children orelse return error.NoChildren;
-            const bw_input = bw_self_children[0];
-            if (bw_input.grad == null) return;
+        pub fn callback(y: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
+            const bw_input = children.get_bwd(0) orelse return;
+            const bw_grad = try bw_input.ensure_grad_data(0);
+            const y_grad = try y.assume_grad_data();
 
-            const bw_dim_size = bw_tensor.data.shape.get(ctx.dim);
-            const bw_total_size = bw_tensor.get_size();
+            const bw_dim_size = y.data.shape.get(ctx.dim);
+            const bw_total_size = y.get_size();
             const bw_outer_size = @divExact(bw_total_size, bw_dim_size);
 
             var bw_outer_idx: usize = 0;
@@ -267,12 +267,12 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
                 var bw_sum_grad: T = 0;
                 for (0..bw_dim_size) |bw_j| {
                     const bw_idx = bw_base_idx + bw_j;
-                    bw_sum_grad += bw_tensor.data.data[bw_idx] * bw_tensor.grad.?.data[bw_idx];
+                    bw_sum_grad += y.data.data[bw_idx] * y_grad[bw_idx];
                 }
                 for (0..bw_dim_size) |bw_j| {
                     const bw_idx = bw_base_idx + bw_j;
-                    const bw_softmax_out = bw_tensor.data.data[bw_idx];
-                    bw_input.grad.?.data[bw_idx] += bw_softmax_out * (bw_tensor.grad.?.data[bw_idx] - bw_sum_grad);
+                    const bw_softmax_out = y.data.data[bw_idx];
+                    bw_grad[bw_idx] += bw_softmax_out * (y_grad[bw_idx] - bw_sum_grad);
                 }
             }
         }
@@ -287,7 +287,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
     });
 }
 
-pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, device: DeviceReference) !*NDTensor(T) {
+pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, device: DeviceReference) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_loss: T = 0;
 
@@ -304,10 +304,9 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
 
     const Sl1LossBwd = struct {
         beta: T,
-        pub fn callback(tensor: *NDTensor(T), ctx: *@This()) !void {
-            const self_children = tensor.get_children() orelse return error.NoChildren;
-            const _y_pred = self_children[0];
-            const _y = self_children[1];
+        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
+            const _y_pred = children.get_bwd(0) orelse return;
+            const _y = children.get(1);
             const _beta = ctx.beta;
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
@@ -334,7 +333,7 @@ pub fn smooth_l1_loss(comptime T: type, y_pred: *NDTensor(T), y: *NDTensor(T), b
     });
 }
 // TODO: move this since refactor this file was renamed to loss.zig
-// pub fn gather(comptime T: type, input: *const NDTensor(T), indices: *const NDTensor(usize), dim: usize, device: DeviceReference) !*NDTensor(T)
+// pub fn gather(T: type, input: *const NDTensor(T), indices: *const NDTensor(usize), dim: usize, device: DeviceReference) !*NDTensor(T)
 
 // Documented outline for adding new custom operations
 // pub fn myop(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {

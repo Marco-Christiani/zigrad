@@ -38,11 +38,11 @@ pub fn GraphManager(comptime T: type) type {
         fn topo(self: *Self, node: *T) void {
             const gopr = self.visited_nodes.getOrPut(node) catch unreachable;
             if (!gopr.found_existing) {
-                if (node.get_children()) |children| {
-                    for (children) |child| {
-                        if (!child.attached) continue;
-                        self.topo(child);
-                    }
+                const bwd_ctx = &(node._backward_ctx orelse return);
+                var children = bwd_ctx.child_iterator();
+                while (children.next()) |child| {
+                    if (!child.attached) continue;
+                    self.topo(child);
                 }
                 self.sorted_nodes.append(node) catch unreachable;
             }
