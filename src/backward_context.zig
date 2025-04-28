@@ -181,7 +181,8 @@ pub fn BackwardContext(primary_type: type) type {
                             try ArgType.callback(x, &_self.children, _self.cast(ArgType));
                         },
                         else => {
-                            @compileError("backward callback must have artiy within [1,2]");
+                            @compileLog(@typeName(ArgType));
+                            @compileError("backward callback must have artiy within [2,3]");
                         },
                     }
                 }

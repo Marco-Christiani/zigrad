@@ -58,10 +58,12 @@ pub fn SGD(comptime T: type) type {
 
         pub fn attach(self: *Self, param: *Tensor) !void {
             std.debug.assert(param._backward_ctx == null);
-            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, true, param.device);
+            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, param.device, .{
+                .persist = true,
+            });
         }
 
-        pub fn callback(param: *Tensor, self: *Self) !void {
+        pub fn callback(param: *Tensor, _: *Tensor.Children, self: *Self) !void {
             // std.debug.print("IN SGD BACKWARD\n", .{});
 
             if (self.grad_clip_enabled) param._clip_grad_norm(.{

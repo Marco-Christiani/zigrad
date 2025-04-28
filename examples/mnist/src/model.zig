@@ -94,8 +94,9 @@ pub fn LinearLayer(comptime T: type) type {
         pub fn forward(self: *const Self, x: *Tensor) !*Tensor {
             const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
             const n_features = self.weights.data.shape.get(0);
-            const b_y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
-            return self.bias.add(b_y);
+            const output = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
+            try self.bias.add_(output);
+            return output;
         }
     };
 }
@@ -122,8 +123,8 @@ pub fn ReLULayer(comptime T: type) type {
             });
         }
 
-        pub fn callback(y: *Tensor) !void {
-            const x = y.backward_child(0) orelse return;
+        pub fn callback(y: *Tensor, children: *Tensor.Children) !void {
+            const x = children.get_bwd(0) orelse return;
             y.device.dispatch(opspec.relu_bwd(T){
                 .x = x.get_data(),
                 .x_g = try x.ensure_grad_data(0),
@@ -136,8 +137,9 @@ pub fn ReLULayer(comptime T: type) type {
 pub fn FlattenLayer(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Tensor = NDTensor(T);
 
-        pub fn forward(_: Self, input: *NDTensor(T)) !*NDTensor(T) {
+        pub fn forward(_: Self, input: *Tensor) !*Tensor {
             const batch_dim = input.data.shape.get(0);
             const other_dims = input.data.shape.crop(1, 0);
             const flattened_dim = zg.arrayutils.prod(other_dims);
@@ -151,12 +153,11 @@ pub fn FlattenLayer(comptime T: type) type {
                 .device = input.device,
             });
             result.data._reshape(&.{ batch_dim, flattened_dim });
-
             return result;
         }
 
-        pub fn callback(y: *NDTensor(T)) !void {
-            const x = y.backward_child(0) orelse return;
+        pub fn callback(y: *Tensor, children: *Tensor.Children) !void {
+            const x = children.get_bwd(0) orelse return;
             const x_grad = try x.ensure_grad(0);
             y.device.dispatch(opspec.add(T){
                 .x = x_grad.data,
