@@ -299,9 +299,7 @@ pub fn NDTensor(comptime T: type) type {
             children: []const *Self,
             callback: BwdCallback,
             device: DeviceReference,
-            label: ?[]const u8 = null,
-            op: ?Op = null,
-        }) !*Self {
+        }) !void {
             const rg: bool = for (opts.children) |child| {
                 if (child.requires_grad()) break true;
             } else self.requires_grad();
@@ -322,7 +320,6 @@ pub fn NDTensor(comptime T: type) type {
                     self._backward_ctx = ctx;
                 }
             }
-            return self;
         }
 
         pub fn deinit(self: *Self) void {
@@ -679,27 +676,27 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        pub fn add_(self: *Self, other: *Self) !*Self {
+        pub fn add_(self: *Self, other: *Self) !void {
             std.debug.assert(self.device.is_compatible(other.device));
 
-            const SharedAddBwd = struct {
-                pub fn callback(c: *Self, children: *Children) !void {
-                    scope: {
-                        const a = children.get_bwd(0) orelse break :scope;
-                        try c.assume_grad().unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
-                    }
+            const InplaceAddBwd = struct {
+                pub fn callback(b: *Self, children: *Children) !void {
+                    const a = children.get_bwd(0) orelse return;
+                    try b.assume_grad().unbroadcast_(try a.ensure_grad(0), b.device, .{ .alpha = 1.0, .beta = 1.0 });
                 }
             };
 
-            try other.data._add(self.data, self.device);
+            try self.data.add_(&other.data, self.device);
 
-            return prepend_dependent(SharedAddBwd, other, .{
-                .children = &.{ self, other },
+            return prepend_dependent(InplaceAddBwd, other, .{
+                .children = &.{self},
                 .device = self.device,
                 .callback = .{},
-                .label = other.get_label(),
-                .op = .ADD,
             });
+        }
+
+        pub fn _add(self: *Self, other: *Self) !void {
+            return other.add_(self);
         }
 
         /// Element-wise subtraction. COM.
@@ -1806,6 +1803,61 @@ test "tensor/GraphManager/dot_backward" {
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 }
+
+
+test "tensor/inplace_add" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
+    const u = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer u.deinit();
+
+    const v = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer v.deinit();
+
+    const x = try u.mul(v);
+    defer x.deinit();
+
+    const a = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer a.deinit();
+
+    const b = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer b.deinit();
+
+    const c = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer c.deinit();
+
+    // x now carries 4 contexts for (a), (b), (c), (u, v)
+    try a.add_(x);
+    try b.add_(x);
+    try c.add_(x);
+
+    try x.setup_grad(2.0);
+
+    try x.backward();
+    try std.testing.expectEqualSlices(f32, &.{ 4, 4, 4, 4 }, x.get_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, a.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, b.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, c.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, u.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, v.assume_grad_data());
+
+    // check the children...
+    var children = x._backward_ctx.?.child_iterator();
+    try std.testing.expectEqual(children.next().?, c);
+    try std.testing.expectEqual(children.next().?, b);
+    try std.testing.expectEqual(children.next().?, a);
+    try std.testing.expectEqual(children.next().?, u);
+    try std.testing.expectEqual(children.next().?, v);
+    try std.testing.expectEqual(children.next(), null);
+}
+
+
 
 //test "tensor/GraphManager/shared ops" {
 //    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
