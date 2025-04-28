@@ -94,9 +94,9 @@ pub fn LinearLayer(comptime T: type) type {
         pub fn forward(self: *const Self, x: *Tensor) !*Tensor {
             const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
             const n_features = self.weights.data.shape.get(0);
-            const output = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
-            try self.bias.add_(output);
-            return output;
+            const y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
+            try self.bias.add_(y);
+            return y;
         }
     };
 }
