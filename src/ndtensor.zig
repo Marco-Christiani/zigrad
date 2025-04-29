@@ -63,9 +63,9 @@ pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
         pub const DataType = NDArray(T);
-        pub const Children = std.BoundedArray(*Self, 8);
         pub const Label = std.BoundedArray(u8, 32);
         pub const BackwardsContext = @import("backward_context.zig").BackwardContext(Self);
+        pub const Children = BackwardsContext.Children;
 
         /// Core NDArray that holds the values and shape.
         /// Use this member directly when you want to perform
@@ -88,10 +88,6 @@ pub fn NDTensor(comptime T: type) type {
         /// continue through that tensor. Set by using
         /// the "attach" and "detach" functions.
         attached: bool = true,
-        /// When a tensor is created as the result of
-        /// an op, the tensor arguments of that op are
-        /// the children of the resulting output.
-        children: Children = .{},
         /// Optional label for naming tensors. This is
         /// useful for printing graphs and diagrams.
         label: Label = .{},
@@ -127,7 +123,6 @@ pub fn NDTensor(comptime T: type) type {
                 .acquired = false,
                 ._requires_grad = _requires_grad,
                 ._backward_ctx = null,
-                .children = .{},
                 .label = .{},
                 .op = null,
             };
@@ -238,31 +233,6 @@ pub fn NDTensor(comptime T: type) type {
             return grd.data;
         }
 
-        pub fn get_children(self: *const Self) ?[]*Self {
-            // TODO: The static array propogates const-ness to the children,
-            // but we know that these children are actually mutable pointers
-            return if (self.children.len > 0) @constCast(self.children.slice()) else null;
-        }
-
-        // internal helper to reduce noise
-        pub fn get_child(self: *const Self, i: usize) *Self {
-            const slice = self.get_children() orelse {
-                @branchHint(.cold);
-                @panic("no children");
-            };
-            return slice[i];
-        }
-
-        // returns a null child if it does not require gradient
-        pub fn backward_child(self: *const Self, i: usize) ?*Self {
-            const child = self.get_child(i);
-            return if (child.requires_grad()) child else null;
-        }
-
-        pub fn set_children(self: *Self, new_children: []const *Self) !void {
-            self.children = try Children.fromSlice(new_children);
-        }
-
         pub fn get_label(self: *const Self) ?[]const u8 {
             return if (self.label.len > 0) self.label.slice() else null;
         }
@@ -308,14 +278,48 @@ pub fn NDTensor(comptime T: type) type {
             self.* = Self{
                 .data = opts.data,
                 .op = opts.op,
-                .children = try Children.fromSlice(opts.children),
                 .label = try Label.fromSlice(opts.label orelse ""),
                 .acquired = false,
                 .device = opts.device,
                 ._requires_grad = rg,
-                ._backward_ctx = if (rg) try BackwardsContext.init(BwdCallback, opts.callback, false, opts.device) else null,
+                ._backward_ctx = if (rg) try BackwardsContext.init(
+                    BwdCallback,
+                    opts.callback,
+                    opts.device,
+                    .{
+                        .children = opts.children,
+                        .persist = false,
+                    },
+                ) else null,
             };
             return self;
+        }
+
+        pub fn prepend_dependent(BwdCallback: type, self: *Self, opts: struct {
+            children: []const *Self,
+            callback: BwdCallback,
+            device: DeviceReference,
+        }) !void {
+            const rg: bool = for (opts.children) |child| {
+                if (child.requires_grad()) break true;
+            } else self.requires_grad();
+
+            if (rg) {
+                const ctx = try BackwardsContext.init(
+                    BwdCallback,
+                    opts.callback,
+                    opts.device,
+                    .{
+                        .children = opts.children,
+                        .persist = false,
+                    },
+                );
+                if (self._backward_ctx) |*_ctx| {
+                    try _ctx.prepend(ctx, self.device);
+                } else {
+                    self._backward_ctx = ctx;
+                }
+            }
         }
 
         pub fn deinit(self: *Self) void {
@@ -442,7 +446,6 @@ pub fn NDTensor(comptime T: type) type {
                 .grad = if (self.grad) |g| try g.copy(self.device) else null,
                 ._requires_grad = self.requires_grad(),
                 .op = null,
-                .children = .{},
                 .label = .{},
                 .acquired = false,
                 .device = self.device,
@@ -493,8 +496,8 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn transpose(self: *Self) !*Self {
             const TransposeBwd = struct {
-                pub fn callback(y: *Self) !void {
-                    const x = y.backward_child(0) orelse return;
+                pub fn callback(y: *Self, children: *Children) !void {
+                    const x = children.get_bwd(0) orelse return;
                     y.device.dispatch(opspec.transpose(T){
                         .A = y.assume_grad_data(),
                         .B = try x.ensure_grad_data(0),
@@ -626,8 +629,8 @@ pub fn NDTensor(comptime T: type) type {
             const ClampBwd = struct {
                 _min: T,
                 _max: T,
-                pub fn callback(y: *Self, ctx: *@This()) !void {
-                    const x = y.backward_child(0) orelse return;
+                pub fn callback(y: *Self, children: *Children, ctx: *@This()) !void {
+                    const x = children.get_bwd(0) orelse return;
                     y.device.dispatch(opspec.clamp_bwd(T){
                         .x = x.get_data(),
                         .x_g = try x.ensure_grad_data(0),
@@ -652,13 +655,13 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const AddBwd = struct {
-                pub fn callback(c: *Self) !void {
+                pub fn callback(c: *Self, children: *Children) !void {
                     scope: {
-                        const a = c.backward_child(0) orelse break :scope;
+                        const a = children.get_bwd(0) orelse break :scope;
                         try c.assume_grad().unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
                     }
                     scope: {
-                        const b = c.backward_child(1) orelse break :scope;
+                        const b = children.get_bwd(1) orelse break :scope;
                         try c.assume_grad().unbroadcast_(try b.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
                     }
                 }
@@ -673,43 +676,41 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        //pub fn add_(self: *Self, other: *Self) !*Self {
-        //    std.debug.assert(self.device.is_compatible(other.device));
+        pub fn add_(self: *Self, other: *Self) !void {
+            std.debug.assert(self.device.is_compatible(other.device));
 
-        //    const SharedAddBwd = struct {
-        //        pub fn callback(c: *Self) !void {
-        //            scope: {
-        //                const a = c.backward_child(0) orelse break :scope;
-        //                try c.assume_grad().unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
-        //            }
-        //        }
-        //    };
+            const InplaceAddBwd = struct {
+                pub fn callback(b: *Self, children: *Children) !void {
+                    const a = children.get_bwd(0) orelse return;
+                    try b.assume_grad().unbroadcast_(try a.ensure_grad(0), b.device, .{ .alpha = 1.0, .beta = 1.0 });
+                }
+            };
 
-        //    try other.data._add(self.data, self.device);
+            try self.data.add_(&other.data, self.device);
 
-        //    return create_shared_dependent(SharedAddBwd, .{
-        //        .data = other.data,
-        //        .grad = &other.grad,
-        //        .children = &.{ self, other },
-        //        .device = self.device,
-        //        .callback = .{},
-        //        .label = other.get_label(),
-        //        .op = .ADD,
-        //    });
-        //}
+            return prepend_dependent(InplaceAddBwd, other, .{
+                .children = &.{self},
+                .device = self.device,
+                .callback = .{},
+            });
+        }
+
+        pub fn _add(self: *Self, other: *Self) !void {
+            return other.add_(self);
+        }
 
         /// Element-wise subtraction. COM.
         pub fn sub(self: *Self, other: *Self) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const SubBwd = struct {
-                pub fn callback(c: *Self) !void {
+                pub fn callback(c: *Self, children: *Children) !void {
                     scope: {
-                        const a = c.backward_child(0) orelse break :scope;
+                        const a = children.get_bwd(0) orelse break :scope;
                         try c.assume_grad().unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
                     }
                     scope: {
-                        const b = c.backward_child(1) orelse break :scope;
+                        const b = children.get_bwd(1) orelse break :scope;
                         try c.assume_grad().unbroadcast_(try b.ensure_grad(0), c.device, .{ .alpha = -1.0, .beta = 1.0 });
                     }
                 }
@@ -729,10 +730,10 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const MulBwd = struct {
-                pub fn callback(c: *Self) !void {
+                pub fn callback(c: *Self, children: *Children) !void {
                     scope: {
-                        const a = c.backward_child(0) orelse break :scope;
-                        const b = c.get_child(1);
+                        const a = children.get_bwd(0) orelse break :scope;
+                        const b = children.get(1);
 
                         var bc_grad = try b.data.mul(c.assume_grad().*, c.device);
                         defer bc_grad.deinit(c.device);
@@ -740,8 +741,8 @@ pub fn NDTensor(comptime T: type) type {
                         try bc_grad.unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
                     }
                     scope: {
-                        const b = c.backward_child(1) orelse break :scope;
-                        const a = c.get_child(0);
+                        const b = children.get_bwd(1) orelse break :scope;
+                        const a = children.get(0);
 
                         var ac_grad = try a.data.mul(c.assume_grad().*, c.device);
                         defer ac_grad.deinit(c.device);
@@ -765,10 +766,10 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const DivBwd = struct {
-                pub fn callback(c: *Self) !void {
+                pub fn callback(c: *Self, children: *Children) !void {
                     scope: {
-                        const a = c.backward_child(0) orelse break :scope;
-                        const b = c.get_child(1);
+                        const a = children.get_bwd(0) orelse break :scope;
+                        const b = children.get(1);
 
                         var bc_grad = try c.assume_grad().div(b.data, c.device);
                         defer bc_grad.deinit(c.device);
@@ -776,8 +777,8 @@ pub fn NDTensor(comptime T: type) type {
                         try bc_grad.unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
                     }
                     scope: {
-                        const b = c.backward_child(1) orelse break :scope;
-                        const a = c.get_child(0);
+                        const b = children.get_bwd(1) orelse break :scope;
+                        const a = children.get(0);
 
                         var ac_grad = blk: {
                             var b_grad_value = try c.assume_grad().mul(a.data, c.device);
@@ -805,8 +806,8 @@ pub fn NDTensor(comptime T: type) type {
         /// Computes the maximum value of the tensor. Returns a scalar tensor. COM.
         pub fn max(self: *Self) !*Self {
             const MaxBwd = struct {
-                pub fn callback(y: *Self) !void {
-                    const x = y.backward_child(0) orelse return;
+                pub fn callback(y: *Self, children: *Children) !void {
+                    const x = children.get_bwd(0) orelse return;
                     y.device.dispatch(opspec.max_bwd(T){
                         .x = x.get_data(),
                         .x_g = try x.ensure_grad_data(0),
@@ -829,8 +830,8 @@ pub fn NDTensor(comptime T: type) type {
         /// Element-wise exponential. COM.
         pub fn exp(self: *Self) !*Self {
             const ExpBwd = struct {
-                pub fn callback(y: *Self) !void {
-                    const x = y.backward_child(0) orelse return;
+                pub fn callback(y: *Self, children: *Children) !void {
+                    const x = children.get_bwd(0) orelse return;
                     y.device.dispatch(opspec.exp_bwd(T){
                         .x_g = try x.ensure_grad_data(0),
                         .y = y.get_data(),
@@ -910,12 +911,12 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         const BmmAccBwd = struct {
-            pub fn callback(C: *Self) !void {
+            pub fn callback(C: *Self, children: *Children) !void {
                 const op_tag = C.op orelse unreachable;
-                const A = C.get_child(0);
-                const B = C.get_child(1);
+                const A = children.get(0);
+                const B = children.get(1);
 
-                if (C.backward_child(0)) |_| {
+                if (children.get_bwd(0)) |_| {
                     const C_grad = C.assume_grad().*;
                     switch (op_tag) {
                         .MATMUL_AB => {
@@ -934,7 +935,7 @@ pub fn NDTensor(comptime T: type) type {
                     }
                 }
 
-                if (C.backward_child(1)) |_| {
+                if (children.get_bwd(1)) |_| {
                     const C_grad = C.assume_grad().*;
                     switch (op_tag) {
                         .MATMUL_AB => {
@@ -960,19 +961,19 @@ pub fn NDTensor(comptime T: type) type {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const DotBwd = struct {
-                pub fn callback(c: *Self) !void {
+                pub fn callback(c: *Self, children: *Children) !void {
                     scope: {
-                        const a = c.backward_child(0) orelse break :scope;
+                        const a = children.get_bwd(0) orelse break :scope;
                         c.device.dispatch(opspec.axpy(T){
-                            .x = c.get_child(1).get_data(),
+                            .x = children.get(1).get_data(),
                             .y = try a.ensure_grad_data(0),
                             .alpha = @ptrCast(c.assume_grad_data().ptr),
                         });
                     }
                     scope: {
-                        const b = c.backward_child(1) orelse break :scope;
+                        const b = children.get_bwd(1) orelse break :scope;
                         c.device.dispatch(opspec.axpy(T){
-                            .x = c.get_child(0).get_data(),
+                            .x = children.get(0).get_data(),
                             .y = try b.ensure_grad_data(0),
                             .alpha = @ptrCast(c.assume_grad_data().ptr),
                         });
@@ -995,11 +996,11 @@ pub fn NDTensor(comptime T: type) type {
 
             const MatvecBwd = struct {
                 _trans_a: bool,
-                pub fn callback(y: *Self, ctx: *@This()) !void {
+                pub fn callback(y: *Self, children: *Children, ctx: *@This()) !void {
                     const ta = ctx._trans_a;
                     scope: {
-                        const A = y.backward_child(0) orelse break :scope;
-                        const x = y.get_child(1);
+                        const A = children.get_bwd(0) orelse break :scope;
+                        const x = children.get(1);
                         y.device.dispatch(opspec.outer(T){
                             .x = if (ta) x.get_data() else y.assume_grad_data(),
                             .y = if (ta) y.assume_grad_data() else x.get_data(),
@@ -1008,8 +1009,8 @@ pub fn NDTensor(comptime T: type) type {
                         });
                     }
                     scope: {
-                        const x = y.backward_child(1) orelse break :scope;
-                        const A = y.get_child(0);
+                        const x = children.get_bwd(1) orelse break :scope;
+                        const A = children.get(0);
                         y.device.dispatch(opspec.matvec(T){
                             .A = A.get_data(),
                             .x = y.assume_grad_data(),
@@ -1036,8 +1037,8 @@ pub fn NDTensor(comptime T: type) type {
         /// Sum of all elements in the tensor. COM.
         pub fn sum(self: *Self) !*Self {
             const SumBwd = struct {
-                pub fn callback(y: *Self) !void {
-                    const x = y.backward_child(0) orelse return;
+                pub fn callback(y: *Self, children: *Children) !void {
+                    const x = children.get_bwd(0) orelse return;
                     const x_grad = try x.ensure_grad(0);
                     try x_grad._add(y.assume_grad().*, y.device);
                 }
@@ -1397,20 +1398,30 @@ test "tensor/GraphManager/moreback" {
     const Tensor = NDTensor(T);
 
     var w = try Tensor.init(&[_]f32{ 3, 2 }, shape, true, device);
+    try w.set_label("W");
     defer w.deinit();
+
     var b = try Tensor.init(&[_]f32{ 1, 1 }, shape, true, device);
+    try b.set_label("b");
     defer b.deinit();
+
     var x = try Tensor.init(&[_]f32{ 4, 4 }, shape, true, device);
+    try x.set_label("x");
     defer x.deinit();
 
     // h = w*x + b
     // dh/dw = x, dh/db = 1
     const temp = try w.mul(x);
+    try temp.set_label("temp");
     defer temp.deinit();
+
     const h = try temp.add(b);
+    try h.set_label("h");
     defer h.deinit();
 
-    var gm = GraphManager(Tensor).init(device.allocator, .{});
+    var gm = GraphManager(Tensor).init(device.allocator, .{
+        .eager_teardown = true,
+    });
     defer gm.deinit();
 
     try gm.backward(h);
@@ -1426,8 +1437,8 @@ test "tensor/GraphManager/moreback" {
     w._reshape(shape2);
     b._reshape(shape2);
     x._reshape(shape2);
-    // h = w*x + b
-    // dh/dw = x, dh/db = 1
+    //// h = w*x + b
+    //// dh/dw = x, dh/db = 1
     const temp2 = try w.mul(x);
     defer temp2.deinit();
     const h2 = try temp2.add(b);
@@ -1792,6 +1803,61 @@ test "tensor/GraphManager/dot_backward" {
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
     try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
 }
+
+
+test "tensor/inplace_add" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var cpu = zg.device.HostDevice.init(allocator);
+    defer cpu.deinit();
+    const device = cpu.reference();
+
+    const u = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer u.deinit();
+
+    const v = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer v.deinit();
+
+    const x = try u.mul(v);
+    defer x.deinit();
+
+    const a = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer a.deinit();
+
+    const b = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer b.deinit();
+
+    const c = try NDTensor(f32).ones(&.{ 2, 2 }, true, device);
+    defer c.deinit();
+
+    // x now carries 4 contexts for (a), (b), (c), (u, v)
+    try a.add_(x);
+    try b.add_(x);
+    try c.add_(x);
+
+    try x.setup_grad(2.0);
+
+    try x.backward();
+    try std.testing.expectEqualSlices(f32, &.{ 4, 4, 4, 4 }, x.get_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, a.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, b.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, c.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, u.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, v.assume_grad_data());
+
+    // check the children...
+    var children = x._backward_ctx.?.child_iterator();
+    try std.testing.expectEqual(children.next().?, c);
+    try std.testing.expectEqual(children.next().?, b);
+    try std.testing.expectEqual(children.next().?, a);
+    try std.testing.expectEqual(children.next().?, u);
+    try std.testing.expectEqual(children.next().?, v);
+    try std.testing.expectEqual(children.next(), null);
+}
+
+
 
 //test "tensor/GraphManager/shared ops" {
 //    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -63,16 +63,89 @@ const ClosurePointer = struct {
     }
 };
 
-pub fn BackwardContext(PrimaryType: type) type {
+pub fn BackwardChildren(ChildType: type) type {
     return struct {
         const Self = @This();
-        const ContextPtr = ?*anyopaque;
-        const ContextFunction = *const fn (*Self, *PrimaryType) anyerror!void;
-        // small-buffer-optimized context object
-        const SmallBuffer = [4]usize;
+        pub const Slice = []ChildType;
+        pub const ChildIterator = struct {};
+        pub const capacity: u64 = 8;
+        buffer: [capacity]ChildType = undefined,
+        len: usize = 0,
+
+        pub fn init(children: []const ChildType) Self {
+            std.debug.assert(Self.capacity >= children.len);
+            var self: Self = .{};
+            self.len = children.len;
+            @memcpy(self.buffer[0..self.len], children);
+            return self;
+        }
+
+        pub fn get(self: *const Self, i: usize) ChildType {
+            std.debug.assert(i < self.len);
+            return self.buffer[i];
+        }
+
+        pub fn get_bwd(self: *const Self, i: usize) ?ChildType {
+            return if (self.get(i).requires_grad())
+                self.buffer[i]
+            else
+                null;
+        }
+
+        /// Remove all elements from the slice.
+        pub fn clear(self: *Self) void {
+            self.len = 0;
+        }
+    };
+}
+pub fn Iterator(ContextType: type) type {
+    return struct {
+        const Self = @This();
+        node: ?*ContextType,
+
+        pub fn next(self: *Self) ?*ContextType {
+            if (self.node) |node| {
+                defer self.node = node.next;
+                return node;
+            }
+            return null;
+        }
+    };
+}
+
+pub fn ChildIterator(ContextType: type) type {
+    return struct {
+        const Self = @This();
+        node: ?*ContextType,
+        index: usize = 0,
+
+        pub fn next(self: *Self) ?*ContextType.PrimaryType {
+            if (self.node) |node| {
+                if (self.index < node.children.len) {
+                    defer self.index += 1;
+                    return node.children.buffer[self.index];
+                }
+                self.node = node.next;
+                self.index = 0;
+                return self.next();
+            }
+            return null;
+        }
+    };
+}
+
+pub fn BackwardContext(primary_type: type) type {
+    return struct {
+        const Self = @This();
+        pub const PrimaryType = primary_type;
+        pub const ContextPtr = ?*anyopaque;
+        pub const ContextFunction = *const fn (*Self, *PrimaryType) anyerror!void;
+        pub const Children = BackwardChildren(*PrimaryType);
+        pub const SmallBuffer = [4]usize;
 
         debug_id: if (debug) usize else void,
         callable: ContextFunction,
+        children: Children,
         persist: bool = false,
         storage: union(enum) {
             none: void,
@@ -80,8 +153,17 @@ pub fn BackwardContext(PrimaryType: type) type {
             ptr: ClosurePointer,
             ref: *anyopaque,
         } = .none,
+        next: ?*Self = null,
 
-        pub fn init(CtxType: type, context: CtxType, persist: bool, device: DeviceReference) !Self {
+        pub fn init(
+            CtxType: type,
+            context: CtxType,
+            device: DeviceReference,
+            config: struct {
+                children: ?[]const *PrimaryType = null,
+                persist: bool = false,
+            },
+        ) !Self {
             const is_ref = (@typeInfo(CtxType) == .pointer);
             const ArgType = if (is_ref) std.meta.Child(CtxType) else CtxType;
 
@@ -92,32 +174,37 @@ pub fn BackwardContext(PrimaryType: type) type {
             const callback = struct {
                 pub fn wrapper(_self: *Self, x: *PrimaryType) anyerror!void {
                     switch (comptime arity(ArgType.callback)) {
-                        1 => {
-                            try ArgType.callback(x);
-                        },
                         2 => {
-                            try ArgType.callback(x, _self.cast(ArgType));
+                            try ArgType.callback(x, &_self.children);
+                        },
+                        3 => {
+                            try ArgType.callback(x, &_self.children, _self.cast(ArgType));
                         },
                         else => {
-                            @compileError("backward callback must have artiy within [1,2]");
+                            @compileLog(@typeName(ArgType));
+                            @compileError("backward callback must have artiy within [2,3]");
                         },
                     }
                 }
             }.wrapper;
 
+            const children: Children = if (config.children) |c| Children.init(c) else .{};
+
             if (is_ref) {
                 return .{
-                    .callable = callback,
-                    .storage = .{ .ref = context },
                     .debug_id = if (debug) type_id(ArgType) else {},
-                    .persist = persist,
+                    .callable = callback,
+                    .children = children,
+                    .storage = .{ .ref = context },
+                    .persist = config.persist,
                 };
             }
 
             var tmp: Self = .{
-                .callable = callback,
                 .debug_id = if (debug) type_id(ArgType) else {},
-                .persist = persist,
+                .callable = callback,
+                .children = children,
+                .persist = config.persist,
             };
 
             const arg_size = @sizeOf(ArgType);
@@ -140,13 +227,34 @@ pub fn BackwardContext(PrimaryType: type) type {
             return tmp;
         }
 
+        pub fn prepend(root: *Self, new_root: Self, device: DeviceReference) !void {
+            const next_ptr = try device.allocator.create(Self);
+            next_ptr.* = root.*;
+            root.* = new_root;
+            root.next = next_ptr;
+        }
+
         pub fn deinit(self: *Self, device: DeviceReference) void {
+            if (self.next) |next| {
+                next.deinit(device);
+                device.allocator.destroy(next);
+            }
             self.release(device);
-            self.* = undefined;
+        }
+
+        pub fn iterator(self: *Self) Iterator(Self) {
+            return .{ .node = self };
+        }
+
+        pub fn child_iterator(self: *Self) ChildIterator(Self) {
+            return .{ .node = self };
         }
 
         pub fn call(self: *Self, tensor: *PrimaryType) anyerror!void {
-            return self.callable(self, tensor);
+            var _this: ?*Self = self;
+            while (_this) |this| : (_this = this.next) {
+                try this.callable(this, tensor);
+            }
         }
 
         pub fn release(self: *Self, device: DeviceReference) void {
