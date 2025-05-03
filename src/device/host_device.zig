@@ -236,18 +236,41 @@ pub fn clip_nrm2(self: *const Self, T: type, p: opspec.clip_nrm2(T)) void {
 // non-linear ops
 
 pub fn exp_fwd(_: *const Self, T: type, p: opspec.exp_fwd(T)) void {
-    for (p.x, p.y) |x, *y| y.* = @exp(x);
+    var i: usize = 0;
+    if (comptime std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        while ((i + N) <= p.x.len) : (i += N) {
+            const u: V = p.x[i..][0..N].*;
+            p.y[i..][0..N].* = @exp(u);
+        }
+    }
+    while (i < p.x.len) : (i += 1) {
+        p.y[i] = @exp(p.x[i]);
+    }
 }
 
 pub fn exp_bwd(_: *const Self, T: type, p: opspec.exp_bwd(T)) void {
+    // TODO: vectorize this...
     for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += y * y_g;
 }
 
 pub fn relu_fwd(_: *const Self, T: type, p: opspec.relu_fwd(T)) void {
-    for (p.x, p.y) |x, *y| y.* = @max(x, 0);
+    var i: usize = 0;
+    if (comptime std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        const zero: V = @splat(0);
+        while ((i + N) <= p.x.len) : (i += N) {
+            const u: V = p.x[i..][0..N].*;
+            p.y[i..][0..N].* = @max(zero, u);
+        }
+    }
+    while (i < p.x.len) : (i += 1) {
+        p.y[i] = @max(0, p.x[i]);
+    }
 }
 
 pub fn relu_bwd(_: *const Self, T: type, p: opspec.relu_bwd(T)) void {
+    // TODO: vectorize this...
     for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| x_g.* += if (x > 0) y_g else 0;
 }
 
@@ -299,7 +322,7 @@ pub fn clamp_mask_fwd(_: *const Self, T: type, p: opspec.clamp_mask_fwd(T)) void
     if (vals_idx == p.x.len) return;
 
     var bits: ByteMask = .{ .mask = 0 };
-    for (vals_idx..p.x.len, 0..8) |i, b| {
+    for (vals_idx..p.x.len, 0..p.x_g.len - vals_idx) |i, b| {
         const x = p.x[i];
         const clamped = @min(p.max, @max(p.min, x));
         bits.setValue(b, x != clamped);
@@ -325,8 +348,59 @@ pub fn clamp_mask_bwd(_: *const Self, T: type, p: opspec.clamp_mask_bwd(T)) void
     if (vals_idx == p.x.len) return;
 
     var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
-    for (vals_idx..p.x.len, 0..8) |i, b| {
+    for (vals_idx..p.x.len, 0..p.x_g.len - vals_idx) |i, b| {
         if (bits.isSet(b)) p.x_g[i] += p.y_g[i];
+    }
+}
+
+pub fn relu_mask_fwd(_: *const Self, T: type, p: opspec.relu_mask_fwd(T)) void {
+    var vals_idx: usize = 0;
+    var byte_idx: usize = 0;
+    const chunks: usize = @divFloor(p.x.len, 8);
+
+    for (0..chunks) |_| {
+        var bits: ByteMask = .{ .mask = 0 };
+        inline for (0..8) |b| {
+            if (p.x[vals_idx] <= 0) {
+                p.x[vals_idx] = 0;
+                bits.setValue(b, true);
+            }
+            vals_idx += 1;
+        }
+        p.mask[byte_idx] = @bitCast(bits.mask);
+        byte_idx += 1;
+    }
+    if (vals_idx == p.x.len) return;
+
+    var bits: ByteMask = .{ .mask = 0 };
+    for (vals_idx..p.x.len, 0..p.x.len - vals_idx) |i, b| {
+        if (p.x[i] <= 0) {
+            p.x[i] = 0;
+            bits.setValue(b, true);
+        }
+    }
+    p.mask[byte_idx] = @bitCast(bits.mask);
+}
+
+pub fn relu_mask_bwd(_: *const Self, T: type, p: opspec.relu_mask_bwd(T)) void {
+    var vals_idx: usize = 0;
+    var byte_idx: usize = 0;
+    const chunks: usize = @divFloor(p.x_g.len, 8);
+
+    for (0..chunks) |_| {
+        var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
+        inline for (0..8) |b| {
+            if (bits.isSet(b)) p.x_g[vals_idx] = 0;
+            vals_idx += 1;
+        }
+        byte_idx += 1;
+    }
+
+    if (vals_idx == p.x_g.len) return;
+
+    var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
+    for (vals_idx..p.x_g.len, 0..p.x_g.len - vals_idx) |i, b| {
+        if (bits.isSet(b)) p.x_g[i] = 0;
     }
 }
 

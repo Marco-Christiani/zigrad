@@ -173,6 +173,14 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
 
             for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
                 bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
+                if (bw_grad_val.* == std.math.nan(f32)) {
+                    std.debug.print(
+                        \\
+                        \\ bw_sm_val: {}
+                        \\ bw_tg_val: {}
+                        \\
+                    , .{ bw_sm_val, bw_target_val });
+                }
             }
         }
     };
@@ -208,40 +216,31 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
     var result = try input.clone();
     errdefer result.deinit();
 
-    // TODO: use shape methods, or prod.
-    var strides = try input.device.allocator.alloc(usize, shape.len);
-    defer input.device.allocator.free(strides);
-    var stride: usize = 1;
-    var i: usize = shape.len;
-    while (i > 0) {
-        i -= 1;
-        strides[i] = stride;
-        stride *= shape[i];
-    }
+    const strides = input.data.shape.strides();
 
     // calc softmax
     var outer_idx: usize = 0;
     while (outer_idx < outer_size) : (outer_idx += 1) {
-        const base_idx = (outer_idx / strides[dim]) * (strides[dim] * dim_size) + (outer_idx % strides[dim]);
+        const base_idx = (outer_idx / strides.get(dim)) * (strides.get(dim) * dim_size) + (outer_idx % strides.get(dim));
 
         //  max over slice
         var max_val = result.data.data[base_idx];
         for (1..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             max_val = @max(max_val, result.data.data[idx]);
         }
 
         // log-sum-exp
         var sum_exp: T = 0;
         for (0..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             sum_exp += @exp(result.data.data[idx] - max_val);
         }
         const log_sum_exp = max_val + @log(sum_exp);
 
         // normalize
         for (0..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             result.data.data[idx] = @exp(result.data.data[idx] - log_sum_exp);
         }
     }

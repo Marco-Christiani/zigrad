@@ -407,26 +407,49 @@ pub fn NDArray(comptime T: type) type {
             return output;
         }
 
-        pub fn matvec(self: Self, other: Self, trans_a: bool, device: DeviceReference) !Self {
-            // TODO: shape checks for matvec
-            const M = if (trans_a) self.shape.get(1) else self.shape.get(0);
-            const N = if (trans_a) self.shape.get(0) else self.shape.get(1);
-            std.debug.assert(N == other.shape.size());
+        pub const MatvecConfig = struct {
+            trans_a: bool = false,
+            alpha: T = 1.0,
+            beta: T = 0.0,
+        };
 
-            const output = try Self.empty(&.{M}, device);
-
+        pub fn matvec(A: Self, x: Self, device: DeviceReference, config: MatvecConfig) !Self {
+            std.debug.assert(A.shape.len == 2);
+            std.debug.assert(x.shape.len == 1);
+            const M = if (config.trans_a) A.shape.get(1) else A.shape.get(0);
+            const N = if (config.trans_a) A.shape.get(0) else A.shape.get(1);
+            std.debug.assert(N == x.shape.size());
+            const y = try Self.empty(&.{M}, device);
             device.dispatch(opspec.matvec(T){
-                .A = self.data,
-                .x = other.data,
-                .y = output.data,
+                .A = A.data,
+                .x = x.data,
+                .y = y.data,
                 .m = M,
                 .n = N,
-                .trans_a = trans_a,
-                .alpha = 1,
-                .beta = 0,
+                .trans_a = config.trans_a,
+                .alpha = config.alpha,
+                .beta = config.beta,
             });
+            return y;
+        }
 
-            return output;
+        pub fn matvec_(A: Self, x: Self, y: *Self, device: DeviceReference, config: MatvecConfig) void {
+            std.debug.assert(A.shape.len == 2);
+            std.debug.assert(x.shape.len == 1);
+            const M = if (config.trans_a) A.shape.get(1) else A.shape.get(0);
+            const N = if (config.trans_a) A.shape.get(0) else A.shape.get(1);
+            std.debug.assert(N == x.shape.size());
+            std.debug.assert(M == y.shape.size());
+            device.dispatch(opspec.matvec(T){
+                .A = A.data,
+                .x = x.data,
+                .y = y.data,
+                .m = M,
+                .n = N,
+                .trans_a = config.trans_a,
+                .alpha = config.alpha,
+                .beta = config.beta,
+            });
         }
 
         /// Performs `self = alpha*other + self` in place.
@@ -1110,7 +1133,7 @@ test "NDArray.matvec" {
     //  [0, 1]]    [6]]    [6]]
     const A1 = try Array.init(&.{ 1, 2, 0, 1 }, &.{ 2, 2 }, cpu.reference());
     const X1 = try Array.init(&.{ 1, 6 }, null, cpu.reference());
-    const Y1 = try A1.matvec(X1, false, cpu.reference());
+    const Y1 = try A1.matvec(X1, cpu.reference(), .{});
 
     const expected1 = try Array.init(&.{ 13, 6 }, null, cpu.reference());
     try std.testing.expectEqualDeep(expected1, Y1);

@@ -113,27 +113,6 @@ pub fn Iterator(ContextType: type) type {
     };
 }
 
-pub fn ChildIterator(ContextType: type) type {
-    return struct {
-        const Self = @This();
-        node: ?*ContextType,
-        index: usize = 0,
-
-        pub fn next(self: *Self) ?*ContextType.PrimaryType {
-            if (self.node) |node| {
-                if (self.index < node.children.len) {
-                    defer self.index += 1;
-                    return node.children.buffer[self.index];
-                }
-                self.node = node.next;
-                self.index = 0;
-                return self.next();
-            }
-            return null;
-        }
-    };
-}
-
 pub fn BackwardContext(primary_type: type) type {
     return struct {
         const Self = @This();
@@ -246,9 +225,23 @@ pub fn BackwardContext(primary_type: type) type {
             return .{ .node = self };
         }
 
-        pub fn child_iterator(self: *Self) ChildIterator(Self) {
-            return .{ .node = self };
-        }
+        pub const ChildIterator = struct {
+            node: ?*Self,
+            index: usize = 0,
+
+            pub fn next(self: *ChildIterator) ?*PrimaryType {
+                if (self.node) |node| {
+                    if (self.index < node.children.len) {
+                        defer self.index += 1;
+                        return node.children.buffer[self.index];
+                    }
+                    self.node = node.next;
+                    self.index = 0;
+                    return self.next();
+                }
+                return null;
+            }
+        };
 
         pub fn call(self: *Self, tensor: *PrimaryType) anyerror!void {
             var _this: ?*Self = self;

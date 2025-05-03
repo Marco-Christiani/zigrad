@@ -10,9 +10,15 @@ const log = std.log.scoped(.zg_graphmanager);
 pub fn GraphManager(comptime T: type) type {
     return struct {
         const Self = @This();
+
+        const NodeMeta = struct {
+            pending: u32 = 0,
+            visited: bool = false,
+        };
+
         allocator: std.mem.Allocator,
-        sorted_nodes: std.ArrayList(*T),
-        visited_nodes: std.AutoHashMap(*const T, void),
+        sorted_nodes: std.AutoArrayHashMapUnmanaged(*const T, NodeMeta) = .empty,
+        node_stack: std.ArrayListUnmanaged(*T) = .empty,
         eager_teardown: bool,
 
         pub const GraphOpts = struct {
@@ -23,52 +29,69 @@ pub fn GraphManager(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator, opts: GraphOpts) Self {
             return Self{
                 .allocator = allocator,
-                .sorted_nodes = std.ArrayList(*T).init(allocator),
-                .visited_nodes = std.AutoHashMap(*const T, void).init(allocator),
                 .eager_teardown = opts.eager_teardown,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.sorted_nodes.deinit();
-            self.visited_nodes.deinit();
+            self.sorted_nodes.deinit(self.allocator);
+            self.node_stack.deinit(self.allocator);
             self.* = undefined;
         }
 
         fn topo(self: *Self, node: *T) void {
-            const gopr = self.visited_nodes.getOrPut(node) catch unreachable;
-            if (!gopr.found_existing) {
-                const bwd_ctx = &(node._backward_ctx orelse return);
-                var children = bwd_ctx.child_iterator();
-                while (children.next()) |child| {
-                    if (!child.attached) continue;
-                    self.topo(child);
-                }
-                self.sorted_nodes.append(node) catch unreachable;
+            const gopr = self.sorted_nodes.getOrPut(self.allocator, node) catch unreachable;
+
+            if (gopr.found_existing) {
+                gopr.value_ptr.pending += 1;
+                return;
+            }
+
+            gopr.value_ptr.* = .{};
+
+            var children = node.child_iterator() orelse return;
+            while (children.next()) |child| {
+                if (!child.attached) continue;
+                self.topo(child);
             }
         }
 
         // Must init grad on root node before backprop
-        pub fn backward(self: *Self, node: *T) !void {
+        pub fn backward(self: *Self, root: *T) !void {
             self.sorted_nodes.clearRetainingCapacity();
-            self.visited_nodes.clearRetainingCapacity();
-            self.topo(node);
-            const nodes = self.sorted_nodes.items;
+            self.node_stack.clearRetainingCapacity();
+            self.topo(root);
 
-            for (0..nodes.len) |i| {
-                var curr_node = nodes[nodes.len - i - 1];
-                if (curr_node.requires_grad()) {
-                    try curr_node.backward();
-                    // if eager_teardown, immediately destroy node. note that deinit is designed to not cascade recursively,
-                    // it just destroys the current tensor and not the children
-                    if (!curr_node.acquired and self.eager_teardown) {
-                        //log.warn("destroying node {?s}", .{curr_node.get_label()});
-                        curr_node.deinit();
-                        //log.warn("  ->destroyed", .{});
+            self.node_stack.append(self.allocator, root) catch unreachable;
+
+            outer: while (self.node_stack.pop()) |parent| {
+                if (!parent.requires_grad())
+                    continue :outer;
+
+                //{ // check if we've been here before...
+                //    const meta = self.sorted_nodes.getPtr(parent) orelse unreachable;
+                //    if (meta.visited) continue :outer;
+                //    meta.visited = true;
+                //}
+
+                try parent.backward();
+
+                var children = parent.child_iterator() orelse continue :outer;
+
+                inner: while (children.next()) |child| {
+                    const meta = self.sorted_nodes.getPtr(child) orelse continue :inner;
+
+                    if (meta.pending == 0 and !meta.visited) {
+                        self.node_stack.append(self.allocator, child) catch unreachable;
+                        meta.visited = true;
+                    } else {
+                        //std.debug.print("adjusting pending\n", .{});
+                        meta.pending -|= 1;
                     }
-                } else {
-                    log.debug("Skipping node {?s}", .{node.get_label()});
                 }
+
+                if (!parent.acquired and self.eager_teardown)
+                    parent.deinit();
             }
         }
     };
