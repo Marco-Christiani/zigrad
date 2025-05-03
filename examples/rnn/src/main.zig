@@ -1,5 +1,5 @@
-/// Trains a neural network model on the MNIST dataset using a manual training loop.
 const std = @import("std");
+
 const zg = @import("zigrad");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
@@ -19,9 +19,6 @@ pub fn main() !void {
         battery.buffer[i].data.data[i] = @floatFromInt(i);
     }
 
-    //////////////////////////////////////////////////////
-    //////////////////////////////////////////////////////
-
     var graph: zg.GraphManager(Rnn.Tensor) = .{
         .allocator = std.heap.smp_allocator,
         .eager_teardown = true,
@@ -31,7 +28,7 @@ pub fn main() !void {
     var optim: zg.optim.SGD(f32) = .{
         .grad_clip_max_norm = 1.0,
         .grad_clip_delta = 1e-6,
-        .grad_clip_enabled = true,
+        .grad_clip_enabled = false,
         .lr = 0.01,
     };
 
@@ -46,30 +43,44 @@ pub fn main() !void {
     );
     defer rnn.deinit();
 
-    for (0..1000) |epoch| {
-        // NOTE: this is a simple setup to prove to myself that backprop-through-time
-        // works. Basically, I'm taking 4 samples and using [0..2] to predict [1..3]
-        // and then adding all losses together to score against the sequence. The
-        // backprop should enforce that it cannot reverse too far through the unrolled
-        // time-step chain without first collecting reversals from the independent loss
-        // function calls for each output per time-step.
+    const decay_factor: f32 = 0.9;
+    var moving_avg: f32 = 0;
+    var best_loss: f32 = std.math.inf(f32);
+    const patience: usize = 3;
+    var patience_counter: usize = 0;
+    const min_delta: f32 = 1e-2;
+
+    const max_epochs: usize = 200;
+    for (0..max_epochs) |epoch| {
         const total_loss = try Rnn.Tensor.zeros(&.{1}, true, cpu.reference());
         for (0..examples - 1) |i| {
             const y = try rnn.forward(battery.buffer[i]);
-            const loss = try zg.loss.softmax_cross_entropy_loss(f32, y, battery.buffer[i + 1]);
+            const loss = try zg.loss.mse_loss(f32, y, battery.buffer[i + 1], cpu.reference());
             loss.add_(total_loss) catch {};
         }
 
-        std.debug.print("total loss: {d:.5}\n", .{total_loss.get(0) / 3});
+        const current_loss = total_loss.get(0) / @as(f32, @floatFromInt(examples - 1));
+        std.debug.print("Epoch {d}: loss = {d:.5}\n", .{ epoch, current_loss });
+
+        if (epoch == 0) {
+            moving_avg = current_loss;
+        } else {
+            moving_avg = decay_factor * moving_avg + (1 - decay_factor) * current_loss;
+        }
+
+        if (moving_avg < best_loss - min_delta) {
+            best_loss = moving_avg;
+            patience_counter = 0;
+        } else {
+            patience_counter += 1;
+            if (patience_counter >= patience) {
+                std.debug.print("Early stopping at epoch {d}. No improvement for {d} epochs.\n", .{ epoch, patience });
+                break;
+            }
+        }
 
         try graph.backward(total_loss);
-
-        // adding a little bit of scheduling here...
-        if (epoch % 250 == 0)
-            optim.lr *= 0.5;
-
         optim.step(&rnn.weights.all);
-
         rnn.reset();
     }
 }

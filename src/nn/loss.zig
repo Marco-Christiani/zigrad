@@ -120,30 +120,26 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     }
     const mse = sum_sq_diff / n;
 
-    const bw_fn = struct {
-        fn backward(tensor: *const NDTensor(T), _: DeviceReference) !void {
-            const self_children = tensor.get_children() orelse return error.NoChildren;
-            const _y_pred = self_children[0];
-            const _y = self_children[1];
+    const MseBwd = struct {
+        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children) !void {
+            const _y_pred = children.get_bwd(0) orelse return;
+            const _y = children.get(1);
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
             const scale = @as(T, 2) / _n;
 
-            if (_y_pred.grad) |grad| {
-                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
-                    grad_val.* += scale * (pred_val - target_val);
-                }
+            for (try _y_pred.ensure_grad_data(0), _y_pred.get_data(), _y.get_data()) |*grad_val, pred_val, target_val| {
+                grad_val.* += scale * (pred_val - target_val);
             }
         }
-    }.backward;
+    };
 
-    return try NDTensor(T).create_dependent(.{
+    return try NDTensor(T).create_dependent(MseBwd, .{
         .data = try NDArray(T).init(&.{mse}, &.{1}, device),
         .children = &.{ y_pred, y },
         .label = "mse",
-        .requires_gradient = true,
         .device = device,
-        ._backward = bw_fn,
+        .callback = .{},
     });
 }
 
