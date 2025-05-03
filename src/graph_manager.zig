@@ -68,12 +68,6 @@ pub fn GraphManager(comptime T: type) type {
                 if (!parent.requires_grad())
                     continue :outer;
 
-                //{ // check if we've been here before...
-                //    const meta = self.sorted_nodes.getPtr(parent) orelse unreachable;
-                //    if (meta.visited) continue :outer;
-                //    meta.visited = true;
-                //}
-
                 try parent.backward();
 
                 var children = parent.child_iterator() orelse continue :outer;
@@ -85,7 +79,6 @@ pub fn GraphManager(comptime T: type) type {
                         self.node_stack.append(self.allocator, child) catch unreachable;
                         meta.visited = true;
                     } else {
-                        //std.debug.print("adjusting pending\n", .{});
                         meta.pending -|= 1;
                     }
                 }
