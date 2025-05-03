@@ -173,14 +173,6 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
 
             for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
                 bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
-                if (bw_grad_val.* == std.math.nan(f32)) {
-                    std.debug.print(
-                        \\
-                        \\ bw_sm_val: {}
-                        \\ bw_tg_val: {}
-                        \\
-                    , .{ bw_sm_val, bw_target_val });
-                }
             }
         }
     };
