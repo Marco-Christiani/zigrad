@@ -105,6 +105,11 @@ pub fn NDTensor(comptime T: type) type {
         /// because runtime gradients may be deactivated.
         /// Use the "requires_grad" function instead.
         _requires_grad: bool,
+        /// versioning ensures that inplace ops do not
+        /// interfere with the backward pass. Versioning
+        /// is only enabled in debug mode and only
+        /// matters if you are doing a backward pass.
+        _version: u8 = 0,
 
         /// Values and shape are allocated. COM.
         pub fn init(values: []const T, shape: ?[]const usize, _requires_grad: bool, device: DeviceReference) !*Self {
@@ -325,6 +330,14 @@ pub fn NDTensor(comptime T: type) type {
                 } else {
                     self._backward_ctx = ctx;
                 }
+                // I'm using wrapping add on the off-chance that someone
+                // overflows the byte - it would still be a mismatch on
+                // the backward pass whereas saturation wouldn't.
+                // Since this is effectively a modulus, the user could
+                // setup an extremely odd situation (with more than 256 inplace
+                // ops on a single tensor) that would cause a false pass,
+                // but I don't see the need to address such edge cases.
+                self._version +%= 1;
             }
         }
 
@@ -1925,7 +1938,6 @@ test "tensor/inplace_add" {
     try std.testing.expectEqual(children.next().?, v);
     try std.testing.expectEqual(children.next(), null);
 }
-
 
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
 //test "tensor/gather" {;;
