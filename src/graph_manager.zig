@@ -17,7 +17,7 @@ pub fn GraphManager(comptime T: type) type {
         };
 
         allocator: std.mem.Allocator,
-        sorted_nodes: std.AutoArrayHashMapUnmanaged(*const T, NodeMeta) = .empty,
+        sorted_nodes: std.AutoArrayHashMapUnmanaged(*T, NodeMeta) = .empty,
         node_stack: std.ArrayListUnmanaged(*T) = .empty,
         eager_teardown: bool,
 
@@ -39,7 +39,7 @@ pub fn GraphManager(comptime T: type) type {
             self.* = undefined;
         }
 
-        fn topo(self: *Self, node: *T) void {
+        pub fn topological_sort(self: *Self, node: *T) void {
             const gopr = self.sorted_nodes.getOrPut(self.allocator, node) catch unreachable;
 
             if (gopr.found_existing) {
@@ -52,16 +52,14 @@ pub fn GraphManager(comptime T: type) type {
             var children = node.child_iterator() orelse return;
             while (children.next()) |child| {
                 if (!child.attached) continue;
-                self.topo(child);
+                self.topological_sort(child);
             }
         }
 
         // Must init grad on root node before backprop
         pub fn backward(self: *Self, root: *T) !void {
-            self.sorted_nodes.clearRetainingCapacity();
-            self.node_stack.clearRetainingCapacity();
-            self.topo(root);
-
+            self.reset();
+            self.topological_sort(root);
             self.node_stack.append(self.allocator, root) catch unreachable;
 
             outer: while (self.node_stack.pop()) |parent| {
@@ -86,6 +84,11 @@ pub fn GraphManager(comptime T: type) type {
                 if (!parent.acquired and self.eager_teardown)
                     parent.deinit();
             }
+        }
+
+        pub fn reset(self: *Self) void {
+            self.sorted_nodes.clearRetainingCapacity();
+            self.node_stack.clearRetainingCapacity();
         }
     };
 }
