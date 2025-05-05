@@ -358,17 +358,19 @@ pub fn NDTensor(comptime T: type) type {
             self.device.allocator.destroy(self);
         }
 
-        pub fn teardown(self: *Self) void {
-            log.debug("START teardown {?s}", .{self.get_label()});
-            if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-            if (self.get_children()) |children| {
-                for (children) |c| {
-                    log.debug("{?s} accessing child {?s}", .{ self.get_label(), c.get_label() });
-                    if (!c.acquired) c.teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.get_label()});
-                }
+        pub fn teardown(self: *Self, gm: *GraphManager(Self)) void {
+            gm.reset();
+            gm.topological_sort(self);
+
+            var iter = gm.sorted_nodes.iterator();
+
+            while (iter.next()) |entry| {
+                const node = entry.key_ptr.*;
+                if (node.acquired) continue;
+                node.deinit();
             }
-            log.debug("ENDING teardown()->deinit() {?s}", .{self.get_label()});
-            self.deinit();
+
+            gm.reset();
         }
 
         pub fn acquire(self: *Self) void {
