@@ -620,8 +620,11 @@ inline fn div_op(x: anytype, y: anytype) @TypeOf(x, y) {
 }
 
 pub fn elwise(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
-    if (x.len == 1 or y.len == 1)
+    if (x.len == 1 or y.len == 1) {
         return _elwise_scalar_dispatch(T, x, y, z, op);
+    } else if (x.len == y.len) {
+        return _elwise_equal_len(T, x, y, z, op);
+    }
 
     const min_size = @min(x.len, y.len);
     const x_step = if (x.len == z.len) min_size else 0;
@@ -649,44 +652,15 @@ fn _elwise_scalar_dispatch(T: type, x: []const T, y: []const T, z: []T, comptime
 
 fn _elwise_equal_len(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == y.len and y.len == z.len);
-
-    var val_idx: usize = 0;
-    if (std.simd.suggestVectorLength(T)) |N| {
-        const V = @Vector(N, T);
-        while (val_idx + N <= z.len) : (val_idx += N) {
-            z[val_idx..][0..N].* = op(@as(V, x[val_idx..][0..N].*), @as(V, y[val_idx..][0..N].*));
-        }
-    }
-    // clean up remainder
-    while (val_idx < z.len) : (val_idx += 1) {
-        z[val_idx] = op(x[val_idx], y[val_idx]);
-    }
+    for (0..z.len) |j| z[j] = op(x[j], y[j]);
 }
 
 fn _elwise_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype) void {
-    var i: usize = 0;
-    if (std.simd.suggestVectorLength(T)) |N| {
-        const V = @Vector(N, T);
-        const xv: V = @splat(x);
-        while ((i + N) <= z.len) : (i += N) {
-            z[i..][0..N].* = op(xv, @as(V, y[i..][0..N].*));
-        }
-    }
-    for (i..z.len) |j| {
-        z[j] = op(x, y[j]);
-    }
+    std.debug.assert(y.len == z.len);
+    for (0..z.len) |j| z[j] = op(x, y[j]);
 }
 
 fn _elwise_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
-    var i: usize = 0;
-    if (std.simd.suggestVectorLength(T)) |N| {
-        const V = @Vector(N, T);
-        const yv: V = @splat(y);
-        while ((i + N) <= z.len) : (i += N) {
-            z[i..][0..N].* = op(@as(V, x[i..][0..N].*), yv);
-        }
-    }
-    for (i..z.len) |j| {
-        z[j] = op(x[j], y);
-    }
+    std.debug.assert(x.len == z.len);
+    for (0..z.len) |j| z[j] = op(x[j], y);
 }

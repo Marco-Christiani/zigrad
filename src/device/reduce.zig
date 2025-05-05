@@ -1,13 +1,5 @@
 const std = @import("std");
 
-// ijklmq -> ikm
-//
-// ijklmq -> iklmq -> scratch
-//
-// iklmq -> iklm -> scratch
-//
-// iklm -> ikm -> out
-
 pub fn scaled_copy(T: type, p: struct {
     x: []const T,
     y: []T,
@@ -15,25 +7,7 @@ pub fn scaled_copy(T: type, p: struct {
     beta: T,
 }) void {
     std.debug.assert(p.x.len == p.y.len);
-
-    var i: usize = 0;
-    if (comptime std.simd.suggestVectorLength(T)) |N| {
-        const V = @Vector(N, T);
-        const alpha: V = @splat(p.alpha);
-        const beta: V = @splat(p.beta);
-
-        // check if we can fit another vector in.
-        // if we can, add it to our running reductions
-        while ((i + N) <= p.x.len) : (i += N) {
-            const u: V = p.x[i..][0..N].*;
-            const v: V = p.y[i..][0..N].*;
-            p.y[i..][0..N].* = alpha * u + beta * v;
-        }
-    }
-
-    while (i < p.x.len) : (i += 1) {
-        p.y[i] = p.alpha * p.x[i] + p.beta * p.y[i];
-    }
+    for (p.x, p.y) |x, *y| y.* = p.alpha * x + p.beta * y.*;
 }
 
 pub fn flat_reduce(T: type, p: struct {
