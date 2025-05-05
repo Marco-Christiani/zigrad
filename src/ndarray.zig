@@ -71,7 +71,7 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn random(shape: []const usize, device: DeviceReference, op: zg.RandType) !Self {
             const self = try Self.empty(shape, device);
-            device.mem_random(T, self.data, op, zg.settings.seed);
+            device.mem_random(T, self.data, op, zg.random);
             return self;
         }
 

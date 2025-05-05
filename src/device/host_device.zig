@@ -612,9 +612,7 @@ pub fn mem_fill(_: *const Self, T: type, slice: []T, value: T) void {
     @memset(slice, value);
 }
 
-pub fn mem_random(_: *const Self, T: type, slice: []T, op: RandType, seed: u64) void {
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rand = prng.random();
+pub fn mem_random(_: *const Self, T: type, slice: []T, op: RandType, rand: std.Random) void {
     if (op == .uniform) {
         for (slice) |*e| e.* = rand.float(T);
     } else {

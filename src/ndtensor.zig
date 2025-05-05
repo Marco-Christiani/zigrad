@@ -143,7 +143,7 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn random(shape: []const usize, _requires_grad: bool, op: zg.RandType, device: DeviceReference) !*Self {
             const self = try Self.empty(shape, _requires_grad, device);
-            device.mem_random(T, self.get_data(), op, zg.settings.seed);
+            device.mem_random(T, self.get_data(), op, zg.random);
             return self;
         }
 
