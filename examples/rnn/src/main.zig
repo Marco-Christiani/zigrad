@@ -97,49 +97,9 @@ const Rnn = struct {
 
         if (h0) |_h0| try _h0.add_(h1);
 
-        try nn.relu_(f32, h1);
+        try zg.nn.relu_(f32, h1);
 
         return h1;
-    }
-};
-
-// TODO: Move this to the nn module - wrapping in struct for
-// for keeping the syntax similar after the move..
-const nn = struct {
-    pub fn relu_(T: type, x: *zg.NDTensor(T)) !void {
-        const Tensor = NDTensor(T);
-
-        const BwdClosure = struct {
-            mask: []u8,
-            pub fn callback(y: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
-                y.device.dispatch(opspec.relu_mask_bwd(T){
-                    .x_g = try y.ensure_grad_data(0),
-                    .mask = ctx.mask,
-                });
-                y.device.mem_free(ctx.mask);
-            }
-        };
-
-        if (x.requires_grad()) {
-            return x.device.dispatch(opspec.relu_fwd(T){
-                .x = x.get_data(),
-                .y = x.get_data(),
-            });
-        }
-
-        const mask = try x.device.mem_alloc_byte_mask(x.get_size());
-        errdefer x.device.mem_free(mask);
-
-        x.device.dispatch(opspec.relu_mask_fwd(T){
-            .x = x.get_data(),
-            .mask = mask,
-        });
-
-        try Tensor.prepend_dependent(BwdClosure, x, .{
-            .callback = .{ .mask = mask },
-            .children = &.{},
-            .device = x.device,
-        });
     }
 };
 
@@ -228,7 +188,7 @@ pub fn train_seq_to_seq(
                 if (time_step >= bwd_start_step) {
                     // we need the full forward to calculate loss
                     const out = try rnn.forward(x_i, prev_hid);
-                    const loss = try zg.loss.mse_loss(f32, out.y, y_i, rnn.device);
+                    const loss = try zg.loss.mse_loss(f32, out.y, y_i);
                     loss.add_(total_loss) catch {};
                     prev_hid = out.h;
                 } else {

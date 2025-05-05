@@ -22,6 +22,7 @@ pub const utils = @import("nn/utils.zig");
 //pub const layer = @import("nn/layer.zig");
 pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
+pub const nn = @import("nn/nn.zig");
 
 const device_root = @import("device");
 pub const device = device_root.device;

@@ -111,7 +111,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     return out;
 }
 
-pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -135,10 +135,10 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     };
 
     return try NDTensor(T).create_dependent(MseBwd, .{
-        .data = try NDArray(T).init(&.{mse}, &.{1}, device),
+        .data = try NDArray(T).init(&.{mse}, &.{1}, y_pred.device),
         .children = &.{ y_pred, y },
         .label = "mse",
-        .device = device,
+        .device = y_pred.device,
         .callback = .{},
     });
 }
