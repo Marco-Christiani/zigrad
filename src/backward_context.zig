@@ -70,6 +70,7 @@ pub fn BackwardChildren(ChildType: type) type {
         pub const ChildIterator = struct {};
         pub const capacity: u64 = 8;
         buffer: [capacity]ChildType = undefined,
+        versions: if (debug) [capacity]u8 else void = undefined,
         len: usize = 0,
 
         pub fn init(children: []const ChildType) Self {
@@ -77,11 +78,29 @@ pub fn BackwardChildren(ChildType: type) type {
             var self: Self = .{};
             self.len = children.len;
             @memcpy(self.buffer[0..self.len], children);
+            if (comptime debug) {
+                for (children, 0..) |child, i| {
+                    self.versions[i] = child._version;
+                }
+            }
+
             return self;
         }
 
         pub fn get(self: *const Self, i: usize) ChildType {
             std.debug.assert(i < self.len);
+            if (comptime debug) {
+                const old_version = self.versions[i];
+                const new_version = self.buffer[i]._version;
+                // TODO: use @src at some point? Would be more helpful...
+                if (self.versions[i] != self.buffer[i]._version) {
+                    std.debug.panic("Version mismatch for {s}, {}->{}", .{
+                        self.buffer[i].get_label() orelse "<unknown>",
+                        old_version,
+                        new_version,
+                    });
+                }
+            }
             return self.buffer[i];
         }
 
@@ -107,27 +126,6 @@ pub fn Iterator(ContextType: type) type {
             if (self.node) |node| {
                 defer self.node = node.next;
                 return node;
-            }
-            return null;
-        }
-    };
-}
-
-pub fn ChildIterator(ContextType: type) type {
-    return struct {
-        const Self = @This();
-        node: ?*ContextType,
-        index: usize = 0,
-
-        pub fn next(self: *Self) ?*ContextType.PrimaryType {
-            if (self.node) |node| {
-                if (self.index < node.children.len) {
-                    defer self.index += 1;
-                    return node.children.buffer[self.index];
-                }
-                self.node = node.next;
-                self.index = 0;
-                return self.next();
             }
             return null;
         }
@@ -246,9 +244,23 @@ pub fn BackwardContext(primary_type: type) type {
             return .{ .node = self };
         }
 
-        pub fn child_iterator(self: *Self) ChildIterator(Self) {
-            return .{ .node = self };
-        }
+        pub const ChildIterator = struct {
+            node: ?*Self,
+            index: usize = 0,
+
+            pub fn next(self: *ChildIterator) ?*PrimaryType {
+                if (self.node) |node| {
+                    if (self.index < node.children.len) {
+                        defer self.index += 1;
+                        return node.children.buffer[self.index];
+                    }
+                    self.node = node.next;
+                    self.index = 0;
+                    return self.next();
+                }
+                return null;
+            }
+        };
 
         pub fn call(self: *Self, tensor: *PrimaryType) anyerror!void {
             var _this: ?*Self = self;

@@ -304,6 +304,24 @@ pub fn clamp_mask_bwd(T: type) type {
     };
 }
 
+pub fn relu_mask_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "relu_mask_fwd";
+        pub const __type__ = T;
+        x: []T,
+        mask: []u8,
+    };
+}
+
+pub fn relu_mask_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "relu_mask_bwd";
+        pub const __type__ = T;
+        x_g: []T,
+        mask: []u8,
+    };
+}
+
 pub fn unbroadcast(T: type) type {
     return struct {
         pub const __name__ = "unbroadcast";
