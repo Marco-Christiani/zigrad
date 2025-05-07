@@ -111,7 +111,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     return out;
 }
 
-pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -120,30 +120,26 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     }
     const mse = sum_sq_diff / n;
 
-    const bw_fn = struct {
-        fn backward(tensor: *const NDTensor(T), _: DeviceReference) !void {
-            const self_children = tensor.get_children() orelse return error.NoChildren;
-            const _y_pred = self_children[0];
-            const _y = self_children[1];
+    const MseBwd = struct {
+        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children) !void {
+            const _y_pred = children.get_bwd(0) orelse return;
+            const _y = children.get(1);
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
             const scale = @as(T, 2) / _n;
 
-            if (_y_pred.grad) |grad| {
-                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
-                    grad_val.* += scale * (pred_val - target_val);
-                }
+            for (try _y_pred.ensure_grad_data(0), _y_pred.get_data(), _y.get_data()) |*grad_val, pred_val, target_val| {
+                grad_val.* += scale * (pred_val - target_val);
             }
         }
-    }.backward;
+    };
 
-    return try NDTensor(T).create_dependent(.{
-        .data = try NDArray(T).init(&.{mse}, &.{1}, device),
+    return try NDTensor(T).create_dependent(MseBwd, .{
+        .data = try NDArray(T).init(&.{mse}, &.{1}, y_pred.device),
         .children = &.{ y_pred, y },
         .label = "mse",
-        .requires_gradient = true,
-        .device = device,
-        ._backward = bw_fn,
+        .device = y_pred.device,
+        .callback = .{},
     });
 }
 
@@ -208,40 +204,31 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
     var result = try input.clone();
     errdefer result.deinit();
 
-    // TODO: use shape methods, or prod.
-    var strides = try input.device.allocator.alloc(usize, shape.len);
-    defer input.device.allocator.free(strides);
-    var stride: usize = 1;
-    var i: usize = shape.len;
-    while (i > 0) {
-        i -= 1;
-        strides[i] = stride;
-        stride *= shape[i];
-    }
+    const strides = input.data.shape.strides();
 
     // calc softmax
     var outer_idx: usize = 0;
     while (outer_idx < outer_size) : (outer_idx += 1) {
-        const base_idx = (outer_idx / strides[dim]) * (strides[dim] * dim_size) + (outer_idx % strides[dim]);
+        const base_idx = (outer_idx / strides.get(dim)) * (strides.get(dim) * dim_size) + (outer_idx % strides.get(dim));
 
         //  max over slice
         var max_val = result.data.data[base_idx];
         for (1..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             max_val = @max(max_val, result.data.data[idx]);
         }
 
         // log-sum-exp
         var sum_exp: T = 0;
         for (0..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             sum_exp += @exp(result.data.data[idx] - max_val);
         }
         const log_sum_exp = max_val + @log(sum_exp);
 
         // normalize
         for (0..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             result.data.data[idx] = @exp(result.data.data[idx] - log_sum_exp);
         }
     }

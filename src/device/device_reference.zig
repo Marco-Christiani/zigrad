@@ -72,9 +72,9 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
             };
         }
 
-        pub fn mem_random(self: Self, T: type, slice: []T, op: RandType, seed: u64) void {
+        pub fn mem_random(self: Self, T: type, slice: []T, op: RandType, rand: std.Random) void {
             return switch (self.ptrs) {
-                inline else => |dev| dev.mem_random(T, slice, op, seed),
+                inline else => |dev| dev.mem_random(T, slice, op, rand),
             };
         }
 

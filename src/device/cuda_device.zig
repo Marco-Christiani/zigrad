@@ -422,9 +422,9 @@ pub fn mem_copy(self: Self, T: type, src: []const T, dst: []T) void {
     return self.mem_transfer(T, src, dst, .DtoD);
 }
 
-pub fn mem_random(self: Self, T: type, slice: []T, op: RandType, seed: u64) void {
+pub fn mem_random(self: Self, T: type, slice: []T, op: RandType, rand: std.Random) void {
     // at some point, I should put in u64 support for the device random.
-    cuda.mem_random(dtype(T), slice.ptr, slice.len, randtype(op), @truncate(seed), self.context.stream);
+    cuda.mem_random(dtype(T), slice.ptr, slice.len, randtype(op), rand.int(u32), self.context.stream);
 }
 
 pub fn mem_sequence(self: Self, T: type, slice: []T, initial: T, step: T) void {

@@ -105,6 +105,11 @@ pub fn NDTensor(comptime T: type) type {
         /// because runtime gradients may be deactivated.
         /// Use the "requires_grad" function instead.
         _requires_grad: bool,
+        /// versioning ensures that inplace ops do not
+        /// interfere with the backward pass. Versioning
+        /// is only enabled in debug mode and only
+        /// matters if you are doing a backward pass.
+        _version: u8 = 0,
 
         /// Values and shape are allocated. COM.
         pub fn init(values: []const T, shape: ?[]const usize, _requires_grad: bool, device: DeviceReference) !*Self {
@@ -143,7 +148,7 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn random(shape: []const usize, _requires_grad: bool, op: zg.RandType, device: DeviceReference) !*Self {
             const self = try Self.empty(shape, _requires_grad, device);
-            device.mem_random(T, self.get_data(), op, zg.settings.seed);
+            device.mem_random(T, self.get_data(), op, zg.random);
             return self;
         }
 
@@ -184,6 +189,12 @@ pub fn NDTensor(comptime T: type) type {
         pub fn cast(self: *Self, K: type) !*NDTensor(K) {
             _ = self;
             @compileError("Not implemented");
+        }
+
+        pub fn child_iterator(self: *Self) ?BackwardsContext.ChildIterator {
+            const ctx = &(self._backward_ctx orelse return null);
+            if (ctx.children.len == 0 and ctx.next == null) return null;
+            return .{ .node = ctx };
         }
 
         pub fn _unsqueeze(self: *Self) !*Self {
@@ -319,6 +330,14 @@ pub fn NDTensor(comptime T: type) type {
                 } else {
                     self._backward_ctx = ctx;
                 }
+                // I'm using wrapping add on the off-chance that someone
+                // overflows the byte - it would still be a mismatch on
+                // the backward pass whereas saturation wouldn't.
+                // Since this is effectively a modulus, the user could
+                // setup an extremely odd situation (with more than 256 inplace
+                // ops on a single tensor) that would cause a false pass,
+                // but I don't see the need to address such edge cases.
+                self._version +%= 1;
             }
         }
 
@@ -339,17 +358,19 @@ pub fn NDTensor(comptime T: type) type {
             self.device.allocator.destroy(self);
         }
 
-        pub fn teardown(self: *Self) void {
-            log.debug("START teardown {?s}", .{self.get_label()});
-            if (self.acquired) std.debug.panic("Attempt to deinit an acquired tensor.", .{});
-            if (self.get_children()) |children| {
-                for (children) |c| {
-                    log.debug("{?s} accessing child {?s}", .{ self.get_label(), c.get_label() });
-                    if (!c.acquired) c.teardown() else log.warn("skipping acquired tensor in teardown label={?s}", .{c.get_label()});
-                }
+        pub fn teardown(self: *Self, gm: *GraphManager(Self)) void {
+            gm.reset();
+            gm.topological_sort(self);
+
+            var iter = gm.sorted_nodes.iterator();
+
+            while (iter.next()) |entry| {
+                const node = entry.key_ptr.*;
+                if (node.acquired) continue;
+                node.deinit();
             }
-            log.debug("ENDING teardown()->deinit() {?s}", .{self.get_label()});
-            self.deinit();
+
+            gm.reset();
         }
 
         pub fn acquire(self: *Self) void {
@@ -648,6 +669,26 @@ pub fn NDTensor(comptime T: type) type {
                 .callback = .{ ._min = vmin, ._max = vmax },
                 .op = .CLAMP,
             });
+        }
+
+        pub fn add_scalar(self: *Self, s: T) !*Self {
+            const AddBwd = struct {
+                pub fn callback(c: *Self, children: *Children) !void {
+                    const a = children.get_bwd(0) orelse return;
+                    try c.assume_grad().unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
+                }
+            };
+            return create_dependent(AddBwd, .{
+                .data = try self.data.add_scalar(s, self.device),
+                .children = &.{self},
+                .device = self.device,
+                .callback = .{},
+                .op = .ADD,
+            });
+        }
+
+        pub fn sub_scalar(self: *Self, s: T) !*Self {
+            return self.add_scalar(-s);
         }
 
         /// Element-wise addition. COM.
@@ -990,8 +1031,61 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        // TODO: add transpose parameter here.
-        pub fn matvec(self: *Self, other: *Self, trans_a: bool) !*Self {
+        const MatvecConfig = struct {
+            trans_a: bool = false,
+        };
+
+        pub fn matvec_(A: *Self, x: *Self, y: *Self, config: struct {
+            trans_a: bool = false,
+            beta: T = 0.0,
+        }) !void {
+            std.debug.assert(A.device.is_compatible(x.device));
+            std.debug.assert(A.device.is_compatible(y.device));
+            const MatvecBwd = struct {
+                _trans_a: bool,
+                pub fn callback(_y: *Self, children: *Children, ctx: *@This()) !void {
+                    const ta = ctx._trans_a;
+                    scope: {
+                        const _A = children.get_bwd(0) orelse break :scope;
+                        const _x = children.get(1);
+                        _y.device.dispatch(opspec.outer(T){
+                            .x = if (ta) _x.get_data() else _y.assume_grad_data(),
+                            .y = if (ta) _y.assume_grad_data() else _x.get_data(),
+                            .A = try _A.ensure_grad_data(0),
+                            .alpha = 1.0,
+                        });
+                    }
+                    scope: {
+                        const _x = children.get_bwd(1) orelse break :scope;
+                        const _A = children.get(0);
+                        _y.device.dispatch(opspec.matvec(T){
+                            .A = _A.get_data(),
+                            .x = _y.assume_grad_data(),
+                            .y = try _x.ensure_grad_data(0),
+                            .m = if (!ta) _A.get_dim(1) else _A.get_dim(0),
+                            .n = if (!ta) _A.get_dim(0) else _A.get_dim(1),
+                            .trans_a = !ta,
+                            .alpha = 1.0,
+                            .beta = 1.0,
+                        });
+                    }
+                }
+            };
+
+            A.data.matvec_(x.data, &y.data, A.device, .{
+                .trans_a = config.trans_a,
+                .alpha = 1.0,
+                .beta = config.beta,
+            });
+
+            return prepend_dependent(MatvecBwd, y, .{
+                .children = &.{ A, x },
+                .device = A.device,
+                .callback = .{ ._trans_a = config.trans_a },
+            });
+        }
+
+        pub fn matvec(self: *Self, other: *Self, config: MatvecConfig) !*Self {
             std.debug.assert(self.device.is_compatible(other.device));
 
             const MatvecBwd = struct {
@@ -1026,10 +1120,14 @@ pub fn NDTensor(comptime T: type) type {
             };
 
             return create_dependent(MatvecBwd, .{
-                .data = try self.data.matvec(other.data, trans_a, self.device),
+                .data = try self.data.matvec(other.data, self.device, .{
+                    .trans_a = config.trans_a,
+                    .alpha = 1.0,
+                    .beta = 0.0,
+                }),
                 .children = &.{ self, other },
                 .device = self.device,
-                .callback = .{ ._trans_a = trans_a },
+                .callback = .{ ._trans_a = config.trans_a },
                 .op = .MATVEC,
             });
         }
@@ -1128,27 +1226,32 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes
-        pub fn print_arrows(self: *const Self) void {
-            if (self.get_children()) |children| {
-                for (children) |elem| {
-                    std.debug.print("{?s}<-{?s}", .{ self.get_label(), elem.get_label() });
-                    const symbol = switch (self.op.?) {
-                        Op.ADD => ": +",
-                        Op.SUB => ": -",
-                        Op.MUL => ": x",
-                        Op.DIV => ": /",
-                        Op.SUM => ": ++",
-                        Op.MATMUL_AB, Op.MATMUL_AtB, Op.MATMUL_ABt, Op.MATMUL_AtBt => ": AB",
-                        Op.MATVEC => ": Ax",
+        pub fn print_arrows(self: *Self) void {
+            var children = self.child_iterator() orelse return;
+            while (children.next()) |elem| {
+                std.debug.print("{?s}<-{?s}", .{ self.get_label(), elem.get_label() });
+                const symbol = blk: {
+                    const op = self.op orelse break :blk ": ?";
+                    switch (op) {
+                        Op.ADD => break :blk ": +",
+                        Op.SUB => break :blk ": -",
+                        Op.MUL => break :blk ": x",
+                        Op.DIV => break :blk ": /",
+                        Op.SUM => break :blk ": ++",
+                        Op.MATVEC => break :blk ": Ax",
+                        Op.MATMUL_AB,
+                        Op.MATMUL_AtB,
+                        Op.MATMUL_ABt,
+                        Op.MATMUL_AtBt,
+                        => break :blk ": AB",
                         else => std.debug.panic("Unsupported op {?}\n", .{self.op}),
-                    };
-                    std.debug.print("{?s}\n", .{symbol});
-                }
-                for (children) |elem| {
-                    elem.print_arrows();
-                }
-            } else {
-                std.debug.print("{?s}\n", .{self.get_label()});
+                    }
+                };
+                std.debug.print("{?s}\n", .{symbol});
+            }
+            var next_children = self.child_iterator() orelse return;
+            while (next_children.next()) |elem| {
+                elem.print_arrows();
             }
         }
     };
@@ -1176,6 +1279,7 @@ test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
     defer y.deinit();
 
     try y.setup_grad(1.0);
+
     try gm.backward(y);
 
     const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
@@ -1253,7 +1357,7 @@ test "tensor/NDTensor index, add, div" {
              0, 1, 2,
              3, 4, 5,
              6, 7, 8,
-    
+
              0, 1, 2,
              3, 4, 5,
              6, 7, 8
@@ -1267,7 +1371,7 @@ test "tensor/NDTensor index, add, div" {
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
-    
+
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
@@ -1290,7 +1394,7 @@ test "tensor/NDTensor index, add, div" {
              0, 1, 2,
              3, 4, 5,
              6, 7, 8,
-    
+
              0, 1, 2,
              3, 4, 5,
              6, 7, 8
@@ -1304,7 +1408,7 @@ test "tensor/NDTensor index, add, div" {
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
-    
+
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
@@ -1753,7 +1857,7 @@ test "tensor/GraphManager/matvec_backward" {
     // dl/dx = A' * grad = [4, 6]'
     const t1 = try Tensor.init(&.{ 1, 2, 3, 4 }, shape_mat, true, device);
     const t2 = try Tensor.init(&.{ 1, 1 }, shape_vec, true, device);
-    const t3 = try t1.matvec(t2, false);
+    const t3 = try t1.matvec(t2, .{});
 
     try t1.setup_grad(0.0);
     try t2.setup_grad(0.0);
@@ -1848,7 +1952,7 @@ test "tensor/inplace_add" {
     try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, v.assume_grad_data());
 
     // check the children...
-    var children = x._backward_ctx.?.child_iterator();
+    var children = x.child_iterator() orelse unreachable;
     try std.testing.expectEqual(children.next().?, c);
     try std.testing.expectEqual(children.next().?, b);
     try std.testing.expectEqual(children.next().?, a);
@@ -1856,67 +1960,6 @@ test "tensor/inplace_add" {
     try std.testing.expectEqual(children.next().?, v);
     try std.testing.expectEqual(children.next(), null);
 }
-
-
-
-//test "tensor/GraphManager/shared ops" {
-//    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-//    defer arena.deinit();
-//    const allocator = arena.allocator();
-//
-//    var cpu = zg.device.HostDevice.init(allocator);
-//    defer cpu.deinit();
-//    const device = cpu.reference();
-//
-//    const T = f32;
-//    const Tensor = NDTensor(T);
-//    const shape = &[_]usize{3};
-//
-//    const t1 = try Tensor.init(&[_]T{ 1, 2, 3 }, shape, true, device);
-//    defer t1.deinit();
-//
-//    try t1.set_label("t1");
-//
-//    const t2 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, device);
-//    defer t2.deinit();
-//    try t2.set_label("t2");
-//
-//    const t3 = try Tensor.init(&[_]T{ 4, 5, 6 }, shape, true, device);
-//    defer t3.deinit();
-//
-//    try t3.set_label("t3");
-//
-//    const y1 = try t1.add_(t2);
-//    //try y1.set_label("y1");
-//
-//    const y2 = try t3.add_(y1);
-//    //try y2.set_label("y2");
-//
-//    try std.testing.expect(y1 != y2);
-//    try std.testing.expect(t2.data.data.ptr == y1.data.data.ptr);
-//    try std.testing.expect(t2.data.data.ptr == y2.data.data.ptr);
-//    try std.testing.expect(t2.grad.?.data.ptr == y1.grad.?.data.ptr);
-//    try std.testing.expect(t2.grad.?.data.ptr == y2.grad.?.data.ptr);
-//    try std.testing.expect(y1.get_child(0).data.data.ptr == t1.data.data.ptr);
-//    try std.testing.expect(y2.get_child(0).data.data.ptr == t3.data.data.ptr);
-//    try std.testing.expect(y1.assume_grad().data.len == 3);
-//    try std.testing.expect(y2.assume_grad().data.len == 3);
-//
-//    var gm = GraphManager(Tensor).init(device.allocator, .{});
-//    defer gm.deinit();
-//
-//    try y2.setup_grad(1);
-//    try gm.backward(y2);
-//
-//    try std.testing.expect(y1.assume_grad().data.len == 3);
-//    try std.testing.expect(y2.assume_grad().data.len == 3);
-//
-//    const expected_grad = &[_]T{ 1, 1, 1 };
-//    try std.testing.expectEqualSlices(T, expected_grad, y1.assume_grad_data());
-//    try std.testing.expectEqualSlices(T, expected_grad, t1.assume_grad_data());
-//    try std.testing.expectEqualSlices(T, expected_grad, t2.assume_grad_data());
-//    try std.testing.expectEqualSlices(T, expected_grad, t3.assume_grad_data());
-//}
 
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
 //test "tensor/gather" {;;
