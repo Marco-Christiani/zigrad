@@ -273,20 +273,28 @@ pub fn relu_bwd(_: *const Self, T: type, p: opspec.relu_bwd(T)) void {
     for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| x_g.* += if (x > 0) y_g else 0;
 }
 
-pub fn tanh_fwd(T: type, p: opspec.tanh_fwd(T)) void {
+pub fn tanh_fwd(_: *const Self, T: type, p: opspec.tanh_fwd(T)) void {
     for (p.x, p.y) |x, *y| y.* = std.math.tanh(x);
 }
 
-pub fn tanh_bwd(T: type, p: opspec.tanh_bwd(T)) void {
+pub fn tanh_bwd(_: *const Self, T: type, p: opspec.tanh_bwd(T)) void {
     for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += (1 - (y * y)) * y_g;
 }
 
-pub fn sigm_fwd(T: type, p: opspec.sigm_fwd(T)) void {
+pub fn tanh_inplace_bwd(_: *const Self, T: type, p: opspec.tanh_inplace_bwd(T)) void {
+    for (p.x, p.x_g) |x, *x_g| x_g.* *= (1 - (x * x));
+}
+
+pub fn sigm_fwd(_: *const Self, T: type, p: opspec.sigm_fwd(T)) void {
     for (p.x, p.y) |x, *y| y.* = 1 / (1 + @exp(-x));
 }
 
-pub fn sigm_bwd(T: type, p: opspec.sigm_bwd(T)) void {
+pub fn sigm_bwd(_: *const Self, T: type, p: opspec.sigm_bwd(T)) void {
     for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += y * (1 - y) * y_g;
+}
+
+pub fn sigm_inplace_bwd(_: *const Self, T: type, p: opspec.sigm_inplace_bwd(T)) void {
+    for (p.x, p.x_g) |x, *x_g| x_g.* *= (x * (1 - x));
 }
 
 pub fn max_fwd(_: *const Self, T: type, p: opspec.max_fwd(T)) void {

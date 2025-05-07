@@ -253,6 +253,18 @@ pub fn NDArray(comptime T: type) type {
             return z;
         }
 
+        pub fn add_scalar(self: *const Self, s: T, device: DeviceReference) !Self {
+            var z = try Self.empty(self.shape.slice(), device);
+            errdefer z.deinit(device);
+            // kernel needs to handle memory transfer of scalars
+            device.dispatch(opspec.add(T){ .x = self.data, .y = &.{s}, .z = z.data });
+            return z;
+        }
+
+        pub fn sub_scalar(self: *const Self, s: T, device: DeviceReference) !Self {
+            return self.add_scalar(-s, device);
+        }
+
         // element wise operations (broadcasting)
         pub fn add(self: *const Self, other: Self, device: DeviceReference) !Self {
             return elwise_alloc(self, &other, device, opspec.add(T));

@@ -66,6 +66,8 @@ pub fn GraphManager(comptime T: type) type {
                 if (!parent.requires_grad())
                     continue :outer;
 
+                // std.debug.print("{?s}\n", .{parent.get_label()});
+
                 try parent.backward();
 
                 var children = parent.child_iterator() orelse continue :outer;

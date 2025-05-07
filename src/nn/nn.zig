@@ -38,8 +38,10 @@ pub fn relu_(T: type, x: *NDTensor(T)) !void {
     const Tensor = NDTensor(T);
 
     const BwdClosure = struct {
+        version: u8,
         mask: []u8,
         pub fn callback(y: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == y._version);
             y.device.dispatch(opspec.relu_mask_bwd(T){
                 .x_g = try y.ensure_grad_data(0),
                 .mask = ctx.mask,
@@ -64,7 +66,10 @@ pub fn relu_(T: type, x: *NDTensor(T)) !void {
     });
 
     try Tensor.prepend_dependent(BwdClosure, x, .{
-        .callback = .{ .mask = mask },
+        .callback = .{
+            .version = x._version +% 1,
+            .mask = mask,
+        },
         .children = &.{},
         .device = x.device,
     });
@@ -88,7 +93,7 @@ pub fn tanh(T: type, x: *NDTensor(T)) !void {
     const y = try Tensor.DataType.empty(x.get_shape(), x.device);
 
     x.device.dispatch(opspec.tanh_fwd(T){
-        .x = x.data,
+        .x = x.get_data(),
         .y = y.data,
     });
 
@@ -97,6 +102,33 @@ pub fn tanh(T: type, x: *NDTensor(T)) !void {
         .children = &.{x},
         .device = x.device,
         .callback = .{},
+    });
+}
+
+// inplace sigmoid
+pub fn tanh_(T: type, x: *NDTensor(T)) !void {
+    const Tensor = NDTensor(T);
+
+    const BwdClosure = struct {
+        version: u8,
+        pub fn callback(_x: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == _x._version);
+            _x.device.dispatch(opspec.tanh_inplace_bwd(T){
+                .x = _x.get_data(),
+                .x_g = try _x.ensure_grad_data(0),
+            });
+        }
+    };
+
+    x.device.dispatch(opspec.tanh_fwd(T){
+        .x = x.get_data(),
+        .y = x.get_data(),
+    });
+
+    try Tensor.prepend_dependent(BwdClosure, x, .{
+        .callback = .{ .version = x._version +% 1 },
+        .children = &.{},
+        .device = x.device,
     });
 }
 
@@ -118,7 +150,7 @@ pub fn sigm(T: type, x: *NDTensor(T)) !void {
     const y = try Tensor.DataType.empty(x.get_shape(), x.device);
 
     x.device.dispatch(opspec.sigm_fwd(T){
-        .x = x.data,
+        .x = x.get_data(),
         .y = y.data,
     });
 
@@ -127,5 +159,32 @@ pub fn sigm(T: type, x: *NDTensor(T)) !void {
         .children = &.{x},
         .device = x.device,
         .callback = .{},
+    });
+}
+
+// inplace sigmoid
+pub fn sigm_(T: type, x: *NDTensor(T)) !void {
+    const Tensor = NDTensor(T);
+
+    const BwdClosure = struct {
+        version: u8,
+        pub fn callback(_x: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == _x._version);
+            _x.device.dispatch(opspec.sigm_inplace_bwd(T){
+                .x = _x.get_data(),
+                .x_g = try _x.ensure_grad_data(0),
+            });
+        }
+    };
+
+    x.device.dispatch(opspec.sigm_fwd(T){
+        .x = x.get_data(),
+        .y = x.get_data(),
+    });
+
+    try Tensor.prepend_dependent(BwdClosure, x, .{
+        .callback = .{ .version = x._version +% 1 },
+        .children = &.{},
+        .device = x.device,
     });
 }

@@ -193,7 +193,7 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn child_iterator(self: *Self) ?BackwardsContext.ChildIterator {
             const ctx = &(self._backward_ctx orelse return null);
-            if (ctx.children.len == 0) return null;
+            if (ctx.children.len == 0 and ctx.next == null) return null;
             return .{ .node = ctx };
         }
 
@@ -669,6 +669,26 @@ pub fn NDTensor(comptime T: type) type {
                 .callback = .{ ._min = vmin, ._max = vmax },
                 .op = .CLAMP,
             });
+        }
+
+        pub fn add_scalar(self: *Self, s: T) !*Self {
+            const AddBwd = struct {
+                pub fn callback(c: *Self, children: *Children) !void {
+                    const a = children.get_bwd(0) orelse return;
+                    try c.assume_grad().unbroadcast_(try a.ensure_grad(0), c.device, .{ .alpha = 1.0, .beta = 1.0 });
+                }
+            };
+            return create_dependent(AddBwd, .{
+                .data = try self.data.add_scalar(s, self.device),
+                .children = &.{self},
+                .device = self.device,
+                .callback = .{},
+                .op = .ADD,
+            });
+        }
+
+        pub fn sub_scalar(self: *Self, s: T) !*Self {
+            return self.add_scalar(-s);
         }
 
         /// Element-wise addition. COM.

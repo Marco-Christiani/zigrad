@@ -22,16 +22,25 @@ pub fn main() !void {
     for (0..4) |i|
         samples.buffer[i].data.data[i] = @floatFromInt(i);
 
-    var rnn = try Rnn.init(
+    var gru = try Gru.init(
         cpu.reference(),
         .{
-            .hid_size = 128,
+            .hid_size = N,
             .inp_size = N,
         },
     );
-    defer rnn.deinit();
+    defer gru.deinit();
 
-    try train_seq_to_seq(&rnn, .{
+    var decoder = try Decoder.init(
+        cpu.reference(),
+        .{
+            .inp_size = N,
+            .hid_size = 128,
+        },
+    );
+    defer decoder.deinit();
+
+    try train_seq_to_seq(&gru, &decoder, .{
         .inputs = &.{samples.buffer[0..3]},
         .targets = &.{samples.buffer[1..4]},
         .total_epochs = 200,
@@ -40,81 +49,62 @@ pub fn main() !void {
     });
 }
 
-const Rnn = struct {
+const Decoder = struct {
     const Tensor = zg.NDTensor(f32);
 
-    const Output = struct {
-        h: *Tensor,
-        y: *Tensor,
-    };
-
-    device: zg.DeviceReference,
     weights: extern union {
         all: [2]*Tensor,
         get: extern struct {
-            W1: *Tensor,
-            W2: *Tensor,
+            Wh: *Tensor,
+            Wy: *Tensor,
         },
     },
 
     pub fn init(device: zg.DeviceReference, config: struct {
         inp_size: usize,
         hid_size: usize,
-    }) !Rnn {
+    }) !Decoder {
         return .{
-            .device = device,
             .weights = .{
                 .get = .{
-                    .W1 = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .W2 = try Tensor.random(&.{ config.inp_size, config.hid_size }, false, .normal, device),
+                    .Wh = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
+                    .Wy = try Tensor.random(&.{ config.inp_size, config.hid_size }, false, .normal, device),
                 },
             },
         };
     }
 
-    pub fn deinit(self: *Rnn) void {
+    pub fn deinit(self: *Decoder) void {
         for (&self.weights.all) |wgt| {
             wgt.release();
             wgt.deinit();
         }
     }
 
-    // y1 = W2.ReLU(W1.x + y0)
-    pub fn forward(self: *Rnn, x: *Tensor, h0: ?*Tensor) !Output {
-        const h1 = try self.compute_hidden(x, h0);
-        errdefer h1.deinit();
+    pub fn forward(self: *Decoder, x: *Tensor) !*Tensor {
+        const h = try self.weights.get.Wh.matvec(x, .{});
+        errdefer h.deinit();
 
-        const y = try self.weights.get.W2.matvec(h1, .{});
+        try zg.nn.tanh_(f32, h);
 
-        return .{ .h = h1, .y = y };
-    }
+        h.set_label("decoder.h") catch {};
 
-    // small optimization to make training faster - we can
-    // compute just the hidden state and not the full output
-    fn compute_hidden(self: *Rnn, x: *Tensor, h0: ?*Tensor) !*Tensor {
-        const h1 = try self.weights.get.W1.matvec(x, .{});
-        errdefer h1.deinit();
+        const y = try self.weights.get.Wy.matvec(h, .{});
 
-        if (h0) |_h0| try _h0.add_(h1);
+        if (!y.requires_grad())
+            h.deinit();
 
-        try zg.nn.relu_(f32, h1);
+        y.set_label("decoder.y") catch {};
 
-        return h1;
+        return y;
     }
 };
 
 const Gru = struct {
     const Tensor = zg.NDTensor(f32);
 
-    const Output = struct {
-        h: *Tensor,
-        y: *Tensor,
-    };
-
-    device: zg.DeviceReference,
-
     weights: extern union {
-        all: [2]*Tensor,
+        all: [9]*Tensor,
         get: extern struct {
             // update gate
             Wz: *Tensor,
@@ -134,46 +124,49 @@ const Gru = struct {
     pub fn init(device: zg.DeviceReference, config: struct {
         inp_size: usize,
         hid_size: usize,
-    }) !Rnn {
+    }) !Gru {
         return .{
-            .device = device,
             .weights = .{
                 .get = .{
                     .Wz = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
                     .Uz = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .bz = try Tensor.zeros(&.{ config.hid_size, config.inp_size }, false, device),
+                    .bz = try Tensor.zeros(&.{config.inp_size}, false, device),
                     .Wr = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
                     .Ur = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .br = try Tensor.zeros(&.{ config.hid_size, config.inp_size }, false, device),
+                    .br = try Tensor.zeros(&.{config.inp_size}, false, device),
                     .Wh = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
                     .Uh = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .bh = try Tensor.zeros(&.{ config.hid_size, config.inp_size }, false, device),
+                    .bh = try Tensor.zeros(&.{config.inp_size}, false, device),
                 },
             },
         };
     }
 
-    pub fn deinit(self: *Rnn) void {
+    pub fn deinit(self: *Gru) void {
         for (&self.weights.all) |wgt| {
             wgt.release();
             wgt.deinit();
         }
     }
 
-    pub fn forward(self: *Gru, x0: *Tensor, h0: ?*Tensor) !Output {
+    pub fn forward(self: *Gru, x0: *Tensor, h0: *Tensor) !*Tensor {
         // update gate
         const z1 = try self.weights.get.Wz.matvec(x0, .{});
         errdefer z1.deinit();
         try self.weights.get.Uz.matvec_(h0, z1, .{ .beta = 1.0 });
-        try z1._add(self.weights.get.bh);
-        try zg.nn.sigm_(z1);
+        try z1._add(self.weights.get.bz);
+        try zg.nn.sigm_(f32, z1);
+
+        z1.set_label("gru.gate.update") catch {};
 
         // reset gate
         const r1 = try self.weights.get.Wz.matvec(x0, .{});
         errdefer r1.deinit();
         try self.weights.get.Ur.matvec_(h0, r1, .{ .beta = 1.0 });
         try r1._add(self.weights.get.br);
-        try zg.nn.sigm_(r1);
+        try zg.nn.sigm_(f32, r1);
+
+        r1.set_label("gru.gate.reset") catch {};
 
         // activation candidate
         const hd = try r1.mul(h0);
@@ -182,16 +175,21 @@ const Gru = struct {
         errdefer th.deinit();
         try self.weights.get.Uh.matvec_(hd, th, .{ .beta = 1.0 });
         try th._add(self.weights.get.bh);
-        try zg.nn.tanh_(th);
+        try zg.nn.tanh_(f32, th);
+
+        th.set_label("gru.gate.candidate") catch {};
 
         // hidden state
         const hd1 = try z1.mul(th);
         errdefer hd1.deinit();
+
         const sub_one = try z1.sub_scalar(1);
         errdefer sub_one.deinit();
         const hd2 = try sub_one.mul(h0);
         errdefer hd2.deinit();
         const h1 = try hd1.sub(hd2);
+
+        h1.set_label("hidden") catch {};
 
         if (!h1.requires_grad()) {
             hd.deinit();
@@ -204,26 +202,14 @@ const Gru = struct {
         }
         return h1;
     }
-
-    // small optimization to make training faster - we can
-    // compute just the hidden state and not the full output
-    fn compute_hidden(self: *Rnn, x: *Tensor, h0: ?*Tensor) !*Tensor {
-        const h1 = try self.weights.get.W1.matvec(x, .{});
-        errdefer h1.deinit();
-
-        if (h0) |_h0| try _h0.add_(h1);
-
-        try zg.nn.relu_(f32, h1);
-
-        return h1;
-    }
 };
 
 pub fn train_seq_to_seq(
-    rnn: *Rnn,
+    gru: *Gru,
+    decoder: *Decoder,
     config: struct {
-        inputs: []const []*Rnn.Tensor,
-        targets: []const []*Rnn.Tensor,
+        inputs: []const []*Gru.Tensor,
+        targets: []const []*Gru.Tensor,
         total_epochs: usize,
         print_loss_every_n: usize,
         max_bwd_steps: ?usize,
@@ -242,8 +228,14 @@ pub fn train_seq_to_seq(
         @panic("Max backward steps must be either null or greater than 0.");
 
     // start by aquiring the weights so backward won't free them (labeling is optional)
-    for (&rnn.weights.all, '1'..) |wgt, i| {
+    for (&gru.weights.all, '1'..) |wgt, i| {
         try wgt.set_label(&.{ 'W', @intCast(i) });
+        wgt.acquire();
+    }
+
+    for (&decoder.weights.all, '1'..) |wgt, i| {
+        try wgt.set_label(&.{ 'W', @intCast(i) });
+        wgt._requires_grad = true;
         wgt.acquire();
     }
 
@@ -257,7 +249,7 @@ pub fn train_seq_to_seq(
 
     // It's important to have `eager_teardown == true` here
     // because I'm choosing to not manually track the outputs.
-    var gm: zg.GraphManager(Rnn.Tensor) = .{
+    var gm: zg.GraphManager(Gru.Tensor) = .{
         .allocator = std.heap.smp_allocator,
         .eager_teardown = true,
     };
@@ -265,15 +257,22 @@ pub fn train_seq_to_seq(
 
     // or your favorite optimizer...
     var optim: zg.optim.SGD(f32) = .{
-        .grad_clip_max_norm = 1.0,
+        .grad_clip_max_norm = 10.0,
         .grad_clip_delta = 1e-6,
-        .grad_clip_enabled = false,
+        .grad_clip_enabled = true,
         .lr = 0.01,
     };
 
+    // assumes zeros
+    const initial_hid = try gru.weights.get.bh.clone();
+
+    defer {
+        initial_hid.release();
+        initial_hid.deinit();
+    }
+
     for (0..config.total_epochs) |epoch| {
         for (config.inputs, config.targets, 0..) |inp_seq, trg_seq, example_num| {
-
             // Backward start step tells us where to
             // beging recording the backward graph. This
             // only applices if "requires_grad" is true.
@@ -288,32 +287,33 @@ pub fn train_seq_to_seq(
             else
                 0; // keep the entire sequence
 
-            var prev_hid: ?*Rnn.Tensor = null;
+            var prev_hid: *Gru.Tensor = initial_hid;
 
             // we're going to score the total loss for the entire sequence
-            const total_loss = try Rnn.Tensor.zeros(&.{1}, true, rnn.device);
+            const total_loss = try Gru.Tensor.zeros(&.{1}, true, prev_hid.device);
 
             for (inp_seq, trg_seq, 0..) |x_i, y_i, time_step| {
                 // std.debug.print("bwd_start_step: {}, time_step: {}\n", .{ bwd_start_step, time_step });
 
                 if (time_step == bwd_start_step) {
                     // set to true to start tracking the operations from this step onwards
-                    for (&rnn.weights.all) |wgt| wgt._requires_grad = true;
+                    for (&gru.weights.all) |wgt| wgt._requires_grad = true;
                 }
 
                 if (time_step >= bwd_start_step) {
                     // we need the full forward to calculate loss
-                    const out = try rnn.forward(x_i, prev_hid);
-                    const loss = try zg.loss.mse_loss(f32, out.y, y_i);
+                    const hid = try gru.forward(x_i, prev_hid);
+                    const pred = try decoder.forward(hid);
+                    const loss = try zg.loss.mse_loss(f32, pred, y_i);
                     loss.add_(total_loss) catch {};
-                    prev_hid = out.h;
+                    prev_hid = hid;
                 } else {
                     // in this case, we only need the hidden state
                     // because we don't actually care about what
                     // the output was (it won't effect the gradient)
-                    const h1 = try rnn.compute_hidden(x_i, prev_hid);
-                    if (prev_hid) |ph| ph.deinit();
-                    prev_hid = h1;
+                    const hid = try gru.forward(x_i, prev_hid);
+                    if (example_num > 0) prev_hid.deinit();
+                    prev_hid = hid;
                 }
             }
 
@@ -348,10 +348,11 @@ pub fn train_seq_to_seq(
             try gm.backward(total_loss);
 
             // update the weights
-            optim.step(&rnn.weights.all);
+            //optim.step(&gru.weights.all);
+            optim.step(&decoder.weights.all);
 
             // set to false to allow truncation to occur
-            for (&rnn.weights.all) |wgt|
+            for (&gru.weights.all) |wgt|
                 wgt._requires_grad = false;
         }
     }
@@ -361,11 +362,11 @@ pub fn train_seq_to_seq(
 pub fn Samples(comptime n: usize) type {
     return struct {
         const Self = @This();
-        buffer: [n]*Rnn.Tensor = undefined,
+        buffer: [n]*Gru.Tensor = undefined,
         pub fn init(len: usize, device: zg.DeviceReference) !Self {
             var self: Self = .{};
             for (0..n, '0'..) |i, c| {
-                self.buffer[i] = try Rnn.Tensor.zeros(&.{len}, false, device);
+                self.buffer[i] = try Gru.Tensor.zeros(&.{len}, false, device);
                 try self.buffer[i].set_label(&.{ 'x', @intCast(c) });
                 self.buffer[i].acquire();
             }
