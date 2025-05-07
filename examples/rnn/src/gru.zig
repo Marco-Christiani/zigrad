@@ -150,55 +150,69 @@ const Gru = struct {
     }
 
     pub fn forward(self: *Gru, x0: *Tensor, h0: *Tensor) !*Tensor {
-        // update gate
+        ////////////////////////////////////////////
+        // update gate /////////////////////////////
+
         const z1 = try self.weights.get.Wz.matvec(x0, .{});
         errdefer z1.deinit();
+
         try self.weights.get.Uz.matvec_(h0, z1, .{ .beta = 1.0 });
         try z1._add(self.weights.get.bz);
         try zg.nn.sigm_(f32, z1);
 
-        z1.set_label("gru.gate.update") catch {};
+        ////////////////////////////////////////////
+        // reset gate //////////////////////////////
 
-        // reset gate
         const r1 = try self.weights.get.Wz.matvec(x0, .{});
         errdefer r1.deinit();
+
         try self.weights.get.Ur.matvec_(h0, r1, .{ .beta = 1.0 });
         try r1._add(self.weights.get.br);
         try zg.nn.sigm_(f32, r1);
 
-        r1.set_label("gru.gate.reset") catch {};
+        ////////////////////////////////////////////
+        // activation candidate ///////////////////
 
-        // activation candidate
-        const hd = try r1.mul(h0);
-        errdefer hd.deinit();
-        const th = try self.weights.get.Wh.matvec(x0, .{});
-        errdefer th.deinit();
-        try self.weights.get.Uh.matvec_(hd, th, .{ .beta = 1.0 });
-        try th._add(self.weights.get.bh);
-        try zg.nn.tanh_(f32, th);
+        const ac_mul = try r1.mul(h0);
+        errdefer ac_mul.deinit();
 
-        th.set_label("gru.gate.candidate") catch {};
+        if (!r1.requires_grad())
+            r1.deinit();
 
-        // hidden state
-        const hd1 = try z1.mul(th);
-        errdefer hd1.deinit();
+        const ac = try self.weights.get.Wh.matvec(x0, .{});
+        errdefer ac.deinit();
+
+        try self.weights.get.Uh.matvec_(ac_mul, ac, .{ .beta = 1.0 });
+
+        if (!ac_mul.requires_grad())
+            ac_mul.deinit();
+
+        try ac._add(self.weights.get.bh);
+        try zg.nn.tanh_(f32, ac);
+
+        ////////////////////////////////////////////
+        // hidden state ////////////////////////////
 
         const sub_one = try z1.sub_scalar(1);
         errdefer sub_one.deinit();
-        const hd2 = try sub_one.mul(h0);
-        errdefer hd2.deinit();
-        const h1 = try hd1.sub(hd2);
 
-        h1.set_label("hidden") catch {};
+        const h_mul_a = try z1.mul(ac);
+        errdefer h_mul_a.deinit();
+
+        if (!z1.requires_grad())
+            z1.deinit();
+
+        const h_mul_b = try sub_one.mul(h0);
+        errdefer h_mul_b.deinit();
+
+        if (!sub_one.requires_grad())
+            sub_one.deinit();
+
+        const h1 = try h_mul_a.sub(h_mul_b);
 
         if (!h1.requires_grad()) {
-            hd.deinit();
-            z1.deinit();
-            r1.deinit();
-            th.deinit();
-            hd1.deinit();
-            hd2.deinit();
-            sub_one.deinit();
+            h_mul_a.deinit();
+            h_mul_b.deinit();
         }
         return h1;
     }
