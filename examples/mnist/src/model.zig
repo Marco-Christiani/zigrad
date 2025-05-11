@@ -2,8 +2,8 @@ const std = @import("std");
 const zg = @import("zigrad");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
+const GraphManager = zg.GraphManager;
 const NDTensor = zg.NDTensor;
-const winit = zg.winit;
 
 pub fn MnistModel(comptime T: type, Optimizer: type) type {
     return struct {
@@ -14,12 +14,16 @@ pub fn MnistModel(comptime T: type, Optimizer: type) type {
         flatten: FlattenLayer(T) = .{},
         relu: ReLULayer(T) = .{},
 
-        pub fn init(device: DeviceReference, optim: ?*Optimizer) !Self {
+        pub fn init(
+            gm: *GraphManager,
+            device: DeviceReference,
+            optim: ?*Optimizer,
+        ) !Self {
             var self: Self = .{
                 .linear_layers = .{
-                    try LinearLayer(T).init(device, 28 * 28, 128),
-                    try LinearLayer(T).init(device, 128, 64),
-                    try LinearLayer(T).init(device, 64, 10),
+                    try LinearLayer(T).init(gm, device, 28 * 28, 128),
+                    try LinearLayer(T).init(gm, device, 128, 64),
+                    try LinearLayer(T).init(gm, device, 64, 10),
                 },
             };
 
@@ -44,17 +48,17 @@ pub fn MnistModel(comptime T: type, Optimizer: type) type {
 
             const f0 = try self.linear_layers[0].forward(flat);
             errdefer f0.deinit();
+
             const a0 = try self.relu.forward(f0);
             errdefer a0.deinit();
 
             const f1 = try self.linear_layers[1].forward(a0);
             errdefer f1.deinit();
+
             const a1 = try self.relu.forward(f1);
             errdefer a1.deinit();
 
-            const f2 = try self.linear_layers[2].forward(a1);
-            errdefer f2.deinit();
-            return f2;
+            return self.linear_layers[2].forward(a1);
         }
     };
 }
@@ -65,20 +69,23 @@ pub fn LinearLayer(comptime T: type) type {
         const Tensor = NDTensor(T);
         weights: *Tensor,
         bias: *Tensor,
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
-            var weights = try Tensor.empty(&.{ out_features, in_features }, true, device);
+        pub fn init(gm: *GraphManager, device: DeviceReference, in_features: usize, out_features: usize) !Self {
+            const weights = try Tensor.random(&.{ out_features, in_features }, .{ .kaiming = in_features }, .{
+                .requires_grad = true,
+                .device = device,
+                .heap = gm.heap(),
+                .label = "linear_weights",
+                .acquired = true,
+            });
             errdefer weights.deinit();
 
-            var bias = try Tensor.zeros(&.{ 1, out_features }, true, device);
-            errdefer bias.deinit();
-
-            try weights.set_label("linear_weights");
-            try bias.set_label("linear_bias");
-
-            weights.acquire();
-            bias.acquire();
-
-            winit.he_init(T, weights);
+            const bias = try Tensor.zeros(&.{out_features}, .{
+                .requires_grad = true,
+                .device = device,
+                .heap = gm.heap(),
+                .label = "linear_bias",
+                .acquired = true,
+            });
 
             return .{ .weights = weights, .bias = bias };
         }
@@ -86,7 +93,6 @@ pub fn LinearLayer(comptime T: type) type {
         pub fn deinit(self: *Self) void {
             self.weights.release();
             self.weights.deinit();
-
             self.bias.release();
             self.bias.deinit();
         }
@@ -118,6 +124,7 @@ pub fn ReLULayer(comptime T: type) type {
                 .data = y,
                 .children = &.{x},
                 .device = x.device,
+                .heap = x._heap,
                 .callback = .{},
                 .label = "relu_out",
             });
@@ -151,6 +158,7 @@ pub fn FlattenLayer(comptime T: type) type {
                 .label = "flattened",
                 .callback = .{},
                 .device = input.device,
+                .heap = input._heap,
             });
             result.data._reshape(&.{ batch_dim, flattened_dim });
             return result;

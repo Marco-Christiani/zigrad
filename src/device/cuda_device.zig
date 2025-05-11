@@ -40,13 +40,10 @@ context: struct {
     cudnn: cuda.CudnnWrapper,
     cutensor: cuda.CutensorWrapper,
 },
-
 cache: CachingAllocator,
-scratch: ScratchMemory,
 capture: ExecutionGraph,
-allocator: std.mem.Allocator,
 
-pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) Self {
+pub fn init(device_number: u32) Self {
     const properties = cuda.init_device(device_number);
     const stream = cuda.init_stream();
     const cublas = cuda.init_cublas_handle(stream);
@@ -62,9 +59,7 @@ pub fn init(device_number: u32, backing_allocator: std.mem.Allocator) Self {
             .cutensor = cutensor,
         },
         .cache = CachingAllocator.init(.{}),
-        .scratch = .{},
         .capture = .{},
-        .allocator = backing_allocator,
     };
 }
 
@@ -80,12 +75,12 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn reference(self: *Self) DeviceReference {
-    return .{ .ptrs = .{ .aux = self }, .allocator = self.allocator };
+    return .{ .ptrs = .{ .aux = self } };
 }
 
 // callback to replace host reference to union
 pub fn host_reference(self: *HostDevice) DeviceReference {
-    return .{ .ptrs = .{ .host = self }, .allocator = self.allocator };
+    return .{ .ptrs = .{ .host = self } };
 }
 
 pub fn dtype(T: type) cuda.dtype {
@@ -201,7 +196,7 @@ pub fn bmm_acc(self: *Self, T: type, p: opspec.bmm_acc(T)) void {
         p.A.ptr, p.A_shape.ptr, A_modes.ptr, p.A_shape.len,
         p.B.ptr, p.B_shape.ptr, B_modes.ptr, p.B_shape.len,
         p.C.ptr, p.C_shape.ptr, C_modes.ptr, p.C_shape.len,
-        &self.scratch.start, &self.scratch.total,
+        &self.cache.scratch.start, &self.cache.scratch.total,
         &_alpha, &_beta,
     );
     // zig fmt: on
@@ -212,7 +207,7 @@ pub fn nrm2(self: *const Self, T: type, p: opspec.nrm2(T)) void {
 }
 
 pub fn clip_nrm2(self: *Self, T: type, p: opspec.clip_nrm2(T)) void {
-    const scratch = self.scratch.get(T, 1, self.context.stream);
+    const scratch = self.mem_scratch(T, 1, self.context.stream);
     cuda.clip_nrm2(dtype(T), self.context.cublas, p.x.ptr, scratch.ptr, p.x.len, p.max_norm, p.delta);
 }
 
@@ -251,11 +246,10 @@ pub fn permutate(
     y_syms: []const u8,
     alpha: T,
 ) void {
-    const par = self.parent();
     const _alpha = alpha;
     cuda.permutate(
         dtype(T),
-        par.context.cutensor,
+        self.context.cutensor,
         x_vals.ptr,
         x_dims.ptr,
         x_syms.ptr,
@@ -264,8 +258,8 @@ pub fn permutate(
         y_dims.ptr,
         y_syms.ptr,
         y_dims.len,
-        &par.scratch.start,
-        &par.scratch.total,
+        &self.cache.scratch.start,
+        &self.cache.scratch.total,
         &_alpha,
     );
 }
@@ -327,8 +321,8 @@ pub fn sum_along(self: *Self, T: type, p: opspec.sum_along(T)) void {
         p.x_shape.ptr,
         p.x_shape.len,
         p.y.ptr,
-        &self.scratch.start,
-        &self.scratch.total,
+        &self.cache.scratch.start,
+        &self.cache.scratch.total,
         &dim_arr[0],
         dim_arr.len,
         &_alpha,
@@ -348,8 +342,8 @@ pub fn max_along(self: *Self, T: type, p: opspec.max_along(T)) void {
         p.x_shape.ptr,
         p.x_shape.len,
         p.y.ptr,
-        &self.scratch.start,
-        &self.scratch.total,
+        &self.cache.scratch.start,
+        &self.cache.scratch.total,
         &dim_arr[0],
         dim_arr.len,
         &_alpha,
@@ -357,37 +351,6 @@ pub fn max_along(self: *Self, T: type, p: opspec.max_along(T)) void {
         cuda.MAX,
     );
 }
-
-pub const ScratchMemory = struct {
-    start: usize = 0,
-    total: usize = 0,
-    pub fn deinit(self: *ScratchMemory, stream: cuda.StreamWrapper) void {
-        if (self.start != 0) {
-            cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.start)), stream);
-        }
-        self.* = undefined;
-    }
-    // Each device has it's own scratch memory because streams work
-    // like queues. It's safe if the same queue tries to access its
-    // own memory, but dangerous if streams can use other scratch.
-    pub fn get(self: *ScratchMemory, T: type, n: usize, stream: cuda.StreamWrapper) []T {
-        if (n == 0) return &.{};
-
-        const total: usize = @sizeOf(T) * n;
-        // check if we have enough scratch to provide a payload
-        if (self.total < total) {
-            if (self.start != 0) {
-                cuda.mem_free(@as(*anyopaque, @ptrFromInt(self.start)), stream);
-            }
-            // after a first pass through the network, we should know if we have enough memory.
-            const ptr = cuda.mem_alloc(total, stream) orelse @panic("Cannot allocate scratch memory.");
-            self.start = @intFromPtr(ptr);
-            self.total = total;
-        }
-        const ptr: [*]T = @ptrFromInt(self.start);
-        return ptr[0..n];
-    }
-};
 
 pub fn mem_alloc(self: *Self, T: type, n: usize) ![]T {
     if (n == 0) return &.{};
@@ -405,7 +368,7 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
 }
 
 pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.scratch.get(T, n, self.context.stream);
+    return self.cache.get_scratch(T, n, self.context.stream);
 }
 
 pub fn mem_free(self: *Self, slice: anytype) void {

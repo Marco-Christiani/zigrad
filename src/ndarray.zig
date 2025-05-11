@@ -24,7 +24,7 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
-        pub const Mode = enum { none, view, shared };
+        pub const Status = enum { none, view };
         /// Can be safely accessed. See `Shape`
         shape: Shape,
 
@@ -34,7 +34,7 @@ pub fn NDArray(comptime T: type) type {
         data: []T,
 
         /// Whether `data` is a view into another array.
-        mode: Mode = .none,
+        status: Status = .none,
 
         /// Values and shape are copied. COM.
         pub fn init(values: []const T, shape: ?[]const usize, device: DeviceReference) !Self {
@@ -52,8 +52,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self, device: DeviceReference) void {
-            if (self.mode == .none) device.mem_free(self.data);
-            self.* = undefined;
+            if (self.status == .none) device.mem_free(self.data);
         }
 
         pub fn empty(shape: []const usize, device: DeviceReference) !Self {
@@ -80,7 +79,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn share(self: Self) Self {
-            return .{ .data = self.data, .shape = self.shape, .mode = .shared };
+            return .{ .data = self.data, .shape = self.shape, .status = .shared };
         }
 
         pub fn cast(self: *Self, K: type, _: DeviceReference) !NDArray(K) {
@@ -169,7 +168,7 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = new_shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
-                .mode = .view,
+                .status = .view,
             };
         }
 
@@ -179,7 +178,7 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = self.shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
-                .mode = .view,
+                .status = .view,
             };
         }
 
@@ -224,7 +223,7 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = Shape.init(new_shape),
                 .data = self.data[start_index .. start_index + total_elements],
-                .mode = .view,
+                .status = .view,
             };
         }
 
@@ -237,7 +236,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         inline fn elwise(x: *const Self, y: *const Self, z: *Self, device: DeviceReference, Op: type) !void {
-            std.debug.assert(z.mode != .view);
+            std.debug.assert(z.status == .none);
             if (builtin.mode == .Debug and !x.shape.compatible(y.shape)) {
                 log.err("_" ++ Op.__name__ ++ "() self.shape={} other.shape={}", .{ x.shape, y.shape });
                 return error.IncompatibleShapes;
@@ -307,6 +306,14 @@ pub fn NDArray(comptime T: type) type {
             return elwise(self, other, other, device, opspec.div(T));
         }
 
+        pub fn equal(x: Self, y: Self, mask: []bool, device: DeviceReference) !void {
+            device.dispatch(opspec.equal(T){
+                .x = x.data,
+                .y = y.data,
+                .mask = mask, // boolean mask
+            });
+        }
+
         pub fn sum(self: Self, device: DeviceReference) !Self {
             const sum_arr = try Self.empty(&.{1}, device);
             device.dispatch(opspec.sum(T){ .x = self.data, .y = sum_arr.data });
@@ -326,12 +333,12 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _exp(self: *Self, device: DeviceReference) void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
             device.dispatch(opspec.exp_fwd(T){ .x = self.data, .y = self.data });
         }
 
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });
         }
 
@@ -467,7 +474,7 @@ pub fn NDArray(comptime T: type) type {
         /// Performs `self = alpha*other + self` in place.
         /// Shapes must match (although practically the op is possible under other conditions)
         pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
             std.debug.assert(self.shape.equal(other.shape));
             device.dispatch(opspec.axpy(T){ .x = other.data, .y = self.data, .alpha = &alpha });
         }
@@ -535,15 +542,21 @@ pub fn NDArray(comptime T: type) type {
             values: Self,
             offsets: ?[]usize, // offsets taken, so they dont have to be recomputed
             device: DeviceReference, // reference for both offsets and values
+            allocator: std.mem.Allocator,
             pub fn deinit(self: *GatherResult) void {
                 self.values.deinit(self.device);
                 if (self.offsets) |o|
-                    self.device.allocator.free(o); // TODO: cache?
+                    self.allocator.free(o); // TODO: cache?
             }
         };
 
         // TODO: proper gather backend kernel.
-        pub fn gather(self: Self, device: DeviceReference, opts: GatherOptions) !GatherResult {
+        pub fn gather(
+            self: Self,
+            allocator: std.mem.Allocator,
+            device: DeviceReference,
+            opts: GatherOptions,
+        ) !GatherResult {
             const indices = opts.indices;
             const dim = opts.dim;
 
@@ -553,8 +566,8 @@ pub fn NDArray(comptime T: type) type {
             }
             // to-owned-slice allows us to properly free regardless of exit, otherwise
             // we could try to free on error and because the user didn't ask for offsets
-            var offsets = try device.allocator.alloc(usize, indices.data.len); // TODO: cache?
-            defer if (!opts.return_offsets) device.allocator.free(offsets); // TODO: cache?
+            var offsets = try allocator.alloc(usize, indices.data.len); // TODO: cache?
+            defer if (!opts.return_offsets) allocator.free(offsets); // TODO: cache?
 
             const values = try Self.empty(indices.shape.slice(), device);
             const idx_strides = indices.shape.strides();
@@ -577,6 +590,7 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .values = values,
                 .offsets = if (opts.return_offsets) offsets else null,
+                .allocator = allocator,
                 .device = device,
             };
         }
@@ -595,7 +609,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _clip_norm(self: Self, max_norm: T, delta: T, device: DeviceReference) void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
             device.dispatch(opspec.clip_nrm2(T){ .x = self.data, .max_norm = max_norm, .delta = delta });
         }
 
@@ -607,7 +621,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _clamp(self: Self, vmin: T, vmax: T, device: DeviceReference) void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
             std.debug.assert(vmin <= vmax);
             device.dispatch(opspec.clamp_fwd(T){ .x = self.data, .y = self.data, .max = vmax, .min = vmin });
         }
@@ -629,7 +643,7 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.data.len >= out.data.len);
             std.debug.assert(self.data.len % out.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
-            std.debug.assert(out.mode != .view);
+            std.debug.assert(out.status == .none);
 
             const scratch: []T = outer: {
                 const delta = self.shape.len - out.shape.len;
@@ -669,7 +683,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _unbroadcast(self: *Self, new_shape: Shape, device: DeviceReference) !void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
 
             if (self.shape.equal(new_shape))
                 return;
@@ -692,7 +706,7 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(out.shape.len >= self.shape.len);
             std.debug.assert(self.data.len % self.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
-            std.debug.assert(out.mode != .view);
+            std.debug.assert(out.status == .none);
 
             device.dispatch(opspec.broadcast(T){
                 .x = self.data,
@@ -711,7 +725,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _broadcast(self: *Self, new_shape: Shape, device: DeviceReference) !void {
-            std.debug.assert(self.mode != .view);
+            std.debug.assert(self.status == .none);
 
             if (self.shape.equal(new_shape))
                 return;
@@ -802,7 +816,7 @@ fn bmm_acc_impl(
 
     if (builtin.mode == .Debug) {
         if (accumulator) |_| {
-            std.debug.assert(C.mode != .view);
+            std.debug.assert(C.status == .none);
             if (!C.shape.compatible(C_shape)) {
                 std.debug.panic("Expected accumulator shape {} but got {}", .{ C_shape, C.shape });
             }
@@ -844,8 +858,7 @@ pub const Range = struct {
 };
 
 test "NDArray._clip_norm,l2_norm" {
-    const allocator = std.testing.allocator;
-    var device = zg.device.HostDevice.init(allocator);
+    var device = zg.device.HostDevice.init();
     defer device.deinit();
     const shape = &[_]usize{ 2, 2 };
     const T = f64;
@@ -881,8 +894,7 @@ test "NDArray._clip_norm,l2_norm" {
 }
 
 test "NDArray._clamp" {
-    const allocator = std.testing.allocator;
-    var device = zg.device.HostDevice.init(allocator);
+    var device = zg.device.HostDevice.init();
     defer device.deinit();
     const shape = &[_]usize{5};
     const T = f64;
@@ -906,7 +918,7 @@ test "NDArray._clamp" {
 //    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
 //    defer arena.deinit();
 //    const allocator = arena.allocator();
-//    var cpu = zg.device.HostDevice.init(allocator);
+//    var cpu = zg.device.HostDevice.init();
 //    defer cpu.deinit();
 //    const device = cpu.reference();
 //    const T = f64;
@@ -922,11 +934,9 @@ test "NDArray._clamp" {
 //}
 
 test "NDArray.add" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+
     const device = cpu.reference();
     const T = f64;
     const Array = NDArray(T);
@@ -944,10 +954,7 @@ test "NDArray.add" {
 }
 
 test "NDArray.dot" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
     const device = cpu.reference();
     const T = f64;
@@ -961,10 +968,7 @@ test "NDArray.dot" {
 }
 
 test "NDArray.matmul" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
     const device = cpu.reference();
 
@@ -1100,9 +1104,7 @@ test "NDArray.matmul" {
 }
 
 test "NDArray.matmul with accumulation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var cpu = zg.device.HostDevice.init(arena.allocator());
+    var cpu = zg.device.HostDevice.init();
 
     const T = f64;
     const Array = NDArray(T);
@@ -1133,9 +1135,7 @@ test "NDArray.matmul with accumulation" {
 }
 
 test "NDArray.matvec" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var cpu = zg.device.HostDevice.init(arena.allocator());
+    var cpu = zg.device.HostDevice.init();
 
     const T = f64;
     const Array = NDArray(T);
@@ -1152,8 +1152,7 @@ test "NDArray.matvec" {
 }
 
 test "NDArray.sum_along" {
-    const allocator = std.testing.allocator;
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
     const device = cpu.reference();
 
@@ -1177,8 +1176,7 @@ test "NDArray.sum_along" {
 }
 
 test "NDArray.max_along" {
-    const allocator = std.testing.allocator;
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
     const device = cpu.reference();
 
@@ -1240,9 +1238,7 @@ test "NDArray.max_along" {
 }
 
 test "NDArray.gather" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var cpu = zg.device.HostDevice.init(arena.allocator());
+    var cpu = zg.device.HostDevice.init();
 
     const T = f32;
 
@@ -1270,7 +1266,11 @@ test "NDArray.gather" {
     var index = try NDArray(usize).init(&index_data, &index_shape, cpu.reference());
     defer index.deinit(cpu.reference());
 
-    var output = try input.gather(cpu.reference(), .{ .indices = index, .dim = 1, .return_offsets = true });
+    var output = try input.gather(std.testing.allocator, cpu.reference(), .{
+        .indices = index,
+        .dim = 1,
+        .return_offsets = true,
+    });
     defer output.deinit();
 
     try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 5, 6, 7, 9 }, output.values.data);
@@ -1289,7 +1289,7 @@ test "NDArray.gather" {
 }
 
 //test "NDArray.slice" {
-//    var cpu = zg.device.HostDevice.init(std.testing.allocator);
+//    var cpu = zg.device.HostDevice.init();
 //    var arr = try NDArray(f32).init(&[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &[_]usize{ 3, 3 }, cpu.reference());
 //    defer arr.deinit(cpu.reference());
 //
@@ -1408,7 +1408,7 @@ test "NDArray.gather" {
 //        }
 //    }.content_check;
 //    const allocator = std.testing.allocator;
-//    var device = zg.device.HostDevice.init(allocator);
+//    var device = zg.device.HostDevice.init();
 //    defer device.deinit();
 //    const Array = NDArray(f32);
 

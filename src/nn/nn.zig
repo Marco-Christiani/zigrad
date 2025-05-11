@@ -29,6 +29,7 @@ pub fn relu(T: type, x: *NDTensor(T)) !void {
         .data = y,
         .children = &.{x},
         .device = x.device,
+        .heap = x._heap,
         .callback = .{},
     });
 }
@@ -71,7 +72,6 @@ pub fn relu_(T: type, x: *NDTensor(T)) !void {
             .mask = mask,
         },
         .children = &.{},
-        .device = x.device,
     });
 }
 
@@ -101,6 +101,7 @@ pub fn tanh(T: type, x: *NDTensor(T)) !void {
         .data = y,
         .children = &.{x},
         .device = x.device,
+        .heap = x._heap,
         .callback = .{},
     });
 }
@@ -128,7 +129,6 @@ pub fn tanh_(T: type, x: *NDTensor(T)) !void {
     try Tensor.prepend_dependent(BwdClosure, x, .{
         .callback = .{ .version = x._version +% 1 },
         .children = &.{},
-        .device = x.device,
     });
 }
 
@@ -158,6 +158,7 @@ pub fn sigm(T: type, x: *NDTensor(T)) !void {
         .data = y,
         .children = &.{x},
         .device = x.device,
+        .heap = x._heap,
         .callback = .{},
     });
 }
@@ -185,6 +186,5 @@ pub fn sigm_(T: type, x: *NDTensor(T)) !void {
     try Tensor.prepend_dependent(BwdClosure, x, .{
         .callback = .{ .version = x._version +% 1 },
         .children = &.{},
-        .device = x.device,
     });
 }

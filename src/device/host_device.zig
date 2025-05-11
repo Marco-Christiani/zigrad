@@ -6,12 +6,11 @@ pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
-const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
 const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
-pub const HostDevice = @This();
-
+const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
 const opspec = @import("opspec.zig");
+pub const HostDevice = @This();
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -45,21 +44,14 @@ const Self = @This();
 const Error = CachingAllocator.Error;
 pub const DeviceReference = *Self;
 
-scratch: ScratchMemory,
 cache: CachingAllocator,
-allocator: std.mem.Allocator,
 
-pub fn init(backing_allocator: std.mem.Allocator) Self {
-    return .{
-        .scratch = .{},
-        .cache = CachingAllocator.init(.{}),
-        .allocator = backing_allocator,
-    };
+pub fn init() Self {
+    return .{ .cache = CachingAllocator.init(.{}) };
 }
 
 pub fn deinit(self: *Self) void {
     self.cache.deinit(undefined);
-    self.scratch.deinit();
     self.* = undefined;
 }
 
@@ -620,7 +612,7 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
 }
 
 pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.scratch.get(T, n);
+    return self.cache.get_scratch(T, n, undefined);
 }
 
 pub fn mem_copy(_: *const Self, T: type, src: []const T, dst: []T) void {
@@ -636,10 +628,18 @@ pub fn mem_fill(_: *const Self, T: type, slice: []T, value: T) void {
 }
 
 pub fn mem_random(_: *const Self, T: type, slice: []T, op: RandType, rand: std.Random) void {
-    if (op == .uniform) {
-        for (slice) |*e| e.* = rand.float(T);
-    } else {
-        for (slice) |*e| e.* = rand.floatNorm(T);
+    switch (op) {
+        .uniform => {
+            for (slice) |*e| e.* = rand.float(T);
+        },
+        .normal => {
+            for (slice) |*e| e.* = rand.floatNorm(T);
+        },
+        .kaiming => |fan_mode| {
+            const fan_in: T = @floatFromInt(fan_mode);
+            const std_dev = @sqrt(2.0 / fan_in);
+            for (slice) |*e| e.* = rand.floatNorm(T) * std_dev;
+        },
     }
 }
 
@@ -671,35 +671,6 @@ pub inline fn is_compatible(_: *const Self, _: *const Self) bool {
 pub fn is_host(_: DeviceReference) bool {
     return true;
 }
-
-pub const ScratchMemory = struct {
-    head: usize = 0,
-    tail: usize = 0,
-    // We're using malloc for memory alignment. After one pass
-    // through a network, this should never need to be resized.
-    pub fn deinit(self: *ScratchMemory) void {
-        if (self.head != 0) {
-            std.c.free(@ptrFromInt(self.head));
-        }
-        self.* = undefined;
-    }
-    pub fn get(self: *ScratchMemory, T: type, n: usize) []T {
-        if (n == 0) return &.{};
-
-        const total: usize = @sizeOf(T) * n;
-        // check if we have enough scratch to provide a payload
-        if (self.tail < (self.head + total)) {
-            if (self.head != 0) {
-                std.c.free(@ptrFromInt(self.head));
-            }
-            const ptr = std.c.malloc(total) orelse @panic("Cannot allocate scratch memory");
-            self.head = @intFromPtr(ptr);
-            self.tail = self.head + total;
-        }
-        const ptr: [*]T = @ptrFromInt(self.head);
-        return ptr[0..n];
-    }
-};
 
 inline fn add_op(x: anytype, y: anytype) @TypeOf(x, y) {
     return x + y;
