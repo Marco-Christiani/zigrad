@@ -239,6 +239,62 @@ pub fn relu_bwd(T: type) type {
     };
 }
 
+pub fn tanh_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "tanh_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        y: []T,
+    };
+}
+
+pub fn tanh_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "tanh_bwd";
+        pub const __type__ = T;
+        x_g: []T,
+        y: []const T,
+        y_g: []const T,
+    };
+}
+
+pub fn tanh_inplace_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "tanh_inplace_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+    };
+}
+
+pub fn sigm_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "sigm_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        y: []T,
+    };
+}
+
+pub fn sigm_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "sigm_bwd";
+        pub const __type__ = T;
+        x_g: []T,
+        y: []const T,
+        y_g: []const T,
+    };
+}
+
+pub fn sigm_inplace_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "sigm_inplace_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+    };
+}
+
 pub fn max_fwd(T: type) type {
     return struct {
         pub const __name__ = "max_fwd";
@@ -252,8 +308,8 @@ pub fn max_bwd(T: type) type {
     return struct {
         pub const __name__ = "max_bwd";
         pub const __type__ = T;
-        x: []T,
-        x_g: []const T,
+        x: []const T,
+        x_g: []T,
         y: []const T,
         y_g: []const T,
     };

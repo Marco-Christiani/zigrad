@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zg = @import("zigrad.zig");
 const debug: bool = (builtin.mode == .Debug);
-const DeviceReference = zg.DeviceReference;
 
 //////////////////////////////////////
 //////////////////////////////////////
@@ -156,7 +155,7 @@ pub fn BackwardContext(primary_type: type) type {
         pub fn init(
             CtxType: type,
             context: CtxType,
-            device: DeviceReference,
+            allocator: std.mem.Allocator,
             config: struct {
                 children: ?[]const *PrimaryType = null,
                 persist: bool = false,
@@ -217,7 +216,7 @@ pub fn BackwardContext(primary_type: type) type {
                 const src = std.mem.asBytes(&context);
                 @memcpy(dst[0..arg_size], src);
             } else {
-                const ptr = try device.allocator.create(ArgType);
+                const ptr = try allocator.create(ArgType);
                 ptr.* = context;
                 tmp.storage = .{ .ptr = ClosurePointer.init(ArgType, ptr) };
             }
@@ -225,19 +224,19 @@ pub fn BackwardContext(primary_type: type) type {
             return tmp;
         }
 
-        pub fn prepend(root: *Self, new_root: Self, device: DeviceReference) !void {
-            const next_ptr = try device.allocator.create(Self);
+        pub fn prepend(root: *Self, new_root: Self, allocator: std.mem.Allocator) !void {
+            const next_ptr = try allocator.create(Self);
             next_ptr.* = root.*;
             root.* = new_root;
             root.next = next_ptr;
         }
 
-        pub fn deinit(self: *Self, device: DeviceReference) void {
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.next) |next| {
-                next.deinit(device);
-                device.allocator.destroy(next);
+                next.deinit(allocator);
+                allocator.destroy(next);
             }
-            self.release(device);
+            self.release(allocator);
         }
 
         pub fn iterator(self: *Self) Iterator(Self) {
@@ -269,9 +268,9 @@ pub fn BackwardContext(primary_type: type) type {
             }
         }
 
-        pub fn release(self: *Self, device: DeviceReference) void {
+        pub fn release(self: *Self, allocator: std.mem.Allocator) void {
             if (self.storage == .ptr) {
-                self.storage.ptr.deinit(device.allocator);
+                self.storage.ptr.deinit(allocator);
             }
             self.storage = .none;
         }

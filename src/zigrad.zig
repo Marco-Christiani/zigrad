@@ -14,14 +14,15 @@ pub const NDTensor = @import("ndtensor.zig").NDTensor;
 pub const Op = @import("ndtensor.zig").Op;
 pub const loss = @import("nn/loss.zig");
 pub const mnist = @import("nn/mnist.zig");
-pub const GraphManager = @import("graph_manager.zig").GraphManager;
+pub const GraphManager = @import("graph_manager.zig");
+pub const TensorConfig = @import("ndtensor/utils.zig").TensorConfig;
 //pub const Trainer = @import("nn/trainer.zig").Trainer;
 //pub const Model = @import("nn/model.zig").Model;
 pub const conv_utils = @import("nn/conv_utils.zig");
 pub const utils = @import("nn/utils.zig");
 //pub const layer = @import("nn/layer.zig");
-pub const winit = @import("nn/winit.zig");
 pub const optim = @import("nn/optim.zig");
+pub const nn = @import("nn/nn.zig");
 
 const device_root = @import("device");
 pub const device = device_root.device;

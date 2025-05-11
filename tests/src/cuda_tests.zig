@@ -26,22 +26,18 @@ pub fn main() !void {
     }
     //var prng = std.Random.DefaultPrng.init(zg.settings.seed);
     //const rand = prng.random();
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-
-    var cpu = zg.device.HostDevice.init(arena.allocator());
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gpu = zg.device.CudaDevice.init(0, arena.allocator());
+    var gpu = zg.device.CudaDevice.init(0);
     defer gpu.deinit();
+
+    var gm = zg.GraphManager.init(std.heap.smp_allocator, .{});
+    defer gm.deinit();
 
     { // MEMORY TRANSFER //
         std.log.info("TESTING: MEMORY TRANSFER", .{});
-        const x = try Tensor.random(&.{256}, false, .uniform, cpu.reference());
+        const x = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
         defer x.deinit();
 
         const y = try x.to_device(gpu.reference());
@@ -56,9 +52,9 @@ pub fn main() !void {
     }
 
     { // ELEMENTWISE OPS //
-        const a = try Tensor.random(&.{256}, false, .uniform, cpu.reference());
+        const a = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
         defer a.deinit();
-        const b = try Tensor.random(&.{256}, false, .uniform, cpu.reference());
+        const b = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
         defer b.deinit();
 
         const x = try a.to_device(gpu.reference());
@@ -117,12 +113,21 @@ pub fn main() !void {
 
     cpu.clear_cache();
     gpu.clear_cache();
+    gm.reset();
 
     { // BATCH MATRIX MUL //
         std.log.info("TESTING: BATCH MATRIX MUL", .{});
-        const a = try Tensor.random(&.{ 3, 256, 256 }, false, .normal, cpu.reference());
+        const a = try Tensor.random(
+            &.{ 3, 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer a.deinit();
-        const b = try Tensor.random(&.{ 3, 256, 256 }, false, .normal, cpu.reference());
+        const b = try Tensor.random(
+            &.{ 3, 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer b.deinit();
 
         const x = try a.to_device(gpu.reference());
@@ -155,12 +160,21 @@ pub fn main() !void {
 
     cpu.clear_cache();
     gpu.clear_cache();
+    gm.reset();
 
     { // MATRIX VECTOR OP //
         std.log.info("TESTING: MATRIX VECTOR MUL", .{});
-        const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
+        const a = try Tensor.random(
+            &.{ 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer a.deinit();
-        const b = try Tensor.random(&.{256}, false, .normal, cpu.reference());
+        const b = try Tensor.random(
+            &.{256},
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer b.deinit();
 
         const x = try a.to_device(gpu.reference());
@@ -168,10 +182,10 @@ pub fn main() !void {
         const y = try b.to_device(gpu.reference());
         defer y.deinit();
 
-        const c = try a.matvec(b);
+        const c = try a.matvec(b, .{});
         defer c.deinit();
 
-        const z = try x.matvec(y);
+        const z = try x.matvec(y, .{});
         defer z.deinit();
 
         const d = try z.to_device(cpu.reference());
@@ -182,7 +196,11 @@ pub fn main() !void {
 
     { // SUM ALONG - TODO: Move this to NDArray testing file //
         std.log.info("TESTING: MAX", .{});
-        const a = try Tensor.random(&.{256}, false, .normal, cpu.reference());
+        const a = try Tensor.random(
+            &.{256},
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer a.deinit();
 
         const x = try a.to_device(gpu.reference());
@@ -202,7 +220,11 @@ pub fn main() !void {
 
     { // SUM ALONG - TODO: Move this to NDArray testing file //
         std.log.info("TESTING: SUM ALONG", .{});
-        const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
+        const a = try Tensor.random(
+            &.{ 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer a.deinit();
 
         const x = try a.to_device(gpu.reference());
@@ -224,7 +246,11 @@ pub fn main() !void {
 
     { // SUM ALONG - TODO: Move this to NDArray testing file //
         std.log.info("TESTING: MAX ALONG", .{});
-        const a = try Tensor.random(&.{ 256, 256 }, false, .normal, cpu.reference());
+        const a = try Tensor.random(
+            &.{ 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
         defer a.deinit();
 
         const x = try a.to_device(gpu.reference());

@@ -111,7 +111,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     return out;
 }
 
-pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -135,10 +135,11 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     };
 
     return try NDTensor(T).create_dependent(MseBwd, .{
-        .data = try NDArray(T).init(&.{mse}, &.{1}, device),
+        .data = try NDArray(T).init(&.{mse}, &.{1}, y_pred.device),
         .children = &.{ y_pred, y },
         .label = "mse",
-        .device = device,
+        .device = y_pred.device,
+        .heap = y_pred._heap,
         .callback = .{},
     });
 }
@@ -179,6 +180,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
         .device = y_pred.device,
+        .heap = y_pred._heap,
         .callback = .{ .sm_preds = sm_preds },
     });
 }
@@ -270,11 +272,13 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
         .children = &.{input},
         .label = "softmax",
         .device = device,
+        .heap = input._heap,
         .callback = .{ .dim = dim },
     });
 }
 
-pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, device: DeviceReference) !*NDTensor(T) {
+pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !*NDTensor(T) {
+    std.debug.assert(y_pred.device.is_compatible(y.device));
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_loss: T = 0;
 
@@ -312,11 +316,12 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, d
     };
 
     return try NDTensor(T).create_dependent(Sl1LossBwd, .{
-        .data = try NDArray(T).init(&.{loss}, &.{1}, device),
+        .data = try NDArray(T).init(&.{loss}, &.{1}, y_pred.device),
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
         .callback = .{ .beta = beta },
-        .device = device,
+        .heap = y_pred._heap,
+        .device = y_pred.device,
     });
 }
 // TODO: move this since refactor this file was renamed to loss.zig
