@@ -6,8 +6,13 @@ const DeviceReference = zg.DeviceReference;
 const NDTensor = zg.NDTensor;
 
 pub fn main() !void {
-    var cpu = zg.device.HostDevice.init(std.heap.smp_allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+
+    var graph = zg.GraphManager.init(std.heap.smp_allocator, .{
+        .eager_teardown = true,
+    });
+    defer graph.deinit();
 
     //////////////////////////////////////////////////
     // I'm setting up a toy example where each sequence
@@ -16,15 +21,17 @@ pub fn main() !void {
     const N: usize = 10;
     const examples: usize = 4;
 
-    var samples = try Samples(examples).init(N, cpu.reference());
+    var samples = try Samples(examples).init(N, &graph, cpu.reference());
     defer samples.deinit();
 
     for (0..4) |i|
         samples.buffer[i].data.data[i] = @floatFromInt(i);
 
     var gru = try Gru.init(
+        &graph,
         cpu.reference(),
         .{
+            .requires_grad = true,
             .hid_size = N,
             .inp_size = N,
         },
@@ -32,21 +39,29 @@ pub fn main() !void {
     defer gru.deinit();
 
     var decoder = try Decoder.init(
+        &graph,
         cpu.reference(),
         .{
+            .requires_grad = true,
             .inp_size = N,
             .hid_size = 128,
         },
     );
     defer decoder.deinit();
 
-    try train_seq_to_seq(&gru, &decoder, .{
-        .inputs = &.{samples.buffer[0..3]},
-        .targets = &.{samples.buffer[1..4]},
-        .total_epochs = 200,
-        .print_loss_every_n = 1,
-        .max_bwd_steps = null,
-    });
+    try train_seq_to_seq(
+        &graph,
+        cpu.reference(),
+        &gru,
+        &decoder,
+        .{
+            .inputs = &.{samples.buffer[0..3]},
+            .targets = &.{samples.buffer[1..4]},
+            .total_epochs = 200,
+            .print_loss_every_n = 1,
+            .max_bwd_steps = null,
+        },
+    );
 }
 
 const Decoder = struct {
@@ -60,15 +75,22 @@ const Decoder = struct {
         },
     },
 
-    pub fn init(device: zg.DeviceReference, config: struct {
+    pub fn init(graph: *zg.GraphManager, device: zg.DeviceReference, config: struct {
+        requires_grad: bool,
         inp_size: usize,
         hid_size: usize,
     }) !Decoder {
+        const wgts_config: zg.TensorConfig = .{
+            .requires_grad = config.requires_grad,
+            .device = device,
+            .heap = graph.heap(),
+            .acquired = true,
+        };
         return .{
             .weights = .{
                 .get = .{
-                    .Wh = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .Wy = try Tensor.random(&.{ config.inp_size, config.hid_size }, false, .normal, device),
+                    .Wh = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .Wy = try Tensor.random(&.{ config.inp_size, config.hid_size }, .normal, wgts_config),
                 },
             },
         };
@@ -87,16 +109,61 @@ const Decoder = struct {
 
         try zg.nn.tanh_(f32, h);
 
-        h.set_label("decoder.h") catch {};
-
         const y = try self.weights.get.Wy.matvec(h, .{});
 
-        if (!y.requires_grad())
+        if (!h.requires_grad())
             h.deinit();
 
-        y.set_label("decoder.y") catch {};
-
         return y;
+    }
+};
+
+// Let's explain what problem this object is trying
+// to solve. Let's observe that on the forward pass,
+// we do not need intermediate values - we only need
+// the output. The problem though comes from double
+// freeing... observe:
+//
+//////////////////////
+// Case 1: defer-deinit
+//
+// x = try a.op(b)
+// defer x.deinit(); // Fails for training - destroys backwards child.
+//
+//////////////////////////
+// Case 3: errdefer-deinit
+//
+// y = try W1.op(x);
+// errdefer x.deinit(); // fine for reverse, no error...
+//
+// z = try W2.op(y);
+//
+// if (!x.requires_grad())
+//   x.deinit(); // free x because it's no-longer used
+//
+// try op_(z); // Whoops - if this fails, x gets freed twice.
+//
+/////////////////////////////////////
+// Case 3: errdefer-deinit-eviscerate
+//
+// y = try W1.op(x);
+// errdefer x.deinit(); // fine for reverse, no error...
+//
+// z = try W2.op(y);
+//
+// if (!x.requires_grad())
+//   x.eviscerate(); // free x's *data* because it's no-longer used
+//
+// // Whoops - didn't free x's pointer.
+//
+//////////////////////////////////////
+// Thus, this simple struct helps us decide when
+// it's right to deinit a tensor. Only deinit
+// if there was an error OR gradient not required.
+const DeinitManager = struct {
+    had_error: bool = false,
+    pub fn handle(mgr: @This(), x: anytype) void {
+        if (mgr.had_error or !x.requires_grad()) x.deinit();
     }
 };
 
@@ -121,22 +188,29 @@ const Gru = struct {
         },
     },
 
-    pub fn init(device: zg.DeviceReference, config: struct {
+    pub fn init(graph: *zg.GraphManager, device: zg.DeviceReference, config: struct {
+        requires_grad: bool,
         inp_size: usize,
         hid_size: usize,
     }) !Gru {
+        const wgts_config: zg.TensorConfig = .{
+            .requires_grad = config.requires_grad,
+            .device = device,
+            .heap = graph.heap(),
+            .acquired = true,
+        };
         return .{
             .weights = .{
                 .get = .{
-                    .Wz = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .Uz = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .bz = try Tensor.zeros(&.{config.inp_size}, false, device),
-                    .Wr = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .Ur = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .br = try Tensor.zeros(&.{config.inp_size}, false, device),
-                    .Wh = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .Uh = try Tensor.random(&.{ config.hid_size, config.inp_size }, false, .normal, device),
-                    .bh = try Tensor.zeros(&.{config.inp_size}, false, device),
+                    .Wz = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .Uz = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .bz = try Tensor.zeros(&.{config.inp_size}, wgts_config),
+                    .Wr = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .Ur = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .br = try Tensor.zeros(&.{config.inp_size}, wgts_config),
+                    .Wh = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .Uh = try Tensor.random(&.{ config.hid_size, config.inp_size }, .normal, wgts_config),
+                    .bh = try Tensor.zeros(&.{config.inp_size}, wgts_config),
                 },
             },
         };
@@ -171,13 +245,13 @@ const Gru = struct {
         try zg.nn.sigm_(f32, r1);
 
         ////////////////////////////////////////////
-        // activation candidate ///////////////////
+        // activation candidate ////////////////////
 
         const ac_mul = try r1.mul(h0);
         errdefer ac_mul.deinit();
 
         if (!r1.requires_grad())
-            r1.deinit();
+            r1.clear();
 
         const ac = try self.weights.get.Wh.matvec(x0, .{});
         errdefer ac.deinit();
@@ -185,7 +259,7 @@ const Gru = struct {
         try self.weights.get.Uh.matvec_(ac_mul, ac, .{ .beta = 1.0 });
 
         if (!ac_mul.requires_grad())
-            ac_mul.deinit();
+            ac_mul.clear();
 
         try ac._add(self.weights.get.bh);
         try zg.nn.tanh_(f32, ac);
@@ -200,13 +274,13 @@ const Gru = struct {
         errdefer h_mul_a.deinit();
 
         if (!z1.requires_grad())
-            z1.deinit();
+            z1.clear();
 
         const h_mul_b = try sub_one.mul(h0);
-        errdefer h_mul_b.deinit();
+        errdefer h_mul_b.clear();
 
         if (!sub_one.requires_grad())
-            sub_one.deinit();
+            sub_one.clear();
 
         const h1 = try h_mul_a.sub(h_mul_b);
 
@@ -219,6 +293,8 @@ const Gru = struct {
 };
 
 pub fn train_seq_to_seq(
+    graph: *zg.GraphManager,
+    device: zg.DeviceReference,
     gru: *Gru,
     decoder: *Decoder,
     config: struct {
@@ -241,18 +317,6 @@ pub fn train_seq_to_seq(
     if (config.max_bwd_steps != null and config.max_bwd_steps.? == 0)
         @panic("Max backward steps must be either null or greater than 0.");
 
-    // start by aquiring the weights so backward won't free them (labeling is optional)
-    for (&gru.weights.all, '1'..) |wgt, i| {
-        try wgt.set_label(&.{ 'W', @intCast(i) });
-        wgt.acquire();
-    }
-
-    for (&decoder.weights.all, '1'..) |wgt, i| {
-        try wgt.set_label(&.{ 'W', @intCast(i) });
-        wgt._requires_grad = true;
-        wgt.acquire();
-    }
-
     // TODO: make this part of configuration? Probably.
     const decay_factor: f32 = 0.9;
     var moving_avg: f32 = 0;
@@ -263,11 +327,7 @@ pub fn train_seq_to_seq(
 
     // It's important to have `eager_teardown == true` here
     // because I'm choosing to not manually track the outputs.
-    var gm: zg.GraphManager(Gru.Tensor) = .{
-        .allocator = std.heap.smp_allocator,
-        .eager_teardown = true,
-    };
-    defer gm.deinit();
+    graph.eager_teardown = true;
 
     // or your favorite optimizer...
     var optim: zg.optim.SGD(f32) = .{
@@ -277,13 +337,16 @@ pub fn train_seq_to_seq(
         .lr = 0.01,
     };
 
-    // assumes zeros
+    // assumes zeros...
+    // cloning takes the properties of the tensor being
+    // being cloned so this tensor is "acquired"
     const initial_hid = try gru.weights.get.bh.clone();
-
     defer {
         initial_hid.release();
         initial_hid.deinit();
     }
+
+    initial_hid.disable_grad();
 
     for (0..config.total_epochs) |epoch| {
         for (config.inputs, config.targets, 0..) |inp_seq, trg_seq, example_num| {
@@ -304,16 +367,15 @@ pub fn train_seq_to_seq(
             var prev_hid: *Gru.Tensor = initial_hid;
 
             // we're going to score the total loss for the entire sequence
-            const total_loss = try Gru.Tensor.zeros(&.{1}, true, prev_hid.device);
+            const total_loss = try Gru.Tensor.zeros(&.{1}, .{
+                .requires_grad = true,
+                .heap = graph.heap(),
+                .device = device,
+            });
+            defer total_loss.deinit();
 
             for (inp_seq, trg_seq, 0..) |x_i, y_i, time_step| {
                 // std.debug.print("bwd_start_step: {}, time_step: {}\n", .{ bwd_start_step, time_step });
-
-                if (time_step == bwd_start_step) {
-                    // set to true to start tracking the operations from this step onwards
-                    for (&gru.weights.all) |wgt| wgt._requires_grad = true;
-                }
-
                 if (time_step >= bwd_start_step) {
                     // we need the full forward to calculate loss
                     const hid = try gru.forward(x_i, prev_hid);
@@ -352,22 +414,21 @@ pub fn train_seq_to_seq(
             } else {
                 patience_counter += 1;
                 if (patience_counter >= patience) {
-                    total_loss.teardown(&gm);
+                    graph.teardown(total_loss);
                     std.debug.print("Early stopping at epoch {d}. No improvement for {d} epochs.\n", .{ epoch, patience });
                     return;
                 }
             }
 
             // collects gradients and free intermediate state
-            try gm.backward(total_loss);
+            try graph.backward(total_loss);
 
             // update the weights
             //optim.step(&gru.weights.all);
             optim.step(&decoder.weights.all);
 
-            // set to false to allow truncation to occur
-            for (&gru.weights.all) |wgt|
-                wgt._requires_grad = false;
+            // clear the computation graph
+            graph.reset();
         }
     }
 }
@@ -377,12 +438,15 @@ pub fn Samples(comptime n: usize) type {
     return struct {
         const Self = @This();
         buffer: [n]*Gru.Tensor = undefined,
-        pub fn init(len: usize, device: zg.DeviceReference) !Self {
+        pub fn init(len: usize, graph: *zg.GraphManager, device: zg.DeviceReference) !Self {
             var self: Self = .{};
-            for (0..n, '0'..) |i, c| {
-                self.buffer[i] = try Gru.Tensor.zeros(&.{len}, false, device);
-                try self.buffer[i].set_label(&.{ 'x', @intCast(c) });
-                self.buffer[i].acquire();
+            for (0..n) |i| {
+                self.buffer[i] = try Gru.Tensor.zeros(&.{len}, .{
+                    .requires_grad = false,
+                    .heap = graph.heap(),
+                    .device = device,
+                    .acquired = true,
+                });
             }
             return self;
         }

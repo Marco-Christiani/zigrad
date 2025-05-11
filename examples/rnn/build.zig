@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    inline for (&.{ "main", "gru" }) |file| {
+    inline for (&.{"gru"}) |file| {
         const zigrad_dep = b.dependency("zigrad", .{
             .target = target,
             .optimize = optimize,
@@ -19,8 +19,11 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.root_module.addImport("zigrad", zigrad_dep.module("zigrad"));
         b.installArtifact(exe);
+
         const run_cmd = b.addRunArtifact(exe);
+
         run_cmd.step.dependOn(b.getInstallStep());
+
         if (b.args) |args| {
             run_cmd.addArgs(args);
         }
