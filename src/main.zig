@@ -1,112 +1,272 @@
 const std = @import("std");
-pub const zg = @import("zigrad");
-//const layer = zg.layer;
-pub const std_options = zg.std_options;
+const zg = @import("zigrad");
 
-///////////////////////////////
+const Tensor = zg.NDTensor(f32);
+const Array = zg.NDArray(f32);
 
-pub fn main() !void {
-    const Tensor = zg.NDTensor(f32);
-
-    var optim = zg.optim.SGD(f32){
-        .lr = 0.1,
-    };
-
-    var cpu = zg.device.HostDevice.init(std.heap.smp_allocator);
-    defer cpu.deinit();
-
-    var gm = zg.GraphManager(Tensor).init(std.heap.smp_allocator, .{
-        .eager_teardown = false,
-    });
-    defer gm.deinit();
-
-    ///////////////////////////////////////////////////////////////////////
-
-    const x = try Tensor.ones(&.{10}, true, cpu.reference());
-    defer x.deinit();
-
-    const y = try Tensor.zeros(&.{10}, false, cpu.reference());
-    defer y.deinit();
-
-    try optim.attach(x);
-
-    y.set(0, 1);
-
-    for (0..100) |_| {
-        const loss = try zg.loss.softmax_cross_entropy_loss(f32, x, y);
-        std.debug.print("LOSS: {}\n\n", .{loss.get(0)});
-        try gm.backward(loss);
+// It is expected to have some epsilon between the
+// device and the host. Floating point is not associative
+// and the GPU does perform oprations in the same order.
+const epsilon: f32 = 1e-3;
+pub fn similar(x: *Tensor, y: *Tensor) !void {
+    return similar_slice(x.get_data(), y.get_data());
+}
+pub fn similar_slice(x: []const f32, y: []const f32) error{ NotSimilar, WrongSize }!void {
+    if (x.len != y.len) {
+        return error.WrongSize;
     }
-
-    std.debug.print("X GRAD: {any}\n\n", .{x.assume_grad_data()});
-
-    /////////////////
-    //var ts: [5]*Tensor = undefined;
-
-    //for (0..ts.len) |i| {
-    //    ts[i] = try Tensor.sequence(@floatFromInt(i + 1), 1.0, &.{10}, true, cpu.reference());
-    //    ts[i].acquire();
-    //}
-    //defer for (&ts) |t| {
-    //    t.release();
-    //    t.deinit();
-    //};
-
-    //var out = x;
-    //std.debug.print("DATA: {any}\n", .{out.get_data()});
-    //for (&ts) |t| {
-    //    out = try t.mul(out);
-    //    std.debug.print("DATA: {any}\n", .{out.get_data()});
-    //}
-    //try out.setup_grad(1);
-
-    //std.debug.print("\n\n", .{});
-
-    //for (&ts) |t| {
-    //    std.debug.print("GRAD: {any}\n", .{t.assume_grad_data()});
-    //}
-
-    //try mnist.main();
+    for (x, y) |u, v| {
+        if (@abs(u - v) > epsilon) return error.NotSimilar;
+    }
 }
 
-pub fn LinearLayer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Tensor = zg.NDTensor(T);
-        weights: *Tensor,
-        bias: *Tensor,
-        pub fn init(device: zg.DeviceReference, in_features: usize, out_features: usize) !Self {
-            var weights = try Tensor.ones(&.{ out_features, in_features }, true, device);
-            errdefer weights.deinit();
+pub fn main() !void {
+    if (comptime zg.backend != .CUDA) {
+        @compileError("Zigrad backend must be targeted at CUDA to run cuda_tests.zig");
+    }
+    //var prng = std.Random.DefaultPrng.init(zg.settings.seed);
+    //const rand = prng.random();
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
 
-            var bias = try Tensor.zeros(&.{ 1, out_features }, true, device);
-            errdefer bias.deinit();
+    var gpu = zg.device.CudaDevice.init(0);
+    defer gpu.deinit();
 
-            try weights.set_label("linear_weights");
-            try bias.set_label("linear_bias");
+    var gm = zg.GraphManager.init(std.heap.smp_allocator, .{});
+    defer gm.deinit();
 
-            weights.acquire();
-            bias.acquire();
+    { // MEMORY TRANSFER //
+        std.log.info("TESTING: MEMORY TRANSFER", .{});
+        const x = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
+        defer x.deinit();
 
-            // winit.he_init(T, weights);
-            //bias.fill(0.0);
+        const y = try x.to_device(gpu.reference());
+        defer y.deinit();
 
-            return .{ .weights = weights, .bias = bias };
+        const z = try y.to_device(cpu.reference());
+        defer z.deinit();
+
+        gpu.sync();
+
+        try similar(x, z);
+    }
+
+    { // ELEMENTWISE OPS //
+        const a = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
+        defer a.deinit();
+        const b = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
+        defer b.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+        const y = try b.to_device(gpu.reference());
+        defer y.deinit();
+
+        { // ADDITION //
+            std.log.info("TESTING: ELEMENTWISE ADD", .{});
+            const c = try a.add(b);
+            defer c.deinit();
+
+            const z = try x.add(y);
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            gpu.sync();
+
+            try similar(c, d);
         }
 
-        pub fn deinit(self: *Self) void {
-            self.weights.release();
-            self.weights.deinit();
+        { // SUBTRACTION //
+            std.log.info("TESTING: ELEMENTWISE SUB", .{});
+            const c = try a.sub(b);
+            defer c.deinit();
 
-            self.bias.release();
-            self.bias.deinit();
+            const z = try x.sub(y);
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            gpu.sync();
+
+            try similar(c, d);
         }
 
-        pub fn forward(self: *const Self, x: *Tensor) !*Tensor {
-            const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
-            const n_features = self.weights.data.shape.get(0);
-            const b_y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
-            return self.bias.add(b_y);
+        { // MULTIPLICATION //
+            std.log.info("TESTING: ELEMENTWISE MUL", .{});
+            const c = try a.mul(b);
+            defer c.deinit();
+
+            const z = try x.mul(y);
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            gpu.sync();
+
+            try similar(c, d);
         }
-    };
+    }
+
+    cpu.clear_cache();
+    gpu.clear_cache();
+    gm.reset();
+
+    { // BATCH MATRIX MUL //
+        std.log.info("TESTING: BATCH MATRIX MUL", .{});
+        const a = try Tensor.random(
+            &.{ 3, 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer a.deinit();
+        const b = try Tensor.random(
+            &.{ 3, 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer b.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+        const y = try b.to_device(gpu.reference());
+        defer y.deinit();
+
+        for (
+            &[_]bool{ true, true, false, false },
+            &[_]bool{ true, false, true, false },
+        ) |trans_a, trans_b| {
+            const c = try a.bmm(b, .{
+                .trans_a = trans_a,
+                .trans_b = trans_b,
+            });
+            defer c.deinit();
+
+            const z = try x.bmm(y, .{
+                .trans_a = trans_a,
+                .trans_b = trans_b,
+            });
+            defer z.deinit();
+
+            const d = try z.to_device(cpu.reference());
+            defer d.deinit();
+
+            try similar(c, d);
+        }
+    }
+
+    cpu.clear_cache();
+    gpu.clear_cache();
+    gm.reset();
+
+    { // MATRIX VECTOR OP //
+        std.log.info("TESTING: MATRIX VECTOR MUL", .{});
+        const a = try Tensor.random(
+            &.{ 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer a.deinit();
+        const b = try Tensor.random(
+            &.{256},
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer b.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+        const y = try b.to_device(gpu.reference());
+        defer y.deinit();
+
+        const c = try a.matvec(b, .{});
+        defer c.deinit();
+
+        const z = try x.matvec(y, .{});
+        defer z.deinit();
+
+        const d = try z.to_device(cpu.reference());
+        defer d.deinit();
+
+        try similar(c, d);
+    }
+
+    { // SUM ALONG - TODO: Move this to NDArray testing file //
+        std.log.info("TESTING: MAX", .{});
+        const a = try Tensor.random(
+            &.{256},
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer a.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+
+        var c = try a.max();
+        defer c.deinit();
+
+        var z = try x.max();
+        defer z.deinit();
+
+        const d = try z.to_device(cpu.reference());
+        defer d.deinit();
+
+        try similar(c, d);
+    }
+
+    { // SUM ALONG - TODO: Move this to NDArray testing file //
+        std.log.info("TESTING: SUM ALONG", .{});
+        const a = try Tensor.random(
+            &.{ 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer a.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+
+        var c = try a.data.sum_along(cpu.reference(), .{ .dim = 0 });
+        defer c.deinit(cpu.reference());
+
+        var z = try x.data.sum_along(gpu.reference(), .{ .dim = 0 });
+        defer z.deinit(gpu.reference());
+
+        const dst = try cpu.mem_alloc(f32, 256);
+        defer cpu.mem_free(dst);
+
+        gpu.mem_transfer(f32, z.data, dst, .DtoH);
+
+        try similar_slice(c.data, dst);
+    }
+
+    { // SUM ALONG - TODO: Move this to NDArray testing file //
+        std.log.info("TESTING: MAX ALONG", .{});
+        const a = try Tensor.random(
+            &.{ 256, 256 },
+            .normal,
+            .{ .device = cpu.reference(), .heap = gm.heap() },
+        );
+        defer a.deinit();
+
+        const x = try a.to_device(gpu.reference());
+        defer x.deinit();
+
+        var c = try a.data.max_along(cpu.reference(), .{ .dim = 0 });
+        defer c.deinit(cpu.reference());
+
+        var z = try x.data.max_along(gpu.reference(), .{ .dim = 0 });
+        defer z.deinit(gpu.reference());
+
+        const dst = try cpu.mem_alloc(f32, 256);
+        defer cpu.mem_free(dst);
+
+        gpu.mem_transfer(f32, z.data, dst, .DtoH);
+
+        try similar_slice(c.data, dst);
+    }
 }

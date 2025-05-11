@@ -20,7 +20,6 @@ pub fn DeviceReference(comptime AuxDevice: type) type {
         };
 
         ptrs: DevicePtrs,
-        allocator: std.mem.Allocator,
 
         pub fn dispatch(self: Self, params: anytype) void {
             switch (self.ptrs) {

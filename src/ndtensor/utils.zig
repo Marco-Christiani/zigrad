@@ -16,7 +16,7 @@ pub fn as_label(slice: ?[]const u8) Label {
 pub const TensorConfig = struct {
     device: DeviceReference,
     heap: NodeHeap,
-    requires_grad: bool,
+    requires_grad: bool = false,
     acquired: bool = false,
     attached: bool = true,
     label: ?[]const u8 = null,

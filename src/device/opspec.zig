@@ -308,8 +308,8 @@ pub fn max_bwd(T: type) type {
     return struct {
         pub const __name__ = "max_bwd";
         pub const __type__ = T;
-        x: []T,
-        x_g: []const T,
+        x: []const T,
+        x_g: []T,
         y: []const T,
         y_g: []const T,
     };

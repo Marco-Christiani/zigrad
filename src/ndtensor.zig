@@ -401,11 +401,11 @@ pub fn NDTensor(comptime T: type) type {
                 return self;
 
             const ToDeviceBwd = struct {
-                fn callback(y: *Self) !void {
-                    const x = y.backward_child(0) orelse return;
+                pub fn callback(y: *Self, children: *Children) !void {
+                    const x = children.get_bwd(0) orelse return;
                     try to_device_impl(
                         y.assume_grad_data(),
-                        x.ensure_grad_data(0),
+                        try x.ensure_grad_data(0),
                         y.device,
                         x.device,
                     );
@@ -428,10 +428,6 @@ pub fn NDTensor(comptime T: type) type {
             });
             errdefer result.deinit();
 
-            if (self.requires_grad()) { // need to make this call, not check the attribute flag
-                result.grad = try DataType.zeros(self.get_shape(), device);
-                result._requires_grad = true;
-            }
             return result;
         }
 

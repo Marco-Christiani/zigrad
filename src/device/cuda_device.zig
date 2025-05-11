@@ -122,6 +122,7 @@ pub fn randtype(op: RandType) cuda.dtype {
     return switch (op) {
         .uniform => cuda.UNIFORM,
         .normal => cuda.NORMAL,
+        .kaiming => @panic("Unimplemented"),
     };
 }
 
@@ -368,7 +369,7 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
 }
 
 pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.cache.get_scratch(T, n, self.context.stream);
+    return self.cache.get_scratch(T, n, &self.context.stream);
 }
 
 pub fn mem_free(self: *Self, slice: anytype) void {
