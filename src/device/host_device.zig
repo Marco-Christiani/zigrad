@@ -147,7 +147,7 @@ pub fn outer(_: *const Self, T: type, p: opspec.outer(T)) void {
 // TODO: extend to greater than 2D and optimize this
 pub fn transpose(_: *const Self, T: type, p: opspec.transpose(T)) void {
     for (0..p.m) |i| {
-        for (0..p.n[1]) |j| {
+        for (0..p.n) |j| {
             p.B[j * p.m + i] = p.A[i * p.n + j] + p.alpha * p.B[j * p.m + i];
         }
     }

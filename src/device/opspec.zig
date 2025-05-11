@@ -99,7 +99,7 @@ pub fn transpose(T: type) type {
         pub const __name__ = "transpose";
         pub const __type__ = T;
         A: []const T,
-        B: []const T,
+        B: []T,
         m: usize,
         n: usize,
         alpha: T,
