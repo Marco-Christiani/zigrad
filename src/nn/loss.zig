@@ -139,7 +139,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
         .children = &.{ y_pred, y },
         .label = "mse",
         .device = y_pred.device,
-        .heap = y_pred._heap,
+        .node_allocator = y_pred._node_allocator,
         .callback = .{},
     });
 }
@@ -180,7 +180,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
         .device = y_pred.device,
-        .heap = y_pred._heap,
+        .node_allocator = y_pred._node_allocator,
         .callback = .{ .sm_preds = sm_preds },
     });
 }
@@ -272,7 +272,7 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
         .children = &.{input},
         .label = "softmax",
         .device = device,
-        .heap = input._heap,
+        .node_allocator = input._node_allocator,
         .callback = .{ .dim = dim },
     });
 }
@@ -320,7 +320,7 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
         .callback = .{ .beta = beta },
-        .heap = y_pred._heap,
+        .node_allocator = y_pred._node_allocator,
         .device = y_pred.device,
     });
 }

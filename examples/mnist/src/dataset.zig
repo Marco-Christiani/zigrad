@@ -30,7 +30,7 @@ pub fn MnistDataset(comptime T: type) type {
                 .requires_grad = true,
                 .device = device,
                 .acquired = true,
-                .heap = gm.heap(),
+                .node_allocator = gm.heap(),
             };
 
             while (lines.next()) |line| {

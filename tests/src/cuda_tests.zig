@@ -37,7 +37,7 @@ pub fn main() !void {
 
     { // MEMORY TRANSFER //
         std.log.info("TESTING: MEMORY TRANSFER", .{});
-        const x = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
+        const x = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .node_allocator = gm.heap() });
         defer x.deinit();
 
         const y = try x.to_device(gpu.reference());
@@ -52,9 +52,9 @@ pub fn main() !void {
     }
 
     { // ELEMENTWISE OPS //
-        const a = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
+        const a = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .node_allocator = gm.heap() });
         defer a.deinit();
-        const b = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .heap = gm.heap() });
+        const b = try Tensor.random(&.{256}, .uniform, .{ .device = cpu.reference(), .node_allocator = gm.heap() });
         defer b.deinit();
 
         const x = try a.to_device(gpu.reference());
@@ -120,13 +120,13 @@ pub fn main() !void {
         const a = try Tensor.random(
             &.{ 3, 256, 256 },
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer a.deinit();
         const b = try Tensor.random(
             &.{ 3, 256, 256 },
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer b.deinit();
 
@@ -167,13 +167,13 @@ pub fn main() !void {
         const a = try Tensor.random(
             &.{ 256, 256 },
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer a.deinit();
         const b = try Tensor.random(
             &.{256},
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer b.deinit();
 
@@ -199,7 +199,7 @@ pub fn main() !void {
         const a = try Tensor.random(
             &.{256},
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer a.deinit();
 
@@ -223,7 +223,7 @@ pub fn main() !void {
         const a = try Tensor.random(
             &.{ 256, 256 },
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer a.deinit();
 
@@ -249,7 +249,7 @@ pub fn main() !void {
         const a = try Tensor.random(
             &.{ 256, 256 },
             .normal,
-            .{ .device = cpu.reference(), .heap = gm.heap() },
+            .{ .device = cpu.reference(), .node_allocator = gm.heap() },
         );
         defer a.deinit();
 

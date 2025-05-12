@@ -73,7 +73,7 @@ pub fn LinearLayer(comptime T: type) type {
             const weights = try Tensor.random(&.{ out_features, in_features }, .{ .kaiming = in_features }, .{
                 .requires_grad = true,
                 .device = device,
-                .heap = gm.heap(),
+                .node_allocator = gm.heap(),
                 .label = "linear_weights",
                 .acquired = true,
             });
@@ -82,7 +82,7 @@ pub fn LinearLayer(comptime T: type) type {
             const bias = try Tensor.zeros(&.{out_features}, .{
                 .requires_grad = true,
                 .device = device,
-                .heap = gm.heap(),
+                .node_allocator = gm.heap(),
                 .label = "linear_bias",
                 .acquired = true,
             });
@@ -124,7 +124,7 @@ pub fn ReLULayer(comptime T: type) type {
                 .data = y,
                 .children = &.{x},
                 .device = x.device,
-                .heap = x._heap,
+                .node_allocator = x._node_allocator,
                 .callback = .{},
                 .label = "relu_out",
             });
@@ -158,7 +158,7 @@ pub fn FlattenLayer(comptime T: type) type {
                 .label = "flattened",
                 .callback = .{},
                 .device = input.device,
-                .heap = input._heap,
+                .node_allocator = input._node_allocator,
             });
             result.data._reshape(&.{ batch_dim, flattened_dim });
             return result;

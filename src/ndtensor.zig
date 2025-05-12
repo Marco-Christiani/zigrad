@@ -42,7 +42,7 @@ pub fn NDTensor(comptime T: type) type {
         op: ?Op = null,
         /// Interface for creating nodes components such as
         /// tensors and backward contexts.
-        _heap: GraphManager.NodeHeap,
+        _node_allocator: GraphManager.NodeAllocator,
         /// Bitset for tensor flags (see ndtensor/utils.zig)
         _flags: TensorFlags,
         /// Opaque object that acts like a closure for
@@ -59,11 +59,11 @@ pub fn NDTensor(comptime T: type) type {
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
         pub fn empty(shape: []const usize, config: TensorConfig) !*Self {
-            const self = try config.heap.create_node(Self, .leaf);
-            errdefer config.heap.destroy_node(self, .leaf);
+            const self = try config.node_allocator.create_node(Self, .leaf);
+            errdefer config.node_allocator.destroy_node(self, .leaf);
             self.* = Self{
                 .data = try DataType.empty(shape, config.device),
-                ._heap = config.heap,
+                ._node_allocator = config.node_allocator,
                 .device = config.device,
                 .label = utils.as_label(config.label),
                 ._flags = TensorFlags.init(
@@ -241,8 +241,18 @@ pub fn NDTensor(comptime T: type) type {
         pub fn set_label(self: *Self, new_label: []const u8) void {
             self.label = utils.as_label(new_label);
         }
-        // interesting opportunity for dynamic behavior where this could be run on an instance, making self an default dep of result
-        // without overloading it would have to be type introspection, I question the utility it seems like a convenience.
+
+        pub fn CreateDependentOpts(BwdCallback: type) type {
+            return struct {
+                data: DataType,
+                children: []const *Self,
+                callback: BwdCallback,
+                device: DeviceReference,
+                node_allocator: GraphManager.NodeAllocator,
+                label: ?[]const u8 = null,
+                op: ?Op = null,
+            };
+        }
 
         /// Data is not copied. Child slice is allocated. Label is copied. Grad may be initialized as zeros. COM.
         ///
@@ -261,26 +271,18 @@ pub fn NDTensor(comptime T: type) type {
         ///      for mutable `grad` pointer, so the caller can move the reference (Warning: this pattern is a red flag).
         ///   4. Should this respect the global `grad_enabled` flag and override the flag parameter? Tbd.
         ///      UPDATE: Changed my mind, overrides.
-        pub fn create_dependent(BwdCallback: type, config: struct {
-            data: DataType,
-            children: []const *Self,
-            callback: BwdCallback,
-            device: DeviceReference,
-            heap: GraphManager.NodeHeap,
-            label: ?[]const u8 = null,
-            op: ?Op = null,
-        }) !*Self {
-            const rg: bool = for (config.children) |child| {
+        pub fn create_dependent(BwdCallback: type, opts: CreateDependentOpts(BwdCallback)) !*Self {
+            const rg: bool = for (opts.children) |child| {
                 if (child.requires_grad()) break true;
             } else false;
 
-            const self = try config.heap.create_node(Self, .internal);
+            const self = try opts.node_allocator.create_node(Self, .internal);
             self.* = Self{
-                .data = config.data,
-                .device = config.device,
-                .label = utils.as_label(config.label),
-                .op = config.op,
-                ._heap = config.heap,
+                .data = opts.data,
+                .device = opts.device,
+                .label = utils.as_label(opts.label),
+                .op = opts.op,
+                ._node_allocator = opts.node_allocator,
                 ._flags = TensorFlags.init(
                     .internal,
                     .{
@@ -292,10 +294,10 @@ pub fn NDTensor(comptime T: type) type {
                 ),
                 ._backward_ctx = if (rg) try BackwardsContext.init(
                     BwdCallback,
-                    config.callback,
-                    config.heap.allocator,
+                    opts.callback,
+                    opts.node_allocator.allocator,
                     .{
-                        .children = config.children,
+                        .children = opts.children,
                         .persist = false,
                     },
                 ) else null,
@@ -316,14 +318,14 @@ pub fn NDTensor(comptime T: type) type {
                 const ctx = try BackwardsContext.init(
                     BwdCallback,
                     opts.callback,
-                    self._heap.allocator,
+                    self._node_allocator.allocator,
                     .{
                         .children = opts.children,
                         .persist = false,
                     },
                 );
                 if (self._backward_ctx) |*_ctx| {
-                    try _ctx.prepend(ctx, self._heap.allocator);
+                    try _ctx.prepend(ctx, self._node_allocator.allocator);
                 } else {
                     self._backward_ctx = ctx;
                 }
@@ -334,34 +336,28 @@ pub fn NDTensor(comptime T: type) type {
                 // setup an extremely odd situation (with more than 256 inplace
                 // ops on a single tensor) that would cause a false pass,
                 // but I don't see the need to address such edge cases.
+                // While this only checked in debug mode, its free to track so the
+                //   user (or we) can verify the graph once or as-needed if desired.
                 self._version +%= 1;
             }
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.acquired())
-                std.debug.panic("Attempt to deinit an acquired tensor.", .{});
+            if (self.acquired()) @panic("Attempt to deinit an acquired tensor.");
 
             self.clear();
-
-            self._heap.destroy_node(self, self.node_type());
+            self._node_allocator.destroy_node(self, self.node_type());
         }
 
         pub fn clear(self: *Self) void {
-            if (self._flags.get(.cleared))
-                return;
-
-            self._flags.set(.cleared, true);
+            if (self._flags.get(.cleared)) return;
 
             self.data.deinit(self.device);
+            self._flags.set(.cleared, true);
 
-            if (self.grad) |*g| {
-                g.deinit(self.device);
-            }
-            if (self._backward_ctx) |*ctx| {
-                ctx.deinit(self._heap.allocator);
-                self._backward_ctx = null;
-            }
+            if (self.grad) |*g| g.deinit(self.device);
+            if (self._backward_ctx) |*ctx| ctx.deinit(self._node_allocator.allocator);
+            self._backward_ctx = null;
         }
 
         fn to_device_impl(
@@ -422,7 +418,7 @@ pub fn NDTensor(comptime T: type) type {
                 },
                 .children = &.{self},
                 .device = device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .TRANSFER,
             });
@@ -440,12 +436,12 @@ pub fn NDTensor(comptime T: type) type {
         ///   - The choice to have an allocator provided is important, intended to be used for backward
         ///   - If the tensor backing `DataType` changes its allocator ownership contract, then this needs to be changed
         pub fn clone(self: *const Self) !*Self {
-            const result = try self._heap.create_node(Self, self.node_type());
+            const result = try self._node_allocator.create_node(Self, self.node_type());
             result.* = Self{
                 .data = try self.data.copy(self.device),
                 .grad = if (self.grad) |g| try g.copy(self.device) else null,
                 .device = self.device,
-                ._heap = self._heap,
+                ._node_allocator = self._node_allocator,
                 ._flags = TensorFlags.init(
                     self.node_type(),
                     .{
@@ -492,7 +488,7 @@ pub fn NDTensor(comptime T: type) type {
                     .view = false,
                 },
                 .children = &.{self},
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .device = self.device,
                 .callback = .{},
                 .op = .RESHAPE,
@@ -518,7 +514,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.transpose(self.device),
                 .children = &.{self},
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .context = .{},
                 .op = .TRANSPOSE,
             });
@@ -652,7 +648,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.clamp(vmin, vmax, self.device),
                 .children = &.{self},
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{ ._min = vmin, ._max = vmax },
                 .op = .CLAMP,
             });
@@ -669,7 +665,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.add_scalar(s, self.device),
                 .children = &.{self},
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .ADD,
             });
@@ -700,7 +696,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.add(other.data, self.device),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .ADD,
             });
@@ -749,7 +745,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.sub(other.data, self.device),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .SUB,
             });
@@ -786,7 +782,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.mul(other.data, self.device),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .MUL,
             });
@@ -829,7 +825,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.div(other.data, self.device),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .DIV,
             });
@@ -853,7 +849,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.max(self.device),
                 .children = &.{self},
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .MAX,
             });
@@ -876,7 +872,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.exp(self.device),
                 .children = &.{self},
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .EXP,
             });
@@ -899,7 +895,7 @@ pub fn NDTensor(comptime T: type) type {
                 }),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = Op.matmul_tag(config.trans_a, config.trans_b),
             });
@@ -922,7 +918,7 @@ pub fn NDTensor(comptime T: type) type {
                 }),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = Op.matmul_tag(config.trans_a, config.trans_b),
             });
@@ -941,7 +937,7 @@ pub fn NDTensor(comptime T: type) type {
                 .grad = out.grad,
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = Op.matmul_tag(config.trans_a, config.trans_b),
             });
@@ -1022,7 +1018,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.dot(other.data, self.device),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .DOT,
             });
@@ -1123,7 +1119,7 @@ pub fn NDTensor(comptime T: type) type {
                 }),
                 .children = &.{ self, other },
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{ ._trans_a = config.trans_a },
                 .op = .MATVEC,
             });
@@ -1142,7 +1138,7 @@ pub fn NDTensor(comptime T: type) type {
                 .data = try self.data.sum(self.device),
                 .children = &.{self},
                 .device = self.device,
-                .heap = self._heap,
+                .node_allocator = self._node_allocator,
                 .callback = .{},
                 .op = .SUM,
             });
@@ -1242,7 +1238,7 @@ pub fn NDTensor(comptime T: type) type {
                         Op.MATMUL_ABt,
                         Op.MATMUL_AtBt,
                         => break :blk ": AB",
-                        else => std.debug.panic("Unsupported op {?}\n", .{self.op}),
+                        else => @panic("Unsupported op " ++ @tagName(self.op)),
                     }
                 };
                 std.debug.print("{?s}\n", .{symbol});
@@ -1267,7 +1263,7 @@ test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
 
     const x = try Tensor.from_slice(&.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     });
     defer x.deinit();
@@ -1300,7 +1296,7 @@ test "tensor/GraphManager/sum" {
     const input = try Tensor.from_slice(&.{ 1, 2, 3, 4 }, &.{4}, .{
         .requires_grad = true,
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
     });
     defer input.deinit();
 
@@ -1324,7 +1320,7 @@ test "tensor/NDTensor index, add, div" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1414,7 +1410,7 @@ test "tensor/GraphManager/addback" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1443,7 +1439,7 @@ test "tensor/GraphManager/mulback" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1474,7 +1470,7 @@ test "tensor/GraphManager/moreback" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1532,7 +1528,7 @@ test "tensor/GraphManager/divback" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1565,7 +1561,7 @@ test "tensor/GraphManager/matmul_backward square" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1635,7 +1631,7 @@ test "tensor/GraphManager/matmul_backward non-square" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1723,7 +1719,7 @@ test "tensor/GraphManager/matmul_backward" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1793,7 +1789,7 @@ test "tensor/GraphManager/matvec_backward" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1828,7 +1824,7 @@ test "tensor/GraphManager/dot_backward" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1859,7 +1855,7 @@ test "tensor/inplace_add" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 

@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const zg = @import("zigrad.zig");
+
 const debug: bool = (builtin.mode == .Debug);
 
 //////////////////////////////////////
@@ -65,9 +67,8 @@ const ClosurePointer = struct {
 pub fn BackwardChildren(ChildType: type) type {
     return struct {
         const Self = @This();
-        pub const Slice = []ChildType;
         pub const ChildIterator = struct {};
-        pub const capacity: u64 = 8;
+        pub const capacity: u64 = zg.settings.backward_children_capacity;
         buffer: [capacity]ChildType = undefined,
         versions: if (debug) [capacity]u8 else void = undefined,
         len: usize = 0,
@@ -78,11 +79,8 @@ pub fn BackwardChildren(ChildType: type) type {
             self.len = children.len;
             @memcpy(self.buffer[0..self.len], children);
             if (comptime debug) {
-                for (children, 0..) |child, i| {
-                    self.versions[i] = child._version;
-                }
+                for (children, 0..) |child, i| self.versions[i] = child._version;
             }
-
             return self;
         }
 
@@ -104,10 +102,7 @@ pub fn BackwardChildren(ChildType: type) type {
         }
 
         pub fn get_bwd(self: *const Self, i: usize) ?ChildType {
-            return if (self.get(i).requires_grad())
-                self.buffer[i]
-            else
-                null;
+            return if (self.get(i).requires_grad()) self.buffer[i] else null;
         }
 
         /// Remove all elements from the slice.
@@ -116,17 +111,17 @@ pub fn BackwardChildren(ChildType: type) type {
         }
     };
 }
+
 pub fn Iterator(ContextType: type) type {
     return struct {
         const Self = @This();
         node: ?*ContextType,
 
         pub fn next(self: *Self) ?*ContextType {
-            if (self.node) |node| {
-                defer self.node = node.next;
-                return node;
-            }
-            return null;
+            defer if (self.node) |node| {
+                self.node = node.next;
+            };
+            return self.node;
         }
     };
 }

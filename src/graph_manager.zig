@@ -27,18 +27,25 @@ const NodeMeta = struct {
 };
 
 /// Sharable graph heap interface for tensors.
-pub const NodeHeap = struct {
+///
+/// # ADR
+///
+/// - This abstraction allows us to separately manage leaf and internal tensor shells
+///    when building computation graphs.
+/// - Leaves and internal nodes have different lifetimes.
+pub const NodeAllocator = struct {
+    const Self = @This();
     allocator: std.mem.Allocator,
     /// arena for all temporary nodes created by ops
     internal_node_arena: *ArenaUnmanaged,
 
-    pub fn create_node(self: NodeHeap, Tensor: type, node_type: NodeType) !*Tensor {
+    pub fn create_node(self: Self, Tensor: type, node_type: NodeType) !*Tensor {
         return switch (node_type) {
             .leaf => self.allocator.create(Tensor),
             .internal => self.internal_node_arena.create(self.allocator, Tensor),
         };
     }
-    pub fn destroy_node(self: NodeHeap, node: anytype, node_type: NodeType) void {
+    pub fn destroy_node(self: Self, node: anytype, node_type: NodeType) void {
         return switch (node_type) {
             .leaf => self.allocator.destroy(node),
             .internal => {
@@ -70,7 +77,7 @@ pub fn init(allocator: std.mem.Allocator, config: struct {
 }
 
 /// Create a heap interface for op-graph building
-pub fn heap(self: *GraphManager) NodeHeap {
+pub fn heap(self: *GraphManager) NodeAllocator {
     return .{
         .allocator = self.allocator,
         .internal_node_arena = &self.internal_node_arena,
@@ -196,7 +203,7 @@ test "GraphManager eager teardown reuse 1" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -249,7 +256,7 @@ test "GraphManager eager teardown reuse 2" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -299,7 +306,7 @@ test "GraphManager x*x" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -335,7 +342,7 @@ test "GraphManager subgraphs/detach" {
 
     const config: TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 

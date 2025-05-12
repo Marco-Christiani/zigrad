@@ -1,21 +1,22 @@
 const std = @import("std");
 const GraphManager = @import("../graph_manager.zig");
 const NodeType = GraphManager.NodeType;
-const NodeHeap = GraphManager.NodeHeap;
-const DeviceReference = @import("../zigrad.zig").DeviceReference;
+const NodeAllocator = GraphManager.NodeAllocator;
+const zg = @import("../zigrad.zig");
+const DeviceReference = zg.DeviceReference;
 
-const LABEL_SIZE: usize = 32;
+const LABEL_SIZE: usize = zg.settings.label_capacity;
 pub const Label = std.BoundedArray(u8, LABEL_SIZE);
 
 pub fn as_label(slice: ?[]const u8) Label {
     const l = slice orelse return .{};
-    return Label.fromSlice(l) catch @panic("Label size is too large - max 32 characters");
+    return Label.fromSlice(l) catch @panic(std.fmt.comptimePrint("Label size is too large - max {d} characters", .{LABEL_SIZE}));
 }
 
 /// User facing config
 pub const TensorConfig = struct {
     device: DeviceReference,
-    heap: NodeHeap,
+    node_allocator: NodeAllocator,
     requires_grad: bool = false,
     acquired: bool = false,
     attached: bool = true,

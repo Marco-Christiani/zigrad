@@ -29,7 +29,7 @@ pub fn relu(T: type, x: *NDTensor(T)) !void {
         .data = y,
         .children = &.{x},
         .device = x.device,
-        .heap = x._heap,
+        .node_allocator = x._node_allocator,
         .callback = .{},
     });
 }
@@ -101,7 +101,7 @@ pub fn tanh(T: type, x: *NDTensor(T)) !void {
         .data = y,
         .children = &.{x},
         .device = x.device,
-        .heap = x._heap,
+        .node_allocator = x._node_allocator,
         .callback = .{},
     });
 }
@@ -158,7 +158,7 @@ pub fn sigm(T: type, x: *NDTensor(T)) !void {
         .data = y,
         .children = &.{x},
         .device = x.device,
-        .heap = x._heap,
+        .node_allocator = x._node_allocator,
         .callback = .{},
     });
 }

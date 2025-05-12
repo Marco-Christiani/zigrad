@@ -58,7 +58,7 @@ pub fn SGD(comptime T: type) type {
 
         pub fn attach(self: *Self, param: *Tensor) !void {
             std.debug.assert(param._backward_ctx == null);
-            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, param._heap.allocator, .{
+            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, param._node_allocator.allocator, .{
                 .persist = true,
             });
         }

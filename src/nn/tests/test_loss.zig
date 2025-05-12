@@ -41,7 +41,7 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
 
     const config: zg.TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -108,7 +108,7 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
 
     const config: zg.TensorConfig = .{
         .device = cpu.reference(),
-        .heap = gm.heap(),
+        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 

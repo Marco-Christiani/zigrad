@@ -46,6 +46,8 @@ pub const Settings = struct {
     grad_clip_delta: f32 = 1e-6,
     grad_clip_enabled: bool = true,
     seed: u64 = 81761,
+    backward_children_capacity: usize = 8,
+    label_capacity: usize = 32,
 };
 
 /// Global flag for enabling/disabling gradient tracking.

@@ -83,7 +83,7 @@ const Decoder = struct {
         const wgts_config: zg.TensorConfig = .{
             .requires_grad = config.requires_grad,
             .device = device,
-            .heap = graph.heap(),
+            .node_allocator = graph.heap(),
             .acquired = true,
         };
         return .{
@@ -196,7 +196,7 @@ const Gru = struct {
         const wgts_config: zg.TensorConfig = .{
             .requires_grad = config.requires_grad,
             .device = device,
-            .heap = graph.heap(),
+            .node_allocator = graph.heap(),
             .acquired = true,
         };
         return .{
@@ -369,7 +369,7 @@ pub fn train_seq_to_seq(
             // we're going to score the total loss for the entire sequence
             const total_loss = try Gru.Tensor.zeros(&.{1}, .{
                 .requires_grad = true,
-                .heap = graph.heap(),
+                .node_allocator = graph.heap(),
                 .device = device,
             });
             defer total_loss.deinit();
@@ -443,7 +443,7 @@ pub fn Samples(comptime n: usize) type {
             for (0..n) |i| {
                 self.buffer[i] = try Gru.Tensor.zeros(&.{len}, .{
                     .requires_grad = false,
-                    .heap = graph.heap(),
+                    .node_allocator = graph.heap(),
                     .device = device,
                     .acquired = true,
                 });
