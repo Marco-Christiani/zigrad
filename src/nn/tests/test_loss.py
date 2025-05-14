@@ -1,4 +1,4 @@
-import pathlib
+from pathlib import Path
 from typing import cast
 import torch
 import torch.nn as nn
@@ -39,7 +39,7 @@ def _smooth_l1(input_tensor, target_tensor, beta):
     }
 
 
-def generate_smce_tests(output_dir: pathlib.Path) -> None:
+def generate_smce_tests(output_dir: Path) -> None:
     test_cases = {
         "softmax_crossentropy_1d": _smce(
             torch.tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True),
@@ -61,4 +61,6 @@ def generate_smce_tests(output_dir: pathlib.Path) -> None:
 
 
 if __name__ == "__main__":
-    generate_smce_tests(pathlib.Path("/tmp"))
+    data_dir = Path("/tmp/zg_data")
+    data_dir.mkdir(exist_ok=True)
+    generate_smce_tests(data_dir)

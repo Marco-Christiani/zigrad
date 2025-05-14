@@ -85,7 +85,7 @@ test "softmax_cross_entropy_loss" {
     // const allocator = std.testing.allocator;
     var json_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer json_arena.deinit();
-    const file = std.fs.openFileAbsolute("/tmp/loss_test_cases.json", .{}) catch |e| {
+    const file = std.fs.openFileAbsolute("/tmp/zg_data/loss_test_cases.json", .{}) catch |e| {
         std.log.warn("{s} error opening test file. Skipping `smce` test.", .{@errorName(e)});
         return;
     };
@@ -140,7 +140,7 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
 test "smooth_l1_loss" {
     var json_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer json_arena.deinit();
-    const file = std.fs.openFileAbsolute("/tmp/loss_test_cases.json", .{}) catch |e| {
+    const file = std.fs.openFileAbsolute("/tmp/zg_data/loss_test_cases.json", .{}) catch |e| {
         std.log.warn("{s} error opening test file. Skipping smooth L1 loss test.", .{@errorName(e)});
         return;
     };

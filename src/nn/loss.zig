@@ -21,17 +21,15 @@ pub fn nll(T: type, comptime config: NLLConfig) NLLType(T, config) {
 pub const NLLConfig = struct {
     // dimensions of input tensor
     dimensions: usize,
-    // nll expecting logits - if true,
-    // softmax will be used on input
+    // nll expecting logits - if true, softmax will be used on input
     input_logits: bool,
-    // specifies that the target type
-    // will be provided as an index
+    // specifies that the target type will be provided as an index
     target_type: enum { indices, encoding },
     // specifies the reduce type used
     reduce_type: ReduceType,
 };
 
-// negative log likelihood
+/// `NLLIndex` type from config
 pub fn NLLType(T: type, comptime config: NLLConfig) type {
     return if (config.target_type == .indices) NLLIndex(T, config) else @compileError("Unimplemented");
 }
@@ -87,30 +85,7 @@ fn NLLIndex(T: type, comptime config: NLLConfig) type {
     };
 }
 
-/// Relies on autograd, operates on the flat data.
-pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    var diff = try y_pred.sub(y);
-    try diff.set_label("diff");
-
-    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.slice(), true, device);
-    try diff2.set_label("diff2");
-    // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
-    const sq_diff = try diff.mul(diff2);
-    try sq_diff.set_label("sq_diff");
-
-    const sum_sq_diff = try sq_diff.sum();
-    try sum_sq_diff.set_label("sum_sq_diff");
-
-    const coef = @as(T, @floatFromInt(y.get_size()));
-    const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
-    try coef_tensor.set_label("coef");
-
-    const out = try sum_sq_diff.div(coef_tensor);
-    try out.set_label("mse");
-
-    return out;
-}
-
+/// Direct Mean Squared Error loss.
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
@@ -183,14 +158,6 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         .node_allocator = y_pred._node_allocator,
         .callback = .{ .sm_preds = sm_preds },
     });
-}
-
-/// Relies on autograd, operates on the flat data.
-pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
-    const max_val = try input.max();
-    const exp_input = try (try input.sub(max_val)).exp();
-    const sum = try exp_input.sum();
-    return try exp_input.div(sum);
 }
 
 // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
@@ -322,9 +289,40 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
         .device = y_pred.device,
     });
 }
-// TODO: move this since refactor this file was renamed to loss.zig
-// pub fn gather(T: type, input: *const NDTensor(T), indices: *const NDTensor(usize), dim: usize, device: DeviceReference) !*NDTensor(T)
 
+/// Naive softmax 1D that uses on autograd.
+pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
+    const max_val = try input.max();
+    const exp_input = try (try input.sub(max_val)).exp();
+    const sum = try exp_input.sum();
+    return try exp_input.div(sum);
+}
+
+/// Naive Mean Squared Error 1D loss that uses on autograd.
+pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+    var diff = try y_pred.sub(y);
+    try diff.set_label("diff");
+
+    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.slice(), true, device);
+    try diff2.set_label("diff2");
+    // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
+    const sq_diff = try diff.mul(diff2);
+    try sq_diff.set_label("sq_diff");
+
+    const sum_sq_diff = try sq_diff.sum();
+    try sum_sq_diff.set_label("sum_sq_diff");
+
+    const coef = @as(T, @floatFromInt(y.get_size()));
+    const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
+    try coef_tensor.set_label("coef");
+
+    const out = try sum_sq_diff.div(coef_tensor);
+    try out.set_label("mse");
+
+    return out;
+}
+
+// TODO: This is outdated! This is a reminder to write add an example to the docs (and some comments may be useful).
 // Documented outline for adding new custom operations
 // pub fn myop(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
 //     // implement forward... (could be a separate function)

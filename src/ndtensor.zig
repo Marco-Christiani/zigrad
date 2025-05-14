@@ -1210,16 +1210,14 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn backward(self: *Self) !void {
             std.debug.assert(zg.rt_grad_enabled);
-            // TODO: In the future, make sure this works with
-            // quantization. The 1 element is a tensor's gradient
+            // TODO: In the future, make sure this works with quantization. The 1 element is a tensor's gradient
             // with respect to itself.
             _ = try self.ensure_grad(1);
-            if (self._backward_ctx) |*ctx| {
-                try ctx.call(self);
-            }
+            if (self._backward_ctx) |*ctx| try ctx.call(self);
         }
 
-        /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes
+        /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes (non-standard layout)
+        /// Prints to stderr using `std.debug.print` for alternatives see `print_to_writer`
         pub fn print_arrows(self: *Self) void {
             var children = self.child_iterator() orelse return;
             while (children.next()) |elem| {
@@ -1244,9 +1242,7 @@ pub fn NDTensor(comptime T: type) type {
                 std.debug.print("{?s}\n", .{symbol});
             }
             var next_children = self.child_iterator() orelse return;
-            while (next_children.next()) |elem| {
-                elem.print_arrows();
-            }
+            while (next_children.next()) |elem| elem.print_arrows();
         }
     };
 }

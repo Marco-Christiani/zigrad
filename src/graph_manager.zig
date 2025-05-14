@@ -9,9 +9,8 @@ const GraphManager = @This();
 
 pub const NodeType = enum { leaf, internal };
 
-/// Manages the overall graph, allows for a more memory efficient abstraction
-/// where the data structures used for traversing the graph during backprop
-/// can be managed independently and reused across training steps
+/// Manages the overall graph, allows for a more memory efficient abstraction where the data structures used for
+/// traversing the graph during backprop can be managed independently and reused across training steps
 const NodeMeta = struct {
     pending: u32,
     visited: bool,
@@ -30,8 +29,7 @@ const NodeMeta = struct {
 ///
 /// # ADR
 ///
-/// - This abstraction allows us to separately manage leaf and internal tensor shells
-///    when building computation graphs.
+/// - This abstraction allows us to separately manage leaf and internal tensor shells when building computation graphs.
 /// - Leaves and internal nodes have different lifetimes.
 pub const NodeAllocator = struct {
     const Self = @This();
@@ -49,9 +47,8 @@ pub const NodeAllocator = struct {
         return switch (node_type) {
             .leaf => self.allocator.destroy(node),
             .internal => {
-                // internal nodes are kept in the arena and are not
-                // freed individually. Use reset to clear internal
-                // graph nodes.
+                // Internal nodes are kept in the arena and are not freed individually.
+                // Use reset to clear internal graph nodes.
             },
         };
     }
@@ -98,11 +95,8 @@ pub fn create_node(self: *GraphManager, Tensor: type, node_type: NodeType) !*Ten
     };
 }
 
-/// Clears and retains memory - can be called
-/// in the case of a failed forward operation to
-/// destroy the computation graph. Using computed
-/// nodes that belong to this graph after calling
-/// reset is undefined behavior.
+/// Clears and retains memory - can be called in the case of a failed forward operation to destroy the computation
+/// graph. Using computed nodes that belong to this graph after calling reset is undefined behavior.
 pub fn reset(self: *GraphManager) void {
     self.sorted_nodes.clearRetainingCapacity();
     self.backward_node_stack.clearRetainingCapacity();
@@ -139,8 +133,7 @@ pub fn backward(self: *GraphManager, root: anytype) !void {
     const Tensor = @TypeOf(root);
     const rtti_id = type_id(Tensor);
 
-    // do not reset the arena - that contains the graph
-    // that we are currently attempting to reverse over
+    // do not reset the arena - that contains the graph that we are currently attempting to reverse over
     self.sorted_nodes.clearRetainingCapacity();
     self.backward_node_stack.clearRetainingCapacity();
 
@@ -150,11 +143,8 @@ pub fn backward(self: *GraphManager, root: anytype) !void {
     outer: while (self.backward_node_stack.pop()) |opaque_parent| {
         const parent: Tensor = @ptrCast(@alignCast(opaque_parent));
 
-        defer if (!parent.acquired() and self.eager_teardown)
-            parent.deinit();
-
-        if (!parent.requires_grad())
-            continue :outer;
+        defer if (!parent.acquired() and self.eager_teardown) parent.deinit();
+        if (!parent.requires_grad()) continue :outer;
 
         try parent.backward();
 
@@ -164,8 +154,7 @@ pub fn backward(self: *GraphManager, root: anytype) !void {
             const meta = self.sorted_nodes.getPtr(child) orelse continue :inner;
 
             if (comptime debug) {
-                // enforce heterogenous tensors until
-                // we support backwards graphs.
+                // enforce homogeneous tensors until we support backwards graphs.
                 std.debug.assert(meta.rtti_id == rtti_id);
             }
 
@@ -382,19 +371,19 @@ test "GraphManager subgraphs/detach" {
     //          e
 
     try gm.backward(e);
-    // gradients should be collected by all
-    // children that require a gradient
+
+    // gradients should be collected by all children that require a gradient
     try std.testing.expect(e.grad != null);
     try std.testing.expect(d.grad != null);
     try std.testing.expect(c.grad != null);
-    // traversal should have stopped at the
-    // detached child node (c)
+
+    // traversal should have stopped at the detached child node (c)
     try std.testing.expect(a.grad == null);
     try std.testing.expect(b.grad == null);
 
     try gm.backward(c);
-    // traversal should happen to the atached
-    // children of the parent node.
+
+    // traversal should happen to the attached children of the parent node.
     try std.testing.expect(a.grad != null);
     try std.testing.expect(b.grad != null);
 }
