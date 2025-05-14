@@ -1,9 +1,9 @@
 // TODO: fused softmax-ce
 const std = @import("std");
+
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 const ReduceType = zg.ReduceType;
-
 const Shape = zg.Shape;
 const NDArray = zg.NDArray;
 const settings = zg.settings;
@@ -21,17 +21,15 @@ pub fn nll(T: type, comptime config: NLLConfig) NLLType(T, config) {
 pub const NLLConfig = struct {
     // dimensions of input tensor
     dimensions: usize,
-    // nll expecting logits - if true,
-    // softmax will be used on input
+    // nll expecting logits - if true, softmax will be used on input
     input_logits: bool,
-    // specifies that the target type
-    // will be provided as an index
+    // specifies that the target type will be provided as an index
     target_type: enum { indices, encoding },
     // specifies the reduce type used
     reduce_type: ReduceType,
 };
 
-// negative log likelihood
+/// `NLLIndex` type from config
 pub fn NLLType(T: type, comptime config: NLLConfig) type {
     return if (config.target_type == .indices) NLLIndex(T, config) else @compileError("Unimplemented");
 }
@@ -87,31 +85,8 @@ fn NLLIndex(T: type, comptime config: NLLConfig) type {
     };
 }
 
-/// Relies on autograd, operates on the flat data.
-pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
-    var diff = try y_pred.sub(y);
-    try diff.set_label("diff");
-
-    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.slice(), true, device);
-    try diff2.set_label("diff2");
-    // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
-    const sq_diff = try diff.mul(diff2);
-    try sq_diff.set_label("sq_diff");
-
-    const sum_sq_diff = try sq_diff.sum();
-    try sum_sq_diff.set_label("sum_sq_diff");
-
-    const coef = @as(T, @floatFromInt(y.get_size()));
-    const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
-    try coef_tensor.set_label("coef");
-
-    const out = try sum_sq_diff.div(coef_tensor);
-    try out.set_label("mse");
-
-    return out;
-}
-
-pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+/// Direct Mean Squared Error loss.
+pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -120,30 +95,27 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceRe
     }
     const mse = sum_sq_diff / n;
 
-    const bw_fn = struct {
-        fn backward(tensor: *const NDTensor(T), _: DeviceReference) !void {
-            const self_children = tensor.get_children() orelse return error.NoChildren;
-            const _y_pred = self_children[0];
-            const _y = self_children[1];
+    const MseBwd = struct {
+        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children) !void {
+            const _y_pred = children.get_bwd(0) orelse return;
+            const _y = children.get(1);
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
             const scale = @as(T, 2) / _n;
 
-            if (_y_pred.grad) |grad| {
-                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
-                    grad_val.* += scale * (pred_val - target_val);
-                }
+            for (try _y_pred.ensure_grad_data(0), _y_pred.get_data(), _y.get_data()) |*grad_val, pred_val, target_val| {
+                grad_val.* += scale * (pred_val - target_val);
             }
         }
-    }.backward;
+    };
 
-    return try NDTensor(T).create_dependent(.{
-        .data = try NDArray(T).init(&.{mse}, &.{1}, device),
+    return try NDTensor(T).create_dependent(MseBwd, .{
+        .data = try NDArray(T).init(&.{mse}, &.{1}, y_pred.device),
         .children = &.{ y_pred, y },
         .label = "mse",
-        .requires_gradient = true,
-        .device = device,
-        ._backward = bw_fn,
+        .device = y_pred.device,
+        .node_allocator = y_pred._node_allocator,
+        .callback = .{},
     });
 }
 
@@ -165,11 +137,11 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
 
     const CceBwd = struct {
         sm_preds: *NDTensor(T),
-        pub fn callback(loss: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
+        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
             defer ctx.sm_preds.deinit();
             const preds = children.get_bwd(0) orelse return;
             const label = children.get(1);
-            const bw_batch_size = if (preds.data.shape.len > 1) loss.data.shape.get(0) else 1;
+            const bw_batch_size = if (preds.data.shape.len > 1) preds.data.shape.get(0) else 1;
 
             for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
                 bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
@@ -183,16 +155,9 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         .children = &.{ y_pred, y },
         .label = "cross_entropy",
         .device = y_pred.device,
+        .node_allocator = y_pred._node_allocator,
         .callback = .{ .sm_preds = sm_preds },
     });
-}
-
-/// Relies on autograd, operates on the flat data.
-pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
-    const max_val = try input.max();
-    const exp_input = try (try input.sub(max_val)).exp();
-    const sum = try exp_input.sum();
-    return try exp_input.div(sum);
 }
 
 // There are a few ways to do this. Could SIMD sum outside the loop with an NDArray method, but accum seems like a solid idea rn.
@@ -208,40 +173,31 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
     var result = try input.clone();
     errdefer result.deinit();
 
-    // TODO: use shape methods, or prod.
-    var strides = try input.device.allocator.alloc(usize, shape.len);
-    defer input.device.allocator.free(strides);
-    var stride: usize = 1;
-    var i: usize = shape.len;
-    while (i > 0) {
-        i -= 1;
-        strides[i] = stride;
-        stride *= shape[i];
-    }
+    const strides = input.data.shape.strides();
 
     // calc softmax
     var outer_idx: usize = 0;
     while (outer_idx < outer_size) : (outer_idx += 1) {
-        const base_idx = (outer_idx / strides[dim]) * (strides[dim] * dim_size) + (outer_idx % strides[dim]);
+        const base_idx = (outer_idx / strides.get(dim)) * (strides.get(dim) * dim_size) + (outer_idx % strides.get(dim));
 
         //  max over slice
         var max_val = result.data.data[base_idx];
         for (1..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             max_val = @max(max_val, result.data.data[idx]);
         }
 
         // log-sum-exp
         var sum_exp: T = 0;
         for (0..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             sum_exp += @exp(result.data.data[idx] - max_val);
         }
         const log_sum_exp = max_val + @log(sum_exp);
 
         // normalize
         for (0..dim_size) |j| {
-            const idx = base_idx + j * strides[dim];
+            const idx = base_idx + j * strides.get(dim);
             result.data.data[idx] = @exp(result.data.data[idx] - log_sum_exp);
         }
     }
@@ -283,11 +239,13 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
         .children = &.{input},
         .label = "softmax",
         .device = device,
+        .node_allocator = input._node_allocator,
         .callback = .{ .dim = dim },
     });
 }
 
-pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, device: DeviceReference) !*NDTensor(T) {
+pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !*NDTensor(T) {
+    std.debug.assert(y_pred.device.is_compatible(y.device));
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_loss: T = 0;
 
@@ -311,30 +269,60 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T, d
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
 
-            if (_y_pred.grad) |grad| {
-                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
-                    const diff = pred_val - target_val;
-                    if (@abs(diff) < _beta) {
-                        grad_val.* += diff / (_beta * _n);
-                    } else {
-                        grad_val.* += std.math.sign(diff) / _n;
-                    }
+            for (try _y_pred.ensure_grad_data(0), _y_pred.get_data(), _y.get_data()) |*grad_val, pred_val, target_val| {
+                const diff = pred_val - target_val;
+                if (@abs(diff) < _beta) {
+                    grad_val.* += diff / (_beta * _n);
+                } else {
+                    grad_val.* += std.math.sign(diff) / _n;
                 }
             }
         }
     };
 
     return try NDTensor(T).create_dependent(Sl1LossBwd, .{
-        .data = try NDArray(T).init(&.{loss}, &.{1}, device),
+        .data = try NDArray(T).init(&.{loss}, &.{1}, y_pred.device),
         .children = &.{ y_pred, y },
         .label = "smooth_l1",
         .callback = .{ .beta = beta },
-        .device = device,
+        .node_allocator = y_pred._node_allocator,
+        .device = y_pred.device,
     });
 }
-// TODO: move this since refactor this file was renamed to loss.zig
-// pub fn gather(T: type, input: *const NDTensor(T), indices: *const NDTensor(usize), dim: usize, device: DeviceReference) !*NDTensor(T)
 
+/// Naive softmax 1D that uses on autograd.
+pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
+    const max_val = try input.max();
+    const exp_input = try (try input.sub(max_val)).exp();
+    const sum = try exp_input.sum();
+    return try exp_input.div(sum);
+}
+
+/// Naive Mean Squared Error 1D loss that uses on autograd.
+pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
+    var diff = try y_pred.sub(y);
+    try diff.set_label("diff");
+
+    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.slice(), true, device);
+    try diff2.set_label("diff2");
+    // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
+    const sq_diff = try diff.mul(diff2);
+    try sq_diff.set_label("sq_diff");
+
+    const sum_sq_diff = try sq_diff.sum();
+    try sum_sq_diff.set_label("sum_sq_diff");
+
+    const coef = @as(T, @floatFromInt(y.get_size()));
+    const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
+    try coef_tensor.set_label("coef");
+
+    const out = try sum_sq_diff.div(coef_tensor);
+    try out.set_label("mse");
+
+    return out;
+}
+
+// TODO: This is outdated! This is a reminder to write add an example to the docs (and some comments may be useful).
 // Documented outline for adding new custom operations
 // pub fn myop(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
 //     // implement forward... (could be a separate function)

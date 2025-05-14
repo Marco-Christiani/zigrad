@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const zg = @import("zigrad.zig");
+
 const debug: bool = (builtin.mode == .Debug);
-const DeviceReference = zg.DeviceReference;
 
 //////////////////////////////////////
 //////////////////////////////////////
@@ -66,10 +67,10 @@ const ClosurePointer = struct {
 pub fn BackwardChildren(ChildType: type) type {
     return struct {
         const Self = @This();
-        pub const Slice = []ChildType;
         pub const ChildIterator = struct {};
-        pub const capacity: u64 = 8;
+        pub const capacity: u64 = zg.settings.backward_children_capacity;
         buffer: [capacity]ChildType = undefined,
+        versions: if (debug) [capacity]u8 else void = undefined,
         len: usize = 0,
 
         pub fn init(children: []const ChildType) Self {
@@ -77,19 +78,31 @@ pub fn BackwardChildren(ChildType: type) type {
             var self: Self = .{};
             self.len = children.len;
             @memcpy(self.buffer[0..self.len], children);
+            if (comptime debug) {
+                for (children, 0..) |child, i| self.versions[i] = child._version;
+            }
             return self;
         }
 
         pub fn get(self: *const Self, i: usize) ChildType {
             std.debug.assert(i < self.len);
+            if (comptime debug) {
+                const old_version = self.versions[i];
+                const new_version = self.buffer[i]._version;
+                // TODO: use @src at some point? Would be more helpful...
+                if (self.versions[i] != self.buffer[i]._version) {
+                    std.debug.panic("Version mismatch for {s}, {}->{}", .{
+                        self.buffer[i].get_label() orelse "<unknown>",
+                        old_version,
+                        new_version,
+                    });
+                }
+            }
             return self.buffer[i];
         }
 
         pub fn get_bwd(self: *const Self, i: usize) ?ChildType {
-            return if (self.get(i).requires_grad())
-                self.buffer[i]
-            else
-                null;
+            return if (self.get(i).requires_grad()) self.buffer[i] else null;
         }
 
         /// Remove all elements from the slice.
@@ -98,38 +111,17 @@ pub fn BackwardChildren(ChildType: type) type {
         }
     };
 }
+
 pub fn Iterator(ContextType: type) type {
     return struct {
         const Self = @This();
         node: ?*ContextType,
 
         pub fn next(self: *Self) ?*ContextType {
-            if (self.node) |node| {
-                defer self.node = node.next;
-                return node;
-            }
-            return null;
-        }
-    };
-}
-
-pub fn ChildIterator(ContextType: type) type {
-    return struct {
-        const Self = @This();
-        node: ?*ContextType,
-        index: usize = 0,
-
-        pub fn next(self: *Self) ?*ContextType.PrimaryType {
-            if (self.node) |node| {
-                if (self.index < node.children.len) {
-                    defer self.index += 1;
-                    return node.children.buffer[self.index];
-                }
+            defer if (self.node) |node| {
                 self.node = node.next;
-                self.index = 0;
-                return self.next();
-            }
-            return null;
+            };
+            return self.node;
         }
     };
 }
@@ -158,7 +150,7 @@ pub fn BackwardContext(primary_type: type) type {
         pub fn init(
             CtxType: type,
             context: CtxType,
-            device: DeviceReference,
+            allocator: std.mem.Allocator,
             config: struct {
                 children: ?[]const *PrimaryType = null,
                 persist: bool = false,
@@ -219,7 +211,7 @@ pub fn BackwardContext(primary_type: type) type {
                 const src = std.mem.asBytes(&context);
                 @memcpy(dst[0..arg_size], src);
             } else {
-                const ptr = try device.allocator.create(ArgType);
+                const ptr = try allocator.create(ArgType);
                 ptr.* = context;
                 tmp.storage = .{ .ptr = ClosurePointer.init(ArgType, ptr) };
             }
@@ -227,28 +219,42 @@ pub fn BackwardContext(primary_type: type) type {
             return tmp;
         }
 
-        pub fn prepend(root: *Self, new_root: Self, device: DeviceReference) !void {
-            const next_ptr = try device.allocator.create(Self);
+        pub fn prepend(root: *Self, new_root: Self, allocator: std.mem.Allocator) !void {
+            const next_ptr = try allocator.create(Self);
             next_ptr.* = root.*;
             root.* = new_root;
             root.next = next_ptr;
         }
 
-        pub fn deinit(self: *Self, device: DeviceReference) void {
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.next) |next| {
-                next.deinit(device);
-                device.allocator.destroy(next);
+                next.deinit(allocator);
+                allocator.destroy(next);
             }
-            self.release(device);
+            self.release(allocator);
         }
 
         pub fn iterator(self: *Self) Iterator(Self) {
             return .{ .node = self };
         }
 
-        pub fn child_iterator(self: *Self) ChildIterator(Self) {
-            return .{ .node = self };
-        }
+        pub const ChildIterator = struct {
+            node: ?*Self,
+            index: usize = 0,
+
+            pub fn next(self: *ChildIterator) ?*PrimaryType {
+                if (self.node) |node| {
+                    if (self.index < node.children.len) {
+                        defer self.index += 1;
+                        return node.children.buffer[self.index];
+                    }
+                    self.node = node.next;
+                    self.index = 0;
+                    return self.next();
+                }
+                return null;
+            }
+        };
 
         pub fn call(self: *Self, tensor: *PrimaryType) anyerror!void {
             var _this: ?*Self = self;
@@ -257,9 +263,9 @@ pub fn BackwardContext(primary_type: type) type {
             }
         }
 
-        pub fn release(self: *Self, device: DeviceReference) void {
+        pub fn release(self: *Self, allocator: std.mem.Allocator) void {
             if (self.storage == .ptr) {
-                self.storage.ptr.deinit(device.allocator);
+                self.storage.ptr.deinit(allocator);
             }
             self.storage = .none;
         }
