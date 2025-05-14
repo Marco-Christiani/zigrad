@@ -1,9 +1,9 @@
 // TODO: fused softmax-ce
 const std = @import("std");
+
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 const ReduceType = zg.ReduceType;
-
 const Shape = zg.Shape;
 const NDArray = zg.NDArray;
 const settings = zg.settings;
@@ -162,11 +162,11 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
 
     const CceBwd = struct {
         sm_preds: *NDTensor(T),
-        pub fn callback(loss: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
+        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
             defer ctx.sm_preds.deinit();
             const preds = children.get_bwd(0) orelse return;
             const label = children.get(1);
-            const bw_batch_size = if (preds.data.shape.len > 1) loss.data.shape.get(0) else 1;
+            const bw_batch_size = if (preds.data.shape.len > 1) preds.data.shape.get(0) else 1;
 
             for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
                 bw_grad_val.* += (bw_sm_val - bw_target_val) / @as(T, @floatFromInt(bw_batch_size));
@@ -302,14 +302,12 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
 
-            if (_y_pred.grad) |grad| {
-                for (grad.data, _y_pred.data.data, _y.data.data) |*grad_val, pred_val, target_val| {
-                    const diff = pred_val - target_val;
-                    if (@abs(diff) < _beta) {
-                        grad_val.* += diff / (_beta * _n);
-                    } else {
-                        grad_val.* += std.math.sign(diff) / _n;
-                    }
+            for (try _y_pred.ensure_grad_data(0), _y_pred.get_data(), _y.get_data()) |*grad_val, pred_val, target_val| {
+                const diff = pred_val - target_val;
+                if (@abs(diff) < _beta) {
+                    grad_val.* += diff / (_beta * _n);
+                } else {
+                    grad_val.* += std.math.sign(diff) / _n;
                 }
             }
         }
