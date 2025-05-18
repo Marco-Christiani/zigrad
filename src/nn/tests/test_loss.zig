@@ -58,7 +58,7 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
     const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target);
     defer loss.deinit();
 
-    try graph.backward(loss);
+    try loss.backward();
 
     std.log.info("loss: {d}\n", .{loss.data.data});
     std.log.info("expected: {d}\n", .{case.loss});
@@ -124,7 +124,7 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta);
     defer loss.deinit();
 
-    try graph.backward(loss);
+    try loss.backward();
 
     std.log.info("Calculated loss: {d}n", .{loss.data.data[0]});
     std.log.info("Expected loss: {d}", .{case.loss});

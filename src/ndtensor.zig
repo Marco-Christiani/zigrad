@@ -134,6 +134,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn backward(self: *Self) !void {
             std.debug.assert(zg.rt_grad_enabled);
             const graph = self.node.gb.promote();
+            _ = try self.ensure_grad(1);
             try graph.backward(&self.node);
         }
 
@@ -1222,7 +1223,7 @@ test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
 
     std.debug.assert(!y.node.is_leaf());
 
-    try graph.backward(y);
+    try y.backward();
 
     const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
     const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
@@ -1251,7 +1252,7 @@ test "tensor/Graph/sum" {
 
     if (!zg.rt_grad_enabled) return error.GradNotEnabled;
 
-    try graph.backward(sum_result);
+    try sum_result.backward();
 
     try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, input.assume_grad_data());
 }
@@ -1372,7 +1373,7 @@ test "tensor/Graph/addback" {
     var t3 = try t1.add(t2);
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
     try std.testing.expectEqualDeep(&[_]f32{1.0}, t1.assume_grad_data());
     try std.testing.expectEqualDeep(&[_]f32{1.0}, t2.assume_grad_data());
 }
@@ -1402,7 +1403,7 @@ test "tensor/Graph/mulback" {
     const t3 = try t1.mul(t2);
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
 
     try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
     try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
@@ -1440,7 +1441,7 @@ test "tensor/Graph/moreback" {
     const h = try temp.add(b);
     defer h.deinit();
 
-    try graph.backward(h);
+    try h.backward();
 
     try std.testing.expectEqualSlices(f32, x.data.data, w.grad.?.data);
     try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, b.grad.?.data);
@@ -1460,7 +1461,7 @@ test "tensor/Graph/moreback" {
     const h2 = try temp2.add(b);
     defer h2.deinit();
 
-    try graph.backward(h2);
+    try h2.backward();
 
     try std.testing.expectEqualSlices(f32, x.data.data, w.assume_grad_data());
     try std.testing.expect(std.mem.allEqual(f32, b.assume_grad_data(), 1));
@@ -1490,7 +1491,7 @@ test "tensor/Graph/divback" {
     var t3 = try t1.div(t2);
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
 
     const expected_grad_t1 = &[_]f32{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
     const expected_grad_t2 = &[_]f32{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
@@ -1525,7 +1526,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
@@ -1537,7 +1538,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3_trans_a = try t1.bmm(t2, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
 
-    try graph.backward(t3_trans_a);
+    try t3_trans_a.backward();
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.assume_grad_data());
@@ -1549,7 +1550,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3_trans_b = try t1.bmm(t2, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
 
-    try graph.backward(t3_trans_b);
+    try t3_trans_b.backward();
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.assume_grad_data());
@@ -1561,7 +1562,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3_trans_ab = try t1.bmm(t2, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
 
-    try graph.backward(t3_trans_ab);
+    try t3_trans_ab.backward();
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.assume_grad_data());
@@ -1596,7 +1597,7 @@ test "tensor/Graph/matmul_backward non-square" {
         const t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
         defer t3.deinit();
 
-        try graph.backward(t3);
+        try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
@@ -1613,7 +1614,7 @@ test "tensor/Graph/matmul_backward non-square" {
         var t3 = try t1_case2.bmm(t2, .{ .trans_a = true, .trans_b = false });
         defer t3.deinit();
 
-        try graph.backward(t3);
+        try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case2.grad.?.data);
@@ -1629,7 +1630,7 @@ test "tensor/Graph/matmul_backward non-square" {
         var t3 = try t1.bmm(t2_case3, .{ .trans_a = false, .trans_b = true });
         defer t3.deinit();
 
-        try graph.backward(t3);
+        try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
@@ -1648,7 +1649,7 @@ test "tensor/Graph/matmul_backward non-square" {
         var t3 = try t1_case4.bmm(t2_case4, .{ .trans_a = true, .trans_b = true });
         defer t3.deinit();
 
-        try graph.backward(t3);
+        try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case4.grad.?.data);
@@ -1683,7 +1684,7 @@ test "tensor/Graph/matmul_backward" {
     var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
@@ -1695,7 +1696,7 @@ test "tensor/Graph/matmul_backward" {
     const t3_trans_a = try t1.bmm(t2, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
 
-    try graph.backward(t3_trans_a);
+    try t3_trans_a.backward();
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.assume_grad_data());
@@ -1707,7 +1708,7 @@ test "tensor/Graph/matmul_backward" {
     const t3_trans_b = try t1.bmm(t2, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
 
-    try graph.backward(t3_trans_b);
+    try t3_trans_b.backward();
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.assume_grad_data());
@@ -1719,7 +1720,7 @@ test "tensor/Graph/matmul_backward" {
     const t3_trans_ab = try t1.bmm(t2, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
 
-    try graph.backward(t3_trans_ab);
+    try t3_trans_ab.backward();
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.assume_grad_data());
@@ -1755,7 +1756,7 @@ test "tensor/Graph/matvec_backward" {
     const t3 = try t1.matvec(t2, .{});
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
 
     try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, t1.assume_grad_data());
     try std.testing.expectEqualSlices(f32, &.{4, 6}, t2.assume_grad_data());
@@ -1785,7 +1786,7 @@ test "tensor/Graph/dot_backward" {
     var t3 = try t1.dot(t2);
     defer t3.deinit();
 
-    try graph.backward(t3);
+    try t3.backward();
 
     try std.testing.expectEqualSlices(f32, &.{4, 5, 6}, t1.assume_grad_data());
     try std.testing.expectEqualSlices(f32, &.{1, 2, 3}, t2.assume_grad_data());

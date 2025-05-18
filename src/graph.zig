@@ -180,7 +180,7 @@ test "Graph eager teardown reuse 1" {
     const E = try C.mul(D);
 
     // Run backward pass
-    try graph.backward(E);
+    try E.backward();
 
     // The tricky part: B's value is needed for both C and D's backward pass
     // If B is freed too early, we'll get a use-after-free or crash
@@ -236,7 +236,7 @@ test "Graph eager teardown reuse 2" {
     const D = try A.mul(C);
     const E = try D.add(C);
 
-    try graph.backward(E);
+    try E.backward();
 
     // Clean up leaves
     A.release();
@@ -272,7 +272,7 @@ test "Graph x*x" {
     A.acquire();
     B.acquire();
 
-    try graph.backward(E);
+    try E.backward();
 
     // Clean up leaves
     A.release();
@@ -329,7 +329,7 @@ test "Graph subgraphs/detach" {
     //         \ /
     //          e
 
-    try graph.backward(e);
+    try e.backward();
 
     // gradients should be collected by all children that require a gradient
     try std.testing.expect(e.grad != null);
@@ -340,7 +340,7 @@ test "Graph subgraphs/detach" {
     try std.testing.expect(a.grad == null);
     try std.testing.expect(b.grad == null);
 
-    try graph.backward(c);
+    try c.backward();
 
     // traversal should happen to the attached children of the parent node.
     try std.testing.expect(a.grad != null);
