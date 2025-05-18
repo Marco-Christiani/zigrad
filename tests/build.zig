@@ -37,14 +37,30 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const zigrad_dep = b.dependency("zigrad", .{
+        .target = target,
+        .optimize = optimize,
+        .tracy_enable = false,
+    });
+
     const exe = build_python(b, target, optimize) catch @panic("Build failed");
+    exe.root_module.addImport("zigrad", zigrad_dep.module("zigrad"));
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("tests", "Run tests");
+    const run_step = b.step("run", "Run tests");
     run_step.dependOn(&run_cmd.step);
+
+    const unit_tests = b.addTest(.{
+        .root_module = exe.root_module,
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const test_step = b.step("test", "Run all tests");
+    test_step.dependOn(&run_unit_tests.step);
 }
 
 fn build_python(b: *Build, target: Build.ResolvedTarget, optimize: OptimizeMode) !*Compile {
