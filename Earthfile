@@ -36,7 +36,7 @@ ZIG:
         rm "zig-linux-${ARCH}-${ZIG_VERSION}.tar.xz"
 
 deps:
-    ARG PYTHON_VERSION=3.11
+    ARG PYTHON_VERSION=3.12
     FROM python:${PYTHON_VERSION}-slim-bookworm
     RUN apt-get update && apt-get install -y \
         libopenblas-dev \
@@ -50,26 +50,20 @@ build-zig:
     ARG ZIGRAD_BACKEND=HOST
     FROM +deps
     DO +ZIG
-    COPY --dir src ./
+    COPY --dir src scripts ./
     COPY *.zig .
     COPY *.zon .
     ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
     RUN zig build
-    # RUN ZIGRAD_BACKEND=${ZIGRAD_BACKEND} zig build
     RUN mv ./zig-out/bin/main zg-main
-    SAVE ARTIFACT zg-main
-
-build-img:
-    FROM +deps
-    COPY +build-zig/zg-main .
     CMD ["./zg-main"]
     SAVE IMAGE zg:latest
 
 test-matrix:
     FROM alpine:3.18
-    ARG PYTHON_VERSIONS="3.10 3.11 3.12"
-    FOR version IN $PYTHON_VERSIONS
-        BUILD +test --PYTHON_VERSION=$version
+    LET ZIGRAD_BACKENDS="HOST CUDA"
+    FOR backend IN $ZIGRAD_BACKENDS
+        BUILD +test --ZIGRAD_BACKEND=$backend
     END
 
 test:

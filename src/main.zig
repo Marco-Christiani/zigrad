@@ -18,6 +18,14 @@ pub fn similar_slice(x: []const f32, y: []const f32) error{ NotSimilar, WrongSiz
 }
 
 pub fn main() !void {
+    if (comptime zg.backend == .HOST) {
+        std.log.info("Nothing to do, yet.", .{});
+    } else {
+        try test_host_cuda_consistency();
+    }
+}
+
+fn test_host_cuda_consistency() !void {
     if (comptime zg.backend != .CUDA) {
         @compileError("Zigrad backend must be targeted at CUDA to run cuda_tests.zig");
     }
