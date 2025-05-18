@@ -27,6 +27,11 @@ pub fn CachingAllocator(Impl: type) type {
         free_nodes: List,
         /// size difference of each allocation slot
         slot_bytes: usize,
+        /// scratch memory start/total integer pair
+        scratch: struct {
+            start: usize = 0,
+            total: usize = 0,
+        } = .{},
 
         pub fn init(config: struct {
             slot_bytes: usize = 128 * @sizeOf(f32),
@@ -62,6 +67,11 @@ pub fn CachingAllocator(Impl: type) type {
             self.clear(ctx);
             self.map.deinit(c_allocator);
             c_allocator.free(self.node_buffer);
+
+            if (self.scratch.start != 0) {
+                Impl.raw_free(@as(*anyopaque, @ptrFromInt(self.scratch.start)), ctx);
+            }
+
             self.* = undefined;
         }
 
@@ -97,6 +107,25 @@ pub fn CachingAllocator(Impl: type) type {
                 return @ptrCast(node.data);
             }
             return Impl.raw_alloc(slot, ctx);
+        }
+
+        /// Scratch memory does not have to be freed after calling this
+        /// this function Instead, scratch is freed upon calling deinit.
+        pub fn get_scratch(self: *Self, T: type, n: usize, ctx: *anyopaque) []T {
+            if (n == 0) return &.{};
+
+            const total: usize = @sizeOf(T) * n;
+            // check if we have enough scratch to provide a payload
+            if (self.scratch.total < total) {
+                if (self.scratch.start != 0) {
+                    Impl.raw_free(@as(*anyopaque, @ptrFromInt(self.scratch.start)), ctx);
+                }
+                // after a first pass through the network, we should know if we have enough memory.
+                const ptr = Impl.raw_alloc(total, ctx) orelse @panic("Cannot allocate scratch memory.");
+                self.scratch.start = @intFromPtr(ptr);
+                self.scratch.total = total;
+            }
+            return cast_slice(T, @ptrFromInt(self.scratch.start), n);
         }
 
         pub fn free(self: *Self, buf: anytype, ctx: *anyopaque) void {

@@ -82,7 +82,7 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
 }
 
 test "im2col col2im" {
-    var cpu = zg.device.HostDevice.init(std.testing.allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
     const device = cpu.reference();
 
