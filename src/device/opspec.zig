@@ -239,6 +239,15 @@ pub fn relu_bwd(T: type) type {
     };
 }
 
+pub fn relu_inplace_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "relu_inplace_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+    };
+}
+
 pub fn tanh_fwd(T: type) type {
     return struct {
         pub const __name__ = "tanh_fwd";

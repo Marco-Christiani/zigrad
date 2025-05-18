@@ -77,7 +77,7 @@ pub fn deinit(self: *Graph) void {
 pub fn reset(self: *Graph) void {
     self.sorted_nodes.clearRetainingCapacity();
     self.backward_node_stack.clearRetainingCapacity();
-    _ = self.internal_node_arena.reset(self.allocator, .retain_capacity);
+    _ = self.body.internal_node_arena.reset(self.body.allocator, .retain_capacity);
 }
 
 pub fn topological_sort(self: *Graph, node: *Node) void {

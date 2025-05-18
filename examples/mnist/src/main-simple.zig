@@ -76,7 +76,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
-    const train_eval = try eval_mnist(&model, train_dataset);
+    const train_eval = try eval_mnist(&graph, &model, train_dataset);
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
 
@@ -85,7 +85,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const test_dataset = try MnistDataset(T).load(&graph, device, test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
-    const test_eval = try eval_mnist(&model, test_dataset);
+    const test_eval = try eval_mnist(&graph, &model, test_dataset);
     const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     std.debug.print("Test acc: {d:.2} (n={d})\n", .{ test_eval.acc * 100, test_eval.n });
 
@@ -94,13 +94,14 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     std.debug.print("Eval test: {d:.2} (n={d}) {d}ms\n", .{ test_eval.acc * 100, test_eval.n, eval_test_time_ms });
 }
 
-fn eval_mnist(model: *MnistModel, dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {
+fn eval_mnist(graph: *zg.Graph, model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {
     zg.rt_grad_enabled = false; // disable gradient tracking
     var n: u32 = 0;
     var correct: f32 = 0;
     for (dataset.images, dataset.labels) |image, label| {
         const output = try model.forward(image);
         defer output.deinit();
+        defer graph.reset();
         const batch_n = output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;

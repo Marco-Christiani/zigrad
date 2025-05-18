@@ -41,37 +41,22 @@ pub fn relu_(T: type, x: *NDTensor(T)) !void {
 
     const BwdClosure = struct {
         version: u8,
-        mask: []u8,
-        pub fn backward(y: *Tensor, _: *Node.Children, ctx: *@This()) !void {
-            std.debug.assert(ctx.version == y.node.version);
-            y.device.dispatch(opspec.relu_mask_bwd(T){
-                .x_g = try y.ensure_grad_data(0),
-                .mask = ctx.mask,
+        pub fn backward(_x: *Tensor, _: *Node.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == _x.node.version);
+            _x.device.dispatch(opspec.relu_inplace_bwd(T){
+                .x = _x.get_data(),
+                .x_g = try _x.ensure_grad_data(0),
             });
-            y.device.mem_free(ctx.mask);
         }
     };
 
-    if (!x.requires_grad()) {
-        return x.device.dispatch(opspec.relu_fwd(T){
-            .x = x.get_data(),
-            .y = x.get_data(),
-        });
-    }
-
-    const mask = try x.device.mem_alloc_byte_mask(x.get_size());
-    errdefer x.device.mem_free(mask);
-
-    x.device.dispatch(opspec.relu_mask_fwd(T){
+    x.device.dispatch(opspec.relu_fwd(T){
         .x = x.get_data(),
-        .mask = mask,
+        .y = x.get_data(),
     });
 
     try Tensor.prepend_dependent(BwdClosure, x, .{
-        .callback = .{
-            .version = x.node.version +% 1,
-            .mask = mask,
-        },
+        .callback = .{ .version = x.node.version +% 1 },
         .children = &.{},
     });
 }

@@ -37,14 +37,14 @@ pub fn MnistModel(comptime T: type) type {
 
             const z0 = try self.linear_layers[0].forward(flat);
             errdefer z0.deinit();
-            try zg.nn.relu_(z0);
+            try zg.nn.relu_(T, z0);
 
             if (!flat.requires_grad())
                 flat.clear();
 
             const z1 = try self.linear_layers[1].forward(z0);
             errdefer z1.deinit();
-            try zg.nn.relu_(z1);
+            try zg.nn.relu_(T, z1);
 
             if (!z0.requires_grad())
                 z0.clear();
@@ -66,12 +66,11 @@ pub fn MnistModel(comptime T: type) type {
             return tmp;
         }
 
-        pub fn reset(self: *Self, zero_grad: bool) void {
-            self.graph.reset();
-            if (zero_grad) for (&self.linear_layers) |*l| {
-                _ = l.weights.setup_grad(0) catch unreachable;
-                _ = l.bias.setup_grad(0) catch unreachable;
-            };
+        pub fn zero_grad(self: *Self) void {
+            for (&self.linear_layers) |*l| {
+                if (l.weights.grad) |_| l.weights.setup_grad(0) catch {};
+                if (l.bias.grad) |_| l.bias.setup_grad(0) catch {};
+            }
         }
     };
 }
@@ -127,7 +126,7 @@ pub fn FlattenLayer(comptime T: type) type {
             const flattened_dim = zg.arrayutils.prod(other_dims);
 
             // view of input tensor with new shape
-            const result = try NDTensor(T).create_dependent(Self, .{
+            const result = try Tensor.create_dependent(Self, .{
                 .data = try input.data.copy(input.device), // Reuse the same data
                 .children = &.{&input.node},
                 .label = "flattened",
@@ -139,7 +138,7 @@ pub fn FlattenLayer(comptime T: type) type {
             return result;
         }
 
-        pub fn callback(y: *Tensor, children: *Node.Children) !void {
+        pub fn backward(y: *Tensor, children: *Node.Children) !void {
             const x = children.get_bwd_upcast(Tensor, 0) orelse return;
             const x_grad = try x.ensure_grad(0);
             y.device.dispatch(opspec.add(T){
