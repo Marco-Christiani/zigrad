@@ -2,14 +2,15 @@ const std = @import("std");
 const zg = @import("../zigrad.zig");
 const opspec = zg.opspec;
 const NDTensor = zg.NDTensor;
+const Node = zg.Graph.Node;
 
 /// rectified linear-unit
 pub fn relu(T: type, x: *NDTensor(T)) !void {
     const Tensor = NDTensor(T);
 
     const BwdClosure = struct {
-        pub fn callback(_y: *Tensor, children: *Tensor.Children) !void {
-            const _x = children.get_bwd(0) orelse return;
+        pub fn backward(_y: *Tensor, children: *Node.Children) !void {
+            const _x = children.get_bwd_upcast(Tensor, 0) orelse return;
             _y.device.dispatch(opspec.relu_bwd(T){
                 .x = _x.get_data(),
                 .x_g = try _x.ensure_grad_data(0),
@@ -27,9 +28,9 @@ pub fn relu(T: type, x: *NDTensor(T)) !void {
 
     return Tensor.create_dependent(BwdClosure, x, .{
         .data = y,
-        .children = &.{x},
+        .children = &.{&x.node},
         .device = x.device,
-        .node_allocator = x._node_allocator,
+        .gb = x.node.gb,
         .callback = .{},
     });
 }
@@ -41,8 +42,8 @@ pub fn relu_(T: type, x: *NDTensor(T)) !void {
     const BwdClosure = struct {
         version: u8,
         mask: []u8,
-        pub fn callback(y: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
-            std.debug.assert(ctx.version == y._version);
+        pub fn backward(y: *Tensor, _: *Node.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == y.node.version);
             y.device.dispatch(opspec.relu_mask_bwd(T){
                 .x_g = try y.ensure_grad_data(0),
                 .mask = ctx.mask,
@@ -68,7 +69,7 @@ pub fn relu_(T: type, x: *NDTensor(T)) !void {
 
     try Tensor.prepend_dependent(BwdClosure, x, .{
         .callback = .{
-            .version = x._version +% 1,
+            .version = x.node.version +% 1,
             .mask = mask,
         },
         .children = &.{},
@@ -80,8 +81,8 @@ pub fn tanh(T: type, x: *NDTensor(T)) !void {
     const Tensor = NDTensor(T);
 
     const BwdClosure = struct {
-        pub fn callback(_y: *Tensor, children: *Tensor.Children) !void {
-            const _x = children.get_bwd(0) orelse return;
+        pub fn backward(_y: *Tensor, children: *Node.Children) !void {
+            const _x = children.get_bwd_upcast(Tensor, 0) orelse return;
             _y.device.dispatch(opspec.tanh_bwd(T){
                 .x_g = try _x.ensure_grad_data(0),
                 .y = _y.get_data(),
@@ -99,9 +100,9 @@ pub fn tanh(T: type, x: *NDTensor(T)) !void {
 
     return Tensor.create_dependent(BwdClosure, x, .{
         .data = y,
-        .children = &.{x},
+        .children = &.{&x.node},
         .device = x.device,
-        .node_allocator = x._node_allocator,
+        .gb = x.node.gb,
         .callback = .{},
     });
 }
@@ -112,8 +113,8 @@ pub fn tanh_(T: type, x: *NDTensor(T)) !void {
 
     const BwdClosure = struct {
         version: u8,
-        pub fn callback(_x: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
-            std.debug.assert(ctx.version == _x._version);
+        pub fn backward(_x: *Tensor, _: *Node.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == _x.node.version);
             _x.device.dispatch(opspec.tanh_inplace_bwd(T){
                 .x = _x.get_data(),
                 .x_g = try _x.ensure_grad_data(0),
@@ -127,7 +128,7 @@ pub fn tanh_(T: type, x: *NDTensor(T)) !void {
     });
 
     try Tensor.prepend_dependent(BwdClosure, x, .{
-        .callback = .{ .version = x._version +% 1 },
+        .callback = .{ .version = x.node.version +% 1 },
         .children = &.{},
     });
 }
@@ -137,8 +138,8 @@ pub fn sigm(T: type, x: *NDTensor(T)) !void {
     const Tensor = NDTensor(T);
 
     const BwdClosure = struct {
-        pub fn callback(_y: *Tensor, children: *Tensor.Children) !void {
-            const _x = children.get_bwd(0) orelse return;
+        pub fn backward(_y: *Tensor, children: *Node.Children) !void {
+            const _x = children.get_bwd_upcast(Tensor, 0) orelse return;
             _y.device.dispatch(opspec.sigm_bwd(T){
                 .x_g = try _x.ensure_grad_data(0),
                 .y = _y.get_data(),
@@ -156,9 +157,9 @@ pub fn sigm(T: type, x: *NDTensor(T)) !void {
 
     return Tensor.create_dependent(BwdClosure, x, .{
         .data = y,
-        .children = &.{x},
+        .children = &.{&x.node},
         .device = x.device,
-        .node_allocator = x._node_allocator,
+        .node_allocator = x.node.gb,
         .callback = .{},
     });
 }
@@ -169,8 +170,8 @@ pub fn sigm_(T: type, x: *NDTensor(T)) !void {
 
     const BwdClosure = struct {
         version: u8,
-        pub fn callback(_x: *Tensor, _: *Tensor.Children, ctx: *@This()) !void {
-            std.debug.assert(ctx.version == _x._version);
+        pub fn backward(_x: *Tensor, _: *Node.Children, ctx: *@This()) !void {
+            std.debug.assert(ctx.version == _x.node.version);
             _x.device.dispatch(opspec.sigm_inplace_bwd(T){
                 .x = _x.get_data(),
                 .x_g = try _x.ensure_grad_data(0),
@@ -184,7 +185,7 @@ pub fn sigm_(T: type, x: *NDTensor(T)) !void {
     });
 
     try Tensor.prepend_dependent(BwdClosure, x, .{
-        .callback = .{ .version = x._version +% 1 },
+        .callback = .{ .version = x.node.version +% 1 },
         .children = &.{},
     });
 }

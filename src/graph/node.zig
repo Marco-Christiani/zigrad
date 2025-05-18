@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-pub const NodeAllocator = @import("graph_allocator.zig");
 const debug: bool = (builtin.mode == .Debug);
 const Graph = @import("../graph.zig");
 const zg = @import("../zigrad.zig");
@@ -24,7 +23,7 @@ type_id: TypeID,
 /// Optional label for naming nodes in the graph.
 /// These labels are unmanaged and should not be
 /// used to store allocated strings.
-label: []const u8,
+label: Label,
 /// Collection of callback functions - if we get more
 /// of these then consier moving to virtual table.
 callbacks: struct {
@@ -44,15 +43,15 @@ pub fn init(
     node_category: Category,
     graph_body: *Graph.Body,
     bwd_context: ?BackwardContext,
-    label: ?[]const u8,
+    label_bytes: ?[]const u8,
     flag_config: Flags.Config,
-) !Node {
+) Node {
     return .{
         .gb = graph_body,
         .flags = Flags.init(node_category, flag_config),
         .type_id = TypeID.init(NodeParentType),
         .version = 0,
-        .label = label orelse &.{},
+        .label = as_label(label_bytes),
         .callbacks = .{
             .bwd = bwd_context,
             .del = struct {
@@ -64,15 +63,22 @@ pub fn init(
     };
 }
 
-pub fn deinit(self: *Node, allocator: std.mem.Allocator) void {
-    if (self.callbacks.bwd) |*bwd|
-        bwd.deinit(allocator);
-
+pub fn deinit(self: *Node) void {
     return self.callbacks.del(self);
 }
 
+/// Clear any allocated context state.
+/// Should be called by host object that
+/// the node is intruding upon.
+pub fn clear(self: *Node) void {
+    if (self.callbacks.bwd) |*bwd| {
+        bwd.deinit(self.gb.allocator);
+        self.callbacks.bwd = null;
+    }
+}
+
 pub fn is_leaf(self: *const Node) bool {
-    return self.flags.get(.node_type); // true: leaf
+    return self.flags.get(.category); // true: leaf
 }
 
 pub fn category(self: *const Node) Category {
@@ -84,6 +90,14 @@ pub fn backward(self: *Node) anyerror!void {
     return _cb.call(self);
 }
 
+pub fn get_label(self: *const Node) ?[]const u8 {
+    return if (self.label.len > 0) self.label.slice() else null;
+}
+
+pub fn set_label(self: *Node, new_label: []const u8) void {
+    self.label = as_label(new_label);
+}
+
 pub fn upcast(self: *Node, T: type) *T {
     std.debug.assert(self.type_id == TypeID.init(T));
     return @alignCast(@fieldParentPtr("node", self));
@@ -93,6 +107,25 @@ pub fn child_iterator(self: *Node) ?ChildIterator {
     const ctx = &(self.callbacks.bwd orelse return null);
     if (ctx.children.len == 0 and ctx.next == null) return null;
     return .{ .ctx = ctx };
+}
+
+///////////////////////////////////////////////////////
+// Flag Helpers ///////////////////////////////////////
+//
+// A node instance should not set flags - this behavior
+// should be determined by the host object that the
+// node is intruding upon. The API is thus read-only.
+
+pub fn requires_grad(self: *const Node) bool {
+    return self.flags.get(.requires_grad) and zg.rt_grad_enabled;
+}
+
+pub fn acquired(self: *const Node) bool {
+    return self.flags.get(.acquired);
+}
+
+pub fn attached(self: *const Node) bool {
+    return self.flags.get(.attached);
 }
 
 //////////////////////////////////////
@@ -133,7 +166,7 @@ pub const Flags = struct {
         requires_grad,
 
         pub fn count() usize {
-            return std.meta.fields(Flags).len;
+            return std.meta.fields(Values).len;
         }
     };
     bitset: BitSet,
@@ -178,7 +211,7 @@ pub const Children = struct {
         self.len = slice.len;
         @memcpy(self.buffer[0..self.len], slice);
         if (comptime debug) {
-            for (slice, 0..) |child, i| self.versions[i] = child._version;
+            for (slice, 0..) |child, i| self.versions[i] = child.version;
         }
         return self;
     }
@@ -187,9 +220,9 @@ pub const Children = struct {
         std.debug.assert(i < self.len);
         if (comptime debug) {
             const old_version = self.versions[i];
-            const new_version = self.buffer[i]._version;
+            const new_version = self.buffer[i].version;
             // TODO: use @src at some point? Would be more helpful...
-            if (self.versions[i] != self.buffer[i]._version) {
+            if (self.versions[i] != self.buffer[i].version) {
                 std.debug.panic("Version mismatch for {s}, {}->{}", .{
                     self.buffer[i].get_label() orelse "<unknown>",
                     old_version,
@@ -200,12 +233,12 @@ pub const Children = struct {
         return self.buffer[i];
     }
 
-    pub fn get_upcast(self: *const Node, T: type, i: usize) *T {
-        return self.children.get(i).upcast(T);
+    pub fn get_upcast(self: *const Children, T: type, i: usize) *T {
+        return self.get(i).upcast(T);
     }
 
-    pub fn get_bwd_upcast(self: *const Node, T: type, i: usize) ?*T {
-        return if (self.children.get(i).flags.get(.requires_grad))
+    pub fn get_bwd_upcast(self: *const Children, T: type, i: usize) ?*T {
+        return if (self.get(i).requires_grad())
             self.get_upcast(T, i)
         else
             null;
@@ -234,7 +267,7 @@ pub const BackwardContext = struct {
     const SmallBuffer = [4]usize;
     children: Children,
     callable: *const fn (*BackwardContext, *Node) anyerror!void,
-    type_id: if (debug) usize else void,
+    type_id: if (debug) TypeID else void,
     persist: bool = false,
     storage: union(enum) {
         none: void,
@@ -404,3 +437,11 @@ const ClosurePointer = struct {
         self.* = undefined;
     }
 };
+
+const LABEL_SIZE: usize = zg.settings.label_capacity;
+pub const Label = std.BoundedArray(u8, LABEL_SIZE);
+
+pub fn as_label(slice: ?[]const u8) Label {
+    const l = slice orelse return .{};
+    return Label.fromSlice(l) catch @panic(std.fmt.comptimePrint("Label size is too large - max {d} characters", .{LABEL_SIZE}));
+}

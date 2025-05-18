@@ -107,10 +107,10 @@ pub fn backward(self: *Graph, root: *Node) !void {
     self.backward_node_stack.append(self.body.allocator, root) catch unreachable;
 
     outer: while (self.backward_node_stack.pop()) |parent| {
-        defer if (!parent.flags.get(.acquired) and self.eager_teardown)
+        defer if (self.eager_teardown and !parent.acquired())
             parent.deinit();
 
-        if (!parent.flags.get(.requires_grad)) continue :outer;
+        if (!parent.requires_grad()) continue :outer;
 
         try parent.backward();
 
@@ -133,20 +133,25 @@ pub fn teardown(self: *Graph, root: *Node) void {
     self.topological_sort(root);
 
     for (self.sorted_nodes.keys()) |node| {
-        if (!node.flags.get(.acquired)) node.deinit();
+        if (!node.acquired()) node.deinit();
     }
 }
+
+/////////////////////////////////////////////////////
+// Testing //////////////////////////////////////////
+
+const TensorConfig = @import("ndtensor.zig").TensorConfig;
 
 test "Graph eager teardown reuse 1" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -161,9 +166,9 @@ test "Graph eager teardown reuse 1" {
     //    \ /
     //     E
 
-    var A = try Tensor.from_slice(&.{2.0}, null, config);
-    var B = try Tensor.from_slice(&.{3.0}, null, config);
-    var F = try Tensor.from_slice(&.{1.5}, null, config);
+    var A = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
+    var B = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
+    var F = try Tensor.from_slice(&graph, device, &.{1.5}, null, config);
 
     // Acquire leaf tensors
     A.acquire();
@@ -175,7 +180,7 @@ test "Graph eager teardown reuse 1" {
     const E = try C.mul(D);
 
     // Run backward pass
-    try gm.backward(E);
+    try graph.backward(E);
 
     // The tricky part: B's value is needed for both C and D's backward pass
     // If B is freed too early, we'll get a use-after-free or crash
@@ -194,12 +199,12 @@ test "Graph eager teardown reuse 2" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -220,8 +225,8 @@ test "Graph eager teardown reuse 2" {
     //      \ /
     //       E
 
-    var A = try Tensor.from_slice(&.{2.0}, null, config);
-    const B = try Tensor.from_slice(&.{3.0}, null, config);
+    const A = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
+    const B = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
 
     // Acquire leaf tensors
     A.acquire();
@@ -231,7 +236,7 @@ test "Graph eager teardown reuse 2" {
     const D = try A.mul(C);
     const E = try D.add(C);
 
-    try gm.backward(E);
+    try graph.backward(E);
 
     // Clean up leaves
     A.release();
@@ -244,12 +249,12 @@ test "Graph x*x" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -257,8 +262,8 @@ test "Graph x*x" {
 
     zg.rt_grad_enabled = true;
 
-    const A = try Tensor.from_slice(&.{2.0}, null, config);
-    const B = try Tensor.from_slice(&.{3.0}, null, config);
+    const A = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
+    const B = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
 
     const C = try A.mul(B);
     const E = try C.mul(C);
@@ -267,7 +272,7 @@ test "Graph x*x" {
     A.acquire();
     B.acquire();
 
-    try gm.backward(E);
+    try graph.backward(E);
 
     // Clean up leaves
     A.release();
@@ -280,12 +285,12 @@ test "Graph subgraphs/detach" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
@@ -294,10 +299,10 @@ test "Graph subgraphs/detach" {
     zg.rt_grad_enabled = true;
 
     // subgraph 1
-    const a = try Tensor.from_slice(&.{2.0}, null, config);
+    const a = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
     defer a.deinit();
 
-    const b = try Tensor.from_slice(&.{3.0}, null, config);
+    const b = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
     defer b.deinit();
 
     const c = try a.add(b);
@@ -306,7 +311,7 @@ test "Graph subgraphs/detach" {
     c.detach();
 
     // subgraph 2
-    const d = try Tensor.from_slice(&.{4.0}, null, config);
+    const d = try Tensor.from_slice(&graph, device, &.{4.0}, null, config);
     defer d.deinit();
 
     const e = try c.add(d);
@@ -324,7 +329,7 @@ test "Graph subgraphs/detach" {
     //         \ /
     //          e
 
-    try gm.backward(e);
+    try graph.backward(e);
 
     // gradients should be collected by all children that require a gradient
     try std.testing.expect(e.grad != null);
@@ -335,7 +340,7 @@ test "Graph subgraphs/detach" {
     try std.testing.expect(a.grad == null);
     try std.testing.expect(b.grad == null);
 
-    try gm.backward(c);
+    try graph.backward(c);
 
     // traversal should happen to the attached children of the parent node.
     try std.testing.expect(a.grad != null);

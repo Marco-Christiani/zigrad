@@ -8,7 +8,8 @@ const Shape = zg.Shape;
 const NDArray = zg.NDArray;
 const settings = zg.settings;
 const NDTensor = zg.NDTensor;
-const GraphManager = zg.GraphManager;
+const Graph = zg.Graph;
+const Node = Graph.Node;
 
 // NOTE: Reductions return NaN when "reduce" is set to false.
 // This is for c-compatibility and this value is instead traded for null.
@@ -87,6 +88,8 @@ fn NLLIndex(T: type, comptime config: NLLConfig) type {
 
 /// Direct Mean Squared Error loss.
 pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
+    const Tensor = NDTensor(T);
+
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
     for (y_pred.data.data, y.data.data) |pred, target| {
@@ -96,9 +99,9 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     const mse = sum_sq_diff / n;
 
     const MseBwd = struct {
-        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children) !void {
-            const _y_pred = children.get_bwd(0) orelse return;
-            const _y = children.get(1);
+        pub fn backward(_: *Tensor, children: *Node.Children) !void {
+            const _y_pred = children.get_bwd_upcast(Tensor, 0) orelse return;
+            const _y = children.get_upcast(Tensor, 1);
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
             const scale = @as(T, 2) / _n;
@@ -109,18 +112,20 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
         }
     };
 
-    return try NDTensor(T).create_dependent(MseBwd, .{
+    return try Tensor.create_dependent(MseBwd, .{
         .data = try NDArray(T).init(&.{mse}, &.{1}, y_pred.device),
-        .children = &.{ y_pred, y },
+        .children = &.{ &y_pred.node, &y.node },
         .label = "mse",
         .device = y_pred.device,
-        .node_allocator = y_pred._node_allocator,
+        .gb = y_pred.node.gb,
         .callback = .{},
     });
 }
 
 /// Runs over last dim.
 pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
+    const Tensor = NDTensor(T);
+
     var sum_loss: T = 0;
     const epsilon: T = 1e-7;
     if (y_pred.data.shape.len > 2) return error.NotSupported;
@@ -136,11 +141,11 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     const mean_loss = sum_loss / @as(T, @floatFromInt(batch_size));
 
     const CceBwd = struct {
-        sm_preds: *NDTensor(T),
-        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
+        sm_preds: *Tensor,
+        pub fn backward(_: *Tensor, children: *Node.Children, ctx: *@This()) !void {
             defer ctx.sm_preds.deinit();
-            const preds = children.get_bwd(0) orelse return;
-            const label = children.get(1);
+            const preds = children.get_bwd_upcast(Tensor, 0) orelse return;
+            const label = children.get_upcast(Tensor, 1);
             const bw_batch_size = if (preds.data.shape.len > 1) preds.data.shape.get(0) else 1;
 
             for (try preds.ensure_grad_data(0), ctx.sm_preds.get_data(), label.get_data()) |*bw_grad_val, bw_sm_val, bw_target_val| {
@@ -149,13 +154,13 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
         }
     };
 
-    return try NDTensor(T).create_dependent(CceBwd, .{
+    return try Tensor.create_dependent(CceBwd, .{
         .data = try NDArray(T).init(&.{mean_loss}, &.{1}, y_pred.device),
         .op = null,
-        .children = &.{ y_pred, y },
+        .children = &.{ &y_pred.node, &y.node },
         .label = "cross_entropy",
         .device = y_pred.device,
-        .node_allocator = y_pred._node_allocator,
+        .gb = y_pred.node.gb,
         .callback = .{ .sm_preds = sm_preds },
     });
 }
@@ -205,11 +210,13 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
 }
 
 pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
+    const Tensor = NDTensor(T);
+
     const result = try _softmax_fwd(T, input, dim, device);
     const SmaxBwd = struct {
         dim: usize,
-        pub fn callback(y: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
-            const bw_input = children.get_bwd(0) orelse return;
+        pub fn backward(y: *Tensor, children: *Node.Children, ctx: *@This()) !void {
+            const bw_input = children.get_bwd_upcast(Tensor, 0) orelse return;
             const bw_grad = try bw_input.ensure_grad_data(0);
             const y_grad = try y.assume_grad_data();
 
@@ -234,17 +241,19 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
         }
     };
 
-    return try NDTensor(T).create_dependent(SmaxBwd, .{
+    return try Tensor.create_dependent(SmaxBwd, .{
         .data = result.data,
-        .children = &.{input},
+        .children = &.{&input.node},
         .label = "softmax",
         .device = device,
-        .node_allocator = input._node_allocator,
+        .gb = input.node.gb,
         .callback = .{ .dim = dim },
     });
 }
 
 pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !*NDTensor(T) {
+    const Tensor = NDTensor(T);
+
     std.debug.assert(y_pred.device.is_compatible(y.device));
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_loss: T = 0;
@@ -262,9 +271,9 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
 
     const Sl1LossBwd = struct {
         beta: T,
-        pub fn callback(_: *NDTensor(T), children: *NDTensor(T).Children, ctx: *@This()) !void {
-            const _y_pred = children.get_bwd(0) orelse return;
-            const _y = children.get(1);
+        pub fn backward(_: *Tensor, children: *Node.Children, ctx: *@This()) !void {
+            const _y_pred = children.get_bwd_upcast(Tensor, 0) orelse return;
+            const _y = children.get_upcast(Tensor, 1);
             const _beta = ctx.beta;
 
             const _n = @as(T, @floatFromInt(_y.get_size()));
@@ -280,12 +289,12 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
         }
     };
 
-    return try NDTensor(T).create_dependent(Sl1LossBwd, .{
+    return Tensor.create_dependent(Sl1LossBwd, .{
         .data = try NDArray(T).init(&.{loss}, &.{1}, y_pred.device),
-        .children = &.{ y_pred, y },
+        .children = &.{ &y_pred.node, &y.node },
         .label = "smooth_l1",
         .callback = .{ .beta = beta },
-        .node_allocator = y_pred._node_allocator,
+        .gb = y_pred.node.gb,
         .device = y_pred.device,
     });
 }

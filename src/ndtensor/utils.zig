@@ -4,18 +4,8 @@ const NodeType = Graph.NodeType;
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 
-const LABEL_SIZE: usize = zg.settings.label_capacity;
-pub const Label = std.BoundedArray(u8, LABEL_SIZE);
-
-pub fn as_label(slice: ?[]const u8) Label {
-    const l = slice orelse return .{};
-    return Label.fromSlice(l) catch @panic(std.fmt.comptimePrint("Label size is too large - max {d} characters", .{LABEL_SIZE}));
-}
-
 /// User facing config
 pub const TensorConfig = struct {
-    device: DeviceReference,
-    graph: *Graph,
     requires_grad: bool = false,
     acquired: bool = false,
     attached: bool = true,

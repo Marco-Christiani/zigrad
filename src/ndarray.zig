@@ -24,7 +24,7 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
-        pub const Status = enum { none, view };
+        pub const Status = enum { none, view, cleared };
         /// Can be safely accessed. See `Shape`
         shape: Shape,
 

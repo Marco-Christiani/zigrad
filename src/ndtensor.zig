@@ -42,16 +42,16 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Shape is allocated. COM.
         /// As it stands, with grad disabled you can still allocate grads but grads wont be tracked (or allocated) in ops
-        pub fn empty(shape: []const usize, config: TensorConfig) !*Self {
+        pub fn empty(graph: *Graph, device: DeviceReference, shape: []const usize, config: TensorConfig) !*Self {
             const category: Node.Category = .leaf;
 
-            const self = try config.graph.body.create_node(Self, category);
-            errdefer config.graph.body.destroy_node(self, category);
+            const self = try graph.body.create_node(Self, category);
+            errdefer graph.body.destroy_node(self, category);
 
-            self.* = Self{
-                .data = try DataType.empty(shape, config.device),
-                .device = config.device,
-                .node = .init(Self, category, &config.graph.body, null, config.label, .{
+            self.* = .{
+                .data = try DataType.empty(shape, device),
+                .device = device,
+                .node = .init(Self, category, &graph.body, null, config.label, .{
                     .requires_grad = config.requires_grad,
                     .acquired = config.acquired,
                     .attached = config.attached,
@@ -62,32 +62,32 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Transfers a host-slice to device memory. Helpful for constructing tests from static arrays.
-        pub fn from_slice(values: []const T, shape: ?[]const usize, config: TensorConfig) !*Self {
-            const self = try Self.empty(shape orelse &.{values.len}, config);
+        pub fn from_slice(graph: *Graph, device: DeviceReference, values: []const T, shape: ?[]const usize, config: TensorConfig) !*Self {
+            const self = try Self.empty(graph, device, shape orelse &.{values.len}, config);
             self.device.mem_transfer(T, values, self.get_data(), .HtoD);
             return self;
         }
 
-        pub fn zeros(shape: []const usize, config: TensorConfig) !*Self {
-            const self = try Self.empty(shape, config);
+        pub fn zeros(graph: *Graph, device: DeviceReference, shape: []const usize, config: TensorConfig) !*Self {
+            const self = try Self.empty(graph, device, shape, config);
             self.fill(0);
             return self;
         }
 
-        pub fn ones(shape: []const usize, config: TensorConfig) !*Self {
-            const self = try Self.empty(shape, config);
+        pub fn ones(graph: *Graph, device: DeviceReference, shape: []const usize, config: TensorConfig) !*Self {
+            const self = try Self.empty(graph, device, shape, config);
             self.fill(1);
             return self;
         }
 
-        pub fn random(shape: []const usize, rt: zg.RandType, config: TensorConfig) !*Self {
-            const self = try Self.empty(shape, config);
-            self.device.mem_random(T, self.get_data(), rt, zg.random);
+        pub fn random(graph: *Graph, device: DeviceReference, shape: []const usize, rt: zg.RandType, config: TensorConfig) !*Self {
+            const self = try Self.empty(graph, device, shape, config);
+            device.mem_random(T, self.get_data(), rt, zg.random);
             return self;
         }
 
-        pub fn sequence(start: T, step: T, shape: []const usize, config: TensorConfig) !*Self {
-            const self = try Self.empty(shape, config);
+        pub fn sequence(graph: *Graph, device: DeviceReference, start: T, step: T, shape: []const usize, config: TensorConfig) !*Self {
+            const self = try Self.empty(graph, device, shape, config);
             self.device.mem_sequence(T, self.get_data(), start, step);
             return self;
         }
@@ -96,7 +96,7 @@ pub fn NDTensor(comptime T: type) type {
         // Flag Helpers ///////////////////////////////////////
 
         pub fn attached(self: *const Self) bool {
-            return self.node.flags.get(.attached);
+            return self.node.attached();
         }
 
         pub fn attach(self: *Self) void {
@@ -104,11 +104,11 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn detach(self: *Self) void {
-            self.node.set(.attached, false);
+            self.node.flags.set(.attached, false);
         }
 
         pub fn requires_grad(self: *const Self) bool {
-            return self.node.flags.get(.requires_grad) and zg.rt_grad_enabled;
+            return self.node.requires_grad();
         }
 
         pub fn enable_grad(self: *Self) void {
@@ -120,7 +120,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn acquired(self: *const Self) bool {
-            return self.node.flags.get(.acquired);
+            return self.node.acquired();
         }
 
         pub fn acquire(self: *Self) void {
@@ -129,6 +129,17 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn release(self: *Self) void {
             self.node.flags.set(.acquired, false);
+        }
+
+        pub fn backward(self: *Self) !void {
+            std.debug.assert(zg.rt_grad_enabled);
+            const graph = self.node.gb.promote();
+            try graph.backward(&self.node);
+        }
+
+        pub fn teardown(self: *Self) !void {
+            const graph = self.node.gb.promote();
+            try graph.teardown(&self.node);
         }
 
         ///////////////////////////////////////////////////////
@@ -203,18 +214,18 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn get_label(self: *const Self) ?[]const u8 {
-            return if (self.node.label.len > 0) self.node.label else null;
+            return self.node.label.get_label();
         }
 
         pub fn set_label(self: *Self, new_label: []const u8) void {
-            self.node.label = new_label;
+            self.node.set_label(new_label);
         }
 
         pub fn CreateDependentOpts(BwdCallback: type) type {
             return struct {
                 data: DataType,
                 gb: *Graph.Body,
-                children: []const *Self,
+                children: []const *Node,
                 callback: BwdCallback,
                 device: DeviceReference,
                 label: ?[]const u8 = null,
@@ -252,7 +263,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn prepend_dependent(BwdClosureType: type, self: *Self, opts: struct {
-            children: []const *Self,
+            children: []const *Node,
             callback: BwdClosureType,
         }) !void {
             const req_grad: bool = for (opts.children) |child| {
@@ -263,7 +274,7 @@ pub fn NDTensor(comptime T: type) type {
                 const new_ctx: Node.BackwardContext = try .init(
                     Self,
                     BwdClosureType,
-                    opts.gb.allocator,
+                    self.node.gb.allocator,
                     opts.callback,
                     opts.children,
                 );
@@ -282,26 +293,32 @@ pub fn NDTensor(comptime T: type) type {
                 // but I don't see the need to address such edge cases.
                 // While this only checked in debug mode, its free to track so the
                 //   user (or we) can verify the graph once or as-needed if desired.
-                self._version +%= 1;
+                self.node.version +%= 1;
             }
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.acquired()) @panic("Attempt to deinit an acquired tensor.");
+            if (self.acquired())
+                @panic("Attempt to deinit an acquired tensor.");
 
             self.clear();
-            self.node.gb.destroy_node(self, self.node_type());
+
+            self.node.gb.destroy_node(self, self.node.category());
         }
 
         pub fn clear(self: *Self) void {
-            if (self._flags.get(.cleared)) return;
+            if (self.data.status == .cleared)
+                return;
 
             self.data.deinit(self.device);
-            self._flags.set(.cleared, true);
+            self.data.status = .cleared;
 
-            if (self.grad) |*g| g.deinit(self.device);
-            if (self._backward_ctx) |*ctx| ctx.deinit(self.node.gb.allocator);
-            self._backward_ctx = null;
+            if (self.grad) |*g| {
+                g.deinit(self.device);
+                self.grad = null;
+            }
+
+            self.node.clear();
         }
 
         fn to_device_impl(
@@ -352,23 +369,22 @@ pub fn NDTensor(comptime T: type) type {
                 }
             };
 
-            const data = try device.mem_alloc(T, self.data.data.len);
-            try to_device_impl(self.data.data, data, self.device, device);
+            const data = try device.mem_alloc(T, self.get_size());
+            errdefer device.mem_free(data);
 
-            var result = try create_dependent(ToDeviceBwd, .{
+            try to_device_impl(self.get_data(), data, self.device, device);
+
+            return try create_dependent(ToDeviceBwd, .{
                 .data = .{
                     .data = data,
                     .shape = self.data.shape,
                 },
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = device,
                 .gb = self.node.gb,
                 .callback = .{},
                 .op = .TRANSFER,
             });
-            errdefer result.deinit();
-
-            return result;
         }
 
         // NOTE: Check callsites and see if we can fix the comments here
@@ -380,21 +396,23 @@ pub fn NDTensor(comptime T: type) type {
         ///   - The choice to have an allocator provided is important, intended to be used for backward
         ///   - If the tensor backing `DataType` changes its allocator ownership contract, then this needs to be changed
         pub fn clone(self: *const Self) !*Self {
-            const result = try self.node.gb.create_node(Self, self.node_type());
+            const result = try self.node.gb.create_node(Self, self.node.category());
+            errdefer self.node.gb.destroy_node(result, self.node.category());
+
+            var data = try self.data.copy(self.device);
+            errdefer data.deinit(self.device);
+
             result.* = Self{
-                .data = try self.data.copy(self.device),
-                .grad = if (self.grad) |g| try g.copy(self.device) else null,
+                .data = data,
+                .grad = if (self.grad) |*g| try g.copy(self.device) else null,
                 .device = self.device,
-                ._node_allocator = self.node.gb,
-                ._flags = TensorFlags.init(
-                    self.node_type(),
-                    .{
-                        .requires_grad = self.requires_grad(),
-                        .acquired = self.acquired(),
-                        .attached = self.attached(),
-                    },
-                ),
+                .node = .init(Self, self.node.category(), self.node.gb, null, null, .{
+                    .requires_grad = self.requires_grad(),
+                    .acquired = self.acquired(),
+                    .attached = self.attached(),
+                }),
             };
+
             return result;
         }
 
@@ -430,7 +448,7 @@ pub fn NDTensor(comptime T: type) type {
                     .shape = self.data.shape.reshape(new_shape),
                     .view = false,
                 },
-                .children = &.{self},
+                .children = &.{&self.node},
                 .gb = self.node.gb,
                 .device = self.device,
                 .callback = .{},
@@ -455,7 +473,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(TransposeBwd, .{
                 .data = try self.data.transpose(self.device),
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
                 .context = .{},
@@ -589,7 +607,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(ClampBwd, .{
                 .data = try self.data.clamp(vmin, vmax, self.device),
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{ ._min = vmin, ._max = vmax },
@@ -606,7 +624,7 @@ pub fn NDTensor(comptime T: type) type {
             };
             return create_dependent(AddBwd, .{
                 .data = try self.data.add_scalar(s, self.device),
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -637,7 +655,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(AddBwd, .{
                 .data = try self.data.add(other.data, self.device),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -658,7 +676,7 @@ pub fn NDTensor(comptime T: type) type {
             try self.data.add_(&other.data, self.device);
 
             return prepend_dependent(InplaceAddBwd, other, .{
-                .children = &.{self},
+                .children = &.{&self.node},
                 .callback = .{},
             });
         }
@@ -686,7 +704,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(SubBwd, .{
                 .data = try self.data.sub(other.data, self.device),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -723,7 +741,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(MulBwd, .{
                 .data = try self.data.mul(other.data, self.device),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -766,7 +784,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(DivBwd, .{
                 .data = try self.data.div(other.data, self.device),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -790,7 +808,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(MaxBwd, .{
                 .data = try self.data.max(self.device),
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -813,7 +831,7 @@ pub fn NDTensor(comptime T: type) type {
             };
             return create_dependent(ExpBwd, .{
                 .data = try self.data.exp(self.device),
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -836,7 +854,7 @@ pub fn NDTensor(comptime T: type) type {
                     .alpha = 1.0,
                     .beta = 0.0,
                 }),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -859,7 +877,7 @@ pub fn NDTensor(comptime T: type) type {
                     .alpha = 1.0,
                     .beta = 0.0,
                 }),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -878,7 +896,7 @@ pub fn NDTensor(comptime T: type) type {
             return create_dependent(BmmAccBwd, .{
                 .data = out.data,
                 .grad = out.grad,
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -959,7 +977,7 @@ pub fn NDTensor(comptime T: type) type {
 
             return create_dependent(DotBwd, .{
                 .data = try self.data.dot(other.data, self.device),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -1015,7 +1033,7 @@ pub fn NDTensor(comptime T: type) type {
             });
 
             return prepend_dependent(MatvecBwd, y, .{
-                .children = &.{ A, x },
+                .children = &.{ &A.node, &x.node },
                 .callback = .{ ._trans_a = config.trans_a },
             });
         }
@@ -1060,7 +1078,7 @@ pub fn NDTensor(comptime T: type) type {
                     .alpha = 1.0,
                     .beta = 0.0,
                 }),
-                .children = &.{ self, other },
+                .children = &.{ &self.node, &other.node },
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{ ._trans_a = config.trans_a },
@@ -1079,7 +1097,7 @@ pub fn NDTensor(comptime T: type) type {
             };
             return create_dependent(SumBwd, .{
                 .data = try self.data.sum(self.device),
-                .children = &.{self},
+                .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
                 .callback = .{},
@@ -1151,14 +1169,6 @@ pub fn NDTensor(comptime T: type) type {
         //    });
         //}
 
-        pub fn backward(self: *Self) !void {
-            std.debug.assert(zg.rt_grad_enabled);
-            // TODO: In the future, make sure this works with quantization. The 1 element is a tensor's gradient
-            // with respect to itself.
-            _ = try self.ensure_grad(1);
-            if (self._backward_ctx) |*ctx| try ctx.call(self);
-        }
-
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes (non-standard layout)
         /// Prints to stderr using `std.debug.print` for alternatives see `print_to_writer`
         pub fn print_arrows(self: *Self) void {
@@ -1197,24 +1207,22 @@ test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
-    const x = try Tensor.from_slice(&.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
+    const x = try Tensor.from_slice(&graph, cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
         .requires_grad = true,
     });
     defer x.deinit();
 
-    std.debug.assert(x.is_leaf() and x.node_type() == .leaf);
+    std.debug.assert(x.node.is_leaf());
 
     const y = try x.clamp(-1.0, 1.0);
     defer y.deinit();
 
-    std.debug.assert(!y.is_leaf() and y.node_type() == .internal);
+    std.debug.assert(!y.node.is_leaf());
 
-    try gm.backward(y);
+    try graph.backward(y);
 
     const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
     const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
@@ -1227,15 +1235,13 @@ test "tensor/Graph/sum" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const Tensor = NDTensor(f32);
 
-    const input = try Tensor.from_slice(&.{ 1, 2, 3, 4 }, &.{4}, .{
+    const input = try Tensor.from_slice(&graph, cpu.reference(), &.{ 1, 2, 3, 4 }, null, .{
         .requires_grad = true,
-        .device = cpu.reference(),
-        .gb = gm.heap(),
     });
     defer input.deinit();
 
@@ -1245,7 +1251,7 @@ test "tensor/Graph/sum" {
 
     if (!zg.rt_grad_enabled) return error.GradNotEnabled;
 
-    try gm.backward(sum_result);
+    try graph.backward(sum_result);
 
     try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, input.assume_grad_data());
 }
@@ -1254,19 +1260,19 @@ test "tensor/NDTensor index, add, div" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const Tensor = NDTensor(f32);
     {
         // zig fmt: off
-        const t1 = try Tensor.from_slice(&.{
+        const t1 = try Tensor.from_slice(&graph, device, &.{
              0, 1, 2,
              3, 4, 5,
              6, 7, 8,
@@ -1275,12 +1281,13 @@ test "tensor/NDTensor index, add, div" {
              3, 4, 5,
              6, 7, 8
          }, &.{ 2, 3, 3 }, config);
+
         defer t1.deinit();
 
-        const t2 = try Tensor.from_slice(&.{ 1, 1, 1 }, null, config);
+        const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1 }, null, config);
         defer t2.deinit();
 
-        const t3 = try Tensor.from_slice(&.{
+        const t3 = try Tensor.from_slice(&graph, device, &.{
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
@@ -1303,7 +1310,7 @@ test "tensor/NDTensor index, add, div" {
     }
     {
         // zig fmt: off
-        const t1 = try Tensor.from_slice(&.{
+        const t1 = try Tensor.from_slice(&graph, device, &.{
              0, 1, 2,
              3, 4, 5,
              6, 7, 8,
@@ -1314,10 +1321,10 @@ test "tensor/NDTensor index, add, div" {
          }, &.{ 2, 3, 3 }, config);
         defer t1.deinit();
 
-        const t2 = try Tensor.from_slice(&.{ 1, 1, 1, 1, 1, 1 }, &.{ 2, 1, 3 }, config);
+        const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1, 1 }, &.{ 2, 1, 3 }, config);
         defer t2.deinit();
 
-        const t3 = try Tensor.from_slice(&.{
+        const t3 = try Tensor.from_slice(&graph, device, &.{
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
@@ -1344,27 +1351,28 @@ test "tensor/Graph/addback" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const Tensor = NDTensor(f32);
 
-    var t1 = try Tensor.from_slice(&.{2.0}, &.{1}, config);
+    var t1 = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
     defer t1.deinit();
-    var t2 = try Tensor.from_slice(&.{3.0}, &.{1}, config);
+
+    var t2 = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
     defer t2.deinit();
     // t3 = t1 + t2;
     // dt3/dt1 = 1, dt3/dt2 = 1
     var t3 = try t1.add(t2);
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
     try std.testing.expectEqualDeep(&[_]f32{1.0}, t1.assume_grad_data());
     try std.testing.expectEqualDeep(&[_]f32{1.0}, t2.assume_grad_data());
 }
@@ -1373,28 +1381,28 @@ test "tensor/Graph/mulback" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const Tensor = NDTensor(f32);
 
-    const t1 = try Tensor.from_slice(&.{2}, &.{1}, config);
+    const t1 = try Tensor.from_slice(&graph, device, &.{2}, null, config);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&.{3}, &.{1}, config);
+    const t2 = try Tensor.from_slice(&graph, device, &.{3}, null, config);
     defer t2.deinit();
     // t3 = t1 * t2;
     // dt3/dt1 = t2, dt3/dt2 = t1
     const t3 = try t1.mul(t2);
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
 
     try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
     try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
@@ -1404,24 +1412,24 @@ test "tensor/Graph/moreback" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const Tensor = NDTensor(f32);
 
-    var w = try Tensor.from_slice(&.{ 3, 2 }, &.{2}, config);
+    var w = try Tensor.from_slice(&graph, device, &.{ 3, 2 }, null, config);
     defer w.deinit();
 
-    var b = try Tensor.from_slice(&.{ 1, 1 }, &.{2}, config);
+    var b = try Tensor.from_slice(&graph, device, &.{ 1, 1 }, null, config);
     defer b.deinit();
 
-    var x = try Tensor.from_slice(&.{ 4, 4 }, &.{2}, config);
+    var x = try Tensor.from_slice(&graph, device, &.{ 4, 4 }, null, config);
     defer x.deinit();
 
     // h = w*x + b
@@ -1432,7 +1440,7 @@ test "tensor/Graph/moreback" {
     const h = try temp.add(b);
     defer h.deinit();
 
-    try gm.backward(h);
+    try graph.backward(h);
 
     try std.testing.expectEqualSlices(f32, x.data.data, w.grad.?.data);
     try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, b.grad.?.data);
@@ -1452,7 +1460,7 @@ test "tensor/Graph/moreback" {
     const h2 = try temp2.add(b);
     defer h2.deinit();
 
-    try gm.backward(h2);
+    try graph.backward(h2);
 
     try std.testing.expectEqualSlices(f32, x.data.data, w.assume_grad_data());
     try std.testing.expect(std.mem.allEqual(f32, b.assume_grad_data(), 1));
@@ -1462,27 +1470,27 @@ test "tensor/Graph/divback" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const device = cpu.reference();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const Tensor = NDTensor(f32);
 
-    var t1 = try Tensor.from_slice(&.{ 4, 9 }, &.{2}, config);
+    var t1 = try Tensor.from_slice(&graph, device, &.{ 4, 9 }, null, config);
     defer t1.deinit();
 
-    var t2 = try Tensor.from_slice(&.{ 2, 3 }, &.{2}, config);
+    var t2 = try Tensor.from_slice(&graph, device, &.{ 2, 3 }, null, config);
     defer t2.deinit();
 
     var t3 = try t1.div(t2);
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
 
     const expected_grad_t1 = &[_]f32{ 1.0 / 2.0, 1.0 / 3.0 }; // 1 / b
     const expected_grad_t2 = &[_]f32{ -4.0 / 4.0, -9.0 / 9.0 }; // -a / b^2
@@ -1495,30 +1503,29 @@ test "tensor/Graph/matmul_backward square" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const T = f32;
     const Tensor = NDTensor(T);
-    const shape = &[_]usize{ 2, 2 };
 
-    var t1 = try Tensor.from_slice(&[_]T{ 1, 2, 3, 4 }, shape, config);
+    var t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, config);
     defer t1.deinit();
 
-    var t2 = try Tensor.from_slice(&[_]T{ 1, 0, 0, 1 }, shape, config);
+    var t2 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 0, 1 }, &.{ 2, 2 }, config);
     defer t2.deinit();
 
     // Case 1: No transpose
     var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
@@ -1530,7 +1537,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3_trans_a = try t1.bmm(t2, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
 
-    try gm.backward(t3_trans_a);
+    try graph.backward(t3_trans_a);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.assume_grad_data());
@@ -1542,7 +1549,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3_trans_b = try t1.bmm(t2, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
 
-    try gm.backward(t3_trans_b);
+    try graph.backward(t3_trans_b);
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.assume_grad_data());
@@ -1554,7 +1561,7 @@ test "tensor/Graph/matmul_backward square" {
     var t3_trans_ab = try t1.bmm(t2, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
 
-    try gm.backward(t3_trans_ab);
+    try graph.backward(t3_trans_ab);
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.assume_grad_data());
@@ -1565,12 +1572,12 @@ test "tensor/Graph/matmul_backward non-square" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1578,10 +1585,10 @@ test "tensor/Graph/matmul_backward non-square" {
     const Tensor = NDTensor(T);
 
     // Case 1: No transpose (t1: [2, 2, 3], t2: [2, 3, 2])
-    const t1 = try Tensor.from_slice(&[_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &.{ 2, 2, 3 }, config);
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &.{ 2, 2, 3 }, config);
     defer t1.deinit();
     
-    const t2 = try Tensor.from_slice(&[_]T{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &.{ 2, 3, 2 }, config);
+    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &.{ 2, 3, 2 }, config);
     defer t2.deinit();
 
     // Case 1: No transpose
@@ -1589,7 +1596,7 @@ test "tensor/Graph/matmul_backward non-square" {
         const t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
         defer t3.deinit();
 
-        try gm.backward(t3);
+        try graph.backward(t3);
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
@@ -1600,13 +1607,13 @@ test "tensor/Graph/matmul_backward non-square" {
 
     // Case 2: Transpose A (t1: [2, 3, 2], t2: [2, 3, 2])
     {
-        const t1_case2 = try Tensor.from_slice(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, config);
+        const t1_case2 = try Tensor.from_slice(&graph, device, &.{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, config);
         defer t1_case2.deinit();
         
         var t3 = try t1_case2.bmm(t2, .{ .trans_a = true, .trans_b = false });
         defer t3.deinit();
 
-        try gm.backward(t3);
+        try graph.backward(t3);
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case2.grad.?.data);
@@ -1616,13 +1623,13 @@ test "tensor/Graph/matmul_backward non-square" {
 
     // Case 3: Transpose B (t1: [2, 2, 3], t2: [2, 2, 3])
     {
-        var t2_case3 = try Tensor.from_slice(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, config);
+        var t2_case3 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, config);
         defer t2_case3.deinit();
 
         var t3 = try t1.bmm(t2_case3, .{ .trans_a = false, .trans_b = true });
         defer t3.deinit();
 
-        try gm.backward(t3);
+        try graph.backward(t3);
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
@@ -1632,16 +1639,16 @@ test "tensor/Graph/matmul_backward non-square" {
 
     // Case 4: Transpose both A and B (t1: [2, 3, 2], t2: [2, 2, 3])
     {
-        const t1_case4 = try Tensor.from_slice(&[_]T{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &[_]usize{ 2, 3, 2 }, config);
+        const t1_case4 = try Tensor.from_slice(&graph, device, &.{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, config);
         defer t1_case4.deinit();
 
-        const t2_case4 = try Tensor.from_slice(&[_]T{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &[_]usize{ 2, 2, 3 }, config);
+        const t2_case4 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, config);
         defer t2_case4.deinit();
 
         var t3 = try t1_case4.bmm(t2_case4, .{ .trans_a = true, .trans_b = true });
         defer t3.deinit();
 
-        try gm.backward(t3);
+        try graph.backward(t3);
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
         try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case4.grad.?.data);
@@ -1653,12 +1660,12 @@ test "tensor/Graph/matmul_backward" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1666,17 +1673,17 @@ test "tensor/Graph/matmul_backward" {
     const Tensor = NDTensor(T);
     const shape = &[_]usize{ 2, 2 };
 
-    const t1 = try Tensor.from_slice(&[_]T{ 1, 2, 3, 4 }, shape, config);
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4 }, shape, config);
     defer t1.deinit();
     
-    const t2 = try Tensor.from_slice(&[_]T{ 1, 0, 0, 1 }, shape, config);
+    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 0, 1 }, shape, config);
     defer t2.deinit();
 
     // Case 1: No transpose
     var t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
     const expected_grad_t1 = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2 = &[_]T{ 4, 4, 6, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
@@ -1688,7 +1695,7 @@ test "tensor/Graph/matmul_backward" {
     const t3_trans_a = try t1.bmm(t2, .{ .trans_a = true, .trans_b = false });
     defer t3_trans_a.deinit();
 
-    try gm.backward(t3_trans_a);
+    try graph.backward(t3_trans_a);
     const expected_grad_t1_trans_a = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_a = &[_]T{ 3, 3, 7, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_a, t1.assume_grad_data());
@@ -1700,7 +1707,7 @@ test "tensor/Graph/matmul_backward" {
     const t3_trans_b = try t1.bmm(t2, .{ .trans_a = false, .trans_b = true });
     defer t3_trans_b.deinit();
 
-    try gm.backward(t3_trans_b);
+    try graph.backward(t3_trans_b);
     const expected_grad_t1_trans_b = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_b = &[_]T{ 4, 6, 4, 6 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_b, t1.assume_grad_data());
@@ -1712,7 +1719,7 @@ test "tensor/Graph/matmul_backward" {
     const t3_trans_ab = try t1.bmm(t2, .{ .trans_a = true, .trans_b = true });
     defer t3_trans_ab.deinit();
 
-    try gm.backward(t3_trans_ab);
+    try graph.backward(t3_trans_ab);
     const expected_grad_t1_trans_ab = &[_]T{ 1, 1, 1, 1 };
     const expected_grad_t2_trans_ab = &[_]T{ 3, 7, 3, 7 };
     try std.testing.expectEqualSlices(T, expected_grad_t1_trans_ab, t1.assume_grad_data());
@@ -1723,12 +1730,12 @@ test "tensor/Graph/matvec_backward" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
@@ -1739,16 +1746,16 @@ test "tensor/Graph/matvec_backward" {
     // grad = [1, 1]'
     // dl/dA = grad * [1, 1] = [[2, 2], [2, 2]]
     // dl/dx = A' * grad = [4, 6]'
-    const t1 = try Tensor.from_slice(&.{ 1, 2, 3, 4 }, &.{2, 2}, config);
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4 }, &.{2, 2}, config);
     defer t1.deinit();
     
-    const t2 = try Tensor.from_slice(&.{ 1, 1 }, &.{2}, config);
+    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1 }, &.{2}, config);
     defer t2.deinit();
 
     const t3 = try t1.matvec(t2, .{});
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
 
     try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, t1.assume_grad_data());
     try std.testing.expectEqualSlices(f32, &.{4, 6}, t2.assume_grad_data());
@@ -1758,30 +1765,30 @@ test "tensor/Graph/dot_backward" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+    
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
     const Tensor = NDTensor(f32);
 
-    var t1 = try Tensor.from_slice(&.{ 1, 2, 3 }, &.{3}, config);
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3 }, null, config);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&.{ 4, 5, 6 }, &.{3}, config);
+    const t2 = try Tensor.from_slice(&graph, device, &.{ 4, 5, 6 }, null, config);
     defer t2.deinit();
 
     var t3 = try t1.dot(t2);
     defer t3.deinit();
 
-    try gm.backward(t3);
+    try graph.backward(t3);
 
-    try std.testing.expectEqualSlices(f32, &.{4,5,6}, t1.grad.?.data);
-    try std.testing.expectEqualSlices(f32, &.{1, 2, 3}, t2.grad.?.data);
+    try std.testing.expectEqualSlices(f32, &.{4, 5, 6}, t1.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{1, 2, 3}, t2.assume_grad_data());
 }
 
 
@@ -1789,31 +1796,31 @@ test "tensor/inplace_add" {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = Graph.init(std.testing.allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
 
     const config: TensorConfig = .{
-        .device = cpu.reference(),
-        .gb = gm.heap(),
         .requires_grad = true,
     };
 
-    const u = try NDTensor(f32).ones(&.{ 2, 2 }, config);
+    const u = try NDTensor(f32).ones(&graph, device, &.{ 2, 2 }, config);
     defer u.deinit();
 
-    const v = try NDTensor(f32).ones(&.{ 2, 2 }, config);
+    const v = try NDTensor(f32).ones(&graph, device, &.{ 2, 2 }, config);
     defer v.deinit();
 
     const x = try u.mul(v);
     defer x.deinit();
 
-    const a = try NDTensor(f32).ones(&.{ 2, 2 }, config);
+    const a = try NDTensor(f32).ones(&graph, device, &.{ 2, 2 }, config);
     defer a.deinit();
 
-    const b = try NDTensor(f32).ones(&.{ 2, 2 }, config);
+    const b = try NDTensor(f32).ones(&graph, device, &.{ 2, 2 }, config);
     defer b.deinit();
 
-    const c = try NDTensor(f32).ones(&.{ 2, 2 }, config);
+    const c = try NDTensor(f32).ones(&graph, device, &.{ 2, 2 }, config);
     defer c.deinit();
 
     // x now carries 4 contexts for (a), (b), (c), (u, v)
@@ -1832,12 +1839,12 @@ test "tensor/inplace_add" {
     try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2 }, v.assume_grad_data());
 
     // check the children...
-    var children = x.child_iterator() orelse unreachable;
-    try std.testing.expectEqual(children.next().?, c);
-    try std.testing.expectEqual(children.next().?, b);
-    try std.testing.expectEqual(children.next().?, a);
-    try std.testing.expectEqual(children.next().?, u);
-    try std.testing.expectEqual(children.next().?, v);
+    var children = x.node.child_iterator() orelse unreachable;
+    try std.testing.expectEqual(children.next().?, &c.node);
+    try std.testing.expectEqual(children.next().?, &b.node);
+    try std.testing.expectEqual(children.next().?, &a.node);
+    try std.testing.expectEqual(children.next().?, &u.node);
+    try std.testing.expectEqual(children.next().?, &v.node);
     try std.testing.expectEqual(children.next(), null);
 }
 
