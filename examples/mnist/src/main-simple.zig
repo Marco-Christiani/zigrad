@@ -11,8 +11,14 @@ const log = std.log.scoped(.mnist);
 const T = f32;
 
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
-    var cpu = zg.device.HostDevice.init(std.heap.raw_c_allocator);
+    var gm = zg.GraphManager.init(std.heap.smp_allocator, .{
+        .eager_teardown = true,
+    });
+    defer gm.deinit();
+
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+
     const device = cpu.reference();
 
     var optim: Optimizer = .{
@@ -22,17 +28,12 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
         .grad_clip_enabled = false,
     };
 
-    var gm = zg.GraphManager(zg.NDTensor(f32)).init(cpu.allocator, .{
-        .eager_teardown = true,
-    });
-    defer gm.deinit();
-
-    var model = try MnistModel.init(device, &optim); // 109_386
+    var model = try MnistModel.init(&gm, device, &optim); // 109_386
     defer model.deinit();
 
     std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
-    const train_dataset = try MnistDataset(T).load(device, train_path, batch_size);
+    const train_dataset = try MnistDataset(T).load(&gm, device, train_path, batch_size);
 
     // Train -------------------------------------------------------------------
     std.debug.print("Training...\n", .{});
@@ -42,8 +43,8 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
-            try image.set_label("image_batch");
-            try label.set_label("label_batch");
+            image.set_label("image_batch");
+            label.set_label("label_batch");
 
             step_timer.reset();
             const output = try model.forward(image);
@@ -64,6 +65,8 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
                 train_dataset.images.len,
                 ms_per_sample,
             });
+
+            gm.reset();
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
@@ -78,7 +81,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     // Eval on test set
     std.debug.print("Loading test data...\n", .{});
-    const test_dataset = try MnistDataset(T).load(device, test_path, batch_size);
+    const test_dataset = try MnistDataset(T).load(&gm, device, test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
     const test_eval = try eval_mnist(&model, test_dataset);

@@ -52,19 +52,19 @@ pub fn SGD(comptime T: type) type {
         grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
         grad_clip_delta: f32 = settings.grad_clip_delta,
 
-        pub fn step(self: Self, params: []*NDTensor) void {
-            for (params) |param| callback(param, self);
+        pub fn step(self: *Self, params: []*NDTensor(T)) void {
+            for (params) |param| callback(param, undefined, self) catch {};
         }
 
         pub fn attach(self: *Self, param: *Tensor) !void {
             std.debug.assert(param._backward_ctx == null);
-            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, param.device, .{
+            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, param._node_allocator.allocator, .{
                 .persist = true,
             });
         }
 
         pub fn callback(param: *Tensor, _: *Tensor.Children, self: *Self) !void {
-            // std.debug.print("IN SGD BACKWARD\n", .{});
+            //std.debug.print("IN SGD BACKWARD\n", .{});
 
             if (self.grad_clip_enabled) param._clip_grad_norm(.{
                 .max_norm = self.grad_clip_max_norm,
