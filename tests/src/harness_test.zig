@@ -1,7 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const python = @import("python.zig");
-const Py = python.Py;
+const Py = @import("python.zig");
 const c = @cImport({
     @cInclude("Python.h");
 });
@@ -10,7 +9,7 @@ pub fn main() !void {
     Py.init();
     defer Py.finalize();
 
-    const main_mod = try Py.importMain();
+    const main_mod = try Py.import_main();
     const globals = c.PyModule_GetDict(main_mod);
 
     const script =
@@ -22,48 +21,36 @@ pub fn main() !void {
     ;
     try Py.run(script, globals);
 
-    const x_obj = try Py.getVar(globals, "x");
-    const grad_obj = try Py.getattr(x_obj, "grad");
-    const numpy_obj = try Py.callMethod(grad_obj, "numpy");
+    const x_obj = try Py.get_var(globals, "x");
+    const grad_obj = try x_obj.get_attr("grad");
+    const numpy_obj = try grad_obj.call_method("numpy");
 
-    var view: c.Py_buffer = .{};
-    try Py.getBuffer(numpy_obj, &view);
-    defer Py.releaseBuffer(&view);
-
-    if (view.ndim != 2 or view.itemsize != @sizeOf(f32)) {
-        std.debug.print("Unexpected tensor shape/itemsize\n", .{});
-        return error.UnexpectedShape;
-    }
-
-    const rows: usize = @intCast(view.shape[0]);
-    const cols: usize = @intCast(view.shape[1]);
-    const count = rows * cols;
-
-    const flat_ptr: [*]const f32 = @ptrCast(@alignCast(view.buf orelse return error.BadBuffer));
-    const sample = flat_ptr[0..count];
+    const pybuf = try numpy_obj.get_buffer();
+    const pybuf_slice = try pybuf.slice(f32);
 
     std.debug.print("grad w.r.t x [0..8] = ", .{});
     for (0..8) |i| {
-        std.debug.print("{d:.1} ", .{sample[i]});
+        std.debug.print("{d:.1} ", .{pybuf_slice[i]});
     }
     std.debug.print("\n", .{});
 
     const code_obj = try Py.check(c.Py_CompileString("x.grad.sum().item()", "<string>", c.Py_eval_input));
-
-    _ = c.PyObject_Print(code_obj, c.stderr, 0);
-    std.debug.print("\n", .{});
     const result_obj = try Py.check(c.PyEval_EvalCode(code_obj, globals, globals));
-    _ = c.PyObject_Print(result_obj, c.stderr, 0);
-    std.debug.print("\n", .{});
+    if (c.PyFloat_Check(result_obj) == 1) {
+        const value = c.PyFloat_AsDouble(result_obj);
+        std.debug.print("{d}\n", .{value});
+        const v2 = try Py.eval_float("x.grad.sum().item()", globals);
+        std.debug.assert(value == v2);
+    }
 }
 
 test {
     Py.init();
     defer Py.finalize();
-    try test2();
+    try unit_test();
 }
 
-fn test2() !void {
+fn unit_test() !void {
     const T = f32;
     const Tensor = zg.NDTensor(T);
 
@@ -90,7 +77,7 @@ fn test2() !void {
     const zigrad_grad = x.assume_grad_data();
 
     // Torch
-    const globals = try Py.importMain();
+    const globals = try Py.import_main();
     const dict = c.PyModule_GetDict(globals);
 
     const script =
@@ -100,36 +87,41 @@ fn test2() !void {
         \\y = x.clamp(-1.0, 1.0)
         \\y.retain_grad()
         \\y.sum().backward()
+        \\yval = y.detach().numpy()
     ;
     try Py.run(script, dict);
 
-    var py_x = try Py.getVar(dict, "x");
+    var py_x = try Py.get_var(dict, "x");
     defer py_x.deinit();
 
-    var py_y = try Py.getVar(dict, "y");
+    var py_y = try Py.get_var(dict, "y");
     defer py_y.deinit();
 
-    var py_y_detached = try py_y.callMethod("detach");
+    var py_y_detached = try py_y.call_method("detach");
     defer py_y_detached.deinit();
 
-    var py_y_np = try py_y_detached.callMethod("numpy");
+    var py_y_np = try py_y_detached.call_method("numpy");
     defer py_y_np.deinit();
 
-    var py_x_grad = try py_x.getattr("grad");
+    var py_x_grad = try py_x.get_attr("grad");
     defer py_x_grad.deinit();
 
-    var py_x_grad_np = try py_x_grad.callMethod("numpy");
+    var py_x_grad_np = try py_x_grad.call_method("numpy");
     defer py_x_grad_np.deinit();
 
-    var y_buffer = try py_y_np.getBuffer(c.PyBUF_FORMAT | c.PyBUF_ANY_CONTIGUOUS);
+    var y_buffer = try py_y_np.get_buffer();
     defer y_buffer.deinit();
 
-    var grad_buffer = try py_x_grad_np.getBuffer(c.PyBUF_FORMAT | c.PyBUF_ANY_CONTIGUOUS);
+    var grad_buffer = try py_x_grad_np.get_buffer();
     defer grad_buffer.deinit();
 
-    const py_y_slice = try y_buffer.asReshapedSlice(f32, &.{ 2, 2 });
-    const py_grad_slice = try grad_buffer.asReshapedSlice(f32, &.{ 2, 2 });
+    const py_y_slice = try y_buffer.slice(f32);
+    const py_grad_slice = try grad_buffer.slice(f32);
+    const y_buffer2 = try py_y_np.get_slice(f32);
+    const y_slice3 = try Py.get_var_slice(dict, "yval", f32);
 
+    try std.testing.expectEqualSlices(f32, py_y_slice, y_buffer2);
+    try std.testing.expectEqualSlices(f32, py_y_slice, y_slice3);
     // Compare
     try std.testing.expectEqualSlices(f32, py_y_slice, zigrad_out);
     try std.testing.expectEqualSlices(f32, py_grad_slice, zigrad_grad);

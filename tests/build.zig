@@ -65,8 +65,8 @@ pub fn build(b: *std.Build) void {
 
 fn build_python(b: *Build, target: Build.ResolvedTarget, optimize: OptimizeMode) !*Compile {
     const exe = b.addExecutable(.{
-        .name = "main",
-        .root_source_file = b.path("embed_python.zig"),
+        .name = "zg-test-exe",
+        .root_source_file = b.path("src/harness_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -79,12 +79,10 @@ fn build_python(b: *Build, target: Build.ResolvedTarget, optimize: OptimizeMode)
     const pyver = try getPythonInfo(alloc,
         \\import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")
     );
-    // const libname = pyver["python".len..];
 
     const incl = try std.fs.path.join(alloc, &.{ base_root, "include", pyver });
     const libdir = try std.fs.path.join(alloc, &.{ base_root, "lib" });
 
-    // std.debug.print("INCL: {s}\nLIBDIR: {s}\nLIBNAME: python{s}\n", .{ incl, libdir, libname });
     exe.addIncludePath(.{ .cwd_relative = incl });
     exe.linkSystemLibrary(pyver);
     exe.addLibraryPath(.{ .cwd_relative = libdir });
@@ -96,7 +94,6 @@ fn getPythonInfo(allocator: std.mem.Allocator, script: []const u8) ![]const u8 {
     const child = try std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{ "python3", "-c", script },
-        // .= .Pipe,
     });
 
     // defer allocator.free(child.stdout);

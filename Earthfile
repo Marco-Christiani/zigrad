@@ -1,14 +1,5 @@
 VERSION 0.8
 
-localpy:
-    LOCALLY
-    ENV BASE_ROOT=$(python3 -c 'import sys, pathlib; print(pathlib.Path(sys.base_prefix).resolve())')
-    ENV PYVER=$(python3 -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')
-    ENV INCL=$BASE_ROOT/include/$PYVER
-    ENV LIBDIR=$BASE_ROOT/lib
-    ENV LIBNAME=python${PYVER#python}
-    ENV PYTHONHOME=$BASE_ROOT
-    ENV LD_LIBRARY_PATH=$BASE_ROOT/lib
 
 SETUP_PYTHON_ENV:
     FUNCTION
@@ -45,11 +36,12 @@ deps:
         && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
     RUN pip3 install --break-system-packages numpy torch --index-url https://download.pytorch.org/whl/cpu
+    DO +ZIG
+    SAVE IMAGE zigrad-base:latest
 
 build-zig:
     ARG ZIGRAD_BACKEND=HOST
     FROM +deps
-    DO +ZIG
     COPY --dir src scripts ./
     COPY *.zig .
     COPY *.zon .
@@ -57,7 +49,17 @@ build-zig:
     RUN zig build
     RUN mv ./zig-out/bin/main zg-main
     CMD ["./zg-main"]
-    SAVE IMAGE zg:latest
+    SAVE IMAGE zigrad:latest
+
+build-zig-tests:
+  FROM +build-zig
+  ARG ZIGRAD_BACKEND=HOST
+  COPY --dir tests ./
+  ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
+  RUN cd tests && zig build
+  RUN mv tests/zig-out/bin/zg-test-exe zg-test-exe
+  RUN ["./zg-test-exe"]
+
 
 test-matrix:
     FROM alpine:3.18
