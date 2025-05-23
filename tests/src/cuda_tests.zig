@@ -32,7 +32,7 @@ pub fn main() !void {
     var gpu = zg.device.CudaDevice.init(0);
     defer gpu.deinit();
 
-    var gm = zg.GraphManager.init(std.heap.smp_allocator, .{});
+    var gm = zg.Graph.init(std.heap.smp_allocator, .{});
     defer gm.deinit();
 
     { // MEMORY TRANSFER //

@@ -33,13 +33,11 @@ fn unit_test(allocator: std.mem.Allocator) !void {
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = zg.GraphManager.init(allocator, .{ .eager_teardown = false });
-    defer gm.deinit();
+    var graph = zg.Graph.init(allocator, .{ .eager_teardown = false });
+    defer graph.deinit();
 
     // Zigrad
-    const x = try Tensor.from_slice(&.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
+    const x = try Tensor.from_slice(&graph, cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
         .requires_grad = true,
     });
     defer x.deinit();
@@ -47,7 +45,7 @@ fn unit_test(allocator: std.mem.Allocator) !void {
     const y = try x.clamp(-1.0, 1.0);
     defer y.deinit();
 
-    try gm.backward(y);
+    try y.backward();
 
     const zigrad_out = y.get_data();
     const zigrad_grad = x.assume_grad_data();
