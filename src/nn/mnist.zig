@@ -1,5 +1,5 @@
 const std = @import("std");
-const zg = @import("zigrad");
+const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 
 const Model = zg.Model;
@@ -241,7 +241,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
         @setFloatMode(.optimized);
     }
 
-    var cpu = zg.device.HostDevice.init(std.heap.raw_c_allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
     const device = cpu.reference();

@@ -817,7 +817,6 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        /// TODO: exp bw backend
         /// Element-wise exponential. COM.
         pub fn exp(self: *Self) !*Self {
             const ExpBwd = struct {
@@ -845,7 +844,6 @@ pub fn NDTensor(comptime T: type) type {
             trans_b: bool = false,
         };
 
-        /// TODO: this should proxy to bmm_acc
         /// Matrix multiplication. COM.
         pub fn bmm(self: *Self, other: *Self, config: BmmConfig) !*Self {
             return create_dependent(BmmAccBwd, .{
@@ -1125,7 +1123,6 @@ pub fn NDTensor(comptime T: type) type {
         //        .keep_dims = opts.keep_dims,
         //        .return_offsets = true,
         //    });
-        //    // TODO: use a null terminated allocation instead, tired rn
         //    const ctx = if (self.requires_grad()) try device.allocator.dupeZ(usize, max_result.offsets.?) else null;
         //    if (max_result.offsets) |offs| device.allocator.free(offs);
 
@@ -1147,8 +1144,7 @@ pub fn NDTensor(comptime T: type) type {
         //            const bw_input = bw_children[0];
         //            if (bw_input.grad == null) return;
         //            const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-        //            // how am i expected to free this, unknown len
-        //            // defer _self.device.raw(offsets); // FIXME: just occuring to me the problem with this, if _self.device != fwd_allocator
+        //            // defer _self.device.raw(offsets);
         //            // bw_tensor must/should be the same len as indices used to index (note that offsets is a raw c ptr without a len)
         //            // std.debug.assert(offsets.len == bw_tensor.data.data.len); // can make this a real check when its a  null term alloc
         //            for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
@@ -1156,7 +1152,6 @@ pub fn NDTensor(comptime T: type) type {
         //    }.bw_impl;
 
         //    const gather_result = try self.data.gather(device, .{ .indices = opts.indices.data, .dim = opts.dim, .return_offsets = true });;;
-        //    // TODO: use a null terminated allocation instead, tired rn
         //    const ctx = if (self.requires_grad()) try device.allocator.dupe(usize, gather_result.offsets.?) else null;;;
 
         //    return create_dependent(.{

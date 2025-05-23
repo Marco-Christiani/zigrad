@@ -213,7 +213,6 @@ pub const PyObject = struct {
             return PyError.PythonError;
         }
 
-        std.debug.print("Buffer size: {d}\n", .{buffer_size(buffer)});
         const data_ptr: [*]const T = @ptrCast(@alignCast(buffer.buf orelse return PyError.PythonError));
         return data_ptr[0..buffer_size(buffer)];
     }
