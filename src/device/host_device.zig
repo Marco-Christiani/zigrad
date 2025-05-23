@@ -6,12 +6,11 @@ pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
-const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
 const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
-pub const HostDevice = @This();
-
+const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
 const opspec = @import("opspec.zig");
+pub const HostDevice = @This();
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -45,21 +44,14 @@ const Self = @This();
 const Error = CachingAllocator.Error;
 pub const DeviceReference = *Self;
 
-scratch: ScratchMemory,
 cache: CachingAllocator,
-allocator: std.mem.Allocator,
 
-pub fn init(backing_allocator: std.mem.Allocator) Self {
-    return .{
-        .scratch = .{},
-        .cache = CachingAllocator.init(.{}),
-        .allocator = backing_allocator,
-    };
+pub fn init() Self {
+    return .{ .cache = CachingAllocator.init(.{}) };
 }
 
 pub fn deinit(self: *Self) void {
     self.cache.deinit(undefined);
-    self.scratch.deinit();
     self.* = undefined;
 }
 
@@ -147,7 +139,7 @@ pub fn outer(_: *const Self, T: type, p: opspec.outer(T)) void {
 // TODO: extend to greater than 2D and optimize this
 pub fn transpose(_: *const Self, T: type, p: opspec.transpose(T)) void {
     for (0..p.m) |i| {
-        for (0..p.n[1]) |j| {
+        for (0..p.n) |j| {
             p.B[j * p.m + i] = p.A[i * p.n + j] + p.alpha * p.B[j * p.m + i];
         }
     }
@@ -236,19 +228,71 @@ pub fn clip_nrm2(self: *const Self, T: type, p: opspec.clip_nrm2(T)) void {
 // non-linear ops
 
 pub fn exp_fwd(_: *const Self, T: type, p: opspec.exp_fwd(T)) void {
-    for (p.x, p.y) |x, *y| y.* = @exp(x);
+    var i: usize = 0;
+    if (comptime std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        while ((i + N) <= p.x.len) : (i += N) {
+            const u: V = p.x[i..][0..N].*;
+            p.y[i..][0..N].* = @exp(u);
+        }
+    }
+    while (i < p.x.len) : (i += 1) {
+        p.y[i] = @exp(p.x[i]);
+    }
 }
 
 pub fn exp_bwd(_: *const Self, T: type, p: opspec.exp_bwd(T)) void {
+    // TODO: vectorize this...
     for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += y * y_g;
 }
 
 pub fn relu_fwd(_: *const Self, T: type, p: opspec.relu_fwd(T)) void {
-    for (p.x, p.y) |x, *y| y.* = @max(x, 0);
+    var i: usize = 0;
+    if (comptime std.simd.suggestVectorLength(T)) |N| {
+        const V = @Vector(N, T);
+        const zero: V = @splat(0);
+        while ((i + N) <= p.x.len) : (i += N) {
+            const u: V = p.x[i..][0..N].*;
+            p.y[i..][0..N].* = @max(zero, u);
+        }
+    }
+    while (i < p.x.len) : (i += 1) {
+        p.y[i] = @max(0, p.x[i]);
+    }
 }
 
 pub fn relu_bwd(_: *const Self, T: type, p: opspec.relu_bwd(T)) void {
     for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| x_g.* += if (x > 0) y_g else 0;
+}
+
+pub fn relu_inplace_bwd(_: *const Self, T: type, p: opspec.relu_inplace_bwd(T)) void {
+    for (p.x, p.x_g) |x, *x_g| {
+        if (x <= 0) x_g.* = 0;
+    }
+}
+
+pub fn tanh_fwd(_: *const Self, T: type, p: opspec.tanh_fwd(T)) void {
+    for (p.x, p.y) |x, *y| y.* = std.math.tanh(x);
+}
+
+pub fn tanh_bwd(_: *const Self, T: type, p: opspec.tanh_bwd(T)) void {
+    for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += (1 - (y * y)) * y_g;
+}
+
+pub fn tanh_inplace_bwd(_: *const Self, T: type, p: opspec.tanh_inplace_bwd(T)) void {
+    for (p.x, p.x_g) |x, *x_g| x_g.* *= (1 - (x * x));
+}
+
+pub fn sigm_fwd(_: *const Self, T: type, p: opspec.sigm_fwd(T)) void {
+    for (p.x, p.y) |x, *y| y.* = 1 / (1 + @exp(-x));
+}
+
+pub fn sigm_bwd(_: *const Self, T: type, p: opspec.sigm_bwd(T)) void {
+    for (p.x_g, p.y, p.y_g) |*x_g, y, y_g| x_g.* += y * (1 - y) * y_g;
+}
+
+pub fn sigm_inplace_bwd(_: *const Self, T: type, p: opspec.sigm_inplace_bwd(T)) void {
+    for (p.x, p.x_g) |x, *x_g| x_g.* *= (x * (1 - x));
 }
 
 pub fn max_fwd(_: *const Self, T: type, p: opspec.max_fwd(T)) void {
@@ -299,7 +343,7 @@ pub fn clamp_mask_fwd(_: *const Self, T: type, p: opspec.clamp_mask_fwd(T)) void
     if (vals_idx == p.x.len) return;
 
     var bits: ByteMask = .{ .mask = 0 };
-    for (vals_idx..p.x.len, 0..8) |i, b| {
+    for (vals_idx..p.x.len, 0..p.x_g.len - vals_idx) |i, b| {
         const x = p.x[i];
         const clamped = @min(p.max, @max(p.min, x));
         bits.setValue(b, x != clamped);
@@ -325,8 +369,59 @@ pub fn clamp_mask_bwd(_: *const Self, T: type, p: opspec.clamp_mask_bwd(T)) void
     if (vals_idx == p.x.len) return;
 
     var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
-    for (vals_idx..p.x.len, 0..8) |i, b| {
+    for (vals_idx..p.x.len, 0..p.x_g.len - vals_idx) |i, b| {
         if (bits.isSet(b)) p.x_g[i] += p.y_g[i];
+    }
+}
+
+pub fn relu_mask_fwd(_: *const Self, T: type, p: opspec.relu_mask_fwd(T)) void {
+    var vals_idx: usize = 0;
+    var byte_idx: usize = 0;
+    const chunks: usize = @divFloor(p.x.len, 8);
+
+    for (0..chunks) |_| {
+        var bits: ByteMask = .{ .mask = 0 };
+        inline for (0..8) |b| {
+            if (p.x[vals_idx] <= 0) {
+                p.x[vals_idx] = 0;
+                bits.setValue(b, true);
+            }
+            vals_idx += 1;
+        }
+        p.mask[byte_idx] = @bitCast(bits.mask);
+        byte_idx += 1;
+    }
+    if (vals_idx == p.x.len) return;
+
+    var bits: ByteMask = .{ .mask = 0 };
+    for (vals_idx..p.x.len, 0..p.x.len - vals_idx) |i, b| {
+        if (p.x[i] <= 0) {
+            p.x[i] = 0;
+            bits.setValue(b, true);
+        }
+    }
+    p.mask[byte_idx] = @bitCast(bits.mask);
+}
+
+pub fn relu_mask_bwd(_: *const Self, T: type, p: opspec.relu_mask_bwd(T)) void {
+    var vals_idx: usize = 0;
+    var byte_idx: usize = 0;
+    const chunks: usize = @divFloor(p.x_g.len, 8);
+
+    for (0..chunks) |_| {
+        var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
+        inline for (0..8) |b| {
+            if (bits.isSet(b)) p.x_g[vals_idx] = 0;
+            vals_idx += 1;
+        }
+        byte_idx += 1;
+    }
+
+    if (vals_idx == p.x_g.len) return;
+
+    var bits: ByteMask = .{ .mask = p.mask[byte_idx] };
+    for (vals_idx..p.x_g.len, 0..p.x_g.len - vals_idx) |i, b| {
+        if (bits.isSet(b)) p.x_g[i] = 0;
     }
 }
 
@@ -523,7 +618,7 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
 }
 
 pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.scratch.get(T, n);
+    return self.cache.get_scratch(T, n, undefined);
 }
 
 pub fn mem_copy(_: *const Self, T: type, src: []const T, dst: []T) void {
@@ -538,13 +633,19 @@ pub fn mem_fill(_: *const Self, T: type, slice: []T, value: T) void {
     @memset(slice, value);
 }
 
-pub fn mem_random(_: *const Self, T: type, slice: []T, op: RandType, seed: u64) void {
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rand = prng.random();
-    if (op == .uniform) {
-        for (slice) |*e| e.* = rand.float(T);
-    } else {
-        for (slice) |*e| e.* = rand.floatNorm(T);
+pub fn mem_random(_: *const Self, T: type, slice: []T, op: RandType, rand: std.Random) void {
+    switch (op) {
+        .uniform => {
+            for (slice) |*e| e.* = rand.float(T);
+        },
+        .normal => {
+            for (slice) |*e| e.* = rand.floatNorm(T);
+        },
+        .kaiming => |fan_mode| {
+            const fan_in: T = @floatFromInt(fan_mode);
+            const std_dev = @sqrt(2.0 / fan_in);
+            for (slice) |*e| e.* = rand.floatNorm(T) * std_dev;
+        },
     }
 }
 
@@ -576,35 +677,6 @@ pub inline fn is_compatible(_: *const Self, _: *const Self) bool {
 pub fn is_host(_: DeviceReference) bool {
     return true;
 }
-
-pub const ScratchMemory = struct {
-    head: usize = 0,
-    tail: usize = 0,
-    // We're using malloc for memory alignment. After one pass
-    // through a network, this should never need to be resized.
-    pub fn deinit(self: *ScratchMemory) void {
-        if (self.head != 0) {
-            std.c.free(@ptrFromInt(self.head));
-        }
-        self.* = undefined;
-    }
-    pub fn get(self: *ScratchMemory, T: type, n: usize) []T {
-        if (n == 0) return &.{};
-
-        const total: usize = @sizeOf(T) * n;
-        // check if we have enough scratch to provide a payload
-        if (self.tail < (self.head + total)) {
-            if (self.head != 0) {
-                std.c.free(@ptrFromInt(self.head));
-            }
-            const ptr = std.c.malloc(total) orelse @panic("Cannot allocate scratch memory");
-            self.head = @intFromPtr(ptr);
-            self.tail = self.head + total;
-        }
-        const ptr: [*]T = @ptrFromInt(self.head);
-        return ptr[0..n];
-    }
-};
 
 inline fn add_op(x: anytype, y: anytype) @TypeOf(x, y) {
     return x + y;

@@ -11,6 +11,7 @@ alias r := run
 export ZIGRAD_BACKEND := env("ZIGRAD_BACKEND", "HOST")
 
 test +opts="":
+  python src/nn/tests/test_loss.py
   zig build test {{opts}}
 
 build +opts="":
