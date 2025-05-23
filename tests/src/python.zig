@@ -1,26 +1,51 @@
 ///! A minimal Python C API wrapper for verification testing
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("Python.h");
-});
+const c = switch (@import("builtin").target.os.tag) {
+    // .macos => @cImport(@cInclude("/opt/homebrew/Cellar/python@3.11/3.11.10/Frameworks/Python.framework/Versions/3.11/include/python3.11/Python.h")),
+    inline else => @cImport(@cInclude("Python.h")),
+};
 
 pub const PyError = error{PythonError};
+var mutex = std.Thread.Mutex{};
+var initialized = false;
+globals: c.PyObject,
 
 /// Initialize the Python interpreter, only do this once.
 pub fn init() void {
+    var mtx = &mutex;
+    mtx.lock();
+    defer mtx.unlock();
+    if (initialized) return;
     _ = c.Py_InitializeEx(0);
+    initialized = true;
 }
 
 /// Finalize the Python interpreter, only do this once.
 pub fn finalize() void {
+    var mtx = &mutex;
+    mtx.lock();
+    defer mtx.unlock();
+    if (!initialized) return;
     _ = c.Py_FinalizeEx();
+    initialized = false;
 }
 
 /// Get the "__main__" module's dictionary
-/// This is typically used as the globals dictionary for executing Python code
-pub fn import_main() !*c.PyObject {
-    return check(c.PyImport_AddModule("__main__"));
+pub fn import_main() !PyModule {
+    const result = try check(c.PyImport_AddModule("__main__"));
+    return PyModule{ .obj = result };
+}
+
+/// Create a new Python module with a clean namespace
+pub fn create_module(name: [:0]const u8) !PyModule {
+    init();
+    const module = try check(c.PyModule_New(name));
+    const dict = c.PyModule_GetDict(module);
+    const builtins = try check(c.PyImport_ImportModule("builtins"));
+    _ = c.PyDict_SetItemString(dict, "__builtins__", builtins);
+    c.Py_DECREF(builtins);
+    return PyModule{ .obj = module };
 }
 
 /// Run a Python script in the given globals dictionary
@@ -45,7 +70,7 @@ pub fn get_var_buffer(globals: *c.PyObject, name: [:0]const u8) !PyBuffer {
 }
 
 /// Convenience method to get a variable as a slice directly
-pub fn get_var_slice(globals: *c.PyObject, name: [:0]const u8, T: type) ![]const T {
+pub fn get_var_slice(globals: *c.PyObject, T: type, name: [:0]const u8) ![]const T {
     var py_obj = try get_var(globals, name);
     defer py_obj.deinit();
     return try py_obj.get_slice(T);
@@ -79,12 +104,73 @@ pub fn eval_slice(comptime T: type, expr: [:0]const u8, globals: *c.PyObject) ![
     return try obj.get_slice(T);
 }
 
+/// Wrapper for a Python module so tests can create a clean namespace
+pub const PyModule = struct {
+    const Self = @This();
+    obj: *c.PyObject,
+
+    /// Clean up
+    pub fn deinit(self: *PyModule) void {
+        c.Py_DECREF(self.obj);
+    }
+
+    /// Run Python code in this module's namespace
+    pub fn run(self: Self, script: [:0]const u8) !void {
+        const dict = c.PyModule_GetDict(self.obj); // Borrowed reference
+        const res = try check(c.PyRun_String(script, c.Py_file_input, dict, dict));
+        c.Py_DECREF(res);
+    }
+
+    /// Evaluate a Python expression in this module's namespace
+    pub fn eval(self: Self, expr: [:0]const u8) !PyObject {
+        const dict = c.PyModule_GetDict(self.obj); // Borrowed reference
+        const obj = try check(c.PyRun_String(expr, c.Py_eval_input, dict, dict));
+        return PyObject{ .obj = obj };
+    }
+
+    /// Evaluate a Python expression evaluating to a slice-coerceable in this module's namespace
+    pub fn eval_slice(self: Self, T: type, expr: [:0]const u8) ![]const T {
+        const pyobj = try self.eval(expr);
+        return try pyobj.get_slice(T);
+    }
+
+    /// Evaluate a Python expression evaluating to a float-coerceable in this module's namespace
+    pub fn eval_float(self: Self, expr: [:0]const u8) !f64 {
+        const pyobj = try self.eval(expr);
+        return try pyobj.to_float();
+    }
+
+    /// Get a variable from this module by name
+    pub fn get_var(self: Self, name: [:0]const u8) !PyObject {
+        const dict = self._dict();
+        const obj = try check(c.PyDict_GetItemString(dict, name)); // borrowed reference
+        c.Py_INCREF(obj);
+        return PyObject{ .obj = obj };
+    }
+
+    /// Internal use only for temporary access
+    fn _dict(self: Self) *c.PyObject {
+        return c.PyModule_GetDict(self.obj); // borrowed
+    }
+
+    /// Get a reference to the dict.
+    pub fn get_dict(self: Self) PyObject {
+        const dict = c.PyModule_GetDict(self.obj); // borrowed
+        c.Py_IncRef(dict); // User API
+        return PyObject{ .obj = dict };
+    }
+
+    /// Get a variable from this module as a slice
+    pub fn get_slice(self: PyModule, T: type, name: [:0]const u8) ![]const T {
+        return try get_var_slice(self._dict(), T, name);
+    }
+};
+
 /// Wrapper for a Python object with automatic reference counting
 pub const PyObject = struct {
     obj: *c.PyObject,
 
-    /// Decrement the reference count of the object
-    /// Call this when you're done with the object
+    /// Clean up
     pub fn deinit(self: *const PyObject) void {
         c.Py_DECREF(self.obj);
     }
@@ -127,12 +213,23 @@ pub const PyObject = struct {
             return PyError.PythonError;
         }
 
+        std.debug.print("Buffer size: {d}\n", .{buffer_size(buffer)});
         const data_ptr: [*]const T = @ptrCast(@alignCast(buffer.buf orelse return PyError.PythonError));
         return data_ptr[0..buffer_size(buffer)];
     }
 
+    // pub const Dtype = union(enum) {
+    //     F32 = f32,
+    //     F64 = f64,
+    // };
+
     /// Convert the Python object to a double-precision float
     /// Useful for getting scalar numeric values from Python
+    // pub fn to_scalar(self: PyObject, dtype: Dtype) !dtype {
+    // const result = switch (dtype) {
+    //     .F32 => c.PyFloat_AsDouble(self.obj),
+    //     .F64 => c.PyLong_AsDouble(self.obj),
+    // };
     pub fn to_float(self: PyObject) !f64 {
         const result = c.PyFloat_AsDouble(self.obj);
         if (result == -1.0 and c.PyErr_Occurred() != null) {
@@ -180,5 +277,7 @@ fn buffer_size(view: c.Py_buffer) usize {
     while (i < view.ndim) : (i += 1) {
         _len *= @intCast(view.shape[i]);
     }
+    std.debug.assert(@as(usize, @intCast(view.len)) == _len * @as(usize, @intCast(view.itemsize)));
+    std.debug.assert(@as(usize, @intCast(@divTrunc(view.len, view.itemsize))) == _len);
     return _len;
 }

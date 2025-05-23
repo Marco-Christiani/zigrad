@@ -1,63 +1,39 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const Py = @import("python.zig");
-const c = @cImport({
-    @cInclude("Python.h");
-});
+
+const c = switch (@import("builtin").target.os.tag) {
+    // .macos => @cImport(@cInclude("/opt/homebrew/Cellar/python@3.11/3.11.10/Frameworks/Python.framework/Versions/3.11/include/python3.11/Python.h")),
+    inline else => @cImport(@cInclude("Python.h")),
+};
 
 pub fn main() !void {
     Py.init();
     defer Py.finalize();
 
-    const main_mod = try Py.import_main();
-    const globals = c.PyModule_GetDict(main_mod);
+    Py.init();
+    defer Py.finalize();
+    try unit_test(std.heap.smp_allocator);
+    try test_with_clean_module();
 
-    const script =
-        \\import torch
-        \\x = torch.arange(0, 10000, dtype=torch.float32).reshape(100, 100)
-        \\x.requires_grad_()
-        \\y = (x * x).sum()
-        \\y.backward()
-    ;
-    try Py.run(script, globals);
-
-    const x_obj = try Py.get_var(globals, "x");
-    const grad_obj = try x_obj.get_attr("grad");
-    const numpy_obj = try grad_obj.call_method("numpy");
-
-    const pybuf = try numpy_obj.get_buffer();
-    const pybuf_slice = try pybuf.slice(f32);
-
-    std.debug.print("grad w.r.t x [0..8] = ", .{});
-    for (0..8) |i| {
-        std.debug.print("{d:.1} ", .{pybuf_slice[i]});
-    }
-    std.debug.print("\n", .{});
-
-    const code_obj = try Py.check(c.Py_CompileString("x.grad.sum().item()", "<string>", c.Py_eval_input));
-    const result_obj = try Py.check(c.PyEval_EvalCode(code_obj, globals, globals));
-    if (c.PyFloat_Check(result_obj) == 1) {
-        const value = c.PyFloat_AsDouble(result_obj);
-        std.debug.print("{d}\n", .{value});
-        const v2 = try Py.eval_float("x.grad.sum().item()", globals);
-        std.debug.assert(value == v2);
-    }
+    try @import("ndtensor.zig").main();
 }
 
 test {
     Py.init();
     defer Py.finalize();
-    try unit_test();
+    try unit_test(std.testing.allocator);
+    try test_with_clean_module();
 }
 
-fn unit_test() !void {
+fn unit_test(allocator: std.mem.Allocator) !void {
     const T = f32;
     const Tensor = zg.NDTensor(T);
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = zg.GraphManager.init(std.testing.allocator, .{ .eager_teardown = false });
+    var gm = zg.GraphManager.init(allocator, .{ .eager_teardown = false });
     defer gm.deinit();
 
     // Zigrad
@@ -77,8 +53,7 @@ fn unit_test() !void {
     const zigrad_grad = x.assume_grad_data();
 
     // Torch
-    const globals = try Py.import_main();
-    const dict = c.PyModule_GetDict(globals);
+    const mod = try Py.import_main();
 
     const script =
         \\import torch
@@ -89,12 +64,12 @@ fn unit_test() !void {
         \\y.sum().backward()
         \\yval = y.detach().numpy()
     ;
-    try Py.run(script, dict);
+    try mod.run(script);
 
-    var py_x = try Py.get_var(dict, "x");
+    var py_x = try mod.get_var("x");
     defer py_x.deinit();
 
-    var py_y = try Py.get_var(dict, "y");
+    var py_y = try mod.get_var("y");
     defer py_y.deinit();
 
     var py_y_detached = try py_y.call_method("detach");
@@ -118,11 +93,25 @@ fn unit_test() !void {
     const py_y_slice = try y_buffer.slice(f32);
     const py_grad_slice = try grad_buffer.slice(f32);
     const y_buffer2 = try py_y_np.get_slice(f32);
-    const y_slice3 = try Py.get_var_slice(dict, "yval", f32);
+    const y_slice3 = try mod.get_slice(f32, "yval");
 
     try std.testing.expectEqualSlices(f32, py_y_slice, y_buffer2);
     try std.testing.expectEqualSlices(f32, py_y_slice, y_slice3);
     // Compare
     try std.testing.expectEqualSlices(f32, py_y_slice, zigrad_out);
     try std.testing.expectEqualSlices(f32, py_grad_slice, zigrad_grad);
+}
+
+fn test_with_clean_module() !void {
+    var py_mod = try Py.create_module("test_module");
+    defer py_mod.deinit();
+    try py_mod.run(
+        \\import torch
+        \\import numpy as np
+        \\x = torch.tensor([1, 2, 3], dtype=torch.float32)
+        \\y = x * 2
+        \\result = y.numpy()
+    );
+    const result_slice = try py_mod.get_slice(f32, "result");
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 4, 6 }, result_slice);
 }

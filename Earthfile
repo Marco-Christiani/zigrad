@@ -1,16 +1,5 @@
 VERSION 0.8
 
-
-SETUP_PYTHON_ENV:
-    FUNCTION
-    ENV BASE_ROOT=$(python3 -c 'import sys, pathlib; print(pathlib.Path(sys.base_prefix).resolve())')
-    ENV PYVER=$(python3 -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')
-    ENV INCL=$BASE_ROOT/include/$PYVER
-    ENV LIBDIR=$BASE_ROOT/lib
-    ENV LIBNAME=python${PYVER#python}
-    ENV PYTHONHOME=$BASE_ROOT
-    ENV LD_LIBRARY_PATH=$BASE_ROOT/lib
-
 ZIG:
     FUNCTION
     ARG ZIG_VERSION=0.14.0
@@ -28,14 +17,20 @@ ZIG:
 
 deps:
     ARG PYTHON_VERSION=3.12
+    # Any value from https://pytorch.org/get-started/locally/ (e.g. cpu, cu118, cu126, cu128, rocm6.3)
+    ARG COMPUTE_TARGET=cpu
     FROM python:${PYTHON_VERSION}-slim-bookworm
+    # Validate we got a valid compute target (e.g. cpu, cu118, cu126, cu128, rocm6.3)
+    IF bash -c '[[ ! "$COMPUTE_TARGET" =~ ^(cpu|cu[0-9]{3}|rocm[0-9]{1,2}\.[0-9]{1,2})$ ]]'
+        RUN echo "Invalid compute target: $COMPUTE_TARGET" && exit 1
+    END
     RUN apt-get update && apt-get install -y \
         libopenblas-dev \
         build-essential \
         wget \
         && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
-    RUN pip3 install --break-system-packages numpy torch --index-url https://download.pytorch.org/whl/cpu
+    RUN pip3 install --break-system-packages numpy torch --index-url https://download.pytorch.org/whl/${COMPUTE_TARGET}
     DO +ZIG
     SAVE IMAGE zigrad-base:latest
 
@@ -47,8 +42,7 @@ build-zig:
     COPY *.zon .
     ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
     RUN zig build
-    RUN mv ./zig-out/bin/main zg-main
-    CMD ["./zg-main"]
+    CMD ["./zig-out/bin/main"]
     SAVE IMAGE zigrad:latest
 
 build-zig-tests:
@@ -57,8 +51,7 @@ build-zig-tests:
   COPY --dir tests ./
   ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
   RUN cd tests && zig build
-  RUN mv tests/zig-out/bin/zg-test-exe zg-test-exe
-  RUN ["./zg-test-exe"]
+  RUN ["tests/zig-out/bin/zg-test-exe"]
 
 
 test-matrix:
@@ -74,3 +67,11 @@ test:
     COPY --dir tests ./
     WORKDIR tests
     RUN zig build test
+
+local-test:
+    LOCALLY
+    ARG ZIGRAD_BACKEND=HOST
+    RUN source .venv/bin/activate
+    RUN cd tests && zig build
+    ENV PYTHONPATH=$(realpath .venv/lib/python*/site-packages)
+    RUN tests/zig-out/bin/zg-test-exe
