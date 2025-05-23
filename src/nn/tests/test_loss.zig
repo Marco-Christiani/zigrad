@@ -36,31 +36,29 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = zg.GraphManager.init(allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = zg.Graph.init(allocator, .{});
+    defer graph.deinit();
 
     const config: zg.TensorConfig = .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
-    const device = cpu.reference();
-
-    const input = try NDTensor(f32).from_slice(case.input, case.shape, config);
+    const input = try NDTensor(f32).from_slice(&graph, device, case.input, case.shape, config);
     defer input.deinit();
 
     std.log.info("{s} {d}\n", .{ name, case.shape });
     std.log.info("input: {d}\n", .{input.data.data});
     std.log.info("target: {d}\n", .{case.target});
 
-    const target = try NDTensor(f32).from_slice(case.target, case.shape, config);
+    const target = try NDTensor(f32).from_slice(&graph, device, case.target, case.shape, config);
     defer target.deinit();
 
     const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target);
     defer loss.deinit();
 
-    try gm.backward(loss);
+    try loss.backward();
 
     std.log.info("loss: {d}\n", .{loss.data.data});
     std.log.info("expected: {d}\n", .{case.loss});
@@ -103,19 +101,19 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var gm = zg.GraphManager.init(allocator, .{});
-    defer gm.deinit();
+    const device = cpu.reference();
+
+    var graph = zg.Graph.init(allocator, .{});
+    defer graph.deinit();
 
     const config: zg.TensorConfig = .{
-        .device = cpu.reference(),
-        .node_allocator = gm.heap(),
         .requires_grad = true,
     };
 
-    const input = try NDTensor(f32).from_slice(case.input, case.shape, config);
+    const input = try NDTensor(f32).from_slice(&graph, device, case.input, case.shape, config);
     defer input.deinit();
 
-    const target = try NDTensor(f32).from_slice(case.target, case.shape, config);
+    const target = try NDTensor(f32).from_slice(&graph, device, case.target, case.shape, config);
     defer target.deinit();
 
     std.log.info("Smooth L1 Loss Test", .{});
@@ -126,7 +124,7 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta);
     defer loss.deinit();
 
-    try gm.backward(loss);
+    try loss.backward();
 
     std.log.info("Calculated loss: {d}n", .{loss.data.data[0]});
     std.log.info("Expected loss: {d}", .{case.loss});

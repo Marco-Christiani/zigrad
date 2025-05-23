@@ -265,6 +265,12 @@ pub fn relu_bwd(_: *const Self, T: type, p: opspec.relu_bwd(T)) void {
     for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| x_g.* += if (x > 0) y_g else 0;
 }
 
+pub fn relu_inplace_bwd(_: *const Self, T: type, p: opspec.relu_inplace_bwd(T)) void {
+    for (p.x, p.x_g) |x, *x_g| {
+        if (x <= 0) x_g.* = 0;
+    }
+}
+
 pub fn tanh_fwd(_: *const Self, T: type, p: opspec.tanh_fwd(T)) void {
     for (p.x, p.y) |x, *y| y.* = std.math.tanh(x);
 }

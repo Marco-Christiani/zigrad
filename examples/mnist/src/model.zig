@@ -2,39 +2,28 @@ const std = @import("std");
 const zg = @import("zigrad");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
-const GraphManager = zg.GraphManager;
+const Graph = zg.Graph;
+const Node = Graph.Node;
 const NDTensor = zg.NDTensor;
 
-pub fn MnistModel(comptime T: type, Optimizer: type) type {
+pub fn MnistModel(comptime T: type) type {
     return struct {
         const Self = @This();
         const Tensor = NDTensor(T);
         const Layers = 3;
         linear_layers: [Layers]LinearLayer(T) = undefined,
         flatten: FlattenLayer(T) = .{},
-        relu: ReLULayer(T) = .{},
+        graph: *Graph,
 
-        pub fn init(
-            gm: *GraphManager,
-            device: DeviceReference,
-            optim: ?*Optimizer,
-        ) !Self {
-            var self: Self = .{
+        pub fn init(graph: *Graph, device: DeviceReference) !Self {
+            return .{
+                .graph = graph,
                 .linear_layers = .{
-                    try LinearLayer(T).init(gm, device, 28 * 28, 128),
-                    try LinearLayer(T).init(gm, device, 128, 64),
-                    try LinearLayer(T).init(gm, device, 64, 10),
+                    try LinearLayer(T).init(graph, device, 28 * 28, 128),
+                    try LinearLayer(T).init(graph, device, 128, 64),
+                    try LinearLayer(T).init(graph, device, 64, 10),
                 },
             };
-
-            if (optim) |_optim| {
-                for (&self.linear_layers) |l| {
-                    try _optim.attach(l.weights);
-                    try _optim.attach(l.bias);
-                }
-            }
-
-            return self;
         }
 
         pub fn deinit(self: *Self) void {
@@ -46,19 +35,42 @@ pub fn MnistModel(comptime T: type, Optimizer: type) type {
             const flat = try self.flatten.forward(x);
             errdefer flat.deinit();
 
-            const f0 = try self.linear_layers[0].forward(flat);
-            errdefer f0.deinit();
+            const z0 = try self.linear_layers[0].forward(flat);
+            errdefer z0.deinit();
+            try zg.nn.relu_(T, z0);
 
-            const a0 = try self.relu.forward(f0);
-            errdefer a0.deinit();
+            if (!flat.requires_grad())
+                flat.clear();
 
-            const f1 = try self.linear_layers[1].forward(a0);
-            errdefer f1.deinit();
+            const z1 = try self.linear_layers[1].forward(z0);
+            errdefer z1.deinit();
+            try zg.nn.relu_(T, z1);
 
-            const a1 = try self.relu.forward(f1);
-            errdefer a1.deinit();
+            if (!z0.requires_grad())
+                z0.clear();
 
-            return self.linear_layers[2].forward(a1);
+            const z2 = try self.linear_layers[2].forward(z1);
+
+            if (!z1.requires_grad())
+                z1.clear();
+
+            return z2;
+        }
+
+        pub fn params(self: *Self) std.BoundedArray(*Tensor, 6) {
+            var tmp: std.BoundedArray(*Tensor, 6) = .{};
+            for (&self.linear_layers) |*l| {
+                tmp.appendAssumeCapacity(l.weights);
+                tmp.appendAssumeCapacity(l.bias);
+            }
+            return tmp;
+        }
+
+        pub fn zero_grad(self: *Self) void {
+            for (&self.linear_layers) |*l| {
+                if (l.weights.grad) |_| l.weights.setup_grad(0) catch {};
+                if (l.bias.grad) |_| l.bias.setup_grad(0) catch {};
+            }
         }
     };
 }
@@ -69,21 +81,17 @@ pub fn LinearLayer(comptime T: type) type {
         const Tensor = NDTensor(T);
         weights: *Tensor,
         bias: *Tensor,
-        pub fn init(gm: *GraphManager, device: DeviceReference, in_features: usize, out_features: usize) !Self {
-            const weights = try Tensor.random(&.{ out_features, in_features }, .{ .kaiming = in_features }, .{
-                .requires_grad = true,
-                .device = device,
-                .node_allocator = gm.heap(),
+        pub fn init(graph: *Graph, device: DeviceReference, in_features: usize, out_features: usize) !Self {
+            const weights = try Tensor.random(graph, device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
                 .label = "linear_weights",
+                .requires_grad = true,
                 .acquired = true,
             });
             errdefer weights.deinit();
 
-            const bias = try Tensor.zeros(&.{out_features}, .{
-                .requires_grad = true,
-                .device = device,
-                .node_allocator = gm.heap(),
+            const bias = try Tensor.zeros(graph, device, &.{out_features}, .{
                 .label = "linear_bias",
+                .requires_grad = true,
                 .acquired = true,
             });
 
@@ -107,40 +115,6 @@ pub fn LinearLayer(comptime T: type) type {
     };
 }
 
-pub fn ReLULayer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Tensor = NDTensor(T);
-
-        pub fn forward(_: Self, x: *Tensor) !*Tensor {
-            const y = try Tensor.DataType.empty(x.get_shape(), x.device);
-
-            x.device.dispatch(opspec.relu_fwd(T){
-                .x = x.get_data(),
-                .y = y.data,
-            });
-
-            return Tensor.create_dependent(Self, .{
-                .data = y,
-                .children = &.{x},
-                .device = x.device,
-                .node_allocator = x._node_allocator,
-                .callback = .{},
-                .label = "relu_out",
-            });
-        }
-
-        pub fn callback(y: *Tensor, children: *Tensor.Children) !void {
-            const x = children.get_bwd(0) orelse return;
-            y.device.dispatch(opspec.relu_bwd(T){
-                .x = x.get_data(),
-                .x_g = try x.ensure_grad_data(0),
-                .y_g = y.assume_grad_data(),
-            });
-        }
-    };
-}
-
 pub fn FlattenLayer(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -152,20 +126,20 @@ pub fn FlattenLayer(comptime T: type) type {
             const flattened_dim = zg.arrayutils.prod(other_dims);
 
             // view of input tensor with new shape
-            const result = try NDTensor(T).create_dependent(Self, .{
+            const result = try Tensor.create_dependent(Self, .{
                 .data = try input.data.copy(input.device), // Reuse the same data
-                .children = &.{input},
+                .children = &.{&input.node},
                 .label = "flattened",
                 .callback = .{},
                 .device = input.device,
-                .node_allocator = input._node_allocator,
+                .gb = input.node.gb,
             });
             result.data._reshape(&.{ batch_dim, flattened_dim });
             return result;
         }
 
-        pub fn callback(y: *Tensor, children: *Tensor.Children) !void {
-            const x = children.get_bwd(0) orelse return;
+        pub fn backward(y: *Tensor, children: *Node.Children) !void {
+            const x = children.get_bwd_upcast(Tensor, 0) orelse return;
             const x_grad = try x.ensure_grad(0);
             y.device.dispatch(opspec.add(T){
                 .x = x_grad.data,
