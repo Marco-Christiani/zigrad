@@ -298,21 +298,17 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
 
+        /// Free all device related memory associated with a tensor. The graph owns
+        /// the tensor instance, so reset or deinit should be called on the owning
+        /// graph to destroy the instance itself.
         pub fn deinit(self: *Self) void {
             if (self.acquired())
                 @panic("Attempt to deinit an acquired tensor.");
 
-            self.clear();
-
-            self.node.gb.destroy_node(self, self.node.category());
-        }
-
-        pub fn clear(self: *Self) void {
-            if (self.data.status == .cleared)
+            if (!self.node.active())
                 return;
 
             self.data.deinit(self.device);
-            self.data.status = .cleared;
 
             if (self.grad) |*g| {
                 g.deinit(self.device);
@@ -1248,7 +1244,7 @@ test "tensor/Graph/sum" {
 
     const sum_result = try input.sum();
 
-    try std.testing.expectEqualSlices(f32, &.{10}, sum_result.data.data);
+    try std.testing.expectEqualSlices(f32, &.{10}, sum_result.get_data());
 
     if (!zg.rt_grad_enabled) return error.GradNotEnabled;
 

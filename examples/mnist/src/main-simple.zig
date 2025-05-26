@@ -67,7 +67,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
                 ms_per_sample,
             });
 
-            graph.reset();
+            graph.reset(.internal);
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
@@ -101,7 +101,7 @@ fn eval_mnist(graph: *zg.Graph, model: *MnistModel(T), dataset: MnistDataset(T))
     for (dataset.images, dataset.labels) |image, label| {
         const output = try model.forward(image);
         defer output.deinit();
-        defer graph.reset();
+        defer graph.reset(.internal);
         const batch_n = output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;
