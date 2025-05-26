@@ -33,25 +33,32 @@ const TestCases = struct {
 };
 
 fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: std.mem.Allocator) !void {
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+
     const device = cpu.reference();
-    var gm = zg.GraphManager(NDTensor(f32)).init(device.allocator, .{});
-    defer gm.deinit();
-    const input = try NDTensor(f32).init(case.input, case.shape, true, device);
+
+    var graph = zg.Graph.init(allocator, .{});
+    defer graph.deinit();
+
+    const config: zg.TensorConfig = .{
+        .requires_grad = true,
+    };
+
+    const input = try NDTensor(f32).from_slice(&graph, device, case.input, case.shape, config);
     defer input.deinit();
 
     std.log.info("{s} {d}\n", .{ name, case.shape });
     std.log.info("input: {d}\n", .{input.data.data});
     std.log.info("target: {d}\n", .{case.target});
 
-    const target = try NDTensor(f32).init(case.target, case.shape, true, device);
+    const target = try NDTensor(f32).from_slice(&graph, device, case.target, case.shape, config);
     defer target.deinit();
 
     const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target);
-    loss.grad.?.fill(1.0, device);
     defer loss.deinit();
-    try gm.backward(loss);
+
+    try loss.backward();
 
     std.log.info("loss: {d}\n", .{loss.data.data});
     std.log.info("expected: {d}\n", .{case.loss});
@@ -76,7 +83,7 @@ test "softmax_cross_entropy_loss" {
     // const allocator = std.testing.allocator;
     var json_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer json_arena.deinit();
-    const file = std.fs.openFileAbsolute("/tmp/loss_test_cases.json", .{}) catch |e| {
+    const file = std.fs.openFileAbsolute("/tmp/zg_data/loss_test_cases.json", .{}) catch |e| {
         std.log.warn("{s} error opening test file. Skipping `smce` test.", .{@errorName(e)});
         return;
     };
@@ -91,15 +98,22 @@ test "softmax_cross_entropy_loss" {
 }
 
 fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !void {
-    var cpu = zg.device.HostDevice.init(allocator);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+
     const device = cpu.reference();
-    var gm = zg.GraphManager(NDTensor(f32)).init(device.allocator, .{});
-    defer gm.deinit();
-    const input = try NDTensor(f32).init(case.input, case.shape, true, device);
+
+    var graph = zg.Graph.init(allocator, .{});
+    defer graph.deinit();
+
+    const config: zg.TensorConfig = .{
+        .requires_grad = true,
+    };
+
+    const input = try NDTensor(f32).from_slice(&graph, device, case.input, case.shape, config);
     defer input.deinit();
 
-    const target = try NDTensor(f32).init(case.target, case.shape, true, device);
+    const target = try NDTensor(f32).from_slice(&graph, device, case.target, case.shape, config);
     defer target.deinit();
 
     std.log.info("Smooth L1 Loss Test", .{});
@@ -107,11 +121,10 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     std.log.info("Target: {d}", .{target.data.data});
     std.log.info("Beta: {d}", .{case.beta});
 
-    const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta, device);
-    loss.grad.?.fill(1.0, device);
+    const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta);
     defer loss.deinit();
 
-    try gm.backward(loss);
+    try loss.backward();
 
     std.log.info("Calculated loss: {d}n", .{loss.data.data[0]});
     std.log.info("Expected loss: {d}", .{case.loss});
@@ -125,7 +138,7 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
 test "smooth_l1_loss" {
     var json_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer json_arena.deinit();
-    const file = std.fs.openFileAbsolute("/tmp/loss_test_cases.json", .{}) catch |e| {
+    const file = std.fs.openFileAbsolute("/tmp/zg_data/loss_test_cases.json", .{}) catch |e| {
         std.log.warn("{s} error opening test file. Skipping smooth L1 loss test.", .{@errorName(e)});
         return;
     };

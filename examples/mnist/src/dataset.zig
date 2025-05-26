@@ -6,25 +6,30 @@ pub fn MnistDataset(comptime T: type) type {
     return struct {
         images: []*zg.NDTensor(T),
         labels: []*zg.NDTensor(T),
-        device: DeviceReference,
+        allocator: std.mem.Allocator,
 
-        pub fn load(device: DeviceReference, csv_path: []const u8, batch_size: usize) !@This() {
+        pub fn load(graph: *zg.Graph, device: DeviceReference, csv_path: []const u8, batch_size: usize) !@This() {
             const file = try std.fs.cwd().openFile(csv_path, .{});
             defer file.close();
 
             const file_size = try file.getEndPos();
-            const file_contents = try file.readToEndAlloc(device.allocator, file_size);
-            defer device.allocator.free(file_contents);
+            const file_contents = try file.readToEndAlloc(graph.builder.allocator, file_size);
+            defer graph.builder.allocator.free(file_contents);
 
-            var images = std.ArrayList(*zg.NDTensor(T)).init(device.allocator);
-            var labels = std.ArrayList(*zg.NDTensor(T)).init(device.allocator);
+            var images = std.ArrayList(*zg.NDTensor(T)).init(graph.builder.allocator);
+            var labels = std.ArrayList(*zg.NDTensor(T)).init(graph.builder.allocator);
 
             var lines = std.mem.splitScalar(u8, file_contents, '\n');
-            var batch_images = try device.allocator.alloc(T, batch_size * 784);
-            defer device.allocator.free(batch_images);
-            var batch_labels = try device.allocator.alloc(T, batch_size * 10);
-            defer device.allocator.free(batch_labels);
+            var batch_images = try graph.builder.allocator.alloc(T, batch_size * 784);
+            defer graph.builder.allocator.free(batch_images);
+            var batch_labels = try graph.builder.allocator.alloc(T, batch_size * 10);
+            defer graph.builder.allocator.free(batch_labels);
             var batch_count: usize = 0;
+
+            const config: zg.TensorConfig = .{
+                .requires_grad = true,
+                .acquired = true,
+            };
 
             while (lines.next()) |line| {
                 if (line.len == 0) continue; // skip empty lines
@@ -42,10 +47,8 @@ pub fn MnistDataset(comptime T: type) type {
                 batch_count += 1;
 
                 if (batch_count == batch_size or lines.peek() == null) {
-                    const image_tensor = try zg.NDTensor(T).init(batch_images, &[_]usize{ batch_size, 1, 28, 28 }, true, device);
-                    const label_tensor = try zg.NDTensor(T).init(batch_labels, &[_]usize{ batch_size, 10 }, true, device);
-                    image_tensor.acquire();
-                    label_tensor.acquire();
+                    const image_tensor = try zg.NDTensor(T).from_slice(graph, device, batch_images, &.{ batch_size, 1, 28, 28 }, config);
+                    const label_tensor = try zg.NDTensor(T).from_slice(graph, device, batch_labels, &.{ batch_size, 10 }, config);
                     try images.append(image_tensor);
                     try labels.append(label_tensor);
                     batch_count = 0;
@@ -53,15 +56,13 @@ pub fn MnistDataset(comptime T: type) type {
             }
 
             if (batch_count > 0) { // remainder
-                const image_tensor = try zg.NDTensor(T).init(batch_images[0 .. batch_count * 784], &[_]usize{ batch_count, 1, 28, 28 }, true, device);
-                const label_tensor = try zg.NDTensor(T).init(batch_labels[0 .. batch_count * 10], &[_]usize{ batch_count, 10 }, true, device);
-                image_tensor.acquire();
-                label_tensor.acquire();
+                const image_tensor = try zg.NDTensor(T).from_slice(graph, device, batch_images[0 .. batch_count * 784], &.{ batch_count, 1, 28, 28 }, config);
+                const label_tensor = try zg.NDTensor(T).from_slice(graph, device, batch_labels[0 .. batch_count * 10], &.{ batch_count, 10 }, config);
                 try images.append(image_tensor);
                 try labels.append(label_tensor);
             }
 
-            return .{ .images = try images.toOwnedSlice(), .labels = try labels.toOwnedSlice(), .device = device };
+            return .{ .images = try images.toOwnedSlice(), .labels = try labels.toOwnedSlice(), .allocator = graph.builder.allocator };
         }
 
         pub fn deinit(self: @This()) void {
@@ -71,8 +72,8 @@ pub fn MnistDataset(comptime T: type) type {
                 image.deinit();
                 label.deinit();
             }
-            self.device.allocator.free(self.images);
-            self.device.allocator.free(self.labels);
+            self.allocator.free(self.images);
+            self.allocator.free(self.labels);
         }
     };
 }

@@ -10,39 +10,6 @@ pub fn clip_grads(T: type, params: []*NDTensor(T), opts: NDTensor(T).ClipOptions
     for (params) |param| if (param.grad) |_| param._clip_grad_norm(opts);
 }
 
-pub fn Optimizer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        vtable: *const VTable,
-        ptr: *anyopaque,
-
-        const VTable = struct {
-            step: *const fn (ctx: *anyopaque, params: []*const NDTensor(T)) anyerror!void,
-        };
-
-        pub fn init(pointer: anytype) Self {
-            const Ptr = @TypeOf(pointer);
-
-            const gen = struct {
-                pub fn step_fn(ctx: *anyopaque, params: []*NDTensor(T)) anyerror!void {
-                    const self: Ptr = @ptrCast(@alignCast(ctx));
-                    return self.step(params);
-                }
-                const vtable = VTable{ .step = step_fn };
-            };
-            return .{
-                .vtable = &gen.vtable,
-                .ptr = pointer,
-            };
-        }
-
-        pub fn step(self: Self, params: []*NDTensor(T)) anyerror!void {
-            return try self.vtable.step(self.ptr, params);
-        }
-    };
-}
-
 pub fn SGD(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -52,41 +19,23 @@ pub fn SGD(comptime T: type) type {
         grad_clip_max_norm: f32 = settings.grad_clip_max_norm,
         grad_clip_delta: f32 = settings.grad_clip_delta,
 
-        pub fn step(self: Self, params: []*NDTensor) void {
-            for (params) |param| callback(param, self);
-        }
-
-        pub fn attach(self: *Self, param: *Tensor) !void {
-            std.debug.assert(param._backward_ctx == null);
-            param._backward_ctx = try Tensor.BackwardsContext.init(*Self, self, param.device, .{
-                .persist = true,
-            });
-        }
-
-        pub fn callback(param: *Tensor, _: *Tensor.Children, self: *Self) !void {
-            // std.debug.print("IN SGD BACKWARD\n", .{});
-
-            if (self.grad_clip_enabled) param._clip_grad_norm(.{
-                .max_norm = self.grad_clip_max_norm,
-                .delta = self.grad_clip_delta,
-            });
-
+        pub fn step(self: *Self, params: []const *Tensor) void {
             const nlr = -self.lr;
-            // for (params) |param| blas.blas_axpy(T, param.data.data.len, nlr, param.grad.?.data, 1, param.data.data, 1);
-            // I suppose the idiomatic way would be to use the method
-            // for (params) |param| param.data._axpy(param.grad.?, nlr, param.device);
-            // But, can use direct access to skip the shape checks
-            param.device.dispatch(opspec.axpy(T){
-                .x = param.assume_grad_data(),
-                .y = param.get_data(),
-                .alpha = &nlr,
-            });
 
-            param.assume_grad().fill(0, param.device);
-        }
-
-        pub fn optimizer(self: *Self) Optimizer(T) {
-            return Optimizer(T).init(self);
+            for (params) |param| {
+                if (self.grad_clip_enabled) param._clip_grad_norm(.{
+                    .max_norm = self.grad_clip_max_norm,
+                    .delta = self.grad_clip_delta,
+                });
+                // I suppose the idiomatic way would be to use the method
+                // for (params) |param| param.data._axpy(param.grad.?, nlr, param.device);
+                // But, can use direct access to skip the shape checks
+                param.device.dispatch(opspec.axpy(T){
+                    .x = param.assume_grad_data(),
+                    .y = param.get_data(),
+                    .alpha = &nlr,
+                });
+            }
         }
     };
 }
@@ -134,11 +83,7 @@ pub fn Adam(comptime T: type) type {
             self.v.deinit();
         }
 
-        pub fn optimizer(self: *Self) Optimizer(T) {
-            return Optimizer(T).init(self);
-        }
-
-        pub fn step(self: *Self, params: []*NDTensor(T)) !void {
+        pub fn step(self: *Self, params: []const *NDTensor(T)) !void {
             if (self.grad_clip_enabled) clip_grads(T, params, .{
                 .max_norm = self.grad_clip_max_norm,
                 .delta = self.grad_clip_delta,
