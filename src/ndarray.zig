@@ -24,7 +24,7 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
-        pub const Status = enum { none, view, cleared };
+        pub const Status = enum { none, view };
         /// Can be safely accessed. See `Shape`
         shape: Shape,
 
@@ -76,10 +76,6 @@ pub fn NDArray(comptime T: type) type {
 
         pub fn copy(self: Self, device: DeviceReference) !Self {
             return .{ .data = try device.mem_dupe(T, self.data), .shape = self.shape };
-        }
-
-        pub fn share(self: Self) Self {
-            return .{ .data = self.data, .shape = self.shape, .status = .shared };
         }
 
         pub fn cast(self: *Self, K: type, _: DeviceReference) !NDArray(K) {
