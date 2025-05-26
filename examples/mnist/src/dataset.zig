@@ -13,17 +13,17 @@ pub fn MnistDataset(comptime T: type) type {
             defer file.close();
 
             const file_size = try file.getEndPos();
-            const file_contents = try file.readToEndAlloc(graph.body.allocator, file_size);
-            defer graph.body.allocator.free(file_contents);
+            const file_contents = try file.readToEndAlloc(graph.builder.allocator, file_size);
+            defer graph.builder.allocator.free(file_contents);
 
-            var images = std.ArrayList(*zg.NDTensor(T)).init(graph.body.allocator);
-            var labels = std.ArrayList(*zg.NDTensor(T)).init(graph.body.allocator);
+            var images = std.ArrayList(*zg.NDTensor(T)).init(graph.builder.allocator);
+            var labels = std.ArrayList(*zg.NDTensor(T)).init(graph.builder.allocator);
 
             var lines = std.mem.splitScalar(u8, file_contents, '\n');
-            var batch_images = try graph.body.allocator.alloc(T, batch_size * 784);
-            defer graph.body.allocator.free(batch_images);
-            var batch_labels = try graph.body.allocator.alloc(T, batch_size * 10);
-            defer graph.body.allocator.free(batch_labels);
+            var batch_images = try graph.builder.allocator.alloc(T, batch_size * 784);
+            defer graph.builder.allocator.free(batch_images);
+            var batch_labels = try graph.builder.allocator.alloc(T, batch_size * 10);
+            defer graph.builder.allocator.free(batch_labels);
             var batch_count: usize = 0;
 
             const config: zg.TensorConfig = .{
@@ -62,7 +62,7 @@ pub fn MnistDataset(comptime T: type) type {
                 try labels.append(label_tensor);
             }
 
-            return .{ .images = try images.toOwnedSlice(), .labels = try labels.toOwnedSlice(), .allocator = graph.body.allocator };
+            return .{ .images = try images.toOwnedSlice(), .labels = try labels.toOwnedSlice(), .allocator = graph.builder.allocator };
         }
 
         pub fn deinit(self: @This()) void {

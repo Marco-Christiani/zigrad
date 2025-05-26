@@ -9,7 +9,7 @@ const Node = @This();
 pub const Category = enum { leaf, internal };
 /// Pointer to the parent graph's body. Can be promoted
 /// to retrieve the original parent graph.
-gb: *Graph.Body,
+gb: *Graph.Builder,
 /// Bitset for tensor flags (see ndtensor/utils.zig)
 flags: Flags,
 /// versioning ensures that inplace ops do not
@@ -41,13 +41,13 @@ callbacks: struct {
 pub fn init(
     NodeParentType: type,
     node_category: Category,
-    graph_body: *Graph.Body,
+    builder: *Graph.Builder,
     bwd_context: ?BackwardContext,
     label_bytes: ?[]const u8,
     flag_config: Flags.Config,
 ) Node {
     return .{
-        .gb = graph_body,
+        .gb = builder,
         .flags = Flags.init(node_category, flag_config),
         .type_id = TypeID.init(NodeParentType),
         .version = 0,

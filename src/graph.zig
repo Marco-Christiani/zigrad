@@ -14,23 +14,23 @@ const Graph = @This();
 ///
 /// - This abstraction allows us to separately manage leaf and internal tensor shells when building computation graphs.
 /// - Leaves and internal nodes have different lifetimes.
-pub const Body = struct {
+pub const Builder = struct {
     allocator: std.mem.Allocator,
     /// arena for all temporary nodes created by ops
     internal_node_arena: ArenaUnmanaged = .empty,
 
-    pub fn promote(self: *Body) *Graph {
-        return @alignCast(@fieldParentPtr("body", self));
+    pub fn promote(self: *Builder) *Graph {
+        return @alignCast(@fieldParentPtr("builder", self));
     }
 
-    pub fn create_node(self: *Body, T: type, category: Node.Category) !*T {
+    pub fn create_node(self: *Builder, T: type, category: Node.Category) !*T {
         return switch (category) {
             .leaf => self.allocator.create(T),
             .internal => self.internal_node_arena.create(self.allocator, T),
         };
     }
 
-    pub fn destroy_node(self: *Body, node: anytype, category: Node.Category) void {
+    pub fn destroy_node(self: *Builder, node: anytype, category: Node.Category) void {
         return switch (category) {
             .leaf => self.allocator.destroy(node),
             .internal => {
@@ -48,7 +48,7 @@ const PathInfo = struct {
 
 /// Manages the overall graph, allows for a more memory efficient abstraction where the data structures used for
 /// traversing the graph during backprop can be managed independently and reused across training steps
-body: Body,
+builder: Builder,
 /// stores the output result of topological sort
 sorted_nodes: std.AutoArrayHashMapUnmanaged(*Node, PathInfo) = .empty,
 /// stores children for the backwards pass
@@ -60,15 +60,15 @@ pub fn init(allocator: std.mem.Allocator, config: struct {
     eager_teardown: bool = false,
 }) Graph {
     return .{
-        .body = .{ .allocator = allocator },
+        .builder = .{ .allocator = allocator },
         .eager_teardown = config.eager_teardown,
     };
 }
 
 pub fn deinit(self: *Graph) void {
-    self.sorted_nodes.deinit(self.body.allocator);
-    self.backward_node_stack.deinit(self.body.allocator);
-    self.body.internal_node_arena.deinit(self.body.allocator);
+    self.sorted_nodes.deinit(self.builder.allocator);
+    self.backward_node_stack.deinit(self.builder.allocator);
+    self.builder.internal_node_arena.deinit(self.builder.allocator);
     self.* = undefined;
 }
 
@@ -77,11 +77,11 @@ pub fn deinit(self: *Graph) void {
 pub fn reset(self: *Graph) void {
     self.sorted_nodes.clearRetainingCapacity();
     self.backward_node_stack.clearRetainingCapacity();
-    _ = self.body.internal_node_arena.reset(self.body.allocator, .retain_capacity);
+    _ = self.builder.internal_node_arena.reset(self.builder.allocator, .retain_capacity);
 }
 
 pub fn topological_sort(self: *Graph, node: *Node) void {
-    const gopr = self.sorted_nodes.getOrPut(self.body.allocator, node) catch unreachable;
+    const gopr = self.sorted_nodes.getOrPut(self.builder.allocator, node) catch unreachable;
 
     if (gopr.found_existing) {
         gopr.value_ptr.pending += 1;
@@ -104,7 +104,7 @@ pub fn backward(self: *Graph, root: *Node) !void {
     self.backward_node_stack.clearRetainingCapacity();
 
     self.topological_sort(root);
-    self.backward_node_stack.append(self.body.allocator, root) catch unreachable;
+    self.backward_node_stack.append(self.builder.allocator, root) catch unreachable;
 
     outer: while (self.backward_node_stack.pop()) |parent| {
         defer if (self.eager_teardown and !parent.acquired())
@@ -119,7 +119,7 @@ pub fn backward(self: *Graph, root: *Node) !void {
         inner: while (children.next()) |child| {
             const info = self.sorted_nodes.getPtr(child) orelse continue :inner;
             if (info.pending == 0 and !info.visited) {
-                self.backward_node_stack.append(self.body.allocator, child) catch unreachable;
+                self.backward_node_stack.append(self.builder.allocator, child) catch unreachable;
                 info.visited = true;
             } else {
                 info.pending -|= 1;

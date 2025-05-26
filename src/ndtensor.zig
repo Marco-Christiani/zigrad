@@ -45,13 +45,13 @@ pub fn NDTensor(comptime T: type) type {
         pub fn empty(graph: *Graph, device: DeviceReference, shape: []const usize, config: TensorConfig) !*Self {
             const category: Node.Category = .leaf;
 
-            const self = try graph.body.create_node(Self, category);
-            errdefer graph.body.destroy_node(self, category);
+            const self = try graph.builder.create_node(Self, category);
+            errdefer graph.builder.destroy_node(self, category);
 
             self.* = .{
                 .data = try DataType.empty(shape, device),
                 .device = device,
-                .node = .init(Self, category, &graph.body, null, config.label, .{
+                .node = .init(Self, category, &graph.builder, null, config.label, .{
                     .requires_grad = config.requires_grad,
                     .acquired = config.acquired,
                     .attached = config.attached,
@@ -225,7 +225,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn CreateDependentOpts(BwdCallback: type) type {
             return struct {
                 data: DataType,
-                gb: *Graph.Body,
+                gb: *Graph.Builder,
                 children: []const *Node,
                 callback: BwdCallback,
                 device: DeviceReference,
