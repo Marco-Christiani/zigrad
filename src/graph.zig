@@ -144,7 +144,7 @@ pub fn teardown(self: *Graph, root: *Node) void {
     self.topological_sort(root);
 
     for (self.sorted_nodes.keys()) |node| {
-        if (!node.acquired()) node.clear();
+        if (!node.acquired()) node.deinit();
     }
 }
 
@@ -152,6 +152,10 @@ pub fn teardown(self: *Graph, root: *Node) void {
 // Testing //////////////////////////////////////////
 
 const TensorConfig = @import("ndtensor.zig").TensorConfig;
+
+comptime {
+    std.testing.refAllDecls(@This());
+}
 
 test "Graph eager teardown reuse 1" {
     var cpu = zg.device.HostDevice.init();
