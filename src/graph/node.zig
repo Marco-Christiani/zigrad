@@ -70,7 +70,7 @@ pub fn deinit(self: *Node) void {
 /// Clear any allocated context state.
 /// Should be called by host object that
 /// the node is intruding upon.
-pub fn clear(self: *Node) void {
+pub fn deactivate(self: *Node) void {
     if (self.callbacks.bwd) |*bwd| {
         bwd.deinit(self.gb.allocator);
         self.callbacks.bwd = null;
