@@ -40,19 +40,19 @@ pub fn MnistModel(comptime T: type) type {
             try zg.nn.relu_(T, z0);
 
             if (!flat.requires_grad())
-                flat.clear();
+                flat.deinit();
 
             const z1 = try self.linear_layers[1].forward(z0);
             errdefer z1.deinit();
             try zg.nn.relu_(T, z1);
 
             if (!z0.requires_grad())
-                z0.clear();
+                z0.deinit();
 
             const z2 = try self.linear_layers[2].forward(z1);
 
             if (!z1.requires_grad())
-                z1.clear();
+                z1.deinit();
 
             return z2;
         }

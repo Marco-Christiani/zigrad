@@ -70,11 +70,12 @@ pub fn deinit(self: *Node) void {
 /// Clear any allocated context state.
 /// Should be called by host object that
 /// the node is intruding upon.
-pub fn clear(self: *Node) void {
+pub fn deactivate(self: *Node) void {
     if (self.callbacks.bwd) |*bwd| {
         bwd.deinit(self.gb.allocator);
         self.callbacks.bwd = null;
     }
+    self.flags.set(.active, false);
 }
 
 pub fn is_leaf(self: *const Node) bool {
@@ -124,6 +125,10 @@ pub fn acquired(self: *const Node) bool {
     return self.flags.get(.acquired);
 }
 
+pub fn active(self: *const Node) bool {
+    return self.flags.get(.active);
+}
+
 pub fn attached(self: *const Node) bool {
     return self.flags.get(.attached);
 }
@@ -152,6 +157,14 @@ pub const Flags = struct {
         /// not be freed. Set by using the "acquire" and
         /// "release" functions.
         acquired,
+        /// This field describes whether `deinit` has been
+        /// already called on the parent object.
+        /// This makes it easier to handle releasing memory
+        /// on errors if intermediate tensors were freed.
+        /// The parent object is responsible for setting
+        /// this field. It is undefined behavior to use an
+        /// object that is attched to an inactive node.
+        active,
         /// An attached tensor can be traversed through
         /// in the backward process. If the tensor is
         /// unattached, the reversal process will not
@@ -174,7 +187,8 @@ pub const Flags = struct {
     pub fn init(node_category: Category, config: Config) Flags {
         var self: Flags = .empty;
         self.set(.category, node_category == .leaf);
-        comptime var field_count: usize = 1;
+        self.set(.active, true);
+        comptime var field_count: usize = 2;
         inline for (std.meta.fields(@TypeOf(config))) |field| {
             const tag = comptime std.meta.stringToEnum(Values, field.name) orelse continue;
 
