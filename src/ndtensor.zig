@@ -482,18 +482,64 @@ pub fn NDTensor(comptime T: type) type {
             self.data.fill(val, self.device);
         }
 
-        // this needs to get audited for device safety
+        /// Standard value-getter. Try to avoid using this when
+        /// working with device memory because it's expensive.
+        /// Get is not a gradient tracked operation.
         pub fn get(self: *const Self, idx: usize) T {
-            return self.data.data[idx];
+            if (comptime zg.backend == .HOST)
+                return self.data.data[idx];
+
+            var tmp: [1]T = undefined;
+            self.device.mem_transfer(T, self.data.data[idx .. idx + 1], tmp[0..], .DtoH);
+            return tmp[0];
         }
 
-        // this needs to get audited for device safety
+        /// Standard value-setter. Try to avoid using this when
+        /// working with device memory because it's expensive.
+        /// Set is not a gradient tracked operation.
         pub fn set(self: *const Self, idx: usize, value: T) void {
-            self.data.data[idx] = value;
+            if (comptime zg.backend == .HOST) {
+                self.data.data[idx] = value;
+                return;
+            }
+            const tmp: [1]T = @splat(value);
+            self.device.mem_transfer(T, tmp[0..], self.data.data[idx .. idx + 1], .HtoD);
         }
 
-        fn pos_to_index(self: *const Self, indices: []const usize) usize {
-            return self.data.pos_to_offset(indices);
+        /// Tensor value-setter.
+        ///
+        /// x.set_offset(n, y) where y.get_size() -> n: copies y into x[offset..offset + n]
+        pub fn set_offset(dst: *Self, offset: usize, src: *const Self) void {
+            std.debug.assert(src.get_size() <= dst.get_size());
+            const end = offset + src.get_size();
+            const src_data = src.get_data();
+            const dst_data = dst.get_data()[offset..end];
+
+            if (src.device.is_compatible(dst.device)) {
+                dst.device.mem_copy(T, src_data, dst_data);
+            } else if (dst.device.is_host()) {
+                src.device.mem_transfer(T, src_data, dst_data, .DtoH);
+            } else {
+                dst.device.mem_transfer(T, src_data, dst_data, .HtoD);
+            }
+        }
+
+        /// Tensor value-getter.
+        ///
+        /// x.get_offset(n, y) where y.get_size() -> n: copies x[offset..offset + n] into y
+        pub fn get_offset(src: *const Self, offset: usize, dst: *Self) void {
+            std.debug.assert(src.get_size() >= dst.get_size());
+            const end = offset + dst.get_size();
+            const src_data = src.get_data()[offset..end];
+            const dst_data = dst.get_data();
+
+            if (src.device.is_compatible(dst.device)) {
+                dst.device.mem_copy(T, src_data, dst_data);
+            } else if (dst.device.is_host()) {
+                src.device.mem_transfer(T, src_data, dst_data, .HtoD);
+            } else {
+                dst.device.mem_transfer(T, src_data, dst_data, .DtoH);
+            }
         }
 
         fn flex_pos_to_index(self: *const Self, indices: []const usize) error.InvalidIndex!usize {
@@ -527,16 +573,6 @@ pub fn NDTensor(comptime T: type) type {
                 ._backward = null,
                 ._backward_ctx = null,
             };
-        }
-
-        pub fn set_slice(self: *const Self, ranges: []const Range, values: Self) !void {
-            if (self.requires_grad()) {
-                // need to create a new operation
-                @compileError("Not implemented");
-            } else {
-                // if not tracking gradients can just set the values directly
-                try self.data.set_slice_ranges(ranges, values.data.*);
-            }
         }
 
         pub fn print(self: *const Self) void {
