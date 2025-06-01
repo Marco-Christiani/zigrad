@@ -1475,20 +1475,6 @@ test "NDArray.gather" {
 //    return index;
 //}
 
-//pub fn offset_to_pos(self: Self, offset: usize, device: DeviceReference) ![]usize {
-//    const n = self.shape.len;
-//    const pos = try device.allocator.alloc(usize, n);
-//    errdefer device.allocator.free(pos);
-
-//    var remaining_index = offset;
-//    for (0..n) |i| {
-//        pos[i] = remaining_index / self.shape.strides[i];
-//        remaining_index %= self.shape.strides[i];
-//    }
-
-//    return pos;
-//}
-
 // TODO: Check device support
 // Should be analogous to: https://pytorch.org/docs/stable/generated/torch.slice_scatter.html#torch.slice_scatter
 //pub fn set_slice_ranges(self: Self, ranges: []const Range, values: Self) !void {

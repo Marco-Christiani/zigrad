@@ -546,11 +546,6 @@ pub fn NDTensor(comptime T: type) type {
             return self.data.flexPosToOffset(indices);
         }
 
-        /// COM
-        fn index_to_pos(self: *const Self, index: usize) []const usize {
-            return self.data.offset_to_pos(index, self.device.allocator);
-        }
-
         /// [WIP] Values and grads are views into self. Shapes are allocated and COM.
         ///
         /// ---
