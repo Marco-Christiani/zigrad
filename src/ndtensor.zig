@@ -1955,6 +1955,39 @@ test "tensor/Graph/subset" {
 
 }
 
+test "tensor/Graph/getter-setter" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+    
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(f32);
+
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, &.{ 2, 5 }, .{});
+    defer t1.deinit();
+
+    {
+        const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1 }, null, .{});
+        defer t2.deinit();
+
+        t1.set_offset(5, t2);
+
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.get_data());
+    }
+    {
+        const t2 = try  Tensor.empty(&graph, device, &.{ 5 }, .{});
+        defer t2.deinit();
+
+        t1.get_offset(5, t2);
+
+        try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1, 1 }, t2.get_data());
+    }
+
+}
+
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
 //test "tensor/gather" {;;
 //    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
