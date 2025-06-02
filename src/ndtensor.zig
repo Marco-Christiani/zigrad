@@ -548,18 +548,14 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
 
-        pub fn subset(self: *const Self, steps: []const u64, status: Status) !*Self {
+        pub fn subset(self: *Self, steps: []const i64, status: Status) !*Self {
             std.debug.assert(self.data.shape.len >= steps.len);
 
             const SubsetBwds = struct {
-                pub fn backward(y: *Self, children: *Node.Children) !void {
+                start: usize,
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
                     const x = children.get_bwd_upcast(Self, 0) orelse return;
-                    const x_grad_data = blk: {
-                        const x_p = @intFromPtr(x.data.data.ptr);
-                        const y_p = @intFromPtr(y.data.data.ptr);
-                        const start = (y_p - x_p) / @sizeOf(T);
-                        break :blk (try x.ensure_grad_data(0))[start..][0..y.get_size()];
-                    };
+                    const x_grad_data = (try x.ensure_grad_data(0))[ctx.start..][0..y.get_size()];
                     x.device.dispatch(opspec.add(T){
                         .x = x_grad_data,
                         .y = y.assume_grad_data(),
@@ -568,12 +564,12 @@ pub fn NDTensor(comptime T: type) type {
                 }
             };
 
-            const strides = self.shape.strides();
+            const strides = self.data.shape.strides();
 
             var start: usize = 0;
-            var partial_size: usize = self.data.len;
+            var partial_size: usize = self.get_size();
             for (steps, 0..) |step, i| {
-                std.debug.assert(@abs(step) < self.shape.get(i));
+                std.debug.assert(@abs(step) < self.data.shape.get(i));
 
                 if (step < 0) {
                     const total_steps = partial_size / strides.get(i);
@@ -583,10 +579,10 @@ pub fn NDTensor(comptime T: type) type {
                     start += @abs(step) * strides.get(i);
                 }
 
-                partial_size /= self.shape.get(i);
+                partial_size /= self.data.shape.get(i);
             }
 
-            const tail = self.shape.tail(self.shape.len - steps.len);
+            const tail = self.data.shape.tail(self.data.shape.len - steps.len);
             const size = Shape.slice_size(tail);
 
             const raw_data = switch (status) {
@@ -605,7 +601,7 @@ pub fn NDTensor(comptime T: type) type {
                 .gb = self.node.gb,
                 .children = &.{&self.node},
                 .device = self.device,
-                .callback = .{},
+                .callback = .{ .start = start },
             });
             tmp.status = status;
             return tmp;
@@ -1915,6 +1911,48 @@ test "tensor/inplace_add" {
     try std.testing.expectEqual(children.next().?, &u.node);
     try std.testing.expectEqual(children.next().?, &v.node);
     try std.testing.expectEqual(children.next(), null);
+}
+
+test "tensor/Graph/subset" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+    
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(f32);
+
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1, 2, 2, 2, 2, 2 }, &.{ 2, 5 }, .{
+        .requires_grad = true,
+    });
+    defer t1.deinit();
+
+    {
+        const t2 = try t1.subset(&.{ 1 }, .view);
+        defer t2.deinit();
+
+        try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2, 2 }, t2.get_data());
+
+        try t2.backward();
+
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.assume_grad_data());
+    }
+
+    try t1.setup_grad(0);
+
+    {
+        const t2 = try  t1.subset(&.{ 1 }, .owned);
+        defer t2.deinit();
+
+        try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2, 2 }, t2.get_data());
+
+        try t2.backward();
+
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.assume_grad_data());
+    }
+
 }
 
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
