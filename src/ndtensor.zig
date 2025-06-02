@@ -23,6 +23,7 @@ pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
         pub const DataType = NDArray(T);
+        pub const Status = enum { owned, view };
         /// Core NDArray that holds the values and shape.
         /// Use this member directly when you want to perform
         /// ops that will not be tracked by the graph.
@@ -33,6 +34,9 @@ pub fn NDTensor(comptime T: type) type {
         /// The device field is a reference to a stateful
         /// object that provides memory and compute resources.
         device: DeviceReference,
+        /// Denotes if a tensor is owned or viewed. Owned tensors
+        /// are freed when calling deinit.
+        status: Status = .owned,
         /// Intrusive node that hooks up the NDTensor class to
         /// a zigrad computation graph.
         node: Node,
@@ -180,7 +184,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn setup_grad(self: *Self, fill_value: ?T) !void {
             if (self.grad == null) {
                 self.grad = try DataType.empty(self.get_shape(), self.device);
-                self.grad.?.status = self.data.status;
             }
             return self.assume_grad().fill(fill_value orelse return, self.device);
         }
@@ -308,14 +311,17 @@ pub fn NDTensor(comptime T: type) type {
             if (!self.node.active())
                 return;
 
-            self.data.deinit(self.device);
+            self.node.deactivate();
 
+            if (self.status == .owned)
+                self.data.deinit(self.device);
+
+            // Viewing tensors have gradients
+            // independent of origin tensors.
             if (self.grad) |*g| {
                 g.deinit(self.device);
                 self.grad = null;
             }
-
-            self.node.deactivate();
         }
 
         fn to_device_impl(
@@ -542,32 +548,67 @@ pub fn NDTensor(comptime T: type) type {
             }
         }
 
-        fn flex_pos_to_index(self: *const Self, indices: []const usize) error.InvalidIndex!usize {
-            return self.data.flexPosToOffset(indices);
-        }
+        pub fn subset(self: *const Self, steps: []const u64, status: Status) !*Self {
+            std.debug.assert(self.data.shape.len >= steps.len);
 
-        /// [WIP] Values and grads are views into self. Shapes are allocated and COM.
-        ///
-        /// ---
-        /// # ADR
-        ///   - It is assumed the caller wants a temporary mutable view, return by copy.
-        ///   - This creates a complex situation, there is no backward for this operation and it returns a mutable view.
-        ///   - Caller must set backward
-        pub fn slice_ranges(self: *const Self, ranges: []const Range) !Self {
-            log.err("WIP", .{});
-            const sliced_data = try self.data.slice_ranges(ranges);
-            return Self{
-                .data = sliced_data,
-                .grad = if (self.requires_grad()) try self.grad.?.slice_ranges(ranges) else null,
-                ._requires_grad = self.requires_grad(),
-                .op = null,
-                .children = null,
-                .label = null,
-                .acquired = false,
-                .device = self.device,
-                ._backward = null,
-                ._backward_ctx = null,
+            const SubsetBwds = struct {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    const x_grad_data = blk: {
+                        const x_p = @intFromPtr(x.data.data.ptr);
+                        const y_p = @intFromPtr(y.data.data.ptr);
+                        const start = (y_p - x_p) / @sizeOf(T);
+                        break :blk (try x.ensure_grad_data(0))[start..][0..y.get_size()];
+                    };
+                    x.device.dispatch(opspec.add(T){
+                        .x = x_grad_data,
+                        .y = y.assume_grad_data(),
+                        .z = x_grad_data,
+                    });
+                }
             };
+
+            const strides = self.shape.strides();
+
+            var start: usize = 0;
+            var partial_size: usize = self.data.len;
+            for (steps, 0..) |step, i| {
+                std.debug.assert(@abs(step) < self.shape.get(i));
+
+                if (step < 0) {
+                    const total_steps = partial_size / strides.get(i);
+                    const actual_step = total_steps - @abs(step);
+                    start += actual_step * strides.get(i);
+                } else {
+                    start += @abs(step) * strides.get(i);
+                }
+
+                partial_size /= self.shape.get(i);
+            }
+
+            const tail = self.shape.tail(self.shape.len - steps.len);
+            const size = Shape.slice_size(tail);
+
+            const raw_data = switch (status) {
+                .owned => try self.device.mem_dupe(T, self.get_data()[start..][0..size]),
+                .view => self.get_data()[start..][0..size],
+            };
+            errdefer {
+                if (status == .owned) self.device.mem_free(raw_data);
+            }
+
+            const tmp = try create_dependent(SubsetBwds, .{
+                .data = .{
+                    .data = raw_data,
+                    .shape = Shape.init(tail),
+                },
+                .gb = self.node.gb,
+                .children = &.{&self.node},
+                .device = self.device,
+                .callback = .{},
+            });
+            tmp.status = status;
+            return tmp;
         }
 
         pub fn print(self: *const Self) void {

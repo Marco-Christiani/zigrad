@@ -24,17 +24,12 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
-        pub const Status = enum { none, view };
         /// Can be safely accessed. See `Shape`
         shape: Shape,
-
         /// Cannot be safely accessed. Despite its appearance, the data may lie
         /// on device memory. Therefore, direct access is unsafe unless data is
         /// known to reside on host memory.
         data: []T,
-
-        /// Whether `data` is a view into another array.
-        status: Status = .none,
 
         /// Values and shape are copied. COM.
         pub fn init(values: []const T, shape: ?[]const usize, device: DeviceReference) !Self {
@@ -52,7 +47,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self, device: DeviceReference) void {
-            if (self.status == .none) device.mem_free(self.data);
+            device.mem_free(self.data);
         }
 
         pub fn empty(shape: []const usize, device: DeviceReference) !Self {
@@ -164,7 +159,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = new_shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
-                .status = .view,
             };
         }
 
@@ -174,7 +168,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = self.shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
-                .status = .view,
             };
         }
 
@@ -219,7 +212,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = Shape.init(new_shape),
                 .data = self.data[start_index .. start_index + total_elements],
-                .status = .view,
             };
         }
 
@@ -232,7 +224,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         inline fn elwise(x: *const Self, y: *const Self, z: *Self, device: DeviceReference, Op: type) !void {
-            std.debug.assert(z.status == .none);
             if (builtin.mode == .Debug and !x.shape.compatible(y.shape)) {
                 log.err("_" ++ Op.__name__ ++ "() self.shape={} other.shape={}", .{ x.shape, y.shape });
                 return error.IncompatibleShapes;
@@ -329,12 +320,10 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _exp(self: *Self, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             device.dispatch(opspec.exp_fwd(T){ .x = self.data, .y = self.data });
         }
 
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });
         }
 
@@ -470,7 +459,6 @@ pub fn NDArray(comptime T: type) type {
         /// Performs `self = alpha*other + self` in place.
         /// Shapes must match (although practically the op is possible under other conditions)
         pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             std.debug.assert(self.shape.equal(other.shape));
             device.dispatch(opspec.axpy(T){ .x = other.data, .y = self.data, .alpha = &alpha });
         }
@@ -605,7 +593,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _clip_norm(self: Self, max_norm: T, delta: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             device.dispatch(opspec.clip_nrm2(T){ .x = self.data, .max_norm = max_norm, .delta = delta });
         }
 
@@ -617,7 +604,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _clamp(self: Self, vmin: T, vmax: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             std.debug.assert(vmin <= vmax);
             device.dispatch(opspec.clamp_fwd(T){ .x = self.data, .y = self.data, .max = vmax, .min = vmin });
         }
@@ -639,7 +625,6 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.data.len >= out.data.len);
             std.debug.assert(self.data.len % out.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
-            std.debug.assert(out.status == .none);
 
             const scratch: []T = outer: {
                 const delta = self.shape.len - out.shape.len;
@@ -679,8 +664,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _unbroadcast(self: *Self, new_shape: Shape, device: DeviceReference) !void {
-            std.debug.assert(self.status == .none);
-
             if (self.shape.equal(new_shape))
                 return;
 
@@ -702,7 +685,6 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(out.shape.len >= self.shape.len);
             std.debug.assert(self.data.len % self.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
-            std.debug.assert(out.status == .none);
 
             device.dispatch(opspec.broadcast(T){
                 .x = self.data,
@@ -721,8 +703,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _broadcast(self: *Self, new_shape: Shape, device: DeviceReference) !void {
-            std.debug.assert(self.status == .none);
-
             if (self.shape.equal(new_shape))
                 return;
 
@@ -812,7 +792,6 @@ fn bmm_acc_impl(
 
     if (builtin.mode == .Debug) {
         if (accumulator) |_| {
-            std.debug.assert(C.status == .none);
             if (!C.shape.compatible(C_shape)) {
                 std.debug.panic("Expected accumulator shape {} but got {}", .{ C_shape, C.shape });
             }
