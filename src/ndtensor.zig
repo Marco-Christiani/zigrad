@@ -23,6 +23,7 @@ pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
         pub const DataType = NDArray(T);
+        pub const Status = enum { owned, view };
         /// Core NDArray that holds the values and shape.
         /// Use this member directly when you want to perform
         /// ops that will not be tracked by the graph.
@@ -33,6 +34,9 @@ pub fn NDTensor(comptime T: type) type {
         /// The device field is a reference to a stateful
         /// object that provides memory and compute resources.
         device: DeviceReference,
+        /// Denotes if a tensor is owned or viewed. Owned tensors
+        /// are freed when calling deinit.
+        status: Status = .owned,
         /// Intrusive node that hooks up the NDTensor class to
         /// a zigrad computation graph.
         node: Node,
@@ -180,7 +184,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn setup_grad(self: *Self, fill_value: ?T) !void {
             if (self.grad == null) {
                 self.grad = try DataType.empty(self.get_shape(), self.device);
-                self.grad.?.status = self.data.status;
             }
             return self.assume_grad().fill(fill_value orelse return, self.device);
         }
@@ -308,14 +311,17 @@ pub fn NDTensor(comptime T: type) type {
             if (!self.node.active())
                 return;
 
-            self.data.deinit(self.device);
+            self.node.deactivate();
 
+            if (self.status == .owned)
+                self.data.deinit(self.device);
+
+            // Viewing tensors have gradients
+            // independent of origin tensors.
             if (self.grad) |*g| {
                 g.deinit(self.device);
                 self.grad = null;
             }
-
-            self.node.deactivate();
         }
 
         fn to_device_impl(
@@ -482,61 +488,123 @@ pub fn NDTensor(comptime T: type) type {
             self.data.fill(val, self.device);
         }
 
-        // this needs to get audited for device safety
+        /// Standard value-getter. Try to avoid using this when
+        /// working with device memory because it's expensive.
+        /// Get is not a gradient tracked operation.
         pub fn get(self: *const Self, idx: usize) T {
-            return self.data.data[idx];
+            if (comptime zg.backend == .HOST)
+                return self.data.data[idx];
+
+            var tmp: [1]T = undefined;
+            self.device.mem_transfer(T, self.data.data[idx .. idx + 1], tmp[0..], .DtoH);
+            return tmp[0];
         }
 
-        // this needs to get audited for device safety
+        /// Standard value-setter. Try to avoid using this when
+        /// working with device memory because it's expensive.
+        /// Set is not a gradient tracked operation.
         pub fn set(self: *const Self, idx: usize, value: T) void {
-            self.data.data[idx] = value;
-        }
-
-        fn pos_to_index(self: *const Self, indices: []const usize) usize {
-            return self.data.pos_to_offset(indices);
-        }
-
-        fn flex_pos_to_index(self: *const Self, indices: []const usize) error.InvalidIndex!usize {
-            return self.data.flexPosToOffset(indices);
-        }
-
-        /// COM
-        fn index_to_pos(self: *const Self, index: usize) []const usize {
-            return self.data.offset_to_pos(index, self.device.allocator);
-        }
-
-        /// [WIP] Values and grads are views into self. Shapes are allocated and COM.
-        ///
-        /// ---
-        /// # ADR
-        ///   - It is assumed the caller wants a temporary mutable view, return by copy.
-        ///   - This creates a complex situation, there is no backward for this operation and it returns a mutable view.
-        ///   - Caller must set backward
-        pub fn slice_ranges(self: *const Self, ranges: []const Range) !Self {
-            log.err("WIP", .{});
-            const sliced_data = try self.data.slice_ranges(ranges);
-            return Self{
-                .data = sliced_data,
-                .grad = if (self.requires_grad()) try self.grad.?.slice_ranges(ranges) else null,
-                ._requires_grad = self.requires_grad(),
-                .op = null,
-                .children = null,
-                .label = null,
-                .acquired = false,
-                .device = self.device,
-                ._backward = null,
-                ._backward_ctx = null,
-            };
-        }
-
-        pub fn set_slice(self: *const Self, ranges: []const Range, values: Self) !void {
-            if (self.requires_grad()) {
-                // need to create a new operation
-                @compileError("Not implemented");
-            } else {
-                // if not tracking gradients can just set the values directly
-                try self.data.set_slice_ranges(ranges, values.data.*);
+            if (comptime zg.backend == .HOST) {
+                self.data.data[idx] = value;
+                return;
             }
+            const tmp: [1]T = @splat(value);
+            self.device.mem_transfer(T, tmp[0..], self.data.data[idx .. idx + 1], .HtoD);
+        }
+
+        /// Tensor value-setter.
+        ///
+        /// x.set_offset(n, y) where y.get_size() -> n: copies y into x[offset..offset + n]
+        pub fn set_offset(dst: *Self, offset: usize, src: *const Self) void {
+            std.debug.assert(src.get_size() <= dst.get_size());
+            const end = offset + src.get_size();
+            const src_data = src.get_data();
+            const dst_data = dst.get_data()[offset..end];
+
+            if (src.device.is_compatible(dst.device)) {
+                dst.device.mem_copy(T, src_data, dst_data);
+            } else if (dst.device.is_host()) {
+                src.device.mem_transfer(T, src_data, dst_data, .DtoH);
+            } else {
+                dst.device.mem_transfer(T, src_data, dst_data, .HtoD);
+            }
+        }
+
+        /// Tensor value-getter.
+        ///
+        /// x.get_offset(n, y) where y.get_size() -> n: copies x[offset..offset + n] into y
+        pub fn get_offset(src: *const Self, offset: usize, dst: *Self) void {
+            std.debug.assert(src.get_size() >= dst.get_size());
+            const end = offset + dst.get_size();
+            const src_data = src.get_data()[offset..end];
+            const dst_data = dst.get_data();
+
+            if (src.device.is_compatible(dst.device)) {
+                dst.device.mem_copy(T, src_data, dst_data);
+            } else if (dst.device.is_host()) {
+                src.device.mem_transfer(T, src_data, dst_data, .HtoD);
+            } else {
+                dst.device.mem_transfer(T, src_data, dst_data, .DtoH);
+            }
+        }
+
+        pub fn subset(self: *Self, steps: []const i64, status: Status) !*Self {
+            std.debug.assert(self.data.shape.len >= steps.len);
+
+            const SubsetBwds = struct {
+                start: usize,
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    const x_grad_data = (try x.ensure_grad_data(0))[ctx.start..][0..y.get_size()];
+                    x.device.dispatch(opspec.add(T){
+                        .x = x_grad_data,
+                        .y = y.assume_grad_data(),
+                        .z = x_grad_data,
+                    });
+                }
+            };
+
+            const strides = self.data.shape.strides();
+
+            var start: usize = 0;
+            var partial_size: usize = self.get_size();
+            for (steps, 0..) |step, i| {
+                std.debug.assert(@abs(step) < self.data.shape.get(i));
+
+                if (step < 0) {
+                    const total_steps = partial_size / strides.get(i);
+                    const actual_step = total_steps - @abs(step);
+                    start += actual_step * strides.get(i);
+                } else {
+                    start += @abs(step) * strides.get(i);
+                }
+
+                partial_size /= self.data.shape.get(i);
+            }
+
+            const tail = self.data.shape.tail(self.data.shape.len - steps.len);
+            const size = Shape.slice_size(tail);
+
+            const raw_data = switch (status) {
+                .owned => try self.device.mem_dupe(T, self.get_data()[start..][0..size]),
+                .view => self.get_data()[start..][0..size],
+            };
+            errdefer {
+                if (status == .owned) self.device.mem_free(raw_data);
+            }
+
+            const tmp = try create_dependent(SubsetBwds, .{
+                .data = .{
+                    .data = raw_data,
+                    .shape = Shape.init(tail),
+                },
+                .gb = self.node.gb,
+                .children = &.{&self.node},
+                .device = self.device,
+                .callback = .{ .start = start },
+            });
+            tmp.status = status;
+            return tmp;
         }
 
         pub fn print(self: *const Self) void {
@@ -1843,6 +1911,81 @@ test "tensor/inplace_add" {
     try std.testing.expectEqual(children.next().?, &u.node);
     try std.testing.expectEqual(children.next().?, &v.node);
     try std.testing.expectEqual(children.next(), null);
+}
+
+test "tensor/Graph/subset" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+    
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(f32);
+
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1, 2, 2, 2, 2, 2 }, &.{ 2, 5 }, .{
+        .requires_grad = true,
+    });
+    defer t1.deinit();
+
+    {
+        const t2 = try t1.subset(&.{ 1 }, .view);
+        defer t2.deinit();
+
+        try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2, 2 }, t2.get_data());
+
+        try t2.backward();
+
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.assume_grad_data());
+    }
+
+    try t1.setup_grad(0);
+
+    {
+        const t2 = try  t1.subset(&.{ 1 }, .owned);
+        defer t2.deinit();
+
+        try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2, 2 }, t2.get_data());
+
+        try t2.backward();
+
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.assume_grad_data());
+    }
+
+}
+
+test "tensor/Graph/getter-setter" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+    
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(f32);
+
+    const t1 = try Tensor.from_slice(&graph, device, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, &.{ 2, 5 }, .{});
+    defer t1.deinit();
+
+    {
+        const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1 }, null, .{});
+        defer t2.deinit();
+
+        t1.set_offset(5, t2);
+
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.get_data());
+    }
+    {
+        const t2 = try  Tensor.empty(&graph, device, &.{ 5 }, .{});
+        defer t2.deinit();
+
+        t1.get_offset(5, t2);
+
+        try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1, 1 }, t2.get_data());
+    }
+
 }
 
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
