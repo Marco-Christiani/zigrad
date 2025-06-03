@@ -12,7 +12,9 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const allocator = std.heap.smp_allocator;
 
     // use global graph for project
-    zg.init_global_graph(allocator, .{});
+    zg.init_global_graph(allocator, .{
+        .eager_teardown = true,
+    });
     defer zg.deinit_global_graph();
 
     var cpu = zg.device.HostDevice.init();
@@ -50,7 +52,11 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             step_timer.reset();
 
             const output = try model.forward(image);
+            defer output.deinit();
+
             const loss = try zg.loss.softmax_cross_entropy_loss(f32, output, label);
+            defer loss.deinit();
+
             const loss_val = loss.get(0);
 
             try loss.backward();
