@@ -5,48 +5,17 @@ const debug: bool = (builtin.mode == .Debug);
 const zg = @import("zigrad.zig");
 const ArenaUnmanaged = @import("graph/arena_unmanaged.zig");
 pub const Node = @import("graph/node.zig");
+pub const Builder = @import("graph/builder.zig");
 
 const Graph = @This();
-
-/// Sharable graph memory interface for nodes.
-///
-/// # ADR
-///
-/// - This abstraction allows us to separately manage leaf and internal tensor shells when building computation graphs.
-/// - Leaves and internal nodes have different lifetimes.
-pub const Builder = struct {
-    allocator: std.mem.Allocator,
-    /// arena for all leaf nodes created by the user
-    leaf_node_arena: ArenaUnmanaged = .empty,
-    /// arena for all temporary nodes created by ops
-    internal_node_arena: ArenaUnmanaged = .empty,
-
-    pub fn promote(self: *Builder) *Graph {
-        return @alignCast(@fieldParentPtr("builder", self));
-    }
-
-    pub fn create_node(self: *Builder, T: type, category: Node.Category) !*T {
-        return switch (category) {
-            .leaf => self.leaf_node_arena.create(self.allocator, T),
-            .internal => self.internal_node_arena.create(self.allocator, T),
-        };
-    }
-
-    /// This is an arena destroy - it should be used carefully because it will only
-    /// rollback the last allocated object. This is useful for init methods where a
-    /// single object is being created and you need to rollback the end of the arena
-    /// to account for a failed allocation.
-    pub fn destroy_node(self: *Builder, ptr: anytype, category: Node.Category) void {
-        return switch (category) {
-            .leaf => self.leaf_node_arena.destroy(ptr),
-            .internal => self.internal_node_arena.destroy(ptr),
-        };
-    }
-};
 
 const PathInfo = struct {
     pending: u32 = 0,
     visited: bool = false,
+};
+
+pub const Config = struct {
+    eager_teardown: bool = false,
 };
 
 /// Manages the overall graph, allows for a more memory efficient abstraction where the data structures used for
@@ -59,9 +28,7 @@ backward_node_stack: std.ArrayListUnmanaged(*Node) = .empty,
 /// frees unacquired tensors on reverse
 eager_teardown: bool,
 
-pub fn init(allocator: std.mem.Allocator, config: struct {
-    eager_teardown: bool = false,
-}) Graph {
+pub fn init(allocator: std.mem.Allocator, config: Config) Graph {
     return .{
         .builder = .{ .allocator = allocator },
         .eager_teardown = config.eager_teardown,
@@ -71,22 +38,8 @@ pub fn init(allocator: std.mem.Allocator, config: struct {
 pub fn deinit(self: *Graph) void {
     self.sorted_nodes.deinit(self.builder.allocator);
     self.backward_node_stack.deinit(self.builder.allocator);
-    self.builder.leaf_node_arena.deinit(self.builder.allocator);
-    self.builder.internal_node_arena.deinit(self.builder.allocator);
+    self.builder.deinit();
     self.* = undefined;
-}
-
-pub const ResetOption = enum { leaves, internal, all };
-
-/// Clears and retains memory - can be called in the case of a failed forward operation to destroy the computation
-/// graph. Using computed nodes that belong to this graph after calling reset is undefined behavior.
-pub fn reset(self: *Graph, option: ResetOption) void {
-    if (option == .leaves or option == .all) {
-        _ = self.builder.leaf_node_arena.reset(self.builder.allocator, .retain_capacity);
-    }
-    if (option == .internal or option == .all) {
-        _ = self.builder.internal_node_arena.reset(self.builder.allocator, .retain_capacity);
-    }
 }
 
 pub fn topological_sort(self: *Graph, node: *Node) void {
@@ -181,9 +134,9 @@ test "Graph eager teardown reuse 1" {
     //    \ /
     //     E
 
-    var A = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
-    var B = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
-    var F = try Tensor.from_slice(&graph, device, &.{1.5}, null, config);
+    var A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
+    var B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
+    var F = try Tensor.from_slice_graph(&graph, device, &.{1.5}, null, config);
 
     // Acquire leaf tensors
     A.acquire();
@@ -240,8 +193,8 @@ test "Graph eager teardown reuse 2" {
     //      \ /
     //       E
 
-    const A = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
-    const B = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
+    const A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
+    const B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
 
     // Acquire leaf tensors
     A.acquire();
@@ -277,8 +230,8 @@ test "Graph x*x" {
 
     zg.rt_grad_enabled = true;
 
-    const A = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
-    const B = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
+    const A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
+    const B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
 
     const C = try A.mul(B);
     const E = try C.mul(C);
@@ -314,10 +267,10 @@ test "Graph subgraphs/detach" {
     zg.rt_grad_enabled = true;
 
     // subgraph 1
-    const a = try Tensor.from_slice(&graph, device, &.{2.0}, null, config);
+    const a = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
     defer a.deinit();
 
-    const b = try Tensor.from_slice(&graph, device, &.{3.0}, null, config);
+    const b = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
     defer b.deinit();
 
     const c = try a.add(b);
@@ -326,7 +279,7 @@ test "Graph subgraphs/detach" {
     c.detach();
 
     // subgraph 2
-    const d = try Tensor.from_slice(&graph, device, &.{4.0}, null, config);
+    const d = try Tensor.from_slice_graph(&graph, device, &.{4.0}, null, config);
     defer d.deinit();
 
     const e = try c.add(d);

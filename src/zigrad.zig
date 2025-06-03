@@ -5,6 +5,7 @@
 //! - If you got this far there are more detailed roadmap and arch notes under docs/
 const root = @import("root");
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 pub const NDArray = @import("ndarray.zig").NDArray;
@@ -48,6 +49,7 @@ pub const Settings = struct {
     seed: u64 = 81761,
     backward_children_capacity: usize = 8,
     label_capacity: usize = 32,
+    thread_safe: bool = !builtin.single_threaded,
 };
 
 /// Global flag for enabling/disabling gradient tracking.
@@ -58,6 +60,20 @@ pub var rt_grad_enabled: bool = true;
 var prng = std.Random.DefaultPrng.init(settings.seed);
 /// currently only used for generating node labels when tracing the comp graph
 pub const random = prng.random();
+
+// Global computation graph - can be used as a convenience to avoid passing graphs
+// along control-flow paths.
+var global_graph: ?Graph = null;
+
+pub fn init_global_graph(allocator: std.mem.Allocator, config: Graph.Config) void {
+    global_graph = Graph.init(allocator, config);
+}
+pub fn deinit_global_graph() void {
+    if (global_graph) |*gg| gg.deinit();
+}
+pub fn get_global_graph() *Graph {
+    return &(global_graph orelse @panic("Global graph is uninitialized, call init_global_graph first."));
+}
 
 // see zls
 // The type of `log_level` is not `std.log.Level`.
