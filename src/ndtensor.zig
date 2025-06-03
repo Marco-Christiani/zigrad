@@ -337,6 +337,8 @@ pub fn NDTensor(comptime T: type) type {
             }
 
             self.node.deactivate();
+
+            self.node.gb.destroy_node(self);
         }
 
         fn to_device_impl(
