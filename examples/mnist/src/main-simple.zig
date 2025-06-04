@@ -73,8 +73,6 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
                 train_dataset.images.len,
                 ms_per_sample,
             });
-
-            graph.reset();
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
@@ -83,7 +81,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
-    const train_eval = try eval_mnist(&graph, &model, train_dataset);
+    const train_eval = try eval_mnist(&model, train_dataset);
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
 
@@ -92,7 +90,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const test_dataset = try MnistDataset(T).load(allocator, device, test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
-    const test_eval = try eval_mnist(&graph, &model, test_dataset);
+    const test_eval = try eval_mnist(&model, test_dataset);
     const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     std.debug.print("Test acc: {d:.2} (n={d})\n", .{ test_eval.acc * 100, test_eval.n });
 
@@ -108,7 +106,6 @@ fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct
     for (dataset.images, dataset.labels) |image, label| {
         const output = try model.forward(image);
         defer output.deinit();
-        defer graph.reset();
         const batch_n = output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;

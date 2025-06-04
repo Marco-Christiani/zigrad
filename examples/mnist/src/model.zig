@@ -17,9 +17,9 @@ pub fn MnistModel(comptime T: type) type {
         pub fn init(device: DeviceReference) !Self {
             return .{
                 .linear_layers = .{
-                    try LinearLayer(T).init(graph, device, 28 * 28, 128),
-                    try LinearLayer(T).init(graph, device, 128, 64),
-                    try LinearLayer(T).init(graph, device, 64, 10),
+                    try LinearLayer(T).init(device, 28 * 28, 128),
+                    try LinearLayer(T).init(device, 128, 64),
+                    try LinearLayer(T).init(device, 64, 10),
                 },
             };
         }
