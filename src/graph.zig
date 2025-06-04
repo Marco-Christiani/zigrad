@@ -104,7 +104,7 @@ pub fn teardown(self: *Graph, root: *Node) void {
 /////////////////////////////////////////////////////
 // Testing //////////////////////////////////////////
 
-const TensorOpts = @import("ndtensor.zig").CreateOpts;
+const TensorOpts = @import("ndtensor.zig").TensorOpts;
 
 comptime {
     std.testing.refAllDecls(@This());
@@ -121,7 +121,7 @@ test "Graph eager teardown reuse 1" {
 
     const opts: TensorOpts = .{
         .requires_grad = true,
-        .graph = graph,
+        .graph = &graph,
     };
 
     zg.rt_grad_enabled = true;
@@ -135,9 +135,9 @@ test "Graph eager teardown reuse 1" {
     //    \ /
     //     E
 
-    var A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
-    var B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
-    var F = try Tensor.from_slice_graph(&graph, device, &.{1.5}, null, opts);
+    var A = try Tensor.from_slice(device, &.{2.0}, null, opts);
+    var B = try Tensor.from_slice(device, &.{3.0}, null, opts);
+    var F = try Tensor.from_slice(device, &.{1.5}, null, opts);
 
     // Acquire leaf tensors
     A.acquire();
@@ -175,7 +175,7 @@ test "Graph eager teardown reuse 2" {
 
     const opts: TensorOpts = .{
         .requires_grad = true,
-        .graph = graph,
+        .graph = &graph,
     };
 
     zg.rt_grad_enabled = true;
@@ -195,8 +195,8 @@ test "Graph eager teardown reuse 2" {
     //      \ /
     //       E
 
-    const A = try Tensor.from_slice_graph(device, &.{2.0}, null, opts);
-    const B = try Tensor.from_slice_graph(device, &.{3.0}, null, opts);
+    const A = try Tensor.from_slice(device, &.{2.0}, null, opts);
+    const B = try Tensor.from_slice(device, &.{3.0}, null, opts);
 
     // Acquire leaf tensors
     A.acquire();
@@ -226,14 +226,15 @@ test "Graph x*x" {
 
     const opts: TensorOpts = .{
         .requires_grad = true,
+        .graph = &graph,
     };
 
     const Tensor = zg.NDTensor(f32);
 
     zg.rt_grad_enabled = true;
 
-    const A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
-    const B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
+    const A = try Tensor.from_slice(device, &.{2.0}, null, opts);
+    const B = try Tensor.from_slice(device, &.{3.0}, null, opts);
 
     const C = try A.mul(B);
     const E = try C.mul(C);
@@ -262,6 +263,7 @@ test "Graph subgraphs/detach" {
 
     const opts: TensorOpts = .{
         .requires_grad = true,
+        .graph = &graph,
     };
 
     const Tensor = zg.NDTensor(f32);
@@ -269,10 +271,10 @@ test "Graph subgraphs/detach" {
     zg.rt_grad_enabled = true;
 
     // subgraph 1
-    const a = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
+    const a = try Tensor.from_slice(device, &.{2.0}, null, opts);
     defer a.deinit();
 
-    const b = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
+    const b = try Tensor.from_slice(device, &.{3.0}, null, opts);
     defer b.deinit();
 
     const c = try a.add(b);
@@ -281,7 +283,7 @@ test "Graph subgraphs/detach" {
     c.detach();
 
     // subgraph 2
-    const d = try Tensor.from_slice_graph(&graph, device, &.{4.0}, null, opts);
+    const d = try Tensor.from_slice(device, &.{4.0}, null, opts);
     defer d.deinit();
 
     const e = try c.add(d);

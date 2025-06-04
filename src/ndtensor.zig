@@ -9,7 +9,7 @@ const utils = @import("ndtensor/utils.zig");
 const Graph = zg.Graph;
 const Node = Graph.Node;
 
-pub const CreateOpts = @import("ndtensor/utils.zig").CreateOpts;
+pub const TensorOpts = @import("ndtensor/utils.zig").TensorOpts;
 pub const Op = @import("ndtensor/utils.zig").Op;
 
 const ndarray = @import("ndarray.zig");
@@ -40,33 +40,8 @@ pub fn NDTensor(comptime T: type) type {
         op: ?Op = null,
 
         /// Shape is allocated. COM.
-        /// Empty function that utilizes the global graph.
-        pub fn empty(device: DeviceReference, shape: []const usize, opts: CreateOpts) !*Self {
-            return empty_graph(zg.get_global_graph(), device, shape, opts);
-        }
-        /// Transfers a host-slice to device memory. Helpful for constructing tests from static arrays.
-        pub fn from_slice(device: DeviceReference, values: []const T, shape: ?[]const usize, opts: CreateOpts) !*Self {
-            return from_slice_graph(zg.get_global_graph(), device, values, shape, opts);
-        }
-        pub fn zeros(device: DeviceReference, shape: []const usize, opts: CreateOpts) !*Self {
-            return zeros_graph(zg.get_global_graph(), device, shape, opts);
-        }
-
-        pub fn ones(device: DeviceReference, shape: []const usize, opts: CreateOpts) !*Self {
-            return ones_graph(zg.get_global_graph(), device, shape, opts);
-        }
-
-        pub fn random(device: DeviceReference, shape: []const usize, rt: zg.RandType, opts: CreateOpts) !*Self {
-            return random_graph(zg.get_global_graph(), device, shape, rt, opts);
-        }
-
-        pub fn sequence(device: DeviceReference, start: T, step: T, shape: []const usize, opts: CreateOpts) !*Self {
-            return sequence_graph(zg.get_global_graph(), device, start, step, shape, opts);
-        }
-
-        /// Shape is allocated. COM.
-        /// Empty function that requires a user-provided graph.
-        pub fn empty_graph(graph: *Graph, device: DeviceReference, shape: []const usize, opts: CreateOpts) !*Self {
+        pub fn empty(device: DeviceReference, shape: []const usize, opts: TensorOpts) !*Self {
+            var graph = opts.graph orelse zg.get_global_graph();
             const self = try graph.builder.create_node(Self);
             errdefer graph.builder.destroy_node(self);
 
@@ -84,32 +59,32 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         /// Transfers a host-slice to device memory. Helpful for constructing tests from static arrays.
-        pub fn from_slice_graph(graph: *Graph, device: DeviceReference, values: []const T, shape: ?[]const usize, opts: CreateOpts) !*Self {
-            const self = try Self.empty_graph(graph, device, shape orelse &.{values.len}, opts);
+        pub fn from_slice(device: DeviceReference, values: []const T, shape: ?[]const usize, opts: TensorOpts) !*Self {
+            const self = try Self.empty(device, shape orelse &.{values.len}, opts);
             self.device.mem_transfer(T, values, self.get_data(), .HtoD);
             return self;
         }
 
-        pub fn zeros_graph(graph: *Graph, device: DeviceReference, shape: []const usize, opts: CreateOpts) !*Self {
-            const self = try Self.empty_graph(graph, device, shape, opts);
+        pub fn zeros(device: DeviceReference, shape: []const usize, opts: TensorOpts) !*Self {
+            const self = try Self.empty(device, shape, opts);
             self.fill(0);
             return self;
         }
 
-        pub fn ones_graph(graph: *Graph, device: DeviceReference, shape: []const usize, opts: CreateOpts) !*Self {
-            const self = try Self.empty_graph(graph, device, shape, opts);
+        pub fn ones(device: DeviceReference, shape: []const usize, opts: TensorOpts) !*Self {
+            const self = try Self.empty(device, shape, opts);
             self.fill(1);
             return self;
         }
 
-        pub fn random_graph(graph: *Graph, device: DeviceReference, shape: []const usize, rt: zg.RandType, opts: CreateOpts) !*Self {
-            const self = try Self.empty_graph(graph, device, shape, opts);
+        pub fn random(device: DeviceReference, shape: []const usize, rt: zg.RandType, opts: TensorOpts) !*Self {
+            const self = try Self.empty(device, shape, opts);
             device.mem_random(T, self.get_data(), rt, zg.random);
             return self;
         }
 
-        pub fn sequence_graph(graph: *Graph, device: DeviceReference, start: T, step: T, shape: []const usize, opts: CreateOpts) !*Self {
-            const self = try Self.empty_graph(graph, device, shape, opts);
+        pub fn sequence(device: DeviceReference, start: T, step: T, shape: []const usize, opts: TensorOpts) !*Self {
+            const self = try Self.empty(device, shape, opts);
             self.device.mem_sequence(T, self.get_data(), start, step);
             return self;
         }
@@ -1229,8 +1204,9 @@ test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const x = try Tensor.from_slice_graph(&graph, cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
+    const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
         .requires_grad = true,
+        .graph = &graph,
     });
     defer x.deinit();
 
@@ -1255,8 +1231,9 @@ test "tensor/Graph/sum" {
 
     const Tensor = NDTensor(f32);
 
-    const input = try Tensor.from_slice_graph(&graph, cpu.reference(), &.{ 1, 2, 3, 4 }, null, .{
+    const input = try Tensor.from_slice(cpu.reference(), &.{ 1, 2, 3, 4 }, null, .{
         .requires_grad = true,
+        .graph = &graph,
     });
     defer input.deinit();
 
@@ -1280,12 +1257,15 @@ test "tensor/NDTensor index, add, div" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
     {
         // zig fmt: off
-        const t1 = try Tensor.from_slice_graph(&graph, device, &.{
+        const t1 = try Tensor.from_slice(device, &.{
              0, 1, 2,
              3, 4, 5,
              6, 7, 8,
@@ -1297,10 +1277,10 @@ test "tensor/NDTensor index, add, div" {
 
         defer t1.deinit();
 
-        const t2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 1, 1 }, null, opts);
+        const t2 = try Tensor.from_slice(device, &.{ 1, 1, 1 }, null, opts);
         defer t2.deinit();
 
-        const t3 = try Tensor.from_slice_graph(&graph, device, &.{
+        const t3 = try Tensor.from_slice(device, &.{
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
@@ -1323,7 +1303,7 @@ test "tensor/NDTensor index, add, div" {
     }
     {
         // zig fmt: off
-        const t1 = try Tensor.from_slice_graph(&graph, device, &.{
+        const t1 = try Tensor.from_slice(device, &.{
              0, 1, 2,
              3, 4, 5,
              6, 7, 8,
@@ -1334,10 +1314,10 @@ test "tensor/NDTensor index, add, div" {
          }, &.{ 2, 3, 3 }, opts);
         defer t1.deinit();
 
-        const t2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 1, 1, 1, 1, 1 }, &.{ 2, 1, 3 }, opts);
+        const t2 = try Tensor.from_slice(device, &.{ 1, 1, 1, 1, 1, 1 }, &.{ 2, 1, 3 }, opts);
         defer t2.deinit();
 
-        const t3 = try Tensor.from_slice_graph(&graph, device, &.{
+        const t3 = try Tensor.from_slice(device, &.{
              1, 2, 3,
              4, 5, 6,
              7, 8, 9,
@@ -1369,14 +1349,17 @@ test "tensor/Graph/addback" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
 
-    var t1 = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
+    var t1 = try Tensor.from_slice(device, &.{2.0}, null, opts);
     defer t1.deinit();
 
-    var t2 = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
+    var t2 = try Tensor.from_slice(device, &.{3.0}, null, opts);
     defer t2.deinit();
     // t3 = t1 + t2;
     // dt3/dt1 = 1, dt3/dt2 = 1
@@ -1397,14 +1380,17 @@ test "tensor/Graph/mulback" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
 
-    const t1 = try Tensor.from_slice_graph(&graph, device, &.{2}, null, opts);
+    const t1 = try Tensor.from_slice(device, &.{2}, null, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice_graph(&graph, device, &.{3}, null, opts);
+    const t2 = try Tensor.from_slice(device, &.{3}, null, opts);
     defer t2.deinit();
     // t3 = t1 * t2;
     // dt3/dt1 = t2, dt3/dt2 = t1
@@ -1426,17 +1412,20 @@ test "tensor/Graph/moreback" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
 
-    var w = try Tensor.from_slice_graph(&graph, device, &.{ 3, 2 }, null, opts);
+    var w = try Tensor.from_slice(device, &.{ 3, 2 }, null, opts);
     defer w.deinit();
 
-    var b = try Tensor.from_slice_graph(&graph, device, &.{ 1, 1 }, null, opts);
+    var b = try Tensor.from_slice(device, &.{ 1, 1 }, null, opts);
     defer b.deinit();
 
-    var x = try Tensor.from_slice_graph(&graph, device, &.{ 4, 4 }, null, opts);
+    var x = try Tensor.from_slice(device, &.{ 4, 4 }, null, opts);
     defer x.deinit();
 
     // h = w*x + b
@@ -1482,14 +1471,17 @@ test "tensor/Graph/divback" {
 
     const device = cpu.reference();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
 
-    var t1 = try Tensor.from_slice_graph(&graph, device, &.{ 4, 9 }, null, opts);
+    var t1 = try Tensor.from_slice(device, &.{ 4, 9 }, null, opts);
     defer t1.deinit();
 
-    var t2 = try Tensor.from_slice_graph(&graph, device, &.{ 2, 3 }, null, opts);
+    var t2 = try Tensor.from_slice(device, &.{ 2, 3 }, null, opts);
     defer t2.deinit();
 
     var t3 = try t1.div(t2);
@@ -1513,15 +1505,18 @@ test "tensor/Graph/matmul_backward square" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var t1 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, opts);
+    var t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, opts);
     defer t1.deinit();
 
-    var t2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 0, 0, 1 }, &.{ 2, 2 }, opts);
+    var t2 = try Tensor.from_slice(device, &.{ 1, 0, 0, 1 }, &.{ 2, 2 }, opts);
     defer t2.deinit();
 
     // Case 1: No transpose
@@ -1580,16 +1575,19 @@ test "tensor/Graph/matmul_backward non-square" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const T = f32;
     const Tensor = NDTensor(T);
 
     // Case 1: No transpose (t1: [2, 2, 3], t2: [2, 3, 2])
-    const t1 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &.{ 2, 2, 3 }, opts);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &.{ 2, 2, 3 }, opts);
     defer t1.deinit();
-    
-    const t2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &.{ 2, 3, 2 }, opts);
+
+    const t2 = try Tensor.from_slice(device, &.{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &.{ 2, 3, 2 }, opts);
     defer t2.deinit();
 
     // Case 1: No transpose
@@ -1608,9 +1606,9 @@ test "tensor/Graph/matmul_backward non-square" {
 
     // Case 2: Transpose A (t1: [2, 3, 2], t2: [2, 3, 2])
     {
-        const t1_case2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, opts);
+        const t1_case2 = try Tensor.from_slice(device, &.{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, opts);
         defer t1_case2.deinit();
-        
+
         var t3 = try t1_case2.bmm(t2, .{ .trans_a = true, .trans_b = false });
         defer t3.deinit();
 
@@ -1624,7 +1622,7 @@ test "tensor/Graph/matmul_backward non-square" {
 
     // Case 3: Transpose B (t1: [2, 2, 3], t2: [2, 2, 3])
     {
-        var t2_case3 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, opts);
+        var t2_case3 = try Tensor.from_slice(device, &.{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, opts);
         defer t2_case3.deinit();
 
         var t3 = try t1.bmm(t2_case3, .{ .trans_a = false, .trans_b = true });
@@ -1640,10 +1638,10 @@ test "tensor/Graph/matmul_backward non-square" {
 
     // Case 4: Transpose both A and B (t1: [2, 3, 2], t2: [2, 2, 3])
     {
-        const t1_case4 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, opts);
+        const t1_case4 = try Tensor.from_slice(device, &.{ 1, 4, 2, 5, 3, 6, 7, 10, 8, 11, 9, 12 }, &.{ 2, 3, 2 }, opts);
         defer t1_case4.deinit();
 
-        const t2_case4 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, opts);
+        const t2_case4 = try Tensor.from_slice(device, &.{ 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1 }, &.{ 2, 2, 3 }, opts);
         defer t2_case4.deinit();
 
         var t3 = try t1_case4.bmm(t2_case4, .{ .trans_a = true, .trans_b = true });
@@ -1666,16 +1664,19 @@ test "tensor/Graph/matmul_backward" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const T = f32;
     const Tensor = NDTensor(T);
     const shape = &[_]usize{ 2, 2 };
 
-    const t1 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 2, 3, 4 }, shape, opts);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4 }, shape, opts);
     defer t1.deinit();
-    
-    const t2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 0, 0, 1 }, shape, opts);
+
+    const t2 = try Tensor.from_slice(device, &.{ 1, 0, 0, 1 }, shape, opts);
     defer t2.deinit();
 
     // Case 1: No transpose
@@ -1734,7 +1735,10 @@ test "tensor/Graph/matvec_backward" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
 
@@ -1743,10 +1747,10 @@ test "tensor/Graph/matvec_backward" {
     // grad = [1, 1]'
     // dl/dA = grad * [1, 1] = [[2, 2], [2, 2]]
     // dl/dx = A' * grad = [4, 6]'
-    const t1 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 2, 3, 4 }, &.{2, 2}, opts);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4 }, &.{2, 2}, opts);
     defer t1.deinit();
-    
-    const t2 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 1 }, &.{2}, opts);
+
+    const t2 = try Tensor.from_slice(device, &.{ 1, 1 }, &.{2}, opts);
     defer t2.deinit();
 
     const t3 = try t1.matvec(t2, .{});
@@ -1763,18 +1767,21 @@ test "tensor/Graph/dot_backward" {
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     const Tensor = NDTensor(f32);
 
-    const t1 = try Tensor.from_slice_graph(&graph, device, &.{ 1, 2, 3 }, null, opts);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3 }, null, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice_graph(&graph, device, &.{ 4, 5, 6 }, null, opts);
+    const t2 = try Tensor.from_slice(device, &.{ 4, 5, 6 }, null, opts);
     defer t2.deinit();
 
     var t3 = try t1.dot(t2);
@@ -1796,24 +1803,27 @@ test "tensor/inplace_add" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const opts: CreateOpts = .{ .requires_grad = true };
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
-    const u = try NDTensor(f32).ones_graph(&graph, device, &.{ 2, 2 }, opts);
+    const u = try NDTensor(f32).ones(device, &.{ 2, 2 }, opts);
     defer u.deinit();
 
-    const v = try NDTensor(f32).ones_graph(&graph, device, &.{ 2, 2 }, opts);
+    const v = try NDTensor(f32).ones(device, &.{ 2, 2 }, opts);
     defer v.deinit();
 
     const x = try u.mul(v);
     defer x.deinit();
 
-    const a = try NDTensor(f32).ones_graph(&graph, device, &.{ 2, 2 }, opts);
+    const a = try NDTensor(f32).ones(device, &.{ 2, 2 }, opts);
     defer a.deinit();
 
-    const b = try NDTensor(f32).ones_graph(&graph, device, &.{ 2, 2 }, opts);
+    const b = try NDTensor(f32).ones(device, &.{ 2, 2 }, opts);
     defer b.deinit();
 
-    const c = try NDTensor(f32).ones_graph(&graph, device, &.{ 2, 2 }, opts);
+    const c = try NDTensor(f32).ones(device, &.{ 2, 2 }, opts);
     defer c.deinit();
 
     // x now carries 4 contexts for (a), (b), (c), (u, v)
@@ -1857,7 +1867,7 @@ test "tensor/inplace_add" {
 //    // case 1: basic gather;;
 //    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
 //    const input_shape = [_]usize{ 3, 3 };
-//    var input = try Tensor.from_slice_graph(&input_data, &input_shape, true, device);
+//    var input = try Tensor.from_slice(&input_data, &input_shape, true, device);
 //    defer input.deinit();
 //
 //    const index_data = [_]usize{ 0, 1, 1, 2, 0, 2 };
@@ -1902,7 +1912,7 @@ test "tensor/inplace_add" {
 //    // case 1: basic max over dim operation
 //    const input_data = [_]T{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
 //    const input_shape = [_]usize{ 3, 3 };
-//    var input = try Tensor.from_slice_graph(&input_data, &input_shape, true, device);
+//    var input = try Tensor.from_slice(&input_data, &input_shape, true, device);
 //    defer input.deinit();
 //
 //    var output = try input.max_over_dim(device, .{ .dim = 1 });

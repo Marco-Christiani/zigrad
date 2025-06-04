@@ -26,7 +26,7 @@ pub fn MnistDataset(comptime T: type) type {
             defer allocator.free(batch_labels);
             var batch_count: usize = 0;
 
-            const config: zg.TensorConfig = .{
+            const config: zg.TensorOpts = .{
                 .requires_grad = true,
                 .acquired = true,
             };

@@ -41,18 +41,19 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
     var graph = zg.Graph.init(allocator, .{});
     defer graph.deinit();
 
-    const config: zg.TensorConfig = .{
+    const config: zg.TensorOpts = .{
         .requires_grad = true,
+        .graph = &graph,
     };
 
-    const input = try NDTensor(f32).from_slice_graph(&graph, device, case.input, case.shape, config);
+    const input = try NDTensor(f32).from_slice(device, case.input, case.shape, config);
     defer input.deinit();
 
     std.log.info("{s} {d}\n", .{ name, case.shape });
     std.log.info("input: {d}\n", .{input.data.data});
     std.log.info("target: {d}\n", .{case.target});
 
-    const target = try NDTensor(f32).from_slice_graph(&graph, device, case.target, case.shape, config);
+    const target = try NDTensor(f32).from_slice(device, case.target, case.shape, config);
     defer target.deinit();
 
     const loss = try zg.loss.softmax_cross_entropy_loss(f32, input, target);
@@ -106,14 +107,15 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     var graph = zg.Graph.init(allocator, .{});
     defer graph.deinit();
 
-    const config: zg.TensorConfig = .{
+    const config: zg.TensorOpts = .{
         .requires_grad = true,
+        .graph = &graph,
     };
 
-    const input = try NDTensor(f32).from_slice_graph(&graph, device, case.input, case.shape, config);
+    const input = try NDTensor(f32).from_slice(device, case.input, case.shape, config);
     defer input.deinit();
 
-    const target = try NDTensor(f32).from_slice_graph(&graph, device, case.target, case.shape, config);
+    const target = try NDTensor(f32).from_slice(device, case.target, case.shape, config);
     defer target.deinit();
 
     std.log.info("Smooth L1 Loss Test", .{});
