@@ -79,13 +79,16 @@ fn test_add_broadcast(T: type, device: zg.DeviceReference, allocator: std.mem.Al
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     // Test case 1: (2,3,3) + (3,) -> (2,3,3)
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8 }, &.{ 2, 3, 3 }, config);
+    const t1 = try Tensor.from_slice(device, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8 }, &.{ 2, 3, 3 }, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1 }, null, config);
+    const t2 = try Tensor.from_slice(device, &.{ 1, 1, 1 }, null, opts);
     defer t2.deinit();
 
     const t4 = try t1.add(t2);
@@ -116,7 +119,7 @@ fn test_add_broadcast(T: type, device: zg.DeviceReference, allocator: std.mem.Al
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
 
     // Test case 2: (2,3,3) + (2,1,3) -> (2,3,3)
-    const t5 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1, 1 }, &.{ 2, 1, 3 }, config);
+    const t5 = try Tensor.from_slice(device, &.{ 1, 1, 1, 1, 1, 1 }, &.{ 2, 1, 3 }, opts);
     defer t5.deinit();
 
     const t6 = try t1.add(t5);
@@ -151,12 +154,15 @@ fn test_mul_backward(T: type, device: zg.DeviceReference, allocator: std.mem.All
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
-    const t1 = try Tensor.from_slice(&graph, device, &.{2}, null, config);
+    const t1 = try Tensor.from_slice(device, &.{2}, null, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{3}, null, config);
+    const t2 = try Tensor.from_slice(device, &.{3}, null, opts);
     defer t2.deinit();
 
     const t3 = try t1.mul(t2);
@@ -190,12 +196,15 @@ fn test_div_backward(T: type, device: zg.DeviceReference, allocator: std.mem.All
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 4, 9 }, null, config);
+    const t1 = try Tensor.from_slice(device, &.{ 4, 9 }, null, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{ 2, 3 }, null, config);
+    const t2 = try Tensor.from_slice(device, &.{ 2, 3 }, null, opts);
     defer t2.deinit();
 
     const t3 = try t1.div(t2);
@@ -229,12 +238,15 @@ fn test_matmul_backward(T: type, device: zg.DeviceReference, allocator: std.mem.
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, config);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 0, 1 }, &.{ 2, 2 }, config);
+    const t2 = try Tensor.from_slice(device, &.{ 1, 0, 0, 1 }, &.{ 2, 2 }, opts);
     defer t2.deinit();
 
     // Test case 1: No transpose
@@ -355,14 +367,17 @@ fn test_matvec_backward(T: type, device: zg.DeviceReference, allocator: std.mem.
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     // [1, 2] [1]   =  [3]
     // [3, 4] [1]      [7]
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, config);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4 }, &.{ 2, 2 }, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1 }, &.{2}, config);
+    const t2 = try Tensor.from_slice(device, &.{ 1, 1 }, &.{2}, opts);
     defer t2.deinit();
 
     const t3 = try t1.matvec(t2, .{});
@@ -396,12 +411,15 @@ fn test_dot_backward(T: type, device: zg.DeviceReference, allocator: std.mem.All
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3 }, null, config);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3 }, null, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{ 4, 5, 6 }, null, config);
+    const t2 = try Tensor.from_slice(device, &.{ 4, 5, 6 }, null, opts);
     defer t2.deinit();
 
     const t3 = try t1.dot(t2);
@@ -435,13 +453,16 @@ fn test_non_square_matmul(T: type, device: zg.DeviceReference, allocator: std.me
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
-    const config: zg.TensorConfig = .{ .requires_grad = true };
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
 
     // Test non-square matrix multiplication: [2, 2, 3] @ [2, 3, 2] -> [2, 2, 2]
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &.{ 2, 2, 3 }, config);
+    const t1 = try Tensor.from_slice(device, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &.{ 2, 2, 3 }, opts);
     defer t1.deinit();
 
-    const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &.{ 2, 3, 2 }, config);
+    const t2 = try Tensor.from_slice(device, &.{ 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1 }, &.{ 2, 3, 2 }, opts);
     defer t2.deinit();
 
     const t3 = try t1.bmm(t2, .{ .trans_a = false, .trans_b = false });

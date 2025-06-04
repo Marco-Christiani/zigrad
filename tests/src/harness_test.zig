@@ -37,8 +37,9 @@ fn unit_test(allocator: std.mem.Allocator) !void {
     defer graph.deinit();
 
     // Zigrad
-    const x = try Tensor.from_slice(&graph, cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
+    const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
         .requires_grad = true,
+        .graph = &graph,
     });
     defer x.deinit();
 
