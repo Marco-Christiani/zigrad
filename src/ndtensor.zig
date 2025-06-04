@@ -1925,8 +1925,9 @@ test "tensor/Graph/subset" {
 
     const Tensor = NDTensor(f32);
 
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1, 2, 2, 2, 2, 2 }, &.{ 2, 5 }, .{
+    const t1 = try Tensor.from_slice(device, &.{ 1, 1, 1, 1, 1, 2, 2, 2, 2, 2 }, &.{ 2, 5 }, .{
         .requires_grad = true,
+        .graph = &graph,
     });
     defer t1.deinit();
 
@@ -1967,11 +1968,11 @@ test "tensor/Graph/getter-setter" {
 
     const Tensor = NDTensor(f32);
 
-    const t1 = try Tensor.from_slice(&graph, device, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, &.{ 2, 5 }, .{});
+    const t1 = try Tensor.from_slice(device, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, &.{ 2, 5 }, .{ .graph = &graph });
     defer t1.deinit();
 
     {
-        const t2 = try Tensor.from_slice(&graph, device, &.{ 1, 1, 1, 1, 1 }, null, .{});
+        const t2 = try Tensor.from_slice(device, &.{ 1, 1, 1, 1, 1 }, null, .{ .graph = &graph });
         defer t2.deinit();
 
         t1.set_offset(5, t2);
@@ -1979,7 +1980,7 @@ test "tensor/Graph/getter-setter" {
         try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 1, 1, 1, 1, 1 }, t1.get_data());
     }
     {
-        const t2 = try  Tensor.empty(&graph, device, &.{ 5 }, .{});
+        const t2 = try  Tensor.empty(device, &.{ 5 }, .{ .graph = &graph });
         defer t2.deinit();
 
         t1.get_offset(5, t2);
