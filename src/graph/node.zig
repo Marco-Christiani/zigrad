@@ -6,10 +6,9 @@ const zg = @import("../zigrad.zig");
 
 const Node = @This();
 
-pub const Category = enum { leaf, internal };
 /// Pointer to the parent graph's body. Can be promoted
 /// to retrieve the original parent graph.
-gb: *Graph.Body,
+gb: *Graph.Builder,
 /// Bitset for tensor flags (see ndtensor/utils.zig)
 flags: Flags,
 /// versioning ensures that inplace ops do not
@@ -40,15 +39,14 @@ callbacks: struct {
 
 pub fn init(
     NodeParentType: type,
-    node_category: Category,
-    graph_body: *Graph.Body,
+    builder: *Graph.Builder,
     bwd_context: ?BackwardContext,
     label_bytes: ?[]const u8,
     flag_config: Flags.Config,
 ) Node {
     return .{
-        .gb = graph_body,
-        .flags = Flags.init(node_category, flag_config),
+        .gb = builder,
+        .flags = Flags.init(flag_config),
         .type_id = TypeID.init(NodeParentType),
         .version = 0,
         .label = as_label(label_bytes),
@@ -70,19 +68,12 @@ pub fn deinit(self: *Node) void {
 /// Clear any allocated context state.
 /// Should be called by host object that
 /// the node is intruding upon.
-pub fn clear(self: *Node) void {
+pub fn deactivate(self: *Node) void {
     if (self.callbacks.bwd) |*bwd| {
         bwd.deinit(self.gb.allocator);
         self.callbacks.bwd = null;
     }
-}
-
-pub fn is_leaf(self: *const Node) bool {
-    return self.flags.get(.category); // true: leaf
-}
-
-pub fn category(self: *const Node) Category {
-    return if (self.is_leaf()) .leaf else .internal;
+    self.flags.set(.active, false);
 }
 
 pub fn backward(self: *Node) anyerror!void {
@@ -124,6 +115,10 @@ pub fn acquired(self: *const Node) bool {
     return self.flags.get(.acquired);
 }
 
+pub fn active(self: *const Node) bool {
+    return self.flags.get(.active);
+}
+
 pub fn attached(self: *const Node) bool {
     return self.flags.get(.attached);
 }
@@ -145,13 +140,19 @@ pub const Flags = struct {
     };
 
     pub const Values = enum {
-        /// Determine if a tensor is a leaf or internal node
-        category,
         /// Marking a tensor as acquired signals to the
         /// backwards process that this tensor should
         /// not be freed. Set by using the "acquire" and
         /// "release" functions.
         acquired,
+        /// This field describes whether `deinit` has been
+        /// already called on the parent object.
+        /// This makes it easier to handle releasing memory
+        /// on errors if intermediate tensors were freed.
+        /// The parent object is responsible for setting
+        /// this field. It is undefined behavior to use an
+        /// object that is attched to an inactive node.
+        active,
         /// An attached tensor can be traversed through
         /// in the backward process. If the tensor is
         /// unattached, the reversal process will not
@@ -171,9 +172,9 @@ pub const Flags = struct {
     };
     bitset: BitSet,
 
-    pub fn init(node_category: Category, config: Config) Flags {
+    pub fn init(config: Config) Flags {
         var self: Flags = .empty;
-        self.set(.category, node_category == .leaf);
+        self.set(.active, true);
         comptime var field_count: usize = 1;
         inline for (std.meta.fields(@TypeOf(config))) |field| {
             const tag = comptime std.meta.stringToEnum(Values, field.name) orelse continue;

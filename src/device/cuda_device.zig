@@ -208,7 +208,7 @@ pub fn nrm2(self: *const Self, T: type, p: opspec.nrm2(T)) void {
 }
 
 pub fn clip_nrm2(self: *Self, T: type, p: opspec.clip_nrm2(T)) void {
-    const scratch = self.mem_scratch(T, 1, self.context.stream);
+    const scratch = self.mem_scratch(T, 1) catch unreachable;
     cuda.clip_nrm2(dtype(T), self.context.cublas, p.x.ptr, scratch.ptr, p.x.len, p.max_norm, p.delta);
 }
 
@@ -265,16 +265,16 @@ pub fn permutate(
     );
 }
 
-pub fn exp(self: *const Self, T: type, x: []const T, y: []T) void {
-    cuda.pow_exp(dtype(T), self.context.stream, x.ptr, y.ptr, x.len);
+pub fn exp(self: *const Self, T: type, p: opspec.exp_fwd(T)) void {
+    cuda.pow_exp(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.x.len);
 }
 
-pub fn relu_fwd(self: *const Self, T: type, x: []const T, y: []T) void {
-    cuda.relu_fwd(dtype(T), self.context.stream, x.ptr, y.ptr, x.len);
+pub fn relu_fwd(self: *const Self, T: type, p: opspec.relu_fwd(T)) void {
+    cuda.relu_fwd(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.x.len);
 }
 
-pub fn relu_bwd(self: *const Self, T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
-    cuda.relu_bwd(dtype(T), self.context.stream, x.ptr, y_grd.ptr, x_grd.ptr, x.len);
+pub fn relu_bwd(self: *const Self, T: type, p: opspec.relu_bwd(T)) void {
+    cuda.relu_bwd(dtype(T), self.context.stream, p.x.ptr, p.y_grd.ptr, p.x_grd.ptr, p.x.len);
 }
 
 //pub fn smax_vec_fwd(self: *const Self, T: type, x: []const T, y: []T, op: SmaxType) void {

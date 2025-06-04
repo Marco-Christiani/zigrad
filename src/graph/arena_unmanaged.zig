@@ -41,6 +41,17 @@ pub fn create(self: *ArenaUnmanaged, allocator: Allocator, comptime T: type) Err
     return ptr;
 }
 
+/// Modified from standard library allocator interface
+pub fn destroy(self: *ArenaUnmanaged, ptr: anytype) void {
+    const cur_node = self.buffer_list.first orelse return;
+    const cur_buf = @as([*]u8, @ptrCast(cur_node))[@sizeOf(BufNode)..cur_node.data];
+    const buf = std.mem.asBytes(ptr);
+
+    if (@intFromPtr(cur_buf.ptr) + self.end_index == @intFromPtr(buf.ptr) + buf.len) {
+        self.end_index -= buf.len;
+    }
+}
+
 /// Queries the current memory use of this arena.
 /// This will **not** include the storage required for internal keeping.
 pub fn query_capacity(self: ArenaUnmanaged) usize {

@@ -5,11 +5,12 @@ const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 
 /// User facing config
-pub const TensorConfig = struct {
+pub const TensorOpts = struct {
     requires_grad: bool = false,
     acquired: bool = false,
     attached: bool = true,
     label: ?[]const u8 = null,
+    graph: ?*Graph = null,
 };
 
 pub const MaxAlongOptions = struct {

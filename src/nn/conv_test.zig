@@ -1,3 +1,4 @@
+// FIXME: still references the Trainer
 const testing = std.testing;
 const std = @import("std");
 
