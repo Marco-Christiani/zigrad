@@ -17,7 +17,6 @@ pub const loss = @import("nn/loss.zig");
 pub const mnist = @import("nn/mnist.zig");
 pub const Graph = @import("graph.zig");
 pub const TensorOpts = @import("ndtensor/utils.zig").TensorOpts;
-//pub const Trainer = @import("nn/trainer.zig").Trainer;
 //pub const Model = @import("nn/model.zig").Model;
 pub const conv_utils = @import("nn/conv_utils.zig");
 pub const utils = @import("nn/utils.zig");
