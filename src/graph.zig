@@ -14,7 +14,7 @@ const PathInfo = struct {
     visited: bool = false,
 };
 
-pub const Config = struct {
+pub const Opts = struct {
     eager_teardown: bool = false,
 };
 
@@ -28,10 +28,10 @@ backward_node_stack: std.ArrayListUnmanaged(*Node) = .empty,
 /// frees unacquired tensors on reverse
 eager_teardown: bool,
 
-pub fn init(allocator: std.mem.Allocator, config: Config) Graph {
+pub fn init(allocator: std.mem.Allocator, opts: Opts) Graph {
     return .{
         .builder = .{ .allocator = allocator },
-        .eager_teardown = config.eager_teardown,
+        .eager_teardown = opts.eager_teardown,
     };
 }
 
@@ -104,7 +104,7 @@ pub fn teardown(self: *Graph, root: *Node) void {
 /////////////////////////////////////////////////////
 // Testing //////////////////////////////////////////
 
-const TensorConfig = @import("ndtensor.zig").CreateOpts;
+const TensorOpts = @import("ndtensor.zig").CreateOpts;
 
 comptime {
     std.testing.refAllDecls(@This());
@@ -119,8 +119,9 @@ test "Graph eager teardown reuse 1" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const config: TensorConfig = .{
+    const opts: TensorOpts = .{
         .requires_grad = true,
+        .graph = graph,
     };
 
     zg.rt_grad_enabled = true;
@@ -134,9 +135,9 @@ test "Graph eager teardown reuse 1" {
     //    \ /
     //     E
 
-    var A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
-    var B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
-    var F = try Tensor.from_slice_graph(&graph, device, &.{1.5}, null, config);
+    var A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
+    var B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
+    var F = try Tensor.from_slice_graph(&graph, device, &.{1.5}, null, opts);
 
     // Acquire leaf tensors
     A.acquire();
@@ -172,8 +173,9 @@ test "Graph eager teardown reuse 2" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const config: TensorConfig = .{
+    const opts: TensorOpts = .{
         .requires_grad = true,
+        .graph = graph,
     };
 
     zg.rt_grad_enabled = true;
@@ -193,8 +195,8 @@ test "Graph eager teardown reuse 2" {
     //      \ /
     //       E
 
-    const A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
-    const B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
+    const A = try Tensor.from_slice_graph(device, &.{2.0}, null, opts);
+    const B = try Tensor.from_slice_graph(device, &.{3.0}, null, opts);
 
     // Acquire leaf tensors
     A.acquire();
@@ -222,7 +224,7 @@ test "Graph x*x" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const config: TensorConfig = .{
+    const opts: TensorOpts = .{
         .requires_grad = true,
     };
 
@@ -230,8 +232,8 @@ test "Graph x*x" {
 
     zg.rt_grad_enabled = true;
 
-    const A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
-    const B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
+    const A = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
+    const B = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
 
     const C = try A.mul(B);
     const E = try C.mul(C);
@@ -258,7 +260,7 @@ test "Graph subgraphs/detach" {
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const config: TensorConfig = .{
+    const opts: TensorOpts = .{
         .requires_grad = true,
     };
 
@@ -267,10 +269,10 @@ test "Graph subgraphs/detach" {
     zg.rt_grad_enabled = true;
 
     // subgraph 1
-    const a = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, config);
+    const a = try Tensor.from_slice_graph(&graph, device, &.{2.0}, null, opts);
     defer a.deinit();
 
-    const b = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, config);
+    const b = try Tensor.from_slice_graph(&graph, device, &.{3.0}, null, opts);
     defer b.deinit();
 
     const c = try a.add(b);
@@ -279,7 +281,7 @@ test "Graph subgraphs/detach" {
     c.detach();
 
     // subgraph 2
-    const d = try Tensor.from_slice_graph(&graph, device, &.{4.0}, null, config);
+    const d = try Tensor.from_slice_graph(&graph, device, &.{4.0}, null, opts);
     defer d.deinit();
 
     const e = try c.add(d);

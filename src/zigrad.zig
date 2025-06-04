@@ -65,7 +65,7 @@ pub const random = prng.random();
 // along control-flow paths.
 var global_graph: ?Graph = null;
 
-pub fn init_global_graph(allocator: std.mem.Allocator, config: Graph.Config) void {
+pub fn init_global_graph(allocator: std.mem.Allocator, config: Graph.Opts) void {
     global_graph = Graph.init(allocator, config);
 }
 pub fn deinit_global_graph() void {
