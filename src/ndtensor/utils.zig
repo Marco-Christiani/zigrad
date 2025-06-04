@@ -5,7 +5,7 @@ const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 
 /// User facing config
-pub const TensorConfig = struct {
+pub const CreateOpts = struct {
     requires_grad: bool = false,
     acquired: bool = false,
     attached: bool = true,

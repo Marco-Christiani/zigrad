@@ -104,7 +104,7 @@ pub fn teardown(self: *Graph, root: *Node) void {
 /////////////////////////////////////////////////////
 // Testing //////////////////////////////////////////
 
-const TensorConfig = @import("ndtensor.zig").TensorConfig;
+const TensorConfig = @import("ndtensor.zig").CreateOpts;
 
 comptime {
     std.testing.refAllDecls(@This());
