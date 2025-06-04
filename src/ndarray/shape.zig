@@ -36,20 +36,21 @@ pub const Indices = struct {
     }
 };
 
-pub fn decay(T: type) type {
+fn decay(T: type) type {
     return switch (@typeInfo(T)) {
         .pointer => |ptr| ptr.child,
         else => T,
     };
 }
-pub fn is_tuple(T: type) bool {
+
+fn is_tuple(T: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct" => |s| s.is_tuple,
         else => false,
     };
 }
 
-pub fn get_len(T: type) u64 {
+fn get_len(T: type) u64 {
     switch (@typeInfo(T)) {
         .@"struct" => |s| {
             if (T == Indices or T == Shape) {
