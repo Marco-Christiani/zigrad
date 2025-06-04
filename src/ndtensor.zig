@@ -306,8 +306,6 @@ pub fn NDTensor(comptime T: type) type {
             if (!self.node.active())
                 return;
 
-            self.node.deactivate();
-
             if (self.status == .owned)
                 self.data.deinit(self.device);
 
