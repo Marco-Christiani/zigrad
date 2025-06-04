@@ -1,7 +1,4 @@
 const std = @import("std");
-const GraphManager = @import("../graph_manager.zig");
-const NodeType = GraphManager.NodeType;
-const NodeAllocator = GraphManager.NodeAllocator;
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
 
@@ -12,16 +9,6 @@ pub fn as_label(slice: ?[]const u8) Label {
     const l = slice orelse return .{};
     return Label.fromSlice(l) catch @panic(std.fmt.comptimePrint("Label size is too large - max {d} characters", .{LABEL_SIZE}));
 }
-
-/// User facing config
-pub const TensorConfig = struct {
-    device: DeviceReference,
-    node_allocator: NodeAllocator,
-    requires_grad: bool = false,
-    acquired: bool = false,
-    attached: bool = true,
-    label: ?[]const u8 = null,
-};
 
 pub const TensorFlags = struct {
     const BitSet = std.bit_set.IntegerBitSet(Flags.count());

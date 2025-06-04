@@ -6,7 +6,6 @@ const zg = @import("../zigrad.zig");
 
 const Node = @This();
 
-pub const Category = enum { leaf, internal };
 /// Pointer to the parent graph's body. Can be promoted
 /// to retrieve the original parent graph.
 gb: *Graph.Builder,
@@ -40,7 +39,6 @@ callbacks: struct {
 
 pub fn init(
     NodeParentType: type,
-    node_category: Category,
     builder: *Graph.Builder,
     bwd_context: ?BackwardContext,
     label_bytes: ?[]const u8,
@@ -48,7 +46,7 @@ pub fn init(
 ) Node {
     return .{
         .gb = builder,
-        .flags = Flags.init(node_category, flag_config),
+        .flags = Flags.init(flag_config),
         .type_id = TypeID.init(NodeParentType),
         .version = 0,
         .label = as_label(label_bytes),
@@ -76,14 +74,6 @@ pub fn deactivate(self: *Node) void {
         self.callbacks.bwd = null;
     }
     self.flags.set(.active, false);
-}
-
-pub fn is_leaf(self: *const Node) bool {
-    return self.flags.get(.category); // true: leaf
-}
-
-pub fn category(self: *const Node) Category {
-    return if (self.is_leaf()) .leaf else .internal;
 }
 
 pub fn backward(self: *Node) anyerror!void {
@@ -150,8 +140,6 @@ pub const Flags = struct {
     };
 
     pub const Values = enum {
-        /// Determine if a tensor is a leaf or internal node
-        category,
         /// Marking a tensor as acquired signals to the
         /// backwards process that this tensor should
         /// not be freed. Set by using the "acquire" and
@@ -184,11 +172,10 @@ pub const Flags = struct {
     };
     bitset: BitSet,
 
-    pub fn init(node_category: Category, config: Config) Flags {
+    pub fn init(config: Config) Flags {
         var self: Flags = .empty;
-        self.set(.category, node_category == .leaf);
         self.set(.active, true);
-        comptime var field_count: usize = 2;
+        comptime var field_count: usize = 1;
         inline for (std.meta.fields(@TypeOf(config))) |field| {
             const tag = comptime std.meta.stringToEnum(Values, field.name) orelse continue;
 

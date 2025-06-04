@@ -2,8 +2,6 @@ const std = @import("std");
 const zg = @import("zigrad");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
-const Graph = zg.Graph;
-const Node = Graph.Node;
 const NDTensor = zg.NDTensor;
 
 pub fn MnistModel(comptime T: type) type {
@@ -13,15 +11,13 @@ pub fn MnistModel(comptime T: type) type {
         const Layers = 3;
         linear_layers: [Layers]LinearLayer(T) = undefined,
         flatten: FlattenLayer(T) = .{},
-        graph: *Graph,
 
-        pub fn init(graph: *Graph, device: DeviceReference) !Self {
+        pub fn init(device: DeviceReference) !Self {
             return .{
-                .graph = graph,
                 .linear_layers = .{
-                    try LinearLayer(T).init(graph, device, 28 * 28, 128),
-                    try LinearLayer(T).init(graph, device, 128, 64),
-                    try LinearLayer(T).init(graph, device, 64, 10),
+                    try LinearLayer(T).init(device, 28 * 28, 128),
+                    try LinearLayer(T).init(device, 128, 64),
+                    try LinearLayer(T).init(device, 64, 10),
                 },
             };
         }
@@ -81,15 +77,15 @@ pub fn LinearLayer(comptime T: type) type {
         const Tensor = NDTensor(T);
         weights: *Tensor,
         bias: *Tensor,
-        pub fn init(graph: *Graph, device: DeviceReference, in_features: usize, out_features: usize) !Self {
-            const weights = try Tensor.random(graph, device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
+        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
+            const weights = try Tensor.random(device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
                 .label = "linear_weights",
                 .requires_grad = true,
                 .acquired = true,
             });
             errdefer weights.deinit();
 
-            const bias = try Tensor.zeros(graph, device, &.{out_features}, .{
+            const bias = try Tensor.zeros(device, &.{out_features}, .{
                 .label = "linear_bias",
                 .requires_grad = true,
                 .acquired = true,
@@ -138,7 +134,7 @@ pub fn FlattenLayer(comptime T: type) type {
             return result;
         }
 
-        pub fn backward(y: *Tensor, children: *Node.Children) !void {
+        pub fn backward(y: *Tensor, children: *zg.Graph.Node.Children) !void {
             const x = children.get_bwd_upcast(Tensor, 0) orelse return;
             const x_grad = try x.ensure_grad(0);
             y.device.dispatch(opspec.add(T){

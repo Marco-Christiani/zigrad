@@ -9,17 +9,20 @@ const log = std.log.scoped(.mnist);
 const T = f32;
 
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
-    var graph = zg.Graph.init(std.heap.smp_allocator, .{
+    const allocator = std.heap.smp_allocator;
+
+    // use global graph for project
+    zg.init_global_graph(allocator, .{
         .eager_teardown = true,
     });
-    defer graph.deinit();
+    defer zg.deinit_global_graph();
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
     const device = cpu.reference();
 
-    var model = try MnistModel(f32).init(&graph, device);
+    var model = try MnistModel(f32).init(device);
     defer model.deinit();
 
     const params = model.params();
@@ -33,7 +36,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
-    const train_dataset = try MnistDataset(T).load(&graph, device, train_path, batch_size);
+    const train_dataset = try MnistDataset(T).load(allocator, device, train_path, batch_size);
 
     // Train -------------------------------------------------------------------
     std.debug.print("Training...\n", .{});
@@ -49,7 +52,11 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             step_timer.reset();
 
             const output = try model.forward(image);
+            defer output.deinit();
+
             const loss = try zg.loss.softmax_cross_entropy_loss(f32, output, label);
+            defer loss.deinit();
+
             const loss_val = loss.get(0);
 
             try loss.backward();
@@ -66,8 +73,6 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
                 train_dataset.images.len,
                 ms_per_sample,
             });
-
-            graph.reset(.internal);
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
         std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
@@ -76,16 +81,16 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
-    const train_eval = try eval_mnist(&graph, &model, train_dataset);
+    const train_eval = try eval_mnist(&model, train_dataset);
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
 
     // Eval on test set
     std.debug.print("Loading test data...\n", .{});
-    const test_dataset = try MnistDataset(T).load(&graph, device, test_path, batch_size);
+    const test_dataset = try MnistDataset(T).load(allocator, device, test_path, batch_size);
     defer test_dataset.deinit();
     timer.reset();
-    const test_eval = try eval_mnist(&graph, &model, test_dataset);
+    const test_eval = try eval_mnist(&model, test_dataset);
     const eval_test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     std.debug.print("Test acc: {d:.2} (n={d})\n", .{ test_eval.acc * 100, test_eval.n });
 
@@ -94,14 +99,13 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     std.debug.print("Eval test: {d:.2} (n={d}) {d}ms\n", .{ test_eval.acc * 100, test_eval.n, eval_test_time_ms });
 }
 
-fn eval_mnist(graph: *zg.Graph, model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {
+fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {
     zg.rt_grad_enabled = false; // disable gradient tracking
     var n: u32 = 0;
     var correct: f32 = 0;
     for (dataset.images, dataset.labels) |image, label| {
         const output = try model.forward(image);
         defer output.deinit();
-        defer graph.reset(.internal);
         const batch_n = output.data.shape.get(0);
         for (0..batch_n) |j| {
             const start = j * 10;
