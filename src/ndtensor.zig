@@ -317,7 +317,7 @@ pub fn NDTensor(comptime T: type) type {
                 g.deinit(self.device);
                 self.grad = null;
             }
-            
+
             self.node.deactivate();
 
             self.node.gb.destroy_node(self);
