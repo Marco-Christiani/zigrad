@@ -41,6 +41,7 @@ pub fn MnistDataset(comptime T: type) type {
 
                 for (0..784) |i| {
                     const pixel_value = try std.fmt.parseFloat(T, values.next().?);
+                    // pixel_value = pixel_value / 255; // NOTE: Zigrad does NOT need this, but since torch does, ironically adding it messes w convergence here.
                     batch_images[batch_count * 784 + i] = pixel_value;
                 }
 

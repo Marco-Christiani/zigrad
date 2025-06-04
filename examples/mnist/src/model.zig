@@ -2,6 +2,8 @@ const std = @import("std");
 const zg = @import("zigrad");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
+const Graph = zg.Graph;
+const Node = Graph.Node;
 const NDTensor = zg.NDTensor;
 
 pub fn MnistModel(comptime T: type) type {
