@@ -1,5 +1,5 @@
 pub const HostDevice = @import("host_device.zig");
-pub const CudaDevice = @import("host_device.zig");
+pub const CudaDevice = @import("cuda_device.zig");
 pub const DeviceReference = @import("device_reference.zig");
 pub const ReduceType = @import("device_common.zig").ReduceType;
 pub const SmaxType = @import("device_common.zig").SmaxType;
