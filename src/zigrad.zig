@@ -30,8 +30,6 @@ pub const device = struct {
     pub const CudaDevice = device_root.CudaDevice;
 };
 pub const opspec = device_root.opspec;
-pub const HostDevice = device_root.HostDevice;
-pub const CudaDevice = device_root.HostDevice;
 pub const DeviceReference = device_root.DeviceReference;
 pub const ReduceType = device_root.ReduceType;
 pub const RandType = device_root.RandType;
