@@ -1,6 +1,5 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const Optimizer = zg.optim.SGD(T);
 
 const Dataset = @import("dataset.zig").Dataset;
 const GCN = @import("model.zig").GCN;
@@ -12,38 +11,41 @@ const T = f32;
 
 pub fn run_cora(data_dir: []const u8) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    var cpu = zg.device.HostDevice.init(debug_allocator.allocator());
+    const allocator = debug_allocator.allocator();
+
+    zg.init_global_graph(allocator, .{
+        .eager_teardown = true,
+    });
+    defer zg.deinit_global_graph();
+
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+
     const device = cpu.reference();
 
     var buf1: [1024]u8 = undefined;
     var buf2: [1024]u8 = undefined;
     const edge_path = try std.fmt.bufPrint(&buf1, "{s}/cora/csv/cites.csv", .{data_dir});
     const node_path = try std.fmt.bufPrint(&buf2, "{s}/cora/csv/papers.csv", .{data_dir});
-    const dataset = try Dataset(T).load_cora(device, node_path, edge_path);
+    const dataset = try Dataset(T).load_cora(allocator, device, node_path, edge_path);
+    defer dataset.deinit();
 
-    var optim: Optimizer = .{
+    var model = try GCN(T).init(
+        device,
+        dataset.num_features,
+        dataset.num_classes,
+    );
+    defer model.deinit();
+    const params = model.params();
+
+    var optim: zg.optim.SGD(T) = .{
         .lr = 0.01,
         .grad_clip_max_norm = 10.0,
         .grad_clip_delta = 1e-6,
         .grad_clip_enabled = false,
     };
 
-    var gm = zg.GraphManager(zg.NDTensor(T)).init(cpu.allocator, .{
-        .eager_teardown = true,
-    });
-    defer gm.deinit();
-
-    var model = try GCN(T, Optimizer).init(
-        device,
-        dataset.num_features,
-        dataset.num_classes,
-        &optim,
-    );
-    defer model.deinit();
-
     const label = dataset.y;
-    const mask_layer: MaskLayer(T) = .{};
 
     const num_epoochs = 50;
     for (0..num_epoochs) |epoch| {
@@ -53,12 +55,15 @@ pub fn run_cora(data_dir: []const u8) !void {
             zg.rt_grad_enabled = true;
             const output = try model.forward(dataset.x, dataset.edge_index);
 
-            const output_ = try mask_layer.forward(output, dataset.train_mask);
-            const label_ = try mask_layer.forward(label, dataset.train_mask);
+            const mask_layer = MaskLayer(T){ .mask = dataset.train_mask };
+            const output_ = try mask_layer.forward(output);
+            const label_ = try mask_layer.forward(label);
             const loss = try zg.loss.softmax_cross_entropy_loss(T, output_, label_);
             loss_val = loss.get(0);
 
-            try gm.backward(loss);
+            try loss.backward();
+            optim.step(params);
+            model.zero_grad();
         }
 
         {
@@ -67,8 +72,9 @@ pub fn run_cora(data_dir: []const u8) !void {
             defer output.deinit();
             for ([_]*zg.NDTensor(bool){ dataset.train_mask, dataset.eval_mask, dataset.test_mask }, 0..) |mask, i| {
                 var correct: f32 = 0;
-                const output_ = try mask_layer.forward(output, mask);
-                const label_ = try mask_layer.forward(label, mask);
+                const mask_layer = MaskLayer(T){ .mask = mask };
+                const output_ = try mask_layer.forward(output);
+                const label_ = try mask_layer.forward(label);
                 const total = output_.get_dim(0);
 
                 for (0..total) |j| {
