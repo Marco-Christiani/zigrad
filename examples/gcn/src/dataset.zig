@@ -7,20 +7,22 @@ const Tensor = zg.NDTensor;
 const FileReader = struct {
     file: std.fs.File,
     buf: []u8,
+    allocator: std.mem.Allocator,
 
-    pub fn init(device: DeviceReference, path: []const u8) !FileReader {
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileReader {
         const file = try std.fs.cwd().openFile(path, .{});
         const file_size = try file.getEndPos();
-        const buf = try file.readToEndAlloc(device.allocator, file_size);
+        const buf = try file.readToEndAlloc(allocator, file_size);
         return .{
             .file = file,
             .buf = buf,
+            .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *FileReader, device: DeviceReference) void {
+    pub fn deinit(self: *FileReader) void {
         self.file.close();
-        device.allocator.free(self.buf);
+        self.allocator.free(self.buf);
     }
 };
 
@@ -38,26 +40,26 @@ pub fn Dataset(comptime T: type) type {
         test_mask: *Tensor(bool),
         device: DeviceReference,
 
-        pub fn load_cora(device: DeviceReference, node_path: []const u8, edge_path: []const u8) !Self {
-            var node_file = try FileReader.init(device, node_path);
-            defer node_file.deinit(device);
-            var edge_file = try FileReader.init(device, edge_path);
-            defer edge_file.deinit(device);
+        pub fn load_cora(allocator: std.mem.Allocator, device: DeviceReference, node_path: []const u8, edge_path: []const u8) !Self {
+            var node_file = try FileReader.init(allocator, node_path);
+            defer node_file.deinit();
+            var edge_file = try FileReader.init(allocator, edge_path);
+            defer edge_file.deinit();
 
             const total_papers = 2708;
             const num_features = 1433;
             const num_classes = 7;
-            var papers = try device.allocator.alloc(T, total_papers * num_features);
-            defer device.allocator.free(papers);
-            var classes = try device.allocator.alloc(T, total_papers * num_classes);
-            defer device.allocator.free(classes);
-            var masks = try device.allocator.alloc([]bool, 3);
-            defer device.allocator.free(masks);
+            var papers = try allocator.alloc(T, total_papers * num_features);
+            defer allocator.free(papers);
+            var classes = try allocator.alloc(T, total_papers * num_classes);
+            defer allocator.free(classes);
+            var masks = try allocator.alloc([]bool, 3);
+            defer allocator.free(masks);
             for (0..3) |i| {
-                masks[i] = try device.allocator.alloc(bool, total_papers);
+                masks[i] = try allocator.alloc(bool, total_papers);
             }
             defer for (0..3) |i| {
-                device.allocator.free(masks[i]);
+                allocator.free(masks[i]);
             };
 
             var i: usize = 0;
@@ -87,8 +89,8 @@ pub fn Dataset(comptime T: type) type {
             }
 
             const total_cites = 10556;
-            var cites = try device.allocator.alloc(usize, total_cites * 2);
-            defer device.allocator.free(cites);
+            var cites = try allocator.alloc(usize, total_cites * 2);
+            defer allocator.free(cites);
 
             i = 0;
             lines = std.mem.splitScalar(u8, edge_file.buf, '\n');
@@ -106,15 +108,20 @@ pub fn Dataset(comptime T: type) type {
                 i += 1;
             }
 
+            const config: zg.TensorOpts = .{
+                .requires_grad = true,
+                .acquired = true,
+            };
+
             return .{
-                .x = try Tensor(T).init(papers, &[_]usize{ total_papers, num_features }, true, device),
-                .y = try Tensor(T).init(classes, &[_]usize{ total_papers, num_classes }, true, device),
-                .edge_index = try Tensor(usize).init(cites, &[_]usize{ 2, total_cites }, true, device),
+                .x = try Tensor(T).from_slice(device, papers, &[_]usize{ total_papers, num_features }, config),
+                .y = try Tensor(T).from_slice(device, classes, &[_]usize{ total_papers, num_classes }, config),
+                .edge_index = try Tensor(usize).from_slice(device, cites, &[_]usize{ 2, total_cites }, config),
                 .num_features = num_features,
                 .num_classes = num_classes,
-                .train_mask = try zg.NDTensor(bool).init(masks[0], &[_]usize{ total_papers, 1 }, false, device),
-                .eval_mask = try zg.NDTensor(bool).init(masks[1], &[_]usize{ total_papers, 1 }, false, device),
-                .test_mask = try zg.NDTensor(bool).init(masks[2], &[_]usize{ total_papers, 1 }, false, device),
+                .train_mask = try Tensor(bool).from_slice(device, masks[0], &[_]usize{ total_papers, 1 }, .{}),
+                .eval_mask = try Tensor(bool).from_slice(device, masks[1], &[_]usize{ total_papers, 1 }, .{}),
+                .test_mask = try Tensor(bool).from_slice(device, masks[2], &[_]usize{ total_papers, 1 }, .{}),
                 .device = device,
             };
         }

@@ -1,29 +1,24 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const opspec = zg.opspec;
+const Graph = zg.Graph;
+const Node = Graph.Node;
 const DeviceReference = zg.DeviceReference;
 const NDTensor = zg.NDTensor;
 const winit = zg.winit;
 
-pub fn GCN(comptime T: type, Optimizer: type) type {
+pub fn GCN(comptime T: type) type {
     return struct {
         const Self = @This();
         const Layers = 3;
         conv1: GraphConvLayer(T),
         conv2: GraphConvLayer(T),
-        relu: ReLULayer(T) = .{},
 
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize, optim: ?*Optimizer) !Self {
+        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
             const self: Self = .{
                 .conv1 = try GraphConvLayer(T).init(device, in_features, 16),
                 .conv2 = try GraphConvLayer(T).init(device, 16, out_features),
             };
-            if (optim) |o| {
-                try o.attach(self.conv1.lin.weights);
-                try o.attach(self.conv1.bias);
-                try o.attach(self.conv2.lin.weights);
-                try o.attach(self.conv2.bias);
-            }
             return self;
         }
 
@@ -35,14 +30,27 @@ pub fn GCN(comptime T: type, Optimizer: type) type {
         pub fn forward(self: *Self, x: *NDTensor(T), edge_index: *NDTensor(usize)) !*NDTensor(T) {
             const c1 = try self.conv1.forward(x, edge_index);
             errdefer c1.deinit();
-
-            const r1 = try self.relu.forward(c1);
-            errdefer r1.deinit();
-
-            const c2 = try self.conv2.forward(r1, edge_index);
+            try zg.nn.relu_(T, c1);
+            const c2 = try self.conv2.forward(c1, edge_index);
             errdefer c2 = c2.deinit();
 
             return c2;
+        }
+
+        pub fn params(self: *Self) []const *NDTensor(T) {
+            return &.{
+                self.conv1.weights,
+                self.conv1.bias,
+                self.conv2.weights,
+                self.conv2.bias,
+            };
+        }
+
+        pub fn zero_grad(self: *Self) void {
+            if (self.conv1.weights.grad) |_| self.conv1.weights.setup_grad(0) catch {};
+            if (self.conv1.bias.grad) |_| self.conv1.bias.setup_grad(0) catch {};
+            if (self.conv2.weights.grad) |_| self.conv2.weights.setup_grad(0) catch {};
+            if (self.conv2.bias.grad) |_| self.conv2.bias.setup_grad(0) catch {};
         }
     };
 }
@@ -53,29 +61,35 @@ pub fn GraphConvLayer(comptime T: type) type {
         const Tensor = NDTensor(T);
 
         device: DeviceReference,
-        lin: LinearLayer(T),
-        bias: *Tensor,
 
+        weights: *Tensor,
+        bias: *Tensor,
         adj_mat: ?*Tensor = null,
 
         pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
-            const lin = try LinearLayer(T).init(device, in_features, out_features);
+            const weights = try Tensor.random(device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
+                .label = "conv_weights",
+                .requires_grad = true,
+                .acquired = true,
+            });
+            errdefer weights.deinit();
 
-            const bias = try Tensor.zeros(&.{ 1, out_features }, true, device);
-            errdefer bias.deinit();
-            try bias.set_label("conv_bias");
-            bias.acquire();
+            const bias = try Tensor.zeros(device, &.{out_features}, .{
+                .label = "conv_bias",
+                .requires_grad = true,
+                .acquired = true,
+            });
 
             return .{
                 .device = device,
-                .lin = lin,
+                .weights = weights,
                 .bias = bias,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.lin.deinit();
-
+            self.weights.release();
+            self.weights.deinit();
             self.bias.release();
             self.bias.deinit();
 
@@ -85,129 +99,67 @@ pub fn GraphConvLayer(comptime T: type) type {
         }
 
         pub fn forward(self: *Self, x: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            const h = try self.lin.forward(x);
-            if (self.adj_mat == null) {
-                try self.normalize(x.get_dim(0), edge_index);
-            }
-            const out = try self.adj_mat.?.bmm_acc(h, h.get_shape(), .{});
-            try out.add_(self.bias);
-            return out;
-        }
-
-        pub fn normalize(self: *Self, n_node: usize, edge_index: *NDTensor(usize)) !void {
-            const n_edge = edge_index.get_dim(1);
-
-            var adj_mat = try Tensor.empty(&.{ n_node, n_node }, true, self.device);
-            errdefer adj_mat.deinit();
-
-            var deg_map = std.AutoHashMap(usize, T).init(self.device.allocator);
-            defer deg_map.deinit();
-            for (0..n_edge) |i| {
-                const source = edge_index.get(i * 2);
-                if (deg_map.get(source)) |v| {
-                    try deg_map.put(source, v + 1);
-                } else {
-                    try deg_map.put(source, 2); // the initial is 1 (self loop) + current 1;
-                }
-            }
-
-            for (0..n_edge) |i| {
-                const source = edge_index.get(i * 2);
-                const target = edge_index.get(i * 2 + 1);
-                adj_mat.set(source * n_node + target, std.math.pow(T, deg_map.get(source).?, -0.5));
-            }
-            self.adj_mat = adj_mat;
-        }
-    };
-}
-
-pub fn LinearLayer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Tensor = NDTensor(T);
-        weights: *Tensor,
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
-            var weights = try Tensor.empty(&.{ out_features, in_features }, true, device);
-            errdefer weights.deinit();
-
-            try weights.set_label("linear_weights");
-
-            weights.acquire();
-
-            winit.he_init(T, weights);
-
-            return .{ .weights = weights };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.weights.release();
-            self.weights.deinit();
-        }
-
-        pub fn forward(self: *const Self, x: *Tensor) !*Tensor {
-            const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
-            const n_features = self.weights.data.shape.get(0);
-            const y = x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
+            const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
+            const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
+            const y = try self.propagate(h, edge_index);
+            try y.add_(self.bias);
             return y;
         }
-    };
-}
 
-pub fn ReLULayer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Tensor = NDTensor(T);
+        pub fn propagate(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
+            if (self.adj_mat == null) {
+                const n_node = h.get_dim(0);
+                const n_edge = edge_index.get_dim(1);
 
-        pub fn forward(_: Self, x: *Tensor) !*Tensor {
-            const y = try Tensor.DataType.empty(x.get_shape(), x.device);
+                var adj_mat = try Tensor.zeros(self.device, &.{ n_node, n_node }, .{
+                    .label = "conv_adj_mat",
+                    .requires_grad = true,
+                });
+                errdefer adj_mat.deinit();
 
-            x.device.dispatch(opspec.relu_fwd(T){
-                .x = x.get_data(),
-                .y = y.data,
-            });
+                const deg = try self.device.mem_alloc(usize, n_node);
+                self.device.mem_fill(usize, deg, 1); // the initial is 1 (self loop)
+                defer self.device.mem_free(deg);
+                for (0..n_edge) |i| {
+                    const source = edge_index.get(i * 2);
+                    deg[source] += 1;
+                }
 
-            return Tensor.create_dependent(Self, .{
-                .data = y,
-                .children = &.{x},
-                .device = x.device,
-                .callback = .{},
-                .label = "relu_out",
-            });
-        }
-
-        pub fn callback(y: *Tensor, children: *Tensor.Children) !void {
-            const x = children.get_bwd(0) orelse return;
-            y.device.dispatch(opspec.relu_bwd(T){
-                .x = x.get_data(),
-                .x_g = try x.ensure_grad_data(0),
-                .y_g = y.assume_grad_data(),
-            });
+                for (0..n_edge) |i| {
+                    const source = edge_index.get(i * 2);
+                    const target = edge_index.get(i * 2 + 1);
+                    adj_mat.set(source * n_node + target, std.math.pow(T, @floatFromInt(deg[source]), -0.5));
+                }
+                self.adj_mat = adj_mat;
+            }
+            const a = self.adj_mat.?;
+            return a.bmm_acc(h, h.get_shape(), .{});
         }
     };
 }
 
-// TODO: I not sure I doing right with autograd or there a easy way to do this
-/// this layer Filter unused data base on mask
+/// this layer filter unused data base on mask
 /// like pytorch out[train_mask]
 pub fn MaskLayer(comptime T: type) type {
     return struct {
         const Self = @This();
         const Tensor = NDTensor(T);
 
-        mask: *NDTensor(bool) = undefined,
+        mask: *NDTensor(bool),
 
-        pub fn forward(_: Self, x: *Tensor, mask: *NDTensor(bool)) !*Tensor {
+        pub fn forward(self: Self, x: *Tensor) !*Tensor {
+            const device = x.device;
             const num_feature = x.get_dim(1);
-            const buf = try x.device.allocator.alloc(T, x.get_size());
-            defer x.device.allocator.free(buf);
+            const buf = try device.mem_alloc(T, x.get_size());
+            defer device.mem_free(buf);
             var count: usize = 0;
-            for (mask.get_data(), 0..) |ok, i| {
+            for (self.mask.get_data(), 0..) |ok, i| {
                 if (ok) {
                     const buf_start = count * num_feature;
                     const buf_end = count * num_feature + num_feature;
                     const x_start = i * num_feature;
                     const x_end = i * num_feature + num_feature;
-                    std.mem.copyForwards(T, buf[buf_start..buf_end], x.data.data[x_start..x_end]);
+                    device.mem_copy(T, buf[buf_start..buf_end], x.data.data[x_start..x_end]);
                     count += 1;
                 }
             }
@@ -219,17 +171,17 @@ pub fn MaskLayer(comptime T: type) type {
 
             return Tensor.create_dependent(Self, .{
                 .data = y,
-                .children = &.{x},
-                .device = x.device,
-                .callback = .{
-                    .mask = mask,
-                },
+                .children = &.{&x.node},
+                .device = device,
+                .callback = self,
                 .label = "mask",
+                .gb = x.node.gb,
             });
         }
 
-        pub fn callback(y: *Tensor, children: *Tensor.Children, self: *Self) !void {
-            const x = children.get_bwd(0) orelse return;
+        pub fn backward(y: *Tensor, children: *Node.Children, self: *Self) !void {
+            const device = y.device;
+            const x = children.get_bwd_upcast(Tensor, 0) orelse return;
             const num_feature = x.get_dim(1);
 
             var x_grad = try x.ensure_grad_data(0);
@@ -239,11 +191,7 @@ pub fn MaskLayer(comptime T: type) type {
                 const start = i * num_feature;
                 const end = start + num_feature;
                 if (ok) {
-                    std.mem.copyForwards(
-                        T,
-                        x_grad[start..end],
-                        y_grad[start..end],
-                    );
+                    device.mem_copy(T, x_grad[start..end], y_grad[start..end]);
                 }
             }
             return;
