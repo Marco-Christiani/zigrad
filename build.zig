@@ -21,7 +21,10 @@ pub fn build(b: *Build) !void {
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
-    const device_module = build_device_module(b, target);
+    const enable_cuda = b.option(bool, "enable_cuda", "Enable CUDA backend.") orelse false;
+    build_options.addOption(bool, "enable_cuda", enable_cuda);
+
+    const device_module = build_device_module(b, target, build_options_module, enable_cuda);
 
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
@@ -159,22 +162,23 @@ pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
     return tracy;
 }
 
-pub fn build_device_module(b: *Build, target: Build.ResolvedTarget) *Build.Module {
-    const new_backend = get_backend(b);
-
-    const cuda_rebuild: bool = b.option(bool, "cuda_rebuild", "force backend to recompile") orelse false;
+pub fn build_device_module(
+    b: *Build,
+    target: Build.ResolvedTarget,
+    build_options_module: *std.Build.Module,
+    enable_cuda: bool,
+) *Build.Module {
+    const rebuild_cuda: bool = b.option(bool, "rebuild_cuda", "force CUDA backend to recompile") orelse false;
 
     const here = b.path(".").getPath(b);
-
-    if (backend != new_backend) {
-        run_command(b, &.{ "python3", b.pathJoin(&.{ here, "scripts", "backend.py" }), @tagName(new_backend) });
-    }
 
     const device = b.createModule(.{
         .root_source_file = b.path("src/device/root.zig"),
         .link_libc = true,
         .target = target,
     });
+
+    device.addImport("build_options", build_options_module);
 
     switch (target.result.os.tag) {
         .linux => {
@@ -184,7 +188,7 @@ pub fn build_device_module(b: *Build, target: Build.ResolvedTarget) *Build.Modul
         else => @panic("Os not supported."),
     }
 
-    if (new_backend == .CUDA) {
+    if (enable_cuda) {
         const cuda = b.createModule(.{
             .root_source_file = b.path("src/cuda/root.zig"),
             .target = target,
@@ -193,11 +197,12 @@ pub fn build_device_module(b: *Build, target: Build.ResolvedTarget) *Build.Modul
 
         const exists = amalgamate_exists(b);
 
-        if (cuda_rebuild or !exists) {
+        if (rebuild_cuda or !exists) {
+            std.log.info("COMPILING CUDA BACKEND", .{});
             run_command(b, &.{
                 "python3",
                 b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
-                if (cuda_rebuild) "y" else "n",
+                if (rebuild_cuda) "y" else "n",
             });
         }
 
@@ -220,15 +225,6 @@ fn amalgamate_exists(b: *Build) bool {
     } else |_| {
         return false;
     }
-}
-
-fn get_backend(b: *Build) Backend {
-    const env_backend = std.process.getEnvVarOwned(b.allocator, "ZIGRAD_BACKEND") catch {
-        @panic("Environment variable 'ZIGRAD_BACKEND' not found.");
-    };
-    return std.meta.stringToEnum(Backend, env_backend) orelse {
-        @panic("Invalid value for 'ZIGRAD_BACKEND' environment variable.");
-    };
 }
 
 pub fn run_command(b: *Build, args: []const []const u8) void {

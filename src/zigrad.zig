@@ -25,10 +25,14 @@ pub const optim = @import("nn/optim.zig");
 pub const nn = @import("nn/nn.zig");
 
 const device_root = @import("device");
-pub const device = device_root.device;
+pub const device = struct {
+    pub const HostDevice = device_root.HostDevice;
+    pub const CudaDevice = device_root.CudaDevice;
+};
 pub const opspec = device_root.opspec;
-pub const DeviceReference = device.DeviceReference;
-pub const backend = device_root.backend;
+pub const HostDevice = device_root.HostDevice;
+pub const CudaDevice = device_root.HostDevice;
+pub const DeviceReference = device_root.DeviceReference;
 pub const ReduceType = device_root.ReduceType;
 pub const RandType = device_root.RandType;
 pub const SmaxType = device_root.SmaxType;

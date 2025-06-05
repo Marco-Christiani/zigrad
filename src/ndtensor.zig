@@ -489,9 +489,6 @@ pub fn NDTensor(comptime T: type) type {
         /// working with device memory because it's expensive.
         /// Get is not a gradient tracked operation.
         pub fn get(self: *const Self, idx: usize) T {
-            if (comptime zg.backend == .HOST)
-                return self.data.data[idx];
-
             var tmp: [1]T = undefined;
             self.device.mem_transfer(T, self.data.data[idx .. idx + 1], tmp[0..], .DtoH);
             return tmp[0];
@@ -501,10 +498,6 @@ pub fn NDTensor(comptime T: type) type {
         /// working with device memory because it's expensive.
         /// Set is not a gradient tracked operation.
         pub fn set(self: *const Self, idx: usize, value: T) void {
-            if (comptime zg.backend == .HOST) {
-                self.data.data[idx] = value;
-                return;
-            }
             const tmp: [1]T = @splat(value);
             self.device.mem_transfer(T, tmp[0..], self.data.data[idx .. idx + 1], .HtoD);
         }
