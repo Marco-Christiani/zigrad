@@ -37,13 +37,13 @@ pub fn GCN(comptime T: type) type {
             return c2;
         }
 
-        pub fn params(self: *Self) []const *NDTensor(T) {
-            return &.{
+        pub fn update(self: *Self, optim: *zg.optim.SGD(T)) void {
+            return optim.step(&.{
                 self.conv1.weights,
                 self.conv1.bias,
                 self.conv2.weights,
                 self.conv2.bias,
-            };
+            });
         }
 
         pub fn zero_grad(self: *Self) void {
@@ -102,7 +102,7 @@ pub fn GraphConvLayer(comptime T: type) type {
             const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
             const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
             const y = try self.propagate(h, edge_index);
-            try y.add_(self.bias);
+            try self.bias.add_(y);
             return y;
         }
 

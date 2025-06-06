@@ -115,8 +115,8 @@ pub fn Dataset(comptime T: type) type {
 
             return .{
                 .x = try Tensor(T).from_slice(device, papers, &[_]usize{ total_papers, num_features }, config),
-                .y = try Tensor(T).from_slice(device, classes, &[_]usize{ total_papers, num_classes }, config),
-                .edge_index = try Tensor(usize).from_slice(device, cites, &[_]usize{ 2, total_cites }, config),
+                .y = try Tensor(T).from_slice(device, classes, &[_]usize{ total_papers, num_classes }, .{}),
+                .edge_index = try Tensor(usize).from_slice(device, cites, &[_]usize{ 2, total_cites }, .{}),
                 .num_features = num_features,
                 .num_classes = num_classes,
                 .train_mask = try Tensor(bool).from_slice(device, masks[0], &[_]usize{ total_papers, 1 }, .{}),
