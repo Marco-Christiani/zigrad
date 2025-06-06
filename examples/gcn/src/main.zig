@@ -36,7 +36,6 @@ pub fn run_cora(data_dir: []const u8) !void {
         dataset.num_classes,
     );
     defer model.deinit();
-    const params = model.params();
 
     var optim: zg.optim.SGD(T) = .{
         .lr = 0.01,
@@ -54,15 +53,18 @@ pub fn run_cora(data_dir: []const u8) !void {
         {
             zg.rt_grad_enabled = true;
             const output = try model.forward(dataset.x, dataset.edge_index);
+            defer output.deinit();
 
             const mask_layer = MaskLayer(T){ .mask = dataset.train_mask };
             const output_ = try mask_layer.forward(output);
+            defer output_.deinit();
             const label_ = try mask_layer.forward(label);
+            defer label_.deinit();
             const loss = try zg.loss.softmax_cross_entropy_loss(T, output_, label_);
             loss_val = loss.get(0);
 
             try loss.backward();
-            optim.step(params);
+            model.update(&optim);
             model.zero_grad();
         }
 
