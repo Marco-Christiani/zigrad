@@ -11,5 +11,5 @@ jobs:
       - name: Setup Earthly
         uses: earthly/actions/setup-earthly@v1
       - name: Run system tests
-        run: earthly --ci +tests
+        run: earthly --ci +test
 
