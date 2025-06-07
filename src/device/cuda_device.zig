@@ -16,9 +16,9 @@ pub const CudaMalloc = struct {
         const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
         return @ptrCast(@alignCast(cuda.mem_alloc(n, w.*)));
     }
-    pub fn raw_free(ptr: ?*anyopaque, ctx: *anyopaque) void {
+    pub fn raw_free(buf: []u8, ctx: *anyopaque) void {
         const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
-        cuda.mem_free(ptr, w.*);
+        cuda.mem_free(buf.ptr, w.*);
     }
 };
 

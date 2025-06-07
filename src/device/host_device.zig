@@ -29,10 +29,16 @@ const c = switch (builtin.target.os.tag) {
 
 pub const HostMalloc = struct {
     pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
+        if (comptime builtin.is_test) {
+            return std.testing.allocator.rawAlloc(n, @enumFromInt(@alignOf(usize)), @returnAddress());
+        }
         return @ptrCast(@alignCast(std.c.malloc(n) orelse return null));
     }
-    pub fn raw_free(ptr: ?*anyopaque, _: *anyopaque) void {
-        return std.c.free(ptr);
+    pub fn raw_free(buf: []u8, _: *anyopaque) void {
+        if (comptime builtin.is_test) {
+            return std.testing.allocator.rawFree(buf, @enumFromInt(@alignOf(usize)), @returnAddress());
+        }
+        return std.c.free(buf.ptr);
     }
 };
 
