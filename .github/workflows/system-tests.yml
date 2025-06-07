@@ -1,0 +1,15 @@
+name: System Tests
+on:
+  push:
+  pull_request:
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Earthly
+        uses: earthly/actions/setup-earthly@v1
+      - name: Run system tests
+        run: earthly --ci +test
+
