@@ -127,6 +127,7 @@ pub fn Dataset(comptime T: type) type {
         }
 
         pub fn deinit(self: @This()) void {
+            self.x.release();
             self.x.deinit();
             self.y.deinit();
             self.edge_index.deinit();

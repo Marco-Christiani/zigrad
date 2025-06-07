@@ -94,6 +94,7 @@ pub fn GraphConvLayer(comptime T: type) type {
             self.bias.deinit();
 
             if (self.adj_mat) |adj_mat| {
+                adj_mat.release();
                 adj_mat.deinit();
             }
         }
@@ -113,7 +114,7 @@ pub fn GraphConvLayer(comptime T: type) type {
 
                 var adj_mat = try Tensor.zeros(self.device, &.{ n_node, n_node }, .{
                     .label = "conv_adj_mat",
-                    .requires_grad = true,
+                    .acquired = true,
                 });
                 errdefer adj_mat.deinit();
 
@@ -132,8 +133,9 @@ pub fn GraphConvLayer(comptime T: type) type {
                 }
                 self.adj_mat = adj_mat;
             }
-            const a = self.adj_mat.?;
-            return a.bmm_acc(h, h.get_shape(), .{});
+            if (self.adj_mat) |a| {
+                return a.bmm_acc(h, h.get_shape(), .{});
+            } else unreachable;
         }
     };
 }
@@ -159,7 +161,7 @@ pub fn MaskLayer(comptime T: type) type {
                     const buf_end = count * num_feature + num_feature;
                     const x_start = i * num_feature;
                     const x_end = i * num_feature + num_feature;
-                    device.mem_copy(T, buf[buf_start..buf_end], x.data.data[x_start..x_end]);
+                    device.mem_copy(T, x.data.data[x_start..x_end], buf[buf_start..buf_end]);
                     count += 1;
                 }
             }
@@ -191,7 +193,7 @@ pub fn MaskLayer(comptime T: type) type {
                 const start = i * num_feature;
                 const end = start + num_feature;
                 if (ok) {
-                    device.mem_copy(T, x_grad[start..end], y_grad[start..end]);
+                    device.mem_copy(T, y_grad[start..end], x_grad[start..end]);
                 }
             }
             return;
