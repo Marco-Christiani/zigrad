@@ -1,6 +1,38 @@
-from pathlib import Path
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "kaleido",
+#     "numpy",
+#     "pandas",
+#     "plotly",
+#     "scipy",
+#     "torch",
+# ]
+# ///
+"""Timing analysis of log files produced by logging redirect for minimal backpressure.
+
+
+Example
+=======
+
+```sh
+# Profile torch
+uv run src/nn/tests/test_mnist.py -t --batch_size=64 --num_epochs=3 --model_variant=simple --autograd > /tmp/zg_mnist_torch_log.txt
+
+# Profile zigrad
+cd examples/mnist
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/main 2> /tmp/zg_mnist_log.txt
+
+# Analyze
+uv run scripts/mnist_compare.py
+```
+"""
+
 import platform
 import re
+from functools import lru_cache
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -59,23 +91,29 @@ class PerformanceParser:
         metadata["python"] = platform.python_version()
         self.metadata[framework] = metadata
 
-    @property
-    def df(self):
-        df = pd.DataFrame(self.data)
+    def build_df(self, drop_slowest: bool = True) -> pd.DataFrame:
+        timings_df = pd.DataFrame(self.data)
         # Verify
-        s = df.groupby("framework").size()
+        s = timings_df.groupby("framework").size()
         assert len(s) == 2  # got logs from both
         assert s.iloc[0] == s.iloc[1]  # even split
         # discard slowest time to give pytorch an advantage (tracing) and keep torch from skewing the plot
-        torch_times = df["ms_per_sample"][df.framework.str.lower() == "pytorch"]
-        zg_times = df["ms_per_sample"][df.framework.str.lower() == "zigrad"]
-        df = df.drop(index=[torch_times.idxmax(), zg_times.idxmax()])
-        return df
+        torch_times = timings_df["ms_per_sample"][timings_df.framework.str.lower() == "pytorch"]
+        zg_times = timings_df["ms_per_sample"][timings_df.framework.str.lower() == "zigrad"]
+        if drop_slowest:
+            print("Dropping slowest to give torch an advantage")
+            timings_df = timings_df.drop(index=[torch_times.idxmax(), zg_times.idxmax()])  # type: ignore
+        return timings_df
+
+    @property
+    @lru_cache(1)
+    def df(self) -> pd.DataFrame:
+        return self.build_df()
 
     def create_speedup_figure(self):
         torch_ms = self.df["ms_per_sample"][self.df["framework"].str.lower() == "pytorch"]
         zg_ms = self.df["ms_per_sample"][self.df["framework"].str.lower() == "zigrad"]
-        zg_speedup = torch_ms.to_numpy() / zg_ms.to_numpy()
+        zg_speedup = torch_ms.to_numpy() / zg_ms.to_numpy()  # type: ignore
 
         fig = go.Figure()
         fig.add_scatter(y=zg_speedup, mode="lines", name="Speed ratio")
@@ -137,7 +175,7 @@ class PerformanceParser:
         if save_individual:
             for i, fig in enumerate(figures):
                 fig.update_layout(margin=margin, template=theme)
-                title = fig.layout.title.text.replace("/", "_").replace(" ", "").lower()
+                title = fig.layout.title.text.replace("/", "_").replace(" ", "").lower()  # type: ignore
                 # fig.write_html(f"/tmp/zg_mnist_zg_torch_perf_{i}_{title}{theme_short}.html")
                 svg_path = Path(f"/tmp/zg_mnist_zg_torch_perf_{i}_{title}{theme_short}.svg")
                 fig.write_image(svg_path)
@@ -146,7 +184,10 @@ class PerformanceParser:
                 svg_path.write_text(svg_txt)
 
         combined_fig = make_subplots(
-            rows=4, cols=1, vertical_spacing=0.08, subplot_titles=[fig.layout.title.text for fig in figures]
+            rows=4,
+            cols=1,
+            vertical_spacing=0.08,
+            subplot_titles=[fig.layout.title.text for fig in figures],  # type: ignore
         )
         for i, fig in enumerate(figures, start=1):
             for trace in fig.data:
@@ -154,7 +195,7 @@ class PerformanceParser:
 
         metadata_text = self._format_metadata(self.metadata["PyTorch"])
         for i in range(4):
-            combined_fig.layout.annotations[i].text += f"<br><sub>{metadata_text}</sub>"
+            combined_fig.layout.annotations[i].text += f"<br><sub>{metadata_text}</sub>"  # type: ignore
 
         combined_fig.update_layout(
             template=theme,
@@ -172,21 +213,68 @@ class PerformanceParser:
     def _format_metadata(self, metadata):
         return ", ".join([f"{key}: {value}" for key, value in metadata.items()])
 
-    def print_summary(self):
-        df = self.df
-        for framework in df["framework"].unique():
-            framework_df = df[df["framework"] == framework]
+    def print_summary(self, drop_slowest: bool):
+        timings_df = self.build_df(drop_slowest=drop_slowest)
+        for framework in timings_df["framework"].unique():
+            framework_df = timings_df[timings_df["framework"] == framework]
             print(f"\n--- {framework} Summary ---")
             print(f"Metadata: {self._format_metadata(self.metadata.get(framework, {}))}")
             print(f"Avg loss: {framework_df['loss'].mean():.6f}")
             print(f"Std loss: {framework_df['loss'].std():.6f}")
             print(f"Avg ms/sample: {framework_df['ms_per_sample'].mean():.6f}")
             print(f"Std ms/sample: {framework_df['ms_per_sample'].std():.6f}")
-        torch_ms_per_sample = df["ms_per_sample"][df["framework"].str.lower() == "pytorch"]
-        zg_ms_per_sample = df["ms_per_sample"][df["framework"].str.lower() == "zigrad"]
-        zg_speedup = torch_ms_per_sample.to_numpy() / zg_ms_per_sample.to_numpy()
+
+        zg = timings_df[timings_df.framework.str.lower() == "zigrad"].reset_index(drop=True)
+        pt = timings_df[timings_df.framework.str.lower() == "pytorch"].reset_index(drop=True)
+
+        if drop_slowest:
+            zg = zg.drop(index=[zg["ms_per_sample"].idxmax()]).reset_index(drop=True)  # type: ignore
+            pt = pt.drop(index=[pt["ms_per_sample"].idxmax()]).reset_index(drop=True)  # type: ignore
+
+        zg_ms = zg["ms_per_sample"]
+        pt_ms = pt["ms_per_sample"]
+
+        diffs = pt_ms - zg_ms
+        speedup = pt_ms / zg_ms
         print("Speedup")
-        print(pd.Series(zg_speedup).describe())
+        print(speedup.describe())  # type: ignore
+
+        # Stats tests
+        import numpy as np
+        from scipy import stats
+
+        t_stat, t_p = stats.ttest_rel(pt_ms, zg_ms)
+        w_stat, w_p = stats.wilcoxon(diffs)
+
+        # Effect sizes
+        cohen_d = diffs.mean() / diffs.std(ddof=1)
+        wins = (diffs > 0).sum()
+        losses = (diffs < 0).sum()
+        rank_biserial = (wins - losses) / len(diffs)
+
+        # Bootstrap some CIs
+        def bootstrap_ci(data, func, n_boot=5000, ci=95):
+            boot_stats = [func(np.random.choice(data, size=len(data), replace=True)) for _ in range(n_boot)]
+            lower, upper = np.percentile(boot_stats, [(100 - ci) / 2, 100 - (100 - ci) / 2])
+            return lower, upper
+
+        ci_mean_diff = bootstrap_ci(diffs.to_numpy(), np.mean)  # type: ignore
+        ci_median_diff = bootstrap_ci(diffs.to_numpy(), np.median)  # type: ignore
+        ci_speedup = bootstrap_ci(speedup, np.mean)
+
+        print("\n--- Statistical Tests ---")
+        print(f"Paired t-test: t = {t_stat:.3f}, p = {t_p:.3e}")
+        print(f"Wilcoxon signed-rank: W = {w_stat:.3f}, p = {w_p:.3e}")
+
+        print("\n--- Effect Sizes ---")
+        print(f"Cohen's d: {cohen_d:.3f}")
+        print(f"Rank-biserial correlation: {rank_biserial:.3f}")
+        print(f"Zigrad wins in {wins / len(diffs):.2%} of batches")
+
+        print("\n--- Bootstrap 95% Confidence Intervals ---")
+        print(f"Mean latency diff (ms/sample): {ci_mean_diff[0]:.6f} - {ci_mean_diff[1]:.6f}")
+        print(f"Median latency diff (ms/sample): {ci_median_diff[0]:.6f} - {ci_median_diff[1]:.6f}")
+        print(f"Mean speedup (Zigrad/PyTorch): {ci_speedup[0]:.2f}x - {ci_speedup[1]:.2f}x")
 
 
 if __name__ == "__main__":
@@ -195,6 +283,7 @@ if __name__ == "__main__":
     parser.parse_log("/tmp/zg_mnist_torch_log.txt", "PyTorch")
     _ = parser.plot_results(True)
     fig = parser.plot_results(True, "plotly_dark")
-    parser.print_summary()
+    parser.print_summary(drop_slowest=True)
+    parser.df.to_csv("/tmp/zg_mnist_torch_parsed.csv")
     input()
     fig.show()
