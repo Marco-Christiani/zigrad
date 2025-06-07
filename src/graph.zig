@@ -116,7 +116,9 @@ test "Graph eager teardown reuse 1" {
 
     const device = cpu.reference();
 
-    var graph = Graph.init(std.testing.allocator, .{});
+    var graph = Graph.init(std.testing.allocator, .{
+        .eager_teardown = true,
+    });
     defer graph.deinit();
 
     const opts: TensorOpts = .{
@@ -170,7 +172,9 @@ test "Graph eager teardown reuse 2" {
 
     const device = cpu.reference();
 
-    var graph = Graph.init(std.testing.allocator, .{});
+    var graph = Graph.init(std.testing.allocator, .{
+        .eager_teardown = true,
+    });
     defer graph.deinit();
 
     const opts: TensorOpts = .{
@@ -221,7 +225,9 @@ test "Graph x*x" {
 
     const device = cpu.reference();
 
-    var graph = Graph.init(std.testing.allocator, .{});
+    var graph = Graph.init(std.testing.allocator, .{
+        .eager_teardown = true,
+    });
     defer graph.deinit();
 
     const opts: TensorOpts = .{
