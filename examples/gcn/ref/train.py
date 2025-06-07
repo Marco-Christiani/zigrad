@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.datasets import Planetoid
+import time
 
 
 class GCN(torch.nn.Module):
@@ -50,12 +51,39 @@ if __name__ == "__main__":
             accs.append(acc)
         return accs
 
+    class PerfTimer:
+        def __init__(self, name=None):
+            self.name = name
+
+        def __enter__(self):
+            self.start = time.perf_counter()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.end = time.perf_counter()
+            self.duration = (self.end - self.start) * 1000
+
+    total_train_time = 0
+    total_test_time = 0
+
     for epoch in range(0, 50):
         data = dataset[0]
-        loss = train(data)
-        train_acc, val_acc, test_acc = test(data)
+        with PerfTimer("train") as train_timer:
+            loss = train(data)
+        with PerfTimer("test") as test_timer:
+            train_acc, val_acc, test_acc = test(data)
 
+        total_train_time += train_timer.duration
+        total_test_time += test_timer.duration
         print(
             f"Epoch: {epoch + 1:02d}, Loss: {loss:.4f}, "
-            f"Train_acc: {train_acc:.2f}, Val_acc: {val_acc:.2f}, Test_acc: {test_acc:.2f}"
+            f"Train_acc: {train_acc:.2f}, Val_acc: {val_acc:.2f}, Test_acc: {test_acc:.2f}, "
+            f"Train_time {train_timer.duration:.2f} ms, Test_time {test_timer.duration:.2f} ms"
         )
+
+    print(
+        f"Avg epoch train time: {total_train_time / 50:.2f} ms, Avg epoch test time: {total_test_time / 50:.2f} ms"
+    )
+    print(
+        f"Total train time: {total_train_time:.2f} ms, Total test time: {total_test_time:.2f} ms"
+    )

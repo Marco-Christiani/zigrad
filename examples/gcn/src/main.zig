@@ -8,6 +8,7 @@ const MaskLayer = @import("model.zig").MaskLayer;
 const std_options = .{ .log_level = .info };
 const log = std.log.scoped(.gnn);
 const T = f32;
+const Optimizer = zg.optim.SGD(T);
 
 pub fn run_cora(data_dir: []const u8) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -30,28 +31,37 @@ pub fn run_cora(data_dir: []const u8) !void {
     const dataset = try Dataset(T).load_cora(allocator, device, node_path, edge_path);
     defer dataset.deinit();
 
-    var model = try GCN(T).init(
-        device,
-        dataset.num_features,
-        dataset.num_classes,
-    );
-    defer model.deinit();
-
-    var optim: zg.optim.SGD(T) = .{
+    var optim: Optimizer = .{
         .lr = 0.01,
         .grad_clip_max_norm = 10.0,
         .grad_clip_delta = 1e-6,
         .grad_clip_enabled = false,
     };
 
+    var model = try GCN(T, Optimizer).init(
+        device,
+        dataset.num_features,
+        dataset.num_classes,
+    );
+    defer model.deinit();
+
     const label = dataset.y;
 
-    const num_epoochs = 500;
+    var total_train_time: f64 = 0;
+    var total_test_time: f64 = 0;
+
+    var timer = try std.time.Timer.start();
+
+    const num_epoochs = 50;
     for (0..num_epoochs) |epoch| {
         var loss_val: T = 0;
         var acc = [_]f32{ 0, 0, 0 };
+        var train_time_ms: f64 = 0;
+        var test_time_ms: f64 = 0;
         {
             zg.rt_grad_enabled = true;
+            timer.reset();
+
             const output = try model.forward(dataset.x, dataset.edge_index);
             defer output.deinit();
 
@@ -64,12 +74,17 @@ pub fn run_cora(data_dir: []const u8) !void {
             loss_val = loss.get(0);
 
             try loss.backward();
-            model.update(&optim);
+            try model.update(&optim);
             model.zero_grad();
+
+            train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+            total_train_time += train_time_ms;
         }
 
         {
             zg.rt_grad_enabled = false;
+            timer.reset();
+
             const output = try model.forward(dataset.x, dataset.edge_index);
             defer output.deinit();
             for ([_]*zg.NDTensor(bool){ dataset.train_mask, dataset.eval_mask, dataset.test_mask }, 0..) |mask, i| {
@@ -91,9 +106,16 @@ pub fn run_cora(data_dir: []const u8) !void {
                 }
                 acc[i] = correct / @as(f32, @floatFromInt(total));
             }
+            test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+            total_test_time += test_time_ms;
         }
-        log.info("Epoch: {d:<2} Loss: {d:<5.4} Train_acc: {d:<2.2} Eval_acc: {d:<2.2} Test_acc: {d:<2.2}", .{ epoch + 1, loss_val, acc[0], acc[1], acc[2] });
+        std.debug.print(
+            "Epoch: {d:>2}, Loss: {d:<5.4}, Train_acc: {d:<2.2}, Val_acc: {d:<2.2}, Test_acc: {d:<2.2}, Train_time {d:<3.2} ms, Test_time {d:<3.2} ms\n",
+            .{ epoch + 1, loss_val, acc[0], acc[1], acc[2], train_time_ms, test_time_ms },
+        );
     }
+    std.debug.print("Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{ total_train_time / num_epoochs, total_test_time / num_epoochs });
+    std.debug.print("Total train time: {d:.2} ms, Total test time: {d:.2} ms\n", .{ total_train_time, total_test_time });
 }
 
 pub fn main() !void {

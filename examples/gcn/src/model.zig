@@ -7,7 +7,7 @@ const DeviceReference = zg.DeviceReference;
 const NDTensor = zg.NDTensor;
 const winit = zg.winit;
 
-pub fn GCN(comptime T: type) type {
+pub fn GCN(comptime T: type, Optimizer: type) type {
     return struct {
         const Self = @This();
         const Layers = 3;
@@ -37,7 +37,7 @@ pub fn GCN(comptime T: type) type {
             return c2;
         }
 
-        pub fn update(self: *Self, optim: *zg.optim.SGD(T)) void {
+        pub fn update(self: *Self, optim: *Optimizer) !void {
             return optim.step(&.{
                 self.conv1.weights,
                 self.conv1.bias,
