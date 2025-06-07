@@ -111,25 +111,26 @@ pub fn GraphConvLayer(comptime T: type) type {
             if (self.adj_mat == null) {
                 const n_node = h.get_dim(0);
                 const n_edge = edge_index.get_dim(1);
+                const edge_index_data = edge_index.get_data();
 
                 var adj_mat = try Tensor.zeros(self.device, &.{ n_node, n_node }, .{
                     .label = "conv_adj_mat",
                     .acquired = true,
                 });
                 errdefer adj_mat.deinit();
+                const adj_mat_data = adj_mat.get_data();
 
-                const deg = try self.device.mem_alloc(usize, n_node);
-                self.device.mem_fill(usize, deg, 1); // the initial is 1 (self loop)
-                defer self.device.mem_free(deg);
+                const deg = try self.device.mem_scratch(T, n_node);
+                self.device.mem_fill(T, deg, 1); // the initial is 1 (self loop)
                 for (0..n_edge) |i| {
-                    const source = edge_index.get(i * 2);
+                    const source = edge_index_data[i * 2];
                     deg[source] += 1;
                 }
 
                 for (0..n_edge) |i| {
-                    const source = edge_index.get(i * 2);
-                    const target = edge_index.get(i * 2 + 1);
-                    adj_mat.set(source * n_node + target, std.math.pow(T, @floatFromInt(deg[source]), -0.5));
+                    const source = edge_index_data[i * 2];
+                    const target = edge_index_data[i * 2 + 1];
+                    adj_mat_data[source * n_node + target] = std.math.pow(T, deg[source], -0.5);
                 }
                 self.adj_mat = adj_mat;
             }
