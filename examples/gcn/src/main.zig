@@ -46,7 +46,7 @@ pub fn run_cora(data_dir: []const u8) !void {
 
     const label = dataset.y;
 
-    const num_epoochs = 50;
+    const num_epoochs = 500;
     for (0..num_epoochs) |epoch| {
         var loss_val: T = 0;
         var acc = [_]f32{ 0, 0, 0 };
@@ -76,7 +76,10 @@ pub fn run_cora(data_dir: []const u8) !void {
                 var correct: f32 = 0;
                 const mask_layer = MaskLayer(T){ .mask = mask };
                 const output_ = try mask_layer.forward(output);
+                defer output_.deinit();
                 const label_ = try mask_layer.forward(label);
+                defer label_.deinit();
+
                 const total = output_.get_dim(0);
 
                 for (0..total) |j| {
