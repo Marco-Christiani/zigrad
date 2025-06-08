@@ -132,6 +132,16 @@ pub fn NDTensor(comptime T: type) type {
             self.node.flags.set(.acquired, false);
         }
 
+        /// This function should be checked by the user to see
+        /// if they should deinitialize the memory on a forward
+        /// pass. If the tensor requires a gradient, then it must
+        /// exist for the backward pass to function. Likewise,
+        /// acquired memory should never be deinitialized without
+        /// first calling "release" .
+        pub fn should_deinit(self: *const Self) bool {
+            return !(self.acquired() or self.requires_grad());
+        }
+
         pub fn backward(self: *Self) !void {
             std.debug.assert(zg.rt_grad_enabled);
             const graph = self.node.gb.promote();
@@ -1294,6 +1304,7 @@ test "tensor/Graph/sum" {
     defer input.deinit();
 
     const sum_result = try input.sum();
+    defer sum_result.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{10}, sum_result.get_data());
 

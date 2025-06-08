@@ -69,17 +69,20 @@ pub fn CachingAllocator(Impl: type) type {
             c_allocator.free(self.node_buffer);
 
             if (self.scratch.start != 0) {
-                Impl.raw_free(@as(*anyopaque, @ptrFromInt(self.scratch.start)), ctx);
+                const buf = self.get_scratch(u8, self.scratch.total, ctx);
+                Impl.raw_free(buf, ctx);
             }
 
             self.* = undefined;
         }
 
         pub fn clear(self: *Self, ctx: *anyopaque) void {
-            var iter = self.map.valueIterator();
-            while (iter.next()) |list| {
+            var iter = self.map.iterator();
+            while (iter.next()) |entry| {
+                const slot = entry.key_ptr.*;
+                const list = entry.value_ptr;
                 while (list.popFirst()) |node| {
-                    Impl.raw_free(node.data, ctx);
+                    Impl.raw_free(cast_slice(u8, node.data, slot), ctx);
                     self.free_nodes.prepend(node);
                 }
             }
@@ -118,7 +121,7 @@ pub fn CachingAllocator(Impl: type) type {
             // check if we have enough scratch to provide a payload
             if (self.scratch.total < total) {
                 if (self.scratch.start != 0) {
-                    Impl.raw_free(@as(*anyopaque, @ptrFromInt(self.scratch.start)), ctx);
+                    Impl.raw_free(cast_slice(u8, @ptrFromInt(self.scratch.start), self.scratch.total), ctx);
                 }
                 // after a first pass through the network, we should know if we have enough memory.
                 const ptr = Impl.raw_alloc(total, ctx) orelse @panic("Cannot allocate scratch memory.");
@@ -137,11 +140,11 @@ pub fn CachingAllocator(Impl: type) type {
 
             // if we have no more free nodes, we're forced to release the memory
             const node: *Node = self.free_nodes.popFirst() orelse {
-                return Impl.raw_free(buf.ptr, ctx);
+                return Impl.raw_free(cast_slice(u8, buf.ptr, slot), ctx);
             };
             // if we fail to allocate for the map, release the entry
             var result = self.map.getOrPut(c_allocator, slot) catch {
-                return Impl.raw_free(buf.ptr, ctx);
+                return Impl.raw_free(cast_slice(u8, buf.ptr, slot), ctx);
             };
 
             if (!result.found_existing) {

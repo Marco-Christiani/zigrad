@@ -16,9 +16,9 @@ pub const CudaMalloc = struct {
         const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
         return @ptrCast(@alignCast(cuda.mem_alloc(n, w.*)));
     }
-    pub fn raw_free(ptr: ?*anyopaque, ctx: *anyopaque) void {
+    pub fn raw_free(buf: []u8, ctx: *anyopaque) void {
         const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
-        cuda.mem_free(ptr, w.*);
+        cuda.mem_free(buf.ptr, w.*);
     }
 };
 
@@ -52,6 +52,11 @@ context: struct {
 },
 cache: CachingAllocator,
 capture: ExecutionGraph,
+
+/// Conatiner level function to see how many devices you have.
+pub fn device_count() u32 {
+    return cuda.device_count();
+}
 
 pub fn init(device_number: u32) Self {
     const properties = cuda.init_device(device_number);
