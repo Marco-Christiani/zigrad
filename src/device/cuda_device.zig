@@ -53,6 +53,11 @@ context: struct {
 cache: CachingAllocator,
 capture: ExecutionGraph,
 
+/// Conatiner level function to see how many devices you have.
+pub fn device_count() u32 {
+    return cuda.device_count();
+}
+
 pub fn init(device_number: u32) Self {
     const properties = cuda.init_device(device_number);
     const stream = cuda.init_stream();
