@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "numpy",
+#     "torch",
+# ]
+# ///
 import os
 import platform
 import time

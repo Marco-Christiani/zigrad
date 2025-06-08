@@ -10,7 +10,6 @@ const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
 const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
 const opspec = @import("opspec.zig");
-pub const HostDevice = @This();
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -30,10 +29,16 @@ const c = switch (builtin.target.os.tag) {
 
 pub const HostMalloc = struct {
     pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
+        if (comptime builtin.is_test) {
+            return std.testing.allocator.rawAlloc(n, @enumFromInt(@alignOf(usize)), @returnAddress());
+        }
         return @ptrCast(@alignCast(std.c.malloc(n) orelse return null));
     }
-    pub fn raw_free(ptr: ?*anyopaque, _: *anyopaque) void {
-        return std.c.free(ptr);
+    pub fn raw_free(buf: []u8, _: *anyopaque) void {
+        if (comptime builtin.is_test) {
+            return std.testing.allocator.rawFree(buf, @enumFromInt(@alignOf(usize)), @returnAddress());
+        }
+        return std.c.free(buf.ptr);
     }
 };
 
@@ -42,7 +47,7 @@ pub const HostMalloc = struct {
 
 const Self = @This();
 const Error = CachingAllocator.Error;
-pub const DeviceReference = *Self;
+const DeviceReference = @import("device_reference.zig");
 
 cache: CachingAllocator,
 
@@ -55,29 +60,10 @@ pub fn deinit(self: *Self) void {
     self.* = undefined;
 }
 
-// TODO: Move this to a universal backend? Probably.
-pub const dispatch = if (backend == .HOST)
-    _dispatch
-else
-    @compileError("Dispatch only available on device reference");
-
-fn _dispatch(self: *Self, params: anytype) void {
-    const P = @TypeOf(params);
-    if (comptime !@hasDecl(Self, P.__name__)) {
-        @panic("Unimplemented: " ++ @typeName(Self) ++ ", " ++ P.__name__);
-    } else {
-        @field(Self, P.__name__)(self, P.__type__, params);
-    }
+// callback to replace host reference to union
+pub fn reference(self: *Self) DeviceReference {
+    return .{ .ptrs = .{ .host = self } };
 }
-
-fn host_reference(self: *Self) DeviceReference {
-    return self;
-}
-
-pub const reference = switch (backend) {
-    .HOST => host_reference,
-    .CUDA => @import("cuda_device.zig").host_reference,
-};
 
 ///////////////////
 // element wise ops
@@ -667,16 +653,6 @@ pub fn clear_cache(self: *Self) void {
 }
 
 pub fn sync(_: *const Self) void {}
-
-// since host is it's own reference when compiling for HOST only,
-// this is always trivially true. Only for debug compatibility.
-pub inline fn is_compatible(_: *const Self, _: *const Self) bool {
-    return true;
-}
-
-pub fn is_host(_: DeviceReference) bool {
-    return true;
-}
 
 inline fn add_op(x: anytype, y: anytype) @TypeOf(x, y) {
     return x + y;

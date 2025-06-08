@@ -24,17 +24,12 @@ pub fn NDArray(comptime T: type) type {
     // TODO: document bcast rules and shape rules for inplace ewise ops
     return struct {
         const Self = @This();
-        pub const Status = enum { none, view };
         /// Can be safely accessed. See `Shape`
         shape: Shape,
-
         /// Cannot be safely accessed. Despite its appearance, the data may lie
         /// on device memory. Therefore, direct access is unsafe unless data is
         /// known to reside on host memory.
         data: []T,
-
-        /// Whether `data` is a view into another array.
-        status: Status = .none,
 
         /// Values and shape are copied. COM.
         pub fn init(values: []const T, shape: ?[]const usize, device: DeviceReference) !Self {
@@ -52,7 +47,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self, device: DeviceReference) void {
-            if (self.status == .none) device.mem_free(self.data);
+            device.mem_free(self.data);
         }
 
         pub fn empty(shape: []const usize, device: DeviceReference) !Self {
@@ -164,7 +159,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = new_shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
-                .status = .view,
             };
         }
 
@@ -174,7 +168,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = self.shape,
                 .data = try self.slice_raw_no_alloc(dim, start, end),
-                .status = .view,
             };
         }
 
@@ -219,7 +212,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .shape = Shape.init(new_shape),
                 .data = self.data[start_index .. start_index + total_elements],
-                .status = .view,
             };
         }
 
@@ -232,7 +224,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         inline fn elwise(x: *const Self, y: *const Self, z: *Self, device: DeviceReference, Op: type) !void {
-            std.debug.assert(z.status == .none);
             if (builtin.mode == .Debug and !x.shape.compatible(y.shape)) {
                 log.err("_" ++ Op.__name__ ++ "() self.shape={} other.shape={}", .{ x.shape, y.shape });
                 return error.IncompatibleShapes;
@@ -329,12 +320,10 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _exp(self: *Self, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             device.dispatch(opspec.exp_fwd(T){ .x = self.data, .y = self.data });
         }
 
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });
         }
 
@@ -470,7 +459,6 @@ pub fn NDArray(comptime T: type) type {
         /// Performs `self = alpha*other + self` in place.
         /// Shapes must match (although practically the op is possible under other conditions)
         pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             std.debug.assert(self.shape.equal(other.shape));
             device.dispatch(opspec.axpy(T){ .x = other.data, .y = self.data, .alpha = &alpha });
         }
@@ -605,7 +593,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _clip_norm(self: Self, max_norm: T, delta: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             device.dispatch(opspec.clip_nrm2(T){ .x = self.data, .max_norm = max_norm, .delta = delta });
         }
 
@@ -617,7 +604,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _clamp(self: Self, vmin: T, vmax: T, device: DeviceReference) void {
-            std.debug.assert(self.status == .none);
             std.debug.assert(vmin <= vmax);
             device.dispatch(opspec.clamp_fwd(T){ .x = self.data, .y = self.data, .max = vmax, .min = vmin });
         }
@@ -639,7 +625,6 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.data.len >= out.data.len);
             std.debug.assert(self.data.len % out.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
-            std.debug.assert(out.status == .none);
 
             const scratch: []T = outer: {
                 const delta = self.shape.len - out.shape.len;
@@ -679,8 +664,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _unbroadcast(self: *Self, new_shape: Shape, device: DeviceReference) !void {
-            std.debug.assert(self.status == .none);
-
             if (self.shape.equal(new_shape))
                 return;
 
@@ -702,7 +685,6 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(out.shape.len >= self.shape.len);
             std.debug.assert(self.data.len % self.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
-            std.debug.assert(out.status == .none);
 
             device.dispatch(opspec.broadcast(T){
                 .x = self.data,
@@ -721,8 +703,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn _broadcast(self: *Self, new_shape: Shape, device: DeviceReference) !void {
-            std.debug.assert(self.status == .none);
-
             if (self.shape.equal(new_shape))
                 return;
 
@@ -812,7 +792,6 @@ fn bmm_acc_impl(
 
     if (builtin.mode == .Debug) {
         if (accumulator) |_| {
-            std.debug.assert(C.status == .none);
             if (!C.shape.compatible(C_shape)) {
                 std.debug.panic("Expected accumulator shape {} but got {}", .{ C_shape, C.shape });
             }
@@ -854,16 +833,19 @@ pub const Range = struct {
 };
 
 test "NDArray._clip_norm,l2_norm" {
-    var device = zg.device.HostDevice.init();
-    defer device.deinit();
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
     const shape = &[_]usize{ 2, 2 };
     const T = f64;
     const Array = NDArray(T);
     // [2, 2, 1, 4] => 4+4+1+16 = 25 => 5
-    var array = try Array.init(&[_]T{ 2, 2, 1, 4 }, shape, device.reference());
-    defer array.deinit(device.reference());
+    var array = try Array.init(&[_]T{ 2, 2, 1, 4 }, shape, cpu.reference());
+    defer array.deinit(cpu.reference());
 
-    const initial_norm_ndarray = try array.l2_norm(device.reference());
+    var initial_norm_ndarray = try array.l2_norm(cpu.reference());
+    defer initial_norm_ndarray.deinit(cpu.reference());
+
     try std.testing.expectEqual(1, initial_norm_ndarray.size());
     const initial_norm = initial_norm_ndarray.data[0];
     try std.testing.expectEqual(@as(T, 5.0), initial_norm);
@@ -871,9 +853,11 @@ test "NDArray._clip_norm,l2_norm" {
     const max_norm: T = 4.0;
     const delta: T = 1e-6;
 
-    array._clip_norm(max_norm, delta, device.reference());
+    array._clip_norm(max_norm, delta, cpu.reference());
 
-    const clipped_norm_ndarray = try array.l2_norm(device.reference());
+    var clipped_norm_ndarray = try array.l2_norm(cpu.reference());
+    defer clipped_norm_ndarray.deinit(cpu.reference());
+
     const clipped_norm = clipped_norm_ndarray.data[0];
     try std.testing.expect(clipped_norm <= max_norm);
 
@@ -936,16 +920,32 @@ test "NDArray.add" {
     const device = cpu.reference();
     const T = f64;
     const Array = NDArray(T);
-    const a = try Array.init(&[_]T{1}, null, device);
-    const b = try Array.init(&[_]T{ 1, 1, 1 }, null, device);
-    const sum = try a.add(b, device);
+
+    var a = try Array.init(&[_]T{1}, null, device);
+    defer a.deinit(device);
+
+    var b = try Array.init(&[_]T{ 1, 1, 1 }, null, device);
+    defer b.deinit(device);
+
+    var sum = try a.add(b, device);
+    defer sum.deinit(device);
+
     try std.testing.expectEqualSlices(T, &[_]T{ 2, 2, 2 }, sum.data);
-    const b2 = try Array.init(&[_]T{3}, null, device);
-    const sum2 = try a.add(b2, device);
+
+    var b2 = try Array.init(&[_]T{3}, null, device);
+    defer b2.deinit(device);
+
+    var sum2 = try a.add(b2, device);
+    defer sum2.deinit(device);
+
     try std.testing.expectEqualSlices(T, &[_]T{4}, sum2.data);
 
-    const b3 = try Array.init(&[_]T{ 3, 2, 1 }, null, device);
-    const diff = try a.sub(b3, device);
+    var b3 = try Array.init(&[_]T{ 3, 2, 1 }, null, device);
+    defer b3.deinit(device);
+
+    var diff = try a.sub(b3, device);
+    defer diff.deinit(device);
+
     try std.testing.expectEqualSlices(T, &[_]T{ -2, -1, 0 }, diff.data);
 }
 
@@ -956,10 +956,18 @@ test "NDArray.dot" {
     const T = f64;
     const Array = NDArray(T);
 
-    const a = try Array.init(&.{ 1, 2, 3 }, null, device);
-    const b = try Array.init(&.{ 1, 1, 1 }, null, device);
-    const result = try a.dot(b, device);
-    const expected = Array.init(&.{6}, null, device);
+    var a = try Array.init(&.{ 1, 2, 3 }, null, device);
+    defer a.deinit(device);
+
+    var b = try Array.init(&.{ 1, 1, 1 }, null, device);
+    defer b.deinit(device);
+
+    var result = try a.dot(b, device);
+    defer result.deinit(device);
+
+    var expected = try Array.init(&.{6}, null, device);
+    defer expected.deinit(device);
+
     try std.testing.expectEqualDeep(expected, result);
 }
 
@@ -985,10 +993,14 @@ test "NDArray.matmul" {
         // multiply a 2x2 and a 2x2 to get a 2x2
         // [[1, 2]  * [[1, 1]  = [[3, 3]
         //  [0, 1]]    [1, 1]]    [1, 1]]
-        const A1 = try Array.init(&.{ 1, 2, 0, 1 }, &[_]usize{ 2, 2 }, device);
-        const B1 = try Array.init(&.{ 1, 1, 1, 1 }, &[_]usize{ 2, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected1 = try Array.init(&.{ 3, 3, 1, 1 }, &[_]usize{ 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 0, 1 }, &.{ 2, 2 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 1, 1, 1 }, &.{ 2, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected1 = try Array.init(&.{ 3, 3, 1, 1 }, &.{ 2, 2 }, device);
+        defer expected1.deinit(device);
         try std.testing.expectEqualDeep(expected1.data, C1.data);
         try std.testing.expectEqualDeep(expected1.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected1, C1);
@@ -1001,10 +1013,14 @@ test "NDArray.matmul" {
         // [[1, 2, 3]  * [[1, 0]  = [[1, 2]
         //  [4, 5, 6]]    [0, 1]     [4, 5]]
         //                [0, 0]]
-        const A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 0, 0, 1, 0, 0 }, &[_]usize{ 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected2 = try Array.init(&.{ 1, 2, 4, 5 }, &[_]usize{ 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &.{ 2, 3 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 0, 0, 1, 0, 0 }, &.{ 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected2 = try Array.init(&.{ 1, 2, 4, 5 }, &.{ 2, 2 }, device);
+        defer expected2.deinit(device);
         try std.testing.expectEqualDeep(expected2.data, C1.data);
         try std.testing.expectEqualDeep(expected2.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected2, C1);
@@ -1012,10 +1028,14 @@ test "NDArray.matmul" {
 
     // Test 3: 1x2x3 * 1x3x2 = 1x2x2
     {
-        const A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected3 = try Array.init(&.{ 22, 28, 49, 64 }, &[_]usize{ 1, 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 2, 3 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected3 = try Array.init(&.{ 22, 28, 49, 64 }, &[_]usize{ 1, 2, 2 }, device);
+        defer expected3.deinit(device);
         try std.testing.expectEqualDeep(expected3.data, C1.data);
         try std.testing.expectEqualDeep(expected3.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected3, C1);
@@ -1023,10 +1043,14 @@ test "NDArray.matmul" {
 
     // Test 4: 2x2x3 * 2x3x2 = 2x2x2
     {
-        const A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected4 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334 }, &[_]usize{ 2, 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected4 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334 }, &[_]usize{ 2, 2, 2 }, device);
+        defer expected4.deinit(device);
         try std.testing.expectEqualDeep(expected4.data, C1.data);
         try std.testing.expectEqualDeep(expected4.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected4, C1);
@@ -1034,10 +1058,14 @@ test "NDArray.matmul" {
 
     // Test 5: 2x2x3 * 3x2 = 2x2x2 (broadcasting)
     {
-        const A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected5 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected5 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, device);
+        defer expected5.deinit(device);
         try std.testing.expectEqualDeep(expected5.data, C1.data);
         try std.testing.expectEqualDeep(expected5.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected5, C1);
@@ -1045,10 +1073,14 @@ test "NDArray.matmul" {
 
     // Test 6: 2x2x3 * 1x3x2 = 2x2x2 (broadcasting)
     {
-        const A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected6 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 2, 3 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 1, 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected6 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 2, 2 }, device);
+        defer expected6.deinit(device);
         try std.testing.expectEqualDeep(expected6.data, C1.data);
         try std.testing.expectEqualDeep(expected6.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected6, C1);
@@ -1057,17 +1089,23 @@ test "NDArray.matmul" {
     // Test 7: 1x2x2x3 * 3x2 = 1x2x2x2 (4D broadcasting)
     {
         var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 1, 2, 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected7 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 1, 2, 2, 2 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6 }, &[_]usize{ 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected7 = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 1, 2, 2, 2 }, device);
+        defer expected7.deinit(device);
         try std.testing.expectEqualDeep(expected7.data, C1.data);
         try std.testing.expectEqualDeep(expected7.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected7, C1);
 
         // NOTE: This is different behavior than torch which treats this as a different case in broadcasting
-        const expected7b = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 1, 2, 2 }, device);
+        var expected7b = try Array.init(&.{ 22, 28, 49, 64, 76, 100, 103, 136 }, &[_]usize{ 2, 1, 2, 2 }, device);
+        defer expected7b.deinit(device);
         A1._reshape(&.{ 2, 1, 2, 3 });
-        const C1b = try A1.bmm(B1, device, .{});
+        var C1b = try A1.bmm(B1, device, .{});
+        defer C1b.deinit(device);
         try std.testing.expectEqualDeep(expected7b.data, C1b.data);
         try std.testing.expectEqualDeep(expected7b.shape.slice(), C1b.shape.slice());
         try std.testing.expectEqualDeep(expected7b, C1b);
@@ -1075,10 +1113,14 @@ test "NDArray.matmul" {
 
     // Test 8: 2x2x2x3 * 2x3x2 = 2x2x2x2 (4D broadcasting)
     {
-        const A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 }, &[_]usize{ 2, 2, 2, 3 }, device);
-        const B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 3, 2 }, device);
-        const C1 = try A1.bmm(B1, device, .{});
-        const expected8 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334, 130, 172, 157, 208, 544, 604, 625, 694 }, &[_]usize{ 2, 2, 2, 2 }, device);
+        var A1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 }, &[_]usize{ 2, 2, 2, 3 }, device);
+        defer A1.deinit(device);
+        var B1 = try Array.init(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &[_]usize{ 2, 3, 2 }, device);
+        defer B1.deinit(device);
+        var C1 = try A1.bmm(B1, device, .{});
+        defer C1.deinit(device);
+        var expected8 = try Array.init(&.{ 22, 28, 49, 64, 220, 244, 301, 334, 130, 172, 157, 208, 544, 604, 625, 694 }, &[_]usize{ 2, 2, 2, 2 }, device);
+        defer expected8.deinit(device);
         try std.testing.expectEqualDeep(expected8.data, C1.data);
         try std.testing.expectEqualDeep(expected8.shape.slice(), C1.shape.slice());
         try std.testing.expectEqualDeep(expected8, C1);
@@ -1101,6 +1143,7 @@ test "NDArray.matmul" {
 
 test "NDArray.matmul with accumulation" {
     var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
 
     const T = f64;
     const Array = NDArray(T);
@@ -1108,13 +1151,16 @@ test "NDArray.matmul with accumulation" {
     // Test: 2x2 * 2x2 with accumulation
     {
         // A = [[1, 2], [3, 4]]
-        const A = try Array.init(&.{ 1, 2, 3, 4 }, &[_]usize{ 2, 2 }, cpu.reference());
+        var A = try Array.init(&.{ 1, 2, 3, 4 }, &.{ 2, 2 }, cpu.reference());
+        defer A.deinit(cpu.reference());
 
         // B = [[5, 6], [7, 8]]
-        const B = try Array.init(&.{ 5, 6, 7, 8 }, &[_]usize{ 2, 2 }, cpu.reference());
+        var B = try Array.init(&.{ 5, 6, 7, 8 }, &.{ 2, 2 }, cpu.reference());
+        defer B.deinit(cpu.reference());
 
         // C (accum) = [[1, 1], [1, 1]]
-        var C = try Array.init(&.{ 1, 1, 1, 1 }, &[_]usize{ 2, 2 }, cpu.reference());
+        var C = try Array.init(&.{ 1, 1, 1, 1 }, &.{ 2, 2 }, cpu.reference());
+        defer C.deinit(cpu.reference());
 
         // Perform C = 2 * A * B + 3 * C
         try A.bmm_acc_(B, &C, cpu.reference(), .{ .alpha = 2.0, .beta = 3.0 });
@@ -1123,7 +1169,8 @@ test "NDArray.matmul with accumulation" {
         // 2 * [[1, 2], [3, 4]] * [[5, 6], [7, 8]] + 3 * [[1, 1], [1, 1]]
         // = 2 * [[19, 22], [43, 50]] + [[3, 3], [3, 3]]
         // = [[41, 47], [89, 103]]
-        const expected = try Array.init(&.{ 41, 47, 89, 103 }, &[_]usize{ 2, 2 }, cpu.reference());
+        var expected = try Array.init(&.{ 41, 47, 89, 103 }, &.{ 2, 2 }, cpu.reference());
+        defer expected.deinit(cpu.reference());
 
         try std.testing.expectEqualDeep(expected.data, C.data);
         try std.testing.expectEqualDeep(expected.shape.slice(), C.shape.slice());
@@ -1132,6 +1179,7 @@ test "NDArray.matmul with accumulation" {
 
 test "NDArray.matvec" {
     var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
 
     const T = f64;
     const Array = NDArray(T);
@@ -1139,11 +1187,18 @@ test "NDArray.matvec" {
     // multiply a 2x2 and a 2x to get a 2x
     // [[1, 2]  * [[1]  = [[13]
     //  [0, 1]]    [6]]    [6]]
-    const A1 = try Array.init(&.{ 1, 2, 0, 1 }, &.{ 2, 2 }, cpu.reference());
-    const X1 = try Array.init(&.{ 1, 6 }, null, cpu.reference());
-    const Y1 = try A1.matvec(X1, cpu.reference(), .{});
+    var A1 = try Array.init(&.{ 1, 2, 0, 1 }, &.{ 2, 2 }, cpu.reference());
+    defer A1.deinit(cpu.reference());
 
-    const expected1 = try Array.init(&.{ 13, 6 }, null, cpu.reference());
+    var X1 = try Array.init(&.{ 1, 6 }, null, cpu.reference());
+    defer X1.deinit(cpu.reference());
+
+    var Y1 = try A1.matvec(X1, cpu.reference(), .{});
+    defer Y1.deinit(cpu.reference());
+
+    var expected1 = try Array.init(&.{ 13, 6 }, null, cpu.reference());
+    defer expected1.deinit(cpu.reference());
+
     try std.testing.expectEqualDeep(expected1, Y1);
 }
 
@@ -1186,21 +1241,21 @@ test "NDArray.max_along" {
     //  [[13, 14, 15, 16],
     //   [17, 18, 19, 20],
     //   [21, 22, 23, 24]]]
-    var array = try Array.init(@constCast(&[_]T{
+    var array = try Array.init(&.{
         1,  2,  3,  4,
         5,  6,  7,  8,
         9,  10, 11, 12,
         13, 14, 15, 16,
         17, 18, 19, 20,
         21, 22, 23, 24,
-    }), shape, device);
+    }, shape, device);
     defer array.deinit(device);
 
     // max over dim 0
     var result1 = try array.max_along(device, .{ .dim = 0, .keep_dims = true });
     defer result1.deinit(device);
 
-    var expected1 = try Array.init(&[_]T{
+    var expected1 = try Array.init(&.{
         13, 14, 15, 16,
         17, 18, 19, 20,
         21, 22, 23, 24,
@@ -1213,7 +1268,7 @@ test "NDArray.max_along" {
     var result2 = try array.max_along(device, .{ .dim = 1, .keep_dims = false });
     defer result2.deinit(device);
 
-    var expected2 = try Array.init(&[_]T{
+    var expected2 = try Array.init(&.{
         9,  10, 11, 12,
         21, 22, 23, 24,
     }, &[_]usize{ 2, 4 }, device);
@@ -1225,7 +1280,7 @@ test "NDArray.max_along" {
     var result3 = try array.max_along(device, .{ .dim = 2, .keep_dims = true });
     defer result3.deinit(device);
 
-    var expected3 = try Array.init(&[_]T{
+    var expected3 = try Array.init(&.{
         4,  8,  12,
         16, 20, 24,
     }, &[_]usize{ 2, 3, 1 }, device);
@@ -1235,6 +1290,7 @@ test "NDArray.max_along" {
 
 test "NDArray.gather" {
     var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
 
     const T = f32;
 
@@ -1473,20 +1529,6 @@ test "NDArray.gather" {
 //        stride *= dimSize;
 //    }
 //    return index;
-//}
-
-//pub fn offset_to_pos(self: Self, offset: usize, device: DeviceReference) ![]usize {
-//    const n = self.shape.len;
-//    const pos = try device.allocator.alloc(usize, n);
-//    errdefer device.allocator.free(pos);
-
-//    var remaining_index = offset;
-//    for (0..n) |i| {
-//        pos[i] = remaining_index / self.shape.strides[i];
-//        remaining_index %= self.shape.strides[i];
-//    }
-
-//    return pos;
 //}
 
 // TODO: Check device support

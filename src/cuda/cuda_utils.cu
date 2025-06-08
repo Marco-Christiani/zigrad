@@ -44,14 +44,20 @@ extern "C" void device_synchronize() {
   CUDA_ASSERT(cudaDeviceSynchronize());
 }
 
-extern "C" DevicePropertiesWrapper init_device(unsigned device_number) {
+extern "C" unsigned device_count() {
+    CURESULT_ASSERT(cuInit(0));
+    int device_count;
+    CURESULT_ASSERT(cuDeviceGetCount(&device_count));
+    return static_cast<unsigned>(device_count);
+}
 
-    CURESULT_ASSERT(cuInit(device_number));
+extern "C" DevicePropertiesWrapper init_device(unsigned device_number) {
 
     CUdevice device;
     CUcontext context;
     int device_count = 0;
 
+    CURESULT_ASSERT(cuInit(0));
     CURESULT_ASSERT(cuDeviceGetCount(&device_count));
 
     CHECK_INVARIANT(device_count > 0, "Device count came back as zero");
@@ -61,7 +67,7 @@ extern "C" DevicePropertiesWrapper init_device(unsigned device_number) {
     CURESULT_ASSERT(cuCtxCreate(&context, 0, device));
 
     cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, device);
+    CUDA_ASSERT(cudaGetDeviceProperties(&deviceProp, device));
 
     return DeviceProperties::wrap(new DeviceProperties(deviceProp));
 }

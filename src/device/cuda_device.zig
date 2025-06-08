@@ -7,6 +7,7 @@ const RandType = @import("device_common.zig").RandType;
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(CudaMalloc);
 const TransferDirection = @import("device_common.zig").TransferDirection;
+const build_options = @import("build_options");
 
 const opspec = @import("opspec.zig");
 
@@ -15,21 +16,28 @@ pub const CudaMalloc = struct {
         const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
         return @ptrCast(@alignCast(cuda.mem_alloc(n, w.*)));
     }
-    pub fn raw_free(ptr: ?*anyopaque, ctx: *anyopaque) void {
+    pub fn raw_free(buf: []u8, ctx: *anyopaque) void {
         const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
-        cuda.mem_free(ptr, w.*);
+        cuda.mem_free(buf.ptr, w.*);
     }
 };
+
+const CUDA_COMPILE_ERROR =
+    \\ 
+    \\You are attempting to use a CudaDevice object but CUDA is not enabled.
+    \\
+    \\To enable CUDA, build the project with -Dcuda_enabled=true. You can pass
+    \\this flag to the Zigrad module in the build system if you are linking it
+    \\into an existing project.
+    \\
+;
 
 /////////////////////////////
 // Cuda Device Implementation
 
 const Self = @This();
 const Error = std.mem.Allocator.Error;
-// combine host device and cuda device to single device reference.
-pub const DeviceReference = @import("device_reference.zig").DeviceReference(Self);
-pub const HostDevice = @import("host_device.zig");
-pub const CudaDevice = Self;
+pub const DeviceReference = @import("device_reference.zig");
 
 // keep these out of the user api
 context: struct {
@@ -39,9 +47,16 @@ context: struct {
     cublas: cuda.CublasWrapper,
     cudnn: cuda.CudnnWrapper,
     cutensor: cuda.CutensorWrapper,
+    // Anchor to provide proper compiler error for CUDA builds
+    __: if (build_options.enable_cuda) void else @compileError(CUDA_COMPILE_ERROR) = undefined,
 },
 cache: CachingAllocator,
 capture: ExecutionGraph,
+
+/// Conatiner level function to see how many devices you have.
+pub fn device_count() u32 {
+    return cuda.device_count();
+}
 
 pub fn init(device_number: u32) Self {
     const properties = cuda.init_device(device_number);
@@ -76,11 +91,6 @@ pub fn deinit(self: *Self) void {
 
 pub fn reference(self: *Self) DeviceReference {
     return .{ .ptrs = .{ .aux = self } };
-}
-
-// callback to replace host reference to union
-pub fn host_reference(self: *HostDevice) DeviceReference {
-    return .{ .ptrs = .{ .host = self } };
 }
 
 pub fn dtype(T: type) cuda.dtype {
@@ -208,7 +218,7 @@ pub fn nrm2(self: *const Self, T: type, p: opspec.nrm2(T)) void {
 }
 
 pub fn clip_nrm2(self: *Self, T: type, p: opspec.clip_nrm2(T)) void {
-    const scratch = self.mem_scratch(T, 1, self.context.stream);
+    const scratch = self.mem_scratch(T, 1) catch unreachable;
     cuda.clip_nrm2(dtype(T), self.context.cublas, p.x.ptr, scratch.ptr, p.x.len, p.max_norm, p.delta);
 }
 
@@ -265,16 +275,16 @@ pub fn permutate(
     );
 }
 
-pub fn exp(self: *const Self, T: type, x: []const T, y: []T) void {
-    cuda.pow_exp(dtype(T), self.context.stream, x.ptr, y.ptr, x.len);
+pub fn exp(self: *const Self, T: type, p: opspec.exp_fwd(T)) void {
+    cuda.pow_exp(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.x.len);
 }
 
-pub fn relu_fwd(self: *const Self, T: type, x: []const T, y: []T) void {
-    cuda.relu_fwd(dtype(T), self.context.stream, x.ptr, y.ptr, x.len);
+pub fn relu_fwd(self: *const Self, T: type, p: opspec.relu_fwd(T)) void {
+    cuda.relu_fwd(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.x.len);
 }
 
-pub fn relu_bwd(self: *const Self, T: type, x: []const T, y_grd: []const T, x_grd: []T) void {
-    cuda.relu_bwd(dtype(T), self.context.stream, x.ptr, y_grd.ptr, x_grd.ptr, x.len);
+pub fn relu_bwd(self: *const Self, T: type, p: opspec.relu_bwd(T)) void {
+    cuda.relu_bwd(dtype(T), self.context.stream, p.x.ptr, p.y_grd.ptr, p.x_grd.ptr, p.x.len);
 }
 
 //pub fn smax_vec_fwd(self: *const Self, T: type, x: []const T, y: []T, op: SmaxType) void {

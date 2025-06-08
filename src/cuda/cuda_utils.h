@@ -14,11 +14,13 @@ EXTERN_C void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed,
 EXTERN_C void mem_free(void* dptr, StreamWrapper);
 EXTERN_C void mem_take(dtype id, const void* src, len_t src_len, const len_t* idxs, len_t idxs_len, void* dst, StreamWrapper);
 
+
 // device api
 EXTERN_C DevicePropertiesWrapper init_device(unsigned);
 EXTERN_C void check_last_error();
 EXTERN_C void device_synchronize();
 EXTERN_C len_t device_total_memory(unsigned);
+EXTERN_C unsigned device_count();
 
 // stream api
 EXTERN_C StreamWrapper init_stream();

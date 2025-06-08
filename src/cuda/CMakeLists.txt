@@ -12,4 +12,4 @@ set_target_properties(amalgamate PROPERTIES OUTPUT_NAME "amalgamate")
 set_target_properties(amalgamate PROPERTIES CUDA_ARCHITECTURES native)
 
 # Link the required CUDA libraries
-target_link_libraries(amalgamate PRIVATE cudart cublas cutensor cudnn nvrtc)
+target_link_libraries(amalgamate PRIVATE cuda cudart cublas cutensor cudnn nvrtc)

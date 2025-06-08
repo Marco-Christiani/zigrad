@@ -1,7 +1,13 @@
+///! Impractical, unoptimized, first-pass conv impl for testing purposes. Contributions welcome!
 const std = @import("std");
 const zg = @import("../zigrad.zig");
 const NDArray = zg.NDArray;
 const DeviceReference = zg.DeviceReference;
+
+// TODO: conv tests need to be brought up to date
+// test {
+//     std.testing.refAllDecls(@import("conv_test.zig"));
+// }
 
 pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: usize, padding: usize, dilation: usize, device: DeviceReference) !NDArray(T) {
     const batch_size = input.shape.get(0);
