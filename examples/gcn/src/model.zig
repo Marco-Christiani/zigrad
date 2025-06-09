@@ -103,7 +103,7 @@ pub fn GraphConvLayer(comptime T: type) type {
             const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
             const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
             const y = try self.propagate(h, edge_index);
-            try self.bias.add_(y);
+            try y._add(self.bias);
             return y;
         }
 
