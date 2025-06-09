@@ -22,10 +22,21 @@ pub const conv_utils = @import("nn/conv_utils.zig");
 pub const utils = @import("nn/utils.zig");
 //pub const layer = @import("nn/layer.zig");
 pub const optim = @import("nn/optim.zig");
+pub const Optimizer = optim.Optimizer;
 pub const nn = @import("nn/nn.zig");
+
+/// The category tag is used to categorize different
+/// mathematical objects based on their mathematical
+/// category. This is used as a convenience tag to
+/// make comptime deduction easier.
+pub const Category = enum {
+    dense, // NDTensor
+    sparse, // NDSparse
+};
 
 const device_root = @import("device");
 pub const device = struct {
+    pub const Error = device_root.Error;
     pub const HostDevice = device_root.HostDevice;
     pub const CudaDevice = device_root.CudaDevice;
 };
