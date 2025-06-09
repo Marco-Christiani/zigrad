@@ -1,17 +1,29 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "torch",
+#     "torch-geometric",
+# ]
+# ///
+
+import time
+import argparse
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.datasets import Planetoid
-import time
+from torch_geometric.data import Data
 
 
 class GCN(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_features: int, num_classes: int):
         super(GCN, self).__init__()
-        self.conv1 = GCNConv(dataset.num_features, 16)
-        self.conv2 = GCNConv(16, dataset.num_classes)
+        self.conv1 = GCNConv(num_features, 16)
+        self.conv2 = GCNConv(16, num_classes)
 
-    def forward(self, data):
+    def forward(self, data: torch.Tensor):
         x, edge_index = data.x, data.edge_index
 
         x = self.conv1(x, edge_index)
@@ -23,16 +35,24 @@ class GCN(torch.nn.Module):
 
 
 if __name__ == "__main__":
-    from pathlib import Path
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--device",
+        choices=["cuda", "cpu"],
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to use",
+    )
+    args = parser.parse_args()
 
     data_path = Path(__file__).parent.parent / "data"
     dataset = Planetoid(root=str(data_path), name="cora")
+    device = torch.device(args.device)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = GCN().to(device)
+    model = GCN(dataset.num_features, dataset.num_classes).to(device)
+    data = dataset[0].to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 
-    def train(data):
+    def train():
         model.train()
         optimizer.zero_grad()
         out = model(data)
@@ -41,7 +61,7 @@ if __name__ == "__main__":
         optimizer.step()
         return loss.item()
 
-    def test(data):
+    def test():
         model.eval()
         logits = model(data)
         accs = []
@@ -67,11 +87,10 @@ if __name__ == "__main__":
     total_test_time = 0
 
     for epoch in range(0, 50):
-        data = dataset[0]
         with PerfTimer("train") as train_timer:
-            loss = train(data)
+            loss = train()
         with PerfTimer("test") as test_timer:
-            train_acc, val_acc, test_acc = test(data)
+            train_acc, val_acc, test_acc = test()
 
         total_train_time += train_timer.duration
         total_test_time += test_timer.duration

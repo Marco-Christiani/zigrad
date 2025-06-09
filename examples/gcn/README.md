@@ -3,16 +3,14 @@
 ## download dataset
 
 ```bash
-uv venv  # or other venv tool
-uv pip install -r ref/requirements.txt
-uv run python -- ref/dataset.py
+uv run ref/dataset.py
 ```
 
 ## train
 
 ```bash
 # pytorch
-uv run python -- ref/train.py
+uv run ref/train.py
 
 # zigrad
 export ZIGRAD_BACKEND=HOST

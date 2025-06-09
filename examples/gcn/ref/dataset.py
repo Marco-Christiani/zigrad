@@ -1,16 +1,23 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "torch",
+#     "torch_geometric",
+#     "numpy",
+# ]
+# ///
+
 from pathlib import Path
 
 import torch
 import numpy as np
 from torch_geometric.datasets import Planetoid
+from torch_geometric.data import Data
 
 
-def dump_to_csv(data, dir: Path):
-    import os
+def dump_to_csv(data: Data, dir: Path):
+    dir.mkdir(exist_ok=True)
 
-    os.makedirs(dir, exist_ok=True)
-
-    papers_path = dir / "papers.csv"
     papers = torch.cat(
         (
             data.y.view(-1, 1),
@@ -22,16 +29,15 @@ def dump_to_csv(data, dir: Path):
         dim=1,
     )
     np.savetxt(
-        papers_path,
+        dir / "papers.csv",
         papers.numpy(),
         header="y,train_mask,eval_mask,test_mask,x...",
         delimiter=",",
         fmt="%d",
     )
 
-    cites_path = dir / "cites.csv"
     np.savetxt(
-        cites_path,
+        dir / "cites.csv",
         data.edge_index.transpose(0, 1).numpy(),
         delimiter=",",
         fmt="%d",
