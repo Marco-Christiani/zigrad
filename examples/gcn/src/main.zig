@@ -13,6 +13,12 @@ const Optimizer = zg.optim.Adam(T);
 pub fn run_cora(data_dir: []const u8) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = debug_allocator.allocator();
+    defer {
+        const leak = debug_allocator.deinit();
+        if (leak == std.heap.Check.leak) {
+            std.debug.print("memory leak !!\n", .{});
+        }
+    }
 
     zg.init_global_graph(allocator, .{
         .eager_teardown = true,
@@ -32,6 +38,7 @@ pub fn run_cora(data_dir: []const u8) !void {
     defer dataset.deinit();
 
     var optim = Optimizer.init(allocator, 0.01, 0.9, 0.999, 1e-8);
+    defer optim.deinit();
 
     var model = try GCN(T, Optimizer).init(
         device,

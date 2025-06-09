@@ -30,6 +30,11 @@ pub fn GCN(comptime T: type, Optimizer: type) type {
         pub fn forward(self: *Self, x: *NDTensor(T), edge_index: *NDTensor(usize)) !*NDTensor(T) {
             const c1 = try self.conv1.forward(x, edge_index);
             errdefer c1.deinit();
+            defer {
+                if (c1.should_deinit()) {
+                    c1.deinit();
+                }
+            }
             try zg.nn.relu_(T, c1);
             const c2 = try self.conv2.forward(c1, edge_index);
             errdefer c2 = c2.deinit();
@@ -102,7 +107,16 @@ pub fn GraphConvLayer(comptime T: type) type {
         pub fn forward(self: *Self, x: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
             const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
             const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
+            errdefer h.deinit();
+            defer {
+                if (h.should_deinit()) {
+                    h.deinit();
+                }
+            }
+
             const y = try self.propagate(h, edge_index);
+            errdefer y.deinit();
+
             try y._add(self.bias);
             return y;
         }
