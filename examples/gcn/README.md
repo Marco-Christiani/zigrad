@@ -13,6 +13,5 @@ uv run ref/dataset.py
 uv run ref/train.py
 
 # zigrad
-export ZIGRAD_BACKEND=HOST
-zig build run
+zig build run -Doptimize=ReleaseFast
 ```
