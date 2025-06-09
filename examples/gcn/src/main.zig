@@ -47,8 +47,8 @@ pub fn run_cora(data_dir: []const u8) !void {
 
     var timer = try std.time.Timer.start();
 
-    const num_epoochs = 50;
-    for (0..num_epoochs) |epoch| {
+    const num_epochs = 50;
+    for (0..num_epochs) |epoch| {
         var loss_val: T = 0;
         var acc = [_]f32{ 0, 0, 0 };
         var train_time_ms: f64 = 0;
@@ -109,7 +109,7 @@ pub fn run_cora(data_dir: []const u8) !void {
             .{ epoch + 1, loss_val, acc[0], acc[1], acc[2], train_time_ms, test_time_ms },
         );
     }
-    std.debug.print("Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{ total_train_time / num_epoochs, total_test_time / num_epoochs });
+    std.debug.print("Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{ total_train_time / num_epochs, total_test_time / num_epochs });
     std.debug.print("Total train time: {d:.2} ms, Total test time: {d:.2} ms\n", .{ total_train_time, total_test_time });
 }
 
