@@ -8,7 +8,7 @@ const MaskLayer = @import("model.zig").MaskLayer;
 const std_options = .{ .log_level = .info };
 const log = std.log.scoped(.gnn);
 const T = f32;
-const Optimizer = zg.optim.SGD(T);
+const Optimizer = zg.optim.Adam(T);
 
 pub fn run_cora(data_dir: []const u8) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -31,12 +31,7 @@ pub fn run_cora(data_dir: []const u8) !void {
     const dataset = try Dataset(T).load_cora(allocator, device, node_path, edge_path);
     defer dataset.deinit();
 
-    var optim: Optimizer = .{
-        .lr = 0.01,
-        .grad_clip_max_norm = 10.0,
-        .grad_clip_delta = 1e-6,
-        .grad_clip_enabled = false,
-    };
+    var optim = Optimizer.init(allocator, 0.01, 0.9, 0.999, 1e-8);
 
     var model = try GCN(T, Optimizer).init(
         device,
