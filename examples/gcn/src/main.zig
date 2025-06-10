@@ -8,7 +8,7 @@ const MaskLayer = @import("model.zig").MaskLayer;
 const std_options = .{ .log_level = .info };
 const log = std.log.scoped(.gnn);
 const T = f32;
-const Optimizer = zg.optim.Adam(T);
+const Optimizer = zg.optim.Adam;
 
 pub fn run_cora(data_dir: []const u8) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -37,13 +37,21 @@ pub fn run_cora(data_dir: []const u8) !void {
     const dataset = try Dataset(T).load_cora(allocator, device, node_path, edge_path);
     defer dataset.deinit();
 
-    var optim = Optimizer.init(allocator, 0.01, 0.9, 0.999, 1e-8);
-    defer optim.deinit();
+    var adam = Optimizer.init(allocator, .{
+        .lr = 0.01,
+        .beta1 = 0.9,
+        .beta2 = 0.999,
+        .epsilon = 1e-8,
+    });
+    defer adam.deinit();
 
-    var model = try GCN(T, Optimizer).init(
+    const optim = adam.optimizer();
+
+    var model = try GCN(T).init(
         device,
         dataset.num_features,
         dataset.num_classes,
+        .{ .optim = optim },
     );
     defer model.deinit();
 
@@ -76,7 +84,7 @@ pub fn run_cora(data_dir: []const u8) !void {
             loss_val = loss.get(0);
 
             try loss.backward();
-            try model.update(&optim);
+            try optim.step();
             model.zero_grad();
 
             train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));

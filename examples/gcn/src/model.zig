@@ -7,17 +7,19 @@ const DeviceReference = zg.DeviceReference;
 const NDTensor = zg.NDTensor;
 const winit = zg.winit;
 
-pub fn GCN(comptime T: type, Optimizer: type) type {
+pub fn GCN(comptime T: type) type {
     return struct {
         const Self = @This();
         const Layers = 3;
         conv1: GraphConvLayer(T),
         conv2: GraphConvLayer(T),
 
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
+        pub fn init(device: DeviceReference, in_features: usize, out_features: usize, opts: struct {
+            optim: ?zg.Optimizer = null,
+        }) !Self {
             const self: Self = .{
-                .conv1 = try GraphConvLayer(T).init(device, in_features, 16),
-                .conv2 = try GraphConvLayer(T).init(device, 16, out_features),
+                .conv1 = try GraphConvLayer(T).init(device, in_features, 16, .{ .optim = opts.optim }),
+                .conv2 = try GraphConvLayer(T).init(device, 16, out_features, .{ .optim = opts.optim }),
             };
             return self;
         }
@@ -42,15 +44,6 @@ pub fn GCN(comptime T: type, Optimizer: type) type {
             return c2;
         }
 
-        pub fn update(self: *Self, optim: *Optimizer) !void {
-            return optim.step(&.{
-                self.conv1.weights,
-                self.conv1.bias,
-                self.conv2.weights,
-                self.conv2.bias,
-            });
-        }
-
         pub fn zero_grad(self: *Self) void {
             if (self.conv1.weights.grad) |_| self.conv1.weights.setup_grad(0) catch {};
             if (self.conv1.bias.grad) |_| self.conv1.bias.setup_grad(0) catch {};
@@ -71,7 +64,9 @@ pub fn GraphConvLayer(comptime T: type) type {
         bias: *Tensor,
         adj_mat: ?*Tensor = null,
 
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
+        pub fn init(device: DeviceReference, in_features: usize, out_features: usize, opts: struct {
+            optim: ?zg.Optimizer = null,
+        }) !Self {
             const weights = try Tensor.random(device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
                 .label = "conv_weights",
                 .requires_grad = true,
@@ -84,6 +79,11 @@ pub fn GraphConvLayer(comptime T: type) type {
                 .requires_grad = true,
                 .acquired = true,
             });
+
+            if (opts.optim) |optim| {
+                try optim.attach(weights);
+                try optim.attach(bias);
+            }
 
             return .{
                 .device = device,
