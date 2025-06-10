@@ -22,17 +22,20 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     const device = cpu.reference();
 
-    var model = try MnistModel(f32).init(device);
-    defer model.deinit();
-
-    const params = model.params();
-
-    var optim: zg.optim.SGD(T) = .{
+    var sgd = zg.optim.SGD.init(std.heap.smp_allocator, .{
         .lr = 0.01,
         .grad_clip_max_norm = 10.0,
         .grad_clip_delta = 1e-6,
         .grad_clip_enabled = false,
-    };
+    });
+    sgd.deinit();
+
+    const optim = sgd.optimizer();
+
+    var model = try MnistModel(f32).init(device, .{
+        .optim = optim,
+    });
+    defer model.deinit();
 
     std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
@@ -60,7 +63,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             const loss_val = loss.get(0);
 
             try loss.backward();
-            optim.step(params.slice());
+            try optim.step();
             model.zero_grad();
 
             const t1 = @as(f64, @floatFromInt(step_timer.read()));

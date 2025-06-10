@@ -14,12 +14,14 @@ pub fn MnistModel(comptime T: type) type {
         linear_layers: [Layers]LinearLayer(T) = undefined,
         flatten: FlattenLayer(T) = .{},
 
-        pub fn init(device: DeviceReference) !Self {
+        pub fn init(device: DeviceReference, opts: struct {
+            optim: ?zg.Optimizer = null,
+        }) !Self {
             return .{
                 .linear_layers = .{
-                    try LinearLayer(T).init(device, 28 * 28, 128),
-                    try LinearLayer(T).init(device, 128, 64),
-                    try LinearLayer(T).init(device, 64, 10),
+                    try LinearLayer(T).init(device, 28 * 28, 128, .{ .optim = opts.optim }),
+                    try LinearLayer(T).init(device, 128, 64, .{ .optim = opts.optim }),
+                    try LinearLayer(T).init(device, 64, 10, .{ .optim = opts.optim }),
                 },
             };
         }
@@ -55,15 +57,6 @@ pub fn MnistModel(comptime T: type) type {
             return z2;
         }
 
-        pub fn params(self: *Self) std.BoundedArray(*Tensor, 6) {
-            var tmp: std.BoundedArray(*Tensor, 6) = .{};
-            for (&self.linear_layers) |*l| {
-                tmp.appendAssumeCapacity(l.weights);
-                tmp.appendAssumeCapacity(l.bias);
-            }
-            return tmp;
-        }
-
         pub fn zero_grad(self: *Self) void {
             for (&self.linear_layers) |*l| {
                 if (l.weights.grad) |_| l.weights.setup_grad(0) catch {};
@@ -79,7 +72,9 @@ pub fn LinearLayer(comptime T: type) type {
         const Tensor = NDTensor(T);
         weights: *Tensor,
         bias: *Tensor,
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize) !Self {
+        pub fn init(device: DeviceReference, in_features: usize, out_features: usize, opts: struct {
+            optim: ?zg.Optimizer = null,
+        }) !Self {
             const weights = try Tensor.random(device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
                 .label = "linear_weights",
                 .requires_grad = true,
@@ -92,6 +87,12 @@ pub fn LinearLayer(comptime T: type) type {
                 .requires_grad = true,
                 .acquired = true,
             });
+            errdefer bias.deinit();
+
+            if (opts.optim) |optim| {
+                try optim.attach(weights);
+                try optim.attach(bias);
+            }
 
             return .{ .weights = weights, .bias = bias };
         }

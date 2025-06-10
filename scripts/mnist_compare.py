@@ -6,7 +6,6 @@
 #     "pandas",
 #     "plotly",
 #     "scipy",
-#     "torch",
 # ]
 # ///
 """Timing analysis of log files produced by logging redirect for minimal backpressure.
@@ -34,9 +33,15 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy import stats
+
+other_framework_name = "torch"
+# other_framework_name = "jax"
+# other_framework_name = "tf"
 
 
 class PerformanceParser:
@@ -46,6 +51,7 @@ class PerformanceParser:
 
     def parse_log(self, log_file, framework):
         """Parse logs from zg or pytorch runs and extract performance-data."""
+        print("Loading", log_file, "for", framework)
         batch_size_pattern = re.compile(r"batch_size=(\d+)")
         learning_rate_pattern = re.compile(r"learning_rate=([\d.]+)")
         num_epochs_pattern = re.compile(r"num_epochs=(\d+)")
@@ -91,27 +97,44 @@ class PerformanceParser:
         metadata["python"] = platform.python_version()
         self.metadata[framework] = metadata
 
+    @lru_cache()
     def build_df(self, drop_slowest: bool = True) -> pd.DataFrame:
         timings_df = pd.DataFrame(self.data)
         # Verify
-        s = timings_df.groupby("framework").size()
+        grouped = timings_df.groupby("framework")
+        s = grouped.size()
         assert len(s) == 2  # got logs from both
-        assert s.iloc[0] == s.iloc[1]  # even split
-        # discard slowest time to give pytorch an advantage (tracing) and keep torch from skewing the plot
-        torch_times = timings_df["ms_per_sample"][timings_df.framework.str.lower() == "pytorch"]
+
+        torch_times = timings_df["ms_per_sample"][timings_df.framework.str.lower() == other_framework_name]
         zg_times = timings_df["ms_per_sample"][timings_df.framework.str.lower() == "zigrad"]
+
+        if s.iloc[0] != s.iloc[1]:  # uneven split
+            imbalance = abs(s.iloc[0] - s.iloc[1])
+            etol = timings_df["epoch"].max().max()
+            if imbalance <= etol:
+                print("Did not get same number of batches for each framework but within epoch off-by-one tolerance", etol)
+                print(s)
+                min_size = grouped.size().min()
+                timings_df = grouped.head(min_size).reset_index(drop=True)
+                print("Trimming to", s.min(), "per framework")
+            else:
+                print(f"Number of batches for each framework differed significantly: {imbalance=}")
+                print(s)
+                raise ValueError("Parse or setup error in the logs")
+
         if drop_slowest:
+            # discard slowest time to give pytorch an advantage (tracing) and keep torch from skewing the plot
             print("Dropping slowest to give torch an advantage")
             timings_df = timings_df.drop(index=[torch_times.idxmax(), zg_times.idxmax()])  # type: ignore
+
         return timings_df
 
     @property
-    @lru_cache(1)
     def df(self) -> pd.DataFrame:
         return self.build_df()
 
     def create_speedup_figure(self):
-        torch_ms = self.df["ms_per_sample"][self.df["framework"].str.lower() == "pytorch"]
+        torch_ms = self.df["ms_per_sample"][self.df["framework"].str.lower() == other_framework_name]
         zg_ms = self.df["ms_per_sample"][self.df["framework"].str.lower() == "zigrad"]
         zg_speedup = torch_ms.to_numpy() / zg_ms.to_numpy()  # type: ignore
 
@@ -131,12 +154,12 @@ class PerformanceParser:
                 opacity=0.8,
             )
 
-        fig.update_layout(title="Speedup Zigrad/PyTorch")
+        fig.update_layout(title=f"Speedup Zigrad/{other_framework_name}")
         return fig
 
     def create_ms_per_sample_distribution(self):
         fig = go.Figure()
-        for framework in ("zigrad", "pytorch"):
+        for framework in ("zigrad", other_framework_name):
             framework_df = self.df[self.df["framework"].str.lower() == framework]
             fig.add_trace(go.Histogram(x=framework_df["ms_per_sample"], name=f"{framework} ms/sample"))
         fig.update_layout(title="Ms/Sample Distribution")
@@ -144,7 +167,7 @@ class PerformanceParser:
 
     def create_ms_per_sample_scatter(self):
         fig = go.Figure()
-        for framework in ("zigrad", "pytorch"):
+        for framework in ("zigrad", other_framework_name):
             framework_df = self.df[self.df["framework"].str.lower() == framework]
             x = framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"]
             y = framework_df["ms_per_sample"]
@@ -154,7 +177,7 @@ class PerformanceParser:
 
     def create_loss_scatter(self):
         fig = go.Figure()
-        for framework in ("zigrad", "pytorch"):
+        for framework in ("zigrad", other_framework_name):
             framework_df = self.df[self.df["framework"].str.lower() == framework]
             x = framework_df["epoch"] * framework_df["batch"].max() + framework_df["batch"]
             y = framework_df["loss"]
@@ -177,7 +200,7 @@ class PerformanceParser:
                 fig.update_layout(margin=margin, template=theme)
                 title = fig.layout.title.text.replace("/", "_").replace(" ", "").lower()  # type: ignore
                 # fig.write_html(f"/tmp/zg_mnist_zg_torch_perf_{i}_{title}{theme_short}.html")
-                svg_path = Path(f"/tmp/zg_mnist_zg_torch_perf_{i}_{title}{theme_short}.svg")
+                svg_path = Path(f"/tmp/zg_mnist_zg_{other_framework_name}_perf_{i}_{title}{theme_short}.svg")
                 fig.write_image(svg_path)
                 s = 'width="700" height="500" '
                 svg_txt = svg_path.read_text().replace(s, "", 1)
@@ -193,7 +216,7 @@ class PerformanceParser:
             for trace in fig.data:
                 combined_fig.add_trace(trace, row=i, col=1)
 
-        metadata_text = self._format_metadata(self.metadata["PyTorch"])
+        metadata_text = self._format_metadata(self.metadata[other_framework_name])
         for i in range(4):
             combined_fig.layout.annotations[i].text += f"<br><sub>{metadata_text}</sub>"  # type: ignore
 
@@ -201,12 +224,12 @@ class PerformanceParser:
             template=theme,
             height=1400,
             width=1000,
-            title_text="Zigrad vs PyTorch Performance<br><sub>MNIST Train Model Arch - Simple</sub>",
+            title_text=f"Zigrad vs {other_framework_name.capitalize()} Performance<br><sub>MNIST Train Model Arch - Simple</sub>",
             showlegend=False,
         )
 
-        combined_fig.write_html(f"/tmp/zg_mnist_zg_torch_perf{theme_short}.html")
-        combined_fig.write_image(f"/tmp/zg_mnist_zg_torch_perf{theme_short}.svg")
+        combined_fig.write_html(f"/tmp/zg_mnist_zg_{other_framework_name}_perf{theme_short}.html")
+        combined_fig.write_image(f"/tmp/zg_mnist_zg_{other_framework_name}_perf{theme_short}.svg")
 
         return combined_fig
 
@@ -225,7 +248,7 @@ class PerformanceParser:
             print(f"Std ms/sample: {framework_df['ms_per_sample'].std():.6f}")
 
         zg = timings_df[timings_df.framework.str.lower() == "zigrad"].reset_index(drop=True)
-        pt = timings_df[timings_df.framework.str.lower() == "pytorch"].reset_index(drop=True)
+        pt = timings_df[timings_df.framework.str.lower() == other_framework_name].reset_index(drop=True)
 
         if drop_slowest:
             zg = zg.drop(index=[zg["ms_per_sample"].idxmax()]).reset_index(drop=True)  # type: ignore
@@ -240,8 +263,6 @@ class PerformanceParser:
         print(speedup.describe())  # type: ignore
 
         # Stats tests
-        import numpy as np
-        from scipy import stats
 
         t_stat, t_p = stats.ttest_rel(pt_ms, zg_ms)
         w_stat, w_p = stats.wilcoxon(diffs)
@@ -274,16 +295,19 @@ class PerformanceParser:
         print("\n--- Bootstrap 95% Confidence Intervals ---")
         print(f"Mean latency diff (ms/sample): {ci_mean_diff[0]:.6f} - {ci_mean_diff[1]:.6f}")
         print(f"Median latency diff (ms/sample): {ci_median_diff[0]:.6f} - {ci_median_diff[1]:.6f}")
-        print(f"Mean speedup (Zigrad/PyTorch): {ci_speedup[0]:.2f}x - {ci_speedup[1]:.2f}x")
+        print(f"Mean speedup (Zigrad/{other_framework_name.capitalize()}: {ci_speedup[0]:.2f}x - {ci_speedup[1]:.2f}x")
 
 
 if __name__ == "__main__":
+    print("Comparing against", other_framework_name)
     parser = PerformanceParser()
     parser.parse_log("/tmp/zg_mnist_log.txt", "Zigrad")
-    parser.parse_log("/tmp/zg_mnist_torch_log.txt", "PyTorch")
+    parser.parse_log(f"/tmp/zg_mnist_{other_framework_name}_log.txt", other_framework_name)
     _ = parser.plot_results(True)
     fig = parser.plot_results(True, "plotly_dark")
     parser.print_summary(drop_slowest=True)
-    parser.df.to_csv("/tmp/zg_mnist_torch_parsed.csv")
+    fpath = f"/tmp/zg_mnist_{other_framework_name}_parsed.csv"
+    print("Saving parsed results to", fpath)
+    parser.df.to_csv(fpath)
     input()
     fig.show()
