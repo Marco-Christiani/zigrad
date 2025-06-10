@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "numpy",
+#     "jax",
+#     "flax",
+#     "optax",
+# ]
+# ///
 import os
 import platform
 import time

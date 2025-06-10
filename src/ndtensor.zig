@@ -21,7 +21,9 @@ const log = std.log.scoped(.zg_tensor);
 pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
+        pub const ValueType = T;
         pub const DataType = NDArray(T);
+        pub const Category = zg.Category.dense;
         pub const Status = enum { owned, view };
         /// Core NDArray that holds the values and shape.
         /// Use this member directly when you want to perform

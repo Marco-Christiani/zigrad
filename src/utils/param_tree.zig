@@ -230,32 +230,28 @@ pub fn main() !void {
 
     // Create test tensors
     const weight1 = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{ 1.0, 2.0, 3.0 },
         &.{3},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
     const bias1 = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{ 0.1, 0.2 },
         &.{2},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
     const weight2 = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{ 4.0, 5.0, 6.0, 7.0 },
         &.{4},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
     const single_param = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{42.0},
         &.{1},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
 
     std.debug.print("=== Testing Final ParamTree ===\n", .{});
@@ -297,11 +293,10 @@ pub fn main() !void {
 
     // Test duplicate parameter error
     const duplicate_weight = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{ 8, 9 },
         &.{2},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
     defer duplicate_weight.deinit();
 
@@ -317,11 +312,10 @@ pub fn main() !void {
 
     // Test path conflict
     const conflict_tensor = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{10},
         &.{1},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
 
     defer conflict_tensor.deinit();
@@ -356,11 +350,10 @@ pub fn main() !void {
     defer single_tree.deinit();
 
     const single_param2 = try NDTensor(f32).from_slice(
-        &graph,
         cpu.reference(),
         &[_]f32{99},
         &.{1},
-        .{ .requires_grad = true },
+        .{ .requires_grad = true, .graph = &graph },
     );
 
     try single_tree.put("single_param", single_param2);

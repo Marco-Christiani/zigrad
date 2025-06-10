@@ -1,7 +1,15 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "numpy",
+#     "tensorflow",
+# ]
+# ///
 import argparse
+import os
 import platform
 import time
-from enum import Enum, auto
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -91,7 +99,9 @@ def main(
     model_variant: str = "simple",
     autograd: bool = False,
 ):
-    dataloader = load_mnist("/tmp/zigrad_test_mnist_train_full.csv", batch_size)
+    data_dir = Path(os.getenv("ZG_DATA_DIR", "data"))
+    csv_path = data_dir / "mnist_train_full.csv"
+    dataloader = load_mnist(csv_path, batch_size)
     print(f"train={train}")
     print(f"compile={compile}")
     print(f"batch_size={batch_size}")
