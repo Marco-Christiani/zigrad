@@ -148,7 +148,6 @@ pub const Adam = struct {
         grad_clip_delta: f32 = settings.grad_clip_delta,
     }) Adam {
         return .{
-            .allocator = allocator,
             .params = ParamList.init(allocator),
             .map = ParamMap.init(allocator),
             .lr = opts.lr,
@@ -230,3 +229,7 @@ pub const Adam = struct {
         }
     }
 };
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
+}
