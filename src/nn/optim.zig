@@ -164,9 +164,9 @@ pub const Adam = struct {
 
     pub fn deinit(self: *Adam) void {
         self.params.deinit();
-        while (self.map.values()) |entry| {
-            entry.device.mem_free(u8, entry.m);
-            entry.device.mem_free(u8, entry.v);
+        for (self.map.values()) |entry| {
+            entry.device.mem_free(entry.m);
+            entry.device.mem_free(entry.v);
         }
         self.map.deinit();
     }
