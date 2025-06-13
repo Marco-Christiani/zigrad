@@ -64,6 +64,7 @@ test-matrix:
 test:
     ARG ZIGRAD_BACKEND=HOST
     FROM +build-zig --ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
+    RUN zig build test
     COPY --dir tests ./
     WORKDIR tests
     RUN zig build test
