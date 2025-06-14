@@ -330,6 +330,7 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.exp_fwd(T){ .x = self.data, .y = self.data });
         }
 
+        /// In-place element-wise scaling: x = ax
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });
         }
@@ -533,18 +534,16 @@ pub fn NDArray(comptime T: type) type {
             values: Self,
             offsets: ?[]usize, // offsets taken, so they dont have to be recomputed
             device: DeviceReference, // reference for both offsets and values
-            allocator: std.mem.Allocator,
             pub fn deinit(self: *GatherResult) void {
                 self.values.deinit(self.device);
                 if (self.offsets) |o|
-                    self.allocator.free(o); // TODO: cache?
+                    self.device.mem_free(o); // TODO: cache?
             }
         };
 
         // TODO: proper gather backend kernel.
         pub fn gather(
             self: Self,
-            allocator: std.mem.Allocator,
             device: DeviceReference,
             opts: GatherOptions,
         ) !GatherResult {
@@ -557,8 +556,8 @@ pub fn NDArray(comptime T: type) type {
             }
             // to-owned-slice allows us to properly free regardless of exit, otherwise
             // we could try to free on error and because the user didn't ask for offsets
-            var offsets = try allocator.alloc(usize, indices.data.len); // TODO: cache?
-            defer if (!opts.return_offsets) allocator.free(offsets); // TODO: cache?
+            var offsets = try device.mem_alloc(usize, indices.data.len); // TODO: cache?
+            defer if (!opts.return_offsets) device.mem_free(offsets); // TODO: cache?
 
             const values = try Self.empty(indices.shape.slice(), device);
             const idx_strides = indices.shape.strides();
@@ -581,7 +580,6 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .values = values,
                 .offsets = if (opts.return_offsets) offsets else null,
-                .allocator = allocator,
                 .device = device,
             };
         }
@@ -633,7 +631,7 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.data.len % out.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
 
-            const scratch: []T = outer: {
+            const scratch_mem: []T = outer: {
                 const delta = self.shape.len - out.shape.len;
                 // we need enough scratch memory for at least the first reduce
                 // but if that yields the same size as the out.shape, then we know only
@@ -658,7 +656,7 @@ pub fn NDArray(comptime T: type) type {
                 .x_shape = self.shape.slice(),
                 .y = out.data,
                 .y_shape = out.shape.slice(),
-                .scratch = scratch,
+                .scratch = scratch_mem,
                 .alpha = config.alpha,
                 .beta = config.beta,
             });
@@ -742,7 +740,6 @@ pub fn NDArray(comptime T: type) type {
                     self.shape.get(1),
                     self.shape.get(0),
                 }),
-                .vies = false,
             };
         }
     };
@@ -1325,7 +1322,7 @@ test "NDArray.gather" {
     var index = try NDArray(usize).init(&index_data, &index_shape, cpu.reference());
     defer index.deinit(cpu.reference());
 
-    var output = try input.gather(std.testing.allocator, cpu.reference(), .{
+    var output = try input.gather(cpu.reference(), .{
         .indices = index,
         .dim = 1,
         .return_offsets = true,
