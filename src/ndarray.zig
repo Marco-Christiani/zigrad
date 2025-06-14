@@ -90,7 +90,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
-            log.debug("{s} shape: {}", .{ if (msg) |n| n else "", self.shape.slice() });
+            log.debug("{s} shape: {d}", .{ if (msg) |n| n else "", self.shape.slice() });
         }
 
         pub fn reshape(self: *const Self, new_shape: []const usize) Shape {
@@ -177,7 +177,7 @@ pub fn NDArray(comptime T: type) type {
                 return error.RangeOutOfBounds;
             }
 
-            const stride = try self.get_stride(dim);
+            const stride = self.get_stride(dim);
             const start_index = start * stride;
             const slice_size = (end - start) * stride;
 
