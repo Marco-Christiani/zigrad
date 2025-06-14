@@ -227,7 +227,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn get_label(self: *const Self) ?[]const u8 {
-            return self.node.label.get_label();
+            return self.node.label.constSlice();
         }
 
         pub fn set_label(self: *Self, new_label: []const u8) void {
@@ -432,8 +432,8 @@ pub fn NDTensor(comptime T: type) type {
             log.debug("{s}{s} data shape: {d} grad shape: {?d}", .{
                 if (msg) |n| n else "",
                 if (self.get_label()) |l| l else "",
-                self.data.shape.shape,
-                if (self.grad) |g| g.shape.shape else null,
+                self.data.shape.slice(),
+                if (self.grad) |g| g.shape.slice() else null,
             });
         }
 
@@ -1234,30 +1234,30 @@ pub fn NDTensor(comptime T: type) type {
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes (non-standard layout)
         /// Prints to stderr using `std.debug.print` for alternatives see `print_to_writer`
         pub fn print_arrows(self: *Self) void {
-            var children = self.child_iterator() orelse return;
+            var children = self.node.child_iterator() orelse return;
             while (children.next()) |elem| {
                 std.debug.print("{?s}<-{?s}", .{ self.get_label(), elem.get_label() });
                 const symbol = blk: {
-                    const op = self.op orelse break :blk ": ?";
+                    const op = self.op orelse break :blk "?";
                     switch (op) {
-                        Op.ADD => break :blk ": +",
-                        Op.SUB => break :blk ": -",
-                        Op.MUL => break :blk ": x",
-                        Op.DIV => break :blk ": /",
-                        Op.SUM => break :blk ": ++",
-                        Op.MATVEC => break :blk ": Ax",
+                        Op.ADD => break :blk "+",
+                        Op.SUB => break :blk "-",
+                        Op.MUL => break :blk "x",
+                        Op.DIV => break :blk "/",
+                        Op.SUM => break :blk "++",
+                        Op.MATVEC => break :blk "Ax",
                         Op.MATMUL_AB,
                         Op.MATMUL_AtB,
                         Op.MATMUL_ABt,
                         Op.MATMUL_AtBt,
-                        => break :blk ": AB",
-                        else => @panic("Unsupported op " ++ @tagName(self.op)),
+                        => break :blk "AB",
+                        else => |o| break :blk @tagName(o),
                     }
                 };
-                std.debug.print("{?s}\n", .{symbol});
+                std.debug.print(": {?s}\n", .{symbol});
             }
-            var next_children = self.child_iterator() orelse return;
-            while (next_children.next()) |elem| elem.print_arrows();
+            var next_children = self.node.child_iterator() orelse return;
+            while (next_children.next()) |elem| elem.upcast(Self).print_arrows();
         }
     };
 }
