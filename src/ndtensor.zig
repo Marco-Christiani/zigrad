@@ -184,10 +184,16 @@ pub fn NDTensor(comptime T: type) type {
             @compileError("Not implemented");
         }
 
-        pub fn _unsqueeze(self: *Self) !*Self {
-            try self.data.shape._unsqueeze();
-            if (self.grad) |g| try g.shape._unsqueeze();
-            return self;
+        /// In-place unsqueeze, does not provide a backward.
+        pub fn _unsqueeze(self: *Self) void {
+            self.data.shape._unsqueeze();
+            if (self.grad) |*g| g.shape._unsqueeze();
+        }
+
+        /// In-place squeeze, does not provide a backward.
+        pub fn _squeeze(self: *Self) void {
+            self.data.shape._squeeze();
+            if (self.grad) |*g| g.shape._squeeze();
         }
 
         pub fn setup_grad(self: *Self, fill_value: ?T) !void {
@@ -227,7 +233,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn get_label(self: *const Self) ?[]const u8 {
-            return self.node.label.get_label();
+            return self.node.label.constSlice();
         }
 
         pub fn set_label(self: *Self, new_label: []const u8) void {
@@ -432,8 +438,8 @@ pub fn NDTensor(comptime T: type) type {
             log.debug("{s}{s} data shape: {d} grad shape: {?d}", .{
                 if (msg) |n| n else "",
                 if (self.get_label()) |l| l else "",
-                self.data.shape.shape,
-                if (self.grad) |g| g.shape.shape else null,
+                self.data.shape.slice(),
+                if (self.grad) |g| g.shape.slice() else null,
             });
         }
 
@@ -446,20 +452,19 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const ReshapeBwd = struct {
-                fn callback(y: *Self, children: *Node.Children) !void {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
                     const x = children.get_bwd_upcast(Self, 0) orelse return;
                     const x_grad = try x.ensure_grad(0);
                     y.assume_grad()._reshape(x.data.shape.slice());
-                    try x_grad._add(y.assume_grad().*);
+                    try x_grad._add(y.assume_grad().*, y.device);
                 }
             };
 
+            var result = try self.data.copy(self.device);
+            result._reshape(new_shape);
+
             return try create_dependent(ReshapeBwd, .{
-                .data = .{
-                    .data = try self.data.copy(self.device),
-                    .shape = self.data.shape.reshape(new_shape),
-                    .view = false,
-                },
+                .data = result,
                 .children = &.{&self.node},
                 .gb = self.node.gb,
                 .device = self.device,
@@ -483,7 +488,7 @@ pub fn NDTensor(comptime T: type) type {
                 }
             };
 
-            return create_dependent(TransposeBwd, .{
+            return try create_dependent(TransposeBwd, .{
                 .data = try self.data.transpose(self.device),
                 .children = &.{&self.node},
                 .device = self.device,
@@ -905,6 +910,56 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
+        /// Element-wise pow.
+        pub fn pow(self: *Self, exponent: T) !*Self {
+            const PowBwd = struct {
+                exp: T,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    y.device.dispatch(opspec.pow_bwd(T){
+                        .x = x.get_data(),
+                        .x_g = try x.ensure_grad_data(0),
+                        .exp = ctx.exp,
+                        .y_g = y.assume_grad_data(),
+                        .eps = settings.eps,
+                    });
+                }
+            };
+
+            return create_dependent(PowBwd, .{
+                .data = try self.data.pow(exponent, self.device),
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{ .exp = exponent },
+                .op = .POW,
+            });
+        }
+
+        /// Differentiable element-wise square root.
+        pub fn sqrt(self: *Self) !*Self {
+            const SqrtBwd = struct {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    y.device.dispatch(opspec.sqrt_bwd(T){
+                        .x = x.get_data(),
+                        .x_g = try x.ensure_grad_data(0),
+                        .y_g = y.assume_grad_data(),
+                        .eps = settings.eps,
+                    });
+                }
+            };
+
+            return create_dependent(SqrtBwd, .{
+                .data = try self.data.sqrt(self.device),
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{},
+            });
+        }
+
         const BmmOpts = struct {
             trans_a: bool = false,
             trans_b: bool = false,
@@ -1231,33 +1286,201 @@ pub fn NDTensor(comptime T: type) type {
         //    });
         //}
 
+        pub fn gather(self: *Self, indices: NDArray(usize), dim: usize) !*Self {
+            var gather_result = try self.data.gather(self.device, .{
+                .indices = indices,
+                .dim = dim,
+                .return_offsets = self.requires_grad(),
+            });
+            defer if (!self.requires_grad()) gather_result.deinit();
+
+            const GatherBwd = struct {
+                offsets: []usize,
+                dim: usize,
+                src_shape: Shape,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    defer y.device.mem_free(ctx.offsets);
+
+                    const input = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_output = y.assume_grad_data();
+                    const grad_input = try input.ensure_grad_data(0);
+
+                    // Accumulate output grads back to input at gathered positions
+                    y.device.dispatch(opspec.scatter_add(T){
+                        .src = grad_output,
+                        .offsets = ctx.offsets,
+                        .dst = grad_input,
+                    });
+                }
+            };
+
+            return create_dependent(GatherBwd, .{
+                .data = gather_result.values,
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{
+                    .offsets = if (self.requires_grad())
+                        gather_result.offsets.?
+                    else
+                        &.{},
+                    .dim = dim,
+                    .src_shape = Shape.init(self.get_shape()),
+                },
+            });
+        }
+
+        /// Differentiable scatter with additive aggregation: dst[indices[i]] += src[i]
+        pub fn scatter_add(src: *Self, offsets: []const usize, dst_shape: []const usize) !*Self {
+            std.debug.assert(src.data.size() == offsets.len);
+
+            const ScatterAddBwd = struct {
+                offsets: []usize,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    defer y.device.mem_free(ctx.offsets);
+
+                    const src_tensor = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_output = y.assume_grad_data();
+                    const grad_src = try src_tensor.ensure_grad_data(0);
+
+                    // Gather gradients from scattered positions
+                    // take to invert scatter_add
+                    src_tensor.device.mem_take(T, grad_output, ctx.offsets, grad_src);
+                }
+            };
+
+            var output = try DataType.zeros(dst_shape, src.device);
+            src.data.scatter_add(offsets, &output, src.device);
+
+            const offsets_copy = try src.device.mem_dupe(usize, offsets);
+
+            return create_dependent(ScatterAddBwd, .{
+                .data = output,
+                .children = &.{&src.node},
+                .device = src.device,
+                .gb = src.node.gb,
+                .callback = .{
+                    .offsets = offsets_copy,
+                },
+                .op = .SCATTER_ADD,
+            });
+        }
+
+        /// Select complete rows/slices along a dimension using 1D indices
+        pub fn index_select(self: *Self, dim: usize, indices: []const usize) !*Self {
+            std.debug.assert(dim < self.data.shape.len);
+
+            const IndexSelectBwd = struct {
+                dim: usize,
+                src_shape: Shape,
+                indices_data: []usize,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    // defer ctx.allocator.free(ctx.indices_data);
+                    defer y.device.mem_free(ctx.indices_data);
+
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    const x_grad = try x.ensure_grad_data(0);
+                    const y_grad = y.assume_grad_data();
+
+                    // Calculate strides
+                    var stride: usize = 1;
+                    for (ctx.dim + 1..ctx.src_shape.len) |i| {
+                        stride *= ctx.src_shape.get(i);
+                    }
+
+                    // Scatter gradients back to original positions
+                    for (ctx.indices_data, 0..) |src_idx, dst_idx| {
+                        const src_start = src_idx * stride;
+                        const dst_start = dst_idx * stride;
+
+                        y.device.dispatch(opspec.add(T){
+                            .x = y_grad[dst_start .. dst_start + stride],
+                            .y = x_grad[src_start .. src_start + stride],
+                            .z = x_grad[src_start .. src_start + stride],
+                        });
+                    }
+                }
+            };
+
+            const n_indices = indices.len;
+            const src_shape = self.data.shape;
+
+            // Calculate output shape
+            var out_shape_array: [8]usize = undefined;
+            for (src_shape.slice(), 0..) |size, i| {
+                out_shape_array[i] = if (i == dim) n_indices else size;
+            }
+            const out_shape = out_shape_array[0..src_shape.len];
+
+            // Stride for dim selecting along
+            var stride: usize = 1;
+            for (dim + 1..src_shape.len) |i| stride *= src_shape.get(i);
+
+            // Allocate output
+            const total_elements = Shape.slice_size(out_shape);
+            const out_data = try self.device.mem_alloc(T, total_elements);
+            errdefer self.device.mem_free(out_data);
+
+            // Copy data
+            const src_data = self.get_data();
+            for (indices, 0..) |src_idx, dst_idx| {
+                const src_start = src_idx * stride;
+                const dst_start = dst_idx * stride;
+
+                self.device.mem_copy(T, src_data[src_start .. src_start + stride], out_data[dst_start .. dst_start + stride]);
+            }
+
+            // Store indices for backward pass
+            // const indices_copy = try self.node.gb.allocator.dupe(usize, indices);
+            const indices_copy = try self.device.mem_dupe(usize, indices);
+
+            return try create_dependent(IndexSelectBwd, .{
+                .data = .{
+                    .data = out_data,
+                    .shape = Shape.init(out_shape),
+                },
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{
+                    .dim = dim,
+                    .src_shape = src_shape,
+                    .indices_data = indices_copy,
+                },
+                .op = .INDEX_SELECT,
+            });
+        }
+
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes (non-standard layout)
         /// Prints to stderr using `std.debug.print` for alternatives see `print_to_writer`
         pub fn print_arrows(self: *Self) void {
-            var children = self.child_iterator() orelse return;
+            var children = self.node.child_iterator() orelse return;
             while (children.next()) |elem| {
                 std.debug.print("{?s}<-{?s}", .{ self.get_label(), elem.get_label() });
                 const symbol = blk: {
-                    const op = self.op orelse break :blk ": ?";
+                    const op = self.op orelse break :blk "?";
                     switch (op) {
-                        Op.ADD => break :blk ": +",
-                        Op.SUB => break :blk ": -",
-                        Op.MUL => break :blk ": x",
-                        Op.DIV => break :blk ": /",
-                        Op.SUM => break :blk ": ++",
-                        Op.MATVEC => break :blk ": Ax",
+                        Op.ADD => break :blk "+",
+                        Op.SUB => break :blk "-",
+                        Op.MUL => break :blk "x",
+                        Op.DIV => break :blk "/",
+                        Op.SUM => break :blk "++",
+                        Op.MATVEC => break :blk "Ax",
                         Op.MATMUL_AB,
                         Op.MATMUL_AtB,
                         Op.MATMUL_ABt,
                         Op.MATMUL_AtBt,
-                        => break :blk ": AB",
-                        else => @panic("Unsupported op " ++ @tagName(self.op)),
+                        => break :blk "AB",
+                        else => |o| break :blk @tagName(o),
                     }
                 };
-                std.debug.print("{?s}\n", .{symbol});
+                std.debug.print(": {?s}\n", .{symbol});
             }
-            var next_children = self.child_iterator() orelse return;
-            while (next_children.next()) |elem| elem.print_arrows();
+            var next_children = self.node.child_iterator() orelse return;
+            while (next_children.next()) |elem| elem.upcast(Self).print_arrows();
         }
     };
 }
@@ -1925,7 +2148,7 @@ test "tensor/Graph/subset" {
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
@@ -1968,7 +2191,7 @@ test "tensor/Graph/getter-setter" {
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
@@ -1994,6 +2217,62 @@ test "tensor/Graph/getter-setter" {
         try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1, 1 }, t2.get_data());
     }
 
+}
+
+test "tensor/pow" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    const Tensor = NDTensor(f32);
+
+    const x = try Tensor.from_slice(device, &.{2, 3, 0, 1}, null, opts);
+    defer x.deinit();
+
+    const out = try x.pow(2);
+    defer out.deinit();
+    try out.backward();
+
+    try std.testing.expectEqualDeep(&[_]f32{4, 9, 0, 1}, out.data.data);
+    try std.testing.expectEqualDeep(&[_]f32{4, 6, 0, 2}, x.grad.?.data);
+}
+
+test "tensor/sqrt" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    const Tensor = NDTensor(f32);
+
+    const x = try Tensor.from_slice(device, &.{4, 9, 16, 1}, null, opts);
+    defer x.deinit();
+
+    const out = try x.sqrt_();
+    defer out.deinit();
+
+    try out.backward();
+
+    try std.testing.expectEqualSlices(f32, &[_]f32{2, 3, 4, 1}, out.get_data());
+    // d/dx[sqrt(x)] = 1/(2*sqrt(x))
+    try std.testing.expectEqualSlices(f32, &[_]f32{0.25, 1.0/6.0, 0.125, 0.5}, x.assume_grad_data());
 }
 
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
