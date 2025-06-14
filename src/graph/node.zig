@@ -430,7 +430,7 @@ const ClosurePointer = struct {
             pub fn impl(_ptr: *anyopaque, allocator: std.mem.Allocator) void {
                 allocator.destroy(@ptrCast(@alignCast(_ptr)));
             }
-        }.free;
+        }.impl;
         return .{ .held = ptr, .free = free };
     }
     fn deinit(self: *ClosurePointer, allocator: std.mem.Allocator) void {
