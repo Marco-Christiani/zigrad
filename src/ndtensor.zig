@@ -1286,6 +1286,43 @@ pub fn NDTensor(comptime T: type) type {
         //    });
         //}
 
+        /// Differentiable scatter with additive aggregation: dst[indices[i]] += src[i]
+        pub fn scatter_add(src: *Self, offsets: []const usize, dst_shape: []const usize) !*Self {
+            std.debug.assert(src.data.size() == offsets.len);
+
+            const ScatterAddBwd = struct {
+                offsets: []usize,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    defer y.device.mem_free(ctx.offsets);
+
+                    const src_tensor = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_output = y.assume_grad_data();
+                    const grad_src = try src_tensor.ensure_grad_data(0);
+
+                    // Gather gradients from scattered positions
+                    // take to invert scatter_add
+                    src_tensor.device.mem_take(T, grad_output, ctx.offsets, grad_src);
+                }
+            };
+
+            var output = try DataType.zeros(dst_shape, src.device);
+            src.data.scatter_add(offsets, &output, src.device);
+
+            const offsets_copy = try src.device.mem_dupe(usize, offsets);
+
+            return create_dependent(ScatterAddBwd, .{
+                .data = output,
+                .children = &.{&src.node},
+                .device = src.device,
+                .gb = src.node.gb,
+                .callback = .{
+                    .offsets = offsets_copy,
+                },
+                .op = .SCATTER_ADD,
+            });
+        }
+
         /// Prints dynamic compuation graph in d2 format with ops as and operands as nodes (non-standard layout)
         /// Prints to stderr using `std.debug.print` for alternatives see `print_to_writer`
         pub fn print_arrows(self: *Self) void {

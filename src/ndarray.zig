@@ -616,6 +616,25 @@ pub fn NDArray(comptime T: type) type {
             };
         }
 
+        /// Scatter with additive aggregation: dst[indices[i]] += src[i]
+        pub fn scatter_add(
+            /// Source values
+            src: Self,
+            /// Flat scatter offsets
+            offsets: []const usize,
+            /// Destination
+            dst: *Self,
+            device: DeviceReference,
+        ) void {
+            std.debug.assert(offsets.len == src.size());
+
+            device.dispatch(opspec.scatter_add(T){
+                .src = src.data,
+                .offsets = offsets,
+                .dst = dst.data,
+            });
+        }
+
         /// COM
         pub fn take(self: Self, offsets: []const usize, device: DeviceReference) !Self {
             const result = try Self.empty(&.{offsets.len}, device);
