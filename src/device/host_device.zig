@@ -1,6 +1,8 @@
 //! BLAS ops for host device, CPU or Apple Silicon.
 //! Important: strides are assumed to be 1 for many ops now.
 //! This assumption is fine until slicing support comes along.
+//! Some elementwise ops are not numerically stable, check the code.
+//! Open an issue/PR if you need stable variants.
 const std = @import("std");
 pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
@@ -212,6 +214,64 @@ pub fn clip_nrm2(self: *const Self, T: type, p: opspec.clip_nrm2(T)) void {
 
 /////////////////////////////////
 // non-linear ops
+
+/// NOTE: Unstable
+/// Forward pow implementation $y = x^\text{exp}$
+pub fn pow_fwd(_: *const Self, T: type, p: opspec.pow_fwd(T)) void {
+    // TODO: Stable impl
+    // TODO: Specialized impls
+    const exp = p.exp;
+    for (p.x, p.y) |x, *y| y.* = std.math.pow(T, x, exp);
+}
+
+/// In-place forward pow implementation x = x^exp
+pub fn pow_fwd_(_: *const Self, T: type, p: opspec.pow_fwd_(T)) void {
+    for (p.x) |*x_val| x_val.* = std.math.pow(T, x_val.*, p.exp);
+}
+
+/// Backward pow implementation: x_g += exp * x^(exp-1) * y_g
+/// Stable.
+pub fn pow_bwd(_: *const Self, T: type, p: opspec.pow_bwd(T)) void {
+    // TODO: Reorder. Specialized impls
+    const exp = p.exp;
+    const expm1 = p.exp - 1;
+    const eps = p.eps;
+    for (p.x, p.x_g, p.y_g) |x, *x_g, y_g| {
+        if (x < eps) {
+            x_g.* += 0.0;
+        } else {
+            x_g.* += exp * std.math.pow(T, x, expm1) * y_g;
+        }
+    }
+}
+
+// Forward square root implementation
+pub fn sqrt_fwd(_: *const Self, T: type, p: opspec.sqrt_fwd(T)) void {
+    for (p.x, p.y) |x_val, *y_val| {
+        y_val.* = std.math.sqrt(x_val);
+    }
+}
+
+/// In-place forward square root implementation: $x = \sqrt x$
+pub fn sqrt_fwd_(_: *const Self, T: type, p: opspec.sqrt_fwd_(T)) void {
+    for (p.x) |*x_val| x_val.* = std.math.sqrt(x_val.*);
+}
+
+/// Backward square root implementation
+/// Stable. Uses subgradient for $\x_i < \epsilon$
+pub fn sqrt_bwd(_: *const Self, T: type, p: opspec.sqrt_bwd(T)) void {
+    const eps = p.eps;
+    for (p.x, p.x_g, p.y_g) |x_val, *x_g_val, y_g_val| {
+        // TODO: Reorder. Specialized impls
+        if (x_val < eps) {
+            // Subgradient
+            x_g_val.* += 0.0;
+        } else {
+            // d/dx(sqrt(x)) = 1/(2*sqrt(x)) = 0.5 / sqrt(x)
+            x_g_val.* += 0.5 / std.math.sqrt(x_val) * y_g_val;
+        }
+    }
+}
 
 pub fn exp_fwd(_: *const Self, T: type, p: opspec.exp_fwd(T)) void {
     var i: usize = 0;
@@ -711,4 +771,94 @@ fn _elwise_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype)
 fn _elwise_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == z.len);
     for (0..z.len) |j| z[j] = op(x[j], y);
+}
+
+// pub fn scatter_add_gcn(_: *const Self, T: type, p: opspec.scatter_add(T)) void {
+//     const f = switch (T) {
+//         f32 => c.vDSP_vadd,
+//         f64 => c.vDSP_vaddD,
+//         else => @compileError("Unsupported type for scatter_add"),
+//     };
+//     for (0..p.indices.len) |edge_idx| {
+//         const target_node = p.indices[edge_idx];
+//         const src_offset = edge_idx * p.n_features;
+//         const dst_offset = target_node * p.n_features;
+//         f(
+//             p.src[src_offset .. src_offset + p.n_features].ptr,
+//             1,
+//             p.dst[dst_offset .. dst_offset + p.n_features].ptr,
+//             1,
+//             p.dst[dst_offset .. dst_offset + p.n_features].ptr,
+//             1,
+//             @intCast(p.n_features),
+//         );
+//     }
+// }
+
+pub fn scatter_add(_: *const Self, T: type, p: opspec.scatter_add(T)) void {
+    switch (builtin.target.os.tag) {
+        .macos => scatter_add_apple(T, p),
+        .linux => {
+            if (using_mkl) {
+                // TODO: cblas_?sctr maybe?
+                scatter_add_mkl(T, p);
+            } else {
+                // TODO: Native scatter add
+                scatter_add_vectorized(T, p);
+            }
+        },
+        else => {
+            // TODO: Native scatter add implementation
+            scatter_add_vectorized(T, p);
+        },
+    }
+}
+
+fn scatter_add_apple(T: type, p: opspec.scatter_add(T)) void {
+    var i: usize = 0;
+    const vector_size = if (T == f32) 16 else 8; // NEON/SVE vector width
+    const vadd = switch (T) {
+        f32 => c.vDSP_vadd,
+        f64 => c.vDSP_vaddD,
+        else => @compileError("Unsupported type for vDSP scatter_add"),
+    };
+
+    // Process vectorizable chunks when offsets allow
+    while (i + vector_size <= p.src.len) {
+        // Check if we can vectorize this chunk (consecutive or stride-pattern offsets)
+        var can_vectorize = true;
+        const base_offset = p.offsets[i];
+        for (i + 1..i + vector_size) |j| {
+            if (p.offsets[j] != base_offset + (j - i)) {
+                can_vectorize = false;
+                break;
+            }
+        }
+
+        // Accumulate
+        if (can_vectorize and base_offset + vector_size <= p.dst.len) {
+            // Vectorize
+            vadd(p.src[i..].ptr, 1, p.dst[base_offset..].ptr, 1, p.dst[base_offset..].ptr, 1, @intCast(vector_size));
+            i += vector_size;
+        } else {
+            // Scalar
+            p.dst[p.offsets[i]] += p.src[i];
+            i += 1;
+        }
+    }
+
+    // Remainder
+    while (i < p.src.len) : (i += 1) {
+        p.dst[p.offsets[i]] += p.src[i];
+    }
+}
+
+fn scatter_add_mkl(T: type, p: opspec.scatter_add(T)) void {
+    _ = p;
+    @compileError("Not implemented");
+}
+
+fn scatter_add_vectorized(T: type, p: opspec.scatter_add(T)) void {
+    _ = p;
+    @compileError("Not implemented");
 }

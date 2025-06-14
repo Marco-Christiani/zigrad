@@ -201,6 +201,71 @@ pub fn clip_nrm2(T: type) type {
 /////////////////
 // non-linear ops
 
+/// Forward pow: y = x^exp
+pub fn pow_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "pow_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        exp: T,
+        y: []T,
+    };
+}
+
+/// In-place forward pow: x = x^exp
+pub fn pow_fwd_(T: type) type {
+    return struct {
+        pub const __name__ = "pow_fwd_";
+        pub const __type__ = T;
+        x: []T,
+        exp: T,
+    };
+}
+
+/// Backward pow: x_g += exp * x^(exp-1) * y_g
+pub fn pow_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "pow_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+        exp: T,
+        y_g: []const T,
+        eps: f32,
+    };
+}
+
+/// Forward square root: $y = \sqrt{x}$
+pub fn sqrt_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "sqrt_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        y: []T,
+    };
+}
+
+/// In-place forward square root operation: $x = \sqrt{x}$
+pub fn sqrt_fwd_(T: type) type {
+    return struct {
+        pub const __name__ = "sqrt_fwd_";
+        pub const __type__ = T;
+        x: []T,
+    };
+}
+
+/// Backward square root: $x_g += 0.5 / \sqrt{x} * y_g$
+pub fn sqrt_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "sqrt_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+        y_g: []const T,
+        eps: f32,
+    };
+}
+
 pub fn exp_fwd(T: type) type {
     return struct {
         pub const __name__ = "exp_fwd";
@@ -435,5 +500,29 @@ pub fn max_along(T: type) type {
         x_shape: []const usize,
         y: []T,
         dim: usize,
+    };
+}
+
+// pub fn scatter_add(T: type) type {
+//     return struct {
+//         pub const __name__ = "scatter_add";
+//         pub const __type__ = T;
+//         /// Source values (n_edges, n_features)
+//         src: []const T,
+//         /// Target indices (n_edges)
+//         indices: []const usize,
+//         /// Destination (n_nodes, n_features)
+//         dst: []T,
+//         n_features: usize,
+//     };
+// }
+
+pub fn scatter_add(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_add";
+        pub const __type__ = T;
+        src: []const T,
+        offsets: []const usize,
+        dst: []T,
     };
 }
