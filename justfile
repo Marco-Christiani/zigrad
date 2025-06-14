@@ -1,7 +1,15 @@
 set unstable
 
 default:
-  @just mnist
+    @just gcn
+
+[script("bash")]
+gcn:
+    set -e
+    cd examples/gcn
+    # uv run ref/dataset.py
+    zig build -Doptimize=ReleaseFast
+    ZG_DATA_DIR=data zig-out/bin/main
 
 alias b := build
 alias bf := build-fast
