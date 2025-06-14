@@ -330,6 +330,38 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.exp_fwd(T){ .x = self.data, .y = self.data });
         }
 
+        /// Element-wise power operation: y = x^p
+        pub fn pow(self: Self, p: T, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.pow_fwd(T){ .x = self.data, .exp = p, .y = result.data });
+            return result;
+        }
+
+        /// In-place element-wise power operation: x = x^p
+        pub fn _pow(self: *Self, p: T, device: DeviceReference) void {
+            device.dispatch(opspec.pow_fwd_(T){
+                .x = self.data,
+                .exp = p,
+            });
+        }
+
+        /// Element-wise square root operation: y = sqrt(x)
+        pub fn sqrt(self: Self, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.sqrt_fwd(T){
+                .x = self.data,
+                .y = result.data,
+            });
+            return result;
+        }
+
+        /// In-place element-wise square root operation: x = sqrt(x)
+        pub fn _sqrt(self: *Self, device: DeviceReference) void {
+            device.dispatch(opspec.sqrt_fwd_(T){
+                .x = self.data,
+            });
+        }
+
         /// In-place element-wise scaling: x = ax
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });
