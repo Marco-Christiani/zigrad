@@ -910,6 +910,56 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
+        /// Element-wise pow.
+        pub fn pow(self: *Self, exponent: T) !*Self {
+            const PowBwd = struct {
+                exp: T,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    y.device.dispatch(opspec.pow_bwd(T){
+                        .x = x.get_data(),
+                        .x_g = try x.ensure_grad_data(0),
+                        .exp = ctx.exp,
+                        .y_g = y.assume_grad_data(),
+                        .eps = settings.eps,
+                    });
+                }
+            };
+
+            return create_dependent(PowBwd, .{
+                .data = try self.data.pow(exponent, self.device),
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{ .exp = exponent },
+                .op = .POW,
+            });
+        }
+
+        /// Differentiable element-wise square root.
+        pub fn sqrt(self: *Self) !*Self {
+            const SqrtBwd = struct {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    y.device.dispatch(opspec.sqrt_bwd(T){
+                        .x = x.get_data(),
+                        .x_g = try x.ensure_grad_data(0),
+                        .y_g = y.assume_grad_data(),
+                        .eps = settings.eps,
+                    });
+                }
+            };
+
+            return create_dependent(SqrtBwd, .{
+                .data = try self.data.sqrt(self.device),
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{},
+            });
+        }
+
         const BmmOpts = struct {
             trans_a: bool = false,
             trans_b: bool = false,
@@ -1930,7 +1980,7 @@ test "tensor/Graph/subset" {
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
@@ -1973,7 +2023,7 @@ test "tensor/Graph/getter-setter" {
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
@@ -1999,6 +2049,62 @@ test "tensor/Graph/getter-setter" {
         try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1, 1 }, t2.get_data());
     }
 
+}
+
+test "tensor/pow" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    const Tensor = NDTensor(f32);
+
+    const x = try Tensor.from_slice(device, &.{2, 3, 0, 1}, null, opts);
+    defer x.deinit();
+
+    const out = try x.pow(2);
+    defer out.deinit();
+    try out.backward();
+
+    try std.testing.expectEqualDeep(&[_]f32{4, 9, 0, 1}, out.data.data);
+    try std.testing.expectEqualDeep(&[_]f32{4, 6, 0, 2}, x.grad.?.data);
+}
+
+test "tensor/sqrt" {
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    const device = cpu.reference();
+
+    var graph = Graph.init(std.testing.allocator, .{});
+    defer graph.deinit();
+
+    const opts: TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    const Tensor = NDTensor(f32);
+
+    const x = try Tensor.from_slice(device, &.{4, 9, 16, 1}, null, opts);
+    defer x.deinit();
+
+    const out = try x.sqrt_();
+    defer out.deinit();
+
+    try out.backward();
+
+    try std.testing.expectEqualSlices(f32, &[_]f32{2, 3, 4, 1}, out.get_data());
+    // d/dx[sqrt(x)] = 1/(2*sqrt(x))
+    try std.testing.expectEqualSlices(f32, &[_]f32{0.25, 1.0/6.0, 0.125, 0.5}, x.assume_grad_data());
 }
 
 // TODO: Fix memory freeing conundrum with gather() then dont use an arena here.;;
