@@ -50,6 +50,13 @@ pub fn NDArray(comptime T: type) type {
             device.mem_free(self.data);
         }
 
+        pub fn scratch(shape: []const usize, device: DeviceReference) !Self {
+            const _shape = Shape.init(shape);
+            const _size = _shape.size();
+            std.debug.assert(shape.len > 0 and _size > 0);
+            return .{ .data = try device.mem_scratch(T, _size), .shape = _shape };
+        }
+
         pub fn empty(shape: []const usize, device: DeviceReference) !Self {
             const _shape = Shape.init(shape);
             const _size = _shape.size();
