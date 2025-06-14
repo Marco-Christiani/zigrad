@@ -1286,6 +1286,51 @@ pub fn NDTensor(comptime T: type) type {
         //    });
         //}
 
+        pub fn gather(self: *Self, indices: NDArray(usize), dim: usize) !*Self {
+            var gather_result = try self.data.gather(self.device, .{
+                .indices = indices,
+                .dim = dim,
+                .return_offsets = self.requires_grad(),
+            });
+            defer if (!self.requires_grad()) gather_result.deinit();
+
+            const GatherBwd = struct {
+                offsets: []usize,
+                dim: usize,
+                src_shape: Shape,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    defer y.device.mem_free(ctx.offsets);
+
+                    const input = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_output = y.assume_grad_data();
+                    const grad_input = try input.ensure_grad_data(0);
+
+                    // Accumulate output grads back to input at gathered positions
+                    y.device.dispatch(opspec.scatter_add(T){
+                        .src = grad_output,
+                        .offsets = ctx.offsets,
+                        .dst = grad_input,
+                    });
+                }
+            };
+
+            return create_dependent(GatherBwd, .{
+                .data = gather_result.values,
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{
+                    .offsets = if (self.requires_grad())
+                        gather_result.offsets.?
+                    else
+                        &.{},
+                    .dim = dim,
+                    .src_shape = Shape.init(self.get_shape()),
+                },
+            });
+        }
+
         /// Differentiable scatter with additive aggregation: dst[indices[i]] += src[i]
         pub fn scatter_add(src: *Self, offsets: []const usize, dst_shape: []const usize) !*Self {
             std.debug.assert(src.data.size() == offsets.len);
@@ -1320,6 +1365,92 @@ pub fn NDTensor(comptime T: type) type {
                     .offsets = offsets_copy,
                 },
                 .op = .SCATTER_ADD,
+            });
+        }
+
+        /// Select complete rows/slices along a dimension using 1D indices
+        pub fn index_select(self: *Self, dim: usize, indices: []const usize) !*Self {
+            std.debug.assert(dim < self.data.shape.len);
+
+            const IndexSelectBwd = struct {
+                dim: usize,
+                src_shape: Shape,
+                indices_data: []usize,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    // defer ctx.allocator.free(ctx.indices_data);
+                    defer y.device.mem_free(ctx.indices_data);
+
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    const x_grad = try x.ensure_grad_data(0);
+                    const y_grad = y.assume_grad_data();
+
+                    // Calculate strides
+                    var stride: usize = 1;
+                    for (ctx.dim + 1..ctx.src_shape.len) |i| {
+                        stride *= ctx.src_shape.get(i);
+                    }
+
+                    // Scatter gradients back to original positions
+                    for (ctx.indices_data, 0..) |src_idx, dst_idx| {
+                        const src_start = src_idx * stride;
+                        const dst_start = dst_idx * stride;
+
+                        y.device.dispatch(opspec.add(T){
+                            .x = y_grad[dst_start .. dst_start + stride],
+                            .y = x_grad[src_start .. src_start + stride],
+                            .z = x_grad[src_start .. src_start + stride],
+                        });
+                    }
+                }
+            };
+
+            const n_indices = indices.len;
+            const src_shape = self.data.shape;
+
+            // Calculate output shape
+            var out_shape_array: [8]usize = undefined;
+            for (src_shape.slice(), 0..) |size, i| {
+                out_shape_array[i] = if (i == dim) n_indices else size;
+            }
+            const out_shape = out_shape_array[0..src_shape.len];
+
+            // Stride for dim selecting along
+            var stride: usize = 1;
+            for (dim + 1..src_shape.len) |i| stride *= src_shape.get(i);
+
+            // Allocate output
+            const total_elements = Shape.slice_size(out_shape);
+            const out_data = try self.device.mem_alloc(T, total_elements);
+            errdefer self.device.mem_free(out_data);
+
+            // Copy data
+            const src_data = self.get_data();
+            for (indices, 0..) |src_idx, dst_idx| {
+                const src_start = src_idx * stride;
+                const dst_start = dst_idx * stride;
+
+                self.device.mem_copy(T, src_data[src_start .. src_start + stride], out_data[dst_start .. dst_start + stride]);
+            }
+
+            // Store indices for backward pass
+            // const indices_copy = try self.node.gb.allocator.dupe(usize, indices);
+            const indices_copy = try self.device.mem_dupe(usize, indices);
+
+            return try create_dependent(IndexSelectBwd, .{
+                .data = .{
+                    .data = out_data,
+                    .shape = Shape.init(out_shape),
+                },
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{
+                    .dim = dim,
+                    .src_shape = src_shape,
+                    .indices_data = indices_copy,
+                },
+                .op = .INDEX_SELECT,
             });
         }
 
