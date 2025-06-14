@@ -184,10 +184,16 @@ pub fn NDTensor(comptime T: type) type {
             @compileError("Not implemented");
         }
 
-        pub fn _unsqueeze(self: *Self) !*Self {
-            try self.data.shape._unsqueeze();
-            if (self.grad) |g| try g.shape._unsqueeze();
-            return self;
+        /// In-place unsqueeze, does not provide a backward.
+        pub fn _unsqueeze(self: *Self) void {
+            self.data.shape._unsqueeze();
+            if (self.grad) |*g| g.shape._unsqueeze();
+        }
+
+        /// In-place squeeze, does not provide a backward.
+        pub fn _squeeze(self: *Self) void {
+            self.data.shape._squeeze();
+            if (self.grad) |*g| g.shape._squeeze();
         }
 
         pub fn setup_grad(self: *Self, fill_value: ?T) !void {
