@@ -41,6 +41,10 @@ pub const Op = enum {
     EXP,
     TRANSFER,
     CLAMP,
+    INDEX_SELECT,
+    SCATTER_ADD,
+    MASK,
+    SMCE,
 
     pub fn matmul_tag(trans_a: bool, trans_b: bool) Op {
         return if (!trans_a and !trans_b)
