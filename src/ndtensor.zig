@@ -452,20 +452,19 @@ pub fn NDTensor(comptime T: type) type {
         /// Copies. COM.
         pub fn reshape(self: *Self, new_shape: []const usize) !*Self {
             const ReshapeBwd = struct {
-                fn callback(y: *Self, children: *Node.Children) !void {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
                     const x = children.get_bwd_upcast(Self, 0) orelse return;
                     const x_grad = try x.ensure_grad(0);
                     y.assume_grad()._reshape(x.data.shape.slice());
-                    try x_grad._add(y.assume_grad().*);
+                    try x_grad._add(y.assume_grad().*, y.device);
                 }
             };
 
+            var result = try self.data.copy(self.device);
+            result._reshape(new_shape);
+
             return try create_dependent(ReshapeBwd, .{
-                .data = .{
-                    .data = try self.data.copy(self.device),
-                    .shape = self.data.shape.reshape(new_shape),
-                    .view = false,
-                },
+                .data = result,
                 .children = &.{&self.node},
                 .gb = self.node.gb,
                 .device = self.device,
@@ -489,7 +488,7 @@ pub fn NDTensor(comptime T: type) type {
                 }
             };
 
-            return create_dependent(TransposeBwd, .{
+            return try create_dependent(TransposeBwd, .{
                 .data = try self.data.transpose(self.device),
                 .children = &.{&self.node},
                 .device = self.device,
