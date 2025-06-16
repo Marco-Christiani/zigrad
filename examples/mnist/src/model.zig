@@ -141,9 +141,9 @@ pub fn FlattenLayer(comptime T: type) type {
             const x = children.get_bwd_upcast(Tensor, 0) orelse return;
             const x_grad = try x.ensure_grad(0);
             y.device.dispatch(opspec.add(T){
-                .x = x_grad.data,
+                .x = x_grad.get_data(),
                 .y = y.assume_grad_data(),
-                .z = x_grad.data,
+                .z = x_grad.get_data(),
             });
         }
     };

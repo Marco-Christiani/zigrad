@@ -8,6 +8,7 @@ const utils = @import("ndtensor/utils.zig");
 
 const Graph = zg.Graph;
 const Node = Graph.Node;
+const DeviceData = zg.device.DeviceData;
 
 pub const TensorOpts = @import("ndtensor/utils.zig").TensorOpts;
 pub const Op = @import("ndtensor/utils.zig").Op;
@@ -145,7 +146,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn backward(self: *Self) !void {
-            std.debug.assert(zg.rt_grad_enabled);
+            std.debug.assert(zg.runtime.grad_enabled);
             const graph = self.node.gb.promote();
             _ = try self.ensure_grad(1);
             try graph.backward(&self.node);
@@ -164,7 +165,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn get_size(self: *const Self) usize {
-            return self.data.data.len;
+            return self.data.size();
         }
 
         pub fn get_strides(self: *const Self) Shape.Strides {
@@ -172,7 +173,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn get_data(self: *const Self) []T {
-            return self.data.data;
+            return self.data.get_data();
         }
 
         pub fn get_dim(self: *const Self, i: usize) usize {
@@ -207,7 +208,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn assume_grad_data(self: *Self) []T {
-            return self.assume_grad().data;
+            return self.assume_grad().get_data();
         }
 
         // This function can allocate a gradient if one is not present.
@@ -223,7 +224,7 @@ pub fn NDTensor(comptime T: type) type {
         // This function can allocate a gradient if one is not present.
         pub fn ensure_grad_data(self: *Self, fill_value: ?T) ![]T {
             const grd = try self.ensure_grad(fill_value);
-            return grd.data;
+            return grd.get_data();
         }
 
         pub fn get_label(self: *const Self) ?[]const u8 {
@@ -323,8 +324,8 @@ pub fn NDTensor(comptime T: type) type {
 
             // Viewing tensors have gradients
             // independent of origin tensors.
-            if (self.grad) |*g| {
-                g.deinit(self.device);
+            if (self.grad != null) {
+                self.grad.?.deinit(self.device);
                 self.grad = null;
             }
 
@@ -358,9 +359,9 @@ pub fn NDTensor(comptime T: type) type {
             if (self.device.is_compatible(device))
                 return;
 
-            const data = try device.mem_alloc(T, self.data.data.len);
-            try to_device_impl(self.data.data, data, self.device, device);
-            self.device.mem_free(self.data.data);
+            const data = try device.mem_cache_alloc(T, self.get_size());
+            try to_device_impl(self.get_data(), data, self.device, device);
+            self.data.deinit(self.device);
             self.data.data = data;
             self.device = device;
         }
@@ -381,10 +382,10 @@ pub fn NDTensor(comptime T: type) type {
                 }
             };
 
-            const data = try device.mem_alloc(T, self.get_size());
-            errdefer device.mem_free(data);
+            const data = try device.mem_cache_alloc(T, self.get_size());
+            errdefer device.mem_cache_free(data);
 
-            try to_device_impl(self.get_data(), data, self.device, device);
+            try to_device_impl(self.get_data(), data.raw, self.device, device);
 
             return try create_dependent(ToDeviceBwd, .{
                 .data = .{
@@ -502,7 +503,7 @@ pub fn NDTensor(comptime T: type) type {
         /// Get is not a gradient tracked operation.
         pub fn get(self: *const Self, idx: usize) T {
             var tmp: [1]T = undefined;
-            self.device.mem_transfer(T, self.data.data[idx .. idx + 1], tmp[0..], .DtoH);
+            self.device.mem_transfer(T, self.data.data.raw[idx .. idx + 1], tmp[0..], .DtoH);
             return tmp[0];
         }
 
@@ -588,12 +589,11 @@ pub fn NDTensor(comptime T: type) type {
             const size = Shape.slice_size(tail);
 
             const raw_data = switch (status) {
-                .owned => try self.device.mem_dupe(T, self.get_data()[start..][0..size]),
-                .view => self.get_data()[start..][0..size],
+                .owned => try self.device.mem_cache_dupe(T, self.get_data()[start..][0..size]),
+                .view => DeviceData(T){ .raw = self.get_data()[start..][0..size], .ctx = 0 },
             };
-            errdefer {
-                if (status == .owned) self.device.mem_free(raw_data);
-            }
+            errdefer if (status == .owned)
+                self.device.mem_cache_free(raw_data);
 
             const tmp = try create_dependent(SubsetBwds, .{
                 .data = .{
@@ -634,14 +634,14 @@ pub fn NDTensor(comptime T: type) type {
             delta: f32 = settings.grad_clip_delta,
         };
 
-        pub fn _clip_grad_norm(self: *const Self, opts: ClipOptions) void {
-            self.grad.?._clip_norm(opts.max_norm, opts.delta, self.device);
+        pub fn _clip_grad_norm(self: *Self, opts: ClipOptions) void {
+            self.assume_grad()._clip_norm(opts.max_norm, opts.delta, self.device);
         }
 
         /// Direct modification. Clamps the underlying data, as with all in place ops you must know what you are doing.
         /// This operation is not tracked in the computation graph.
         /// *Will not notify you of an improper gradient calculation.*
-        pub fn _clamp(self: *const Self, vmin: T, vmax: T) void {
+        pub fn _clamp(self: *Self, vmin: T, vmax: T) void {
             self.data._clamp(vmin, vmax, self.device);
         }
 
@@ -1262,36 +1262,41 @@ pub fn NDTensor(comptime T: type) type {
     };
 }
 
+const TestOpts: zg.device.HostDevice.Options = .{
+    .max_pool_size = zg.constants.@"1Mb" / 2,
+};
+
 test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
     const T = f32;
     const Tensor = NDTensor(T);
 
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
-    const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-        .requires_grad = true,
-        .graph = &graph,
-    });
-    defer x.deinit();
+    {
+        const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
+            .requires_grad = true,
+            .graph = &graph,
+        });
+        defer x.deinit();
 
-    const y = try x.clamp(-1.0, 1.0);
-    defer y.deinit();
+        const y = try x.clamp(-1.0, 1.0);
+        defer y.deinit();
 
-    try y.backward();
+        try y.backward();
+        const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
+        const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
 
-    const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
-    const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
-
-    try std.testing.expectEqualSlices(T, expected_output, y.get_data());
-    try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
+        try std.testing.expectEqualSlices(T, expected_output, y.get_data());
+        try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
+    }
 }
 
 test "tensor/Graph/sum" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     var graph = Graph.init(std.testing.allocator, .{});
@@ -1310,7 +1315,7 @@ test "tensor/Graph/sum" {
 
     try std.testing.expectEqualSlices(f32, &.{10}, sum_result.get_data());
 
-    if (!zg.rt_grad_enabled) return error.GradNotEnabled;
+    if (!zg.runtime.grad_enabled) return error.GradNotEnabled;
 
     try sum_result.backward();
 
@@ -1318,7 +1323,7 @@ test "tensor/Graph/sum" {
 }
 
 test "tensor/NDTensor index, add, div" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1410,7 +1415,7 @@ test "tensor/NDTensor index, add, div" {
 }
 
 test "tensor/Graph/addback" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1441,7 +1446,7 @@ test "tensor/Graph/addback" {
 }
 
 test "tensor/Graph/mulback" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1468,12 +1473,12 @@ test "tensor/Graph/mulback" {
 
     try t3.backward();
 
-    try std.testing.expectEqualDeep(t2.data.data, t1.grad.?.data);
-    try std.testing.expectEqualDeep(t1.data.data, t2.grad.?.data);
+    try std.testing.expectEqualDeep(t2.get_data(), t1.assume_grad_data());
+    try std.testing.expectEqualDeep(t1.get_data(), t2.assume_grad_data());
 }
 
 test "tensor/Graph/moreback" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1507,8 +1512,8 @@ test "tensor/Graph/moreback" {
 
     try h.backward();
 
-    try std.testing.expectEqualSlices(f32, x.data.data, w.grad.?.data);
-    try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, b.grad.?.data);
+    try std.testing.expectEqualSlices(f32, x.get_data(), w.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, b.assume_grad_data());
 
     // 2 x 1
     const shape2 = &[_]usize{ 2, 1 };
@@ -1527,12 +1532,12 @@ test "tensor/Graph/moreback" {
 
     try h2.backward();
 
-    try std.testing.expectEqualSlices(f32, x.data.data, w.assume_grad_data());
+    try std.testing.expectEqualSlices(f32, x.get_data(), w.assume_grad_data());
     try std.testing.expect(std.mem.allEqual(f32, b.assume_grad_data(), 1));
 }
 
 test "tensor/Graph/divback" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     var graph = Graph.init(std.testing.allocator, .{});
@@ -1566,7 +1571,7 @@ test "tensor/Graph/divback" {
 }
 
 test "tensor/Graph/matmul_backward square" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1636,7 +1641,7 @@ test "tensor/Graph/matmul_backward square" {
 }
 
 test "tensor/Graph/matmul_backward non-square" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1684,8 +1689,8 @@ test "tensor/Graph/matmul_backward non-square" {
         try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 5, 7, 7, 9, 9, 17, 17, 19, 19, 21, 21 };
-        try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case2.grad.?.data);
-        try std.testing.expectEqualSlices(T, expected_grad_t2, t2.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case2.assume_grad_data());
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2.assume_grad_data());
         try t2.setup_grad(0);
     }
 
@@ -1700,8 +1705,8 @@ test "tensor/Graph/matmul_backward non-square" {
         try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
-        try std.testing.expectEqualSlices(T, expected_grad_t1, t1.grad.?.data);
-        try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case3.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1.assume_grad_data());
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case3.assume_grad_data());
         try t1.setup_grad(0);
     }
 
@@ -1719,13 +1724,13 @@ test "tensor/Graph/matmul_backward non-square" {
         try t3.backward();
         const expected_grad_t1 = &[_]T{ 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 2 };
         const expected_grad_t2 = &[_]T{ 5, 7, 9, 5, 7, 9, 17, 19, 21, 17, 19, 21 };
-        try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case4.grad.?.data);
-        try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case4.grad.?.data);
+        try std.testing.expectEqualSlices(T, expected_grad_t1, t1_case4.assume_grad_data());
+        try std.testing.expectEqualSlices(T, expected_grad_t2, t2_case4.assume_grad_data());
     }
 }
 
 test "tensor/Graph/matmul_backward" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1796,7 +1801,7 @@ test "tensor/Graph/matmul_backward" {
 }
 
 test "tensor/Graph/matvec_backward" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1832,7 +1837,7 @@ test "tensor/Graph/matvec_backward" {
 }
 
 test "tensor/Graph/dot_backward" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1864,7 +1869,7 @@ test "tensor/Graph/dot_backward" {
 
 
 test "tensor/inplace_add" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -1921,11 +1926,11 @@ test "tensor/inplace_add" {
 }
 
 test "tensor/Graph/subset" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
@@ -1964,11 +1969,11 @@ test "tensor/Graph/subset" {
 }
 
 test "tensor/Graph/getter-setter" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
-    
+
     var graph = Graph.init(std.testing.allocator, .{});
     defer graph.deinit();
 
@@ -2002,7 +2007,7 @@ test "tensor/Graph/getter-setter" {
 //    defer arena.deinit();
 //    const allocator = arena.allocator();
 //
-//    var cpu = zg.device.HostDevice.init();
+//    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
 //    defer cpu.deinit();
 //    const device = cpu.reference();
 //
@@ -2047,7 +2052,7 @@ test "tensor/Graph/getter-setter" {
 //    defer arena.deinit();
 //    const allocator = arena.allocator();
 //
-//    var cpu = zg.device.HostDevice.init();
+//    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
 //    defer cpu.deinit();
 //    const device = cpu.reference();
 //

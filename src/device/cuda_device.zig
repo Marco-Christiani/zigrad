@@ -5,7 +5,9 @@ const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
 const BinaryOp = @import("device_common.zig").BinaryOp;
-const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(CudaMalloc);
+const CachingAllocator = @import("../allocators.zig").CachingAllocator(CudaMalloc);
+const DeviceData = @import("../allocators.zig").DeviceData;
+const Error = @import("../allocators.zig").Error;
 const TransferDirection = @import("device_common.zig").TransferDirection;
 const build_options = @import("build_options");
 
@@ -36,7 +38,6 @@ const CUDA_COMPILE_ERROR =
 // Cuda Device Implementation
 
 const Self = @This();
-const Error = std.mem.Allocator.Error;
 pub const DeviceReference = @import("device_reference.zig");
 
 // keep these out of the user api
@@ -59,6 +60,12 @@ pub fn device_count() u32 {
 }
 
 pub fn init(device_number: u32) Self {
+    return init_advanced(device_number, .{}); // system defaults
+}
+
+// TODO: There is probably more to configure than the
+// caching allocator - make a unified optoins struct?
+pub fn init_advanced(device_number: u32, opts: CachingAllocator.Options) Self {
     const properties = cuda.init_device(device_number);
     const stream = cuda.init_stream();
     const cublas = cuda.init_cublas_handle(stream);
@@ -73,7 +80,7 @@ pub fn init(device_number: u32) Self {
             .cudnn = cudnn,
             .cutensor = cutensor,
         },
-        .cache = CachingAllocator.init(.{}),
+        .cache = CachingAllocator.init(opts),
         .capture = .{},
     };
 }

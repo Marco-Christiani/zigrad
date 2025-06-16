@@ -34,11 +34,12 @@ pub const Category = enum {
     sparse, // NDSparse
 };
 
-const device_root = @import("device");
+const device_root = @import("device.zig");
 pub const device = struct {
     pub const Error = device_root.Error;
     pub const HostDevice = device_root.HostDevice;
     pub const CudaDevice = device_root.CudaDevice;
+    pub const DeviceData = device_root.DeviceData;
 };
 pub const opspec = device_root.opspec;
 pub const DeviceReference = device_root.DeviceReference;
@@ -52,6 +53,8 @@ pub const SmaxType = device_root.SmaxType;
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
 /// E.g. in your main file `const zigrad_settings = .{ .gradEnabled = true };`
 pub const settings: Settings = if (@hasDecl(root, "zigrad_settings")) root.zigrad_settings else .{};
+
+pub const constants = @import("allocators.zig").constants;
 
 /// Default values
 pub const Settings = struct {
@@ -67,7 +70,15 @@ pub const Settings = struct {
 /// Global flag for enabling/disabling gradient tracking.
 /// NOTE: there should be an inference mode coming, there was a comptime disable flag to allow for
 /// more optimizations tbd if it will be added back in the future.
-pub var rt_grad_enabled: bool = true;
+pub const runtime = struct {
+    pub var grad_enabled: bool = true;
+    // TODO: At some point, I'd rather turn this into
+    // a system memory check to verify availability.
+    // Right now, 64 gigs until more research...
+    pub var max_pool_size: usize = constants.@"1Gb";
+    // TODO: Come up with a better default value.
+    pub var max_pool_count: usize = 8;
+};
 
 var prng = std.Random.DefaultPrng.init(settings.seed);
 /// currently only used for generating node labels when tracing the comp graph

@@ -103,7 +103,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 }
 
 fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {
-    zg.rt_grad_enabled = false; // disable gradient tracking
+    zg.runtime.grad_enabled = false; // disable gradient tracking
     var n: u32 = 0;
     var correct: f32 = 0;
     for (dataset.images, dataset.labels) |image, label| {
@@ -113,8 +113,8 @@ fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct
         for (0..batch_n) |j| {
             const start = j * 10;
             const end = start + 10;
-            const yh = std.mem.indexOfMax(T, output.data.data[start..end]);
-            const y = std.mem.indexOfMax(T, label.data.data[start..end]);
+            const yh = std.mem.indexOfMax(T, output.data.data.raw[start..end]);
+            const y = std.mem.indexOfMax(T, label.data.data.raw[start..end]);
             correct += if (yh == y) 1 else 0;
             n += 1;
         }

@@ -2,14 +2,17 @@
 //! Important: strides are assumed to be 1 for many ops now.
 //! This assumption is fine until slicing support comes along.
 const std = @import("std");
-pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
 const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
-const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
+const CachingAllocator = @import("../allocators.zig").CachingAllocator(DataHandler);
+const DeviceData = @import("../allocators.zig").DeviceData;
+const Error = @import("../allocators.zig").Error;
 const opspec = @import("opspec.zig");
+pub const Options = CachingAllocator.Options;
+pub const Block = @import("../allocators/pool.zig").Block;
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -27,36 +30,61 @@ const c = switch (builtin.target.os.tag) {
     else => @compileError("Unsupported os"),
 };
 
-pub const HostMalloc = struct {
-    pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
+const DataHandler = struct {
+    // zig fmt: off
+    pub fn map(_: DataHandler, size: usize) ![]u8 {
+        return @ptrCast(@alignCast(try std.posix.mmap(
+            null, size,
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .ANONYMOUS = true, .TYPE = .PRIVATE },
+            -1, 0
+        )));
+    }
+
+    pub fn unmap(_: DataHandler, buf: []u8) void {
+        std.posix.munmap(@ptrCast(@alignCast(buf)));
+    }
+
+    pub fn alloc(_: DataHandler, n: usize) ?[*]u8 {
         if (comptime builtin.is_test) {
             return std.testing.allocator.rawAlloc(n, @enumFromInt(@alignOf(usize)), @returnAddress());
         }
         return @ptrCast(@alignCast(std.c.malloc(n) orelse return null));
     }
-    pub fn raw_free(buf: []u8, _: *anyopaque) void {
+
+    pub fn free(_: DataHandler, buf: []u8) void {
         if (comptime builtin.is_test) {
             return std.testing.allocator.rawFree(buf, @enumFromInt(@alignOf(usize)), @returnAddress());
         }
         return std.c.free(buf.ptr);
     }
+
+    pub fn page_size(_: DataHandler) usize {
+        return std.heap.pageSize();
+    }
+    // zig fmt: on
 };
 
 /////////////////////////////
 // Host Device Implementation
 
 const Self = @This();
-const Error = CachingAllocator.Error;
 const DeviceReference = @import("device_reference.zig");
 
 cache: CachingAllocator,
 
 pub fn init() Self {
-    return .{ .cache = CachingAllocator.init(.{}) };
+    return init_advanced(.{}); // system defaults
+}
+
+// TODO: There is probably more to configure than the
+// caching allocator - make a unified optoins struct?
+pub fn init_advanced(opts: CachingAllocator.Options) Self {
+    return .{ .cache = CachingAllocator.init(.{}, opts) };
 }
 
 pub fn deinit(self: *Self) void {
-    self.cache.deinit(undefined);
+    self.cache.deinit();
     self.* = undefined;
 }
 
@@ -583,28 +611,49 @@ pub fn max_along(_: *const Self, T: type, p: opspec.max_along(T)) void {
     }
 }
 
-pub fn mem_alloc(self: *Self, T: type, n: usize) ![]T {
+pub fn mem_cache_alloc(self: *Self, T: type, n: usize) !DeviceData(T) {
+    if (n == 0) return .{ .raw = &.{}, .ctx = 0 };
+    return self.cache.alloc(T, n);
+}
+
+pub fn mem_cache_free(self: *Self, data: anytype) void {
+    if (data.raw.len == 0) return;
+    self.cache.free(data);
+}
+
+pub fn mem_cache_dupe(self: *Self, T: type, src: []const T) !DeviceData(T) {
+    const dst = try self.cache.alloc(T, src.len);
+    self.mem_copy(T, src, dst.raw);
+    return dst;
+}
+
+pub fn mem_alloc(_: *const Self, T: type, n: usize) ![]T {
     if (n == 0) return &.{};
-    return self.cache.alloc(T, n, undefined);
+
+    const ptr = DataHandler.alloc(undefined, n * @sizeOf(T)) orelse
+        return Error.DeviceOOM;
+
+    const tptr: [*]T = @ptrCast(@alignCast(ptr));
+    return tptr[0..n];
+}
+
+pub fn mem_free(_: *const Self, slice: anytype) void {
+    if (slice.len == 0) return;
+    DataHandler.free(undefined, std.mem.sliceAsBytes(slice));
 }
 
 pub fn mem_alloc_byte_mask(self: *Self, n: usize) ![]u8 {
     return self.mem_alloc(u8, @divFloor(n - 1, 8) + 1);
 }
 
-pub fn mem_free(self: *Self, slice: anytype) void {
-    if (slice.len == 0) return;
-    return self.cache.free(slice, undefined);
-}
-
 pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
-    const dst = try self.cache.alloc(T, src.len, undefined);
+    const dst = try self.mem_alloc(T, src.len);
     self.mem_copy(T, src, dst);
     return dst;
 }
 
 pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.cache.get_scratch(T, n, undefined);
+    return self.cache.scratch(T, n);
 }
 
 pub fn mem_copy(_: *const Self, T: type, src: []const T, dst: []T) void {
@@ -649,7 +698,7 @@ pub fn mem_take(_: *const Self, T: type, src: []const T, idxs: []const usize, ds
 }
 
 pub fn clear_cache(self: *Self) void {
-    self.cache.clear(undefined);
+    self.cache.clear();
 }
 
 pub fn sync(_: *const Self) void {}
