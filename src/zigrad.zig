@@ -75,9 +75,7 @@ pub const runtime = struct {
     // TODO: At some point, I'd rather turn this into
     // a system memory check to verify availability.
     // Right now, 64 gigs until more research...
-    pub var max_pool_size: usize = constants.@"1Gb";
-    // TODO: Come up with a better default value.
-    pub var max_pool_count: usize = 8;
+    pub var max_cache_size: usize = constants.@"1Gb" * 16;
 };
 
 var prng = std.Random.DefaultPrng.init(settings.seed);

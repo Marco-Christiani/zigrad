@@ -29,13 +29,14 @@ pub fn alloc(self: *ScratchAllocator, data_handler: anytype, T: type, n: usize) 
 }
 
 pub fn deinit(self: *ScratchAllocator, data_handler: anytype) void {
-    self.clear(data_handler);
+    self.reset(data_handler);
     self.* = undefined;
 }
 
-fn clear(self: *ScratchAllocator, data_handler: anytype) void {
+fn reset(self: *ScratchAllocator, data_handler: anytype) void {
     if (self.total != 0)
         data_handler.free(self.ptr[0..self.total]);
 
+    self.ptr = undefined;
     self.total = 0;
 }

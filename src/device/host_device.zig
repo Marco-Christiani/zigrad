@@ -12,7 +12,6 @@ const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
 const opspec = @import("opspec.zig");
 pub const Options = CachingAllocator.Options;
-pub const Block = @import("../allocators/pool.zig").Block;
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;

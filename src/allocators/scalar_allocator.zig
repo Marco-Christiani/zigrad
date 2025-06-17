@@ -80,7 +80,7 @@ pub fn free(self: *ScalarAllocator, data_handler: anytype, data: anytype) void {
     self.stack.appendAssumeCapacity(ptr);
 }
 
-pub fn clear(self: *ScalarAllocator, data_handler: anytype) void {
+pub fn reset(self: *ScalarAllocator, data_handler: anytype) void {
     data_handler.unmap(self.mem_buf);
     const capacity = self.stack.capacity;
     self.stack.deinit(allocator);
