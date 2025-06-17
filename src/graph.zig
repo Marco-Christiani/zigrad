@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const debug: bool = (builtin.mode == .Debug);
 
 const zg = @import("zigrad.zig");
-const ArenaUnmanaged = @import("graph/arena_unmanaged.zig");
+const ArenaUnmanaged = @import("allocators/arena_unmanaged.zig");
 pub const Node = @import("graph/node.zig");
 pub const Builder = @import("graph/builder.zig");
 
@@ -106,12 +106,17 @@ pub fn teardown(self: *Graph, root: *Node) void {
 
 const TensorOpts = @import("ndtensor.zig").TensorOpts;
 
+// limit memory usage for testing
+const TestOpts: zg.device.HostDevice.Options = .{
+    .max_pool_size = zg.constants.@"1Mb" / 2, // probably still excessive
+};
+
 comptime {
     std.testing.refAllDecls(@This());
 }
 
 test "Graph eager teardown reuse 1" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -126,7 +131,7 @@ test "Graph eager teardown reuse 1" {
         .graph = &graph,
     };
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     const Tensor = zg.NDTensor(f32);
 
@@ -167,7 +172,7 @@ test "Graph eager teardown reuse 1" {
 }
 
 test "Graph eager teardown reuse 2" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -182,7 +187,7 @@ test "Graph eager teardown reuse 2" {
         .graph = &graph,
     };
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     const Tensor = zg.NDTensor(f32);
 
@@ -220,7 +225,7 @@ test "Graph eager teardown reuse 2" {
 }
 
 test "Graph x*x" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -237,7 +242,7 @@ test "Graph x*x" {
 
     const Tensor = zg.NDTensor(f32);
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     const A = try Tensor.from_slice(device, &.{2.0}, null, opts);
     const B = try Tensor.from_slice(device, &.{3.0}, null, opts);
@@ -259,7 +264,7 @@ test "Graph x*x" {
 }
 
 test "Graph subgraphs/detach" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -274,7 +279,7 @@ test "Graph subgraphs/detach" {
 
     const Tensor = zg.NDTensor(f32);
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     // subgraph 1
     const a = try Tensor.from_slice(device, &.{2.0}, null, opts);

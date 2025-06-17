@@ -36,10 +36,10 @@ pub fn im2col(comptime T: type, input: NDArray(T), kernel_size: usize, stride: u
                     if (h_pad >= 0 and h_pad < @as(i64, @intCast(height)) and w_pad >= 0 and w_pad < @as(i64, @intCast(width))) {
                         const input_index = b * channels * height * width + c_im * height * width + @as(usize, @intCast(h_pad)) * width + @as(usize, @intCast(w_pad));
                         const col_index = b * col_height * col_width + c * col_width + h * output_width + w;
-                        col.data[col_index] = input.data[input_index];
+                        col.data.raw[col_index] = input.data.raw[input_index];
                     } else {
                         const col_index = b * col_height * col_width + c * col_width + h * output_width + w;
-                        col.data[col_index] = 0;
+                        col.data.raw[col_index] = 0;
                     }
                 }
             }
@@ -59,7 +59,7 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
     const output_width = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     var im = try NDArray(T).empty(input_shape, device);
-    @memset(im.data, 0);
+    @memset(im.get_data(), 0);
 
     const col_height = channels * kernel_size * kernel_size;
     const col_width = output_height * output_width;
@@ -77,7 +77,7 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
                     if (h_pad >= 0 and h_pad < @as(i64, @intCast(height)) and w_pad >= 0 and w_pad < @as(i64, @intCast(width))) {
                         const col_index = b * col_height * col_width + c * col_width + h * output_width + w;
                         const im_index = b * channels * height * width + c_im * height * width + @as(usize, @intCast(h_pad)) * width + @as(usize, @intCast(w_pad));
-                        im.data[im_index] += col.data[col_index];
+                        im.data.raw[im_index] += col.data.raw[col_index];
                     }
                 }
             }
@@ -87,8 +87,12 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
     return im;
 }
 
+const TestOpts: zg.device.HostDevice.Options = .{
+    .max_pool_size = zg.constants.@"1Mb",
+};
+
 test "im2col col2im" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
     const device = cpu.reference();
 
@@ -99,7 +103,7 @@ test "im2col col2im" {
     const padding: usize = 1;
     const dilation: usize = 1;
 
-    var input = try NDArray(f32).init(&input_data, &input_shape, device);
+    var input = try NDArray(f32).from_slice(&input_data, &input_shape, device);
     defer input.deinit(device);
 
     // im2col
@@ -118,12 +122,12 @@ test "im2col col2im" {
         6, 7, 8, 0, 10, 11, 12, 0,  14, 15, 16, 0,  0,  0,  0,  0,
     };
 
-    try std.testing.expectEqualSlices(f32, &expected_col_data, col.data);
+    try std.testing.expectEqualSlices(f32, &expected_col_data, col.get_data());
 
     // col2im
     var im = try col2im(f32, col, &input_shape, kernel_size, stride, padding, dilation, device);
     defer im.deinit(device);
 
     const exp_im_data = [_]f32{ 4, 12, 18, 16, 30, 54, 63, 48, 54, 90, 99, 72, 52, 84, 90, 64 };
-    try std.testing.expectEqualSlices(f32, &exp_im_data, im.data);
+    try std.testing.expectEqualSlices(f32, &exp_im_data, im.get_data());
 }

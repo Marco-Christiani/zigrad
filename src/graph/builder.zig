@@ -1,5 +1,5 @@
 const std = @import("std");
-const ArenaUnmanaged = @import("arena_unmanaged.zig");
+const ArenaUnmanaged = @import("../allocators/arena_unmanaged.zig");
 const zg = @import("../zigrad.zig");
 
 const thread_safe: bool = zg.settings.thread_safe;

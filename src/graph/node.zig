@@ -108,7 +108,7 @@ pub fn child_iterator(self: *Node) ?ChildIterator {
 // node is intruding upon. The API is thus read-only.
 
 pub fn requires_grad(self: *const Node) bool {
-    return self.flags.get(.requires_grad) and zg.rt_grad_enabled;
+    return self.flags.get(.requires_grad) and zg.runtime.grad_enabled;
 }
 
 pub fn acquired(self: *const Node) bool {
