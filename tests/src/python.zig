@@ -92,10 +92,10 @@ pub fn eval(expr: [:0]const u8, globals: *c.PyObject) !PyObject {
     return PyObject{ .obj = obj };
 }
 
-pub fn eval_float(expr: [:0]const u8, globals: *c.PyObject) !f64 {
+pub fn eval_f64(expr: [:0]const u8, globals: *c.PyObject) !f64 {
     const obj = try eval(expr, globals);
     defer obj.deinit();
-    return try obj.to_float();
+    return try obj.double();
 }
 
 pub fn eval_slice(comptime T: type, expr: [:0]const u8, globals: *c.PyObject) ![]const T {
@@ -137,7 +137,7 @@ pub const PyModule = struct {
     /// Evaluate a Python expression evaluating to a float-coerceable in this module's namespace
     pub fn eval_float(self: Self, expr: [:0]const u8) !f64 {
         const pyobj = try self.eval(expr);
-        return try pyobj.to_float();
+        return try pyobj.double();
     }
 
     /// Get a variable from this module by name
@@ -229,13 +229,17 @@ pub const PyObject = struct {
     //     .F32 => c.PyFloat_AsDouble(self.obj),
     //     .F64 => c.PyLong_AsDouble(self.obj),
     // };
-    pub fn to_float(self: PyObject) !f64 {
+    pub fn double(self: PyObject) !f64 {
         const result = c.PyFloat_AsDouble(self.obj);
         if (result == -1.0 and c.PyErr_Occurred() != null) {
             c.PyErr_Print();
             return PyError.PythonError;
         }
         return result;
+    }
+
+    pub fn float(self: PyObject, T: type) !T {
+        return @floatCast(try self.double());
     }
 };
 

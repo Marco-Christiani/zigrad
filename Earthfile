@@ -34,7 +34,7 @@ deps:
     DO +ZIG
     SAVE IMAGE zigrad-base:latest
 
-build-zig:
+build:
     ARG ZIGRAD_BACKEND=HOST
     FROM +deps
     COPY --dir src scripts ./
@@ -45,12 +45,13 @@ build-zig:
     CMD ["./zig-out/bin/main"]
     SAVE IMAGE zigrad:latest
 
-build-zig-tests:
-  FROM +build-zig
+test:
+  FROM +build
   ARG ZIGRAD_BACKEND=HOST
   COPY --dir tests ./
   ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
   RUN cd tests && zig build
+  RUN zig build test
   RUN ["tests/zig-out/bin/zg-test-exe"]
 
 
@@ -60,13 +61,6 @@ test-matrix:
     FOR backend IN $ZIGRAD_BACKENDS
         BUILD +test --ZIGRAD_BACKEND=$backend
     END
-
-test:
-    ARG ZIGRAD_BACKEND=HOST
-    FROM +build-zig --ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
-    COPY --dir tests ./
-    WORKDIR tests
-    RUN zig build test
 
 local-test:
     LOCALLY

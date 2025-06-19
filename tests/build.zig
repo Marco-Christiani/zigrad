@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
 fn build_python(b: *Build, target: Build.ResolvedTarget, optimize: OptimizeMode) !*Compile {
     const exe = b.addExecutable(.{
         .name = "zg-test-exe",
-        .root_source_file = b.path("src/harness_test.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
