@@ -2265,7 +2265,7 @@ test "tensor/sqrt" {
     const x = try Tensor.from_slice(device, &.{4, 9, 16, 1}, null, opts);
     defer x.deinit();
 
-    const out = try x.sqrt_();
+    const out = try x.sqrt();
     defer out.deinit();
 
     try out.backward();
