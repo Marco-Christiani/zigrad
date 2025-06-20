@@ -46,7 +46,7 @@ pub const ReduceType = device_root.ReduceType;
 pub const RandType = device_root.RandType;
 pub const SmaxType = device_root.SmaxType;
 
-// we should make this a build option like
+pub const has_cuda = build_options.enable_cuda;
 
 /// lib-wide default options that can be overridden by the root file.
 /// Note that these values can be overridden at call-site, this is just a way to configure global defaults.
@@ -62,6 +62,7 @@ pub const Settings = struct {
     backward_children_capacity: usize = 8,
     label_capacity: usize = 32,
     thread_safe: bool = !builtin.single_threaded,
+    eps: f32 = 1e-12,
 };
 
 /// Global flag for enabling/disabling gradient tracking.

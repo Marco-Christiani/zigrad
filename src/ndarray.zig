@@ -50,6 +50,13 @@ pub fn NDArray(comptime T: type) type {
             device.mem_free(self.data);
         }
 
+        pub fn scratch(shape: []const usize, device: DeviceReference) !Self {
+            const _shape = Shape.init(shape);
+            const _size = _shape.size();
+            std.debug.assert(shape.len > 0 and _size > 0);
+            return .{ .data = try device.mem_scratch(T, _size), .shape = _shape };
+        }
+
         pub fn empty(shape: []const usize, device: DeviceReference) !Self {
             const _shape = Shape.init(shape);
             const _size = _shape.size();
@@ -90,7 +97,7 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
-            log.debug("{s} shape: {}", .{ if (msg) |n| n else "", self.shape.slice() });
+            log.debug("{s} shape: {d}", .{ if (msg) |n| n else "", self.shape.slice() });
         }
 
         pub fn reshape(self: *const Self, new_shape: []const usize) Shape {
@@ -177,7 +184,7 @@ pub fn NDArray(comptime T: type) type {
                 return error.RangeOutOfBounds;
             }
 
-            const stride = try self.get_stride(dim);
+            const stride = self.get_stride(dim);
             const start_index = start * stride;
             const slice_size = (end - start) * stride;
 
@@ -323,6 +330,39 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.exp_fwd(T){ .x = self.data, .y = self.data });
         }
 
+        /// Element-wise power operation: y = x^p
+        pub fn pow(self: Self, p: T, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.pow_fwd(T){ .x = self.data, .exp = p, .y = result.data });
+            return result;
+        }
+
+        /// In-place element-wise power operation: x = x^p
+        pub fn _pow(self: *Self, p: T, device: DeviceReference) void {
+            device.dispatch(opspec.pow_fwd_(T){
+                .x = self.data,
+                .exp = p,
+            });
+        }
+
+        /// Element-wise square root operation: y = sqrt(x)
+        pub fn sqrt(self: Self, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.sqrt_fwd(T){
+                .x = self.data,
+                .y = result.data,
+            });
+            return result;
+        }
+
+        /// In-place element-wise square root operation: x = sqrt(x)
+        pub fn _sqrt(self: *Self, device: DeviceReference) void {
+            device.dispatch(opspec.sqrt_fwd_(T){
+                .x = self.data,
+            });
+        }
+
+        /// In-place element-wise scaling: x = ax
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });
         }
@@ -526,18 +566,16 @@ pub fn NDArray(comptime T: type) type {
             values: Self,
             offsets: ?[]usize, // offsets taken, so they dont have to be recomputed
             device: DeviceReference, // reference for both offsets and values
-            allocator: std.mem.Allocator,
             pub fn deinit(self: *GatherResult) void {
                 self.values.deinit(self.device);
                 if (self.offsets) |o|
-                    self.allocator.free(o); // TODO: cache?
+                    self.device.mem_free(o); // TODO: cache?
             }
         };
 
         // TODO: proper gather backend kernel.
         pub fn gather(
             self: Self,
-            allocator: std.mem.Allocator,
             device: DeviceReference,
             opts: GatherOptions,
         ) !GatherResult {
@@ -550,8 +588,8 @@ pub fn NDArray(comptime T: type) type {
             }
             // to-owned-slice allows us to properly free regardless of exit, otherwise
             // we could try to free on error and because the user didn't ask for offsets
-            var offsets = try allocator.alloc(usize, indices.data.len); // TODO: cache?
-            defer if (!opts.return_offsets) allocator.free(offsets); // TODO: cache?
+            var offsets = try device.mem_alloc(usize, indices.data.len); // TODO: cache?
+            defer if (!opts.return_offsets) device.mem_free(offsets); // TODO: cache?
 
             const values = try Self.empty(indices.shape.slice(), device);
             const idx_strides = indices.shape.strides();
@@ -574,9 +612,27 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .values = values,
                 .offsets = if (opts.return_offsets) offsets else null,
-                .allocator = allocator,
                 .device = device,
             };
+        }
+
+        /// Scatter with additive aggregation: dst[indices[i]] += src[i]
+        pub fn scatter_add(
+            /// Source values
+            src: Self,
+            /// Flat scatter offsets
+            offsets: []const usize,
+            /// Destination
+            dst: *Self,
+            device: DeviceReference,
+        ) void {
+            std.debug.assert(offsets.len == src.size());
+
+            device.dispatch(opspec.scatter_add(T){
+                .src = src.data,
+                .offsets = offsets,
+                .dst = dst.data,
+            });
         }
 
         /// COM
@@ -626,7 +682,7 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.data.len % out.data.len == 0);
             std.debug.assert(self.data.ptr != out.data.ptr);
 
-            const scratch: []T = outer: {
+            const scratch_mem: []T = outer: {
                 const delta = self.shape.len - out.shape.len;
                 // we need enough scratch memory for at least the first reduce
                 // but if that yields the same size as the out.shape, then we know only
@@ -651,7 +707,7 @@ pub fn NDArray(comptime T: type) type {
                 .x_shape = self.shape.slice(),
                 .y = out.data,
                 .y_shape = out.shape.slice(),
-                .scratch = scratch,
+                .scratch = scratch_mem,
                 .alpha = config.alpha,
                 .beta = config.beta,
             });
@@ -735,7 +791,6 @@ pub fn NDArray(comptime T: type) type {
                     self.shape.get(1),
                     self.shape.get(0),
                 }),
-                .vies = false,
             };
         }
     };
@@ -1318,7 +1373,7 @@ test "NDArray.gather" {
     var index = try NDArray(usize).init(&index_data, &index_shape, cpu.reference());
     defer index.deinit(cpu.reference());
 
-    var output = try input.gather(std.testing.allocator, cpu.reference(), .{
+    var output = try input.gather(cpu.reference(), .{
         .indices = index,
         .dim = 1,
         .return_offsets = true,
