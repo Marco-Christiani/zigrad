@@ -3,6 +3,8 @@ on:
   push:
     branches:
      - main
+  schedule:
+    - cron: '0 3 * * 0' # keep cache fresh
   workflow_dispatch:
     inputs:
       zig-version:
@@ -13,9 +15,15 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: zig-cache-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   create-tar:
     runs-on: ubuntu-latest
+    env:
+      ZIG_VERSION: ${{ inputs.zig-version || '0.14.0' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,9 +36,12 @@ jobs:
           sudo apt-get install -y libopenblas-dev
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
-          version: ${{ inputs.zig-version || '0.14.0' }}
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: true
+          cache-key: zig-global-${{ runner.os }}-${{ env.ZIG_VERSION }}
+          cache-size-limit: 2048
 
       - name: Build docs
         env:
