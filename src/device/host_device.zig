@@ -652,7 +652,7 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
 }
 
 pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.cache.scratch(T, n);
+    return self.cache.alloc_scratch(T, n);
 }
 
 pub fn mem_copy(_: *const Self, T: type, src: []const T, dst: []T) void {

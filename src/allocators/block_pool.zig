@@ -67,7 +67,7 @@ pub const MAX_BLOCK_SPLITS = 100; // TODO: unusec
 //
 // If a block has "ordered" siblings, then it must be in a
 // cache (thus it is unused).
-const BlockAllocator = @This();
+const BlockPool = @This();
 
 pub const Block = struct {
     data: []u8,
@@ -106,7 +106,7 @@ const FreeList = struct {
     }
 };
 
-/// Overflow means that the BlockAllocator cannot support the requested
+/// Overflow means that the BlockPool cannot support the requested
 /// memory size requested for the incoming allocation.
 pub const Error = error{Overflow} || std.mem.Allocator.Error;
 
@@ -142,7 +142,7 @@ pub fn init(
     data_handler: anytype,
     allocator: Allocator,
     max_cache_size: usize,
-) BlockAllocator {
+) BlockPool {
     std.debug.assert(max_cache_size > 0);
 
     // adjust to a multiple of page_sizes
@@ -155,7 +155,7 @@ pub fn init(
     const mem_buf = data_handler.map(adjusted_size) catch
         std.debug.panic("Unable to map cache size of: {}", .{max_cache_size});
 
-    var self = BlockAllocator{
+    var self = BlockPool{
         .top_block = undefined,
         .mem_buf = @ptrCast(@alignCast(mem_buf)),
         .mem_rem = adjusted_size,
@@ -174,13 +174,13 @@ pub fn init(
     return self;
 }
 
-pub fn deinit(self: *BlockAllocator, data_handler: anytype, allocator: Allocator) void {
+pub fn deinit(self: *BlockPool, data_handler: anytype, allocator: Allocator) void {
     self.block_arena.deinit(allocator);
     data_handler.unmap(self.mem_buf);
     self.* = undefined;
 }
 
-pub fn alloc(self: *BlockAllocator, T: type, allocator: Allocator, size: usize) Error!DeviceData(T) {
+pub fn alloc(self: *BlockPool, T: type, allocator: Allocator, size: usize) Error!DeviceData(T) {
     const byte_size = size * @sizeOf(T);
     const order = size_to_upper_order(byte_size);
     const split_size = order_to_size(order);
@@ -236,7 +236,7 @@ pub fn alloc(self: *BlockAllocator, T: type, allocator: Allocator, size: usize) 
     };
 }
 
-pub fn free(self: *BlockAllocator, data: anytype) void {
+pub fn free(self: *BlockPool, data: anytype) void {
     const block: *Block = @ptrFromInt(data.ctx);
     self.mem_rem += block.data.len;
 
@@ -286,7 +286,7 @@ pub fn free(self: *BlockAllocator, data: anytype) void {
     self.reserve_block(fused);
 }
 
-pub fn reset(self: *BlockAllocator) void {
+pub fn reset(self: *BlockPool) void {
     for (0..NUM_ORDERS) |i|
         self.block_orders[i] = null;
 
@@ -304,7 +304,7 @@ pub fn reset(self: *BlockAllocator) void {
 }
 
 // maintains that prev<->block<->block => prev<->next
-fn disconnect_from_order(self: *BlockAllocator, block: *Block) void {
+fn disconnect_from_order(self: *BlockPool, block: *Block) void {
     if (block.order.prev) |prev| {
         prev.order.next = block.order.next;
     } else {
@@ -317,13 +317,13 @@ fn disconnect_from_order(self: *BlockAllocator, block: *Block) void {
     }
 }
 
-fn create_block(self: *BlockAllocator, allocator: Allocator) Allocator.Error!*Block {
+fn create_block(self: *BlockPool, allocator: Allocator) Allocator.Error!*Block {
     return self.free_blocks.pop() orelse {
         return self.block_arena.create(allocator, Block);
     };
 }
 
-fn reserve_block(self: *BlockAllocator, block: *Block) void {
+fn reserve_block(self: *BlockPool, block: *Block) void {
     // we want the lowest index possible because if a
     // block can no longer support the largest allocation
     // at that order, then it must be demoted down.
@@ -339,7 +339,7 @@ fn reserve_block(self: *BlockAllocator, block: *Block) void {
     self.block_orders[index] = block;
 }
 
-fn release_block(self: *BlockAllocator, index: usize) ?*Block {
+fn release_block(self: *BlockPool, index: usize) ?*Block {
     const block = self.block_orders[index] orelse return null;
 
     if (block.order.next) |next|

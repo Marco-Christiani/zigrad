@@ -8,6 +8,10 @@ const std_options = .{ .log_level = .info };
 const log = std.log.scoped(.mnist);
 const T = f32;
 
+pub const zigrad_settings: zg.Settings = .{
+    .thread_safe = false,
+};
+
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const allocator = std.heap.smp_allocator;
 
