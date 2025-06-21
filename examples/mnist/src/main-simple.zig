@@ -21,10 +21,8 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer zg.deinit_global_graph();
 
-    //zg.runtime.max_cache_size = zg.constants.@"1Gb" * 20;
-
     var cpu = zg.device.HostDevice.init_advanced(.{
-        .max_cache_size = zg.constants.@"1Gb" * 16,
+        .max_cache_size = zg.constants.@"1Gb" * 2,
     });
     defer cpu.deinit();
 
@@ -45,7 +43,9 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer model.deinit();
 
-    std.debug.print("Loading train data...\n", .{});
+    std.debug.print("MEM_REM: {}\n", .{cpu.cache.block_pool.mem_rem});
+
+    //std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
     const train_dataset = try MnistDataset(T).load(allocator, device, train_path, batch_size);
 
@@ -57,11 +57,13 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
+            std.debug.print("\n\nEPOCH...\n", .{});
             image.set_label("image_batch");
             label.set_label("label_batch");
 
             step_timer.reset();
 
+            // std.debug.print("FORWARD\n", .{});
             const output = try model.forward(image);
             defer output.deinit();
 
@@ -73,6 +75,9 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             try loss.backward();
             try optim.step();
             model.zero_grad();
+
+            std.debug.assert(label.grad == null);
+            std.debug.assert(image.grad == null);
 
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
@@ -92,9 +97,14 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
+
+    std.debug.print("EVAL\n", .{});
+
     const train_eval = try eval_mnist(&model, train_dataset);
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
+
+    std.debug.print("MEM_REM: {}\n", .{cpu.cache.block_pool.mem_rem});
 
     // Eval on test set
     std.debug.print("Loading test data...\n", .{});

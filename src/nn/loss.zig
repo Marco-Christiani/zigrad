@@ -132,6 +132,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     const batch_size = if (y_pred.data.shape.len > 1) y_pred.data.shape.get(0) else 1;
     const last_dim = if (y_pred.data.shape.len > 1) y_pred.data.shape.len - 1 else 0;
     const sm_preds = try _softmax_fwd(T, y_pred, last_dim);
+    sm_preds.set_label("sm_preds");
 
     for (sm_preds.get_data(), 0..) |pred, i| {
         const target = y.data.data.raw[i];

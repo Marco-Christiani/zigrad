@@ -69,6 +69,8 @@ pub const MAX_BLOCK_SPLITS = 100; // TODO: unusec
 // cache (thus it is unused).
 const BlockPool = @This();
 
+const OrderList = @import("order_list.zig");
+
 pub const Block = struct {
     data: []u8,
     used: bool = true,
@@ -76,10 +78,7 @@ pub const Block = struct {
         next: ?*Block = null,
         prev: ?*Block = null,
     } = .{},
-    order: struct {
-        next: ?*Block = null,
-        prev: ?*Block = null,
-    } = .{},
+    order: OrderList.Node = .{},
 };
 
 // Here to make block freeing more clear. I don't want to
@@ -124,7 +123,7 @@ mem_rem: usize,
 order_sentinel: usize = 0,
 /// Array of Linked lists where blocks can
 /// register themselves as free for reuse
-block_orders: [NUM_ORDERS]?*Block = @splat(null),
+block_orders: [NUM_ORDERS]OrderList = @splat(OrderList{}),
 /// Arena for allocating blocks.
 block_arena: ArenaUnmanaged = .empty,
 /// Free list for unused blocks. Blocks become
@@ -166,7 +165,7 @@ pub fn init(
         @panic("Unable allocate a single block.");
 
     self.top_block.* = .{
-        .data = mem_buf,
+        .data = self.mem_buf,
     };
 
     self.reserve_block(self.top_block);
@@ -182,8 +181,9 @@ pub fn deinit(self: *BlockPool, data_handler: anytype, allocator: Allocator) voi
 
 pub fn alloc(self: *BlockPool, T: type, allocator: Allocator, size: usize) Error!DeviceData(T) {
     const byte_size = size * @sizeOf(T);
-    const order = size_to_upper_order(byte_size);
-    const split_size = order_to_size(order);
+    const lower_order = size_to_lower_order(byte_size);
+    const upper_order = size_to_upper_order(byte_size);
+    const split_size = order_to_size(upper_order);
 
     // TODO: This current design doesn't account for holes,
     // but we'd have to get a lot more fancy to deal with that.
@@ -192,11 +192,13 @@ pub fn alloc(self: *BlockPool, T: type, allocator: Allocator, size: usize) Error
     }
 
     // scan up to and including the the max reserved order
-    const lhs = scan: for (order..self.order_sentinel) |i| {
+    const lhs = scan: for (upper_order..self.order_sentinel) |i| {
         const rhs = self.release_block(i) orelse
             continue;
 
-        if (order == i)
+        // Upper orders only match perfectly if this block
+        // was exactly the size of the order itself.
+        if (i == lower_order)
             break :scan rhs;
 
         const lhs = try self.create_block(allocator);
@@ -212,8 +214,8 @@ pub fn alloc(self: *BlockPool, T: type, allocator: Allocator, size: usize) Error
         // since there could be a block already on the left,
         // we're going to insert the new block between them
         // so make sure the previous left side points to this.
-        if (rhs.split.prev) |prev|
-            prev.split.next = lhs;
+        if (rhs.split.prev) |old_left|
+            old_left.split.next = lhs;
 
         // connect the new left-side block
         rhs.split.prev = lhs;
@@ -252,9 +254,9 @@ pub fn free(self: *BlockPool, data: anytype) void {
 
         // we're going to destroy this block,
         // so connect the right to the left
-        if (block.split.next) |right| {
+        if (block.split.next) |right|
             right.split.prev = left;
-        }
+
         // connect the left side to the right
         left.split.next = block.split.next;
 
@@ -274,9 +276,9 @@ pub fn free(self: *BlockPool, data: anytype) void {
 
         // we're going to destroy the right block,
         // so only take what's to the right of it.
-        if (right.split.next) |further_right| {
+        if (right.split.next) |further_right|
             further_right.split.prev = fused;
-        }
+
         // connect to the further right block
         fused.split.next = right.split.next;
 
@@ -303,18 +305,10 @@ pub fn reset(self: *BlockPool) void {
     self.reserve_block(self.top_block);
 }
 
-// maintains that prev<->block<->block => prev<->next
+// maintains that prev<->block<->next => prev<->next
 fn disconnect_from_order(self: *BlockPool, block: *Block) void {
-    if (block.order.prev) |prev| {
-        prev.order.next = block.order.next;
-    } else {
-        // disconnect array from this pointer
-        const index = size_to_lower_index(block.data.len);
-        self.block_orders[index] = block.order.next;
-    }
-    if (block.order.next) |next| {
-        next.order.prev = block.order.prev;
-    }
+    const index = size_to_lower_index(block.data.len);
+    self.block_orders[index].remove(&block.order);
 }
 
 fn create_block(self: *BlockPool, allocator: Allocator) Allocator.Error!*Block {
@@ -324,31 +318,16 @@ fn create_block(self: *BlockPool, allocator: Allocator) Allocator.Error!*Block {
 }
 
 fn reserve_block(self: *BlockPool, block: *Block) void {
-    // we want the lowest index possible because if a
-    // block can no longer support the largest allocation
-    // at that order, then it must be demoted down.
+    // we want the lowest index possible because blocks
+    // must support all allocations and below that order
     const index = size_to_lower_index(block.data.len);
-
-    if (self.block_orders[index]) |head|
-        head.order.prev = block;
-
-    block.order.next = self.block_orders[index];
-    block.order.prev = null; // used to detect head of array
+    self.block_orders[index].prepend(&block.order);
     block.used = false;
-
-    self.block_orders[index] = block;
 }
 
 fn release_block(self: *BlockPool, index: usize) ?*Block {
-    const block = self.block_orders[index] orelse return null;
-
-    if (block.order.next) |next|
-        next.order.prev = null;
-
-    self.block_orders[index] = block.order.next;
-
-    block.order.next = null;
-    block.order.prev = null;
+    const node = self.block_orders[index].pop() orelse return null;
+    const block: *Block = @fieldParentPtr("order", node);
     block.used = true;
     return block;
 }

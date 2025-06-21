@@ -412,7 +412,7 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.outer(T){
                 .x = self.get_data(),
                 .y = other.get_data(),
-                .A = output.data,
+                .A = output.get_data(),
                 .alpha = 0,
             });
 
@@ -731,7 +731,7 @@ pub fn NDArray(comptime T: type) type {
 
             device.dispatch(opspec.transpose(T){
                 .A = self.get_data(),
-                .B = out_data,
+                .B = out_data.raw,
                 .m = self.shape.get(0),
                 .n = self.shape.get(1),
                 .alpha = 0.0,

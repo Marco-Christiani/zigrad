@@ -69,8 +69,9 @@ pub fn backward(self: *Graph, root: *Node) !void {
     self.backward_node_stack.append(self.builder.allocator, root) catch unreachable;
 
     outer: while (self.backward_node_stack.pop()) |parent| {
-        defer if (self.eager_teardown and !parent.acquired())
+        defer if (self.eager_teardown and !parent.acquired()) {
             parent.deinit();
+        };
 
         if (!parent.requires_grad()) continue :outer;
 

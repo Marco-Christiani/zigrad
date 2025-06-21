@@ -611,12 +611,10 @@ pub fn max_along(_: *const Self, T: type, p: opspec.max_along(T)) void {
 }
 
 pub fn mem_cache_alloc(self: *Self, T: type, n: usize) !DeviceData(T) {
-    if (n == 0) return .{ .raw = &.{}, .ctx = 0 };
     return self.cache.alloc(T, n);
 }
 
 pub fn mem_cache_free(self: *Self, data: anytype) void {
-    if (data.raw.len == 0) return;
     self.cache.free(data);
 }
 

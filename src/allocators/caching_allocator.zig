@@ -16,7 +16,7 @@ const zg = @import("../zigrad.zig");
 // the Self heavily uses free lists and arenas,
 // thus there's very little benefit in using something that
 // ultimately uses a page allocator behind the scenes.
-const allocator = std.heap.page_allocator;
+const allocator = std.heap.smp_allocator;
 
 pub fn CachingAllocator(DataHandler: type) type {
     return struct {

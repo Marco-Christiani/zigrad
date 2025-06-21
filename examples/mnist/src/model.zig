@@ -39,20 +39,17 @@ pub fn MnistModel(comptime T: type) type {
             errdefer z0.deinit();
             try zg.nn.relu_(T, z0);
 
-            if (flat.should_deinit())
-                flat.deinit();
+            flat.soft_deinit();
 
             const z1 = try self.linear_layers[1].forward(z0);
             errdefer z1.deinit();
             try zg.nn.relu_(T, z1);
 
-            if (z0.should_deinit())
-                z0.deinit();
+            z0.soft_deinit();
 
             const z2 = try self.linear_layers[2].forward(z1);
 
-            if (z1.should_deinit())
-                z1.deinit();
+            z1.soft_deinit();
 
             return z2;
         }
@@ -125,15 +122,9 @@ pub fn FlattenLayer(comptime T: type) type {
             const flattened_dim = zg.arrayutils.prod(other_dims);
 
             // view of input tensor with new shape
-            const result = try Tensor.create_dependent(Self, .{
-                .data = try input.data.copy(input.device), // Reuse the same data
-                .children = &.{&input.node},
-                .label = "flattened",
-                .callback = .{},
-                .device = input.device,
-                .gb = input.node.gb,
-            });
+            const result = try input.view();
             result.data._reshape(&.{ batch_dim, flattened_dim });
+            result.set_label("flattened");
             return result;
         }
 

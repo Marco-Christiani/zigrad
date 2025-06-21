@@ -228,7 +228,7 @@ pub fn NDTensor(comptime T: type) type {
         }
 
         pub fn get_label(self: *const Self) ?[]const u8 {
-            return self.node.label.get_label();
+            return self.node.get_label();
         }
 
         pub fn set_label(self: *Self, new_label: []const u8) void {
@@ -251,6 +251,9 @@ pub fn NDTensor(comptime T: type) type {
             const req_grad: bool = for (opts.children) |child| {
                 if (child.requires_grad()) break true;
             } else false;
+
+            if (req_grad) for (opts.children) |child|
+                child.flags.set(.grad_operand, true);
 
             const self = try opts.gb.create_node(Self);
             errdefer opts.gb.destroy_node(self);
@@ -281,6 +284,9 @@ pub fn NDTensor(comptime T: type) type {
             const req_grad: bool = for (opts.children) |child| {
                 if (child.requires_grad()) break true;
             } else self.requires_grad();
+
+            if (req_grad) for (opts.children) |child|
+                child.flags.set(.grad_operand, true);
 
             if (req_grad) {
                 const new_ctx: Node.BackwardContext = try .init(
@@ -332,6 +338,17 @@ pub fn NDTensor(comptime T: type) type {
             self.node.deactivate();
 
             self.node.gb.destroy_node(self);
+        }
+
+        // Soft Deinit
+        //
+        // Checks to see if a node is acquired or is the operand of
+        // a node that requires a gradient. If neither are true, the
+        // tensor is freed. Usually called in forward contexts when
+        // working with a mixed gradient requirements and view tensors.
+        pub fn soft_deinit(self: *Self) void {
+            if (!(self.acquired() or self.node.flags.get(.grad_operand)))
+                self.deinit();
         }
 
         fn to_device_impl(
@@ -606,6 +623,33 @@ pub fn NDTensor(comptime T: type) type {
                 .callback = .{ .start = start },
             });
             tmp.status = status;
+            return tmp;
+        }
+
+        /// Tensor value-setter.
+        ///
+        /// Create a tensor that shares underlying memory, but does not share
+        /// shape or gradient. This is useful for reshaping operations.
+        pub fn view(self: *Self) !*Self {
+            const ViewBwds = struct {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    const x_grad_data = try x.ensure_grad_data(0);
+                    x.device.dispatch(opspec.add(T){
+                        .x = x_grad_data,
+                        .y = y.assume_grad_data(),
+                        .z = x_grad_data,
+                    });
+                }
+            };
+            const tmp = try create_dependent(ViewBwds, .{
+                .data = self.data,
+                .gb = self.node.gb,
+                .children = &.{&self.node},
+                .device = self.device,
+                .callback = .{},
+            });
+            tmp.status = .view;
             return tmp;
         }
 
