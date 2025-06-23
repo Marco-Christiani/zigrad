@@ -32,7 +32,7 @@ pub fn run_cora(data_dir: []const u8) !void {
 
     var buf1: [1024]u8 = undefined;
     var buf2: [1024]u8 = undefined;
-    const edge_path = try std.fmt.bufPrint(&buf1, "{s}/cora/csv/cites.csv", .{data_dir});
+    const edge_path = try std.fmt.bufPrint(&buf1, "{s}/cora/csv/cities.csv", .{data_dir});
     const node_path = try std.fmt.bufPrint(&buf2, "{s}/cora/csv/papers.csv", .{data_dir});
     const dataset = try Dataset(T).load_cora(allocator, device, node_path, edge_path);
     defer dataset.deinit();
