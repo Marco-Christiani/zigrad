@@ -62,6 +62,8 @@ pub fn run_cora(data_dir: []const u8) !void {
 
     var timer = try std.time.Timer.start();
 
+    var max_train_time = std.math.floatMin(f64);
+    var max_test_time = std.math.floatMin(f64);
     const num_epochs = 50;
     for (0..num_epochs) |epoch| {
         var loss_val: T = 0;
@@ -89,6 +91,7 @@ pub fn run_cora(data_dir: []const u8) !void {
 
             train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
             total_train_time += train_time_ms;
+            max_train_time = @max(max_train_time, train_time_ms);
         }
 
         {
@@ -118,6 +121,7 @@ pub fn run_cora(data_dir: []const u8) !void {
             }
             test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
             total_test_time += test_time_ms;
+            max_test_time = @max(max_test_time, test_time_ms);
         }
         std.debug.print(
             "Epoch: {d:>2}, Loss: {d:<5.4}, Train_acc: {d:<2.2}, Val_acc: {d:<2.2}, Test_acc: {d:<2.2}, Train_time {d:<3.2} ms, Test_time {d:<3.2} ms\n",
@@ -126,6 +130,17 @@ pub fn run_cora(data_dir: []const u8) !void {
     }
     std.debug.print("Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{ total_train_time / num_epochs, total_test_time / num_epochs });
     std.debug.print("Total train time: {d:.2} ms, Total test time: {d:.2} ms\n", .{ total_train_time, total_test_time });
+
+    const total_train_time_ms_trimmed = total_train_time - max_train_time;
+    const total_test_time_ms_trimmed = total_test_time - max_test_time;
+    std.debug.print("(trimmed) Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{
+        total_train_time_ms_trimmed / (num_epochs - 1),
+        total_test_time_ms_trimmed / (num_epochs - 1),
+    });
+    std.debug.print("(trimmed) Total train time: {d:.2} ms, Total test time: {d:.2} ms\n", .{
+        total_train_time_ms_trimmed,
+        total_test_time_ms_trimmed,
+    });
 }
 
 pub fn main() !void {
