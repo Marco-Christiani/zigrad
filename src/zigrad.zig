@@ -71,7 +71,6 @@ pub const Settings = struct {
 pub var rt_grad_enabled: bool = true;
 
 var prng = std.Random.DefaultPrng.init(settings.seed);
-/// currently only used for generating node labels when tracing the comp graph
 pub const random = prng.random();
 
 // Global computation graph - can be used as a convenience to avoid passing graphs
