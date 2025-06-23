@@ -17,7 +17,6 @@
             nodejs_20
             nodePackages.npm
             # yarn-berry
-            git
             pkg-config
             python3
           ];

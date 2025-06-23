@@ -1,11 +1,11 @@
 import clsx from 'clsx';
 import Heading from '@theme/Heading';
 import styles from './styles.module.css';
-import { Zap, Lock, Cpu, Scale } from 'lucide-react';
+import { Zap, Lock, Cpu, Scale, LucideIcon } from 'lucide-react';
 
 type FeatureItem = {
   title: string;
-  Icon: React.ComponentType<React.ComponentProps<'svg'>>;
+  Icon: LucideIcon,
   description: JSX.Element;
 };
 
@@ -15,9 +15,11 @@ const FeatureList: FeatureItem[] = [
     Icon: Zap,
     description: (
       <>
-        Achieve 2.5x+ speedup over compiled PyTorch models on Apple Silicon.
+        {/* Achieve 2.5x+ speedup over compiled PyTorch models on Apple Silicon. */}
         Zigrad's zero-overhead abstractions and careful memory management deliver
-        exceptional performance across architectures.
+        exceptional performance across architectures. Faster than PyTorch, libtorch,
+        Tensorflow, and Tinygrad.
+        {/* Zigrad is the fastest deep learning framework we have ever tested. */}
       </>
     ),
   },
@@ -37,7 +39,7 @@ const FeatureList: FeatureItem[] = [
     Icon: Cpu,
     description: (
       <>
-        Tiny binaries under 400KB. Minimal and transparent heap allocations.
+        Minimal and transparent heap allocations.
         Hardware-optimized implementations leveraging BLAS, SIMD, and platform-specific
         accelerators.
       </>
@@ -48,9 +50,9 @@ const FeatureList: FeatureItem[] = [
     Icon: Scale,
     description: (
       <>
-        Built for real-world deep learning deployment. Seamless integration with
-        existing ML pipelines via ONNX support. Comprehensive test coverage and
-        benchmarking suite.
+        Built for real-world deep learning deployment. {/*Seamless integration with
+        existing ML pipelines via ONNX support.*/} Comprehensive test coverage and
+        benchmarking suite. More production-specific features in development.
       </>
     ),
   },
@@ -60,7 +62,7 @@ function Feature({ title, Icon, description }: FeatureItem) {
   return (
     <div className={clsx('col col--3')}>
       <div className="text--center">
-        <Icon className={styles.featureSvg} role="img" />
+        <Icon className={styles.featureSvg} role="img" size={64} />
       </div>
       <div className="text--center padding-horiz--md">
         <Heading as="h3">{title}</Heading>
