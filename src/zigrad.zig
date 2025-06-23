@@ -86,13 +86,13 @@ pub const random = prng.random();
 // along control-flow paths.
 var global_graph: ?Graph = null;
 
-pub fn init_global_graph(allocator: std.mem.Allocator, config: Graph.Opts) void {
+pub fn global_graph_init(allocator: std.mem.Allocator, config: Graph.Opts) void {
     global_graph = Graph.init(allocator, config);
 }
-pub fn deinit_global_graph() void {
+pub fn global_graph_deinit() void {
     if (global_graph) |*gg| gg.deinit();
 }
-pub fn get_global_graph() *Graph {
+pub fn global_graph_get() *Graph {
     return &(global_graph orelse @panic("Global graph is uninitialized, call init_global_graph first."));
 }
 

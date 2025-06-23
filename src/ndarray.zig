@@ -497,6 +497,7 @@ pub fn NDArray(comptime T: type) type {
                 .x = self.get_data(),
                 .x_shape = self.shape.slice(),
                 .y = output.get_data(),
+                .y_shape = output_shape.slice(),
                 .dim = opts.dim,
             });
 
@@ -524,6 +525,7 @@ pub fn NDArray(comptime T: type) type {
                 .x = self.get_data(),
                 .x_shape = self.shape.slice(),
                 .y = output.get_data(),
+                .y_shape = output_shape.slice(),
                 .dim = opts.dim,
             });
 
@@ -651,7 +653,7 @@ pub fn NDArray(comptime T: type) type {
                 };
                 const n = out.size() * coef;
 
-                break :outer try device.mem_scratch(T, if (n == self.size()) 0 else n);
+                break :outer device.mem_scratch(T, if (n == self.size()) 0 else n);
             };
 
             device.dispatch(opspec.unbroadcast(T){
@@ -841,7 +843,7 @@ pub const Range = struct {
 };
 
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_pool_size = zg.constants.@"1Mb" / 2,
+    .max_cache_size = zg.constants.@"1Mb" / 2,
 };
 
 test "NDArray._clip_norm,l2_norm" {

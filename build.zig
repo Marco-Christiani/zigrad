@@ -39,16 +39,19 @@ pub fn build(b: *Build) !void {
         else => @panic("Os not supported."),
     }
 
-    if (enable_cuda)
-        add_cuda_module(b, zigrad, target);
-
     const lib = b.addStaticLibrary(.{
         .name = "zigrad",
         .root_module = zigrad,
     });
+
     lib.root_module.addImport("build_options", build_options_module);
     link(target, lib);
     b.installArtifact(lib);
+
+    if (enable_cuda) {
+        const cuda = make_cuda_module(b, target);
+        zigrad.addImport("cuda", cuda);
+    }
 
     const exe = b.addExecutable(.{
         .name = "main",
@@ -159,11 +162,7 @@ pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
     return tracy;
 }
 
-pub fn add_cuda_module(
-    b: *Build,
-    zigrad: *Module,
-    target: Build.ResolvedTarget,
-) void {
+pub fn make_cuda_module(b: *Build, target: Build.ResolvedTarget) *std.Build.Module {
     const rebuild_cuda: bool = b.option(bool, "rebuild_cuda", "force CUDA backend to recompile") orelse false;
 
     const here = b.path(".").getPath(b);
@@ -184,11 +183,10 @@ pub fn add_cuda_module(
             if (rebuild_cuda) "y" else "n",
         });
     }
-
     cuda.addIncludePath(b.path("src/cuda/"));
     cuda.addLibraryPath(b.path("src/cuda/build"));
     cuda.linkSystemLibrary("amalgamate", .{});
-    zigrad.addImport("cuda", cuda);
+    return cuda;
 }
 
 fn amalgamate_exists(b: *Build) bool {

@@ -1,5 +1,4 @@
 const std = @import("std");
-const BlockPool = @import("block_pool.zig");
 const Allocator = std.mem.Allocator;
 const constants = @import("constants.zig");
 const DeviceData = @import("device_data.zig").DeviceData;
@@ -10,21 +9,20 @@ const zg = @import("../zigrad.zig");
 // this data structure itself doesn't benefit from having its
 // internal state managed by yet another allocator. This is
 // similar to the original "GPA" allocator in this sense.
-//
-// I considered using the smp_allocator here isntead, but we
-// really don't need any of its functionality. Internally,
-// the Self heavily uses free lists and arenas,
-// thus there's very little benefit in using something that
-// ultimately uses a page allocator behind the scenes.
 const allocator = std.heap.smp_allocator;
 
 pub fn CachingAllocator(DataHandler: type) type {
     return struct {
         const Self = @This();
-        const ScalarSize = @sizeOf(f64);
+        const BlockPool = @import("block_pool.zig").BockPool(DataHandler);
+
+        // support for small tensor sizes that do not
+        // work with general block alignment requirements.
+        // TODO: Pool this?
+        const Stack = std.ArrayListUnmanaged([*]u8);
 
         data_handler: DataHandler,
-        scalar_stack: std.ArrayListUnmanaged([*]u8) = .empty,
+        stacks: [8]Stack = @splat(Stack.empty),
         block_pool: BlockPool,
         scratch: struct {
             ptr: [*]u8 = undefined,
@@ -34,7 +32,6 @@ pub fn CachingAllocator(DataHandler: type) type {
         pub const Options = struct {
             // TODO: Come up with a better default value.
             max_cache_size: ?usize = null,
-            scalar_limit: usize = 256,
         };
 
         // we could make this an "empty" constant, but this structure
@@ -51,58 +48,82 @@ pub fn CachingAllocator(DataHandler: type) type {
         pub fn deinit(self: *Self) void {
             self.block_pool.deinit(self.data_handler, allocator);
 
-            while (self.scalar_stack.pop()) |ptr| {
-                self.data_handler.free(ptr[0..ScalarSize]);
-            }
-            self.scalar_stack.deinit(allocator);
+            for (0..self.stacks.len) |slot| {
+                const slot_size = get_slot_size(@truncate(slot));
+                while (self.stacks[slot].pop()) |ptr|
+                    self.data_handler.free(ptr[0..slot_size]);
 
-            if (self.scratch.total != 0) {
-                self.data_handler.free(self.scratch.ptr[0..self.scratch.total]);
+                self.stacks[slot].deinit(allocator);
             }
+
+            if (self.scratch.total != 0)
+                self.data_handler.free(self.scratch.ptr[0..self.scratch.total]);
+
+            self.data_handler.deinit();
+
             self.* = undefined;
         }
 
         pub fn reset(self: *Self) void {
             self.block_pool.reset();
 
-            while (self.scalar_stack.pop()) |ptr|
-                self.data_handler.free(ptr[0..ScalarSize]);
+            for (0..self.stacks.len) |slot| {
+                const slot_size = get_slot_size(@truncate(slot));
+                while (self.stacks[slot].pop()) |ptr|
+                    self.data_handler.free(ptr[0..slot_size]);
+            }
 
             if (self.scratch.total != 0)
                 self.data_handler.free(self.scratch.ptr[0..self.scratch.total]);
 
             self.scratch.total = 0;
+
+            self.data_handler.reset();
         }
 
         pub fn alloc(self: *Self, T: type, size: usize) Error!DeviceData(T) {
-            return switch (size) {
+            if (size == 0) {
                 // "Nothing! It does nothing. But it does it in style!"
                 //    ~Andrei Alexandrescu
-                0 => .{ .raw = &.{}, .ctx = 0 },
-                1 => {
-                    const ptr = self.scalar_stack.pop() orelse
-                        self.data_handler.alloc(ScalarSize) orelse
-                        return Error.DeviceOOM;
+                return .{ .raw = &.{}, .ctx = 0 };
+            }
 
-                    const tptr: [*]T = @ptrCast(@alignCast(ptr));
-                    return .{ .raw = tptr[0..1], .ctx = 0 };
-                },
-                else => self.block_pool.alloc(T, allocator, size) catch |err| switch (err) {
-                    Allocator.Error.OutOfMemory => @panic("Page allocator ran out of memory."),
-                    else => Error.DeviceOOM,
-                },
+            const byte_size = size * @sizeOf(T);
+
+            if (byte_size <= 128) {
+                const slot = get_stack_slot(byte_size);
+
+                const new_size = get_slot_size(slot);
+
+                const ptr = self.stacks[slot].pop() orelse
+                    self.data_handler.alloc(new_size) orelse return Error.DeviceOOM;
+
+                return .{ .raw = cast_to_slice(T, ptr, size), .ctx = 0 };
+            }
+
+            return self.block_pool.alloc(T, self.data_handler, allocator, size) catch |err| switch (err) {
+                Allocator.Error.OutOfMemory => @panic("Page allocator ran out of memory."),
+                else => Error.DeviceOOM,
             };
         }
 
         pub fn free(self: *Self, data: anytype) void {
-            switch (data.raw.len) {
-                0 => return,
-                1 => {
-                    const ptr: [*]u8 = @ptrCast(@alignCast(data.raw.ptr));
-                    self.scalar_stack.append(allocator, ptr) catch
-                        self.data_handler.free(ptr[0..ScalarSize]);
-                },
-                else => self.block_pool.free(data),
+            if (data.raw.len == 0)
+                return;
+
+            const byte_size = data.raw.len * @sizeOf(std.meta.Child(@TypeOf(data.raw)));
+
+            if (byte_size <= 128) {
+                const slot = get_stack_slot(byte_size);
+
+                const ptr: [*]u8 = @ptrCast(@alignCast(data.raw.ptr));
+
+                self.stacks[slot].append(allocator, ptr) catch {
+                    const new_size = get_slot_size(slot);
+                    self.data_handler.free(ptr[0..new_size]);
+                };
+            } else {
+                self.block_pool.free(data);
             }
         }
 
@@ -125,8 +146,22 @@ pub fn CachingAllocator(DataHandler: type) type {
 
                 self.scratch.total = total;
             }
-            const tptr: [*]T = @ptrCast(@alignCast(self.scratch.ptr));
-            return tptr[0..n];
+            return cast_to_slice(T, self.scratch.ptr, n);
         }
     };
+}
+
+fn get_stack_slot(byte_size: usize) u6 {
+    std.debug.assert(byte_size <= 128);
+    const slot: u6 = @truncate(std.math.log2_int(usize, byte_size));
+    return slot + @intFromBool(@popCount(byte_size) != 1);
+}
+
+fn get_slot_size(slot: u6) usize {
+    return @as(usize, 1) << slot;
+}
+
+fn cast_to_slice(T: type, ptr: [*]u8, len: usize) []T {
+    const tptr: [*]T = @ptrCast(@alignCast(ptr));
+    return tptr[0..len];
 }

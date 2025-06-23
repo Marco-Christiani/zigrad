@@ -16,10 +16,10 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const allocator = std.heap.smp_allocator;
 
     // use global graph for project
-    zg.init_global_graph(allocator, .{
+    zg.global_graph_init(allocator, .{
         .eager_teardown = true,
     });
-    defer zg.deinit_global_graph();
+    defer zg.global_graph_deinit();
 
     var cpu = zg.device.HostDevice.init_advanced(.{
         .max_cache_size = zg.constants.@"1Gb" * 2,
@@ -43,8 +43,6 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer model.deinit();
 
-    std.debug.print("MEM_REM: {}\n", .{cpu.cache.block_pool.mem_rem});
-
     //std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
     const train_dataset = try MnistDataset(T).load(allocator, device, train_path, batch_size);
@@ -57,7 +55,6 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     for (0..num_epochs) |epoch| {
         var total_loss: f64 = 0;
         for (train_dataset.images, train_dataset.labels, 0..) |image, label, i| {
-            std.debug.print("\n\nEPOCH...\n", .{});
             image.set_label("image_batch");
             label.set_label("label_batch");
 
@@ -98,13 +95,9 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
 
-    std.debug.print("EVAL\n", .{});
-
     const train_eval = try eval_mnist(&model, train_dataset);
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
-
-    std.debug.print("MEM_REM: {}\n", .{cpu.cache.block_pool.mem_rem});
 
     // Eval on test set
     std.debug.print("Loading test data...\n", .{});

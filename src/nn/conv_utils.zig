@@ -88,7 +88,7 @@ pub fn col2im(comptime T: type, col: NDArray(T), input_shape: []const usize, ker
 }
 
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_pool_size = zg.constants.@"1Mb",
+    .max_cache_size = zg.constants.@"1Mb",
 };
 
 test "im2col col2im" {

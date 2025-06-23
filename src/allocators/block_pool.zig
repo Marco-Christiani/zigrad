@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const constants = @import("constants.zig");
 const ArenaUnmanaged = @import("arena_unmanaged.zig");
 const DeviceData = @import("device_data.zig").DeviceData;
+const round_to_next_page = @import("../allocators.zig").round_to_next_page;
 
 // Block Orders:
 //
@@ -35,7 +36,7 @@ const DeviceData = @import("device_data.zig").DeviceData;
 // lower order memory requests.
 
 pub const MAX_ORDER = 36;
-pub const MIN_ORDER = 7;
+pub const MIN_ORDER = 8; // minium block that can be split is 512
 pub const NUM_ORDERS = (MAX_ORDER - MIN_ORDER + 1);
 pub const MAX_BLOCK_SPLITS = 100; // TODO: unusec
 
@@ -67,8 +68,6 @@ pub const MAX_BLOCK_SPLITS = 100; // TODO: unusec
 //
 // If a block has "ordered" siblings, then it must be in a
 // cache (thus it is unused).
-const BlockPool = @This();
-
 const OrderList = @import("order_list.zig");
 
 pub const Block = struct {
@@ -109,227 +108,256 @@ const FreeList = struct {
 /// memory size requested for the incoming allocation.
 pub const Error = error{Overflow} || std.mem.Allocator.Error;
 
-/// The mapped buffer that references the
-/// the available device data in this pool
-mem_buf: []u8,
-/// The remaining memory before and after
-/// an allocation that a pool could theoretically
-/// support (does not account for holes)
-mem_rem: usize,
-/// Small optimization for preventing scans
-/// beyond the higest available order. At
-/// most this is MAX_ORDER + 1 and acts like
-/// an exclusive end ragne for orders.
-order_sentinel: usize = 0,
-/// Array of Linked lists where blocks can
-/// register themselves as free for reuse
-block_orders: [NUM_ORDERS]OrderList = @splat(OrderList{}),
-/// Arena for allocating blocks.
-block_arena: ArenaUnmanaged = .empty,
-/// Free list for unused blocks. Blocks become
-/// unused when free fuses two blocks together
-/// and therefore only requires one block.
-free_blocks: FreeList = .empty,
-/// This block is here to maintain an invariant
-/// for reset. You cannot reset if a single
-/// allocation wiped out the whole pool because
-/// you now have lost all your blocks.
-top_block: *Block,
+pub fn BockPool(DataHandler: type) type {
+    return struct {
+        const Self = @This();
+        const use_map_alloc = @hasDecl(DataHandler, "map_alloc");
 
-// assumes pool is new - setting up an already created pool is UB
-pub fn init(
-    data_handler: anytype,
-    allocator: Allocator,
-    max_cache_size: usize,
-) BlockPool {
-    std.debug.assert(max_cache_size > 0);
+        /// The mapped buffer that references the
+        /// the available device data in this pool
+        mem_buf: []u8,
+        /// The remaining memory before and after
+        /// an allocation that a pool could theoretically
+        /// support (does not account for holes)
+        mem_rem: usize,
+        /// Tracks how much of the mapped buffer has been
+        /// used. This is required for data handlers that
+        /// need to manually map memory to a device.
+        mem_end_ptr: if (use_map_alloc) [*]u8 else void,
+        /// Small optimization for preventing scans
+        /// beyond the higest available order. At
+        /// most this is MAX_ORDER + 1 and acts like
+        /// an exclusive end ragne for orders.
+        order_sentinel: usize = 0,
+        /// Array of Linked lists where blocks can
+        /// register themselves as free for reuse
+        block_orders: [NUM_ORDERS]OrderList = @splat(OrderList{}),
+        /// Arena for allocating blocks.
+        block_arena: ArenaUnmanaged = .empty,
+        /// Free list for unused blocks. Blocks become
+        /// unused when free fuses two blocks together
+        /// and therefore only requires one block.
+        free_blocks: FreeList = .empty,
+        /// This block is here to maintain an invariant
+        /// for reset. You cannot reset if a single
+        /// allocation wiped out the whole pool because
+        /// you now have lost all your blocks.
+        top_block: *Block,
 
-    // adjust to a multiple of page_sizes
-    const adjusted_size = blk: {
-        const ps = data_handler.page_size();
-        const adjust = (ps - (max_cache_size % ps)) % ps;
-        break :blk max_cache_size + adjust;
+        // assumes pool is new - setting up an already created pool is UB
+        pub fn init(
+            data_handler: DataHandler,
+            allocator: Allocator,
+            max_cache_size: usize,
+        ) Self {
+            std.debug.assert(max_cache_size > 0);
+
+            const mem_buf = data_handler.map(max_cache_size) catch
+                std.debug.panic("Unable to map cache size of: {}", .{max_cache_size});
+
+            var self = Self{
+                .top_block = undefined,
+                .mem_buf = @ptrCast(@alignCast(mem_buf)),
+                .mem_rem = mem_buf.len,
+                .mem_end_ptr = if (comptime Self.use_map_alloc) mem_buf.ptr else {},
+                .order_sentinel = @min(size_to_lower_order(mem_buf.len) + 1, NUM_ORDERS),
+            };
+
+            self.top_block = self.create_block(allocator) catch
+                @panic("Unable allocate a single block.");
+
+            self.top_block.* = .{
+                .data = self.mem_buf,
+            };
+
+            self.reserve_block(self.top_block);
+
+            return self;
+        }
+
+        pub fn deinit(
+            self: *Self,
+            data_handler: DataHandler,
+            allocator: Allocator,
+        ) void {
+            self.block_arena.deinit(allocator);
+            data_handler.unmap(self.mem_buf);
+            self.* = undefined;
+        }
+
+        pub fn alloc(
+            self: *Self,
+            T: type,
+            data_handler: DataHandler,
+            allocator: Allocator,
+            size: usize,
+        ) Error!DeviceData(T) {
+            const byte_size = size * @sizeOf(T);
+            const lower_order = size_to_lower_order(byte_size);
+            const upper_order = size_to_upper_order(byte_size);
+            const split_size = order_to_size(upper_order);
+
+            // These should have been picked up by the caching allocator.
+            // Blocks can be a minimum size of 256, thus the smallest block
+            // that can be split is 512.
+            std.debug.assert(byte_size > 128);
+
+            // TODO: This current design doesn't account for holes,
+            // but we'd have to get a lot more fancy to deal with that.
+            if (self.mem_rem < byte_size)
+                return Error.Overflow;
+
+            // scan up to and including the the max reserved order
+            const lhs = scan: for (upper_order..self.order_sentinel) |i| {
+                const rhs = self.release_block(i) orelse
+                    continue;
+
+                // Upper orders only match perfectly if this block
+                // was exactly the size of the order itself.
+                if (i == lower_order)
+                    break :scan rhs;
+
+                const lhs = try self.create_block(allocator);
+
+                lhs.* = .{
+                    .data = rhs.data[0..split_size],
+                    .split = .{
+                        .prev = rhs.split.prev,
+                        .next = rhs,
+                    },
+                };
+
+                // since there could be a block already on the left,
+                // we're going to insert the new block between them
+                // so make sure the previous left side points to this.
+                if (rhs.split.prev) |old_left|
+                    old_left.split.next = lhs;
+
+                // connect the new left-side block
+                rhs.split.prev = lhs;
+
+                // reduce size and reserve.
+                rhs.data.ptr += split_size;
+                rhs.data.len -= split_size;
+                self.reserve_block(rhs);
+
+                break :scan lhs;
+            } else {
+                return Error.Overflow;
+            };
+
+            self.mem_rem -= lhs.data.len;
+
+            if (comptime Self.use_map_alloc) {
+                if (@intFromPtr(self.mem_end_ptr) < @intFromPtr(lhs.data.ptr + lhs.data.len)) {
+                    const total = data_handler.map_alloc(self.mem_end_ptr, lhs.data.len);
+
+                    self.mem_end_ptr += total;
+
+                    std.debug.assert(@intFromPtr(self.mem_end_ptr) >= @intFromPtr(lhs.data.ptr + lhs.data.len));
+                }
+            }
+
+            return .{
+                .raw = @alignCast(std.mem.bytesAsSlice(T, lhs.data)[0..size]),
+                .ctx = @intFromPtr(lhs),
+            };
+        }
+
+        pub fn free(self: *Self, data: anytype) void {
+            const block: *Block = @ptrFromInt(data.ctx);
+            self.mem_rem += block.data.len;
+
+            // fuse the left-side with block
+            const fused: *Block = scope: {
+                const left = block.split.prev orelse
+                    break :scope block;
+
+                if (left.used)
+                    break :scope block;
+
+                self.disconnect_from_order(left);
+
+                // we're going to destroy this block,
+                // so connect the right to the left
+                if (block.split.next) |right|
+                    right.split.prev = left;
+
+                // connect the left side to the right
+                left.split.next = block.split.next;
+
+                left.data.len += block.data.len;
+                self.free_blocks.prepend(block);
+                break :scope left;
+            };
+
+            scope: { // fuse the right hand side
+                const right = fused.split.next orelse
+                    break :scope;
+
+                if (right.used)
+                    break :scope;
+
+                self.disconnect_from_order(right);
+
+                // we're going to destroy the right block,
+                // so only take what's to the right of it.
+                if (right.split.next) |further_right|
+                    further_right.split.prev = fused;
+
+                // connect to the further right block
+                fused.split.next = right.split.next;
+
+                fused.data.len += right.data.len;
+                self.free_blocks.prepend(right);
+            }
+            self.reserve_block(fused);
+        }
+
+        pub fn reset(self: *Self) void {
+            for (0..NUM_ORDERS) |i|
+                self.block_orders[i] = null;
+
+            self.free_blocks.head = null;
+
+            self.block_arena.reset(.{
+                .retain_capacity = @sizeOf(Block),
+            });
+
+            self.top_block = .{
+                .data = self.mem_buf,
+            };
+
+            self.reserve_block(self.top_block);
+        }
+
+        // maintains that prev<->block<->next => prev<->next
+        fn disconnect_from_order(self: *Self, block: *Block) void {
+            const index = size_to_lower_index(block.data.len);
+            self.block_orders[index].remove(&block.order);
+        }
+
+        fn create_block(self: *Self, allocator: Allocator) Allocator.Error!*Block {
+            return self.free_blocks.pop() orelse {
+                return self.block_arena.create(allocator, Block);
+            };
+        }
+
+        fn reserve_block(self: *Self, block: *Block) void {
+            // we want the lowest index possible because blocks
+            // must support all allocations and below that order
+            const index = size_to_lower_index(block.data.len);
+            self.block_orders[index].prepend(&block.order);
+            block.used = false;
+        }
+
+        fn release_block(self: *Self, index: usize) ?*Block {
+            const node = self.block_orders[index].pop() orelse return null;
+            const block: *Block = @fieldParentPtr("order", node);
+            block.used = true;
+            return block;
+        }
     };
-
-    const mem_buf = data_handler.map(adjusted_size) catch
-        std.debug.panic("Unable to map cache size of: {}", .{max_cache_size});
-
-    var self = BlockPool{
-        .top_block = undefined,
-        .mem_buf = @ptrCast(@alignCast(mem_buf)),
-        .mem_rem = adjusted_size,
-        .order_sentinel = @min(size_to_lower_order(adjusted_size) + 1, NUM_ORDERS),
-    };
-
-    self.top_block = self.create_block(allocator) catch
-        @panic("Unable allocate a single block.");
-
-    self.top_block.* = .{
-        .data = self.mem_buf,
-    };
-
-    self.reserve_block(self.top_block);
-
-    return self;
-}
-
-pub fn deinit(self: *BlockPool, data_handler: anytype, allocator: Allocator) void {
-    self.block_arena.deinit(allocator);
-    data_handler.unmap(self.mem_buf);
-    self.* = undefined;
-}
-
-pub fn alloc(self: *BlockPool, T: type, allocator: Allocator, size: usize) Error!DeviceData(T) {
-    const byte_size = size * @sizeOf(T);
-    const lower_order = size_to_lower_order(byte_size);
-    const upper_order = size_to_upper_order(byte_size);
-    const split_size = order_to_size(upper_order);
-
-    // TODO: This current design doesn't account for holes,
-    // but we'd have to get a lot more fancy to deal with that.
-    if (self.mem_rem < byte_size) {
-        return Error.Overflow;
-    }
-
-    // scan up to and including the the max reserved order
-    const lhs = scan: for (upper_order..self.order_sentinel) |i| {
-        const rhs = self.release_block(i) orelse
-            continue;
-
-        // Upper orders only match perfectly if this block
-        // was exactly the size of the order itself.
-        if (i == lower_order)
-            break :scan rhs;
-
-        const lhs = try self.create_block(allocator);
-
-        lhs.* = .{
-            .data = rhs.data[0..split_size],
-            .split = .{
-                .prev = rhs.split.prev,
-                .next = rhs,
-            },
-        };
-
-        // since there could be a block already on the left,
-        // we're going to insert the new block between them
-        // so make sure the previous left side points to this.
-        if (rhs.split.prev) |old_left|
-            old_left.split.next = lhs;
-
-        // connect the new left-side block
-        rhs.split.prev = lhs;
-
-        // reduce size and reserve.
-        rhs.data.ptr += split_size;
-        rhs.data.len -= split_size;
-        self.reserve_block(rhs);
-
-        break :scan lhs;
-    } else {
-        return Error.Overflow;
-    };
-
-    self.mem_rem -= lhs.data.len;
-
-    return .{
-        .raw = @alignCast(std.mem.bytesAsSlice(T, lhs.data)[0..size]),
-        .ctx = @intFromPtr(lhs),
-    };
-}
-
-pub fn free(self: *BlockPool, data: anytype) void {
-    const block: *Block = @ptrFromInt(data.ctx);
-    self.mem_rem += block.data.len;
-
-    // fuse the left-side with block
-    const fused: *Block = scope: {
-        const left = block.split.prev orelse
-            break :scope block;
-
-        if (left.used)
-            break :scope block;
-
-        self.disconnect_from_order(left);
-
-        // we're going to destroy this block,
-        // so connect the right to the left
-        if (block.split.next) |right|
-            right.split.prev = left;
-
-        // connect the left side to the right
-        left.split.next = block.split.next;
-
-        left.data.len += block.data.len;
-        self.free_blocks.prepend(block);
-        break :scope left;
-    };
-
-    scope: { // fuse the right hand side
-        const right = fused.split.next orelse
-            break :scope;
-
-        if (right.used)
-            break :scope;
-
-        self.disconnect_from_order(right);
-
-        // we're going to destroy the right block,
-        // so only take what's to the right of it.
-        if (right.split.next) |further_right|
-            further_right.split.prev = fused;
-
-        // connect to the further right block
-        fused.split.next = right.split.next;
-
-        fused.data.len += right.data.len;
-        self.free_blocks.prepend(right);
-    }
-    self.reserve_block(fused);
-}
-
-pub fn reset(self: *BlockPool) void {
-    for (0..NUM_ORDERS) |i|
-        self.block_orders[i] = null;
-
-    self.free_blocks.head = null;
-
-    self.block_arena.reset(.{
-        .retain_capacity = @sizeOf(Block),
-    });
-
-    self.top_block = .{
-        .data = self.mem_buf,
-    };
-
-    self.reserve_block(self.top_block);
-}
-
-// maintains that prev<->block<->next => prev<->next
-fn disconnect_from_order(self: *BlockPool, block: *Block) void {
-    const index = size_to_lower_index(block.data.len);
-    self.block_orders[index].remove(&block.order);
-}
-
-fn create_block(self: *BlockPool, allocator: Allocator) Allocator.Error!*Block {
-    return self.free_blocks.pop() orelse {
-        return self.block_arena.create(allocator, Block);
-    };
-}
-
-fn reserve_block(self: *BlockPool, block: *Block) void {
-    // we want the lowest index possible because blocks
-    // must support all allocations and below that order
-    const index = size_to_lower_index(block.data.len);
-    self.block_orders[index].prepend(&block.order);
-    block.used = false;
-}
-
-fn release_block(self: *BlockPool, index: usize) ?*Block {
-    const node = self.block_orders[index].pop() orelse return null;
-    const block: *Block = @fieldParentPtr("order", node);
-    block.used = true;
-    return block;
 }
 
 ///////////////////////

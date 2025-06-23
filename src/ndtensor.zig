@@ -48,7 +48,7 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Shape is allocated. COM.
         pub fn empty(device: DeviceReference, shape: []const usize, opts: TensorOpts) !*Self {
-            var graph = opts.graph orelse zg.get_global_graph();
+            var graph = opts.graph orelse zg.global_graph_get();
             const self = try graph.builder.create_node(Self);
             errdefer graph.builder.destroy_node(self);
 
@@ -1307,7 +1307,7 @@ pub fn NDTensor(comptime T: type) type {
 }
 
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_pool_size = zg.constants.@"1Mb" / 2,
+    .max_cache_size = zg.constants.@"1Mb" / 2,
 };
 
 test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {

@@ -18,6 +18,11 @@ pub const Opts = struct {
     eager_teardown: bool = false,
 };
 
+mutex: if (!zg.settings.thread_safe) struct {
+    inline fn lock(_: *@This()) void {}
+    inline fn unlock(_: *@This()) void {}
+} else std.Thread.Mutex = .{},
+
 /// Manages the overall graph, allows for a more memory efficient abstraction where the data structures used for
 /// traversing the graph during backprop can be managed independently and reused across training steps
 builder: Builder,
@@ -36,31 +41,20 @@ pub fn init(allocator: std.mem.Allocator, opts: Opts) Graph {
 }
 
 pub fn deinit(self: *Graph) void {
-    self.sorted_nodes.deinit(self.builder.allocator);
-    self.backward_node_stack.deinit(self.builder.allocator);
-    self.builder.deinit();
+    {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.sorted_nodes.deinit(self.builder.allocator);
+        self.backward_node_stack.deinit(self.builder.allocator);
+        self.builder.deinit();
+    }
     self.* = undefined;
-}
-
-pub fn topological_sort(self: *Graph, node: *Node) void {
-    const gopr = self.sorted_nodes.getOrPut(self.builder.allocator, node) catch unreachable;
-
-    if (gopr.found_existing) {
-        gopr.value_ptr.pending += 1;
-        return;
-    }
-
-    gopr.value_ptr.* = PathInfo{};
-
-    var children = node.child_iterator() orelse return;
-    while (children.next()) |child| {
-        if (!child.attached()) continue;
-        self.topological_sort(child);
-    }
 }
 
 // Must init grad on root node before backprop
 pub fn backward(self: *Graph, root: *Node) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     // do not reset the arena - that contains the graph that we are currently attempting to reverse over
     self.sorted_nodes.clearRetainingCapacity();
     self.backward_node_stack.clearRetainingCapacity();
@@ -69,9 +63,8 @@ pub fn backward(self: *Graph, root: *Node) !void {
     self.backward_node_stack.append(self.builder.allocator, root) catch unreachable;
 
     outer: while (self.backward_node_stack.pop()) |parent| {
-        defer if (self.eager_teardown and !parent.acquired()) {
+        defer if (self.eager_teardown and !parent.acquired())
             parent.deinit();
-        };
 
         if (!parent.requires_grad()) continue :outer;
 
@@ -94,11 +87,31 @@ pub fn backward(self: *Graph, root: *Node) !void {
 /// Calls clear on all nodes in that are attached to the root. This frees object resources
 /// that are associated with the nodes. Freeing nodes themselves must be done with reset.
 pub fn teardown(self: *Graph, root: *Node) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
     self.sorted_nodes.clearRetainingCapacity();
     self.topological_sort(root);
 
     for (self.sorted_nodes.keys()) |node| {
         if (!node.acquired()) node.deinit();
+    }
+}
+
+fn topological_sort(self: *Graph, node: *Node) void {
+    const gopr = self.sorted_nodes.getOrPut(self.builder.allocator, node) catch unreachable;
+
+    if (gopr.found_existing) {
+        gopr.value_ptr.pending += 1;
+        return;
+    }
+
+    gopr.value_ptr.* = PathInfo{};
+
+    var children = node.child_iterator() orelse return;
+    while (children.next()) |child| {
+        if (!child.attached()) continue;
+        self.topological_sort(child);
     }
 }
 
@@ -109,7 +122,7 @@ const TensorOpts = @import("ndtensor.zig").TensorOpts;
 
 // limit memory usage for testing
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_pool_size = zg.constants.@"1Mb" / 2, // probably still excessive
+    .max_cache_size = zg.constants.@"1Kb", // probably still excessive
 };
 
 comptime {

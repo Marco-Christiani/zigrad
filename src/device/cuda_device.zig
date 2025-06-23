@@ -5,7 +5,8 @@ const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
 const BinaryOp = @import("device_common.zig").BinaryOp;
-const CachingAllocator = @import("../allocators.zig").CachingAllocator(CudaMalloc);
+const round_to_next_page = @import("../allocators.zig").round_to_next_page;
+const CachingAllocator = @import("../allocators.zig").CachingAllocator(DataHandler);
 const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
 const TransferDirection = @import("device_common.zig").TransferDirection;
@@ -13,14 +14,67 @@ const build_options = @import("build_options");
 
 const opspec = @import("opspec.zig");
 
-pub const CudaMalloc = struct {
-    pub fn raw_alloc(n: usize, ctx: *anyopaque) ?[*]u8 {
-        const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
-        return @ptrCast(@alignCast(cuda.mem_alloc(n, w.*)));
+// TODO: Move the abstraction up a level when we decide to
+// support more granular operations over cuda virtual memory
+const DataHandler = struct {
+    device_id: u32,
+    memmap: cuda.MemmapWrapper,
+    stream: cuda.StreamWrapper,
+    pub fn init(device_id: u32, stream: cuda.StreamWrapper) DataHandler {
+        return .{
+            .device_id = device_id,
+            .memmap = cuda.init_memmap(device_id),
+            .stream = stream,
+        };
     }
-    pub fn raw_free(buf: []u8, ctx: *anyopaque) void {
-        const w: *cuda.StreamWrapper = @ptrCast(@alignCast(ctx));
-        cuda.mem_free(buf.ptr, w.*);
+
+    pub fn map(self: DataHandler, size: usize) Error![]u8 {
+        cuda.reset_memmap(self.memmap);
+
+        const adjusted_size = round_to_next_page(size, self.page_size());
+
+        std.debug.print("adjusted size: {}\n", .{adjusted_size});
+
+        const ptr: [*]u8 = @ptrCast(@alignCast(cuda.mem_map(self.device_id, adjusted_size) orelse
+            return Error.DeviceOOM));
+
+        return ptr[0..adjusted_size];
+    }
+
+    pub fn unmap(self: DataHandler, buf: []u8) void {
+        cuda.reset_memmap(self.memmap);
+        cuda.mem_unmap(self.device_id, buf.ptr, buf.len);
+    }
+
+    /// returns the adjusted size that was mapped.
+    pub fn map_alloc(self: DataHandler, head: [*]u8, n: usize) usize {
+        // assumes that "map" has been called and that the head poitner
+        // belongs to the virtually mapped region - this data structure
+        // has to manage what mapped regions have been allocated to.
+        const adjusted_size = round_to_next_page(n, self.page_size());
+        cuda.mem_map_alloc(self.memmap, head, adjusted_size);
+        return adjusted_size;
+    }
+
+    pub fn alloc(self: DataHandler, n: usize) ?[*]u8 {
+        return @ptrCast(@alignCast(cuda.mem_alloc(n, self.stream) orelse return null));
+    }
+
+    pub fn free(self: DataHandler, buf: []u8) void {
+        cuda.mem_free(buf.ptr, self.stream);
+    }
+
+    pub fn page_size(self: DataHandler) usize {
+        return cuda.mem_page_size(self.device_id);
+    }
+
+    pub inline fn reset(self: DataHandler) void {
+        cuda.reset_memmap(self.memmap);
+    }
+
+    pub fn deinit(self: *DataHandler) void {
+        cuda.deinit_memmap(self.memmap);
+        self.* = undefined;
     }
 };
 
@@ -39,6 +93,8 @@ const CUDA_COMPILE_ERROR =
 
 const Self = @This();
 pub const DeviceReference = @import("device_reference.zig");
+
+const DeviceContext = struct {};
 
 // keep these out of the user api
 context: struct {
@@ -65,22 +121,22 @@ pub fn init(device_number: u32) Self {
 
 // TODO: There is probably more to configure than the
 // caching allocator - make a unified optoins struct?
-pub fn init_advanced(device_number: u32, opts: CachingAllocator.Options) Self {
-    const properties = cuda.init_device(device_number);
+pub fn init_advanced(device_id: u32, opts: CachingAllocator.Options) Self {
+    const properties = cuda.init_device(device_id);
     const stream = cuda.init_stream();
     const cublas = cuda.init_cublas_handle(stream);
     const cudnn = cuda.init_cudnn_handle(stream);
     const cutensor = cuda.init_cutensor_handle(stream);
     return .{
         .context = .{
-            .device_number = device_number,
+            .device_number = device_id,
             .properties = properties,
             .stream = stream,
             .cublas = cublas,
             .cudnn = cudnn,
             .cutensor = cutensor,
         },
-        .cache = CachingAllocator.init(opts),
+        .cache = CachingAllocator.init(DataHandler.init(device_id, stream), opts),
         .capture = .{},
     };
 }
@@ -88,7 +144,7 @@ pub fn init_advanced(device_number: u32, opts: CachingAllocator.Options) Self {
 pub fn deinit(self: *Self) void {
     self.sync();
     self.capture.free();
-    self.cache.deinit(&self.context.stream);
+    self.cache.deinit();
     cuda.deinit_cudnn_handle(self.context.cudnn);
     cuda.deinit_cublas_handle(self.context.cublas);
     cuda.deinit_cutensor_handle(self.context.cutensor);
@@ -97,7 +153,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn reference(self: *Self) DeviceReference {
-    return .{ .ptrs = .{ .aux = self } };
+    return .{ .ptrs = .{ .cuda = self } };
 }
 
 pub fn dtype(T: type) cuda.dtype {
@@ -180,7 +236,30 @@ pub fn matvec(self: *const Self, T: type, p: opspec.matvec(T)) void {
 pub fn transpose(self: *Self, T: type, p: opspec.transpose(T)) void {
     const A_shape: [2]usize = .{ p.m, p.n };
     const B_shape: [2]usize = .{ p.n, p.m };
-    self.permutate(T, p.A, &A_shape, "ij", p.B, &B_shape, "ji", p.alpha);
+    const A_modes = "ij";
+    const B_modes = "ji";
+    const id = dtype(T);
+    const _alpha = p.alpha;
+
+    // zig fmt: off
+    const w = cuda.get_permutate_plan(
+        self.context.cutensor, id,
+        A_shape.ptr, A_modes.ptr, p.A_shape.len,
+        B_shape.ptr, B_modes.ptr, p.B_shape.len,
+    );
+    // zig fmt: on
+
+    const scratch = self.mem_scratch(u8, p.scratch_len);
+
+    cuda.permutate(
+        self.context.cutensor,
+        w.plan,
+        p.A.ptr,
+        p.B.ptr,
+        scratch.ptr,
+        scratch.len,
+        &_alpha,
+    );
 }
 
 pub fn matmul(self: *const Self, T: type, p: opspec.matmul(T)) void {
@@ -208,16 +287,30 @@ pub fn bmm_acc(self: *Self, T: type, p: opspec.bmm_acc(T)) void {
     const _alpha = p.alpha;
     const _beta = p.beta;
 
+    const id = dtype(T);
+
     // zig fmt: off
-    cuda.contraction(
-        dtype(T), self.context.cutensor,
-        p.A.ptr, p.A_shape.ptr, A_modes.ptr, p.A_shape.len,
-        p.B.ptr, p.B_shape.ptr, B_modes.ptr, p.B_shape.len,
-        p.C.ptr, p.C_shape.ptr, C_modes.ptr, p.C_shape.len,
-        &self.cache.scratch.start, &self.cache.scratch.total,
-        &_alpha, &_beta,
+    const w = cuda.get_contraction_plan(
+        self.context.cutensor, id,
+        p.A_shape.ptr, A_modes.ptr, p.A_shape.len,
+        p.B_shape.ptr, B_modes.ptr, p.B_shape.len,
+        p.C_shape.ptr, C_modes.ptr, p.C_shape.len,
     );
     // zig fmt: on
+
+    const scratch = self.mem_scratch(u8, w.scratch_len);
+
+    cuda.contraction(
+        self.context.cutensor,
+        w.plan,
+        p.A.ptr,
+        p.B.ptr,
+        p.C.ptr,
+        scratch.ptr,
+        scratch.len,
+        &_alpha,
+        &_beta,
+    );
 }
 
 pub fn nrm2(self: *const Self, T: type, p: opspec.nrm2(T)) void {
@@ -252,36 +345,6 @@ pub fn max_bwd(self: *const Self, T: type, p: opspec.max_bwd(T)) void {
     cuda.max_bwd(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.y_g.ptr, p.x_g.ptr, p.x.len);
 }
 
-/// can perform broadcasting of the sort:hi
-pub fn permutate(
-    self: *Self,
-    T: type,
-    x_vals: []const T,
-    x_dims: []const usize,
-    x_syms: []const u8,
-    y_vals: []T,
-    y_dims: []const usize,
-    y_syms: []const u8,
-    alpha: T,
-) void {
-    const _alpha = alpha;
-    cuda.permutate(
-        dtype(T),
-        self.context.cutensor,
-        x_vals.ptr,
-        x_dims.ptr,
-        x_syms.ptr,
-        x_dims.len,
-        y_vals.ptr,
-        y_dims.ptr,
-        y_syms.ptr,
-        y_dims.len,
-        &self.cache.scratch.start,
-        &self.cache.scratch.total,
-        &_alpha,
-    );
-}
-
 pub fn exp(self: *const Self, T: type, p: opspec.exp_fwd(T)) void {
     cuda.pow_exp(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.x.len);
 }
@@ -309,70 +372,122 @@ pub fn relu_bwd(self: *const Self, T: type, p: opspec.relu_bwd(T)) void {
 //pub fn smax_row_bwd(self: *const Self, T: type, y_val: []const T, y_grd: []const T, x_grd: []T, m: usize, n: usize, op: SmaxType) void {
 //    cuda.smax_2D_row_bwd(dtype(T), self.cudnn(), y_val.ptr, y_grd.ptr, x_grd.ptr, m, n, smaxtype(op));
 //}
-
-pub fn nll_loss_1d_index_fwd(self: *const Self, T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
-    const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
-    cuda.nll_loss_1D_index_fwd(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
-}
-
-pub fn nll_loss_1d_index_bwd(self: *const Self, T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
-    cuda.nll_loss_1D_index_bwd(dtype(T), self.cudnn(), src_grd.ptr, trg, src_grd.ptr, src_val.len, rdxtype(reduce_type));
-}
-
-pub fn nll_loss_1d_encode_fwd(self: *const Self, T: type, src: []T, trg: []const T, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
-    const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
-    cuda.nll_loss_1D_index_fwd(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
-}
-
-pub fn nll_loss_1d_encode_bwd(self: *const Self, T: type, src_val: []const T, trg_val: []const T, src_grd: []T, reduce_type: ReduceType) f64 {
-    cuda.nll_loss_1D_index_bwd(dtype(T), self.cudnn(), src_grd.ptr, trg_val.ptr, src_grd.ptr, src_val.len, rdxtype(reduce_type));
-}
+//pub fn nll_loss_1d_index_fwd(self: *const Self, T: type, src: []T, trg: usize, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+//    const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
+//    cuda.nll_loss_1D_index_fwd(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
+//}
+//
+//pub fn nll_loss_1d_index_bwd(self: *const Self, T: type, src_val: []const T, src_grd: []T, trg: usize, reduce_type: ReduceType) f64 {
+//    cuda.nll_loss_1D_index_bwd(dtype(T), self.cudnn(), src_grd.ptr, trg, src_grd.ptr, src_val.len, rdxtype(reduce_type));
+//}
+//
+//pub fn nll_loss_1d_encode_fwd(self: *const Self, T: type, src: []T, trg: []const T, dst: []T, input_logits: bool, reduce: bool, reduce_type: ReduceType) f64 {
+//    const _reduce = if (reduce) rdxtype(reduce_type) else cuda.RDX_NONE;
+//    cuda.nll_loss_1D_index_fwd(dtype(T), self.cudnn(), src.ptr, trg, dst.ptr, src.len, input_logits, _reduce);
+//}
+//
+//pub fn nll_loss_1d_encode_bwd(self: *const Self, T: type, src_val: []const T, trg_val: []const T, src_grd: []T, reduce_type: ReduceType) f64 {
+//    cuda.nll_loss_1D_index_bwd(dtype(T), self.cudnn(), src_grd.ptr, trg_val.ptr, src_grd.ptr, src_val.len, rdxtype(reduce_type));
+//}
 
 pub fn sum_along(self: *Self, T: type, p: opspec.sum_along(T)) void {
-    const dim_arr: [1]usize = .{p.dim};
-    const _alpha: T = 1.0;
-    const _beta: T = 0.0;
-    cuda.reduce(
-        dtype(T),
-        self.context.cutensor,
-        p.x.ptr,
-        p.x_shape.ptr,
-        p.x_shape.len,
-        p.y.ptr,
-        &self.cache.scratch.start,
-        &self.cache.scratch.total,
-        &dim_arr[0],
-        dim_arr.len,
-        &_alpha,
-        &_beta,
-        cuda.ADD,
-    );
+    self.reduce_one(T, .{
+        .x = p.x,
+        .x_shape = p.x_shape,
+        .y = p.y,
+        .y_shape = p.y_shape,
+        .dim = p.dim,
+        .alpha = p.alpha,
+        .beta = p.beta,
+        .binary_op = cuda.ADD,
+    });
 }
 
 pub fn max_along(self: *Self, T: type, p: opspec.max_along(T)) void {
-    const dim_arr: [1]usize = .{p.dim};
-    const _alpha: T = 1.0;
-    const _beta: T = 0.0;
+    self.reduce_one(T, .{
+        .x = p.x,
+        .x_shape = p.x_shape,
+        .y = p.y,
+        .y_shape = p.y_shape,
+        .dim = p.dim,
+        .alpha = p.alpha,
+        .beta = p.beta,
+        .binary_op = cuda.MAX,
+    });
+}
+
+pub fn reduce_one(self: *Self, T: type, p: struct {
+    x: []const T,
+    x_shape: []const usize,
+    y: []T,
+    y_shape: []const usize,
+    dim: usize,
+    alpha: T,
+    beta: T,
+    binary_op: cuda.BINARY_OP,
+}) void {
+    // We can get away with a small lookup table because we
+    // only need to exclude a single dimension out of 8.
+    const x_sims: []const u8 = "abcdefgh"[0..p.x_shape.len];
+
+    const y_sims: []const u8 = switch (p.dim) {
+        0 => "bcdefgh",
+        1 => "acdefgh",
+        2 => "abdefgh",
+        3 => "abcefgh",
+        4 => "abcdfgh",
+        5 => "abcdegh",
+        6 => "abcdefh",
+        7 => "abcdefg",
+        else => unreachable,
+    }[0..p.y_shape.len];
+
+    // zig fmt: off
+    const w = cuda.get_reduce_plan(
+        self.context.cutensor, dtype(T),
+        p.x_shape.ptr, x_sims.ptr, p.x_shape.len,
+        p.y_shape.ptr, y_sims.ptr, p.y_shape.len,
+        p.binary_op,
+    );
+    // zig fmt: on
+    const _alpha = p.alpha;
+    const _beta = p.beta;
+
+    const scratch = self.mem_scratch(u8, w.scratch_len);
+
     cuda.reduce(
-        dtype(T),
         self.context.cutensor,
+        w.plan,
         p.x.ptr,
-        p.x_shape.ptr,
-        p.x_shape.len,
         p.y.ptr,
-        &self.cache.scratch.start,
-        &self.cache.scratch.total,
-        &dim_arr[0],
-        dim_arr.len,
+        scratch.ptr,
+        scratch.len,
         &_alpha,
         &_beta,
-        cuda.MAX,
     );
+}
+
+pub fn mem_cache_alloc(self: *Self, T: type, n: usize) !DeviceData(T) {
+    return self.cache.alloc(T, n);
+}
+
+pub fn mem_cache_free(self: *Self, data: anytype) void {
+    self.cache.free(data);
+}
+
+pub fn mem_cache_dupe(self: *Self, T: type, src: []const T) !DeviceData(T) {
+    const dst = try self.cache.alloc(T, src.len);
+    self.mem_copy(T, src, dst.raw);
+    return dst;
 }
 
 pub fn mem_alloc(self: *Self, T: type, n: usize) ![]T {
     if (n == 0) return &.{};
-    return self.cache.alloc(T, n, &self.context.stream);
+    const tptr: [*]T = @ptrCast(@alignCast(cuda.mem_alloc(
+        n * @sizeOf(T),
+        self.context.stream,
+    ) orelse return Error.DeviceOOM));
+    return tptr[0..n];
 }
 
 pub fn mem_alloc_byte_mask(self: *Self, n: usize) ![]u8 {
@@ -385,13 +500,13 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
     return dup;
 }
 
-pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
-    return self.cache.get_scratch(T, n, &self.context.stream);
+pub fn mem_scratch(self: *Self, T: type, n: usize) []T {
+    return self.cache.alloc_scratch(T, n);
 }
 
 pub fn mem_free(self: *Self, slice: anytype) void {
     if (slice.len == 0) return;
-    return self.cache.free(slice, &self.context.stream);
+    cuda.mem_free(slice.ptr, self.context.stream);
 }
 
 pub fn mem_fill(self: Self, T: type, slice: []T, value: T) void {
@@ -426,10 +541,6 @@ pub fn mem_transfer(self: Self, T: type, src: []const T, dst: []T, direction: Tr
         .DtoH => cuda.memcpy_DtoH(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
         .DtoD => cuda.memcpy_DtoD(dst.ptr, src.ptr, src.len * @sizeOf(T), self.context.stream),
     }
-}
-
-pub fn clear_cache(self: *Self) void {
-    self.cache.clear(&self.context.stream);
 }
 
 pub fn sync(self: Self) void {

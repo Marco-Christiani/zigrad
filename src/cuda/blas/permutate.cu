@@ -3,73 +3,125 @@
 
 #include "blas_utils.cu"
 
-// we're using double because every float can cast
-// up to a double and then we can go back down.
+// syms and dims must be same length
+extern "C" CutensorPlanWrapper get_permutate_plan(
+    CutensorWrapper wrapper,
+    dtype id,
+    const len_t* src_dims,
+    const u8* src_syms,
+    len_t src_dims_len,
+    const len_t* dst_dims,
+    const u8* dst_syms,
+    len_t dst_dims_len
+) {
+  CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to permutate");
+  CHECK_INVARIANT(src_dims_len <= dst_dims_len, "Source dimensions length greater than destination");
+
+  auto ct = CutensorBackend::unwrap(wrapper);
+
+  const auto data_type = cutensor_data_type(id);
+
+  auto key = ct->manager.make_key<PermutatePlan>(
+    data_type,
+    {
+      __seq_hash(src_dims, src_dims_len),
+      __seq_hash(src_syms, src_dims_len),
+      __seq_hash(dst_dims, src_dims_len),
+      __seq_hash(dst_syms, src_dims_len),
+    }
+  );
+
+  if (auto entry = ct->manager.find<PermutatePlan>(key); entry)
+    return { .plan = entry->plan.ptr, .scratch_len = entry->scratch_len };
+
+  BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
+  BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
+  BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
+  BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
+
+  cutensorTensorDescriptor_t x_desc;
+  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+              ct->handle,
+              &x_desc,
+              a_dims.size,
+              a_dims.data,
+              NULL,/*stride*/
+              data_type, cutensor_alignment));
+
+  cutensorTensorDescriptor_t y_desc;
+  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+              ct->handle,
+              &y_desc,
+              b_dims.size,
+              b_dims.data,
+              NULL,/*stride*/
+              data_type, cutensor_alignment));
+
+  cutensorOperationDescriptor_t op_desc;
+  CUTENSOR_ASSERT(cutensorCreatePermutation(
+              ct->handle, &op_desc,
+              x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
+              y_desc, b_syms.data, 
+              cutensor_compute_type(id)));
+
+  const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+
+  cutensorPlanPreference_t plan_pref;
+  CUTENSOR_ASSERT(cutensorCreatePlanPreference(
+              ct->handle,
+              &plan_pref,
+              algo,
+              CUTENSOR_JIT_MODE_NONE));
+
+  len_t scratch_len = 0;
+  CUTENSOR_ASSERT(cutensorEstimateWorkspaceSize(
+              ct->handle,
+              op_desc,
+              plan_pref,
+              CUTENSOR_WORKSPACE_DEFAULT,
+              &scratch_len));
+
+  cutensorPlan_t plan;
+  CUTENSOR_ASSERT(cutensorCreatePlan(
+              ct->handle,
+              &plan,
+              op_desc,
+              plan_pref,
+              scratch_len));
+
+  ct->manager.insert(
+    key,
+    PermutatePlan{
+      .plan = plan,
+      .plan_pref = plan_pref,
+      .x_desc = x_desc,
+      .y_desc = y_desc,
+      .scratch_len = scratch_len,
+    }
+  );
+
+  return { .plan = plan, .scratch_len = scratch_len };
+}
 
 extern "C" void permutate(
-    dtype id,
     CutensorWrapper wrapper,
-    const void* x_vals, const len_t* x_dims, const u8* x_syms, len_t x_dims_len,
-          void* y_vals, const len_t* y_dims, const u8* y_syms, len_t y_dims_len,
-    len_t* scratch, len_t* scratch_len,
+    void* plan,
+    const void* x_vals,
+          void* y_vals,
+    void* scratch,
+    len_t scratch_len,
     const void* alpha
 ) {
   CutensorBackend* backend = CutensorBackend::unwrap(wrapper);
 
-  // TODO: Do we need the scratch memory at all? We don't use it.
-  auto plan = backend->get_permutate_plan(
-    id,
-    x_dims, x_syms, x_dims_len,
-    y_dims, y_syms, y_dims_len,
-    scratch, scratch_len
-  );
-
   CUTENSOR_ASSERT(cutensorPermute(
-      backend->handle, plan, alpha, x_vals, y_vals, backend->stream
+      backend->handle,
+      reinterpret_cast<cutensorPlan_t>(plan),
+      alpha,
+      x_vals,
+      y_vals,
+      backend->stream
   ));
-}
-
-extern "C" void permutate_backwards(
-    dtype id,
-    CutensorWrapper wrapper,
-          void* x_grad, const len_t* x_dims, const u8* x_syms, len_t x_dims_len,
-    const void* y_grad, const len_t* y_dims, const u8* y_syms, len_t y_dims_len,
-    len_t* scratch, len_t* scratch_len,
-    const void* alpha, const void* beta
-) {
-  CutensorBackend* backend = CutensorBackend::unwrap(wrapper);
-
-  if (x_dims_len == y_dims_len) {
-      // TODO: Do we need the scratch memory at all? We don't use it.
-      auto plan = backend->get_binary_plan(
-        id,
-        x_dims, x_syms, x_dims_len,
-        y_dims, y_syms, y_dims_len,
-        BINARY_OP::ADD
-      );
-
-    CUTENSOR_ASSERT(cutensorElementwiseBinaryExecute(
-        backend->handle, plan, alpha, x_grad, beta, y_grad, x_grad, backend->stream
-    ));
-
-  } else {
-    auto plan = backend->get_reduce_plan(
-      id,
-      y_dims, y_syms, y_dims_len,
-      x_dims, x_syms, x_dims_len,
-      scratch, scratch_len,
-      BINARY_OP::ADD
-    );
-
-    CUTENSOR_ASSERT(cutensorReduce(
-        backend->handle, plan, alpha, y_grad, beta, x_grad, x_grad, scratch, *scratch_len, backend->stream
-    ));
-  }
-
-
-  //CUTENSOR_ASSERT(cutensorPermute(
-  //    backend->handle, plan, alpha, x_vals, y_vals, backend->stream
-  //));
 }
 
 #endif

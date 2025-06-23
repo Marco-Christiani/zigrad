@@ -68,7 +68,7 @@ pub fn mem_dupe(self: Self, T: type, slice: anytype) ![]T {
     };
 }
 
-pub fn mem_scratch(self: Self, T: type, n: usize) ![]T {
+pub fn mem_scratch(self: Self, T: type, n: usize) []T {
     return switch (self.ptrs) {
         inline else => |dev| dev.mem_scratch(T, n),
     };

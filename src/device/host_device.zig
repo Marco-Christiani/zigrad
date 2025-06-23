@@ -7,6 +7,7 @@ const BinaryOp = @import("device_common.zig").BinaryOp;
 const RandType = @import("device_common.zig").RandType;
 const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
+const round_to_next_page = @import("../allocators.zig").round_to_next_page;
 const CachingAllocator = @import("../allocators.zig").CachingAllocator(DataHandler);
 const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
@@ -31,9 +32,10 @@ const c = switch (builtin.target.os.tag) {
 
 const DataHandler = struct {
     // zig fmt: off
-    pub fn map(_: DataHandler, size: usize) ![]u8 {
+    pub fn map(self: DataHandler, size: usize) ![]u8 {
+        const adjusted_size = round_to_next_page(size, self.page_size());
         return @ptrCast(@alignCast(try std.posix.mmap(
-            null, size,
+            null, adjusted_size,
             std.posix.PROT.READ | std.posix.PROT.WRITE,
             .{ .ANONYMOUS = true, .TYPE = .PRIVATE },
             -1, 0
@@ -61,6 +63,9 @@ const DataHandler = struct {
     pub fn page_size(_: DataHandler) usize {
         return std.heap.pageSize();
     }
+
+    pub inline fn deinit(_: DataHandler) void {}
+    pub inline fn reset(_: DataHandler) void {}
     // zig fmt: on
 };
 
@@ -502,6 +507,7 @@ pub fn unbroadcast(self: *Self, T: type, p: opspec.unbroadcast(T)) void {
                 .x = x_data,
                 .x_shape = x_shape.slice(),
                 .y = y_data,
+                .y_shape = y_shape.slice(),
                 .dim = i,
                 .alpha = p.alpha,
                 .beta = p.beta,
@@ -649,7 +655,7 @@ pub fn mem_dupe(self: *Self, T: type, src: []const T) ![]T {
     return dst;
 }
 
-pub fn mem_scratch(self: *Self, T: type, n: usize) ![]T {
+pub fn mem_scratch(self: *Self, T: type, n: usize) []T {
     return self.cache.alloc_scratch(T, n);
 }
 
@@ -692,10 +698,6 @@ pub fn mem_sequence(_: *const Self, T: type, slice: []T, initial: T, step: T) vo
 pub fn mem_take(_: *const Self, T: type, src: []const T, idxs: []const usize, dst: []T) void {
     std.debug.assert(dst.len >= idxs.len);
     for (idxs, 0..) |i, j| dst[j] = src[i];
-}
-
-pub fn clear_cache(self: *Self) void {
-    self.cache.clear();
 }
 
 pub fn sync(_: *const Self) void {}
