@@ -29,8 +29,7 @@ pub const using_mkl_rt = build_options.enable_mkl;
 const c = switch (builtin.target.os.tag) {
     .linux => @cImport({
         @cInclude("cblas.h");
-        // if (build_options.enable_mkl) @cInclude("mkl_vml_functions.h");
-        @cInclude("mkl_vml_functions.h");
+        if (build_options.enable_mkl) @cInclude("mkl_vml_functions.h");
     }),
     .macos => @cImport(@cInclude("Accelerate/Accelerate.h")),
     else => @compileError("Unsupported os"),
