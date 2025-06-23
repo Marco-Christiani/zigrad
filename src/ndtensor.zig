@@ -960,6 +960,29 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
+        /// Differentiable element-wise inverse square root.
+        pub fn rsqrt(self: *Self) !*Self {
+            const RSqrtBwd = struct {
+                pub fn backward(y: *Self, children: *Node.Children) !void {
+                    const x = children.get_bwd_upcast(Self, 0) orelse return;
+                    y.device.dispatch(opspec.rsqrt_bwd(T){
+                        .x = x.get_data(),
+                        .x_g = try x.ensure_grad_data(0),
+                        .y_g = y.assume_grad_data(),
+                        .eps = settings.eps,
+                    });
+                }
+            };
+
+            return create_dependent(RSqrtBwd, .{
+                .data = try self.data.rsqrt(self.device),
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{},
+            });
+        }
+
         const BmmOpts = struct {
             trans_a: bool = false,
             trans_b: bool = false,
@@ -1370,6 +1393,7 @@ pub fn NDTensor(comptime T: type) type {
 
         /// Select complete rows/slices along a dimension using 1D indices
         pub fn index_select(self: *Self, dim: usize, indices: []const usize) !*Self {
+            // TODO: lower to device and ndarray layers
             std.debug.assert(dim < self.data.shape.len);
 
             const IndexSelectBwd = struct {
@@ -1378,18 +1402,14 @@ pub fn NDTensor(comptime T: type) type {
                 indices_data: []usize,
 
                 pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
-                    // defer ctx.allocator.free(ctx.indices_data);
                     defer y.device.mem_free(ctx.indices_data);
 
                     const x = children.get_bwd_upcast(Self, 0) orelse return;
                     const x_grad = try x.ensure_grad_data(0);
                     const y_grad = y.assume_grad_data();
 
-                    // Calculate strides
-                    var stride: usize = 1;
-                    for (ctx.dim + 1..ctx.src_shape.len) |i| {
-                        stride *= ctx.src_shape.get(i);
-                    }
+                    // Calculate stride
+                    const stride = Shape.init(ctx.src_shape.tail(ctx.src_shape.len - ctx.dim - 1)).size();
 
                     // Scatter gradients back to original positions
                     for (ctx.indices_data, 0..) |src_idx, dst_idx| {
@@ -1409,39 +1429,35 @@ pub fn NDTensor(comptime T: type) type {
             const src_shape = self.data.shape;
 
             // Calculate output shape
-            var out_shape_array: [8]usize = undefined;
-            for (src_shape.slice(), 0..) |size, i| {
-                out_shape_array[i] = if (i == dim) n_indices else size;
-            }
-            const out_shape = out_shape_array[0..src_shape.len];
-
-            // Stride for dim selecting along
-            var stride: usize = 1;
-            for (dim + 1..src_shape.len) |i| stride *= src_shape.get(i);
+            var out_shape = Shape.init(src_shape.slice());
+            out_shape.set(dim, n_indices);
 
             // Allocate output
-            const total_elements = Shape.slice_size(out_shape);
-            const out_data = try self.device.mem_alloc(T, total_elements);
-            errdefer self.device.mem_free(out_data);
+            var output = try DataType.empty(out_shape.slice(), self.device);
+            errdefer output.deinit(self.device);
+
+            // Stride for dim selecting along
+            const stride = Shape.init(src_shape.tail(src_shape.len - dim - 1)).size();
 
             // Copy data
             const src_data = self.get_data();
+            const out_data = output.data;
             for (indices, 0..) |src_idx, dst_idx| {
                 const src_start = src_idx * stride;
                 const dst_start = dst_idx * stride;
 
-                self.device.mem_copy(T, src_data[src_start .. src_start + stride], out_data[dst_start .. dst_start + stride]);
+                self.device.mem_copy(
+                    T,
+                    src_data[src_start .. src_start + stride],
+                    out_data[dst_start .. dst_start + stride],
+                );
             }
 
             // Store indices for backward pass
-            // const indices_copy = try self.node.gb.allocator.dupe(usize, indices);
             const indices_copy = try self.device.mem_dupe(usize, indices);
 
             return try create_dependent(IndexSelectBwd, .{
-                .data = .{
-                    .data = out_data,
-                    .shape = Shape.init(out_shape),
-                },
+                .data = output,
                 .children = &.{&self.node},
                 .device = self.device,
                 .gb = self.node.gb,
