@@ -120,19 +120,19 @@ pub fn reference(self: *Self) DeviceReference {
 ///////////////////
 // element wise ops
 pub fn add(_: *const Self, T: type, p: opspec.add(T)) void {
-    return elwise(T, p.x, p.y, p.z, add_op);
+    return elwise_binop(T, p.x, p.y, p.z, add_op);
 }
 
 pub fn sub(_: *const Self, T: type, p: opspec.sub(T)) void {
-    return elwise(T, p.x, p.y, p.z, sub_op);
+    return elwise_binop(T, p.x, p.y, p.z, sub_op);
 }
 
 pub fn mul(_: *const Self, T: type, p: opspec.mul(T)) void {
-    return elwise(T, p.x, p.y, p.z, mul_op);
+    return elwise_binop(T, p.x, p.y, p.z, mul_op);
 }
 
 pub fn div(_: *const Self, T: type, p: opspec.div(T)) void {
-    return elwise(T, p.x, p.y, p.z, div_op);
+    return elwise_binop(T, p.x, p.y, p.z, div_op);
 }
 
 /////////////////////////////////
@@ -319,6 +319,86 @@ pub fn sqrt_bwd(_: *const Self, T: type, p: opspec.sqrt_bwd(T)) void {
         } else {
             // d/dx(sqrt(x)) = 1/(2*sqrt(x)) = 0.5 / sqrt(x)
             x_g_val.* += 0.5 / std.math.sqrt(x_val) * y_g_val;
+        }
+    }
+}
+
+fn vrsqrt(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+    // if (inca == 1 and incb == 1 and incr == 1)
+    switch (builtin.target.os.tag) {
+        .macos => switch (T) {
+            else => @compileError("TODO" ++ @typeName(T)), // i dont want to defer to native yet until i check if theres a kernel
+        },
+        .linux => if (using_mkl_rt) switch (T) {
+            f32 => c.vsInvSqrtI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+            f64 => c.vdInvSqrtI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+            else => @compileError("Unsupported type for vrsqrt" ++ @typeName(T)),
+        } else vrsqrt_native(
+            T,
+            a,
+            inca,
+            r,
+            incr,
+            n,
+        ),
+        inline else => @panic("Unsupported os"),
+    }
+}
+
+/// Inverse square root native implementation
+/// No bounds checking.
+fn vrsqrt_native(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+    _ = n;
+    var ai = 0;
+    var ri = 0;
+    while (ai < a.len) : ({
+        ai += inca;
+        ri += incr;
+    }) {
+        r[ri] = 1 / std.math.sqrt(a[ai]);
+    }
+}
+
+/// Forward inverse square root implementation
+pub fn rsqrt_fwd(_: *const Self, T: type, p: opspec.rsqrt_fwd(T)) void {
+    // TODO: broadcast and stride
+    // vrsqrt(T, p.x, 1, p.y, 1, p.x.len);
+    c.vsInvSqrt(
+        @intCast(p.x.len),
+        @ptrCast(p.x.ptr),
+        @ptrCast(p.y.ptr),
+    );
+}
+
+/// In-place backward rsqrt implementation
+/// Stable. Uses subgradient for x < eps.
+pub fn rsqrt_bwd(
+    _: *const Self,
+    T: type,
+    p: opspec.rsqrt_bwd(T),
+) void {
+    const eps = p.eps;
+    for (p.x, p.x_g, p.y_g) |x_val, *x_g_val, y_g_val| {
+        if (x_val < eps) {
+            // subgradient: treat as zero
+            x_g_val.* += 0.0;
+        } else {
+            // dy/dx = -0.5 * x^(-1.5)
+            const inv_sqrt = std.math.sqrt(x_val); // sqrt(x)
+            const inv_x_1p5 = 1.0 / (x_val * inv_sqrt); // x^(-1.5)
+            x_g_val.* += (-0.5 * inv_x_1p5) * y_g_val;
         }
     }
 }
@@ -777,11 +857,11 @@ inline fn div_op(x: anytype, y: anytype) @TypeOf(x, y) {
     return x / y;
 }
 
-pub fn elwise(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+pub fn elwise_binop(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     if (x.len == 1 or y.len == 1) {
-        return _elwise_scalar_dispatch(T, x, y, z, op);
+        return _elwise_binop_scalar_dispatch(T, x, y, z, op);
     } else if (x.len == y.len) {
-        return _elwise_equal_len(T, x, y, z, op);
+        return _elwise_binop_equal_len(T, x, y, z, op);
     }
 
     const min_size = @min(x.len, y.len);
@@ -790,35 +870,35 @@ pub fn elwise(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype)
     const z_step = min_size;
     var _x, var _y, var _z = .{ x, y, z };
     while (0 < _z.len) {
-        _elwise_equal_len(T, _x[0..min_size], _y[0..min_size], _z[0..min_size], op);
+        _elwise_binop_equal_len(T, _x[0..min_size], _y[0..min_size], _z[0..min_size], op);
         _x = _x[x_step..];
         _y = _y[y_step..];
         _z = _z[z_step..];
     }
 }
 
-fn _elwise_scalar_dispatch(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_scalar_dispatch(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == 1 or y.len == 1);
     if (z.len == 1) {
         z[0] = op(x[0], y[0]);
     } else if (x.len == 1) {
-        _elwise_scalar_lhs(T, x[0], y, z, op);
+        _elwise_binop_scalar_lhs(T, x[0], y, z, op);
     } else {
-        _elwise_scalar_rhs(T, x, y[0], z, op);
+        _elwise_binop_scalar_rhs(T, x, y[0], z, op);
     }
 }
 
-fn _elwise_equal_len(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_equal_len(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == y.len and y.len == z.len);
     for (0..z.len) |j| z[j] = op(x[j], y[j]);
 }
 
-fn _elwise_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(y.len == z.len);
     for (0..z.len) |j| z[j] = op(x, y[j]);
 }
 
-fn _elwise_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == z.len);
     for (0..z.len) |j| z[j] = op(x[j], y);
 }

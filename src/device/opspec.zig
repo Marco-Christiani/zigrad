@@ -266,6 +266,28 @@ pub fn sqrt_bwd(T: type) type {
     };
 }
 
+/// Forward inverse square root: $y = \frac{1}{\sqrt{x}}$
+pub fn rsqrt_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "rsqrt_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        y: []T,
+    };
+}
+
+/// Backward inverse square root: $x_g += -0.5 x^{-1.5} * y_g$
+pub fn rsqrt_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "rsqrt_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+        y_g: []const T,
+        eps: f32,
+    };
+}
+
 pub fn exp_fwd(T: type) type {
     return struct {
         pub const __name__ = "exp_fwd";
