@@ -4,12 +4,13 @@ default:
     @just gcn
 
 [script("bash")]
-gcn:
+gcn +opts="":
     set -e
+    export ZG_DATA_DIR=$(realpath -e data)
     cd examples/gcn
-    # uv run ref/dataset.py
-    zig build -Doptimize=ReleaseFast
-    ZG_DATA_DIR=data zig-out/bin/main
+    uv run ref/dataset.py
+    zig build -Doptimize=ReleaseFast {{opts}}
+    zig-out/bin/main
 
 alias b := build
 alias bf := build-fast
