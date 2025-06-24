@@ -362,6 +362,16 @@ pub fn NDArray(comptime T: type) type {
             });
         }
 
+        /// Element-wise inverse square root operation: y = 1/sqrt(x)
+        pub fn rsqrt(self: Self, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.rsqrt_fwd(T){
+                .x = self.data,
+                .y = result.data,
+            });
+            return result;
+        }
+
         /// In-place element-wise scaling: x = ax
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
             device.dispatch(opspec.scale(T){ .x = self.data, .alpha = alpha });

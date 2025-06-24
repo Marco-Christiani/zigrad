@@ -51,7 +51,7 @@ fn is_tuple(T: type) bool {
 }
 
 fn get_len(T: type) u64 {
-    switch (@typeInfo(T)) {
+    return switch (@typeInfo(T)) {
         .@"struct" => |s| {
             if (T == Indices or T == Shape) {
                 return capacity;
@@ -59,18 +59,27 @@ fn get_len(T: type) u64 {
             return s.fields.len;
         },
         .array => |arr| arr.len,
-        else => undefined,
-    }
+        .pointer => |ptr| switch (ptr.size) {
+            .slice => {
+                // For slices, we can't determine length at compile time
+                // This should be handled differently in pos_to_offset
+                @compileError("get_len called with slice type - use runtime length instead");
+            },
+            else => @compileError("Unsupported pointer type for get_len"),
+        },
+        else => @compileError("Unsupported type for get_len: " ++ @typeName(T)),
+    };
 }
 
 pub const Strides = struct {
     buffer: [capacity]u64,
     len: SizeType,
     // calculate inner-product between indices and strides to create offset
-    pub fn pos_to_offset(self: Strides, indices: anytype) u64 {
+    pub inline fn pos_to_offset(self: Strides, indices: anytype) u64 {
         const T = decay(@TypeOf(indices));
         const N: u64 = comptime get_len(T);
         const V = @Vector(N, u64);
+        std.debug.print("N: {d}\n", .{N});
 
         if (comptime @typeInfo(decay(T)) == .@"struct") {
             if (@hasField(T, "buffer")) {
@@ -103,6 +112,41 @@ pub const Strides = struct {
         return self.buffer[i];
     }
 };
+
+// fn offset_with_coord_replaced(self: Shape, val: u64, dim: u64) u64 {
+//     std.debug.print("strides: {d}\n", .{self.strides().slice()});
+//     // const s = self.strides();
+//     var tmp = self;
+//     std.debug.assert(dim < tmp.len);
+//     tmp.set(dim, val);
+//     std.debug.print("strides: {d}\n", .{self.strides().slice()});
+//     std.debug.print("tmp: {d}\n", .{tmp});
+//     const result = self.strides().pos_to_offset(tmp);
+//     std.debug.assert(result <= self.size());
+//     return result;
+// }
+// pub fn main() !void {
+//     const shape = Shape.init(&.{ 5, 4, 3, 2 });
+//     const strides_ = shape.strides();
+//     const offset = strides_.pos_to_offset(.{ 4, 3, 2, 1 });
+//     const pos = strides_.offset_to_pos(offset);
+
+//     std.debug.print("shape: {d}\n", .{shape.slice()});
+//     std.debug.print("strides: {d}\n", .{strides_.slice()});
+//     std.debug.print("offset: {d}\n", .{offset});
+//     std.debug.print("pos: {d}\n", .{pos.slice()});
+//     std.debug.assert(pos.get(0) == 4);
+//     std.debug.assert(pos.get(1) == 3);
+//     std.debug.assert(pos.get(2) == 2);
+//     std.debug.assert(pos.get(3) == 1);
+
+//     // Test offset with coordinate replaced
+//     // const new_offset = shape.offset_with_coord_replaced(0, 0);
+//     // const tgt_coord = [_]usize{ 0, 4, 3, 2 };
+//     // std.debug.print("new_offset: {d}\n", .{new_offset});
+//     // std.debug.print("tgt_coord: {d}\n", .{tgt_coord});
+//     // std.debug.print("{d}\n", .{shape.strides().offset_to_pos(new_offset).slice()});
+// }
 
 buffer: [8]u64,
 len: SizeType = 0,
@@ -262,6 +306,7 @@ pub fn tail(self: anytype, amount: u64) MatchedSlice(@TypeOf(&self.buffer)) {
     return self.buffer[self.len - amount .. self.len];
 }
 
+/// Crop `shape[lhs:-rhs]`
 pub fn crop(self: anytype, lhs: u64, rhs: u64) MatchedSlice(@TypeOf(&self.buffer)) {
     return if (lhs < self.len and rhs < self.len)
         self.buffer[lhs..@max(lhs, self.len - rhs)]

@@ -12,8 +12,9 @@ const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
 const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
 const opspec = @import("opspec.zig");
+const build_options = @import("build_options");
 
-pub const using_mkl: bool = blk: {
+pub const using_mkl_blas: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
     for (decls) |decl| {
         if (std.mem.startsWith(u8, decl.name, "mkl_") or std.mem.startsWith(u8, decl.name, "MKL_")) {
@@ -23,11 +24,59 @@ pub const using_mkl: bool = blk: {
     break :blk false;
 };
 
+pub const using_mkl_rt = build_options.enable_mkl;
+
 const c = switch (builtin.target.os.tag) {
-    .linux => @cImport(@cInclude("cblas.h")),
+    .linux => @cImport({
+        @cInclude("cblas.h");
+        if (build_options.enable_mkl) @cInclude("mkl_vml_functions.h");
+    }),
     .macos => @cImport(@cInclude("Accelerate/Accelerate.h")),
     else => @compileError("Unsupported os"),
 };
+
+/// Vector math accuracy mode
+const AccMode = struct {
+    mode: enum {
+        accurate,
+        faster,
+        fastest,
+    },
+
+    pub fn to_vml(self: @This()) c_int {
+        return if (using_mkl_rt) switch (self.mode) {
+            .accurate => c.VML_HA,
+            .faster => c.VML_LA,
+            .fastest => c.VML_EP,
+        } else unreachable;
+    }
+};
+
+pub const vm_mode: AccMode = .{ .mode = .accurate };
+
+pub const PlatformSDK = enum {
+    mkl,
+    accel,
+    // TODO: Add detection for other blas, also vector libs
+    // openblas,
+    // blis,
+};
+
+// pub const Capabilities = struct {
+//
+//     pub const empty: Flags = .{
+//         .bitset = .initEmpty(),
+//     };
+//
+//     var set = std.bit_set.IntegerBitSet(16);
+//
+//     pub fn set(self: *Flags, flag: Values, value: bool) void {
+//         self.bitset.setValue(@intFromEnum(flag), value);
+//     }
+//     pub fn get(self: Flags, flag: Values) bool {
+//         return self.bitset.isSet(@intFromEnum(flag));
+//     }
+// };
 
 pub const HostMalloc = struct {
     pub fn raw_alloc(n: usize, _: *anyopaque) ?[*]u8 {
@@ -70,19 +119,19 @@ pub fn reference(self: *Self) DeviceReference {
 ///////////////////
 // element wise ops
 pub fn add(_: *const Self, T: type, p: opspec.add(T)) void {
-    return elwise(T, p.x, p.y, p.z, add_op);
+    return elwise_binop(T, p.x, p.y, p.z, add_op);
 }
 
 pub fn sub(_: *const Self, T: type, p: opspec.sub(T)) void {
-    return elwise(T, p.x, p.y, p.z, sub_op);
+    return elwise_binop(T, p.x, p.y, p.z, sub_op);
 }
 
 pub fn mul(_: *const Self, T: type, p: opspec.mul(T)) void {
-    return elwise(T, p.x, p.y, p.z, mul_op);
+    return elwise_binop(T, p.x, p.y, p.z, mul_op);
 }
 
 pub fn div(_: *const Self, T: type, p: opspec.div(T)) void {
-    return elwise(T, p.x, p.y, p.z, div_op);
+    return elwise_binop(T, p.x, p.y, p.z, div_op);
 }
 
 /////////////////////////////////
@@ -269,6 +318,86 @@ pub fn sqrt_bwd(_: *const Self, T: type, p: opspec.sqrt_bwd(T)) void {
         } else {
             // d/dx(sqrt(x)) = 1/(2*sqrt(x)) = 0.5 / sqrt(x)
             x_g_val.* += 0.5 / std.math.sqrt(x_val) * y_g_val;
+        }
+    }
+}
+
+fn vrsqrt(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+    // if (inca == 1 and incb == 1 and incr == 1)
+    switch (builtin.target.os.tag) {
+        .macos => switch (T) {
+            else => @compileError("TODO" ++ @typeName(T)), // i dont want to defer to native yet until i check if theres a kernel
+        },
+        .linux => if (using_mkl_rt) switch (T) {
+            f32 => c.vsInvSqrtI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+            f64 => c.vdInvSqrtI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+            else => @compileError("Unsupported type for vrsqrt" ++ @typeName(T)),
+        } else vrsqrt_native(
+            T,
+            a,
+            inca,
+            r,
+            incr,
+            n,
+        ),
+        inline else => @panic("Unsupported os"),
+    }
+}
+
+/// Inverse square root native implementation
+/// No bounds checking.
+fn vrsqrt_native(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+    _ = n;
+    var ai = 0;
+    var ri = 0;
+    while (ai < a.len) : ({
+        ai += inca;
+        ri += incr;
+    }) {
+        r[ri] = 1 / std.math.sqrt(a[ai]);
+    }
+}
+
+/// Forward inverse square root implementation
+pub fn rsqrt_fwd(_: *const Self, T: type, p: opspec.rsqrt_fwd(T)) void {
+    // TODO: broadcast and stride
+    // vrsqrt(T, p.x, 1, p.y, 1, p.x.len);
+    c.vsInvSqrt(
+        @intCast(p.x.len),
+        @ptrCast(p.x.ptr),
+        @ptrCast(p.y.ptr),
+    );
+}
+
+/// In-place backward rsqrt implementation
+/// Stable. Uses subgradient for x < eps.
+pub fn rsqrt_bwd(
+    _: *const Self,
+    T: type,
+    p: opspec.rsqrt_bwd(T),
+) void {
+    const eps = p.eps;
+    for (p.x, p.x_g, p.y_g) |x_val, *x_g_val, y_g_val| {
+        if (x_val < eps) {
+            // subgradient: treat as zero
+            x_g_val.* += 0.0;
+        } else {
+            // dy/dx = -0.5 * x^(-1.5)
+            const inv_sqrt = std.math.sqrt(x_val); // sqrt(x)
+            const inv_x_1p5 = 1.0 / (x_val * inv_sqrt); // x^(-1.5)
+            x_g_val.* += (-0.5 * inv_x_1p5) * y_g_val;
         }
     }
 }
@@ -727,11 +856,11 @@ inline fn div_op(x: anytype, y: anytype) @TypeOf(x, y) {
     return x / y;
 }
 
-pub fn elwise(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+pub fn elwise_binop(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     if (x.len == 1 or y.len == 1) {
-        return _elwise_scalar_dispatch(T, x, y, z, op);
+        return _elwise_binop_scalar_dispatch(T, x, y, z, op);
     } else if (x.len == y.len) {
-        return _elwise_equal_len(T, x, y, z, op);
+        return _elwise_binop_equal_len(T, x, y, z, op);
     }
 
     const min_size = @min(x.len, y.len);
@@ -740,35 +869,35 @@ pub fn elwise(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype)
     const z_step = min_size;
     var _x, var _y, var _z = .{ x, y, z };
     while (0 < _z.len) {
-        _elwise_equal_len(T, _x[0..min_size], _y[0..min_size], _z[0..min_size], op);
+        _elwise_binop_equal_len(T, _x[0..min_size], _y[0..min_size], _z[0..min_size], op);
         _x = _x[x_step..];
         _y = _y[y_step..];
         _z = _z[z_step..];
     }
 }
 
-fn _elwise_scalar_dispatch(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_scalar_dispatch(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == 1 or y.len == 1);
     if (z.len == 1) {
         z[0] = op(x[0], y[0]);
     } else if (x.len == 1) {
-        _elwise_scalar_lhs(T, x[0], y, z, op);
+        _elwise_binop_scalar_lhs(T, x[0], y, z, op);
     } else {
-        _elwise_scalar_rhs(T, x, y[0], z, op);
+        _elwise_binop_scalar_rhs(T, x, y[0], z, op);
     }
 }
 
-fn _elwise_equal_len(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_equal_len(T: type, x: []const T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == y.len and y.len == z.len);
     for (0..z.len) |j| z[j] = op(x[j], y[j]);
 }
 
-fn _elwise_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_scalar_lhs(T: type, x: T, y: []const T, z: []T, comptime op: anytype) void {
     std.debug.assert(y.len == z.len);
     for (0..z.len) |j| z[j] = op(x, y[j]);
 }
 
-fn _elwise_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
+fn _elwise_binop_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype) void {
     std.debug.assert(x.len == z.len);
     for (0..z.len) |j| z[j] = op(x[j], y);
 }
@@ -796,33 +925,8 @@ fn _elwise_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: anytype)
 // }
 
 pub fn scatter_add(_: *const Self, T: type, p: opspec.scatter_add(T)) void {
-    switch (builtin.target.os.tag) {
-        .macos => scatter_add_apple(T, p),
-        .linux => {
-            if (using_mkl) {
-                // TODO: cblas_?sctr maybe?
-                scatter_add_mkl(T, p);
-            } else {
-                // TODO: Native scatter add
-                scatter_add_vectorized(T, p);
-            }
-        },
-        else => {
-            // TODO: Native scatter add implementation
-            scatter_add_vectorized(T, p);
-        },
-    }
-}
-
-fn scatter_add_apple(T: type, p: opspec.scatter_add(T)) void {
     var i: usize = 0;
     const vector_size = if (T == f32) 16 else 8; // NEON/SVE vector width
-    const vadd = switch (T) {
-        f32 => c.vDSP_vadd,
-        f64 => c.vDSP_vaddD,
-        else => @compileError("Unsupported type for vDSP scatter_add"),
-    };
-
     // Process vectorizable chunks when offsets allow
     while (i + vector_size <= p.src.len) {
         // Check if we can vectorize this chunk (consecutive or stride-pattern offsets)
@@ -838,7 +942,7 @@ fn scatter_add_apple(T: type, p: opspec.scatter_add(T)) void {
         // Accumulate
         if (can_vectorize and base_offset + vector_size <= p.dst.len) {
             // Vectorize
-            vadd(p.src[i..].ptr, 1, p.dst[base_offset..].ptr, 1, p.dst[base_offset..].ptr, 1, @intCast(vector_size));
+            vadd(T, p.src[i..], 1, p.dst[base_offset..], 1, p.dst[base_offset..], 1, @intCast(vector_size));
             i += vector_size;
         } else {
             // Scalar
@@ -853,12 +957,81 @@ fn scatter_add_apple(T: type, p: opspec.scatter_add(T)) void {
     }
 }
 
-fn scatter_add_mkl(T: type, p: opspec.scatter_add(T)) void {
-    _ = p;
-    @compileError("Not implemented");
+/// L2 vadd
+pub fn vadd(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []T, incr: usize, n: usize) void {
+    switch (builtin.target.os.tag) {
+        .macos => switch (T) {
+            f32 => c.vDSP_vadd(
+                a.ptr,
+                @intCast(inca),
+                b.ptr,
+                @intCast(incb),
+                r,
+                @intCast(incr),
+                n,
+            ),
+            f64 => c.vDSP_vaddD(
+                a.ptr,
+                @intCast(inca),
+                b.ptr,
+                @intCast(incb),
+                r,
+                @intCast(incr),
+                n,
+            ),
+            else => @compileError("Unsupported type for vadd" ++ @typeName(T)),
+        },
+        .linux => if (using_mkl_rt) switch (T) {
+            f32 => c.vsAddI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(b.ptr),
+                @intCast(incb),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+            f64 => c.vdAddI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(b.ptr),
+                @intCast(incb),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+            else => @compileError("Unsupported type for vadd" ++ @typeName(T)),
+        } else vadd_native(T, a, inca, b, incb, r, incr, n),
+        inline else => @panic("Unsupported os"),
+    }
 }
 
-fn scatter_add_vectorized(T: type, p: opspec.scatter_add(T)) void {
-    _ = p;
-    @compileError("Not implemented");
+/// No bounds checking.
+fn vadd_native(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []T, incr: usize, n: usize) void {
+    _ = n;
+    var ai = 0;
+    var bi = 0;
+    var ri = 0;
+    while (ai < a.len) : ({
+        ai += inca;
+        bi += incb;
+        ri += incr;
+    }) {
+        r[ri] = a[ai] + b[bi];
+    }
 }
+
+// fn vadd_native_simd(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []T, incr: usize, n: usize) type {
+//     var i = 0;
+//     if (comptime std.simd.suggestVectorLength(T)) |N| {
+//         const V = @Vector(N, T);
+//         while ((i + N) <= a.len) : (i += N) {
+//             const av: V = a[i..][0..N].*;
+//             const bv: V = b[i..][0..N].*;
+//             r[i..][0..N].* = av + bv;
+//         }
+//     }
+//     while (i < a.len) : (i += 1) {
+//         r[i] = a[i] + b[i];
+//     }
+// }

@@ -208,8 +208,6 @@ pub fn GraphConvLayer(comptime T: type) type {
         /// by introducing more functionality to Zigrad, such as adding more ops.
         /// This should become more concise over time and eventually become the official implementation
         pub fn propagate_ag(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            // NOTE: currently, some of the deinit lines are commented out. there is a double free, the deinit lines in this
-            // method are not responsible for it but while its being tracked down they are commented.
             const n_node = h.get_dim(0);
             const n_features = h.get_dim(1);
             const n_edge = edge_index.get_dim(1);
@@ -249,8 +247,9 @@ pub fn GraphConvLayer(comptime T: type) type {
             total_deg.set_label("total_deg");
 
             // Apply degree normalization: deg^(-0.5)
-            const deg_norm = try total_deg.pow(-0.5);
-            // const deg_norm = try total_deg.rsqrt(); // TODO: rsqrt
+            // These are equivalent
+            // const deg_norm = try total_deg.pow(-0.5);
+            const deg_norm = try total_deg.rsqrt();
             defer deg_norm.deinit();
             deg_norm.set_label("deg_norm");
 
