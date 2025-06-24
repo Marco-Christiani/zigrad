@@ -6,7 +6,7 @@ default:
 [script("bash")]
 gcn +opts="-Doptimize=ReleaseFast":
     set -e
-    export ZG_DATA_DIR=$(realpath -e data)
+    export ZG_DATA_DIR=$(realpath data)
     cd examples/gcn
     uv run ref/dataset.py
     zig build {{opts}}
