@@ -428,7 +428,9 @@ const ClosurePointer = struct {
     fn init(T: type, ptr: *T) ClosurePointer {
         const free = struct {
             pub fn impl(_ptr: *anyopaque, allocator: std.mem.Allocator) void {
-                allocator.destroy(@ptrCast(@alignCast(_ptr)));
+                var self: *T = @ptrCast(@alignCast(_ptr));
+                if (@hasDecl(T, "deinit")) self.deinit();
+                allocator.destroy(self);
             }
         }.impl;
         return .{ .held = ptr, .free = free };
