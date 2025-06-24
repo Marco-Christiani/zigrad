@@ -141,7 +141,7 @@ pub fn dot(_: *const Self, T: type, p: opspec.dot(T)) void {
     switch (T) {
         f32 => p.z[0] = c.cblas_sdot(@intCast(p.x.len), p.x.ptr, 1, p.y.ptr, 1),
         f64 => p.z[0] = c.cblas_ddot(@intCast(p.x.len), p.x.ptr, 1, p.y.ptr, 1),
-        else => @compileError("Unsupported type for BLAS dot" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS dot" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -151,7 +151,7 @@ pub fn matvec(_: *const Self, T: type, p: opspec.matvec(T)) void {
     switch (T) {
         f32 => c.cblas_sgemv(c.CblasRowMajor, @intCast(ta), @intCast(p.m), @intCast(p.n), p.alpha, p.A.ptr, @intCast(lda), p.x.ptr, 1, p.beta, p.y.ptr, 1),
         f64 => c.cblas_dgemv(c.CblasRowMajor, @intCast(ta), @intCast(p.m), @intCast(p.n), p.alpha, p.A.ptr, @intCast(lda), p.x.ptr, 1, p.beta, p.y.ptr, 1),
-        else => @compileError("Unsupported type for BLAS matvec" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS demv" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -161,7 +161,7 @@ pub fn matmul(_: *const Self, T: type, p: opspec.matmul(T)) void {
     switch (T) {
         f32 => c.cblas_sgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(p.m), @intCast(p.n), @intCast(p.k), p.alpha, p.A.ptr, @intCast(p.lda), p.B.ptr, @intCast(p.ldb), p.beta, p.C.ptr, @intCast(p.ldc)),
         f64 => c.cblas_dgemm(c.CblasRowMajor, @intCast(ta), @intCast(tb), @intCast(p.m), @intCast(p.n), @intCast(p.k), p.alpha, p.A.ptr, @intCast(p.lda), p.B.ptr, @intCast(p.ldb), p.beta, p.C.ptr, @intCast(p.ldc)),
-        else => @compileError("Unsupported type for BLAS matmul" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS gemm" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -169,7 +169,7 @@ pub fn outer(_: *const Self, T: type, p: opspec.outer(T)) void {
     switch (T) {
         f32 => c.cblas_sger(c.CblasRowMajor, @intCast(p.x.len), @intCast(p.y.len), p.alpha, p.x.ptr, 1, p.y.ptr, 1, p.A.ptr, @intCast(p.y.len)),
         f64 => c.cblas_dger(c.CblasRowMajor, @intCast(p.x.len), @intCast(p.y.len), p.alpha, p.x.ptr, 1, p.y.ptr, 1, p.A.ptr, @intCast(p.y.len)),
-        else => @compileError("Unsupported type for BLAS outer" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS ger" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -186,7 +186,7 @@ pub fn axpy(_: *const Self, T: type, p: opspec.axpy(T)) void {
     switch (T) {
         f32 => c.cblas_saxpy(@intCast(p.x.len), p.alpha.*, p.x.ptr, 1, p.y.ptr, 1),
         f64 => c.cblas_daxpy(@intCast(p.x.len), p.alpha.*, p.x.ptr, 1, p.y.ptr, 1),
-        else => @compileError("Unsupported type for BLAS axpy: " ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS axpy" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -232,7 +232,7 @@ pub fn sum(_: *const Self, T: type, p: opspec.sum(T)) void {
     switch (T) {
         f32 => p.y[0] = c.cblas_sasum(@intCast(p.x.len), p.x.ptr, 1),
         f64 => p.y[0] = c.cblas_dasum(@intCast(p.x.len), p.x.ptr, 1),
-        else => @compileError("Unsupported type for BLAS sum" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS asum" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -240,7 +240,7 @@ pub fn scale(_: *const Self, T: type, p: opspec.scale(T)) void {
     switch (T) {
         f32 => c.cblas_sscal(@intCast(p.x.len), p.alpha, p.x.ptr, 1),
         f64 => c.cblas_dscal(@intCast(p.x.len), p.alpha, p.x.ptr, 1),
-        else => @compileError("Unsupported type for BLAS scale" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS scal" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -248,7 +248,7 @@ pub fn nrm2(_: *const Self, T: type, p: opspec.nrm2(T)) void {
     switch (T) {
         f32 => p.y[0] = c.cblas_snrm2(@intCast(p.x.len), p.x.ptr, 1),
         f64 => p.y[0] = c.cblas_dnrm2(@intCast(p.x.len), p.x.ptr, 1),
-        else => @compileError("Unsupported type for BLAS nrm2" ++ @typeName(T)),
+        else => @compileError("Unsupported type for BLAS nrm2" ++ @typeName(T) ++ " for platform " ++ @tagName(builtin.target.os.tag)),
     }
 }
 
@@ -322,46 +322,62 @@ pub fn sqrt_bwd(_: *const Self, T: type, p: opspec.sqrt_bwd(T)) void {
     }
 }
 
+/// L2 Inverse Sqrt
 fn vrsqrt(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
-    // if (inca == 1 and incb == 1 and incr == 1)
-    switch (builtin.target.os.tag) {
-        .macos => switch (T) {
-            else => @compileError("TODO" ++ @typeName(T)), // i dont want to defer to native yet until i check if theres a kernel
-        },
-        .linux => if (using_mkl_rt) switch (T) {
-            f32 => c.vsInvSqrtI(
-                @intCast(n),
-                @ptrCast(a.ptr),
-                @intCast(inca),
-                @ptrCast(r.ptr),
-                @intCast(incr),
-            ),
-            f64 => c.vdInvSqrtI(
-                @intCast(n),
-                @ptrCast(a.ptr),
-                @intCast(inca),
-                @ptrCast(r.ptr),
-                @intCast(incr),
-            ),
-            else => @compileError("Unsupported type for vrsqrt" ++ @typeName(T)),
-        } else vrsqrt_native(
-            T,
-            a,
-            inca,
-            r,
-            incr,
-            n,
-        ),
-        inline else => @panic("Unsupported os"),
+    if (inca == 1 and incr == 1) {
+        vrsqrt_contig(T, a, r);
+    } else {
+        vrsqrt_strided(T, a, inca, r, incr, n);
     }
+}
+
+/// L2 Inverse Sqrt for arbitrary strides
+fn vrsqrt_strided(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+    switch (T) {
+        f32 => if (@hasDecl(c, "vsInvSqrtI"))
+            return c.vsInvSqrtI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+        f64 => if (@hasDecl(c, "vdInvSqrtI"))
+            return c.vdInvSqrtI(
+                @intCast(n),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(r.ptr),
+                @intCast(incr),
+            ),
+        else => {},
+    }
+    vrsqrt_strided_native(T, a, inca, r, incr);
+}
+
+/// L2 Inverse Sqrt for contiguous vectors
+fn vrsqrt_contig(T: type, a: []const T, r: []T) void {
+    switch (T) {
+        f32 => if (@hasDecl(c, "vvrsqrtf")) {
+            return c.vvrsqrtf(@ptrCast(r.ptr), @ptrCast(a.ptr), @ptrCast(&@as(c_int, @intCast(r.len))));
+        } else if (@hasDecl(c, "vsInvSqrt")) {
+            return c.vsInvSqrt(@intCast(a.len), @ptrCast(a.ptr), @ptrCast(r.ptr));
+        },
+        f64 => if (@hasDecl(c, "vvrsqrt")) {
+            return c.vvrsqrt(@ptrCast(r.ptr), @ptrCast(a.ptr), @ptrCast(&@as(c_int, @intCast(r.len))));
+        } else if (@hasDecl(c, "vdInvSqrt")) {
+            return c.vdInvSqrt(@intCast(a.len), @ptrCast(a.ptr), @ptrCast(r.ptr));
+        },
+        else => {},
+    }
+    vrsqrt_contig_native(T, a, r);
 }
 
 /// Inverse square root native implementation
 /// No bounds checking.
-fn vrsqrt_native(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
-    _ = n;
-    var ai = 0;
-    var ri = 0;
+fn vrsqrt_strided_native(T: type, a: []const T, inca: usize, r: []T, incr: usize) void {
+    var ai: usize = 0;
+    var ri: usize = 0;
     while (ai < a.len) : ({
         ai += inca;
         ri += incr;
@@ -370,15 +386,15 @@ fn vrsqrt_native(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usi
     }
 }
 
+/// Inverse square root contiguous native implementation
+/// No bounds checking.
+fn vrsqrt_contig_native(T: type, a: []const T, r: []T) void {
+    for (r, a) |*ri, ai| ri.* = 1 / std.math.sqrt(ai);
+}
+
 /// Forward inverse square root implementation
 pub fn rsqrt_fwd(_: *const Self, T: type, p: opspec.rsqrt_fwd(T)) void {
-    // TODO: broadcast and stride
-    // vrsqrt(T, p.x, 1, p.y, 1, p.x.len);
-    c.vsInvSqrt(
-        @intCast(p.x.len),
-        @ptrCast(p.x.ptr),
-        @ptrCast(p.y.ptr),
-    );
+    vrsqrt(T, p.x, 1, p.y, 1, p.x.len);
 }
 
 /// In-place backward rsqrt implementation
@@ -962,22 +978,22 @@ pub fn vadd(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []
     switch (builtin.target.os.tag) {
         .macos => switch (T) {
             f32 => c.vDSP_vadd(
-                a.ptr,
+                @ptrCast(a.ptr),
                 @intCast(inca),
-                b.ptr,
+                @ptrCast(b.ptr),
                 @intCast(incb),
-                r,
+                @ptrCast(r.ptr),
                 @intCast(incr),
-                n,
+                @intCast(n),
             ),
             f64 => c.vDSP_vaddD(
-                a.ptr,
+                @ptrCast(a.ptr),
                 @intCast(inca),
-                b.ptr,
+                @ptrCast(b.ptr),
                 @intCast(incb),
-                r,
+                @ptrCast(r.ptr),
                 @intCast(incr),
-                n,
+                @intCast(n),
             ),
             else => @compileError("Unsupported type for vadd" ++ @typeName(T)),
         },

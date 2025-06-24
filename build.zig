@@ -20,7 +20,7 @@ pub fn build(b: *Build) !void {
     );
 
     // const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse false;
-    const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse true;
+    const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse false;
     build_options.addOption(bool, "enable_mkl", enable_mkl);
 
     // const enable_vml = b.option(bool, "enable_vml", "Link VML.") orelse false;
