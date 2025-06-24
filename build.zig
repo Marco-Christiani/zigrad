@@ -5,8 +5,6 @@ const Build = std.Build;
 const Module = Build.Module;
 const OptimizeMode = std.builtin.OptimizeMode;
 
-// this is a comment
-
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -21,10 +19,24 @@ pub fn build(b: *Build) !void {
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
+    // const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse false;
+    const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse true;
+    build_options.addOption(bool, "enable_mkl", enable_mkl);
+
+    // const enable_vml = b.option(bool, "enable_vml", "Link VML.") orelse false;
+    // build_options.addOption(bool, "enable_vml", enable_vml);
+
     const enable_cuda = b.option(bool, "enable_cuda", "Enable CUDA backend.") orelse false;
     build_options.addOption(bool, "enable_cuda", enable_cuda);
 
-    const device_module = build_device_module(b, target, build_options_module, enable_cuda);
+    const device_module = build_device_module(
+        b,
+        target,
+        build_options_module,
+        enable_cuda,
+        enable_mkl,
+        // enable_vml,
+    );
 
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
@@ -167,6 +179,8 @@ pub fn build_device_module(
     target: Build.ResolvedTarget,
     build_options_module: *std.Build.Module,
     enable_cuda: bool,
+    enable_mkl: bool,
+    // link_vml: bool,
 ) *Build.Module {
     const rebuild_cuda: bool = b.option(bool, "rebuild_cuda", "force CUDA backend to recompile") orelse false;
 
@@ -183,6 +197,10 @@ pub fn build_device_module(
     switch (target.result.os.tag) {
         .linux => {
             device.linkSystemLibrary("blas", .{});
+            device.linkSystemLibrary("mkl_rt", .{});
+            _ = enable_mkl;
+            // if (enable_mkl) device.linkSystemLibrary("mkl_rt", .{});
+            // if (link_vml) device.linkSystemLibrary("mkl_rt", .{});
         },
         .macos => device.linkFramework("Accelerate", .{}),
         else => @panic("Os not supported."),

@@ -1,3 +1,6 @@
+anyzig: zig version '0.14.0' pulled from '/Users/mchristiani/Github/zigrad/build.zig.zon'
+anyzig: appdata '/Users/mchristiani/Library/Application Support/anyzig'
+anyzig: zig '0.14.0' already exists at '/Users/mchristiani/.cache/zig/p/N-V-__8AAM5IhxPUhuItOUlu8dBF12u6bpOm3kQrrNQ8RVyW'
 const std = @import("std");
 const builtin = @import("builtin");
 const debug: bool = (builtin.mode == .Debug);
