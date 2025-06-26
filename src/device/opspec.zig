@@ -525,26 +525,68 @@ pub fn max_along(T: type) type {
     };
 }
 
-// pub fn scatter_add(T: type) type {
-//     return struct {
-//         pub const __name__ = "scatter_add";
-//         pub const __type__ = T;
-//         /// Source values (n_edges, n_features)
-//         src: []const T,
-//         /// Target indices (n_edges)
-//         indices: []const usize,
-//         /// Destination (n_nodes, n_features)
-//         dst: []T,
-//         n_features: usize,
-//     };
-// }
-
 pub fn scatter_add(T: type) type {
     return struct {
         pub const __name__ = "scatter_add";
         pub const __type__ = T;
         src: []const T,
         offsets: []const usize,
+        dst: []T,
+    };
+}
+
+pub fn scatter_add_strided(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_add_strided";
+        pub const __type__ = T;
+
+        /// Source data organized as contiguous blocks of `stride` elements each.
+        /// Shape: (n_blocks, stride) flattened to (n_blocks * stride,)
+        src: []const T,
+
+        /// Segment identifier for each source block.
+        /// indices[i] specifies which output segment block i should be summed into.
+        /// Shape: (n_blocks,)
+        indices: []const usize,
+
+        /// Destination buffer organized as contiguous blocks of `stride` elements.
+        /// Values are accumulated.
+        /// Shape: (n_segments, stride) flattened to (n_segments * stride,)
+        dst: []T,
+
+        /// Number of contiguous elements per block/segment
+        stride: usize,
+    };
+}
+
+pub fn scatter_add_csr(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_add_csr";
+        pub const __type__ = T;
+
+        /// Values to scatter (shape: [n_segments])
+        src: []const T,
+
+        /// CSR segment boundaries (shape: [n_segments + 1])
+        row_ptr: []const usize,
+
+        /// Output buffer (shape: [total_elements])
+        dst: []T,
+    };
+}
+
+pub fn segment_sum_csr(T: type) type {
+    return struct {
+        pub const __name__ = "segment_sum_csr";
+        pub const __type__ = T;
+
+        /// Input data, shape: [total_elems]
+        src: []const T,
+
+        /// CSR offsets (segment boundaries), shape: [n_segments + 1]
+        row_ptr: []const usize,
+
+        /// Output buffer, shape: [n_segments]
         dst: []T,
     };
 }
