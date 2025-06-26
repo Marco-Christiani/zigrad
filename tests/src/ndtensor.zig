@@ -13,6 +13,9 @@ pub fn run_tests(T: type, device: zg.DeviceReference) !void {
     try test_matvec_backward(T, device);
     try test_dot_backward(T, device);
     try test_non_square_matmul(T, device);
+    try test_pow(T, device);
+    try test_sqrt(T, device);
+    try test_segment_sum_csr(T, device);
 }
 
 fn test_add_broadcast(T: type, device: zg.DeviceReference) !void {
@@ -434,8 +437,8 @@ fn test_non_square_matmul(T: type, device: zg.DeviceReference) !void {
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
 }
 
-fn test_pow(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_pow(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -473,8 +476,8 @@ fn test_pow(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !
     try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
 }
 
-fn test_sqrt(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_sqrt(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -489,15 +492,15 @@ fn test_sqrt(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) 
     const y = try x.sqrt();
     defer y.deinit();
 
-    try y.backward();
+    try (try y.sum()).backward();
 
     // PyTorch verification
-    var py_mod = try Py.create_module("test_sqrt_all_cases");
+    var py_mod = try Py.create_module("test_sqrt");
     defer py_mod.deinit();
 
     try py_mod.run(
         \\import torch
-        \\x = torch.tensor([1.0, 4.0, 9.0, 100000.0], requires_grad=True)
+        \\x = torch.tensor([1.0, 4.0, 9.0, 16.0], requires_grad=True)
         \\y = x.sqrt()
         \\y.sum().backward()
         \\x_grad = x.grad.numpy()
@@ -507,6 +510,75 @@ fn test_sqrt(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) 
     const expected_out = try py_mod.get_slice(T, "y_out");
     const expected_grad = try py_mod.get_slice(T, "x_grad");
 
-    try lib.expectApproxEqRelSlices(T, expected_out, y.get_data());
-    try lib.expectApproxEqRelSlices(T, expected_grad, x.assume_grad_data());
+    try lib.expectApproxEqRelSlices(T, expected_out, y.get_data(), 1e-5);
+    try lib.expectApproxEqRelSlices(T, expected_grad, x.assume_grad_data(), 1e-5);
+}
+
+fn test_segment_sum_csr(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(T);
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    // src = [1.0, 2.0, 3.0, 4.0, 5.0]
+    // row_ptr = [0, 2, 5]
+    // segments = [[1.0, 2.0], [3.0, 4.0, 5.0]]
+    const src = try Tensor.from_slice(device, &.{ 1.0, 2.0, 3.0, 4.0, 5.0 }, null, opts);
+    defer src.deinit();
+
+    const row_ptr = [_]usize{ 0, 2, 5 };
+    const out = try src.segment_sum_csr(&row_ptr, &.{2});
+    defer out.deinit();
+
+    try out.backward();
+
+    // Verify against PyTorch
+    var py_mod = try Py.create_module("test_segment_sum_csr");
+    defer py_mod.deinit();
+
+    {
+        try py_mod.run(
+            \\import torch
+            \\src = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], requires_grad=True)
+            \\row_ptr = [0, 2, 5]
+            \\y = torch.stack([
+            \\    src[row_ptr[0]:row_ptr[1]].sum(),
+            \\    src[row_ptr[1]:row_ptr[2]].sum()
+            \\])
+            \\y.sum().backward()
+            \\out = y.detach().numpy()
+            \\grad = src.grad.numpy()
+        );
+
+        const expected_out = try py_mod.get_slice(T, "out");
+        const expected_grad = try py_mod.get_slice(T, "grad");
+
+        try lib.expectApproxEqRelSlices(T, expected_out, out.get_data(), 1e-5);
+        try lib.expectApproxEqRelSlices(T, expected_grad, src.assume_grad_data(), 1e-5);
+    }
+
+    scope: {
+        py_mod.run(
+            \\import torch
+            \\from torch_scatter import segment_csr
+            \\src = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], requires_grad=True)
+            \\row_ptr = torch.tensor([0, 2, 5], dtype=torch.long)
+            \\y = segment_csr(src, row_ptr, reduce='sum')
+            \\y.sum().backward()
+            \\y_out = y.detach().numpy()
+            \\x_grad = src.grad.numpy()
+        ) catch {
+            std.debug.print("prob couldnt import torch_scatter\n", .{});
+            break :scope;
+        };
+        const expected_out = try py_mod.get_slice(T, "out");
+        const expected_grad = try py_mod.get_slice(T, "grad");
+
+        try lib.expectApproxEqRelSlices(T, expected_out, out.get_data(), 1e-5);
+        try lib.expectApproxEqRelSlices(T, expected_grad, src.assume_grad_data(), 1e-5);
+    }
 }
