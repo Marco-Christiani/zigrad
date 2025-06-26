@@ -19,7 +19,6 @@ pub fn build(b: *Build) !void {
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
 
-    // const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse false;
     const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse false;
     build_options.addOption(bool, "enable_mkl", enable_mkl);
 
@@ -197,10 +196,7 @@ pub fn build_device_module(
     switch (target.result.os.tag) {
         .linux => {
             device.linkSystemLibrary("blas", .{});
-            device.linkSystemLibrary("mkl_rt", .{});
-            _ = enable_mkl;
-            // if (enable_mkl) device.linkSystemLibrary("mkl_rt", .{});
-            // if (link_vml) device.linkSystemLibrary("mkl_rt", .{});
+            if (enable_mkl) device.linkSystemLibrary("mkl_rt", .{});
         },
         .macos => device.linkFramework("Accelerate", .{}),
         else => @panic("Os not supported."),
