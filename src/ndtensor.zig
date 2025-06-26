@@ -1364,18 +1364,22 @@ pub fn NDTensor(comptime T: type) type {
                 pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
                     defer y.device.mem_free(ctx.offsets);
 
-                    const src_tensor = children.get_bwd_upcast(Self, 0) orelse return;
-                    const grad_output = y.assume_grad_data();
-                    const grad_src = try src_tensor.ensure_grad_data(0);
+                    const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_input = try input_tensor.ensure_grad(0);
+                    const grad_output = y.assume_grad();
 
                     // Gather gradients from scattered positions
                     // take to invert scatter_add
-                    src_tensor.device.mem_take(T, grad_output, ctx.offsets, grad_src);
+                    // This should accumulate
+                    // src_tensor.device.mem_take(T, grad_output, ctx.offsets, grad_src);
+                    // Currently adapting this so it accumulates:
+                    // grad_output[indices[i]] += grad_input[i]
+                    grad_input.scatter_add_(ctx.offsets, grad_output, input_tensor.device);
                 }
             };
 
             var output = try DataType.zeros(dst_shape, src.device);
-            src.data.scatter_add(offsets, &output, src.device);
+            src.data.scatter_add_(offsets, &output, src.device);
 
             const offsets_copy = try src.device.mem_dupe(usize, offsets);
 
@@ -1388,6 +1392,100 @@ pub fn NDTensor(comptime T: type) type {
                     .offsets = offsets_copy,
                 },
                 .op = .SCATTER_ADD,
+            });
+        }
+
+        /// Differentiable scatter with additive aggregation for strided data:
+        /// `dst[indices[i]*stride:(indices[i]+1)*stride] += src[i*stride:(i+1)*stride]`
+        pub fn scatter_add_strided(
+            src: *Self,
+            indices: []const usize,
+            stride: usize,
+            dst_shape: []const usize,
+        ) !*Self {
+            std.debug.assert(src.data.size() == indices.len * stride);
+            std.debug.assert(dst_shape[dst_shape.len - 1] == stride or
+                (dst_shape.len >= 2 and dst_shape[dst_shape.len - 1] * dst_shape[dst_shape.len - 2] % stride == 0));
+
+            const ScatterAddStridedBwd = struct {
+                indices: []usize,
+                stride: usize,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    defer y.device.mem_free(ctx.indices);
+
+                    const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_input = try input_tensor.ensure_grad(0);
+                    const grad_output = y.assume_grad();
+
+                    // Gather from scattered positions
+                    // grad_output[i*stride:(i+1)*stride] += grad_input[indices[i]*stride:(indices[i]+1)*stride]
+                    grad_input.scatter_add_strided_(ctx.indices, ctx.stride, grad_output, input_tensor.device);
+                }
+            };
+
+            var output = try DataType.zeros(dst_shape, src.device);
+            src.data.scatter_add_strided_(indices, stride, &output, src.device);
+
+            const indices_copy = try src.device.mem_dupe(usize, indices);
+
+            return create_dependent(ScatterAddStridedBwd, .{
+                .data = output,
+                .children = &.{&src.node},
+                .device = src.device,
+                .gb = src.node.gb,
+                .callback = .{
+                    .indices = indices_copy,
+                    .stride = stride,
+                },
+            });
+        }
+
+        pub fn segment_sum_csr(
+            src: *Self,
+            row_ptr: []const usize,
+            dst_shape: []const usize,
+        ) !*Self {
+            std.debug.assert(row_ptr.len >= 2);
+
+            const SegmentSumCsrBwd = struct {
+                row_ptr: []usize,
+
+                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+                    defer y.device.mem_free(ctx.row_ptr);
+                    const grad_output = y.assume_grad();
+                    const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
+                    const grad_input = try input_tensor.ensure_grad(0);
+
+                    // Grad distributes over segment ranges
+                    // For each i, grad_output[row_ptr[i]..row_ptr[i+1]] += grad_src[i]
+                    // TODO: device kernel
+                    // for (0..ctx.row_ptr.len - 1) |i| {
+                    //     const start = ctx.row_ptr[i];
+                    //     const end = ctx.row_ptr[i + 1];
+                    //     for (start..end) |j| {
+                    //         grad_src.data[j] += grad_output.data[i];
+                    //     }
+                    // }
+
+                    // TODO: use device kernel
+                    grad_output.scatter_add_csr_(ctx.row_ptr, grad_input, y.device);
+                }
+            };
+
+            var output = try DataType.zeros(dst_shape, src.device);
+            src.data.segment_sum_csr_(row_ptr, &output, src.device);
+
+            const row_ptr_copy = try src.device.mem_dupe(usize, row_ptr);
+
+            return create_dependent(SegmentSumCsrBwd, .{
+                .data = output,
+                .children = &.{&src.node},
+                .device = src.device,
+                .gb = src.node.gb,
+                .callback = .{
+                    .row_ptr = row_ptr_copy,
+                },
             });
         }
 
