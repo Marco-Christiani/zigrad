@@ -276,18 +276,21 @@ pub fn GraphConvLayer(comptime T: type) type {
             defer if (!edge_features.requires_grad()) edge_features.deinit();
             edge_features.set_label("edge_features");
 
-            // TODO: Not device safe!!
-            // Create flattened offsets for scatter_add
-            const flat_offsets = try self.device.mem_scratch(usize, n_edge * n_features);
-            for (0..n_edge) |edge| {
-                const target_node = edge_index_data[edge * 2 + 1];
-                for (0..n_features) |feat| {
-                    flat_offsets[edge * n_features + feat] = target_node * n_features + feat;
-                }
-            }
+            // // V1: using scatter_add()
+            // // Create flattened offsets for scatter_add
+            // const flat_offsets = try self.device.mem_scratch(usize, n_edge * n_features);
+            // for (0..n_edge) |edge| {
+            //     const target_node = edge_index_data[edge * 2 + 1];
+            //     for (0..n_features) |feat| {
+            //         flat_offsets[edge * n_features + feat] = target_node * n_features + feat;
+            //     }
+            // }
+            // // Scatter features to target nodes
+            // const aggregated = try edge_features.scatter_add(flat_offsets, &.{ n_node, n_features });
 
-            // Scatter features to target nodes
-            const aggregated = try edge_features.scatter_add(flat_offsets, &.{ n_node, n_features });
+            // V2: using scatter_add_strided() to reduce contiguous segments
+            // Scatter features to target nodes w strided scatter add
+            const aggregated = try edge_features.scatter_add_strided(target_indices, n_features, &.{ n_node, n_features });
             defer if (!aggregated.requires_grad()) aggregated.deinit();
             aggregated.set_label("aggregated");
 
