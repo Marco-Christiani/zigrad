@@ -5,10 +5,12 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const cfg = .{ "src/main.zig", "main" };
+    const enable_mkl = b.option(bool, "enable_mkl", "Enable MKL") orelse false;
 
     const zigrad_dep = b.dependency("zigrad", .{
         .target = target,
         .optimize = optimize,
+        .enable_mkl = enable_mkl,
     });
 
     const exe = b.addExecutable(.{
