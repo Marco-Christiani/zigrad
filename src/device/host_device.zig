@@ -4,16 +4,19 @@
 //! Some elementwise ops are not numerically stable, check the code.
 //! Open an issue/PR if you need stable variants.
 const std = @import("std");
-pub const backend = @import("root.zig").backend;
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+pub const using_mkl_rt = build_options.enable_mkl;
+
+pub const backend = @import("root.zig").backend;
 const BinaryOp = @import("device_common.zig").BinaryOp;
+const DeviceReference = @import("device_reference.zig");
+const opspec = @import("opspec.zig");
 const RandType = @import("device_common.zig").RandType;
 const TransferDirection = @import("device_common.zig").TransferDirection;
+
 const ByteMask = std.bit_set.IntegerBitSet(8);
 const CachingAllocator = @import("caching_allocator.zig").CachingAllocator(HostMalloc);
-const opspec = @import("opspec.zig");
-const build_options = @import("build_options");
-
 pub const using_mkl_blas: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
     for (decls) |decl| {
@@ -23,8 +26,6 @@ pub const using_mkl_blas: bool = blk: {
     }
     break :blk false;
 };
-
-pub const using_mkl_rt = build_options.enable_mkl;
 
 const c = switch (builtin.target.os.tag) {
     .linux => @cImport({
@@ -98,8 +99,6 @@ pub const HostMalloc = struct {
 
 const Self = @This();
 const Error = CachingAllocator.Error;
-const DeviceReference = @import("device_reference.zig");
-
 cache: CachingAllocator,
 
 pub fn init() Self {
@@ -918,58 +917,138 @@ fn _elwise_binop_scalar_rhs(T: type, x: []const T, y: T, z: []T, comptime op: an
     for (0..z.len) |j| z[j] = op(x[j], y);
 }
 
-// pub fn scatter_add_gcn(_: *const Self, T: type, p: opspec.scatter_add(T)) void {
-//     const f = switch (T) {
-//         f32 => c.vDSP_vadd,
-//         f64 => c.vDSP_vaddD,
-//         else => @compileError("Unsupported type for scatter_add"),
-//     };
-//     for (0..p.indices.len) |edge_idx| {
-//         const target_node = p.indices[edge_idx];
-//         const src_offset = edge_idx * p.n_features;
-//         const dst_offset = target_node * p.n_features;
-//         f(
-//             p.src[src_offset .. src_offset + p.n_features].ptr,
-//             1,
-//             p.dst[dst_offset .. dst_offset + p.n_features].ptr,
-//             1,
-//             p.dst[dst_offset .. dst_offset + p.n_features].ptr,
-//             1,
-//             @intCast(p.n_features),
-//         );
-//     }
-// }
-
+/// ## ADR
+///
+/// Regarding the vectorizable chunks, we dispatch to vadd_contig or similar.
+///
+/// There are tradeoffs between our options. We can force the correct instructions
+/// to be used on Apple platforms using their (SIMD) primitives. If Zig already emits
+/// the correct instructions, performance is likely better in Zig as we avoid overhead
+/// and give the compiler more visibility.
+///
+/// For sufficiently long contiguous segments dispatching to vendor kernels would make sense.
+/// However, I expect to provide specialized ops for when such a structure is know a-priori.
+/// For this op I assuming we dont have large contiguous segments so dispatching isnt necessary.
+///
+/// In fact, there is an argument to be made for skipping all manual vectorization efforts.
+///
+/// Benchmarks needed on more platforms. Training benchmarks not showing significant differences
+/// except on silicon, on x86 kernel has too much overhead. Analysis will give us a real direction
+/// for this op and related ops.
 pub fn scatter_add(_: *const Self, T: type, p: opspec.scatter_add(T)) void {
+    var dst = p.dst;
+    const src = p.src;
+    const offs = p.offsets;
+
+    // SIMD segments
     var i: usize = 0;
-    const vector_size = if (T == f32) 16 else 8; // NEON/SVE vector width
+    const vector_size = comptime std.simd.suggestVectorLength(T) orelse 4;
     // Process vectorizable chunks when offsets allow
-    while (i + vector_size <= p.src.len) {
+    while (i + vector_size <= src.len) {
         // Check if we can vectorize this chunk (consecutive or stride-pattern offsets)
         var can_vectorize = true;
-        const base_offset = p.offsets[i];
+        const base_offset = offs[i];
         for (i + 1..i + vector_size) |j| {
-            if (p.offsets[j] != base_offset + (j - i)) {
+            if (offs[j] != base_offset + (j - i)) {
                 can_vectorize = false;
                 break;
             }
         }
 
         // Accumulate
-        if (can_vectorize and base_offset + vector_size <= p.dst.len) {
-            // Vectorize
-            vadd(T, p.src[i..], 1, p.dst[base_offset..], 1, p.dst[base_offset..], 1, @intCast(vector_size));
+        if (can_vectorize and base_offset + vector_size <= dst.len) {
+            // Vectorize - See above notes
+            // Dispatch to kernel:
+            vadd(T, src[i..][0..vector_size], 1, dst[base_offset..][0..vector_size], 1, dst[base_offset..][0..vector_size], 1, vector_size);
+            // Dont yet have an example of forced SIMD primitives
+
+            // Zig manual SIMD:
+            // const V = @Vector(vector_size, T);
+            // var dst: V = dst[base_offset..][0..vector_size].*;
+            // dst += @as(V, src[i..][0..vector_size].*);
+
+            // Zig auto SIMD:
+            // for (dst[base_offset..][0..vector_size], src[i..][0..vector_size]) |*di, si| {
+            //     di.* += si;
+            // }
+
             i += vector_size;
         } else {
             // Scalar
-            p.dst[p.offsets[i]] += p.src[i];
+            dst[offs[i]] += src[i];
             i += 1;
         }
     }
-
     // Remainder
-    while (i < p.src.len) : (i += 1) {
-        p.dst[p.offsets[i]] += p.src[i];
+    while (i < src.len) : (i += 1) {
+        dst[offs[i]] += src[i];
+    }
+
+    // Greedy exploit arbitrary length contig sequences
+    // var i: usize = 0;
+    // while (i < src.len) {
+    //     var n_contig: usize = 0;
+    //     const base_offset = offs[i];
+    //     for (i + 1..src.len) |j| {
+    //         if (offs[j] != base_offset + (j - i)) {
+    //             break;
+    //         } else {
+    //             n_contig += 1;
+    //         }
+    //     }
+    //     // Accumulate
+    //     if (n_contig > 8 and base_offset + n_contig <= dst.len) {
+    //         // Vectorize - See above notes
+    //         // Dispatch to kernel:
+    //         vadd(T, src[i..][0..n_contig], 1, dst[base_offset..][0..n_contig], 1, dst[base_offset..][0..n_contig], 1, n_contig);
+    //
+    //         // Zig auto SIMD:
+    //         // for (dst[base_offset..][0..n_contig], src[i..][0..n_contig]) |*di, si| {
+    //         //     di.* += si;
+    //         // }
+    //
+    //         i += n_contig;
+    //     } else {
+    //         // Scalar
+    //         dst[offs[i]] += src[i];
+    //         i += 1;
+    //     }
+    // }
+
+    // No vectorization, baseline for new platforms
+    // for (offs, src) |oi, si| {
+    //     dst[oi] += si;
+    // }
+}
+
+/// Scatter add with contiguous subseqences in a strided layout. Conflicted what to name this,
+/// `segment_sum_contig`, `segment_sum_2d`? `segment_sum` is often used to refer to a reduction
+/// and this is a reduction for each subsequence with scattered accmulation.
+///
+/// Sums blocks of `stride` contiguous elements from `src` into corresponding blocks in `dst`
+/// based on segment assignment in `indices`.
+/// Each src[i*stride:(i+1)*stride] is added to dst[indices[i]*stride:(indices[i]+1)*stride].
+///
+/// This is equivalent to segment_sum but optimized for cases where
+/// data is organized in fixed-size contiguous blocks and elements within a block
+/// belong to the same segment
+pub fn scatter_add_strided(_: *const Self, T: type, p: opspec.scatter_add_strided(T)) void {
+    for (0..p.indices.len) |block_idx| {
+        const target_segment = p.indices[block_idx];
+        const src_offset = block_idx * p.stride;
+        const dst_offset = target_segment * p.stride;
+
+        // TODO: this should be vadd_contig
+        vadd(
+            T,
+            p.src[src_offset .. src_offset + p.stride],
+            1,
+            p.dst[dst_offset .. dst_offset + p.stride],
+            1,
+            p.dst[dst_offset .. dst_offset + p.stride],
+            1,
+            @intCast(p.stride),
+        );
     }
 }
 
@@ -1017,18 +1096,17 @@ pub fn vadd(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []
                 @intCast(incr),
             ),
             else => @compileError("Unsupported type for vadd" ++ @typeName(T)),
-        } else vadd_native(T, a, inca, b, incb, r, incr, n),
+        } else vadd_native(T, a, inca, b, incb, r, incr),
         inline else => @panic("Unsupported os"),
     }
 }
 
 /// No bounds checking.
-fn vadd_native(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []T, incr: usize, n: usize) void {
-    _ = n;
-    var ai = 0;
-    var bi = 0;
-    var ri = 0;
-    while (ai < a.len) : ({
+fn vadd_native(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r: []T, incr: usize) void {
+    var ai: usize = 0;
+    var bi: usize = 0;
+    var ri: usize = 0;
+    while (ri < r.len) : ({
         ai += inca;
         bi += incb;
         ri += incr;
@@ -1051,3 +1129,122 @@ fn vadd_native(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r:
 //         r[i] = a[i] + b[i];
 //     }
 // }
+//
+
+/// Vector Sum
+fn vsum(T: type, a: []const T, inca: usize) T {
+    if (inca == 1) {
+        return vsum_contig(T, a);
+    } else {
+        return vsum_strided(T, a, inca);
+    }
+}
+
+/// Vector Sum with arbitrary stride
+fn vsum_strided(T: type, a: []const T, inca: usize) T {
+    switch (T) {
+        f32 => if (@hasDecl(c, "vsSumI")) {
+            var result: f32 = undefined;
+            _ = c.vsSumI(
+                @intCast(a.len),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(&result),
+            );
+            return result;
+        },
+        f64 => if (@hasDecl(c, "vdSumI")) {
+            var result: f64 = undefined;
+            _ = c.vdSumI(
+                @intCast(a.len),
+                @ptrCast(a.ptr),
+                @intCast(inca),
+                @ptrCast(&result),
+            );
+            return result;
+        },
+        else => {},
+    }
+    return vsum_strided_native(T, a, inca);
+}
+
+/// Vector Sum for contiguous arrays
+fn vsum_contig(T: type, a: []const T) T {
+    switch (T) {
+        f32 => if (@hasDecl(c, "vvsumf")) {
+            var result: f32 = undefined;
+            _ = c.vvsumf(
+                @ptrCast(&result),
+                @ptrCast(a.ptr),
+                @ptrCast(&@as(c_int, @intCast(a.len))),
+            );
+            return result;
+        } else if (@hasDecl(c, "vsSum")) {
+            var result: f32 = undefined;
+            _ = c.vsSum(@intCast(a.len), @ptrCast(a.ptr), @ptrCast(&result));
+            return result;
+        },
+        f64 => if (@hasDecl(c, "vvsum")) {
+            var result: f64 = undefined;
+            _ = c.vvsum(
+                @ptrCast(&result),
+                @ptrCast(a.ptr),
+                @ptrCast(&@as(c_int, @intCast(a.len))),
+            );
+            return result;
+        } else if (@hasDecl(c, "vdSum")) {
+            var result: f64 = undefined;
+            _ = c.vdSum(@intCast(a.len), @ptrCast(a.ptr), @ptrCast(&result));
+            return result;
+        },
+        else => {},
+    }
+    return vsum_contig_native(T, a);
+}
+
+/// Native vector sum (strided)
+fn vsum_strided_native(T: type, a: []const T, inca: usize) T {
+    var s: T = 0;
+    var i: usize = 0;
+    while (i < a.len) : (i += inca) {
+        s += a[i];
+    }
+    return s;
+}
+
+/// Native vector sum (contiguous)
+fn vsum_contig_native(T: type, a: []const T) T {
+    var s: T = 0;
+    for (a) |x| s += x;
+    return s;
+}
+
+/// See `scatter_add`
+pub fn scatter_add_csr(_: *const Self, T: type, p: opspec.scatter_add_csr(T)) void {
+    for (0..p.src.len) |i| {
+        const start = p.row_ptr[i];
+        const end = p.row_ptr[i + 1];
+        const value = p.src[i];
+        std.debug.print("{d}:{d}\n", .{ start, end });
+        // TODO: not this
+        for (start..end) |j| {
+            p.dst[j] += value;
+        }
+    }
+}
+
+pub fn segment_sum_csr(_: *const Self, T: type, p: opspec.segment_sum_csr(T)) void {
+    const src = p.src;
+    const row_ptr = p.row_ptr;
+    const dst = p.dst;
+
+    std.debug.assert(row_ptr.len >= 2);
+    std.debug.assert(dst.len + 1 == row_ptr.len);
+    std.debug.assert(row_ptr[row_ptr.len - 1] == src.len);
+
+    for (0..dst.len) |i| {
+        const start = row_ptr[i];
+        const end = row_ptr[i + 1];
+        dst[i] = vsum_contig(T, src[start..end]);
+    }
+}
