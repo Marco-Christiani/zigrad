@@ -14,15 +14,7 @@ ptrs: EnabledDevicePointers,
 
 pub fn dispatch(self: Self, params: anytype) void {
     switch (self.ptrs) {
-        inline else => |d| {
-            const D = std.meta.Child(@TypeOf(d));
-            const P = @TypeOf(params);
-            if (comptime !@hasDecl(D, P.__name__)) {
-                @panic("Unimplemented: " ++ @typeName(D) ++ ", " ++ P.__name__);
-            } else {
-                @field(D, P.__name__)(d, P.__type__, params);
-            }
-        },
+        inline else => |d| d.dispatch(params),
     }
 }
 

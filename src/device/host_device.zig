@@ -13,6 +13,7 @@ const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
 const opspec = @import("opspec.zig");
 pub const Options = CachingAllocator.Options;
+pub const enable_capture = @import("build_options").enable_capture;
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -74,8 +75,10 @@ const DataHandler = struct {
 
 const Self = @This();
 const DeviceReference = @import("device_reference.zig");
+const Capture = @import("capture.zig");
 
 cache: CachingAllocator,
+capture: if (enable_capture) Capture else void = if (enable_capture) Capture.empty else {},
 
 pub fn init() Self {
     return init_advanced(.{}); // system defaults
@@ -87,7 +90,25 @@ pub fn init_advanced(opts: CachingAllocator.Options) Self {
     return .{ .cache = CachingAllocator.init(.{}, opts) };
 }
 
+pub fn dispatch(self: *Self, params: anytype) void {
+    if (comptime enable_capture) {
+        if (self.capture.is_open()) {
+            @branchHint(.cold);
+            return self.capture.record(self, params);
+        }
+    }
+    const P = @TypeOf(params);
+    if (comptime !@hasDecl(Self, P.__name__)) {
+        @panic("Unimplemented: " ++ @typeName(Self) ++ ", " ++ P.__name__);
+    } else {
+        @field(Self, P.__name__)(self, P.__type__, params);
+    }
+}
+
 pub fn deinit(self: *Self) void {
+    if (comptime enable_capture)
+        self.capture.deinit();
+
     self.cache.deinit();
     self.* = undefined;
 }

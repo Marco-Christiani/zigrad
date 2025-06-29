@@ -156,6 +156,15 @@ pub fn reference(self: *Self) DeviceReference {
     return .{ .ptrs = .{ .cuda = self } };
 }
 
+pub fn dispatch(self: *Self, params: anytype) void {
+    const P = @TypeOf(params);
+    if (comptime !@hasDecl(Self, P.__name__)) {
+        @panic("Unimplemented: " ++ @typeName(Self) ++ ", " ++ P.__name__);
+    } else {
+        @field(Self, P.__name__)(self, P.__type__, params);
+    }
+}
+
 pub fn dtype(T: type) cuda.dtype {
     return switch (T) {
         f16 => @compileError("f16 not current supported."),
