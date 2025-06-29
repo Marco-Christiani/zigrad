@@ -14,12 +14,22 @@
 <br>
 <p align="center" class="markdown-heading"><strong><i>Supporting AI innovation from ideation to results.</i></strong></p>
 
+---
+
+> 🚧 **Zigrad is under active development.**  
+> By using Zigrad, you are participating in its development and contributing to its early testing and validation. Expect APIs to change and features to evolve rapidly. Bug reports, benchmarks, and contributions are welcome.
+
+> 🧪 **CUDA support is experimental.**  
+> CUDA integration is in **beta** and may be incomplete, unstable, or suboptimal. Use it for testing and feedback. Full GPU support is actively being developed.
+---
+
 AI frameworks optimized for rapid research iteration do not seamlessly transition into the infrastructure required for large-scale training. This fragmented pipeline creates redundant engineering effort and slows iteration cycles. Zigrad provides a path to performance that preserves the natural development workflow researchers prefer; bridging research and engineering. Using Zigrad you can:
 
   - Experiment using high-level, PyTorch-like abstractions
   - Gradually opt into fine-grained control and performance optimizations
   - Access low-level primitives and assert control--without switching frameworks, code translation, or building complex extensions.
   - Quickly transition research to high performance training
+  - Learn on the edge with SWAP constrained hardware
 
 
 https://github.com/user-attachments/assets/3842aa72-9b16-4c25-8789-eac7159e3768
