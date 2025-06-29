@@ -6,7 +6,7 @@ const Tensor = zg.NDTensor(f32);
 const Array = zg.NDArray(f32);
 
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_pool_size = zg.constants.@"1Mb" / 2,
+    .max_cache_size = zg.constants.@"1Mb" / 2,
 };
 
 pub fn main() !void {
