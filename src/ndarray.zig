@@ -125,18 +125,19 @@ pub fn NDArray(comptime T: type) type {
         }
 
         fn print_to_writer_impl(self: Self, _data: []T, writer: anytype, is_host: bool, device: DeviceReference) !void {
+            const allocator = std.heap.smp_allocator;
+
             if (!is_host) {
                 device.sync();
-                const _host_data = try device.allocator.alloc(T, _data.len);
-                defer device.allocator.free(_host_data);
+                const _host_data = try allocator.alloc(T, _data.len);
+                defer allocator.free(_host_data);
                 device.mem_transfer(T, _data, _host_data, .DtoH);
                 device.sync();
                 return self.print_to_writer_impl(_host_data, writer, true, device);
             }
 
-            const alloc = std.heap.smp_allocator;
-            const shape_str: []u8 = alloc.alloc(u8, @as(usize, self.shape.len) * @sizeOf(usize)) catch @panic("allocation failed in print");
-            defer alloc.free(shape_str);
+            const shape_str: []u8 = allocator.alloc(u8, @as(usize, self.shape.len) * @sizeOf(usize)) catch @panic("allocation failed in print");
+            defer allocator.free(shape_str);
             var j: usize = 0;
             var bytes_written: usize = 0;
             for (self.shape.slice(), 0..) |s, i| {
@@ -150,7 +151,13 @@ pub fn NDArray(comptime T: type) type {
                 }
                 j += 2;
             }
-            const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shape_str[0..bytes_written] }) catch @panic("allocation failed in print");
+
+            const preamble = std.fmt.allocPrint(
+                allocator,
+                "NDArray<{any},{s}>",
+                .{ T, shape_str[0..bytes_written] },
+            ) catch @panic("allocation failed in print");
+
             try writer.writeAll(preamble);
             try utils.print_ndslice(T, _data, self.shape.slice(), writer);
         }

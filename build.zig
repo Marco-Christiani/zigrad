@@ -22,6 +22,9 @@ pub fn build(b: *Build) !void {
     const enable_cuda = b.option(bool, "enable_cuda", "Enable CUDA backend.") orelse false;
     build_options.addOption(bool, "enable_cuda", enable_cuda);
 
+    const enable_capture = b.option(bool, "enable_capture", "Enable forward graph capturing.") orelse false;
+    build_options.addOption(bool, "enable_capture", enable_capture);
+
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
         .target = target,
