@@ -5,10 +5,9 @@ const DeviceData = @import("device_data.zig").DeviceData;
 const Error = @import("device_data.zig").Error;
 const zg = @import("../zigrad.zig");
 
-// I understand the philosophy of passing in allocators, but
-// this data structure itself doesn't benefit from having its
-// internal state managed by yet another allocator. This is
-// similar to the original "GPA" allocator in this sense.
+// I understand the philosophy of passing in allocators, but this data structure
+// itself doesn't benefit from having its internal state managed by yet another
+// allocator. This is similar to the original "GPA" allocator in this sense.
 const allocator = std.heap.smp_allocator;
 
 pub fn CachingAllocator(DataHandler: type) type {
@@ -16,8 +15,8 @@ pub fn CachingAllocator(DataHandler: type) type {
         const Self = @This();
         const BlockPool = @import("block_pool.zig").BockPool(DataHandler);
 
-        // support for small tensor sizes that do not
-        // work with general block alignment requirements.
+        // support for small tensor sizes that do not work with general block
+        // alignment requirements.
         // TODO: Pool this?
         const Stack = std.ArrayListUnmanaged([*]u8);
 
@@ -34,8 +33,8 @@ pub fn CachingAllocator(DataHandler: type) type {
             max_cache_size: ?usize = null,
         };
 
-        // we could make this an "empty" constant, but this structure
-        // needs to be deinitialized, so I'll match it with an init.
+        // we could make this an "empty" constant, but this structure needs to be
+        // deinitialized, so I'll match it with an init.
         pub fn init(data_handler: DataHandler, opts: Options) Self {
             const max_cache_size = opts.max_cache_size orelse zg.runtime.max_cache_size;
 
@@ -127,9 +126,11 @@ pub fn CachingAllocator(DataHandler: type) type {
             }
         }
 
-        /// Scratch memory does not have to be freed after calling this
-        /// this function Instead, scratch is freed upon calling deinit.
-        /// Also, using anytype because this is a sub-allocator.
+        /// Scratch memory does not have to be freed after calling this this function,
+        /// scratch is freed upon calling deinit.
+        ///
+        /// ## ADR
+        ///  - Using anytype because this is a sub-allocator.
         pub fn alloc_scratch(self: *Self, T: type, n: usize) []T {
             if (n == 0) return &.{};
 

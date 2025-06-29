@@ -30,10 +30,11 @@ fn insert_before(list: *OrderList, existing_node: *Node, new_node: *Node) void {
 }
 
 /// Insert a new node at the beginning of the list.
-///
-/// Arguments:
-///     new_node: Pointer to the new node to insert.
-pub fn prepend(list: *OrderList, new_node: *Node) void {
+pub fn prepend(
+    list: *OrderList,
+    /// new_node: Pointer to the new node to insert.
+    new_node: *Node,
+) void {
     if (list.first) |first| {
         // Insert before first.
         list.insert_before(first, new_node);
@@ -46,10 +47,11 @@ pub fn prepend(list: *OrderList, new_node: *Node) void {
 }
 
 /// Remove a node from the list.
-///
-/// Arguments:
-///     node: Pointer to the node to be removed.
-pub fn remove(list: *OrderList, node: *Node) void {
+pub fn remove(
+    list: *OrderList,
+    /// Pointer to the node to be removed.
+    node: *Node,
+) void {
     if (node.prev) |prev_node| {
         // Intermediate node.
         prev_node.next = node.next;
@@ -65,9 +67,6 @@ pub fn remove(list: *OrderList, node: *Node) void {
 }
 
 /// Remove and return the first node in the list.
-///
-/// Returns:
-///     A pointer to the first node in the list.
 pub fn pop(list: *OrderList) ?*Node {
     const first = list.first orelse return null;
     list.remove(first);
