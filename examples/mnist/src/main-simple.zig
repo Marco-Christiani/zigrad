@@ -43,7 +43,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer model.deinit();
 
-    //std.debug.print("Loading train data...\n", .{});
+    std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
     const train_dataset = try MnistDataset(T).load(allocator, device, train_path, batch_size);
 
@@ -60,7 +60,6 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
             step_timer.reset();
 
-            // std.debug.print("FORWARD\n", .{});
             const output = try model.forward(image);
             defer output.deinit();
 
@@ -142,14 +141,14 @@ pub fn main() !void {
     try run_mnist(train_full, test_full);
 }
 
-//test run_mnist {
-//    var buf1: [1024]u8 = undefined;
-//    var buf2: [1024]u8 = undefined;
-//    const data_sub_dir = std.posix.getenv("ZG_DATA_DIR") orelse "data";
-//    const train_small = try std.fmt.bufPrint(&buf1, "{s}/{s}", .{ data_sub_dir, "mnist_train_small.csv" });
-//    const test_small = try std.fmt.bufPrint(&buf2, "{s}/{s}", .{ data_sub_dir, "mnist_test_small.csv" });
-//    run_mnist(train_small, test_small) catch |err| switch (err) {
-//        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `runMnist` test.", .{@errorName(err)}),
-//        else => return err,
-//    };
-//}
+test run_mnist {
+    var buf1: [1024]u8 = undefined;
+    var buf2: [1024]u8 = undefined;
+    const data_sub_dir = std.posix.getenv("ZG_DATA_DIR") orelse "data";
+    const train_small = try std.fmt.bufPrint(&buf1, "{s}/{s}", .{ data_sub_dir, "mnist_train_small.csv" });
+    const test_small = try std.fmt.bufPrint(&buf2, "{s}/{s}", .{ data_sub_dir, "mnist_test_small.csv" });
+    run_mnist(train_small, test_small) catch |err| switch (err) {
+        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `run_mnist` test.", .{@errorName(err)}),
+        else => return err,
+    };
+}
