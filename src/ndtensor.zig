@@ -2405,8 +2405,8 @@ test "tensor/pow" {
     defer out.deinit();
     try out.backward();
 
-    try std.testing.expectEqualDeep(&[_]f32{4, 9, 0, 1}, out.data.data);
-    try std.testing.expectEqualDeep(&[_]f32{4, 6, 0, 2}, x.grad.?.data);
+    try std.testing.expectEqualDeep(&[_]f32{4, 9, 0, 1}, out.get_data());
+    try std.testing.expectEqualDeep(&[_]f32{4, 6, 0, 2}, x.assume_grad_data());
 }
 
 test "tensor/sqrt" {
