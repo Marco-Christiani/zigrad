@@ -3,39 +3,49 @@ const zg = @import("zigrad");
 const ParamTree = @import("utils/param_tree.zig").ParamTree;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const stderr = std.io.getStderr();
+    const ttyconf = std.io.tty.detectConfig(stderr);
 
-const TestOpts: zg.device.HostDevice.Options = .{
-    .max_cache_size = zg.constants.@"1Mb" / 2,
-};
+    std.fs.cwd().deleteFile("model.safetensors") catch {};
+    std.debug.print("\nDone.\n", .{});
+    try ttyconf.setColor(stderr, .reset);
+}
 
-pub fn main() !void {
-    const T = f32;
+test "visitors" {
+    const allocator = std.testing.allocator;
 
-    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    var graph = zg.Graph.init(std.heap.smp_allocator, .{});
+    var graph = zg.Graph.init(allocator, .{});
     defer graph.deinit();
 
-    {
-        const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-            .requires_grad = true,
-            .graph = &graph,
-        });
+    const device = cpu.reference();
+    const tree = try ParamTree(zg.NDTensor(f32)).create(allocator);
+    defer tree.deinit();
 
-        const y = try x.clamp(-1.0, 1.0);
+    const tensor = try zg.NDTensor(f32).from_slice(
+        device,
+        &[_]f32{ 1.0, 2.0, 3.0, 4.0 },
+        &.{ 2, 2 },
+        .{ .requires_grad = true, .graph = &graph },
+    );
+    defer tensor.deinit();
 
-        try y.backward();
-        const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
-        const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
+    try tree.put("test", tensor);
 
-        try std.testing.expectEqualSlices(T, expected_output, y.get_data());
-        try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
+    const Counter = struct {
+        count: u32 = 0,
 
-        x.deinit();
-        y.deinit();
-    }
+        pub fn visit(self: *@This(), path: []const u8, tensor_param: *zg.NDTensor(f32)) !void {
+            _ = path;
+            _ = tensor_param;
+            self.count += 1;
+        }
+    };
+
+    var counter = Counter{};
+    try tree.for_each(&counter);
+
+    try std.testing.expectEqual(@as(u32, 1), counter.count);
 }
