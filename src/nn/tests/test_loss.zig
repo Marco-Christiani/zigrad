@@ -50,7 +50,7 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
     defer input.deinit();
 
     std.log.info("{s} {d}\n", .{ name, case.shape });
-    std.log.info("input: {d}\n", .{input.data.data});
+    std.log.info("input: {d}\n", .{input.get_data()});
     std.log.info("target: {d}\n", .{case.target});
 
     const target = try NDTensor(f32).from_slice(device, case.target, case.shape, config);
@@ -61,19 +61,19 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
 
     try loss.backward();
 
-    std.log.info("loss: {d}\n", .{loss.data.data});
+    std.log.info("loss: {d}\n", .{loss.get_data()});
     std.log.info("expected: {d}\n", .{case.loss});
-    std.log.info("input grad      : {d}\n", .{input.grad.?.data});
+    std.log.info("input grad      : {d}\n", .{input.assume_grad_data()});
     std.log.info("expected grad   : {d}\n\n", .{case.input_grad});
 
-    try std.testing.expectApproxEqAbs(case.loss, loss.data.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(case.loss, loss.get(0), 1e-4);
 
     const PRECISION = f16; // precision to compare grad slices at
-    const grad_exp_trunc = try device.mem_alloc(PRECISION, input.grad.?.data.len);
-    const grad_actual_trunc = try device.mem_alloc(PRECISION, input.grad.?.data.len);
+    const grad_exp_trunc = try device.mem_alloc(PRECISION, input.assume_grad().size());
+    const grad_actual_trunc = try device.mem_alloc(PRECISION, input.assume_grad().size());
     defer device.mem_free(grad_exp_trunc);
     defer device.mem_free(grad_actual_trunc);
-    for (case.input_grad, input.grad.?.data, 0..) |e1, e2, i| {
+    for (case.input_grad, input.assume_grad_data(), 0..) |e1, e2, i| {
         grad_exp_trunc[i] = @floatCast(e1);
         grad_actual_trunc[i] = @floatCast(e2);
     }
@@ -119,8 +119,8 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     defer target.deinit();
 
     std.log.info("Smooth L1 Loss Test", .{});
-    std.log.info("Input: {d}", .{input.data.data});
-    std.log.info("Target: {d}", .{target.data.data});
+    std.log.info("Input: {d}", .{input.get_data()});
+    std.log.info("Target: {d}", .{target.get_data()});
     std.log.info("Beta: {d}", .{case.beta});
 
     const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta);
@@ -128,13 +128,13 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
 
     try loss.backward();
 
-    std.log.info("Calculated loss: {d}n", .{loss.data.data[0]});
+    std.log.info("Calculated loss: {d}n", .{loss.get(0)});
     std.log.info("Expected loss: {d}", .{case.loss});
-    std.log.info("Calculated input grad: {d}", .{input.grad.?.data});
+    std.log.info("Calculated input grad: {d}", .{input.assume_grad_data()});
     std.log.info("Expected input grad: {d}", .{case.input_grad});
 
-    try std.testing.expectApproxEqAbs(case.loss, loss.data.data[0], 1e-4);
-    try std.testing.expectEqualSlices(f32, case.input_grad, input.grad.?.data);
+    try std.testing.expectApproxEqAbs(case.loss, loss.get(0), 1e-4);
+    try std.testing.expectEqualSlices(f32, case.input_grad, input.assume_grad_data());
 }
 
 test "smooth_l1_loss" {

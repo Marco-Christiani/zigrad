@@ -6,176 +6,131 @@
 // we're using double because every float can cast
 // up to a double and then we can go back down.
 
-extern "C" void reduce(
-    dtype id,
-    CutensorWrapper wrapper,
-    // x_tensor //
-    const void* x_vals,
-    const len_t* x_dims,
-    len_t x_dims_len,
-    // y_tensor //
-    void* y_vals,
-    // scratch //
-    len_t* scratch,
-    len_t* scratch_len,
-    // reduce idxs //
-    const len_t* rdx_idxs,
-    len_t rdx_idxs_len,
-    const void* alpha,
-    const void* beta,
-    BINARY_OP op
+extern "C" CutensorPlanWrapper get_reduce_plan(
+  CutensorWrapper wrapper,
+  dtype id,
+  const len_t* src_dims,
+  const u8* src_syms,
+  len_t src_dims_len,
+  const len_t* dst_dims,
+  const u8* dst_syms,
+  len_t dst_dims_len,
+  BINARY_OP op
 ) {
-  CutensorBackend* backend = CutensorBackend::unwrap(wrapper);
+  CHECK_INVARIANT(0 < dst_dims_len, "Zero length dimensions passed to reduce");
+  CHECK_INVARIANT(src_dims_len > dst_dims_len, "Reduction dimension out of bounds");
 
-  auto plan = backend->get_reduce_plan(
-    id, x_dims, x_dims_len, rdx_idxs, rdx_idxs_len, scratch, scratch_len, op
+  auto ct = CutensorBackend::unwrap(wrapper);
+  
+  const auto data_type = cutensor_data_type(id);
+  const auto op_type = cutensor_op_type(op);
+
+  auto key = ct->manager.make_key<ReducePlan>(
+    data_type,
+    {
+      __seq_hash(src_dims, src_dims_len),
+      __seq_hash(src_syms, src_dims_len),
+      __seq_hash(dst_dims, src_dims_len),
+      __seq_hash(dst_syms, src_dims_len),
+      static_cast<len_t>(op_type),
+    }
   );
 
-  const auto workspace = reinterpret_cast<void*>(*scratch);
+  if (auto entry = ct->manager.find<ReducePlan>(key); entry)
+    return { .plan = entry->plan.ptr, .scratch_len = entry->scratch_len };
+
+  BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
+  BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
+  BoundedArray<i64> b_dims(dst_dims, dst_dims_len, true);
+  BoundedArray<i32> b_syms(dst_syms, dst_dims_len, true);
+
+  cutensorTensorDescriptor_t x_desc;
+  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+              ct->handle,
+              &x_desc,
+              a_dims.size,
+              a_dims.data,
+              NULL,/*stride*/
+              data_type, cutensor_alignment));
+  
+  cutensorTensorDescriptor_t y_desc;
+  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+              ct->handle,
+              &y_desc,
+              b_dims.size,
+              b_dims.data,
+              NULL,/*stride*/
+              data_type, cutensor_alignment));
+  
+  cutensorOperationDescriptor_t op_desc;
+  CUTENSOR_ASSERT(cutensorCreateReduction(
+              ct->handle, &op_desc,
+              x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
+              y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
+              y_desc, b_syms.data, op_type,
+              cutensor_compute_type(id)));
+  
+  const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+  
+  cutensorPlanPreference_t plan_pref;
+  CUTENSOR_ASSERT(cutensorCreatePlanPreference(
+              ct->handle,
+              &plan_pref,
+              algo,
+              CUTENSOR_JIT_MODE_NONE));
+  
+  len_t scratch_len;
+  CUTENSOR_ASSERT(cutensorEstimateWorkspaceSize(
+              ct->handle,
+              op_desc,
+              plan_pref,
+              CUTENSOR_WORKSPACE_DEFAULT,
+              &scratch_len));
+
+  cutensorPlan_t plan;
+  CUTENSOR_ASSERT(cutensorCreatePlan(
+              ct->handle,
+              &plan,
+              op_desc,
+              plan_pref,
+              scratch_len));
+  
+  ct->manager.insert(
+    key,
+    ReducePlan{
+      .plan = plan,
+      .plan_pref = plan_pref,
+      .x_desc = x_desc,
+      .y_desc = y_desc,
+      .scratch_len = scratch_len,
+    }
+  );
+  
+  return { .plan = plan, .scratch_len = scratch_len };
+} 
+
+extern "C" void reduce(
+    CutensorWrapper c_wrap,
+    void* plan,
+    const void* x_vals,
+          void* y_vals,
+    void* scratch,
+    len_t scratch_len,
+    const void* alpha,
+    const void* beta
+) {
+  CutensorBackend* backend = CutensorBackend::unwrap(c_wrap);
 
   CUTENSOR_ASSERT(cutensorReduce(
       backend->handle,
-      plan, 
+      reinterpret_cast<cutensorPlan_t>(plan), 
       alpha, x_vals,
       beta, y_vals,
       y_vals,
-      workspace,
-      *scratch_len,
+      scratch,
+      scratch_len,
       backend->stream
   ));
-}
-
-template<class T>
-void __reduce_backwards(
-    dtype id,
-    CutensorBackend* backend,
-    // x_tensor //
-    const void* x_vals,
-          void* x_grad,
-    const len_t* x_dims,
-    len_t x_dims_len,
-    // y_tensor //
-    const void* y_vals,
-    const void* y_grad,
-    // scratch //
-    len_t* scratch,
-    len_t* scratch_len,
-    // reduce idxs //
-    const len_t* rdx_idxs,
-    len_t rdx_idxs_len,
-    BINARY_OP op
-) {
-  if (op == BINARY_OP::ADD) {
-    auto binary_plan = backend->get_reduce_bwds_binary(
-      id, x_dims, x_dims_len, rdx_idxs, rdx_idxs_len, BINARY_OP::ADD
-    );
-
-    const T alpha = 1.0;
-    const T gamma = 1.0;
-    CUTENSOR_ASSERT(cutensorElementwiseBinaryExecute(
-        backend->handle,
-        binary_plan, 
-        &alpha, y_grad,
-        &gamma, x_grad,
-        x_grad,
-        backend->stream
-    ));
-
-  } else {
-    ENSURE_SCRATCH(id, backend->stream, scratch, scratch_len, __product(x_dims, x_dims_len));
-    auto s_vals = reinterpret_cast<T*>(*scratch);
-    auto s_size = *scratch_len;
-    
-    auto add_plan = backend->get_reduce_bwds_binary(
-      id, x_dims, x_dims_len, rdx_idxs, rdx_idxs_len, BINARY_OP::ADD
-    );
-    auto mul_plan = backend->get_reduce_bwds_binary(
-      id, x_dims, x_dims_len, rdx_idxs, rdx_idxs_len, BINARY_OP::MUL
-    );
-
-    T alpha = 1.0;
-    T gamma = 0.0;
-    CUTENSOR_ASSERT(cutensorElementwiseBinaryExecute(
-        backend->handle,
-        add_plan, 
-        &alpha,
-        y_vals,
-        &gamma,
-        scratch,
-        scratch,
-        backend->stream
-    ));
-
-    thrust::transform(
-      thrust::cuda::par.on(backend->stream), 
-      s_vals,  
-      s_vals + s_size,
-      static_cast<const T*>(x_vals),
-      s_vals,
-      [=] __device__ (T x, T y) -> T { return (x == y) ? T(1) : T(0); }
-    );
-
-    // TODO: remove both of these and replace with trinary
-
-    gamma = 1;
-    CUTENSOR_ASSERT(cutensorElementwiseBinaryExecute(
-        backend->handle,
-        mul_plan, 
-        &alpha,
-        y_grad,
-        &gamma,
-        scratch,
-        scratch,
-        backend->stream
-    ));
-
-    CUTENSOR_ASSERT(cutensorElementwiseBinaryExecute(
-        backend->handle,
-        add_plan, 
-        &alpha,
-        scratch,
-        &gamma,
-        x_grad,
-        x_grad,
-        backend->stream
-    ));
-  }
-}
-
-extern "C" void reduce_backwards(
-    dtype id,
-    CutensorWrapper wrapper,
-    // x_tensor //
-    const void* x_vals,
-          void* x_grad,
-    const len_t* x_dims,
-    len_t x_dims_len,
-    // y_tensor //
-    const void* y_vals,
-    const void* y_grad,
-    // scratch //
-    len_t* scratch,
-    len_t* scratch_len,
-    // reduce idxs //
-    const len_t* rdx_idxs,
-    len_t rdx_idxs_len,
-    BINARY_OP op
-) {
-    CutensorBackend* backend = CutensorBackend::unwrap(wrapper);
-
-    if (op == BINARY_OP::MUL) {
-      SYSTEM_EXIT("Unimplemented binary op in reduce backwards");
-    }
-
-    switch (id) {
-      case SINGLE: return __reduce_backwards<f32>(
-          id, backend, x_vals, x_grad, x_dims, x_dims_len, y_vals, y_grad, scratch, scratch_len, rdx_idxs, rdx_idxs_len, op
-      );
-      case DOUBLE: return __reduce_backwards<f64>(
-          id, backend, x_vals, x_grad, x_dims, x_dims_len, y_vals, y_grad, scratch, scratch_len, rdx_idxs, rdx_idxs_len, op
-      );
-      default: SYSTEM_EXIT("Unsupported datatype");
-    }
 }
 
 #endif

@@ -1,6 +1,4 @@
 const std = @import("std");
-const Backend = @import("src/device/root.zig").Backend;
-const backend = @import("src/device/root.zig").backend;
 const Build = std.Build;
 const Module = Build.Module;
 const OptimizeMode = std.builtin.OptimizeMode;
@@ -24,15 +22,12 @@ pub fn build(b: *Build) !void {
     const enable_cuda = b.option(bool, "enable_cuda", "Enable CUDA backend.") orelse false;
     build_options.addOption(bool, "enable_cuda", enable_cuda);
 
-    const device_module = build_device_module(b, target, build_options_module, enable_cuda);
-
     const zigrad = b.addModule("zigrad", .{
         .root_source_file = b.path("src/zigrad.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "build_options", .module = build_options_module },
-            .{ .name = "device", .module = device_module },
         },
     });
 
@@ -48,10 +43,15 @@ pub fn build(b: *Build) !void {
         .name = "zigrad",
         .root_module = zigrad,
     });
+
     lib.root_module.addImport("build_options", build_options_module);
-    lib.root_module.addImport("device", device_module);
     link(target, lib);
     b.installArtifact(lib);
+
+    if (enable_cuda) {
+        const cuda = make_cuda_module(b, target);
+        zigrad.addImport("cuda", cuda);
+    }
 
     const exe = b.addExecutable(.{
         .name = "main",
@@ -83,8 +83,8 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = optimize,
     });
+
     unit_tests.root_module.addImport("build_options", build_options_module);
-    unit_tests.root_module.addImport("device", device_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     link(target, unit_tests);
     const test_step = b.step("test", "Run all tests");
@@ -162,57 +162,31 @@ pub fn build_tracy(b: *Build, target: Build.ResolvedTarget) ?*Module {
     return tracy;
 }
 
-pub fn build_device_module(
-    b: *Build,
-    target: Build.ResolvedTarget,
-    build_options_module: *std.Build.Module,
-    enable_cuda: bool,
-) *Build.Module {
+pub fn make_cuda_module(b: *Build, target: Build.ResolvedTarget) *std.Build.Module {
     const rebuild_cuda: bool = b.option(bool, "rebuild_cuda", "force CUDA backend to recompile") orelse false;
 
     const here = b.path(".").getPath(b);
 
-    const device = b.createModule(.{
-        .root_source_file = b.path("src/device/root.zig"),
-        .link_libc = true,
+    const cuda = b.createModule(.{
+        .root_source_file = b.path("src/cuda/root.zig"),
         .target = target,
+        .link_libc = true,
     });
 
-    device.addImport("build_options", build_options_module);
+    const exists = amalgamate_exists(b);
 
-    switch (target.result.os.tag) {
-        .linux => {
-            device.linkSystemLibrary("blas", .{});
-        },
-        .macos => device.linkFramework("Accelerate", .{}),
-        else => @panic("Os not supported."),
-    }
-
-    if (enable_cuda) {
-        const cuda = b.createModule(.{
-            .root_source_file = b.path("src/cuda/root.zig"),
-            .target = target,
-            .link_libc = true,
+    if (rebuild_cuda or !exists) {
+        std.log.info("COMPILING CUDA BACKEND", .{});
+        run_command(b, &.{
+            "python3",
+            b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
+            if (rebuild_cuda) "y" else "n",
         });
-
-        const exists = amalgamate_exists(b);
-
-        if (rebuild_cuda or !exists) {
-            std.log.info("COMPILING CUDA BACKEND", .{});
-            run_command(b, &.{
-                "python3",
-                b.pathJoin(&.{ here, "scripts", "cuda_setup.py" }),
-                if (rebuild_cuda) "y" else "n",
-            });
-        }
-
-        cuda.addIncludePath(b.path("src/cuda/"));
-        cuda.addLibraryPath(b.path("src/cuda/build"));
-        cuda.linkSystemLibrary("amalgamate", .{});
-        device.addImport("cuda", cuda);
     }
-
-    return device;
+    cuda.addIncludePath(b.path("src/cuda/"));
+    cuda.addLibraryPath(b.path("src/cuda/build"));
+    cuda.linkSystemLibrary("amalgamate", .{});
+    return cuda;
 }
 
 fn amalgamate_exists(b: *Build) bool {

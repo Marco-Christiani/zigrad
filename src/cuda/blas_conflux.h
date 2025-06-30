@@ -160,56 +160,76 @@ EXTERN_C void division(
   len_t z_len
 );
 
-EXTERN_C void reduce(
-    dtype id,
-    CutensorWrapper wrapper,
-    // x_tensor //
-    const void* x_vals,
-    const len_t* x_dims,
-    len_t x_dims_len,
-    // y_tensor //
-    void* y_vals,
-    // scratch //
-    len_t* scratch,
-    len_t* scratch_len,
-    // reduce idxs //
-    const len_t* rdx_idxs,
-    len_t rdx_idxs_len,
-    const void* alpha,
-    const void* beta,
-    BINARY_OP op
-);
 
-EXTERN_C void permutate(
-  dtype id,
+EXTERN_C CutensorPlanWrapper get_contraction_plan(
   CutensorWrapper wrapper,
-  const void* x_vals, const len_t* x_dims, const unsigned char* x_syms, len_t x_dims_len,
-        void* y_vals, const len_t* y_dims, const unsigned char* y_syms, len_t y_dims_len,
-  len_t* scratch, len_t* scratch_len,
-  const void* alpha
-);
-
-EXTERN_C void contraction(
   dtype id,
-  CutensorWrapper wrapper,
-  // A tensor //
-  const void* A_vals,
-  const len_t* A_dims,
-  const unsigned char* A_syms,
-  len_t A_dims_len,
   // x tensor //
-  const void* x_vals,
   const len_t* x_dims,
   const unsigned char* x_syms,
   len_t x_dims_len,
   // y tensor //
-         void* y_vals,
   const len_t* y_dims,
   const unsigned char* y_syms,
   len_t y_dims_len,
-  // scratch //
-  len_t* scratch,
-  len_t* scratch_len,
+  // z tensor //
+  const len_t* z_dims,
+  const unsigned char* z_syms,
+  len_t z_dims_len
+);
+
+EXTERN_C CutensorPlanWrapper get_reduce_plan(
+  CutensorWrapper wrapper,
+  dtype id,
+  const len_t* src_dims,
+  const unsigned char* src_syms,
+  len_t src_dims_len,
+  const len_t* dst_dims,
+  const unsigned char* dst_syms,
+  len_t dst_dims_len,
+  BINARY_OP op
+);
+
+EXTERN_C CutensorPlanWrapper get_permutate_plan(
+    CutensorWrapper wrapper,
+    dtype id,
+    const len_t* src_dims,
+    const unsigned char* src_syms,
+    len_t src_dims_len,
+    const len_t* dst_dims,
+    const unsigned char* dst_syms,
+    len_t dst_dims_len
+);
+
+EXTERN_C void reduce(
+    CutensorWrapper c_wrap,
+    void* plan,
+    const void* x_vals,
+          void* y_vals,
+    void* scratch,
+    len_t scratch_len,
+    const void* alpha,
+    const void* beta
+);
+
+EXTERN_C void permutate(
+  CutensorWrapper wrapper,
+  void* plan,
+  const void* x_vals,
+        void* y_vals,
+  void* scratch,
+  len_t scratch_len,
+  const void* alpha
+);
+
+EXTERN_C void contraction(
+  CutensorWrapper wrapper,
+  void* plan,
+  const void* A_vals,
+  const void* x_vals,
+        void* y_vals,
+  void* scratch,
+  len_t scratch_len,
   const void* alpha,
   const void* gamma
 );
