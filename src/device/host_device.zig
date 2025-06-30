@@ -8,7 +8,6 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 pub const using_mkl_rt = build_options.enable_mkl;
 
-pub const backend = @import("root.zig").backend;
 const BinaryOp = @import("device_common.zig").BinaryOp;
 const DeviceReference = @import("device_reference.zig");
 const RandType = @import("device_common.zig").RandType;

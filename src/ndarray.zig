@@ -336,14 +336,14 @@ pub fn NDArray(comptime T: type) type {
         /// Element-wise power operation: y = x^p
         pub fn pow(self: Self, p: T, device: DeviceReference) !Self {
             const result = try Self.empty(self.shape.slice(), device);
-            device.dispatch(opspec.pow_fwd(T){ .x = self.data, .exp = p, .y = result.data });
+            device.dispatch(opspec.pow_fwd(T){ .x = self.get_data(), .exp = p, .y = result.get_data() });
             return result;
         }
 
         /// In-place element-wise power operation: x = x^p
         pub fn _pow(self: *Self, p: T, device: DeviceReference) void {
             device.dispatch(opspec.pow_fwd_(T){
-                .x = self.data,
+                .x = self.get_data(),
                 .exp = p,
             });
         }
@@ -352,8 +352,8 @@ pub fn NDArray(comptime T: type) type {
         pub fn sqrt(self: Self, device: DeviceReference) !Self {
             const result = try Self.empty(self.shape.slice(), device);
             device.dispatch(opspec.sqrt_fwd(T){
-                .x = self.data,
-                .y = result.data,
+                .x = self.get_data(),
+                .y = result.get_data(),
             });
             return result;
         }
@@ -361,7 +361,7 @@ pub fn NDArray(comptime T: type) type {
         /// In-place element-wise square root operation: x = sqrt(x)
         pub fn _sqrt(self: *Self, device: DeviceReference) void {
             device.dispatch(opspec.sqrt_fwd_(T){
-                .x = self.data,
+                .x = self.get_data(),
             });
         }
 
@@ -369,8 +369,8 @@ pub fn NDArray(comptime T: type) type {
         pub fn rsqrt(self: Self, device: DeviceReference) !Self {
             const result = try Self.empty(self.shape.slice(), device);
             device.dispatch(opspec.rsqrt_fwd(T){
-                .x = self.data,
-                .y = result.data,
+                .x = self.get_data(),
+                .y = result.get_data(),
             });
             return result;
         }
@@ -518,7 +518,7 @@ pub fn NDArray(comptime T: type) type {
         /// Shapes must match (although practically the op is possible under other conditions)
         pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
             std.debug.assert(self.shape.equal(other.shape));
-            device.dispatch(opspec.axpy(T){ .x = other.data, .y = self.get_data(), .alpha = &alpha });
+            device.dispatch(opspec.axpy(T){ .x = other.get_data(), .y = self.get_data(), .alpha = &alpha });
         }
 
         pub const SumOpts = struct {
@@ -649,9 +649,9 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(offsets.len == src.size());
 
             device.dispatch(opspec.scatter_add(T){
-                .src = src.data,
+                .src = src.get_data(),
                 .offsets = offsets,
-                .dst = dst.data,
+                .dst = dst.get_data(),
             });
         }
 
@@ -672,9 +672,9 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(dst.size() % stride == 0);
 
             device.dispatch(opspec.scatter_add_strided(T){
-                .src = src.data,
+                .src = src.get_data(),
                 .indices = indices,
-                .dst = dst.data,
+                .dst = dst.get_data(),
                 .stride = stride,
             });
         }
@@ -693,9 +693,9 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(row_ptr[row_ptr.len - 1] == dst.size());
 
             device.dispatch(opspec.scatter_add_csr(T){
-                .src = src.data,
+                .src = src.get_data(),
                 .row_ptr = row_ptr,
-                .dst = dst.data,
+                .dst = dst.get_data(),
             });
         }
 
@@ -710,16 +710,16 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(row_ptr[row_ptr.len - 1] == src.size());
 
             device.dispatch(opspec.segment_sum_csr(T){
-                .src = src.data,
+                .src = src.get_data(),
                 .row_ptr = row_ptr,
-                .dst = dst.data,
+                .dst = dst.get_data(),
             });
         }
 
         /// COM
         pub fn take(self: Self, offsets: []const usize, device: DeviceReference) !Self {
             const result = try Self.empty(&.{offsets.len}, device);
-            device.mem_take(T, self.get_data(), offsets, result.data);
+            device.mem_take(T, self.get_data(), offsets, result.get_data());
             return result;
         }
 
@@ -987,7 +987,7 @@ test "NDArray._clip_norm,l2_norm" {
     defer initial_norm_ndarray.deinit(cpu.reference());
 
     try std.testing.expectEqual(1, initial_norm_ndarray.size());
-    const initial_norm = initial_norm_ndarray.data.raw[0];
+    const initial_norm = initial_norm_ndarray.get_data()[0];
     try std.testing.expectEqual(@as(T, 5.0), initial_norm);
 
     const max_norm: T = 4.0;
@@ -998,7 +998,7 @@ test "NDArray._clip_norm,l2_norm" {
     var clipped_norm_ndarray = try array.l2_norm(cpu.reference());
     defer clipped_norm_ndarray.deinit(cpu.reference());
 
-    const clipped_norm = clipped_norm_ndarray.data.raw[0];
+    const clipped_norm = clipped_norm_ndarray.get_data()[0];
     try std.testing.expect(clipped_norm <= max_norm);
 
     const expected_values = &[_]T{
@@ -1009,7 +1009,7 @@ test "NDArray._clip_norm,l2_norm" {
     };
 
     for (0..array.size()) |i| {
-        try std.testing.expectApproxEqAbs(expected_values[i], array.data.raw[i], 1e-5);
+        try std.testing.expectApproxEqAbs(expected_values[i], array.get_data()[i], 1e-5);
     }
 }
 

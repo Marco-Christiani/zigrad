@@ -50,7 +50,7 @@ pub fn build(b: *Build) !void {
     });
 
     lib.root_module.addImport("build_options", build_options_module);
-    link(target, lib);
+    link(target, lib, enable_mkl);
     b.installArtifact(lib);
 
     if (enable_cuda) {
@@ -70,7 +70,7 @@ pub fn build(b: *Build) !void {
         }),
     });
 
-    link(target, exe);
+    link(target, exe, enable_mkl);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -91,7 +91,7 @@ pub fn build(b: *Build) !void {
 
     unit_tests.root_module.addImport("build_options", build_options_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    link(target, unit_tests);
+    link(target, unit_tests, enable_mkl);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
@@ -114,14 +114,14 @@ pub fn build(b: *Build) !void {
     }
 }
 
-fn link(target: Build.ResolvedTarget, exe: *Build.Step.Compile) void {
+fn link(target: Build.ResolvedTarget, x: *Build.Step.Compile, enable_mkl: bool) void {
     switch (target.result.os.tag) {
         .linux => {
-            exe.linkSystemLibrary("blas");
-            if (enable_mkl) device.linkSystemLibrary("mkl_rt", .{});
-            exe.linkLibC();
+            x.linkSystemLibrary("blas");
+            if (enable_mkl) x.linkSystemLibrary("mkl_rt");
+            x.linkLibC();
         },
-        .macos => exe.linkFramework("Accelerate"),
+        .macos => x.linkFramework("Accelerate"),
         else => @panic("Os not supported."),
     }
 }
