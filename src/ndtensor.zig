@@ -346,12 +346,10 @@ pub fn NDTensor(comptime T: type) type {
             self.node.gb.destroy_node(self);
         }
 
-        // Soft Deinit
-        //
-        // Checks to see if a node is acquired or is the operand of
-        // a node that requires a gradient. If neither are true, the
-        // tensor is freed. Usually called in forward contexts when
-        // working with a mixed gradient requirements and view tensors.
+        /// Checks to see if a node is acquired or is the operand of a node that
+        /// requires a gradient. If neither are true, the tensor is freed. Usually
+        /// called in forward contexts when working with a mixed gradient requirements
+        /// and view tensors.
         pub fn soft_deinit(self: *Self) void {
             if (!(self.acquired() or self.node.flags.get(.grad_operand)))
                 self.deinit();
@@ -1413,10 +1411,6 @@ pub fn NDTensor(comptime T: type) type {
                     const grad_output = y.assume_grad();
 
                     // Gather gradients from scattered positions
-                    // take to invert scatter_add
-                    // This should accumulate
-                    // src_tensor.device.mem_take(T, grad_output, ctx.offsets, grad_src);
-                    // Currently adapting this so it accumulates:
                     // grad_output[indices[i]] += grad_input[i]
                     grad_input.scatter_add_(ctx.offsets, grad_output, input_tensor.device);
                 }
@@ -1583,7 +1577,7 @@ pub fn NDTensor(comptime T: type) type {
 
             // Copy data
             const src_data = self.get_data();
-            const out_data = output.data;
+            const out_data = output.get_data();
             for (indices, 0..) |src_idx, dst_idx| {
                 const src_start = src_idx * stride;
                 const dst_start = dst_idx * stride;
