@@ -3,8 +3,6 @@ const Build = std.Build;
 const Module = Build.Module;
 const OptimizeMode = std.builtin.OptimizeMode;
 
-// this is a comment
-
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -18,6 +16,12 @@ pub fn build(b: *Build) !void {
         "log_level",
         b.option(std.log.Level, "log_level", "The Log Level to be used.") orelse .info,
     );
+
+    const enable_mkl = b.option(bool, "enable_mkl", "Link MKL.") orelse false;
+    build_options.addOption(bool, "enable_mkl", enable_mkl);
+
+    // const enable_vml = b.option(bool, "enable_vml", "Link VML.") orelse false;
+    // build_options.addOption(bool, "enable_vml", enable_vml);
 
     const enable_cuda = b.option(bool, "enable_cuda", "Enable CUDA backend.") orelse false;
     build_options.addOption(bool, "enable_cuda", enable_cuda);
@@ -34,6 +38,7 @@ pub fn build(b: *Build) !void {
     switch (target.result.os.tag) {
         .linux => {
             zigrad.linkSystemLibrary("blas", .{});
+            if (enable_mkl) zigrad.linkSystemLibrary("mkl_rt", .{});
         },
         .macos => zigrad.linkFramework("Accelerate", .{}),
         else => @panic("Os not supported."),
@@ -45,7 +50,7 @@ pub fn build(b: *Build) !void {
     });
 
     lib.root_module.addImport("build_options", build_options_module);
-    link(target, lib);
+    link(target, lib, enable_mkl);
     b.installArtifact(lib);
 
     if (enable_cuda) {
@@ -65,7 +70,7 @@ pub fn build(b: *Build) !void {
         }),
     });
 
-    link(target, exe);
+    link(target, exe, enable_mkl);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -86,7 +91,7 @@ pub fn build(b: *Build) !void {
 
     unit_tests.root_module.addImport("build_options", build_options_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    link(target, unit_tests);
+    link(target, unit_tests, enable_mkl);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
@@ -109,13 +114,14 @@ pub fn build(b: *Build) !void {
     }
 }
 
-fn link(target: Build.ResolvedTarget, exe: *Build.Step.Compile) void {
+fn link(target: Build.ResolvedTarget, x: *Build.Step.Compile, enable_mkl: bool) void {
     switch (target.result.os.tag) {
         .linux => {
-            exe.linkSystemLibrary("blas");
-            exe.linkLibC();
+            x.linkSystemLibrary("blas");
+            if (enable_mkl) x.linkSystemLibrary("mkl_rt");
+            x.linkLibC();
         },
-        .macos => exe.linkFramework("Accelerate"),
+        .macos => x.linkFramework("Accelerate"),
         else => @panic("Os not supported."),
     }
 }

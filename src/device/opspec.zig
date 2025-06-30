@@ -201,6 +201,93 @@ pub fn clip_nrm2(T: type) type {
 /////////////////
 // non-linear ops
 
+/// Forward pow: y = x^exp
+pub fn pow_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "pow_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        exp: T,
+        y: []T,
+    };
+}
+
+/// In-place forward pow: x = x^exp
+pub fn pow_fwd_(T: type) type {
+    return struct {
+        pub const __name__ = "pow_fwd_";
+        pub const __type__ = T;
+        x: []T,
+        exp: T,
+    };
+}
+
+/// Backward pow: x_g += exp * x^(exp-1) * y_g
+pub fn pow_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "pow_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+        exp: T,
+        y_g: []const T,
+        eps: f32,
+    };
+}
+
+/// Forward square root: $y = \sqrt{x}$
+pub fn sqrt_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "sqrt_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        y: []T,
+    };
+}
+
+/// In-place forward square root operation: $x = \sqrt{x}$
+pub fn sqrt_fwd_(T: type) type {
+    return struct {
+        pub const __name__ = "sqrt_fwd_";
+        pub const __type__ = T;
+        x: []T,
+    };
+}
+
+/// Backward square root: $x_g += 0.5 / \sqrt{x} * y_g$
+pub fn sqrt_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "sqrt_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+        y_g: []const T,
+        eps: f32,
+    };
+}
+
+/// Forward inverse square root: $y = \frac{1}{\sqrt{x}}$
+pub fn rsqrt_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "rsqrt_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        y: []T,
+    };
+}
+
+/// Backward inverse square root: $x_g += -0.5 x^{-1.5} * y_g$
+pub fn rsqrt_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "rsqrt_bwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_g: []T,
+        y_g: []const T,
+        eps: f32,
+    };
+}
+
 pub fn exp_fwd(T: type) type {
     return struct {
         pub const __name__ = "exp_fwd";
@@ -439,5 +526,71 @@ pub fn max_along(T: type) type {
         dim: usize,
         alpha: T = 1.0,
         beta: T = 0.0,
+    };
+}
+
+pub fn scatter_add(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_add";
+        pub const __type__ = T;
+        src: []const T,
+        offsets: []const usize,
+        dst: []T,
+    };
+}
+
+pub fn scatter_add_strided(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_add_strided";
+        pub const __type__ = T;
+
+        /// Source data organized as contiguous blocks of `stride` elements each.
+        /// Shape: (n_blocks, stride) flattened to (n_blocks * stride,)
+        src: []const T,
+
+        /// Segment identifier for each source block.
+        /// indices[i] specifies which output segment block i should be summed into.
+        /// Shape: (n_blocks,)
+        indices: []const usize,
+
+        /// Destination buffer organized as contiguous blocks of `stride` elements.
+        /// Values are accumulated.
+        /// Shape: (n_segments, stride) flattened to (n_segments * stride,)
+        dst: []T,
+
+        /// Number of contiguous elements per block/segment
+        stride: usize,
+    };
+}
+
+pub fn scatter_add_csr(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_add_csr";
+        pub const __type__ = T;
+
+        /// Values to scatter (shape: [n_segments])
+        src: []const T,
+
+        /// CSR segment boundaries (shape: [n_segments + 1])
+        row_ptr: []const usize,
+
+        /// Output buffer (shape: [total_elements])
+        dst: []T,
+    };
+}
+
+pub fn segment_sum_csr(T: type) type {
+    return struct {
+        pub const __name__ = "segment_sum_csr";
+        pub const __type__ = T;
+
+        /// Input data, shape: [total_elems]
+        src: []const T,
+
+        /// CSR offsets (segment boundaries), shape: [n_segments + 1]
+        row_ptr: []const usize,
+
+        /// Output buffer, shape: [n_segments]
+        dst: []T,
     };
 }

@@ -1,43 +1,65 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const Py = @import("python.zig");
-
-const c = switch (@import("builtin").target.os.tag) {
-    // .macos => @cImport(@cInclude("/opt/homebrew/Cellar/python@3.11/3.11.10/Frameworks/Python.framework/Versions/3.11/include/python3.11/Python.h")),
-    inline else => @cImport(@cInclude("Python.h")),
-};
+const lib = @import("lib.zig");
+const c = @cImport(@cInclude("Python.h"));
 
 pub fn main() !void {
     Py.init();
     defer Py.finalize();
 
-    Py.init();
-    defer Py.finalize();
-    try unit_test(std.heap.smp_allocator);
-    try test_with_clean_module();
+    const T = f32;
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
 
-    try @import("ndtensor.zig").main();
+    try self_test();
+    try integration_test(T, cpu.reference());
+
+    try @import("ndtensor.zig").run_tests(T, cpu.reference());
+    try @import("loss.zig").run_tests(T, cpu.reference());
+
+    if (zg.has_cuda) {
+        var cuda = zg.device.CudaDevice.init();
+        defer cuda.deinit();
+        try integration_test(T, cuda.reference());
+        try @import("ndtensor.zig").main();
+        try @import("loss.zig").main();
+    }
+    std.debug.print("Verified.\n", .{});
 }
 
 test {
     Py.init();
     defer Py.finalize();
-    try unit_test(std.testing.allocator);
-    try test_with_clean_module();
-}
-
-fn unit_test(allocator: std.mem.Allocator) !void {
-    const T = f32;
-    const Tensor = zg.NDTensor(T);
+    try self_test();
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
+    try integration_test(f32, cpu.reference());
+}
 
-    var graph = zg.Graph.init(allocator, .{ .eager_teardown = false });
+fn self_test() !void {
+    var py_mod = try Py.create_module("test_module");
+    defer py_mod.deinit();
+    try py_mod.run(
+        \\import torch
+        \\import numpy as np
+        \\x = torch.tensor([1, 2, 3], dtype=torch.float32)
+        \\y = x * 2
+        \\result = y.numpy()
+    );
+    const result_slice = try py_mod.get_slice(f32, "result");
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 4, 6 }, result_slice);
+}
+
+fn integration_test(T: type, device: zg.DeviceReference) !void {
+    const Tensor = zg.NDTensor(T);
+
+    var graph = zg.Graph.init(std.heap.smp_allocator, .{ .eager_teardown = false });
     defer graph.deinit();
 
     // Zigrad
-    const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
+    const x = try Tensor.from_slice(device, &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
         .requires_grad = true,
         .graph = &graph,
     });
@@ -54,15 +76,25 @@ fn unit_test(allocator: std.mem.Allocator) !void {
     // Torch
     const mod = try Py.import_main();
 
-    const script =
+    const script_fmt =
         \\import torch
-        \\x = torch.tensor([-2.0, -0.5, 0.5, 2.0], dtype=torch.float32, requires_grad=True).reshape(2, 2)
+        \\x = torch.tensor([-2.0, -0.5, 0.5, 2.0], dtype=torch.{s}, requires_grad=True).reshape(2, 2)
         \\x.retain_grad()
         \\y = x.clamp(-1.0, 1.0)
         \\y.retain_grad()
         \\y.sum().backward()
         \\yval = y.detach().numpy()
     ;
+
+    const torch_dtype = switch (T) {
+        f32 => "float32",
+        f64 => "float64",
+        inline else => @compileError("Unsupported type" ++ @typeName(T)),
+    };
+
+    var buf: [script_fmt.len + torch_dtype.len:0]u8 = undefined;
+
+    const script = try std.fmt.bufPrintZ(&buf, script_fmt, .{torch_dtype});
     try mod.run(script);
 
     var py_x = try mod.get_var("x");
@@ -99,18 +131,4 @@ fn unit_test(allocator: std.mem.Allocator) !void {
     // Compare
     try std.testing.expectEqualSlices(f32, py_y_slice, zigrad_out);
     try std.testing.expectEqualSlices(f32, py_grad_slice, zigrad_grad);
-}
-
-fn test_with_clean_module() !void {
-    var py_mod = try Py.create_module("test_module");
-    defer py_mod.deinit();
-    try py_mod.run(
-        \\import torch
-        \\import numpy as np
-        \\x = torch.tensor([1, 2, 3], dtype=torch.float32)
-        \\y = x * 2
-        \\result = y.numpy()
-    );
-    const result_slice = try py_mod.get_slice(f32, "result");
-    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 4, 6 }, result_slice);
 }
