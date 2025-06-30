@@ -188,10 +188,7 @@ struct ReducePlan {
   ManagedOperationDescriptor op_desc;
   ManagedTensorDescriptor x_desc;
   ManagedTensorDescriptor y_desc;
-  BoundedArray<i64> x_dims;
-  BoundedArray<i64> y_dims;
-  BoundedArray<i32> x_syms;
-  BoundedArray<i32> y_syms;
+  len_t scratch_len;
 };
 
 struct PermutatePlan {
@@ -200,10 +197,7 @@ struct PermutatePlan {
   ManagedOperationDescriptor op_desc;
   ManagedTensorDescriptor x_desc;
   ManagedTensorDescriptor y_desc;
-  BoundedArray<i64> x_dims;
-  BoundedArray<i64> y_dims;
-  BoundedArray<i32> x_syms;
-  BoundedArray<i32> y_syms;
+  len_t scratch_len;
 };
 
 struct ContractionPlan {
@@ -213,6 +207,7 @@ struct ContractionPlan {
   ManagedTensorDescriptor x_desc;
   ManagedTensorDescriptor y_desc;
   ManagedTensorDescriptor z_desc;
+  len_t scratch_len;
 };
 
 struct BinaryPlan {
@@ -221,10 +216,7 @@ struct BinaryPlan {
   ManagedOperationDescriptor op_desc;
   ManagedTensorDescriptor x_desc;
   ManagedTensorDescriptor y_desc;
-  BoundedArray<i64> x_dims;
-  BoundedArray<i64> y_dims;
-  BoundedArray<i32> x_syms;
-  BoundedArray<i32> y_syms;
+  len_t scratch_len;
 };
 
 typedef std::variant<
@@ -291,16 +283,9 @@ public:
   }
 };
 
-/////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////
 
-class CutensorBackend {
-
-  private:
+struct CutensorBackend {
     PlanManager manager;
-
-  public:
-
     cudaStream_t stream{nullptr};
     cutensorHandle_t handle{nullptr};
 
@@ -319,675 +304,204 @@ class CutensorBackend {
     ~CutensorBackend() {
       CUTENSOR_ASSERT(cutensorDestroy(this->handle));
     }
-
-    // start using this more in the future
-    struct ReduceModesPair {
-      BoundedArray<u8> src_syms;
-      BoundedArray<u8> dst_syms;
-    };
-
-    // specified index version
-    cutensorPlan_t get_reduce_plan(
-      dtype id,
-      const len_t* src_dims,
-      len_t src_dims_len,
-      const len_t* rdx_idxs,
-      len_t rdx_idxs_len,
-      len_t* scratch,
-      len_t* scratch_len,
-      BINARY_OP op
-    ) {
-      CHECK_INVARIANT(rdx_idxs_len <= src_dims_len, "Reduction dimension out of bounds");
-      CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to reduce");
-      CHECK_INVARIANT(0 < rdx_idxs_len, "Zero length dimensions passed to reduce");
-  
-      BoundedArray<len_t> dst_dims;
-      BoundedArray<u8> src_syms;
-      BoundedArray<u8> dst_syms;
-
-      BoundedArray<len_t> r_idxs(rdx_idxs, rdx_idxs_len);
-      r_idxs.sort();
-  
-      {
-          u8 sym = 'i';
-          len_t r_pos = 0;
-  
-          for (len_t i = 0; i < src_dims_len; ++i, ++sym) {  
-            src_syms.append(sym);
-  
-            // skip every index indicated for reduction...
-            if (r_pos < r_idxs.size && i == r_idxs.data[r_pos]) {
-              r_pos += 1;
-              continue;
-            };
-  
-            dst_dims.append(src_dims[i]);
-            dst_syms.append(sym);
-          }  
-      }
-
-      return this->get_reduce_plan(
-        id,
-        src_dims,
-        src_syms.ptr(),
-        src_dims_len, 
-        dst_dims.ptr(),
-        dst_syms.ptr(),
-        dst_dims.size,
-        scratch, scratch_len,
-        op
-      );
-    } 
-
-    cutensorPlan_t get_reduce_plan(
-      dtype id,
-      const len_t* src_dims,
-      const u8* src_syms,
-      len_t src_dims_len,
-      const len_t* dst_dims,
-      const u8* dst_syms,
-      len_t dst_dims_len,
-      len_t* scratch,
-      len_t* scratch_len,
-      BINARY_OP op
-    ) {
-      CHECK_INVARIANT(0 < dst_dims_len, "Zero length dimensions passed to reduce");
-      CHECK_INVARIANT(src_dims_len > dst_dims_len, "Reduction dimension out of bounds");
-  
-      const auto data_type = cutensor_data_type(id);
-      const auto op_type = cutensor_op_type(op);
-
-      auto key = this->manager.make_key<ReducePlan>(
-        data_type,
-        {
-          __seq_hash(src_dims, src_dims_len),
-          __seq_hash(src_syms, src_dims_len),
-          __seq_hash(dst_dims, src_dims_len),
-          __seq_hash(dst_syms, src_dims_len),
-        }
-      );
-
-      if (auto entry = this->manager.find<ReducePlan>(key); entry) {
-        return entry->plan.ptr;
-      }
-
-      BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
-      BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
-      BoundedArray<i64> b_dims(dst_dims, dst_dims_len, true);
-      BoundedArray<i32> b_syms(dst_syms, dst_dims_len, true);
-
-      cutensorTensorDescriptor_t x_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &x_desc,
-                  a_dims.size,
-                  a_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorTensorDescriptor_t y_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &y_desc,
-                  b_dims.size,
-                  b_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorOperationDescriptor_t op_desc;
-      CUTENSOR_ASSERT(cutensorCreateReduction(
-                  this->handle, &op_desc,
-                  x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data, op_type,
-                  cutensor_compute_type(id)));
-  
-      const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
-  
-      cutensorPlanPreference_t plan_pref;
-      CUTENSOR_ASSERT(cutensorCreatePlanPreference(
-                  this->handle,
-                  &plan_pref,
-                  algo,
-                  CUTENSOR_JIT_MODE_NONE));
-  
-      len_t new_scratch_len = 0;
-      CUTENSOR_ASSERT(cutensorEstimateWorkspaceSize(
-                  this->handle,
-                  op_desc,
-                  plan_pref,
-                  CUTENSOR_WORKSPACE_DEFAULT,
-                  &new_scratch_len));
-
-      if (new_scratch_len > *scratch_len) {
-          CUdeviceptr new_mem;
-          CURESULT_ASSERT(cuMemFreeAsync(static_cast<CUdeviceptr>(*scratch), this->stream));
-          CURESULT_ASSERT(cuMemAllocAsync(&new_mem, new_scratch_len, this->stream));
-          *scratch = static_cast<len_t>(new_mem);
-          *scratch_len = new_scratch_len;
-      }
-  
-      cutensorPlan_t plan;
-      CUTENSOR_ASSERT(cutensorCreatePlan(
-                  this->handle,
-                  &plan,
-                  op_desc,
-                  plan_pref,
-                  *scratch_len));
-  
-      this->manager.insert(
-        key,
-        ReducePlan{
-          .plan = plan,
-          .plan_pref = plan_pref,
-          .x_desc = x_desc,
-          .y_desc = y_desc,
-          .x_dims = a_dims,
-          .y_dims = b_dims,
-          .x_syms = a_syms,
-          .y_syms = b_syms,
-        }
-      );
-  
-      return plan;
-    } 
-
-    // syms and dims must be same length
-    cutensorPlan_t get_contraction_plan(
-      dtype id,
-      // x tensor //
-      const len_t* x_dims,
-      const u8* x_syms,
-      len_t x_dims_len,
-      // y tensor //
-      const len_t* y_dims,
-      const u8* y_syms,
-      len_t y_dims_len,
-      // z tensor //
-      const len_t* z_dims,
-      const u8* z_syms,
-      len_t z_dims_len,
-      // scratch //
-      len_t* scratch,
-      len_t* scratch_len
-    ) {
-      CHECK_INVARIANT(0 < x_dims_len, "Zero length dimensions passed to contraction.");
-      CHECK_INVARIANT(0 < y_dims_len, "Zero length dimensions passed to contraction.");
-  
-      const auto data_type = cutensor_data_type(id);
-
-      auto key = this->manager.make_key<PermutatePlan>(
-        data_type,
-        {
-          __seq_hash(x_dims, x_dims_len),
-          __seq_hash(x_syms, x_dims_len),
-          __seq_hash(y_dims, y_dims_len),
-          __seq_hash(y_syms, y_dims_len),
-          __seq_hash(z_dims, z_dims_len),
-          __seq_hash(z_syms, z_dims_len),
-        }
-      );
-
-      if (auto entry = this->manager.find<ContractionPlan>(key); entry) {
-        return entry->plan.ptr;
-      }
-
-      BoundedArray<i64> a_dims(x_dims, x_dims_len, true);
-      BoundedArray<i32> a_syms(x_syms, x_dims_len, true);
-
-      BoundedArray<i64> b_dims(y_dims, y_dims_len, true);
-      BoundedArray<i32> b_syms(y_syms, y_dims_len, true);
-
-      BoundedArray<i64> c_dims(z_dims, z_dims_len, true);
-      BoundedArray<i32> c_syms(z_syms, z_dims_len, true);
-  
-      cutensorTensorDescriptor_t x_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &x_desc,
-                  a_dims.size,
-                  a_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorTensorDescriptor_t y_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &y_desc,
-                  b_dims.size,
-                  b_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-
-      cutensorTensorDescriptor_t z_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &z_desc,
-                  c_dims.size,
-                  c_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorOperationDescriptor_t op_desc;
-      CUTENSOR_ASSERT(cutensorCreateContraction(
-                  this->handle, &op_desc,
-                  x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
-                  z_desc, c_syms.data, CUTENSOR_OP_IDENTITY,
-                  z_desc, c_syms.data,
-                  cutensor_compute_type(id)));
-  
-      const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
-  
-      cutensorPlanPreference_t plan_pref;
-      CUTENSOR_ASSERT(cutensorCreatePlanPreference(
-                  this->handle,
-                  &plan_pref,
-                  algo,
-                  CUTENSOR_JIT_MODE_NONE));
-
-      len_t new_scratch_len = 0;
-      CUTENSOR_ASSERT(cutensorEstimateWorkspaceSize(
-                  this->handle,
-                  op_desc,
-                  plan_pref,
-                  CUTENSOR_WORKSPACE_DEFAULT,
-                  &new_scratch_len));
-
-      if (new_scratch_len > *scratch_len) {
-          CUdeviceptr new_mem;
-          CURESULT_ASSERT(cuMemFreeAsync(static_cast<CUdeviceptr>(*scratch), this->stream));
-          CURESULT_ASSERT(cuMemAllocAsync(&new_mem, new_scratch_len, this->stream));
-          *scratch = static_cast<len_t>(new_mem);
-          *scratch_len = new_scratch_len;
-      }
-  
-      cutensorPlan_t plan;
-      CUTENSOR_ASSERT(cutensorCreatePlan(
-                  this->handle,
-                  &plan,
-                  op_desc,
-                  plan_pref,
-                  *scratch_len));
-  
-      this->manager.insert(
-        key,
-        ContractionPlan{
-          .plan = plan,
-          .plan_pref = plan_pref,
-          .x_desc = x_desc,
-          .y_desc = y_desc,
-          .z_desc = z_desc,
-        }
-      );
-  
-      return plan;
-    }
-
-    // syms and dims must be same length
-    cutensorPlan_t get_permutate_plan(
-      dtype id,
-      const len_t* src_dims,
-      const u8* src_syms,
-      len_t src_dims_len,
-      const len_t* dst_dims,
-      const u8* dst_syms,
-      len_t dst_dims_len,
-      len_t* scratch,
-      len_t* scratch_len
-    ) {
-      CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to permutate");
-      CHECK_INVARIANT(src_dims_len <= dst_dims_len, "Source dimensions length greater than destination");
-  
-      const auto data_type = cutensor_data_type(id);
-
-      auto key = this->manager.make_key<PermutatePlan>(
-        data_type,
-        {
-          __seq_hash(src_dims, src_dims_len),
-          __seq_hash(src_syms, src_dims_len),
-          __seq_hash(dst_dims, src_dims_len),
-          __seq_hash(dst_syms, src_dims_len),
-        }
-      );
-
-      if (auto entry = this->manager.find<PermutatePlan>(key); entry) {
-        return entry->plan.ptr;
-      }
-
-      BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
-      BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
-      BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
-      BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
-  
-      cutensorTensorDescriptor_t x_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &x_desc,
-                  a_dims.size,
-                  a_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorTensorDescriptor_t y_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &y_desc,
-                  b_dims.size,
-                  b_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorOperationDescriptor_t op_desc;
-      CUTENSOR_ASSERT(cutensorCreatePermutation(
-                  this->handle, &op_desc,
-                  x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data, 
-                  cutensor_compute_type(id)));
-  
-      const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
-  
-      cutensorPlanPreference_t plan_pref;
-      CUTENSOR_ASSERT(cutensorCreatePlanPreference(
-                  this->handle,
-                  &plan_pref,
-                  algo,
-                  CUTENSOR_JIT_MODE_NONE));
-
-      len_t new_scratch_len = 0;
-      CUTENSOR_ASSERT(cutensorEstimateWorkspaceSize(
-                  this->handle,
-                  op_desc,
-                  plan_pref,
-                  CUTENSOR_WORKSPACE_DEFAULT,
-                  &new_scratch_len));
-
-      if (new_scratch_len > *scratch_len) {
-          CUdeviceptr new_mem;
-          CURESULT_ASSERT(cuMemFreeAsync(static_cast<CUdeviceptr>(*scratch), this->stream));
-          CURESULT_ASSERT(cuMemAllocAsync(&new_mem, new_scratch_len, this->stream));
-          *scratch = static_cast<len_t>(new_mem);
-          *scratch_len = new_scratch_len;
-      }
-  
-      cutensorPlan_t plan;
-      CUTENSOR_ASSERT(cutensorCreatePlan(
-                  this->handle,
-                  &plan,
-                  op_desc,
-                  plan_pref,
-                  *scratch_len));
-  
-      this->manager.insert(
-        key,
-        PermutatePlan{
-          .plan = plan,
-          .plan_pref = plan_pref,
-          .x_desc = x_desc,
-          .y_desc = y_desc,
-          .x_dims = a_dims,
-          .y_dims = b_dims,
-          .x_syms = a_syms,
-          .y_syms = b_syms,
-        }
-      );
-  
-      return plan;
-    }
-
-    // binary is used for broadcasting reverses
-    // not intended to be used with 
-    cutensorPlan_t get_binary_plan(
-      dtype id,
-      const len_t* src_dims,
-      const u8* src_syms,
-      len_t src_dims_len,
-      const len_t* dst_dims,
-      const u8* dst_syms,
-      len_t dst_dims_len,
-      BINARY_OP op
-    ) {
-      CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to permutate");
-      CHECK_INVARIANT(src_dims_len <= dst_dims_len, "Source dimensions length greater than destination");
-  
-      const auto data_type = cutensor_data_type(id);
-      const auto op_type = cutensor_op_type(op);
-
-      auto key = this->manager.make_key<BinaryPlan>(
-        data_type,
-        {
-          __seq_hash(src_dims, src_dims_len),
-          __seq_hash(src_syms, src_dims_len),
-          __seq_hash(dst_dims, src_dims_len),
-          __seq_hash(dst_syms, src_dims_len),
-          static_cast<std::size_t>(op),
-        }
-      );
-
-      if (auto entry = this->manager.find<PermutatePlan>(key); entry) {
-        return entry->plan.ptr;
-      }
-
-      BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
-      BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
-      BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
-      BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
-  
-      cutensorTensorDescriptor_t x_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &x_desc,
-                  a_dims.size,
-                  a_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorTensorDescriptor_t y_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &y_desc,
-                  b_dims.size,
-                  b_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorOperationDescriptor_t op_desc;
-      CUTENSOR_ASSERT(cutensorCreateElementwiseBinary(
-                  this->handle, &op_desc,
-                  x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data,
-                  op_type, cutensor_compute_type(id)));
-
-      const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
-  
-      cutensorPlanPreference_t plan_pref;
-      CUTENSOR_ASSERT(cutensorCreatePlanPreference(
-                  this->handle,
-                  &plan_pref,
-                  algo,
-                  CUTENSOR_JIT_MODE_NONE));
-  
-  
-      cutensorPlan_t plan;
-      CUTENSOR_ASSERT(cutensorCreatePlan(
-                  this->handle,
-                  &plan,
-                  op_desc,
-                  plan_pref,
-                  0 /* not required */));
-  
-      this->manager.insert(
-        key,
-        BinaryPlan{
-          .plan = plan,
-          .plan_pref = plan_pref,
-          .x_desc = x_desc,
-          .y_desc = y_desc,
-          .x_dims = a_dims,
-          .y_dims = b_dims,
-          .x_syms = a_syms,
-          .y_syms = b_syms,
-        }
-      );
-
-      return plan;
-    }
-
-    // binary is used for broadcasting reverses
-    // not intended to be used with 
-    cutensorPlan_t get_reduce_bwds_trinary(
-      dtype id,
-      const len_t* src_dims,
-      const u8* src_syms,
-      len_t src_dims_len,
-      const len_t* dst_dims,
-      const u8* dst_syms,
-      len_t dst_dims_len,
-      BINARY_OP op
-    ) {
-      CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to permutate");
-      CHECK_INVARIANT(src_dims_len <= dst_dims_len, "Source dimensions length greater than destination");
-  
-      const auto data_type = cutensor_data_type(id);
-      const auto op_type = cutensor_op_type(op);
-
-      auto key = this->manager.make_key<BinaryPlan>(
-        data_type,
-        {
-          __seq_hash(src_dims, src_dims_len),
-          __seq_hash(src_syms, src_dims_len),
-          __seq_hash(dst_dims, src_dims_len),
-          __seq_hash(dst_syms, src_dims_len),
-          static_cast<std::size_t>(op),
-        }
-      );
-
-      if (auto entry = this->manager.find<PermutatePlan>(key); entry) {
-        return entry->plan.ptr;
-      }
-
-      BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
-      BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
-      BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
-      BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
-  
-      cutensorTensorDescriptor_t x_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &x_desc,
-                  a_dims.size,
-                  a_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorTensorDescriptor_t y_desc;
-      CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
-                  this->handle,
-                  &y_desc,
-                  b_dims.size,
-                  b_dims.data,
-                  NULL,/*stride*/
-                  data_type, cutensor_alignment));
-  
-      cutensorOperationDescriptor_t op_desc;
-      CUTENSOR_ASSERT(cutensorCreateElementwiseBinary(
-                  this->handle, &op_desc,
-                  x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
-                  y_desc, b_syms.data,
-                  op_type, cutensor_compute_type(id)));
-
-      const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
-  
-      cutensorPlanPreference_t plan_pref;
-      CUTENSOR_ASSERT(cutensorCreatePlanPreference(
-                  this->handle,
-                  &plan_pref,
-                  algo,
-                  CUTENSOR_JIT_MODE_NONE));
-  
-  
-      cutensorPlan_t plan;
-      CUTENSOR_ASSERT(cutensorCreatePlan(
-                  this->handle,
-                  &plan,
-                  op_desc,
-                  plan_pref,
-                  0 /* not required */));
-  
-      this->manager.insert(
-        key,
-        BinaryPlan{
-          .plan = plan,
-          .plan_pref = plan_pref,
-          .x_desc = x_desc,
-          .y_desc = y_desc,
-          .x_dims = a_dims,
-          .y_dims = b_dims,
-          .x_syms = a_syms,
-          .y_syms = b_syms,
-        }
-      );
-
-      return plan;
-    }
-
-    // if we rmove the specified index api, then we
-    // can skip this and go directly to binary ops
-    cutensorPlan_t get_reduce_bwds_binary(
-      dtype id,
-      const len_t* src_dims,
-      len_t src_dims_len,
-      const len_t* rdx_idxs,
-      len_t rdx_idxs_len,
-      BINARY_OP op
-    ) {
-      CHECK_INVARIANT(rdx_idxs_len < src_dims_len, "Reduction dimension out of bounds");
-      CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to reduce");
-      CHECK_INVARIANT(0 < rdx_idxs_len, "Zero length dimensions passed to reduce");
-  
-      BoundedArray<len_t> dst_dims;
-      BoundedArray<u8> src_syms;
-      BoundedArray<u8> dst_syms;
-
-      BoundedArray<len_t> r_idxs(rdx_idxs, rdx_idxs_len);
-      r_idxs.sort();
-  
-      { // TODO: Copy and pasted from above
-          i32 sym = 'i';
-          len_t r_pos = 0;
-  
-          for (len_t i = 0; i < src_dims_len; ++i, ++sym) {  
-            src_syms.append(sym);
-  
-            // skip every index indicated for reduction...
-            if (r_pos < r_idxs.size && i == r_idxs.data[r_pos]) {
-              r_pos += 1;
-              continue;
-            };
-  
-            dst_dims.append(src_dims[i]);
-            dst_syms.append(sym);
-          }  
-      }  
-
-      
-
-      // binary will broadcast up and add-assign our gradient
-      // we just need to reverse the arguments in this case
-      return this->get_binary_plan(
-        id,
-        dst_dims.ptr(),
-        dst_syms.ptr(),
-        dst_dims.size,
-        src_dims,
-        src_syms.ptr(),
-        src_dims_len,
-        op
-      );
-    }    
 };
+  
+// binary is used for broadcasting reverses
+// not intended to be used with 
+//CutensorPlanWrapper get_binary_plan(
+//  CutensorWrapper wrapper,
+//  dtype id,
+//  const len_t* src_dims,
+//  const u8* src_syms,
+//  len_t src_dims_len,
+//  const len_t* dst_dims,
+//  const u8* dst_syms,
+//  len_t dst_dims_len,
+//  BINARY_OP op
+//) {
+//  CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to permutate");
+//  CHECK_INVARIANT(src_dims_len <= dst_dims_len, "Source dimensions length greater than destination");
+//  
+//  const auto data_type = cutensor_data_type(id);
+//  const auto op_type = cutensor_op_type(op);
+//
+//  auto ct = CutensorBackend::unwrap(wrapper);
+//
+//  auto key = ct->manager.make_key<BinaryPlan>(
+//    data_type,
+//    {
+//      __seq_hash(src_dims, src_dims_len),
+//      __seq_hash(src_syms, src_dims_len),
+//      __seq_hash(dst_dims, src_dims_len),
+//      __seq_hash(dst_syms, src_dims_len),
+//      static_cast<std::size_t>(op),
+//    }
+//  );
+//
+//  if (auto entry = ct->manager.find<PermutatePlan>(key); entry)
+//    return { .ptr = entry->plan.ptr, .scratch_len = entry->scratch_len };
+//
+//  BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
+//  BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
+//  BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
+//  BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
+//  
+//  cutensorTensorDescriptor_t x_desc;
+//  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+//              ct->handle,
+//              &x_desc,
+//              a_dims.size,
+//              a_dims.data,
+//              NULL,/*stride*/
+//              data_type, cutensor_alignment));
+//  
+//  cutensorTensorDescriptor_t y_desc;
+//  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+//              ct->handle,
+//              &y_desc,
+//              b_dims.size,
+//              b_dims.data,
+//              NULL,/*stride*/
+//              data_type, cutensor_alignment));
+//  
+//  cutensorOperationDescriptor_t op_desc;
+//  CUTENSOR_ASSERT(cutensorCreateElementwiseBinary(
+//              ct->handle, &op_desc,
+//              x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
+//              y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
+//              y_desc, b_syms.data,
+//              op_type, cutensor_compute_type(id)));
+//
+//  const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+//  
+//  cutensorPlanPreference_t plan_pref;
+//  CUTENSOR_ASSERT(cutensorCreatePlanPreference(
+//              ct->handle,
+//              &plan_pref,
+//              algo,
+//              CUTENSOR_JIT_MODE_NONE));
+//  
+//  
+//  cutensorPlan_t plan;
+//  CUTENSOR_ASSERT(cutensorCreatePlan(
+//              ct->handle,
+//              &plan,
+//              op_desc,
+//              plan_pref,
+//              0 /* not required */));
+//  
+//  ct->manager.insert(
+//    key,
+//    BinaryPlan{
+//      .plan = plan,
+//      .plan_pref = plan_pref,
+//      .x_desc = x_desc,
+//      .y_desc = y_desc,
+//    }
+//  );
+//
+//  return { .ptr = plan };
+//}
+
+// binary is used for broadcasting reverses
+// not intended to be used with 
+//CutensorPlanWrapper get_reduce_bwds_trinary(
+//  CutensorWrapper wrapper,
+//  dtype id,
+//  const len_t* src_dims,
+//  const u8* src_syms,
+//  len_t src_dims_len,
+//  const len_t* dst_dims,
+//  const u8* dst_syms,
+//  len_t dst_dims_len,
+//  BINARY_OP op
+//) {
+//  CHECK_INVARIANT(0 < src_dims_len, "Zero length dimensions passed to permutate");
+//  CHECK_INVARIANT(src_dims_len <= dst_dims_len, "Source dimensions length greater than destination");
+//
+//  auto ct = CutensorBackend::unwrap(wrapper);
+//  
+//  const auto data_type = cutensor_data_type(id);
+//  const auto op_type = cutensor_op_type(op);
+//
+//  auto key = ct->manager.make_key<BinaryPlan>(
+//    data_type,
+//    {
+//      __seq_hash(src_dims, src_dims_len),
+//      __seq_hash(src_syms, src_dims_len),
+//      __seq_hash(dst_dims, src_dims_len),
+//      __seq_hash(dst_syms, src_dims_len),
+//      static_cast<std::size_t>(op),
+//    }
+//  );
+//
+//  if (auto entry = ct->manager.find<PermutatePlan>(key); entry) {
+//    return entry->plan.ptr;
+//  }
+//
+//  BoundedArray<i64> a_dims(src_dims, src_dims_len, true);
+//  BoundedArray<i32> a_syms(src_syms, src_dims_len, true);
+//  BoundedArray<i64> b_dims(dst_dims, src_dims_len, true);
+//  BoundedArray<i32> b_syms(dst_syms, src_dims_len, true);
+//  
+//  cutensorTensorDescriptor_t x_desc;
+//  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+//              ct->handle,
+//              &x_desc,
+//              a_dims.size,
+//              a_dims.data,
+//              NULL,/*stride*/
+//              data_type, cutensor_alignment));
+//  
+//  cutensorTensorDescriptor_t y_desc;
+//  CUTENSOR_ASSERT(cutensorCreateTensorDescriptor(
+//              ct->handle,
+//              &y_desc,
+//              b_dims.size,
+//              b_dims.data,
+//              NULL,/*stride*/
+//              data_type, cutensor_alignment));
+//  
+//  cutensorOperationDescriptor_t op_desc;
+//  CUTENSOR_ASSERT(cutensorCreateElementwiseBinary(
+//              ct->handle, &op_desc,
+//              x_desc, a_syms.data, CUTENSOR_OP_IDENTITY,
+//              y_desc, b_syms.data, CUTENSOR_OP_IDENTITY,
+//              y_desc, b_syms.data,
+//              op_type, cutensor_compute_type(id)));
+//
+//  const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+//  
+//  cutensorPlanPreference_t plan_pref;
+//  CUTENSOR_ASSERT(cutensorCreatePlanPreference(
+//              ct->handle,
+//              &plan_pref,
+//              algo,
+//              CUTENSOR_JIT_MODE_NONE));
+//  
+//  
+//  cutensorPlan_t plan;
+//  CUTENSOR_ASSERT(cutensorCreatePlan(
+//              ct->handle,
+//              &plan,
+//              op_desc,
+//              plan_pref,
+//              0 /* not required */));
+//  
+//  ct->manager.insert(
+//    key,
+//    BinaryPlan{
+//      .plan = plan,
+//      .plan_pref = plan_pref,
+//      .x_desc = x_desc,
+//      .y_desc = y_desc,
+//    }
+//  );
+//
+//  return { .ptr = plan, .scratch_len = scratch_len };
+//}
+  
+/////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////
 
 #endif
-  

@@ -7,6 +7,9 @@ const TransferDirection = @import("device_common.zig").TransferDirection;
 const EnabledDevicePointers = @import("enabled_devices.zig").EnabledDevicePointers;
 const Self = @This();
 
+const DeviceData = @import("../allocators.zig").DeviceData;
+const Error = @import("../allocators.zig").Error;
+
 ptrs: EnabledDevicePointers,
 
 pub fn dispatch(self: Self, params: anytype) void {
@@ -21,6 +24,24 @@ pub fn dispatch(self: Self, params: anytype) void {
             }
         },
     }
+}
+
+pub fn mem_cache_alloc(self: Self, T: type, n: usize) !DeviceData(T) {
+    return switch (self.ptrs) {
+        inline else => |dev| dev.mem_cache_alloc(T, n),
+    };
+}
+
+pub fn mem_cache_free(self: Self, data: anytype) void {
+    return switch (self.ptrs) {
+        inline else => |dev| dev.mem_cache_free(data),
+    };
+}
+
+pub fn mem_cache_dupe(self: Self, T: type, src: []const T) !DeviceData(T) {
+    return switch (self.ptrs) {
+        inline else => |dev| dev.mem_cache_dupe(T, src),
+    };
 }
 
 pub fn mem_alloc(self: Self, T: type, n: usize) ![]T {
@@ -47,7 +68,7 @@ pub fn mem_dupe(self: Self, T: type, slice: anytype) ![]T {
     };
 }
 
-pub fn mem_scratch(self: Self, T: type, n: usize) ![]T {
+pub fn mem_scratch(self: Self, T: type, n: usize) []T {
     return switch (self.ptrs) {
         inline else => |dev| dev.mem_scratch(T, n),
     };

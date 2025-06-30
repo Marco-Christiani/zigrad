@@ -92,7 +92,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
 
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_sq_diff: T = 0;
-    for (y_pred.data.data, y.data.data) |pred, target| {
+    for (y_pred.get_data(), y.get_data()) |pred, target| {
         const diff = pred - target;
         sum_sq_diff += diff * diff;
     }
@@ -113,7 +113,7 @@ pub fn mse_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)) !*NDTensor(T) {
     };
 
     return try Tensor.create_dependent(MseBwd, .{
-        .data = try NDArray(T).init(&.{mse}, &.{1}, y_pred.device),
+        .data = try NDArray(T).from_slice(&.{mse}, &.{1}, y_pred.device),
         .children = &.{ &y_pred.node, &y.node },
         .label = "mse",
         .device = y_pred.device,
@@ -132,9 +132,10 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     const batch_size = if (y_pred.data.shape.len > 1) y_pred.data.shape.get(0) else 1;
     const last_dim = if (y_pred.data.shape.len > 1) y_pred.data.shape.len - 1 else 0;
     const sm_preds = try _softmax_fwd(T, y_pred, last_dim);
+    sm_preds.set_label("sm_preds");
 
-    for (sm_preds.data.data, 0..) |pred, i| {
-        const target = y.data.data[i];
+    for (sm_preds.get_data(), 0..) |pred, i| {
+        const target = y.data.data.raw[i];
         const safe_pred = @min(@max(pred, epsilon), 1.0 - epsilon);
         sum_loss -= target * @log(safe_pred);
     }
@@ -155,7 +156,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     };
 
     return try Tensor.create_dependent(CceBwd, .{
-        .data = try NDArray(T).init(&.{mean_loss}, &.{1}, y_pred.device),
+        .data = try NDArray(T).from_slice(&.{mean_loss}, &.{1}, y_pred.device),
         .op = null,
         .children = &.{ &y_pred.node, &y.node },
         .label = "cross_entropy",
@@ -186,24 +187,24 @@ fn _softmax_fwd(T: type, input: *NDTensor(T), dim: usize) !*NDTensor(T) {
         const base_idx = (outer_idx / strides.get(dim)) * (strides.get(dim) * dim_size) + (outer_idx % strides.get(dim));
 
         //  max over slice
-        var max_val = result.data.data[base_idx];
+        var max_val = result.data.data.raw[base_idx];
         for (1..dim_size) |j| {
             const idx = base_idx + j * strides.get(dim);
-            max_val = @max(max_val, result.data.data[idx]);
+            max_val = @max(max_val, result.data.data.raw[idx]);
         }
 
         // log-sum-exp
         var sum_exp: T = 0;
         for (0..dim_size) |j| {
             const idx = base_idx + j * strides.get(dim);
-            sum_exp += @exp(result.data.data[idx] - max_val);
+            sum_exp += @exp(result.data.data.raw[idx] - max_val);
         }
         const log_sum_exp = max_val + @log(sum_exp);
 
         // normalize
         for (0..dim_size) |j| {
             const idx = base_idx + j * strides.get(dim);
-            result.data.data[idx] = @exp(result.data.data[idx] - log_sum_exp);
+            result.data.data.raw[idx] = @exp(result.data.data.raw[idx] - log_sum_exp);
         }
     }
     return result;
@@ -230,11 +231,11 @@ pub fn softmax(T: type, input: *const NDTensor(T), dim: usize, device: DeviceRef
                 var bw_sum_grad: T = 0;
                 for (0..bw_dim_size) |bw_j| {
                     const bw_idx = bw_base_idx + bw_j;
-                    bw_sum_grad += y.data.data[bw_idx] * y_grad[bw_idx];
+                    bw_sum_grad += y.data.data.raw[bw_idx] * y_grad[bw_idx];
                 }
                 for (0..bw_dim_size) |bw_j| {
                     const bw_idx = bw_base_idx + bw_j;
-                    const bw_softmax_out = y.data.data[bw_idx];
+                    const bw_softmax_out = y.data.data.raw[bw_idx];
                     bw_grad[bw_idx] += bw_softmax_out * (y_grad[bw_idx] - bw_sum_grad);
                 }
             }
@@ -258,7 +259,7 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
     const n = @as(T, @floatFromInt(y.get_size()));
     var sum_loss: T = 0;
 
-    for (y_pred.data.data, y.data.data) |pred, target| {
+    for (y_pred.get_data(), y.get_data()) |pred, target| {
         const diff: T = pred - target;
         const abs_diff: T = @abs(diff);
         if (abs_diff < beta) {
@@ -290,7 +291,7 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
     };
 
     return Tensor.create_dependent(Sl1LossBwd, .{
-        .data = try NDArray(T).init(&.{loss}, &.{1}, y_pred.device),
+        .data = try NDArray(T).from_slice(&.{loss}, &.{1}, y_pred.device),
         .children = &.{ &y_pred.node, &y.node },
         .label = "smooth_l1",
         .callback = .{ .beta = beta },
@@ -312,7 +313,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     var diff = try y_pred.sub(y);
     try diff.set_label("diff");
 
-    const diff2 = try NDTensor(T).init(diff.data.data, diff.data.shape.slice(), true, device);
+    const diff2 = try NDTensor(T).from_slice(diff.get_data(), diff.data.shape.slice(), true, device);
     try diff2.set_label("diff2");
     // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
     const sq_diff = try diff.mul(diff2);
@@ -322,7 +323,7 @@ pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceR
     try sum_sq_diff.set_label("sum_sq_diff");
 
     const coef = @as(T, @floatFromInt(y.get_size()));
-    const coef_tensor = try NDTensor(T).init(&.{coef}, null, true, device);
+    const coef_tensor = try NDTensor(T).from_slice(&.{coef}, null, true, device);
     try coef_tensor.set_label("coef");
 
     const out = try sum_sq_diff.div(coef_tensor);

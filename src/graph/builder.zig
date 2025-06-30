@@ -1,8 +1,6 @@
 const std = @import("std");
-const ArenaUnmanaged = @import("arena_unmanaged.zig");
+const ArenaUnmanaged = @import("../allocators/arena_unmanaged.zig");
 const zg = @import("../zigrad.zig");
-
-const thread_safe: bool = zg.settings.thread_safe;
 
 /// Sharable graph memory interface for nodes.
 ///
@@ -11,11 +9,6 @@ const thread_safe: bool = zg.settings.thread_safe;
 /// - This abstraction allows us to separately manage leaf and internal tensor shells when building computation graphs.
 /// - Leaves and internal nodes have different lifetimes.
 const Self = @This();
-
-mutex: if (!thread_safe) struct {
-    inline fn lock(_: *@This()) void {}
-    inline fn unlock(_: *@This()) void {}
-} else std.Thread.Mutex = .{},
 
 allocator: std.mem.Allocator,
 arena: ArenaUnmanaged = .empty,
@@ -26,17 +19,11 @@ pub fn init(allocator: std.mem.Allocator) Self {
 }
 
 pub fn deinit(self: *Self) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
     self.arena.deinit(self.allocator);
     self.map.deinit(self.allocator);
 }
 
 pub fn create_node(self: *Self, T: type) !*T {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
     const U = Chain.Intrusive(T);
 
     cache_block: {
@@ -50,9 +37,6 @@ pub fn create_node(self: *Self, T: type) !*T {
 }
 
 pub fn destroy_node(self: *Self, ptr: anytype) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
     const U = Chain.Intrusive(std.meta.Child(@TypeOf(ptr)));
     const intrusive: *U = @constCast(@alignCast(@fieldParentPtr("data", ptr)));
 
