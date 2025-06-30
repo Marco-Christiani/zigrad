@@ -1,7 +1,10 @@
 #include <stdio.h>
 #include "cuda_utils.h"
 #include "cuda_helpers.cu"
+#include "decls.h"
 #include "device_properties.cu"
+#include <vector>
+#include <thread>
 
 extern "C" void* mem_alloc(len_t N, StreamWrapper stream) {
   CUstream _stream = __cast_stream(stream);
@@ -297,3 +300,165 @@ extern "C" void mem_take(
     default: SYSTEM_EXIT("Unsupported data type");
   }
 }
+
+
+// Helper to keep track of cuda mem-handles for mapping
+// physical regions to virtual device addresses. This
+// currently grows monotonically overtime. We can support
+// unmapping segments in a future release.
+struct MapEntry {
+  CUdeviceptr dptr;
+  len_t size;
+  CUmemGenericAllocationHandle handle;
+};
+
+// TODO: At some point, it makes sense to allow access to
+// the entries in this struct directly.
+struct Memmap {  
+  CUmemAllocationProp prop;
+  CUmemAccessDesc access_desc;
+  std::vector<MapEntry> handles;
+
+  static Memmap* unwrap(MemmapWrapper wrapper) {
+    return static_cast<Memmap*>(wrapper.ptr);
+  }
+
+  static MemmapWrapper wrap(Memmap* backend) {
+    return { .ptr = backend };
+  }
+
+  Memmap(unsigned device_id) {
+      this->prop = {};
+      this->prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+      this->prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      this->prop.location.id = static_cast<int>(device_id);
+
+      this->access_desc = {};
+      this->access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      this->access_desc.location.id = static_cast<int>(device_id);
+      this->access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+
+      this->handles = {};
+  }
+
+  void map_alloc_impl(void* address, len_t size) {
+
+    CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(address);
+
+    CUmemGenericAllocationHandle handle;
+    CURESULT_ASSERT(cuMemCreate(&handle, size, &this->prop, 0));
+    CURESULT_ASSERT(cuMemMap(dptr, size, 0, handle, 0));
+    CURESULT_ASSERT(cuMemSetAccess(dptr, size, &this->access_desc, 1));
+
+    this->handles.emplace_back(MapEntry{ .dptr = dptr, .size = size, .handle = handle });
+  }
+
+  void reset() {
+    for (auto& entry: this->handles) {
+      CURESULT_ASSERT(cuMemUnmap(entry.dptr, entry.size));
+      CURESULT_ASSERT(cuMemRelease(entry.handle));
+    }
+    this->handles.clear();
+  }
+
+  ~Memmap() {
+    this->reset();
+  }
+};
+
+extern "C" MemmapWrapper init_memmap(unsigned device_id) {
+  return Memmap::wrap(new Memmap(device_id));
+}
+
+extern "C" void reset_memmap(MemmapWrapper wrapper) {
+  Memmap::unwrap(wrapper)->reset();
+}
+
+extern "C" void deinit_memmap(MemmapWrapper wrapper) {
+  delete Memmap::unwrap(wrapper);
+}
+
+extern "C" void mem_map_alloc(MemmapWrapper wrapper, void* address, len_t size) {
+  Memmap::unwrap(wrapper)->map_alloc_impl(address, size);
+}
+
+extern "C" len_t mem_page_size(unsigned device_id) {
+  CUmemAllocationProp prop;
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = static_cast<int>(device_id);
+
+  len_t page_size;
+  CURESULT_ASSERT(cuMemGetAllocationGranularity(&page_size, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+  return page_size;
+}
+
+
+extern "C" void* mem_map(unsigned device_id, size_t virtual_buffer_size) {
+  CUdeviceptr base_address = 0;  
+  // This is an annoying hack because "cuMemAddressReserve" only works with the
+  // device assigned to the current thread context. Directly changing will tamper
+  // with objects observing the previous context. Create a child thread, set its
+  // context, and then reserve space on the specified device.
+ std::thread ctx_thread([=](CUdeviceptr* dptr_ref){
+      CUcontext ctx;
+      CURESULT_ASSERT(cuDevicePrimaryCtxRetain(&ctx, static_cast<int>(device_id)));
+      CURESULT_ASSERT(cuCtxSetCurrent(ctx));
+      CURESULT_ASSERT(cuMemAddressReserve(dptr_ref, virtual_buffer_size, mem_page_size(device_id), 0, 0));
+
+      //CUmemAllocationProp prop;
+      //CUmemAccessDesc access_desc;
+
+      //prop = {};
+      //prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+      //prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      //prop.location.id = static_cast<int>(device_id);
+
+      //access_desc = {};
+      //access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      //access_desc.location.id = static_cast<int>(device_id);
+      //access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+
+      //
+
+      //CUmemGenericAllocationHandle handle;
+      //CURESULT_ASSERT(cuMemCreate(&handle, mem_page_size(device_id), &prop, 0));
+      //CURESULT_ASSERT(cuMemMap(*dptr_ref, mem_page_size(device_id), 0, handle, 0));
+      //CURESULT_ASSERT(cuMemSetAccess(*dptr_ref, mem_page_size(device_id), &access_desc, 1));
+
+ }, &base_address);
+
+  ctx_thread.join();
+  
+  return reinterpret_cast<void*>(base_address);
+}
+
+
+extern "C" void mem_unmap(unsigned device_id, void* base_address, size_t virtual_buffer_size) {
+  // This is an annoying hack because "cuMemAddressReserve" only works with the
+  // device assigned to the current thread context. Directly changing will tamper
+  // with objects observing the previous context. Create a child thread, set its
+  // context, and then free the space associated with this device.
+  std::thread ctx_thread([=](){
+      CUcontext ctx;
+      CURESULT_ASSERT(cuDevicePrimaryCtxRetain(&ctx, static_cast<int>(device_id)));
+      CURESULT_ASSERT(cuCtxSetCurrent(ctx));
+      CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(base_address);
+      CURESULT_ASSERT(cuMemAddressFree(dptr, virtual_buffer_size));
+  });
+
+  ctx_thread.join();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+

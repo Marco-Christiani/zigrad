@@ -13,6 +13,7 @@ EXTERN_C void mem_sequence(dtype id, void* data, len_t n, const void* init, cons
 EXTERN_C void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, StreamWrapper);
 EXTERN_C void mem_free(void* dptr, StreamWrapper);
 EXTERN_C void mem_take(dtype id, const void* src, len_t src_len, const len_t* idxs, len_t idxs_len, void* dst, StreamWrapper);
+EXTERN_C len_t mem_page_size(unsigned device_id);
 
 
 // device api
@@ -44,5 +45,13 @@ EXTERN_C GraphWrapper open_capture(StreamWrapper);
 EXTERN_C void save_capture(GraphWrapper wrapper, StreamWrapper stream);
 EXTERN_C void free_capture(GraphWrapper wrapper, StreamWrapper stream);
 EXTERN_C void run_capture(GraphWrapper wrapper, StreamWrapper stream);
+
+// caching allocator api
+EXTERN_C void* mem_map(unsigned device_id, size_t virtual_buffer_size);
+EXTERN_C void mem_unmap(unsigned device_id, void* base_address, size_t virtual_buffer_size);
+EXTERN_C MemmapWrapper init_memmap(unsigned device_id);
+EXTERN_C void reset_memmap(MemmapWrapper wrapper);
+EXTERN_C void deinit_memmap(MemmapWrapper wrapper);
+EXTERN_C void mem_map_alloc(MemmapWrapper wrapper, void* address, len_t size);
 
 #endif

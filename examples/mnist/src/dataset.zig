@@ -27,7 +27,7 @@ pub fn MnistDataset(comptime T: type) type {
             var batch_count: usize = 0;
 
             const config: zg.TensorOpts = .{
-                .requires_grad = true,
+                .requires_grad = false,
                 .acquired = true,
             };
 

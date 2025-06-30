@@ -8,16 +8,22 @@ const std_options = .{ .log_level = .info };
 const log = std.log.scoped(.mnist);
 const T = f32;
 
+pub const zigrad_settings: zg.Settings = .{
+    .thread_safe = false,
+};
+
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const allocator = std.heap.smp_allocator;
 
     // use global graph for project
-    zg.init_global_graph(allocator, .{
+    zg.global_graph_init(allocator, .{
         .eager_teardown = true,
     });
-    defer zg.deinit_global_graph();
+    defer zg.global_graph_deinit();
 
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(.{
+        .max_cache_size = zg.constants.@"1Gb" * 2,
+    });
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -66,6 +72,9 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             try optim.step();
             model.zero_grad();
 
+            std.debug.assert(label.grad == null);
+            std.debug.assert(image.grad == null);
+
             const t1 = @as(f64, @floatFromInt(step_timer.read()));
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
             total_loss += loss_val;
@@ -84,6 +93,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     //// Eval --------------------------------------------------------------------
     //// Eval on train set
+
     const train_eval = try eval_mnist(&model, train_dataset);
     const eval_train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
     train_dataset.deinit();
@@ -103,7 +113,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 }
 
 fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {
-    zg.rt_grad_enabled = false; // disable gradient tracking
+    zg.runtime.grad_enabled = false; // disable gradient tracking
     var n: u32 = 0;
     var correct: f32 = 0;
     for (dataset.images, dataset.labels) |image, label| {
@@ -113,8 +123,8 @@ fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct
         for (0..batch_n) |j| {
             const start = j * 10;
             const end = start + 10;
-            const yh = std.mem.indexOfMax(T, output.data.data[start..end]);
-            const y = std.mem.indexOfMax(T, label.data.data[start..end]);
+            const yh = std.mem.indexOfMax(T, output.data.data.raw[start..end]);
+            const y = std.mem.indexOfMax(T, label.data.data.raw[start..end]);
             correct += if (yh == y) 1 else 0;
             n += 1;
         }
@@ -131,14 +141,14 @@ pub fn main() !void {
     try run_mnist(train_full, test_full);
 }
 
-//test run_mnist {
-//    var buf1: [1024]u8 = undefined;
-//    var buf2: [1024]u8 = undefined;
-//    const data_sub_dir = std.posix.getenv("ZG_DATA_DIR") orelse "data";
-//    const train_small = try std.fmt.bufPrint(&buf1, "{s}/{s}", .{ data_sub_dir, "mnist_train_small.csv" });
-//    const test_small = try std.fmt.bufPrint(&buf2, "{s}/{s}", .{ data_sub_dir, "mnist_test_small.csv" });
-//    run_mnist(train_small, test_small) catch |err| switch (err) {
-//        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `runMnist` test.", .{@errorName(err)}),
-//        else => return err,
-//    };
-//}
+test run_mnist {
+    var buf1: [1024]u8 = undefined;
+    var buf2: [1024]u8 = undefined;
+    const data_sub_dir = std.posix.getenv("ZG_DATA_DIR") orelse "data";
+    const train_small = try std.fmt.bufPrint(&buf1, "{s}/{s}", .{ data_sub_dir, "mnist_train_small.csv" });
+    const test_small = try std.fmt.bufPrint(&buf2, "{s}/{s}", .{ data_sub_dir, "mnist_test_small.csv" });
+    run_mnist(train_small, test_small) catch |err| switch (err) {
+        std.fs.File.OpenError.FileNotFound => std.log.warn("{s} error opening test file. Skipping `run_mnist` test.", .{@errorName(err)}),
+        else => return err,
+    };
+}

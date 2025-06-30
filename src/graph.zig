@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const debug: bool = (builtin.mode == .Debug);
 
 const zg = @import("zigrad.zig");
-const ArenaUnmanaged = @import("graph/arena_unmanaged.zig");
+const ArenaUnmanaged = @import("allocators/arena_unmanaged.zig");
 pub const Node = @import("graph/node.zig");
 pub const Builder = @import("graph/builder.zig");
 
@@ -17,6 +17,11 @@ const PathInfo = struct {
 pub const Opts = struct {
     eager_teardown: bool = false,
 };
+
+mutex: if (!zg.settings.thread_safe) struct {
+    inline fn lock(_: *@This()) void {}
+    inline fn unlock(_: *@This()) void {}
+} else std.Thread.Mutex = .{},
 
 /// Manages the overall graph, allows for a more memory efficient abstraction where the data structures used for
 /// traversing the graph during backprop can be managed independently and reused across training steps
@@ -36,31 +41,20 @@ pub fn init(allocator: std.mem.Allocator, opts: Opts) Graph {
 }
 
 pub fn deinit(self: *Graph) void {
-    self.sorted_nodes.deinit(self.builder.allocator);
-    self.backward_node_stack.deinit(self.builder.allocator);
-    self.builder.deinit();
+    {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.sorted_nodes.deinit(self.builder.allocator);
+        self.backward_node_stack.deinit(self.builder.allocator);
+        self.builder.deinit();
+    }
     self.* = undefined;
-}
-
-pub fn topological_sort(self: *Graph, node: *Node) void {
-    const gopr = self.sorted_nodes.getOrPut(self.builder.allocator, node) catch unreachable;
-
-    if (gopr.found_existing) {
-        gopr.value_ptr.pending += 1;
-        return;
-    }
-
-    gopr.value_ptr.* = PathInfo{};
-
-    var children = node.child_iterator() orelse return;
-    while (children.next()) |child| {
-        if (!child.attached()) continue;
-        self.topological_sort(child);
-    }
 }
 
 // Must init grad on root node before backprop
 pub fn backward(self: *Graph, root: *Node) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     // do not reset the arena - that contains the graph that we are currently attempting to reverse over
     self.sorted_nodes.clearRetainingCapacity();
     self.backward_node_stack.clearRetainingCapacity();
@@ -93,6 +87,9 @@ pub fn backward(self: *Graph, root: *Node) !void {
 /// Calls clear on all nodes in that are attached to the root. This frees object resources
 /// that are associated with the nodes. Freeing nodes themselves must be done with reset.
 pub fn teardown(self: *Graph, root: *Node) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
     self.sorted_nodes.clearRetainingCapacity();
     self.topological_sort(root);
 
@@ -101,17 +98,39 @@ pub fn teardown(self: *Graph, root: *Node) void {
     }
 }
 
+fn topological_sort(self: *Graph, node: *Node) void {
+    const gopr = self.sorted_nodes.getOrPut(self.builder.allocator, node) catch unreachable;
+
+    if (gopr.found_existing) {
+        gopr.value_ptr.pending += 1;
+        return;
+    }
+
+    gopr.value_ptr.* = PathInfo{};
+
+    var children = node.child_iterator() orelse return;
+    while (children.next()) |child| {
+        if (!child.attached()) continue;
+        self.topological_sort(child);
+    }
+}
+
 /////////////////////////////////////////////////////
 // Testing //////////////////////////////////////////
 
 const TensorOpts = @import("ndtensor.zig").TensorOpts;
+
+// limit memory usage for testing
+const TestOpts: zg.device.HostDevice.Options = .{
+    .max_cache_size = zg.constants.@"1Kb", // probably still excessive
+};
 
 comptime {
     std.testing.refAllDecls(@This());
 }
 
 test "Graph eager teardown reuse 1" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -126,7 +145,7 @@ test "Graph eager teardown reuse 1" {
         .graph = &graph,
     };
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     const Tensor = zg.NDTensor(f32);
 
@@ -167,7 +186,7 @@ test "Graph eager teardown reuse 1" {
 }
 
 test "Graph eager teardown reuse 2" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -182,7 +201,7 @@ test "Graph eager teardown reuse 2" {
         .graph = &graph,
     };
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     const Tensor = zg.NDTensor(f32);
 
@@ -220,7 +239,7 @@ test "Graph eager teardown reuse 2" {
 }
 
 test "Graph x*x" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -237,7 +256,7 @@ test "Graph x*x" {
 
     const Tensor = zg.NDTensor(f32);
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     const A = try Tensor.from_slice(device, &.{2.0}, null, opts);
     const B = try Tensor.from_slice(device, &.{3.0}, null, opts);
@@ -259,7 +278,7 @@ test "Graph x*x" {
 }
 
 test "Graph subgraphs/detach" {
-    var cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
     defer cpu.deinit();
 
     const device = cpu.reference();
@@ -274,7 +293,7 @@ test "Graph subgraphs/detach" {
 
     const Tensor = zg.NDTensor(f32);
 
-    zg.rt_grad_enabled = true;
+    zg.runtime.grad_enabled = true;
 
     // subgraph 1
     const a = try Tensor.from_slice(device, &.{2.0}, null, opts);

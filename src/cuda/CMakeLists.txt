@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18)
 project(amalgamate LANGUAGES CUDA)
 
 # Set the NVCC compiler flags
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --std=c++20 --expt-extended-lambda --expt-relaxed-constexpr --compiler-options -fPIC")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --std=c++20 --expt-extended-lambda --expt-relaxed-constexpr --compiler-options -fPIC -pthread")
 
 # Create a shared library from the single CUDA source file
 add_library(amalgamate SHARED amalgamate.cu)

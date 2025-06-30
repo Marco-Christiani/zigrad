@@ -508,6 +508,7 @@ pub fn sum_along(T: type) type {
         x: []const T,
         x_shape: []const usize,
         y: []T,
+        y_shape: []const usize,
         dim: usize,
         alpha: T = 1.0,
         beta: T = 0.0,
@@ -521,7 +522,10 @@ pub fn max_along(T: type) type {
         x: []const T,
         x_shape: []const usize,
         y: []T,
+        y_shape: []const usize,
         dim: usize,
+        alpha: T = 1.0,
+        beta: T = 0.0,
     };
 }
 

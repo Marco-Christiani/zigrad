@@ -15,6 +15,8 @@ typedef unsigned char dtype;
 static const dtype SINGLE = 0;
 static const dtype DOUBLE = 1;
 
+static const len_t CUDA_PAGE_SIZE = 4096;
+
 // Wrappers for zig interface
 typedef struct { void* ptr; } StreamWrapper;
 typedef struct { void* ptr; } CublasWrapper;
@@ -22,6 +24,9 @@ typedef struct { void* ptr; } CutensorWrapper;
 typedef struct { void* ptr; } CudnnWrapper;
 typedef struct { void* ptr; } GraphWrapper;
 typedef struct { void* ptr; } DevicePropertiesWrapper;
+typedef struct { void* ptr; } MemmapWrapper;
+
+typedef struct { void* plan; len_t scratch_len; } CutensorPlanWrapper;
 
 typedef unsigned char reduxtype;
 static const reduxtype RDX_NONE = 0;

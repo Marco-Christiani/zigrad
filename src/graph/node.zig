@@ -108,7 +108,7 @@ pub fn child_iterator(self: *Node) ?ChildIterator {
 // node is intruding upon. The API is thus read-only.
 
 pub fn requires_grad(self: *const Node) bool {
-    return self.flags.get(.requires_grad) and zg.rt_grad_enabled;
+    return self.flags.get(.requires_grad) and zg.runtime.grad_enabled;
 }
 
 pub fn acquired(self: *const Node) bool {
@@ -165,6 +165,13 @@ pub const Flags = struct {
         /// because runtime gradients may be deactivated.
         /// Use the "requires_grad" function instead.
         requires_grad,
+        /// Is set to true if this node is the child of
+        /// an operation that requires a gradient. Handles
+        /// the case where a node itself does not need a
+        /// gradient, but it is not safe to free this node
+        /// until other tensors that depend upon it have
+        /// collected theirs.
+        grad_operand,
 
         pub fn count() usize {
             return std.meta.fields(Values).len;
@@ -175,7 +182,8 @@ pub const Flags = struct {
     pub fn init(config: Config) Flags {
         var self: Flags = .empty;
         self.set(.active, true);
-        comptime var field_count: usize = 1;
+        self.set(.grad_operand, false);
+        comptime var field_count: usize = 2;
         inline for (std.meta.fields(@TypeOf(config))) |field| {
             const tag = comptime std.meta.stringToEnum(Values, field.name) orelse continue;
 
