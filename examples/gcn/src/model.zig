@@ -30,22 +30,14 @@ pub fn GCN(comptime T: type) type {
         }
 
         pub fn forward(self: *Self, x: *NDTensor(T), edge_index: *NDTensor(usize)) !*NDTensor(T) {
-            if (zg.rt_grad_enabled) std.debug.assert(x.requires_grad());
             const c1 = try self.conv1.forward(x, edge_index);
             errdefer c1.deinit();
-            defer {
-                if (c1.should_deinit()) {
-                    c1.deinit();
-                }
-            }
-            try zg.nn.relu_(T, c1);
 
-            if (zg.rt_grad_enabled) std.debug.assert(c1.requires_grad());
+            try zg.nn.relu_(T, c1);
 
             const c2 = try self.conv2.forward(c1, edge_index);
             errdefer c2 = c2.deinit();
-
-            if (zg.rt_grad_enabled) std.debug.assert(c2.requires_grad());
+            c1.soft_deinit();
 
             return c2;
         }
@@ -105,8 +97,6 @@ pub fn GraphConvLayer(comptime T: type) type {
             }
         }
         pub fn forward(self: *Self, x: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            if (zg.rt_grad_enabled) std.debug.assert(x.requires_grad());
-
             const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
             const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
             errdefer h.deinit();
@@ -189,15 +179,16 @@ pub fn GraphConvLayer(comptime T: type) type {
                 }
             }
 
-            const target_indices = try self.device.mem_scratch(usize, n_edge);
+            const target_indices = try self.device.mem_alloc(usize, n_edge);
             for (0..n_edge) |i| {
                 target_indices[i] = edge_index_data[i * 2 + 1];
             }
 
-            const source_indices = try zg.NDArray(usize).scratch(&.{ n_edge, 1 }, self.device);
-            const source_index_data = source_indices.data;
+            const source_indices = try zg.NDArray(usize).empty(&.{ n_edge, 1 }, self.device);
+            const source_index_data = source_indices.get_data();
             for (0..n_edge) |i| source_index_data[i] = edge_index_data[i * 2];
             const edge_features = try normalized_h.gather(source_indices, 0);
+            // Grad tracked
             const output = try edge_features.scatter_add(target_indices, &.{ n_node, n_features });
             return output;
         }
@@ -255,7 +246,7 @@ pub fn GraphConvLayer(comptime T: type) type {
 
             // Reshape deg_norm to [n_node, 1] for broadcasting with h [n_node, n_features]
             const deg_norm_2d = try deg_norm.reshape(&.{ n_node, 1 });
-            defer if (!zg.rt_grad_enabled) deg_norm_2d.deinit(); // required for normalized_h.grad
+            deg_norm_2d.soft_deinit(); // required for normalized_h.grad
             deg_norm_2d.set_label("deg_norm_2d");
 
             // NOTE: Computation graph starts here as this si the first use of `h`
@@ -271,7 +262,7 @@ pub fn GraphConvLayer(comptime T: type) type {
                 source_indices_data[i] = edge_index_data[i * 2];
             }
 
-            // Extract edge features using index_select (preserves gradients)
+            // Extract edge features
             const edge_features = try normalized_h.index_select(0, source_indices_data);
             defer if (!edge_features.requires_grad()) edge_features.deinit();
             edge_features.set_label("edge_features");
@@ -328,11 +319,11 @@ pub fn MaskLayer(comptime T: type) type {
                     const buf_end = count * num_feature + num_feature;
                     const x_start = i * num_feature;
                     const x_end = i * num_feature + num_feature;
-                    device.mem_copy(T, x.data.data[x_start..x_end], buf[buf_start..buf_end]);
+                    device.mem_copy(T, x.get_data()[x_start..x_end], buf[buf_start..buf_end]);
                     count += 1;
                 }
             }
-            const y = try Tensor.DataType.init(
+            const y = try Tensor.DataType.from_slice(
                 buf[0 .. count * num_feature],
                 &.{ count, num_feature },
                 x.device,

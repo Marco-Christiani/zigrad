@@ -55,13 +55,6 @@ pub fn NDArray(comptime T: type) type {
             device.mem_cache_free(self.data);
         }
 
-        pub fn scratch(shape: []const usize, device: DeviceReference) !Self {
-            const _shape = Shape.init(shape);
-            const _size = _shape.size();
-            std.debug.assert(shape.len > 0 and _size > 0);
-            return .{ .data = try device.mem_scratch(T, _size), .shape = _shape };
-        }
-
         pub fn empty(shape: []const usize, device: DeviceReference) !Self {
             const _shape = Shape.init(shape);
             const _size = _shape.size();
@@ -134,8 +127,11 @@ pub fn NDArray(comptime T: type) type {
         fn print_to_writer_impl(self: Self, _data: []T, writer: anytype, is_host: bool, device: DeviceReference) !void {
             if (!is_host) {
                 device.sync();
-                const _host_data = try device.allocator.alloc(T, _data.len);
-                defer device.allocator.free(_host_data);
+                const cpu = zg.device.HostDevice.init();
+                const _host_data = try cpu.mem_alloc(T, _data.len);
+                defer cpu.mem_free(_host_data);
+                // const _host_data = try device.allocator.alloc(T, _data.len);
+                // defer device.allocator.free(_host_data);
                 device.mem_transfer(T, _data, _host_data, .DtoH);
                 device.sync();
                 return self.print_to_writer_impl(_host_data, writer, true, device);
