@@ -33,8 +33,12 @@ pub const using_mkl_blas: bool = blk: {
 
 const c = switch (builtin.target.os.tag) {
     .linux => @cImport({
-        @cInclude("cblas.h");
-        if (build_options.enable_mkl) @cInclude("mkl_vml_functions.h");
+        if (build_options.enable_mkl) {
+            @cInclude("mkl_vml_functions.h");
+            @cInclude("mkl_cblas.h");
+        } else {
+            @cInclude("cblas.h");
+        }
     }),
     .macos => @cImport(@cInclude("Accelerate/Accelerate.h")),
     else => @compileError("Unsupported os"),

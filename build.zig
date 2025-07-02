@@ -37,8 +37,7 @@ pub fn build(b: *Build) !void {
 
     switch (target.result.os.tag) {
         .linux => {
-            zigrad.linkSystemLibrary("blas", .{});
-            if (enable_mkl) zigrad.linkSystemLibrary("mkl_rt", .{});
+            if (enable_mkl) zigrad.linkSystemLibrary("mkl_rt", .{}) else zigrad.linkSystemLibrary("blas", .{});
         },
         .macos => zigrad.linkFramework("Accelerate", .{}),
         else => @panic("Os not supported."),
@@ -50,6 +49,7 @@ pub fn build(b: *Build) !void {
     });
 
     lib.root_module.addImport("build_options", build_options_module);
+
     link(target, lib, enable_mkl);
     b.installArtifact(lib);
 
@@ -114,14 +114,13 @@ pub fn build(b: *Build) !void {
     }
 }
 
-fn link(target: Build.ResolvedTarget, x: *Build.Step.Compile, enable_mkl: bool) void {
+fn link(target: Build.ResolvedTarget, exe: *Build.Step.Compile, enable_mkl: bool) void {
     switch (target.result.os.tag) {
         .linux => {
-            x.linkSystemLibrary("blas");
-            if (enable_mkl) x.linkSystemLibrary("mkl_rt");
-            x.linkLibC();
+            if (enable_mkl) exe.linkSystemLibrary("mkl_rt") else exe.linkSystemLibrary("blas");
+            exe.linkLibC();
         },
-        .macos => x.linkFramework("Accelerate"),
+        .macos => exe.linkFramework("Accelerate"),
         else => @panic("Os not supported."),
     }
 }
