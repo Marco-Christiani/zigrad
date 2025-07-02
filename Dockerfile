@@ -1,10 +1,11 @@
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+# FROM nvidia/cuda:12.2.2-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 ENV PATH="/root/.zig/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
-ENV LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:${LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+ENV LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:${LIBRARY_PATH}"
 ENV CPATH="/opt/intel/mkl/include:/usr/local/cuda/include:${CPATH}"
 ENV CUDA_HOME="/usr/local/cuda"
 # ENV DEBIAN_FRONTEND=noninteractive \
@@ -32,11 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Zig
-RUN wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz && \
-    tar -xf zig-linux-x86_64-0.13.0.tar.xz && \
-    mv zig-linux-x86_64-0.13.0 /root/.zig && \
+RUN wget -q https://ziglang.org/download/0.14.1/zig-x86-linux-0.14.1.tar.xz && \
+    tar -xf zig-x86-linux-0.14.1.tar.xz && \
+    mv zig-x86-linux-0.14.1 /root/.zig && \
     ln -s /root/.zig/zig /usr/local/bin/zig && \
-    rm zig-linux-x86_64-0.13.0.tar.xz
+    rm zig-x86-linux-0.14.1.tar.xz
 
 # MKL (oneapi)
 # https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html?packages=dl-essentials&dl-essentials-os=linux&dl-lin=apt
@@ -55,11 +56,11 @@ RUN wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
     rm -rf /var/lib/apt/lists/*
 
 # cutensor, cudnn
-RUN apt-get update && apt-get install -y \
-    libcutensor2 \
-    libcutensor2-dev \
-    cudnn9-cuda-12 \
-    && rm -rf /var/lib/apt/lists/*
+# RUN apt-get update && apt-get install -y \
+#     libcutensor2 \
+#     libcutensor-dev \
+#     cudnn9-cuda-12 \
+#     && rm -rf /var/lib/apt/lists/*
 
 # CMake.
 # ubuntu cmake out of date (shocker) and wont support the "native" option for detecting the gpu compute arch
