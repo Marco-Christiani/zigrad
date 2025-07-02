@@ -4,7 +4,7 @@ default:
     @just gcn
 
 [script("bash")]
-gcn +opts="-Doptimize=ReleaseFast":
+gcn +opts="--release=fast -Denable_mkl=true":
     set -e
     export ZG_DATA_DIR=$(realpath data)
     cd examples/gcn
