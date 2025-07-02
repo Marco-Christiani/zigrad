@@ -19,7 +19,7 @@ pub fn main() !void {
     try @import("loss.zig").run_tests(T, cpu.reference());
 
     if (zg.has_cuda) {
-        var cuda = zg.device.CudaDevice.init();
+        var cuda = zg.device.CudaDevice.init(0);
         defer cuda.deinit();
         try integration_test(T, cuda.reference());
         try @import("ndtensor.zig").main();
