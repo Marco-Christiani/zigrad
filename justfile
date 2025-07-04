@@ -97,6 +97,10 @@ example-mnist:
   apt-get update -y && apt-get install -y make curl xz-utils libopenblas-dev python3-minimal && \
   cd /workspace/examples/mnist/ && bash"
 
+docker-br:
+    docker build -t zigrad-cuda-unstable -f Dockerfile .
+    docker run --rm --gpus all -it -v .:/app zigrad-cuda-unstable
+
 pattern := '\[gpa\] \(err\)*'
 run_pattern:
    zig build test 2>&1 \
