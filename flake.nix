@@ -17,7 +17,7 @@
           allowUnfree = true;
         };
       };
-      zigpkg = zig.packages.${system}."0.14.0";
+      zigpkg = zig.packages.${system}."0.14.1";
       build = pkgs.writeShellScriptBin "build" ''
           zig build -Doptimize=ReleaseFast
       '';

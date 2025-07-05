@@ -79,7 +79,7 @@ const DataHandler = struct {
 };
 
 const CUDA_COMPILE_ERROR =
-    \\ 
+    \\
     \\You are attempting to use a CudaDevice object but CUDA is not enabled.
     \\
     \\To enable CUDA, build the project with -Dcuda_enabled=true. You can pass
