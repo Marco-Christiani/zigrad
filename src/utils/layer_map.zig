@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const NDTensor = @import("../ndtensor.zig").NDTensor;
 const rtti = @import("../utils/rtti.zig");
 const ClosurePointer = rtti.ClosurePointer;
+const ArenaUnmanaged = @import("../allocators.zig").ArenaUnmanaged;
 
 const Self = @This();
 const ParamMap = std.StrinngArrayHashMapUnmanaged(ClosurePointer);
@@ -12,19 +13,24 @@ const PopulateOptions = struct {
 };
 
 allocator: Allocator,
+arena: ArenaUnmanaged,
 map: ParamMap,
 
 pub fn init(allocator: Allocator) Self {
-    return .{ .allocator = allocator, .map = .empty };
+    return .{ .allocator = allocator, .arena = .empty, .map = .empty };
 }
 
 pub fn deinit(self: *Self) void {
+    self.arena.deinit(self.allocator);
     self.map.deinit(self.allocator);
     self.* = undefined;
 }
 
 pub fn put(self: *Self, key: []const u8, ptr: anytype) !void {
-    try self.map.put(self.allocator, key, ClosurePointer.init(ptr));
+    const _key = try self.arena.dupe(self.allocator, u8, key);
+    errdefer self.arena.free(_key);
+
+    try self.map.put(self.allocator, _key, ClosurePointer.init(ptr));
 }
 
 pub fn extract(
