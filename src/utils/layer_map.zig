@@ -6,7 +6,7 @@ const ClosurePointer = rtti.ClosurePointer;
 const ArenaUnmanaged = @import("../allocators.zig").ArenaUnmanaged;
 
 const Self = @This();
-const ParamMap = std.StrinngArrayHashMapUnmanaged(ClosurePointer);
+const ParamMap = std.StringArrayHashMapUnmanaged(ClosurePointer);
 
 const PopulateOptions = struct {
     shared: bool = true,
