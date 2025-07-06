@@ -8,6 +8,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 
+pub const stz = @import("safetensors_zg");
+
 pub const NDArray = @import("ndarray.zig").NDArray;
 pub const Shape = @import("ndarray.zig").Shape;
 pub const arrayutils = @import("ndarray.zig").utils;

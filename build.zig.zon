@@ -9,6 +9,10 @@
             .hash = "N-V-__8AAMBnlQHsQavelHMK9wG6naFro_ELt9C2Kgt_3r4Q",
             .lazy = true,
         },
+        .safetensors_zg = .{
+            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#798b3792dc74731e986cc76a870cae4f250f52b2",
+            .hash = "safetensors_zg-0.0.1-dRXUiGzrAAAGmUQUd1d8ZwHNl0xSnnwetLvob--z_1P6",
+        },
     },
     .paths = .{""},
 }

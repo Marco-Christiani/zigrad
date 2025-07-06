@@ -1,9 +1,11 @@
 const std = @import("std");
-
 const zg = @import("zigrad");
+const ParamTree = @import("utils/param_tree.zig").ParamTree;
 
-const Tensor = zg.NDTensor(f32);
-const Array = zg.NDArray(f32);
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
 const TestOpts: zg.device.HostDevice.Options = .{
     .max_cache_size = zg.constants.@"1Mb" / 2,

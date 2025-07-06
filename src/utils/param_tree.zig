@@ -1,4 +1,5 @@
 const std = @import("std");
+const stz = @import("zigrad").stz;
 
 pub fn ParamTree(comptime T: type) type {
     return struct {
@@ -131,33 +132,46 @@ pub fn ParamTree(comptime T: type) type {
             }
         }
 
-        /// Apply function to all leaf parameters
-        pub fn for_each(self: *Self, callback: fn (path: []const u8, tensor: *T) void) void {
+        /// Apply visitor to all leaf parameters
+        /// The vistor must have a visit method: visit(self, path: []const u8, tensor: *T) !void
+        pub fn for_each(self: *Self, visitor: anytype) !void {
+            const CT = @TypeOf(visitor);
+            const VisitorType = switch (@typeInfo(CT)) {
+                .pointer => std.meta.Child(CT),
+                inline else => CT,
+                // std.builtin.Type.Pointer => @compileLog("Foo."),
+                // inline else => |CT| @compileLog("CT is: " ++ @typeName(CT)),
+            };
+
+            if (!@hasDecl(VisitorType, "visit")) {
+                @compileError("Visitor must have a 'visit' method with signature: visit(self, path: []const u8, tensor: *T) !void");
+            }
+
             var path_parts = std.ArrayList([]const u8).init(self.allocator);
             defer path_parts.deinit();
-            self.for_each_recursive(&path_parts, callback);
+            try self.for_each_recursive(&path_parts, visitor);
         }
 
-        fn for_each_recursive(self: *Self, path_parts: *std.ArrayList([]const u8), callback: fn (path: []const u8, tensor: *T) void) void {
+        fn for_each_recursive(self: *Self, path_parts: *std.ArrayList([]const u8), callback_obj: anytype) !void {
             switch (self.data) {
                 .subtree => |*subtrees| {
                     var iter = subtrees.iterator();
                     while (iter.next()) |entry| {
-                        path_parts.append(entry.key_ptr.*) catch return;
+                        try path_parts.append(entry.key_ptr.*);
                         defer _ = path_parts.pop();
 
-                        entry.value_ptr.*.for_each_recursive(path_parts, callback);
+                        try entry.value_ptr.*.for_each_recursive(path_parts, callback_obj);
                     }
                 },
                 .leaf => |*leaves| {
                     var iter = leaves.iterator();
                     while (iter.next()) |entry| {
-                        path_parts.append(entry.key_ptr.*) catch return;
+                        try path_parts.append(entry.key_ptr.*);
                         defer _ = path_parts.pop();
 
-                        const path_str = self.build_path_string(path_parts.items) catch return;
+                        const path_str = try self.build_path_string(path_parts.items);
                         defer self.allocator.free(path_str);
-                        callback(path_str, entry.value_ptr.*);
+                        try callback_obj.visit(path_str, entry.value_ptr.*);
                     }
                 },
             }
@@ -202,169 +216,160 @@ pub fn ParamTree(comptime T: type) type {
                 .leaf => |*leaves| {
                     var iter = leaves.iterator();
                     while (iter.next()) |entry| {
-                        std.debug.print("{s}{s} (leaf: {} elements)\n", .{ prefix, entry.key_ptr.*, entry.value_ptr.*.get_data().len });
+                        std.debug.print("{s}{s} (leaf: {d} elements)\n", .{ prefix, entry.key_ptr.*, entry.value_ptr.*.get_data().len });
                     }
                 },
             }
         }
+
+        /// Serialize the parameter tree to safetensors format
+        pub fn serialize(self: *Self, allocator: std.mem.Allocator) ![]u8 {
+            var tensor_list = std.ArrayList(stz.Tensor).init(allocator);
+            defer tensor_list.deinit();
+            defer for (tensor_list.items) |tensor| {
+                allocator.free(tensor.name);
+            };
+
+            const TensorCollector = struct {
+                tensor_list: *std.ArrayList(stz.Tensor),
+                allocator: std.mem.Allocator,
+
+                pub fn visit(_self: *@This(), path: []const u8, tensor: *T) !void {
+                    const owned_path = try _self.allocator.dupe(u8, path);
+                    errdefer _self.allocator.free(owned_path);
+
+                    const tensor_data = tensor.get_data();
+                    const shape_slice = tensor.get_shape();
+                    // const owned_shape = _self.allocator.dupe(usize, shape_slice);
+                    // errdefer _self.allocator.free(owned_shape);
+
+                    if (!@hasDecl(T, "ValueType")) @compileError("Unable to infer tensor element type. Missing ValueType field.");
+                    const dtype = switch (T.ValueType) {
+                        f32 => stz.Dtype.f32,
+                        f64 => stz.Dtype.f64,
+                        i32 => stz.Dtype.i32,
+                        i64 => stz.Dtype.i64,
+                        u32 => stz.Dtype.u32,
+                        u64 => stz.Dtype.u64,
+                        else => stz.Dtype.f32,
+                    };
+
+                    const data_bytes = std.mem.sliceAsBytes(tensor_data);
+
+                    try _self.tensor_list.append(stz.Tensor{
+                        .name = owned_path,
+                        .dtype = dtype,
+                        // .shape = owned_shape,
+                        .shape = shape_slice,
+                        .data = @alignCast(data_bytes),
+                    });
+                }
+            };
+
+            var collector = TensorCollector{
+                .tensor_list = &tensor_list,
+                .allocator = allocator,
+            };
+
+            try self.for_each(&collector);
+            return try stz.serialize_tensors(tensor_list, allocator);
+        }
+
+        /// Deserialize a parameter tree from safetensors format
+        /// Leaf labels must be allocated and owned by caller. Use an arena, stack buf might be fine.
+        pub fn deserialize(
+            data: []const u8,
+            allocator: std.mem.Allocator,
+            label_allocator: std.mem.Allocator,
+            device: anytype,
+            graph: anytype,
+        ) !*Self {
+            var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
+            defer st_file.deinit();
+
+            const tree = try Self.create(allocator);
+            errdefer tree.deinit();
+
+            for (st_file.tensors) |tensor_info| {
+                const tensor_view = try st_file.get(tensor_info.name);
+                const ndtensor = try create_tensor_from_view(
+                    tensor_view,
+                    device,
+                    graph,
+                );
+                try tree.put(try label_allocator.dupe(u8, tensor_info.name), ndtensor);
+            }
+
+            std.debug.print("[deserialize] loaded:\n", .{});
+            tree.print_tree("");
+            std.debug.print("\n", .{});
+            return tree;
+        }
+
+        /// Helper function to create NDTensor from TensorView
+        fn create_tensor_from_view(
+            view: stz.TensorView,
+            device: anytype,
+            graph: anytype,
+        ) !*T {
+            const TensorOpts = @import("zigrad").TensorOpts;
+            const tensor_opts = TensorOpts{
+                .requires_grad = true,
+                .graph = graph,
+            };
+
+            // NOTE: This assumes T is NDTensor(f32). we only support f32 for now
+            const typed_data = switch (view.info.dtype) {
+                .u8 => view.data,
+                .bool => std.mem.bytesAsSlice(bool, view.data),
+                .i8 => std.mem.bytesAsSlice(i8, view.data),
+                .i16 => std.mem.bytesAsSlice(i16, view.data),
+                .u16 => std.mem.bytesAsSlice(u16, view.data),
+                .u32 => std.mem.bytesAsSlice(u32, view.data),
+                .u64 => std.mem.bytesAsSlice(u64, view.data),
+                .f16 => std.mem.bytesAsSlice(f16, view.data),
+                .f32 => std.mem.bytesAsSlice(f32, view.data),
+                .f64 => std.mem.bytesAsSlice(f64, view.data),
+                .i32 => std.mem.bytesAsSlice(i32, view.data),
+                .i64 => std.mem.bytesAsSlice(i64, view.data),
+                else => return error.UnsupportedDtype,
+            };
+            return try T.from_slice(device, typed_data, view.info.shape, tensor_opts);
+        }
+
+        /// Save parameter tree to file
+        pub fn save_to_file(
+            self: *Self,
+            file_path: []const u8,
+            allocator: std.mem.Allocator,
+        ) !void {
+            const serialized_data = try self.serialize(allocator);
+            defer allocator.free(serialized_data);
+
+            const file = try std.fs.cwd().createFile(file_path, .{});
+            defer file.close();
+
+            try file.writeAll(serialized_data);
+        }
+
+        /// Load parameter tree from file
+        pub fn load_from_file(
+            file_path: []const u8,
+            label_allocator: std.mem.Allocator,
+            allocator: std.mem.Allocator,
+            device: anytype,
+            graph: anytype,
+        ) !*Self {
+            const file = try std.fs.cwd().openFile(file_path, .{});
+            defer file.close();
+
+            const file_size = try file.getEndPos();
+            const file_data = try allocator.alloc(u8, file_size);
+            defer allocator.free(file_data);
+
+            _ = try file.readAll(file_data);
+
+            return try Self.deserialize(file_data, allocator, label_allocator, device, graph);
+        }
     };
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const zg = @import("zigrad");
-    const NDTensor = zg.NDTensor;
-    const Graph = zg.Graph;
-    const device = zg.device;
-    var cpu = device.HostDevice.init();
-    defer cpu.deinit();
-    var graph = Graph.init(std.heap.smp_allocator, .{});
-    defer graph.deinit();
-
-    // Create param tree
-    const tree = try ParamTree(NDTensor(f32)).create(allocator);
-    defer tree.deinit();
-
-    // Create test tensors
-    const weight1 = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{ 1.0, 2.0, 3.0 },
-        &.{3},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-    const bias1 = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{ 0.1, 0.2 },
-        &.{2},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-    const weight2 = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{ 4.0, 5.0, 6.0, 7.0 },
-        &.{4},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-    const single_param = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{42.0},
-        &.{1},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-
-    std.debug.print("=== Testing Final ParamTree ===\n", .{});
-
-    // Test putting parameters
-    try tree.put("layer1.weight", weight1);
-    try tree.put("layer1.bias", bias1);
-    try tree.put("layer2.weight", weight2);
-
-    std.debug.print("[✓] Added nested parameters\n", .{});
-
-    // Test single parameter conflict - this should fail because root already has subtrees
-    if (tree.put("single", single_param)) {
-        std.debug.print("[✗] Should have failed on path conflict (mixing subtrees and leaves at root)\n", .{});
-        // Clean up if it somehow succeeded
-        single_param.deinit();
-    } else |err| {
-        if (err == error.PathConflict) {
-            std.debug.print("[✓] Correctly detected path conflict (can't mix subtrees and leaves)\n", .{});
-        } else {
-            std.debug.print("[✗] Got wrong error: {}\n", .{err});
-        }
-        single_param.deinit();
-    }
-
-    // Test getting parameters
-    if (tree.get("layer1.weight")) |w| {
-        std.debug.print("[✓] Retrieved layer1.weight: {} elements\n", .{w.get_data().len});
-    } else {
-        std.debug.print("[✗] Failed to retrieve layer1.weight\n", .{});
-    }
-
-    // Test non-existent path
-    if (tree.get("nonexistent.path")) |_| {
-        std.debug.print("[✗] Should not have found nonexistent.path\n", .{});
-    } else {
-        std.debug.print("[✓] Correctly returned null for nonexistent path\n", .{});
-    }
-
-    // Test duplicate parameter error
-    const duplicate_weight = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{ 8, 9 },
-        &.{2},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-    defer duplicate_weight.deinit();
-
-    if (tree.put("layer1.weight", duplicate_weight)) {
-        std.debug.print("[✗] Should have failed on duplicate parameter\n", .{});
-    } else |err| {
-        if (err == error.DuplicateParameter) {
-            std.debug.print("[✓] Correctly detected duplicate parameter\n", .{});
-        } else {
-            std.debug.print("[✗] Got wrong error: {}\n", .{err});
-        }
-    }
-
-    // Test path conflict
-    const conflict_tensor = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{10},
-        &.{1},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-
-    defer conflict_tensor.deinit();
-
-    if (tree.put("layer1.weight.sublayer", conflict_tensor)) {
-        std.debug.print("[✗] Should have failed on path conflict\n", .{});
-    } else |err| {
-        if (err == error.PathConflict) {
-            std.debug.print("[✓] Correctly detected path conflict\n", .{});
-        } else {
-            std.debug.print("[✗] Got wrong error: {}\n", .{err});
-        }
-    }
-
-    // Test for_each
-    std.debug.print("\n=== Testing for_each ===\n", .{});
-    const print_param = struct {
-        fn callback(path: []const u8, tensor: *NDTensor(f32)) void {
-            std.debug.print("Parameter: {s} -> {} elements\n", .{ path, tensor.get_data().len });
-        }
-    }.callback;
-
-    tree.for_each(print_param);
-
-    // Print tree structure
-    std.debug.print("\n=== Tree Structure ===\n", .{});
-    tree.print_tree("");
-
-    // Test single parameter tree (create a separate tree for this)
-    std.debug.print("\n=== Testing Single Parameter Tree ===\n", .{});
-    const single_tree = try ParamTree(NDTensor(f32)).create(allocator);
-    defer single_tree.deinit();
-
-    const single_param2 = try NDTensor(f32).from_slice(
-        cpu.reference(),
-        &[_]f32{99},
-        &.{1},
-        .{ .requires_grad = true, .graph = &graph },
-    );
-
-    try single_tree.put("single_param", single_param2);
-    std.debug.print("[✓] Added single parameter to empty tree\n", .{});
-
-    if (single_tree.get("single_param")) |s| {
-        std.debug.print("[✓] Retrieved single parameter: {}\n", .{s.get(0)});
-    }
-
-    std.debug.print("Single tree structure:\n", .{});
-    single_tree.print_tree("");
-
-    std.debug.print("\n=== Tests completed ===\n", .{});
 }
