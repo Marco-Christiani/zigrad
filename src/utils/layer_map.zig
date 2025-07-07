@@ -137,6 +137,66 @@ pub fn for_all(self: *Self, callable: anytype) void {
     }
 }
 
+/// Print tree structure
+pub fn print_tree(self: *Self) void {
+    const sorted_keys = self.allocator.dupe([]const u8, self.map.keys()) catch return;
+    defer self.allocator.free(sorted_keys);
+
+    std.sort.pdq([]const u8, sorted_keys, {}, struct {
+        pub fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+
+    const keys = sorted_keys;
+    const prefix: [128]u8 = @splat(' ');
+
+    var stack: std.BoundedArray(usize, 64) = .{};
+    var key_idx: usize = 0;
+    var key_pos: usize = 0;
+
+    outer: while (key_idx < keys.len) {
+        const key = keys[key_idx];
+
+        while (std.mem.indexOfScalarPos(u8, key, key_pos, '.')) |sep_pos| {
+            stack.append(sep_pos) catch unreachable;
+
+            if (key_pos == 0)
+                std.debug.print("{s}\n", .{key[key_pos..sep_pos]})
+            else if (key_pos != sep_pos) {
+                std.debug.print("{s}∟{s}\n", .{
+                    prefix[0..stack.len],
+                    key[key_pos..sep_pos],
+                });
+            }
+            key_pos = sep_pos + 1;
+        }
+
+        while (key_idx < keys.len and std.mem.startsWith(
+            u8,
+            keys[key_idx],
+            key[0..key_pos],
+        )) : (key_idx += 1) {
+            std.debug.print("{s}.{s}\n", .{
+                prefix[0 .. stack.len + 1],
+                keys[key_idx][key_pos..],
+            });
+        }
+
+        if (key_idx == keys.len)
+            return;
+
+        while (stack.pop()) |sep_pos| {
+            if (std.mem.startsWith(u8, keys[key_idx], key[0..sep_pos])) {
+                key_pos = sep_pos;
+                continue :outer;
+            }
+        } else {
+            key_pos = 0;
+        }
+    }
+}
+
 const PathBuffer = std.BoundedArray(u8, 1024);
 
 pub fn populate(

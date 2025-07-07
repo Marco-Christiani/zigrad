@@ -25,17 +25,26 @@ test "visitors" {
         .label = "x: f32",
         .graph = &graph,
     });
+    defer x.deinit();
 
     const y = try zg.NDTensor(f64).empty(cpu.reference(), &.{ 2, 2 }, .{
         .label = "y: f64",
         .graph = &graph,
     });
+    defer y.deinit();
 
     var lmap = LayerMap.init(allocator);
     defer lmap.deinit();
 
-    try lmap.put("layer.x", x, .{ .owned = true });
-    try lmap.put("layer.y", y, .{ .owned = true });
+    try lmap.put("layer_a.foo.bar.weights", x, .{ .owned = false });
+    try lmap.put("layer_a.foo.bar.bias", y, .{ .owned = false });
+    try lmap.put("layer_a.foo.baz.weights", x, .{ .owned = false });
+    try lmap.put("layer_a.foo.baz.bias", y, .{ .owned = false });
+
+    try lmap.put("layer_b.foo.bar.weights", x, .{ .owned = false });
+    try lmap.put("layer_b.foo.bar.bias", y, .{ .owned = false });
+    try lmap.put("layer_b.foo.baz.weights", x, .{ .owned = false });
+    try lmap.put("layer_b.foo.baz.bias", y, .{ .owned = false });
 
     lmap.for_all(struct { // target every node in the graph (auto-cast)
         pub fn call(_: @This(), key: []const u8, t: anytype) void {
@@ -83,4 +92,6 @@ test "visitors" {
         counter.largest_tensor,
         counter.largest_tensor_key,
     });
+
+    lmap.print_tree();
 }
