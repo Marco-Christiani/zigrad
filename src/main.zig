@@ -21,7 +21,7 @@ test "visitors" {
     var graph = zg.Graph.init(allocator, .{});
     defer graph.deinit();
 
-    const x = try zg.NDTensor(f32).empty(cpu.reference(), &.{ 2, 2 }, .{
+    const x = try zg.NDTensor(f32).empty(cpu.reference(), &.{ 2, 6 }, .{
         .label = "x: f32",
         .graph = &graph,
     });
@@ -54,4 +54,33 @@ test "visitors" {
             std.debug.print("LABEL (f64): {?s}, key: {s}\n", .{ t.get_label(), key });
         }
     }{});
+
+    var counter: struct { // only target NDTensor(f64)
+        total_params: usize = 0,
+        total_tensors: u32 = 0,
+        largest_tensor: usize = 0,
+        largest_tensor_key: []const u8 = "",
+        pub fn call(self: *@This(), key: []const u8, t: anytype) void {
+            const param_count = t.get_size();
+            self.total_tensors += 1;
+            self.total_params += param_count;
+
+            if (self.largest_tensor < param_count) {
+                self.largest_tensor = param_count;
+                self.largest_tensor_key = key;
+            }
+        }
+    } = .{};
+
+    lmap.for_all(&counter);
+    std.debug.print(
+        \\Parameter Statistics:
+        \\  Total tensors: {d}
+        \\  Largest tensor: {d} at '{s}'
+        \\
+    , .{
+        counter.total_tensors,
+        counter.largest_tensor,
+        counter.largest_tensor_key,
+    });
 }

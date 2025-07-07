@@ -324,8 +324,6 @@ pub fn NDTensor(comptime T: type) type {
         /// the tensor instance, so reset or deinit should be called on the owning
         /// graph to destroy the instance itself.
         pub fn deinit(self: *Self) void {
-            std.debug.print("DEINIT\n", .{});
-
             if (self.acquired())
                 @panic("Attempt to deinit an acquired tensor.");
 
