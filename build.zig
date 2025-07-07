@@ -37,10 +37,9 @@ pub fn build(b: *Build) !void {
 
     switch (target.result.os.tag) {
         .linux => {
-            // std.debug.print("CPU Arch: {s} CPU Model: {s}\n", .{@tagName(target.result.cpu.arch), (target.result.cpu.model.name)});
-            // TODO: Dynamic library paths
-            zigrad.addLibraryPath(.{.cwd_relative = "/lib/x86_64-linux-gnu/"});
-            zigrad.addLibraryPath(.{.cwd_relative = "/usr/lib/x86_64-linux-gnu/"});
+            // TODO: Dynamic library paths for cuda build
+            // zigrad.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu/" });
+            // zigrad.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/" });
             if (enable_mkl) zigrad.linkSystemLibrary("mkl_rt", .{}) else zigrad.linkSystemLibrary("blas", .{});
         },
         .macos => zigrad.linkFramework("Accelerate", .{}),

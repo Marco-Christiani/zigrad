@@ -1495,17 +1495,6 @@ pub fn NDTensor(comptime T: type) type {
                     const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
                     const grad_input = try input_tensor.ensure_grad(0);
 
-                    // Grad distributes over segment ranges
-                    // For each i, grad_output[row_ptr[i]..row_ptr[i+1]] += grad_src[i]
-                    // TODO: device kernel
-                    // for (0..ctx.row_ptr.len - 1) |i| {
-                    //     const start = ctx.row_ptr[i];
-                    //     const end = ctx.row_ptr[i + 1];
-                    //     for (start..end) |j| {
-                    //         grad_src.data[j] += grad_output.data[i];
-                    //     }
-                    // }
-
                     // TODO: use device kernel
                     grad_output.scatter_add_csr_(ctx.row_ptr, grad_input, y.device);
                 }
