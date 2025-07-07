@@ -1236,8 +1236,7 @@ pub fn scatter_add_csr(_: *const Self, T: type, p: opspec.scatter_add_csr(T)) vo
         const start = p.row_ptr[i];
         const end = p.row_ptr[i + 1];
         const value = p.src[i];
-        std.debug.print("{d}:{d}\n", .{ start, end });
-        // TODO: not this
+        // Broadcast value to segment range
         for (start..end) |j| {
             p.dst[j] += value;
         }
