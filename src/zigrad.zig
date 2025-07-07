@@ -98,6 +98,8 @@ pub fn global_graph_get() *Graph {
     return &(global_graph orelse @panic("Global graph is uninitialized, call init_global_graph first."));
 }
 
+pub const LayerMap = @import("utils/layer_map.zig");
+
 // see zls
 // The type of `log_level` is not `std.log.Level`.
 var actual_log_level: std.log.Level = @enumFromInt(@intFromEnum(build_options.log_level));

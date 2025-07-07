@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const ParamTree = @import("utils/param_tree.zig").ParamTree;
+//const ParamTree = @import("utils/param_tree.zig").ParamTree;
+const LayerMap = zg.LayerMap;
 
 pub fn main() !void {
     const stderr = std.io.getStderr();
@@ -20,32 +21,37 @@ test "visitors" {
     var graph = zg.Graph.init(allocator, .{});
     defer graph.deinit();
 
-    const device = cpu.reference();
-    const tree = try ParamTree(zg.NDTensor(f32)).create(allocator);
-    defer tree.deinit();
+    const x = try zg.NDTensor(f32).empty(cpu.reference(), &.{ 2, 2 }, .{
+        .label = "x: f32",
+        .graph = &graph,
+    });
 
-    const tensor = try zg.NDTensor(f32).from_slice(
-        device,
-        &[_]f32{ 1.0, 2.0, 3.0, 4.0 },
-        &.{ 2, 2 },
-        .{ .requires_grad = true, .graph = &graph },
-    );
-    defer tensor.deinit();
+    const y = try zg.NDTensor(f64).empty(cpu.reference(), &.{ 2, 2 }, .{
+        .label = "y: f64",
+        .graph = &graph,
+    });
 
-    try tree.put("test", tensor);
+    var lmap = LayerMap.init(allocator);
+    defer lmap.deinit();
 
-    const Counter = struct {
-        count: u32 = 0,
+    try lmap.put("layer.x", x, .{ .owned = true });
+    try lmap.put("layer.y", y, .{ .owned = true });
 
-        pub fn visit(self: *@This(), path: []const u8, tensor_param: *zg.NDTensor(f32)) !void {
-            _ = path;
-            _ = tensor_param;
-            self.count += 1;
+    lmap.for_all(struct { // target every node in the graph (auto-cast)
+        pub fn call(_: @This(), key: []const u8, t: anytype) void {
+            std.debug.print("LABEL (ALL): {?s}, key: {s}\n", .{ t.get_label(), key });
         }
-    };
+    }{});
 
-    var counter = Counter{};
-    try tree.for_each(&counter);
+    lmap.for_all_type(struct { // only target NDTensor(f32)
+        pub fn call(_: @This(), key: []const u8, t: *zg.NDTensor(f32)) void {
+            std.debug.print("LABEL (f32): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
 
-    try std.testing.expectEqual(@as(u32, 1), counter.count);
+    lmap.for_all_type(struct { // only target NDTensor(f64)
+        pub fn call(_: @This(), key: []const u8, t: *zg.NDTensor(f64)) void {
+            std.debug.print("LABEL (f64): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
 }

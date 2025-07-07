@@ -15,27 +15,32 @@ pub const TypeID = enum(usize) {
 pub const ClosurePointer = struct {
     type_id: TypeID,
     held: *anyopaque,
-    free: *const fn (*anyopaque, Allocator) void,
-    pub fn init(ptr: anytype) ClosurePointer {
+    free: *const fn (*anyopaque) void,
+    pub fn init(ptr: anytype, cleanup: bool) ClosurePointer {
         const T = std.meta.Child(@TypeOf(ptr));
+
         const free = struct {
-            pub fn impl(_ptr: *anyopaque, allocator: Allocator) void {
+            pub fn impl(_ptr: *anyopaque) void {
                 const tptr: *T = @ptrCast(@alignCast(_ptr));
                 if (comptime @hasDecl(T, "deinit")) {
                     tptr.deinit();
                 }
-                allocator.destroy(tptr);
             }
-        }.free;
+        }.impl;
+
+        const pass = struct {
+            pub fn impl(_: *anyopaque) void {}
+        }.impl;
+
         return .{
             .type_id = TypeID.init(T),
             .held = ptr,
-            .free = free,
+            .free = if (cleanup) free else pass,
         };
     }
 
-    pub fn deinit(self: *ClosurePointer, allocator: Allocator) void {
-        self.free(self.held, allocator);
+    pub fn deinit(self: *ClosurePointer) void {
+        self.free(self.held);
         self.* = undefined;
     }
 

@@ -36,7 +36,7 @@ pub fn deinit(self: ArenaUnmanaged, allocator: Allocator) void {
 
 pub fn alloc(self: *ArenaUnmanaged, allocator: Allocator, comptime T: type, n: usize) Error![]T {
     if (@sizeOf(T) == 0) @compileError("Allocating zero-size objects not supported.");
-    const ptr: [*]T = @ptrCast(try self.alloc_bytes_with_alignment(allocator, @alignOf(T), @sizeOf(T)));
+    const ptr: [*]T = @ptrCast(try self.alloc_bytes_with_alignment(allocator, @alignOf(T), n * @sizeOf(T)));
     return ptr[0..n];
 }
 
@@ -44,7 +44,7 @@ pub fn alloc(self: *ArenaUnmanaged, allocator: Allocator, comptime T: type, n: u
 pub fn free(self: *ArenaUnmanaged, slice: anytype) void {
     const cur_node = self.buffer_list.first orelse return;
     const cur_buf = @as([*]u8, @ptrCast(cur_node))[@sizeOf(BufNode)..cur_node.data];
-    const buf = std.mem.slieAsBytes(slice);
+    const buf = std.mem.sliceAsBytes(slice);
 
     if (@intFromPtr(cur_buf.ptr) + self.end_index == @intFromPtr(buf.ptr) + buf.len) {
         self.end_index -= buf.len;
