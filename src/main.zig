@@ -55,7 +55,7 @@ test "visitors" {
         }
     }{});
 
-    var counter: struct { // only target NDTensor(f64)
+    var counter: struct {
         total_params: usize = 0,
         total_tensors: u32 = 0,
         largest_tensor: usize = 0,
