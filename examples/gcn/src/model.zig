@@ -210,17 +210,11 @@ pub fn GraphConvLayer(comptime T: type) type {
             // TODO: Compute deg_norm_2d with in place NDArray ops since this doesnt need to be grad tracked.
             //   Will be less verbose and way more performant anyways.
             // Compute degrees
-            const deg = try Tensor.ones(self.device, &.{n_node}, .{
-                .requires_grad = false,
-                .label = "deg",
-            }); // Start with self-loops
+            const deg = try Tensor.ones(self.device, &.{n_node}, .{ .requires_grad = false }); // Start with self-loops
             defer deg.deinit();
 
             // Count degrees with scatter_add
-            const ones_edges = try Tensor.ones(self.device, &.{n_edge}, .{
-                .requires_grad = false,
-                .label = "ones_edges",
-            });
+            const ones_edges = try Tensor.ones(self.device, &.{n_edge}, .{ .requires_grad = false });
             defer ones_edges.deinit();
 
             // TODO: Not device safe!!
@@ -231,28 +225,23 @@ pub fn GraphConvLayer(comptime T: type) type {
             // Scatter to [n_node]
             const deg_contrib = try ones_edges.scatter_add(target_indices, &.{n_node});
             defer deg_contrib.deinit();
-            deg_contrib.set_label("deg_contrib");
 
             const total_deg = try deg_contrib.add(deg);
             defer total_deg.deinit();
-            total_deg.set_label("total_deg");
 
             // Apply degree normalization: deg^(-0.5)
             // These are equivalent
             // const deg_norm = try total_deg.pow(-0.5);
             const deg_norm = try total_deg.rsqrt();
             defer deg_norm.deinit();
-            deg_norm.set_label("deg_norm");
 
             // Reshape deg_norm to [n_node, 1] for broadcasting with h [n_node, n_features]
             const deg_norm_2d = try deg_norm.reshape(&.{ n_node, 1 });
             deg_norm_2d.soft_deinit(); // required for normalized_h.grad
-            deg_norm_2d.set_label("deg_norm_2d");
 
-            // NOTE: Computation graph starts here as this si the first use of `h`
+            // NOTE: Computation graph starts here as this is the first use of `h`
             const normalized_h = try h.mul(deg_norm_2d); // [n_node, n_features]
             defer if (!normalized_h.requires_grad()) normalized_h.deinit();
-            normalized_h.set_label("normalized_h");
 
             // Create source indices for gathering - must match normalized_h dimensions
             const source_indices_data = try self.device.mem_alloc(usize, n_edge);
@@ -265,7 +254,6 @@ pub fn GraphConvLayer(comptime T: type) type {
             // Extract edge features
             const edge_features = try normalized_h.index_select(0, source_indices_data);
             defer if (!edge_features.requires_grad()) edge_features.deinit();
-            edge_features.set_label("edge_features");
 
             // // V1: using scatter_add()
             // // Create flattened offsets for scatter_add
@@ -283,7 +271,6 @@ pub fn GraphConvLayer(comptime T: type) type {
             // Scatter features to target nodes w strided scatter add
             const aggregated = try edge_features.scatter_add_strided(target_indices, n_features, &.{ n_node, n_features });
             defer if (!aggregated.requires_grad()) aggregated.deinit();
-            aggregated.set_label("aggregated");
 
             // Add self-connections (normalized_h represents self-loops)
             try aggregated._add(normalized_h);
