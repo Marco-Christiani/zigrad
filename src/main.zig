@@ -38,28 +38,28 @@ test "visitors" {
 
     try lmap.put("layer_a.foo.bar.weights", x, .{ .owned = false });
     try lmap.put("layer_a.foo.bar.bias", y, .{ .owned = false });
-    try lmap.put("layer_a.foo.baz.weights", x, .{ .owned = false });
-    try lmap.put("layer_a.foo.baz.bias", y, .{ .owned = false });
+    //try lmap.put("layer_a.foo.baz.weights", x, .{ .owned = false });
+    //try lmap.put("layer_a.foo.baz.bias", y, .{ .owned = false });
 
-    try lmap.put("layer_b.foo.bar.weights", x, .{ .owned = false });
-    try lmap.put("layer_b.foo.bar.bias", y, .{ .owned = false });
-    try lmap.put("layer_b.foo.baz.weights", x, .{ .owned = false });
-    try lmap.put("layer_b.foo.baz.bias", y, .{ .owned = false });
+    //try lmap.put("layer_b.foo.bar.weights", x, .{ .owned = false });
+    //try lmap.put("layer_b.foo.bar.bias", y, .{ .owned = false });
+    //try lmap.put("layer_b.foo.baz.weights", x, .{ .owned = false });
+    //try lmap.put("layer_b.foo.baz.bias", y, .{ .owned = false });
 
-    lmap.for_all(struct { // target every node in the graph (auto-cast)
-        pub fn call(_: @This(), key: []const u8, t: anytype) void {
+    lmap.for_each(struct { // target every node in the graph (auto-cast)
+        pub fn visit(_: @This(), key: []const u8, t: anytype) void {
             std.debug.print("LABEL (ALL): {?s}, key: {s}\n", .{ t.get_label(), key });
         }
     }{});
 
-    lmap.for_all_type(struct { // only target NDTensor(f32)
-        pub fn call(_: @This(), key: []const u8, t: *zg.NDTensor(f32)) void {
+    lmap.for_each_type(struct { // only target NDTensor(f32)
+        pub fn visit(_: @This(), key: []const u8, t: *zg.NDTensor(f32)) void {
             std.debug.print("LABEL (f32): {?s}, key: {s}\n", .{ t.get_label(), key });
         }
     }{});
 
-    lmap.for_all_type(struct { // only target NDTensor(f64)
-        pub fn call(_: @This(), key: []const u8, t: *zg.NDTensor(f64)) void {
+    lmap.for_each_type(struct { // only target NDTensor(f64)
+        pub fn visit(_: @This(), key: []const u8, t: *zg.NDTensor(f64)) void {
             std.debug.print("LABEL (f64): {?s}, key: {s}\n", .{ t.get_label(), key });
         }
     }{});
@@ -69,7 +69,7 @@ test "visitors" {
         total_tensors: u32 = 0,
         largest_tensor: usize = 0,
         largest_tensor_key: []const u8 = "",
-        pub fn call(self: *@This(), key: []const u8, t: anytype) void {
+        pub fn visit(self: *@This(), key: []const u8, t: anytype) void {
             const param_count = t.get_size();
             self.total_tensors += 1;
             self.total_params += param_count;
@@ -81,7 +81,7 @@ test "visitors" {
         }
     } = .{};
 
-    lmap.for_all(&counter);
+    lmap.for_each(&counter);
     std.debug.print(
         \\Parameter Statistics:
         \\  Total tensors: {d}
@@ -94,4 +94,6 @@ test "visitors" {
     });
 
     lmap.print_tree();
+
+    try lmap.save_to_file("here.stz", std.heap.smp_allocator);
 }

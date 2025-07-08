@@ -13,6 +13,11 @@ const zg = @import("../zigrad.zig");
 const Self = @This();
 const ParamMap = std.StringArrayHashMapUnmanaged(ClosurePointer);
 
+const SUPPORTED_TYPES: []const type = &.{
+    NDTensor(f32),
+    NDTensor(f64),
+};
+
 const PopulateOpts = struct {
     shared: bool = true,
 };
@@ -84,14 +89,14 @@ pub fn extract_map(
     return output;
 }
 
-pub fn for_all_type(self: *Self, callable: anytype) void {
-    const T = @TypeOf(callable);
+pub fn for_each_type(self: *Self, visitor: anytype) void {
+    const T = @TypeOf(visitor);
     const U = if (@typeInfo(T) == .pointer) std.meta.Child(T) else T;
-    std.debug.assert(@typeInfo(U) == .@"struct");
-    std.debug.assert(@hasDecl(U, "call"));
+    comptime std.debug.assert(@typeInfo(U) == .@"struct");
+    comptime std.debug.assert(@hasDecl(U, "visit"));
 
-    const params = @typeInfo(@TypeOf(U.call)).@"fn".params;
-    std.debug.assert(params.len == 3);
+    const params = @typeInfo(@TypeOf(U.visit)).@"fn".params;
+    comptime std.debug.assert(params.len == 3);
 
     // argument type must be a pointer
     const arg_type = std.meta.Child(params[2].type orelse unreachable);
@@ -99,36 +104,31 @@ pub fn for_all_type(self: *Self, callable: anytype) void {
     var iter = self.map.iterator();
     while (iter.next()) |entry| {
         if (TypeID.init(arg_type) == entry.value_ptr.type_id) {
-            callable.call(entry.key_ptr.*, entry.value_ptr.cast(arg_type));
+            visitor.visit(entry.key_ptr.*, entry.value_ptr.cast(arg_type));
         }
     }
 }
 
-pub fn for_all(self: *Self, callable: anytype) void {
-    const T = @TypeOf(callable);
+pub fn for_each(self: *Self, visitor: anytype) void {
+    const T = @TypeOf(visitor);
     const U = if (@typeInfo(T) == .pointer) std.meta.Child(T) else T;
-    std.debug.assert(@typeInfo(U) == .@"struct");
-    std.debug.assert(@hasDecl(U, "call"));
+    comptime std.debug.assert(@typeInfo(U) == .@"struct");
+    comptime std.debug.assert(@hasDecl(U, "visit"));
 
-    const params = @typeInfo(@TypeOf(U.call)).@"fn".params;
-    std.debug.assert(params.len == 3);
+    const params = @typeInfo(@TypeOf(U.visit)).@"fn".params;
+    comptime std.debug.assert(params.len == 3);
 
     // argument type must be a "anytype"
-    std.debug.assert(params[2].type == null);
-
-    const recognized: []const type = &.{
-        NDTensor(f32),
-        NDTensor(f64),
-    };
+    comptime std.debug.assert(params[2].type == null);
 
     var iter = self.map.iterator();
     loop: while (iter.next()) |entry| {
         const k = entry.key_ptr;
         const v = entry.value_ptr;
 
-        inline for (recognized) |t| {
+        inline for (SUPPORTED_TYPES) |t| {
             if (v.type_id == TypeID.init(t)) {
-                callable.call(k.*, v.cast(t));
+                visitor.visit(k.*, v.cast(t));
                 continue :loop;
             }
         } else {
@@ -169,6 +169,7 @@ pub fn print_tree(self: *Self) void {
                     key[key_pos..sep_pos],
                 });
             }
+
             key_pos = sep_pos + 1;
         }
 
@@ -236,6 +237,48 @@ fn recursive_populate(
             }
         },
     }
+}
+
+/// Serialize the parameter tree to safetensors format
+pub fn serialize(self: *Self, allocator: Allocator) ![]u8 {
+    const TensorCollector = struct {
+        tensor_list: std.ArrayList(stz.Tensor),
+
+        pub fn visit(_self: *@This(), key: []const u8, tensor: anytype) void {
+            const T = std.meta.Child(@TypeOf(tensor));
+
+            if (!@hasDecl(T, "ValueType"))
+                @compileError("Unable to infer tensor element type. Missing ValueType field.");
+
+            const dtype = switch (T.ValueType) {
+                f32 => stz.Dtype.f32,
+                f64 => stz.Dtype.f64,
+                i32 => stz.Dtype.i32,
+                i64 => stz.Dtype.i64,
+                u32 => stz.Dtype.u32,
+                u64 => stz.Dtype.u64,
+                else => stz.Dtype.f32,
+            };
+
+            const tensor_data = tensor.get_data();
+            const data_bytes = std.mem.sliceAsBytes(tensor_data);
+            _self.tensor_list.appendAssumeCapacity(.{
+                .name = key,
+                .dtype = dtype,
+                .shape = tensor.get_shape(),
+                .data = @alignCast(data_bytes),
+            });
+        }
+    };
+
+    var collector = TensorCollector{
+        .tensor_list = try std.ArrayList(stz.Tensor).initCapacity(self.allocator, self.map.count()),
+    };
+    defer collector.tensor_list.deinit();
+
+    self.for_each(&collector);
+
+    return stz.serialize_tensors(collector.tensor_list, allocator);
 }
 
 // Print tree structure
@@ -376,20 +419,20 @@ fn closure_tensor(
 //}
 
 // Save parameter tree to file
-//pub fn save_to_file(
-//    self: *Self,
-//    file_path: []const u8,
-//    allocator: std.mem.Allocator,
-//) !void {
-//    const serialized_data = try self.serialize(allocator);
-//    defer allocator.free(serialized_data);
-//
-//    try std.fs.cwd().writeFile(.{
-//        .sub_path = file_path,
-//        .data = serialized_data,
-//        .flags = .{},
-//    });
-//}
+pub fn save_to_file(
+    self: *Self,
+    file_path: []const u8,
+    allocator: Allocator,
+) !void {
+    const serialized_data = try self.serialize(allocator);
+    defer self.allocator.free(serialized_data);
+
+    try std.fs.cwd().writeFile(.{
+        .sub_path = file_path,
+        .data = serialized_data,
+        .flags = .{},
+    });
+}
 
 // Load parameter tree from file
 //pub fn load_from_file(
