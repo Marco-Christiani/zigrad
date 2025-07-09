@@ -100,20 +100,20 @@ pub fn GraphConvLayer(comptime T: type) type {
             const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
             const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
             errdefer h.deinit();
-            defer {
-                if (h.should_deinit()) {
-                    h.deinit();
-                }
-            }
 
             const y = try self.propagate(h, edge_index);
             errdefer y.deinit();
+
+            defer h.soft_deinit();
 
             try y._add(self.bias);
             return y;
         }
 
-        pub const propagate = propagate_ag;
+        // pub const propagate = propagate_direct;
+        // pub const propagate = propagate_alt;
+        // pub const propagate = propagate_ag;
+        pub const propagate = propagate_scatter_gcn_deg_scaled;
 
         /// A simple, direct, implementation of propagate
         /// Due to it being direct, it directly accesses device memory and is thus not safe for use with accelerators like CUDA
@@ -131,18 +131,18 @@ pub fn GraphConvLayer(comptime T: type) type {
                 // errdefer adj_mat.deinit();
                 const adj_mat_data = adj_mat.get_data();
 
-                const deg = try zg.NDArray(T).scratch(&.{n_node}, self.device);
+                const deg = try zg.NDArray(T).empty(&.{n_node}, self.device);
                 deg.fill(1, self.device); // the initial is 1 (self loop)
                 for (0..n_edge) |i| {
                     const source = edge_index.get(i * 2);
                     // NOTE: this is not safe until we support `get` and `set` or `inc` for `zg.NDArray`
-                    deg.data[source] += 1;
+                    deg.data.raw[source] += 1;
                 }
 
                 for (0..n_edge) |i| {
                     const source = edge_index.get(i * 2);
                     const target = edge_index.get(i * 2 + 1);
-                    adj_mat_data[source * n_node + target] = std.math.pow(T, deg.data[source], -0.5);
+                    adj_mat_data[source * n_node + target] = std.math.pow(T, deg.data.raw[source], -0.5);
                 }
                 self.adj_mat = adj_mat;
             }
@@ -161,7 +161,7 @@ pub fn GraphConvLayer(comptime T: type) type {
             const edge_index_data = edge_index.get_data();
 
             // Compute degrees for normalization
-            const deg = try self.device.mem_scratch(T, n_node);
+            const deg = self.device.mem_scratch(T, n_node);
             self.device.mem_fill(T, deg, 1); // the initial is 1 (self loop)
             for (0..n_edge) |i| {
                 const source = edge_index_data[i * 2];
@@ -281,6 +281,110 @@ pub fn GraphConvLayer(comptime T: type) type {
             // output.set_label("output");
 
             return output;
+        }
+
+        pub fn propagate_scatter_gcn_deg_scaled(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
+            const n_node = h.get_dim(0);
+            const n_features = h.get_dim(1);
+            const n_edge = edge_index.get_dim(1);
+            std.debug.assert(edge_index.get_dim(0) == 2);
+
+            const edge_index_data = edge_index.get_data();
+
+            // NOTE: this is not free'd as its an operand for our scatter_gcn_deg_scaled grad tracked op
+            // which doesnt explicitly save (copy) for backward.
+            const src_indices = try self.device.mem_alloc(usize, n_edge);
+            const tgt_indices = try self.device.mem_alloc(usize, n_edge);
+
+            // TODO: make device safe, if not just add a transfer
+            for (0..n_edge) |i| {
+                src_indices[i] = edge_index_data[i * 2];
+                tgt_indices[i] = edge_index_data[i * 2 + 1];
+            }
+
+            const deg = try Tensor.ones(self.device, &.{n_node}, .{ .requires_grad = false });
+            defer deg.deinit();
+
+            const ones_edges = try Tensor.ones(self.device, &.{n_edge}, .{ .requires_grad = false });
+
+            const deg_contrib = try ones_edges.scatter_add(tgt_indices, &.{n_node});
+            ones_edges.deinit();
+
+            try deg._add(deg_contrib);
+            deg_contrib.deinit();
+
+            const deg_norm = try deg.rsqrt(); // shape: [n_node]
+            defer deg_norm.soft_deinit();
+
+            if (zg.runtime.grad_enabled) deg_norm.enable_grad();
+
+            return try self.scatter_gcn_deg_scaled(h, deg_norm, src_indices, tgt_indices, n_node, n_features, n_edge);
+        }
+
+        /// Differentiable gcn propagate with degree scaling
+        pub fn scatter_gcn_deg_scaled(
+            _: *const Self,
+            h: *Tensor,
+            deg: *Tensor,
+            src_indices: []const usize,
+            tgt_indices: []const usize,
+            n_node: usize,
+            stride: usize,
+            n_edge: usize,
+        ) !*Tensor {
+            const output = try Tensor.DataType.zeros(&.{ n_node, stride }, h.device);
+
+            // Forward kernel
+            h.device.dispatch(opspec.scatter_gcn_deg_scaled(T){
+                .dst = output.get_data(),
+                .h = h.get_data(),
+                .deg = deg.get_data(),
+                .src_indices = src_indices,
+                .tgt_indices = tgt_indices,
+                .stride = stride,
+                .n_edge = n_edge,
+            });
+
+            const Bwd = struct {
+                src_indices: []const usize,
+                tgt_indices: []const usize,
+                stride: usize,
+                n_edge: usize,
+
+                pub fn backward(y: *Tensor, children: *Node.Children, ctx: *@This()) !void {
+                    const h_ = children.get_bwd_upcast(Tensor, 0) orelse return;
+                    const deg_ = children.get_bwd_upcast(Tensor, 1) orelse return;
+
+                    const grad_output = y.assume_grad_data();
+                    const grad_h = try h_.ensure_grad_data(0);
+                    const grad_deg = try deg_.ensure_grad_data(0);
+
+                    y.device.dispatch(opspec.scatter_gcn_deg_scaled_bwd(T){
+                        .grad_output = grad_output,
+                        .h = h_.get_data(),
+                        .deg = deg_.get_data(),
+                        .src_indices = ctx.src_indices,
+                        .tgt_indices = ctx.tgt_indices,
+                        .grad_h = grad_h,
+                        .grad_deg = grad_deg,
+                        .stride = ctx.stride,
+                        .n_edge = ctx.n_edge,
+                    });
+                }
+            };
+
+            return try Tensor.create_dependent(Bwd, .{
+                .data = output,
+                .children = &.{ &h.node, &deg.node },
+                .device = h.device,
+                .gb = h.node.gb,
+                .callback = .{
+                    .src_indices = src_indices,
+                    .tgt_indices = tgt_indices,
+                    .stride = stride,
+                    .n_edge = n_edge,
+                },
+            });
         }
     };
 }

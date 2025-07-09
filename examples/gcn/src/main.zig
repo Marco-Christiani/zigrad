@@ -86,7 +86,7 @@ pub fn run_cora(data_dir: []const u8) !void {
             loss_val = loss.get(0);
 
             try loss.backward();
-            // try optim.step();
+            try optim.step();
             model.zero_grad();
 
             train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
