@@ -154,7 +154,7 @@ pub fn NDTensor(comptime T: type) type {
 
         pub fn teardown(self: *Self) !void {
             const graph = self.node.gb.promote();
-            try graph.teardown(&self.node);
+            graph.teardown(&self.node);
         }
 
         ///////////////////////////////////////////////////////
