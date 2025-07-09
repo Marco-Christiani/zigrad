@@ -79,7 +79,6 @@ pub const Strides = struct {
         const T = decay(@TypeOf(indices));
         const N: u64 = comptime get_len(T);
         const V = @Vector(N, u64);
-        std.debug.print("N: {d}\n", .{N});
 
         if (comptime @typeInfo(decay(T)) == .@"struct") {
             if (@hasField(T, "buffer")) {

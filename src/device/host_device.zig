@@ -1236,8 +1236,7 @@ pub fn scatter_add_csr(_: *const Self, T: type, p: opspec.scatter_add_csr(T)) vo
         const start = p.row_ptr[i];
         const end = p.row_ptr[i + 1];
         const value = p.src[i];
-        std.debug.print("{d}:{d}\n", .{ start, end });
-        // TODO: not this
+        // Broadcast value to segment range
         for (start..end) |j| {
             p.dst[j] += value;
         }
@@ -1257,5 +1256,57 @@ pub fn segment_sum_csr(_: *const Self, T: type, p: opspec.segment_sum_csr(T)) vo
         const start = row_ptr[i];
         const end = row_ptr[i + 1];
         dst[i] = vsum_contig(T, src[start..end]);
+    }
+}
+
+/// $dst[tgt] += deg[tgt] * deg[src] * h[src]$
+/// Degree may be scaled by the user e.g.,
+///     $dst[tgt] += deg[tgt]^{-0.5} * deg[src]^{-0.5} * h[src]$
+pub fn scatter_gcn_deg_scaled(_: *const Self, T: type, p: opspec.scatter_gcn_deg_scaled(T)) void {
+    for (0..p.n_edge) |i| {
+        const src = p.src_indices[i];
+        const tgt = p.tgt_indices[i];
+
+        const w = p.deg[src] * p.deg[tgt];
+
+        const src_off = src * p.stride;
+        const tgt_off = tgt * p.stride;
+
+        for (0..p.stride) |j| {
+            p.dst[tgt_off + j] += w * p.h[src_off + j];
+        }
+    }
+}
+
+pub fn scatter_gcn_deg_scaled_bwd(_: *const Self, T: type, p: opspec.scatter_gcn_deg_scaled_bwd(T)) void {
+    for (0..p.n_edge) |i| {
+        const src = p.src_indices[i];
+        const tgt = p.tgt_indices[i];
+
+        const deg_src = p.deg[src];
+        const deg_tgt = p.deg[tgt];
+
+        const src_off = src * p.stride;
+        const tgt_off = tgt * p.stride;
+
+        var grad_deg_src: T = 0;
+        var grad_deg_tgt: T = 0;
+
+        for (0..p.stride) |j| {
+            const grad_out = p.grad_output[tgt_off + j];
+            const h_val = p.h[src_off + j];
+
+            // dL/dh[src]
+            p.grad_h[src_off + j] += grad_out * deg_src * deg_tgt;
+
+            // dL/ddeg[src]
+            grad_deg_src += grad_out * deg_tgt * h_val;
+
+            // dL/ddeg[tgt]
+            grad_deg_tgt += grad_out * deg_src * h_val;
+        }
+
+        p.grad_deg[src] += grad_deg_src;
+        p.grad_deg[tgt] += grad_deg_tgt;
     }
 }

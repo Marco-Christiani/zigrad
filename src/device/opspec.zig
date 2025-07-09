@@ -594,3 +594,65 @@ pub fn segment_sum_csr(T: type) type {
         dst: []T,
     };
 }
+
+pub fn scatter_gcn_deg_scaled(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_gcn_deg_scaled";
+        pub const __type__ = T;
+
+        /// [n_node * stride] - output accumulated features
+        dst: []T,
+
+        /// [n_node * stride] - input node features
+        h: []const T,
+
+        /// [n_node] - deg^{-0.5}
+        deg: []const T,
+
+        /// [n_edge] - edge_index[0]
+        src_indices: []const usize,
+
+        /// [n_edge] - edge_index[1]
+        tgt_indices: []const usize,
+
+        /// stride for `src` and `tgt` (e.g., feature dimension)
+        stride: usize,
+
+        /// number of edges
+        n_edge: usize,
+    };
+}
+
+pub fn scatter_gcn_deg_scaled_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "scatter_gcn_deg_scaled_bwd";
+        pub const __type__ = T;
+
+        /// dL/dy [n_node * stride]
+        grad_output: []const T,
+
+        /// forward input
+        h: []const T,
+
+        /// forward input
+        deg: []const T,
+
+        /// forward input
+        src_indices: []const usize,
+
+        /// forward input
+        tgt_indices: []const usize,
+
+        /// dL/dh
+        grad_h: []T,
+
+        /// dL/ddeg
+        grad_deg: []T,
+
+        /// stride for `src` and `tgt` (e.g., feature dimension)
+        stride: usize,
+
+        /// number of edges
+        n_edge: usize,
+    };
+}
