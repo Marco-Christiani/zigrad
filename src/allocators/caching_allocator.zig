@@ -13,7 +13,7 @@ const allocator = std.heap.smp_allocator;
 pub fn CachingAllocator(DataHandler: type) type {
     return struct {
         const Self = @This();
-        const BlockPool = @import("block_pool.zig").BockPool(DataHandler);
+        const BlockPool = @import("block_pool.zig").BlockPool(DataHandler);
 
         // support for small tensor sizes that do not work with general block
         // alignment requirements.

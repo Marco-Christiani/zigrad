@@ -103,7 +103,7 @@ const FreeList = struct {
 /// requested for the incoming allocation.
 pub const Error = error{Overflow} || std.mem.Allocator.Error;
 
-pub fn BockPool(DataHandler: type) type {
+pub fn BlockPool(DataHandler: type) type {
     return struct {
         const Self = @This();
         const use_map_alloc = @hasDecl(DataHandler, "map_alloc");
