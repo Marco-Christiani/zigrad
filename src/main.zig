@@ -21,13 +21,16 @@ test "visitors" {
     var graph = zg.Graph.init(allocator, .{});
     defer graph.deinit();
 
-    const x = try zg.NDTensor(f32).empty(cpu.reference(), &.{ 2, 6 }, .{
+    zg.global_graph_init(allocator, .{});
+    defer zg.global_graph_deinit();
+
+    const x = try zg.NDTensor(f32).random(cpu.reference(), &.{ 2, 6 }, .uniform, .{
         .label = "x: f32",
         .graph = &graph,
     });
     defer x.deinit();
 
-    const y = try zg.NDTensor(f64).empty(cpu.reference(), &.{ 2, 2 }, .{
+    const y = try zg.NDTensor(f64).random(cpu.reference(), &.{ 2, 2 }, .uniform, .{
         .label = "y: f64",
         .graph = &graph,
     });
@@ -38,13 +41,6 @@ test "visitors" {
 
     try lmap.put("layer_a.foo.bar.weights", x, .{ .owned = false });
     try lmap.put("layer_a.foo.bar.bias", y, .{ .owned = false });
-    //try lmap.put("layer_a.foo.baz.weights", x, .{ .owned = false });
-    //try lmap.put("layer_a.foo.baz.bias", y, .{ .owned = false });
-
-    //try lmap.put("layer_b.foo.bar.weights", x, .{ .owned = false });
-    //try lmap.put("layer_b.foo.bar.bias", y, .{ .owned = false });
-    //try lmap.put("layer_b.foo.baz.weights", x, .{ .owned = false });
-    //try lmap.put("layer_b.foo.baz.bias", y, .{ .owned = false });
 
     lmap.for_each(struct { // target every node in the graph (auto-cast)
         pub fn visit(_: @This(), key: []const u8, t: anytype) void {
@@ -96,4 +92,11 @@ test "visitors" {
     lmap.print_tree();
 
     try lmap.save_to_file("here.stz", std.heap.smp_allocator);
+
+    var tree = try LayerMap.load_from_file("here.stz", std.heap.smp_allocator, cpu.reference(), .{
+        .owning = true,
+    });
+    defer tree.deinit();
+
+    tree.print_tree();
 }

@@ -281,142 +281,68 @@ pub fn serialize(self: *Self, allocator: Allocator) ![]u8 {
     return stz.serialize_tensors(collector.tensor_list, allocator);
 }
 
-// Print tree structure
-//pub fn print_tree(self: *Self, prefix: []const u8) void {
-//    switch (self.data) {
-//        .subtree => |*subtrees| {
-//            var iter = subtrees.iterator();
-//            while (iter.next()) |entry| {
-//                std.debug.print("{s}{s}/ (subtree)\n", .{ prefix, entry.key_ptr.* });
-//                const new_prefix = std.fmt.allocPrint(self.allocator, "{s}  ", .{prefix}) catch return;
-//                defer self.allocator.free(new_prefix);
-//                entry.value_ptr.*.print_tree(new_prefix);
-//            }
-//        },
-//        .leaf => |*leaves| {
-//            var iter = leaves.iterator();
-//            while (iter.next()) |entry| {
-//                std.debug.print("{s}{s} (leaf: {d} elements)\n", .{ prefix, entry.key_ptr.*, entry.value_ptr.*.get_data().len });
-//            }
-//        },
-//    }
-//}
-//
-// Serialize the parameter tree to safetensors format
-//pub fn serialize(self: *Self, allocator: std.mem.Allocator) ![]u8 {
-//    var tensor_list = std.ArrayList(stz.Tensor).init(allocator);
-//
-//    const TensorCollector = struct {
-//        tensor_list: *std.ArrayList(stz.Tensor),
-//        allocator: std.mem.Allocator,
-//
-//        pub fn visit(_self: *@This(), path: []const u8, tensor: *T) !void {
-//            const owned_path = try _self.allocator.dupe(u8, path);
-//            errdefer _self.allocator.free(owned_path);
-//
-//            const tensor_data = tensor.get_data();
-//            const shape_slice = tensor.get_shape();
-//            // const owned_shape = _self.allocator.dupe(usize, shape_slice);
-//            // errdefer _self.allocator.free(owned_shape);
-//
-//            if (!@hasDecl(T, "ValueType")) @compileError("Unable to infer tensor element type. Missing ValueType field.");
-//            const dtype = switch (T.ValueType) {
-//                f32 => stz.Dtype.f32,
-//                f64 => stz.Dtype.f64,
-//                i32 => stz.Dtype.i32,
-//                i64 => stz.Dtype.i64,
-//                u32 => stz.Dtype.u32,
-//                u64 => stz.Dtype.u64,
-//                else => stz.Dtype.f32,
-//            };
-//
-//            const data_bytes = std.mem.sliceAsBytes(tensor_data);
-//
-//            try _self.tensor_list.append(stz.Tensor{
-//                .name = owned_path,
-//                .dtype = dtype,
-//                // .shape = owned_shape,
-//                .shape = shape_slice,
-//                .data = @alignCast(data_bytes),
-//            });
-//        }
-//    };
-//
-//    var collector = TensorCollector{
-//        .tensor_list = &tensor_list,
-//        .allocator = allocator,
-//    };
-//
-//    try self.for_each(&collector);
-//    return try stz.serialize_tensors(tensor_list, allocator);
-//}
+pub fn deserialize(
+    data: []const u8,
+    allocator: Allocator,
+    device: zg.DeviceReference,
+    opts: LoadOpts,
+) !Self {
+    const graph = opts.graph orelse zg.global_graph_get();
 
-// Deserialize a parameter tree from safetensors format
-// Leaf labels must be allocated and owned by caller. Use an arena, stack buf might be fine.
-//pub fn deserialize(
-//    data: []const u8,
-//    allocator: Allocator,
-//    device: zg.DeviceReference,
-//    graph: *zg.Graph,
-//) !Self {
-//    var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
-//    defer st_file.deinit();
-//
-//    const tree = Self.init(allocator);
-//    errdefer tree.deinit();
-//
-//    for (st_file.tensors) |tensor_info| {
-//        const tensor_view = try st_file.get(tensor_info.name);
-//        const ndtensor = try create_tensor_from_view(tensor_view, device, graph);
-//        try tree.put(tensor_info.name, ndtensor);
-//    }
-//
-//    std.debug.print("[deserialize] loaded:\n", .{});
-//    tree.print_tree("");
-//    std.debug.print("\n", .{});
-//
-//    return tree;
-//}
+    var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
+    defer st_file.deinit();
+
+    var tree = Self.init(allocator);
+    errdefer tree.deinit();
+
+    for (st_file.tensors) |tensor_info| {
+        const tensor_view = try st_file.get(tensor_info.name);
+        const ndtensor = try create_tensor_from_view(tensor_view, device, graph, opts.owning);
+        try tree.put_closure(tensor_info.name, ndtensor);
+    }
+    return tree;
+}
 
 fn closure_tensor(
     T: type,
     device: zg.DeviceReference,
-    bytes: []const u8,
+    bytes: []align(8) const u8,
     shape: []const usize,
+    owned: bool,
     opts: zg.TensorOpts,
-) !*NDTensor(T) {
-    return ClosurePointer.init(
-        try NDTensor(T).from_slice(device, std.mem.sliceAsBytes(bytes), shape, opts),
-    );
+) !ClosurePointer {
+    const slice: []const T = std.mem.bytesAsSlice(T, bytes);
+    return ClosurePointer.init(try NDTensor(T).from_slice(device, slice, shape, opts), owned);
 }
 
 // Helper function to create NDTensor from TensorView
-//fn create_tensor_from_view(
-//    view: stz.TensorView,
-//    device: zg.DeviceReference,
-//    graph: *zg.Graph,
-//) !ClosurePointer {
-//    const opts = TensorOpts{
-//        .requires_grad = true,
-//        .graph = graph,
-//    };
-//
-//    return switch (view.info.dtype) {
-//        .u8 => view.data,
-//        .bool => closure_tensor(bool, device, view.data, view.info.shape, opts),
-//        .i8 => closure_tensor(i8, device, view.data, view.info.shape, opts),
-//        .i16 => closure_tensor(i16, device, view.data, view.info.shape, opts),
-//        .u16 => closure_tensor(u16, device, view.data, view.info.shape, opts),
-//        .u32 => closure_tensor(u32, device, view.data, view.info.shape, opts),
-//        .u64 => closure_tensor(u64, device, view.data, view.info.shape, opts),
-//        .f16 => closure_tensor(f16, device, view.data, view.info.shape, opts),
-//        .f32 => closure_tensor(f32, device, view.data, view.info.shape, opts),
-//        .f64 => closure_tensor(f64, device, view.data, view.info.shape, opts),
-//        .i32 => closure_tensor(i32, device, view.data, view.info.shape, opts),
-//        .i64 => closure_tensor(i64, device, view.data, view.info.shape, opts),
-//        else => return error.UnsupportedDtype,
-//    };
-//}
+fn create_tensor_from_view(
+    view: stz.TensorView,
+    device: zg.DeviceReference,
+    graph: *zg.Graph,
+    owned: bool,
+) !ClosurePointer {
+    const opts = TensorOpts{
+        .requires_grad = true,
+        .graph = graph,
+    };
+
+    return switch (view.info.dtype) {
+        .u8 => closure_tensor(u8, device, view.data, view.info.shape, owned, opts),
+        .bool => closure_tensor(bool, device, view.data, view.info.shape, owned, opts),
+        .i8 => closure_tensor(i8, device, view.data, view.info.shape, owned, opts),
+        .i16 => closure_tensor(i16, device, view.data, view.info.shape, owned, opts),
+        .u16 => closure_tensor(u16, device, view.data, view.info.shape, owned, opts),
+        .u32 => closure_tensor(u32, device, view.data, view.info.shape, owned, opts),
+        .u64 => closure_tensor(u64, device, view.data, view.info.shape, owned, opts),
+        .f16 => closure_tensor(f16, device, view.data, view.info.shape, owned, opts),
+        .f32 => closure_tensor(f32, device, view.data, view.info.shape, owned, opts),
+        .f64 => closure_tensor(f64, device, view.data, view.info.shape, owned, opts),
+        .i32 => closure_tensor(i32, device, view.data, view.info.shape, owned, opts),
+        .i64 => closure_tensor(i64, device, view.data, view.info.shape, owned, opts),
+        else => return error.UnsupportedDtype,
+    };
+}
 
 // Save parameter tree to file
 pub fn save_to_file(
@@ -434,15 +360,20 @@ pub fn save_to_file(
     });
 }
 
+pub const LoadOpts = struct {
+    owning: bool = true,
+    graph: ?*zg.Graph = null,
+};
+
 // Load parameter tree from file
-//pub fn load_from_file(
-//    file_path: []const u8,
-//    allocator: std.mem.Allocator,
-//    device: anytype,
-//    graph: anytype,
-//) !*Self {
-//    const file_data = try std.fs.cwd().readFileAlloc(allocator, file_path, .{});
-//    defer allocator.free(file_data);
-//
-//    return Self.deserialize(file_data, allocator, device, graph);
-//}
+pub fn load_from_file(
+    file_path: []const u8,
+    allocator: std.mem.Allocator,
+    device: zg.DeviceReference,
+    opts: LoadOpts,
+) !Self {
+    const file_data = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
+    defer allocator.free(file_data);
+
+    return deserialize(file_data, allocator, device, opts);
+}
