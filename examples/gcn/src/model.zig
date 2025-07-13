@@ -286,26 +286,98 @@ pub fn GraphConvLayer(comptime T: type) type {
         pub fn propagate_scatter_gcn_deg_scaled(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
             const n_node = h.get_dim(0);
             const n_features = h.get_dim(1);
-            const n_edge = edge_index.get_dim(1);
-            std.debug.assert(edge_index.get_dim(0) == 2);
+            // std.debug.assert(edge_index.get_dim(1) == 2); // standard layout
+            std.debug.assert(edge_index.get_dim(0) == 2); // optimized layout
+            // const n_conn = edge_index.get_size() / 2; // in both cases, this holds
+            const n_conn = edge_index.get_dim(1); // optimized layout
 
-            const edge_index_data = edge_index.get_data();
+            // Two possible layouts for edge_index
+            // Standard Representation:
+            // [
+            //   [src_0, tgt_0],
+            //   [src_1, tgt_1],
+            //   [src_2, tgt_2],
+            // ]
+            //
+            // Data layout - interleaved:
+            // [src_0, tgt_0, src_1, tgt_1, src_2, tgt_2]
+            //
+            // To construct 1D views for src and tgt notice the data interleaved,
+            // so our views necessarily non-contiguous. In terms of the data layout
+            // this corresponds to strides={2}. For tgt, we need to shift the base
+            // pointer by an offset.
+            //
+            // View layout:
+            // src = edge_index[:, 0]
+            // -> ptr = edge_index.ptr (i.e. &edge_index[0])
+            //    offset = 0
+            //    strides = {2}
+            //
+            // tgt = edge_index[:, 1]
+            // -> ptr = edge_index.ptr (i.e. &edge_index[0])
+            //    offset = 1
+            //    strides = {2}
+            //
+            // Generalized access semantics:
+            // Consider $v \in {src, tgt}$ and
+            // let v_i be the value for the i'th source/target and v[k] be the k'th element of v following contiguous
+            //   indexing semantics, i.e. in pseudocode &v[k] == v.ptr + k
+            //
+            // Then,
+            //   v_i = (v.ptr + offset)[i * 2]
+            //
+            // This is, of course, indexing semantics generalized with the addition of an offset and relaxing the
+            //   assumption of row contiguity.
+            //
+            //  ---
+            //
+            // Optimized Representation:
+            // [
+            //   [src_0, src_1, src_2],
+            //   [tgt_0, tgt_1, tgt_2],
+            // ]
+            //
+            // Data layout:
+            // [src_0, src_1, src_2, tgt_0, tgt_1, tgt_2]
+            //
+            // 1D views for src and tgt are now contiguous slices.
+            // I.e.,
+            // src = edge_index[0..3]
+            // tgt = edge_index[3..6]
+            //
+            // View layout:
+            // src = edge_index[0, :]
+            // -> ptr = edge_index.ptr (i.e. &edge_index[0])
+            //    offset = 0
+            //    strides = {1}
+            //
+            // tgt = edge_index[1, :]
+            // -> ptr = edge_index.ptr
+            //    offset = 3
+            //    strides = {1}
+            // tgt's first element is thus at ptr + offset == &edge_index[3]
 
+            // Standard storage layout
             // NOTE: this is not free'd as its an operand for our scatter_gcn_deg_scaled grad tracked op
             // which doesnt explicitly save (copy) for backward.
-            const src_indices = try self.device.mem_alloc(usize, n_edge);
-            const tgt_indices = try self.device.mem_alloc(usize, n_edge);
+            // const src_indices = try self.device.mem_alloc(usize, n_edge);
+            // const tgt_indices = try self.device.mem_alloc(usize, n_edge);
 
             // TODO: make device safe, if not just add a transfer
-            for (0..n_edge) |i| {
-                src_indices[i] = edge_index_data[i * 2];
-                tgt_indices[i] = edge_index_data[i * 2 + 1];
-            }
+            // const edge_index_data = edge_index.get_data();
+            // for (0..n_edge) |i| {
+            //     src_indices[i] = edge_index_data[0 + i * 2]; // [0, i]
+            //     tgt_indices[i] = edge_index_data[1 + i * 2]; // [1, i]
+            // }
+
+            // Optimized layout
+            const src_indices = edge_index.data.data.raw[0..n_conn];
+            const tgt_indices = edge_index.data.data.raw[n_conn..];
 
             const deg = try Tensor.ones(self.device, &.{n_node}, .{ .requires_grad = false });
             defer deg.deinit();
 
-            const ones_edges = try Tensor.ones(self.device, &.{n_edge}, .{ .requires_grad = false });
+            const ones_edges = try Tensor.ones(self.device, &.{n_conn}, .{ .requires_grad = false });
 
             const deg_contrib = try ones_edges.scatter_add(tgt_indices, &.{n_node});
             ones_edges.deinit();
@@ -318,7 +390,7 @@ pub fn GraphConvLayer(comptime T: type) type {
 
             if (zg.runtime.grad_enabled) deg_norm.enable_grad();
 
-            return try self.scatter_gcn_deg_scaled(h, deg_norm, src_indices, tgt_indices, n_node, n_features, n_edge);
+            return try self.scatter_gcn_deg_scaled(h, deg_norm, src_indices, tgt_indices, n_node, n_features, n_conn);
         }
 
         /// Differentiable gcn propagate with degree scaling

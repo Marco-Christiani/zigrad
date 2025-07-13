@@ -103,8 +103,13 @@ pub fn Dataset(comptime T: type) type {
                 const cited_index = try std.fmt.parseUnsigned(usize, values.next().?, 10);
                 const citing_index = try std.fmt.parseUnsigned(usize, values.next().?, 10);
 
-                cites[i * 2] = cited_index;
-                cites[i * 2 + 1] = citing_index;
+                // Write col-wise (standard convention)
+                // cites[i * 2] = cited_index;
+                // cites[i * 2 + 1] = citing_index;
+
+                // Write directly to row-wise layout (better cache behavior): [src0, src1, ..., tgt0, tgt1, ...]
+                cites[i] = cited_index; // src indices: [0..total_cites)
+                cites[total_cites + i] = citing_index; // tgt indices: [total_cites..2*total_cites)
                 i += 1;
             }
 
@@ -116,6 +121,9 @@ pub fn Dataset(comptime T: type) type {
             return .{
                 .x = try Tensor(T).from_slice(device, papers, &[_]usize{ total_papers, num_features }, config),
                 .y = try Tensor(T).from_slice(device, classes, &[_]usize{ total_papers, num_classes }, .{}),
+                // Standard convention
+                // .edge_index = try Tensor(usize).from_slice(device, cites, &[_]usize{ total_cites, 2 }, .{}),
+                // Optimized storage
                 .edge_index = try Tensor(usize).from_slice(device, cites, &[_]usize{ 2, total_cites }, .{}),
                 .num_features = num_features,
                 .num_classes = num_classes,

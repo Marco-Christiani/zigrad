@@ -497,8 +497,8 @@ pub fn NDTensor(comptime T: type) type {
                     y.device.dispatch(opspec.transpose(T){
                         .A = y.assume_grad_data(),
                         .B = try x.ensure_grad_data(0),
-                        .m = self.shape.get(0),
-                        .n = self.shape.get(1),
+                        .m = y.get_dim(0),
+                        .n = y.get_dim(1),
                         .alpha = 1.0,
                     });
                 }
@@ -506,10 +506,10 @@ pub fn NDTensor(comptime T: type) type {
 
             return try create_dependent(TransposeBwd, .{
                 .data = try self.data.transpose(self.device),
+                .gb = self.node.gb,
                 .children = &.{&self.node},
                 .device = self.device,
-                .gb = self.node.gb,
-                .context = .{},
+                .callback = .{},
                 .op = .TRANSPOSE,
             });
         }
