@@ -68,6 +68,7 @@ pub fn GraphConvLayer(comptime T: type) type {
                 .requires_grad = true,
                 .acquired = true,
             });
+            
             errdefer weights.deinit();
             const bias = try Tensor.zeros(device, &.{out_features}, .{
                 .label = "conv_bias",
@@ -110,178 +111,7 @@ pub fn GraphConvLayer(comptime T: type) type {
             return y;
         }
 
-        // pub const propagate = propagate_direct;
-        // pub const propagate = propagate_alt;
-        // pub const propagate = propagate_ag;
         pub const propagate = propagate_scatter_gcn_deg_scaled;
-
-        /// A simple, direct, implementation of propagate
-        /// Due to it being direct, it directly accesses device memory and is thus not safe for use with accelerators like CUDA
-        /// This implementation is also slower on some platforms for which NDArray ops dispatch to optimized vendor kernels,
-        /// so despite having fewer steps it underperforms the above variant that chains many ops together.
-        pub fn propagate_direct(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            if (self.adj_mat == null) {
-                const n_node = h.get_dim(0);
-                const n_edge = edge_index.get_dim(1);
-
-                var adj_mat = try Tensor.zeros(self.device, &.{ n_node, n_node }, .{
-                    .label = "conv_adj_mat",
-                    .acquired = true,
-                });
-                // errdefer adj_mat.deinit();
-                const adj_mat_data = adj_mat.get_data();
-
-                const deg = try zg.NDArray(T).empty(&.{n_node}, self.device);
-                deg.fill(1, self.device); // the initial is 1 (self loop)
-                for (0..n_edge) |i| {
-                    const source = edge_index.get(i * 2);
-                    // NOTE: this is not safe until we support `get` and `set` or `inc` for `zg.NDArray`
-                    deg.data.raw[source] += 1;
-                }
-
-                for (0..n_edge) |i| {
-                    const source = edge_index.get(i * 2);
-                    const target = edge_index.get(i * 2 + 1);
-                    adj_mat_data[source * n_node + target] = std.math.pow(T, deg.data.raw[source], -0.5);
-                }
-                self.adj_mat = adj_mat;
-            }
-            if (self.adj_mat) |a| {
-                return a.bmm_acc(h, h.get_shape(), .{});
-            } else unreachable;
-        }
-
-        /// Another simple implementation of propagate
-        /// This implementation is also slightly direct but uses the differentiable `gather` and `scatter_add` ops
-        pub fn propagate_alt(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            // NOTE: for now, for simplicity and development, we use unsafe direct data access as we are developing using only the host device
-            const n_node = h.get_dim(0);
-            const n_features = h.get_dim(1);
-            const n_edge = edge_index.get_dim(1);
-            const edge_index_data = edge_index.get_data();
-
-            // Compute degrees for normalization
-            const deg = self.device.mem_scratch(T, n_node);
-            self.device.mem_fill(T, deg, 1); // the initial is 1 (self loop)
-            for (0..n_edge) |i| {
-                const source = edge_index_data[i * 2];
-                deg[source] += 1;
-            }
-
-            // Create normalized features for scatter
-            var normalized_h = try h.clone();
-            errdefer normalized_h.deinit();
-            const h_data = normalized_h.get_data();
-            for (0..n_node) |node| {
-                const norm_factor = std.math.pow(T, deg[node], -0.5);
-                for (0..n_features) |feat| {
-                    h_data[node * n_features + feat] *= norm_factor;
-                }
-            }
-
-            const target_indices = try self.device.mem_alloc(usize, n_edge);
-            for (0..n_edge) |i| {
-                target_indices[i] = edge_index_data[i * 2 + 1];
-            }
-
-            const source_indices = try zg.NDArray(usize).empty(&.{ n_edge, 1 }, self.device);
-            const source_index_data = source_indices.get_data();
-            for (0..n_edge) |i| source_index_data[i] = edge_index_data[i * 2];
-            const edge_features = try normalized_h.gather(source_indices, 0);
-            // Grad tracked
-            const output = try edge_features.scatter_add(target_indices, &.{ n_node, n_features });
-            return output;
-        }
-
-        /// An implementation of propogate that attempts to rely on Zigrad ops as much as possible
-        /// This is the fastest implementation, despite building a larger computation graph.
-        /// This is also a development version. It is complex and we are working to reduce the complexity
-        /// by introducing more functionality to Zigrad, such as adding more ops.
-        /// This should become more concise over time and eventually become the official implementation
-        pub fn propagate_ag(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            const n_node = h.get_dim(0);
-            const n_features = h.get_dim(1);
-            const n_edge = edge_index.get_dim(1);
-
-            std.debug.assert(edge_index.get_dim(0) == 2);
-
-            const edge_index_data = edge_index.get_data();
-
-            // TODO: Compute deg_norm_2d with in place NDArray ops since this doesnt need to be grad tracked.
-            //   Will be less verbose and way more performant anyways.
-            // Compute degrees
-            const deg = try Tensor.ones(self.device, &.{n_node}, .{ .requires_grad = false }); // Start with self-loops
-            defer deg.deinit();
-
-            // Count degrees with scatter_add
-            const ones_edges = try Tensor.ones(self.device, &.{n_edge}, .{ .requires_grad = false });
-            defer ones_edges.deinit();
-
-            // TODO: Not device safe!!
-            const target_indices = try self.device.mem_alloc(usize, n_edge);
-            defer self.device.mem_free(target_indices);
-            for (0..n_edge) |i| target_indices[i] = edge_index_data[i * 2 + 1];
-
-            // Scatter to [n_node]
-            const deg_contrib = try ones_edges.scatter_add(target_indices, &.{n_node});
-            defer deg_contrib.deinit();
-
-            const total_deg = try deg_contrib.add(deg);
-            defer total_deg.deinit();
-
-            // Apply degree normalization: deg^(-0.5)
-            // These are equivalent
-            // const deg_norm = try total_deg.pow(-0.5);
-            const deg_norm = try total_deg.rsqrt();
-            defer deg_norm.deinit();
-
-            // Reshape deg_norm to [n_node, 1] for broadcasting with h [n_node, n_features]
-            const deg_norm_2d = try deg_norm.reshape(&.{ n_node, 1 });
-            deg_norm_2d.soft_deinit(); // required for normalized_h.grad
-
-            // NOTE: Computation graph starts here as this is the first use of `h`
-            const normalized_h = try h.mul(deg_norm_2d); // [n_node, n_features]
-            defer if (!normalized_h.requires_grad()) normalized_h.deinit();
-
-            // Create source indices for gathering - must match normalized_h dimensions
-            const source_indices_data = try self.device.mem_alloc(usize, n_edge);
-            defer self.device.mem_free(source_indices_data);
-
-            for (0..n_edge) |i| {
-                source_indices_data[i] = edge_index_data[i * 2];
-            }
-
-            // Extract edge features
-            const edge_features = try normalized_h.index_select(0, source_indices_data);
-            defer if (!edge_features.requires_grad()) edge_features.deinit();
-
-            // // V1: using scatter_add()
-            // // Create flattened offsets for scatter_add
-            // const flat_offsets = try self.device.mem_scratch(usize, n_edge * n_features);
-            // for (0..n_edge) |edge| {
-            //     const target_node = edge_index_data[edge * 2 + 1];
-            //     for (0..n_features) |feat| {
-            //         flat_offsets[edge * n_features + feat] = target_node * n_features + feat;
-            //     }
-            // }
-            // // Scatter features to target nodes
-            // const aggregated = try edge_features.scatter_add(flat_offsets, &.{ n_node, n_features });
-
-            // V2: using scatter_add_strided() to reduce contiguous segments
-            // Scatter features to target nodes w strided scatter add
-            const aggregated = try edge_features.scatter_add_strided(target_indices, n_features, &.{ n_node, n_features });
-            defer if (!aggregated.requires_grad()) aggregated.deinit();
-
-            // Add self-connections (normalized_h represents self-loops)
-            try aggregated._add(normalized_h);
-            const output = aggregated;
-
-            // Or,
-            // const output = try aggregated.add(normalized_h);
-            // output.set_label("output");
-
-            return output;
-        }
 
         pub fn propagate_scatter_gcn_deg_scaled(self: *Self, h: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
             const n_node = h.get_dim(0);
@@ -387,6 +217,7 @@ pub fn GraphConvLayer(comptime T: type) type {
 
             const deg_norm = try deg.rsqrt(); // shape: [n_node]
             defer deg_norm.soft_deinit();
+
 
             if (zg.runtime.grad_enabled) deg_norm.enable_grad();
 
