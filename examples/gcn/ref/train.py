@@ -39,8 +39,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--device",
-        choices=["cuda", "cpu"],
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=["cuda", "cpu", "mps"],
+        default="cpu",
         help="Device to use",
     )
     args = parser.parse_args()
@@ -104,7 +104,7 @@ if __name__ == "__main__":
         total_test_time += test_timer.duration
         print(
             f"Epoch: {epoch + 1:02d}, Loss: {loss:.4f}, "
-            f"Train_acc: {train_acc:.2f}, Val_acc: {val_acc:.2f}, Test_acc: {test_acc:.2f}, "
+            f"Train_acc: {train_acc:.4f}, Val_acc: {val_acc:.4f}, Test_acc: {test_acc:.4f}, "
             f"Train_time {train_timer.duration:.2f} ms, Test_time {test_timer.duration:.2f} ms"
         )
 
