@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const debug: bool = (builtin.mode == .Debug);
 const Graph = @import("../graph.zig");
 const zg = @import("../zigrad.zig");
+const TypeID = @import("../utils/rtti.zig").TypeID;
 
 const Node = @This();
 
@@ -385,17 +386,6 @@ pub const BackwardContext = struct {
             .none => @panic("Cannot cast from empty storage."),
         };
         return @ptrFromInt(address);
-    }
-};
-
-pub const TypeID = enum(usize) {
-    _,
-    pub fn init(T: type) TypeID {
-        const __impl__ = struct {
-            const held = T;
-            var id: u8 = 0;
-        };
-        return @enumFromInt(@intFromPtr(&__impl__.id));
     }
 };
 
