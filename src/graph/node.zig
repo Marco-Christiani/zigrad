@@ -281,7 +281,7 @@ pub const BackwardContext = struct {
     storage: union(enum) {
         none: void,
         buf: SmallBuffer,
-        ptr: ClosurePointer,
+        ptr: StoragePointer,
         ref: *anyopaque,
     } = .none,
     next: ?*BackwardContext = null,
@@ -338,7 +338,7 @@ pub const BackwardContext = struct {
         } else {
             const ptr = try allocator.create(BwdClosureDeep);
             ptr.* = bwd_instance;
-            tmp.storage = .{ .ptr = ClosurePointer.init(BwdClosureDeep, ptr) };
+            tmp.storage = .{ .ptr = StoragePointer.init(BwdClosureDeep, ptr) };
         }
 
         return tmp;
@@ -430,10 +430,10 @@ fn ContextArgType(comptime callable: anytype) type {
     }
 }
 
-const ClosurePointer = struct {
+const StoragePointer = struct {
     held: *anyopaque,
     free: *const fn (*anyopaque, std.mem.Allocator) void,
-    fn init(T: type, ptr: *T) ClosurePointer {
+    fn init(T: type, ptr: *T) StoragePointer {
         const free = struct {
             pub fn impl(_ptr: *anyopaque, allocator: std.mem.Allocator) void {
                 allocator.destroy(@ptrCast(@alignCast(_ptr)));
@@ -441,7 +441,7 @@ const ClosurePointer = struct {
         }.free;
         return .{ .held = ptr, .free = free };
     }
-    fn deinit(self: *ClosurePointer, allocator: std.mem.Allocator) void {
+    fn deinit(self: *StoragePointer, allocator: std.mem.Allocator) void {
         self.free(self.held, allocator);
         self.* = undefined;
     }
