@@ -273,6 +273,7 @@ pub fn rsqrt_fwd(T: type) type {
         pub const __type__ = T;
         x: []const T,
         y: []T,
+        eps: f32,
     };
 }
 

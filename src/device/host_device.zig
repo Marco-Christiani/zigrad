@@ -317,16 +317,16 @@ pub fn sqrt_bwd(_: *const Self, T: type, p: opspec.sqrt_bwd(T)) void {
 }
 
 /// L2 Inverse Sqrt
-fn vrsqrt(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+fn vrsqrt(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize, eps: f32) void {
     if (inca == 1 and incr == 1) {
-        vrsqrt_contig(T, a, r);
+        vrsqrt_contig(T, a, r, eps);
     } else {
-        vrsqrt_strided(T, a, inca, r, incr, n);
+        vrsqrt_strided(T, a, inca, r, incr, n, eps);
     }
 }
 
 /// L2 Inverse Sqrt for arbitrary strides
-fn vrsqrt_strided(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize) void {
+fn vrsqrt_strided(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize, eps: f32) void {
     switch (T) {
         f32 => if (@hasDecl(c, "vsInvSqrtI"))
             return c.vsInvSqrtI(
@@ -346,11 +346,11 @@ fn vrsqrt_strided(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: us
             ),
         else => {},
     }
-    vrsqrt_strided_native(T, a, inca, r, incr);
+    vrsqrt_strided_native(T, a, inca, r, incr, eps);
 }
 
 /// L2 Inverse Sqrt for contiguous vectors
-fn vrsqrt_contig(T: type, a: []const T, r: []T) void {
+fn vrsqrt_contig(T: type, a: []const T, r: []T, eps: f32) void {
     switch (T) {
         f32 => if (@hasDecl(c, "vvrsqrtf")) {
             return c.vvrsqrtf(@ptrCast(r.ptr), @ptrCast(a.ptr), @ptrCast(&@as(c_int, @intCast(r.len))));
@@ -364,31 +364,31 @@ fn vrsqrt_contig(T: type, a: []const T, r: []T) void {
         },
         else => {},
     }
-    vrsqrt_contig_native(T, a, r);
+    vrsqrt_contig_native(T, a, r, eps);
 }
 
 /// Inverse square root native implementation
 /// No bounds checking.
-fn vrsqrt_strided_native(T: type, a: []const T, inca: usize, r: []T, incr: usize) void {
+fn vrsqrt_strided_native(T: type, a: []const T, inca: usize, r: []T, incr: usize, eps: f32) void {
     var ai: usize = 0;
     var ri: usize = 0;
     while (ai < a.len) : ({
         ai += inca;
         ri += incr;
     }) {
-        r[ri] = 1 / std.math.sqrt(a[ai]);
+        r[ri] = 1 / @sqrt(@max(a[ai], eps));
     }
 }
 
 /// Inverse square root contiguous native implementation
 /// No bounds checking.
-fn vrsqrt_contig_native(T: type, a: []const T, r: []T) void {
-    for (r, a) |*ri, ai| ri.* = 1 / std.math.sqrt(ai);
+fn vrsqrt_contig_native(T: type, a: []const T, r: []T, eps: f32) void {
+    for (r, a) |*ri, ai| ri.* = 1 / @sqrt(@max(ai, eps));
 }
 
 /// Forward inverse square root implementation
 pub fn rsqrt_fwd(_: *const Self, T: type, p: opspec.rsqrt_fwd(T)) void {
-    vrsqrt(T, p.x, 1, p.y, 1, p.x.len);
+    vrsqrt(T, p.x, 1, p.y, 1, p.x.len, p.eps);
 }
 
 /// In-place backward rsqrt implementation

@@ -90,7 +90,6 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn fill(self: Self, val: T, device: DeviceReference) void {
-            // std.debug.print("FILLING: {}\n", .{val});
             device.mem_fill(T, self.get_data(), val);
         }
 
@@ -367,6 +366,7 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.rsqrt_fwd(T){
                 .x = self.get_data(),
                 .y = result.get_data(),
+                .eps = zg.settings.eps,
             });
             return result;
         }
