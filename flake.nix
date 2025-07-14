@@ -23,7 +23,7 @@
       '';
       defaultShell = {
         "aarch64-darwin" = with pkgs; [ zigpkg ];
-        "x86_64-linux" = with pkgs; [ zigpkg mkl openblas ];
+        "x86_64-linux" = with pkgs; [ zigpkg zls mkl openblas ];
         "aarch64-linux" = with pkgs; [ zigpkg openblas ];
       };
       in

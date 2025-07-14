@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const debug: bool = (builtin.mode == .Debug);
 const Graph = @import("../graph.zig");
 const zg = @import("../zigrad.zig");
+const TypeID = @import("../utils/rtti.zig").TypeID;
 
 const Node = @This();
 
@@ -281,7 +282,7 @@ pub const BackwardContext = struct {
     storage: union(enum) {
         none: void,
         buf: SmallBuffer,
-        ptr: ClosurePointer,
+        ptr: StoragePointer,
         ref: *anyopaque,
     } = .none,
     next: ?*BackwardContext = null,
@@ -338,7 +339,7 @@ pub const BackwardContext = struct {
         } else {
             const ptr = try allocator.create(BwdClosureDeep);
             ptr.* = bwd_instance;
-            tmp.storage = .{ .ptr = ClosurePointer.init(BwdClosureDeep, ptr) };
+            tmp.storage = .{ .ptr = StoragePointer.init(BwdClosureDeep, ptr) };
         }
 
         return tmp;
@@ -388,17 +389,6 @@ pub const BackwardContext = struct {
     }
 };
 
-pub const TypeID = enum(usize) {
-    _,
-    pub fn init(T: type) TypeID {
-        const __impl__ = struct {
-            const held = T;
-            var id: u8 = 0;
-        };
-        return @enumFromInt(@intFromPtr(&__impl__.id));
-    }
-};
-
 fn arity(comptime callable: anytype) usize {
     return switch (@typeInfo(@TypeOf(callable))) {
         .@"fn" => |f| f.params.len,
@@ -430,10 +420,10 @@ fn ContextArgType(comptime callable: anytype) type {
     }
 }
 
-const ClosurePointer = struct {
+const StoragePointer = struct {
     held: *anyopaque,
     free: *const fn (*anyopaque, std.mem.Allocator) void,
-    fn init(T: type, ptr: *T) ClosurePointer {
+    fn init(T: type, ptr: *T) StoragePointer {
         const free = struct {
             pub fn impl(_ptr: *anyopaque, allocator: std.mem.Allocator) void {
                 allocator.destroy(@ptrCast(@alignCast(_ptr)));
@@ -441,7 +431,7 @@ const ClosurePointer = struct {
         }.free;
         return .{ .held = ptr, .free = free };
     }
-    fn deinit(self: *ClosurePointer, allocator: std.mem.Allocator) void {
+    fn deinit(self: *StoragePointer, allocator: std.mem.Allocator) void {
         self.free(self.held, allocator);
         self.* = undefined;
     }
