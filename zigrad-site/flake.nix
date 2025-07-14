@@ -14,12 +14,11 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            nodejs_20
-            nodePackages.npm
-            # yarn-berry
-            pkg-config
-            python3
+            bun
           ];
+          shellHook = ''
+            which bun
+          '';
         };
       }
     );

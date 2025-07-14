@@ -10,13 +10,9 @@ function APIDocsContent() {
   useEffect(() => {
     // Load WASM and main.js
     const script = document.createElement('script');
-    script.src = '/api-docs/main.js';
+    script.src = '/api/main.js';
     script.async = true;
     script.onload = () => setIsLoading(false);
-    // const l = document.createElement("link");
-    // l.rel = "stylesheet";
-    // l.href = "/api-docs/api-styles.css;"
-    // document.head.appendChild(l);
     document.body.appendChild(script);
 
     return () => {
