@@ -72,11 +72,6 @@ pub fn NDTensor(comptime T: type) type {
             return self;
         }
 
-        /// Transfers a host-slice to device memory. Helpful for constructing tests from static arrays.
-        pub fn from_bytes(device: DeviceReference, bytes: []const u8, shape: ?[]const usize, opts: TensorOpts) !*Self {
-            return from_slice(device, std.mem.bytesAsSlice(bytes), shape, opts);
-        }
-
         pub fn zeros(device: DeviceReference, shape: []const usize, opts: TensorOpts) !*Self {
             const self = try Self.empty(device, shape, opts);
             self.fill(0);
