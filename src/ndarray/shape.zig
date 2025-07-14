@@ -7,14 +7,9 @@ const SizeType = std.math.IntFittingRange(0, capacity);
 const ReduceOp = std.builtin.ReduceOp;
 const Slice = []const u64;
 
-pub const MemoryOrder = enum {
-    row_major,
-    col_major,
-};
-
 pub const capacity: u64 = 8;
 // shapes are value 1 by default
-pub const empty: Shape = .{ .buffer = .{1} ** capacity, .order = .row_major };
+pub const empty: Shape = .{ .buffer = .{1} ** capacity };
 
 // These classes are here to ensure that the correct
 // values are initialized througout. Strides and Shape
@@ -154,17 +149,9 @@ pub const Strides = struct {
 
 buffer: [8]u64,
 len: SizeType = 0,
-order: MemoryOrder = .row_major,
-cached_strides: ?Strides = null,
 
 pub fn init(values: Slice) Shape {
     return Shape.empty.overlay(values);
-}
-
-pub fn init_with_order(values: Slice, order: MemoryOrder) Shape {
-    var shape = Shape.empty;
-    shape.order = order;
-    return shape.overlay(values);
 }
 
 pub fn merge(slices: []const Slice) Shape {
@@ -181,7 +168,6 @@ pub fn overlay(shape: Shape, values: Slice) Shape {
     var tmp = shape;
     tmp.len = @intCast(values.len);
     @memcpy(tmp.slice(), values);
-    tmp.invalidate_strides();
     return tmp;
 }
 
@@ -192,7 +178,6 @@ pub fn simd(self: Shape) SimdType {
 
 pub fn set(self: *Shape, i: u64, value: u64) void {
     self.buffer[i] = value;
-    self.invalidate_strides();
 }
 
 pub fn get(self: Shape, i: u64) u64 {
@@ -209,7 +194,6 @@ pub fn remove(self: *Shape, i: u64) void {
     std.mem.copyForwards(u64, self.crop(i, 1), self.crop(i + 1, 0));
     self.set(self.len - 1, 1);
     self.len -= 1;
-    self.invalidate_strides();
 }
 
 pub fn insert(self: *Shape, i: u64, item: u64) error{Overflow}!void {
@@ -219,14 +203,12 @@ pub fn insert(self: *Shape, i: u64, item: u64) error{Overflow}!void {
     var s = self.slice();
     std.mem.copyBackwards(u64, s[i + 1 .. s.len], s[i .. s.len - 1]);
     self.buffer[i] = item;
-    self.invalidate_strides();
 }
 
 pub fn append(self: *Shape, value: u64) void {
     std.debug.assert(self.len < capacity);
     self.set(self.len, value);
     self.len += 1;
-    self.invalidate_strides();
 }
 
 pub fn count(self: Shape, value: u64) u64 {
@@ -253,7 +235,6 @@ pub fn compatible(a: Shape, b: Shape) bool {
 pub fn unsqueeze(self: Shape) Shape {
     std.debug.assert(self.len < capacity);
     var tmp = Shape.empty;
-    tmp.order = self.order;
     tmp.len = self.len + 1;
     @memcpy(tmp.crop(1, 0), self.slice());
     return tmp;
@@ -261,28 +242,21 @@ pub fn unsqueeze(self: Shape) Shape {
 
 pub fn _unsqueeze(self: *Shape) void {
     self.* = self.unsqueeze();
-    self.invalidate_strides();
 }
 
-pub const BroadcastError = error{ Unbroadcastable, IncompatibleOrder };
-
-pub fn broadcast(self: Shape, other: Shape) BroadcastError!Shape {
-    if (self.order != other.order) {
-        return BroadcastError.IncompatibleOrder; // Not getting too fancy, simple error condition is fine for now.
-    }
+pub fn broadcast(self: Shape, other: Shape) error{Unbroadcastable}!Shape {
     if (self.equal(other)) {
         return self;
     }
     const dims = @max(self.len, other.len);
     var result = Shape.empty;
-    result.order = self.order;
     result.len = dims;
     for (0..dims) |i| {
         const dim_a = if (i < self.len) self.get(self.len - 1 - i) else 1;
         const dim_b = if (i < other.len) other.get(other.len - 1 - i) else 1;
 
         if (dim_a != dim_b and dim_a != 1 and dim_b != 1) {
-            return BroadcastError.Unbroadcastable;
+            return error.Unbroadcastable;
         }
         result.set(dims - 1 - i, @max(dim_a, dim_b));
     }
@@ -312,13 +286,11 @@ pub fn squeeze(self: Shape) Shape {
         }
     }
     tmp.len = @intCast(j);
-    self.invalidate_strides();
     return tmp;
 }
 
 pub fn _squeeze(self: *Shape) void {
     self.* = self.squeeze();
-    self.invalidate_strides();
 }
 
 pub fn slice(self: anytype) MatchedSlice(@TypeOf(&self.buffer)) {
@@ -398,12 +370,7 @@ fn _suffix_scan(self: Shape) SimdType {
     // zig fmt: on
 }
 
-fn _prefix_scan(self: Shape) SimdType {
-    // For column-major: [1, dim0, dim0*dim1, dim0*dim1*dim2, ...]
-    return std.simd.prefixScan(ReduceOp.Mul, 1, std.simd.shiftElementsRight(self.simd(), 1, 1));
-}
-
-fn row_major_strides(self: Shape) Strides {
+pub fn strides(self: Shape) Strides {
     return Strides{
         .buffer = switch (self.len) {
             0 => @panic("Cannot calculate strides on 0 length shape"),
@@ -416,44 +383,13 @@ fn row_major_strides(self: Shape) Strides {
     };
 }
 
-fn col_major_strides(self: Shape) Strides {
-    return Strides{
-        .buffer = switch (self.len) {
-            0 => @panic("Cannot calculate strides on 0 length shape"),
-            1 => empty.overlay(&.{1}).simd(),
-            2 => empty.overlay(&.{ 1, self.get(0) }).simd(),
-            3...8 => _prefix_scan(self),
-            else => @panic("Unsupported length for tensor shape"),
-        },
-        .len = self.len,
-    };
-}
-
-fn invalidate_strides(self: *Shape) void {
-    self.cached_strides = null;
-}
-
-pub fn strides(self: *Shape) Strides {
-    if (self.cached_strides) |cached| return cached;
-    const computed = switch (self.order) {
-        .row_major => self.row_major_strides(),
-        .col_major => self.col_major_strides(),
-    };
-    self.cached_strides = computed;
-    return computed;
-}
-
 pub fn format(
     shape: Shape,
     comptime _: []const u8,
     _: std.fmt.FormatOptions,
     writer: anytype,
 ) !void {
-    const order_str = switch (shape.order) {
-        .row_major => "RM",
-        .col_major => "CM",
-    };
-    try writer.print("{d}({s})", .{ shape.slice(), order_str });
+    try writer.print("{d}", .{shape.slice()});
 }
 
 pub fn MatchedSlice(T: type) type {
@@ -501,22 +437,4 @@ test "broadcast" {
     try std.testing.expectError(error.Unbroadcastable, shape1.broadcast(Shape.init(&.{ 4, 3 })));
     try std.testing.expectError(error.Unbroadcastable, shape1.broadcast(Shape.init(&.{ 3, 2 })));
     try std.testing.expectError(error.Unbroadcastable, shape1.broadcast(Shape.init(&.{ 3, 3 })));
-}
-
-test "memory order strides" {
-    const shape_dims = &.{ 2, 3, 4 };
-
-    // Row-major strides
-    const rm_shape = Shape.init_with_order(shape_dims, .row_major);
-    const rm_strides = rm_shape.strides();
-    try std.testing.expectEqualSlices(u64, &.{ 12, 4, 1 }, rm_strides.slice());
-
-    // Col-major strides
-    const cm_shape = Shape.init_with_order(shape_dims, .col_major);
-    const cm_strides = cm_shape.strides();
-    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 6 }, cm_strides.slice());
-
-    // Should have same size
-    try std.testing.expect(rm_shape.size() == cm_shape.size());
-    try std.testing.expect(rm_shape.size() == 24);
 }
