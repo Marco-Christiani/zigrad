@@ -1,9 +1,8 @@
 ///! A minimal Python C API wrapper for verification testing
 const std = @import("std");
 
-const c = @cImport(@cInclude("/home/marco/.local/share/uv/python/cpython-3.12.0-linux-x86_64-gnu/include/python3.12/Python.h"));
+const c = @cImport(@cInclude("Python.h"));
 
-// pub const PyError = error{PythonError};
 var mutex = std.Thread.Mutex{};
 var initialized = false;
 globals: c.PyObject,
