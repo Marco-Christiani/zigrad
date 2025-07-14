@@ -3,14 +3,7 @@ const zg = @import("zigrad");
 //const ParamTree = @import("utils/param_tree.zig").ParamTree;
 const LayerMap = zg.LayerMap;
 
-pub fn main() !void {
-    const stderr = std.io.getStderr();
-    const ttyconf = std.io.tty.detectConfig(stderr);
-
-    std.fs.cwd().deleteFile("model.safetensors") catch {};
-    std.debug.print("\nDone.\n", .{});
-    try ttyconf.setColor(stderr, .reset);
-}
+pub fn main() !void {}
 
 test "visitors" {
     const allocator = std.testing.allocator;
