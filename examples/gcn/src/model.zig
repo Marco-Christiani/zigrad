@@ -68,7 +68,7 @@ pub fn GraphConvLayer(comptime T: type) type {
                 .requires_grad = true,
                 .acquired = true,
             });
-            
+
             errdefer weights.deinit();
             const bias = try Tensor.zeros(device, &.{out_features}, .{
                 .label = "conv_bias",
@@ -217,7 +217,6 @@ pub fn GraphConvLayer(comptime T: type) type {
 
             const deg_norm = try deg.rsqrt(); // shape: [n_node]
             defer deg_norm.soft_deinit();
-
 
             if (zg.runtime.grad_enabled) deg_norm.enable_grad();
 

@@ -572,7 +572,11 @@ fn test_segment_sum_csr(T: type, device: zg.DeviceReference) !void {
             \\y_out = y.detach().numpy()
             \\x_grad = src.grad.numpy()
         ) catch |e| {
-            std.debug.print("prob couldnt import torch_scatter. Got: {any}\n", .{e});
+            std.debug.print(
+                \\Got {any} so we likely could not import torch_scatter (python error can be shown with PY_ERRS=1).
+                \\We will skip this double-verification test, the previous one still passed.
+                \\
+            , .{e});
             break :scope;
         };
         const expected_out = try py_mod.get_slice(T, "out");
