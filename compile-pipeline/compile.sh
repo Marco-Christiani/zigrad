@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env zsh
+# set -euo pipefail
 
 ZIG_SOURCE="main.zig"
 RAW_LL="main.ll"
 
-declare -A OPT_PASSES
+typeset -A OPT_PASSES
 OPT_PASSES["baseline"]="default<O3>"
 OPT_PASSES["noopt"]=""
 OPT_PASSES["sroa_only"]="sroa"
@@ -43,7 +43,8 @@ zig build-exe "$ZIG_SOURCE" \
   --name "${RAW_LL/\.ll/}"
 
 executables=()
-for key in "${!OPT_PASSES[@]}"; do
+# for key in "${!OPT_PASSES[@]}"; do
+for key in ${(@k)OPT_PASSES}; do
   echo "[2] Compile variant: $key"
 
   OPT_LL="main_opt_$key.ll"
