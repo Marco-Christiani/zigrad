@@ -126,7 +126,7 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
 
         /// Small optimization for preventing scans beyond the higest available order. At
         /// most this is MAX_ORDER + 1 and acts like an exclusive end ragne for orders.
-        order_sentinel: usize = 0,
+        index_sentinel: usize = 0,
 
         /// Array of Linked lists where blocks can register themselves as free for reuse
         block_orders: [NUM_ORDERS]OrderList = @splat(OrderList{}),
@@ -156,7 +156,7 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
                 .mem_buf = @ptrCast(@alignCast(mem_buf)),
                 .mem_rem = mem_buf.len,
                 .mem_end_ptr = if (comptime Self.use_map_alloc) mem_buf.ptr else {},
-                .order_sentinel = @min(size_to_lower_order(mem_buf.len) + 1, NUM_ORDERS),
+                .index_sentinel = @min(order_to_index(size_to_lower_order(mem_buf.len)) + 1, NUM_ORDERS),
             };
 
             self.top_block = self.create_block(allocator) catch
@@ -189,7 +189,6 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
             size: usize,
         ) Error!DeviceData(T) {
             const byte_size = size * @sizeOf(T);
-            const lower_order = size_to_lower_order(byte_size);
             const upper_order = size_to_upper_order(byte_size);
             const split_size = order_to_size(upper_order);
 
@@ -199,13 +198,12 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
                 return Error.Overflow;
 
             // scan up to and including the the max reserved order
-            const lhs = scan: for (upper_order..self.order_sentinel) |i| {
+            const lhs = scan: for (order_to_index(upper_order)..self.index_sentinel) |i| {
                 const rhs = self.release_block(i) orelse
                     continue;
 
-                // Upper orders only match perfectly if this block
-                // was exactly the size of the order itself.
-                if (i == lower_order)
+                // no need to split
+                if (split_size == rhs.data.len)
                     break :scan rhs;
 
                 const lhs = try self.create_block(allocator);
