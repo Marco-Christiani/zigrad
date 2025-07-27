@@ -21,9 +21,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer zg.global_graph_deinit();
 
-    var cpu = zg.device.HostDevice.init_advanced(.{
-        .max_cache_size = zg.constants.@"1Gb" * 2,
-    });
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
     const device = cpu.reference();

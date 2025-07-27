@@ -19,7 +19,7 @@ const opspec = @import("opspec.zig");
 // TODO: Move the abstraction up a level when we decide to
 // support more granular operations over cuda virtual memory
 const DataHandler = struct {
-    pub const min_split_size = 258; // bytes
+    pub const min_split_size = 256; // bytes
 
     device_id: u32,
     memmap: cuda.MemmapWrapper,
