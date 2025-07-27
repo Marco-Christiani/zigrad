@@ -5,7 +5,9 @@ const ReduceType = @import("device_common.zig").ReduceType;
 const SmaxType = @import("device_common.zig").SmaxType;
 const RandType = @import("device_common.zig").RandType;
 const BinaryOp = @import("device_common.zig").BinaryOp;
+const adjust_map_size = @import("../allocators.zig").adjust_map_size;
 const round_to_next_page = @import("../allocators.zig").round_to_next_page;
+const round_to_prev_page = @import("../allocators.zig").round_to_prev_page;
 const CachingAllocator = @import("../allocators.zig").CachingAllocator(DataHandler);
 const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
@@ -17,6 +19,8 @@ const opspec = @import("opspec.zig");
 // TODO: Move the abstraction up a level when we decide to
 // support more granular operations over cuda virtual memory
 const DataHandler = struct {
+    pub const min_split_size = 258; // bytes
+
     device_id: u32,
     memmap: cuda.MemmapWrapper,
     stream: cuda.StreamWrapper,
@@ -28,12 +32,10 @@ const DataHandler = struct {
         };
     }
 
-    pub fn map(self: DataHandler, size: usize) Error![]u8 {
-        cuda.reset_memmap(self.memmap);
-
-        const adjusted_size = round_to_next_page(size, self.page_size());
-
-        std.debug.print("adjusted size: {}\n", .{adjusted_size});
+    pub fn map(self: DataHandler, size: ?usize) Error![]u8 {
+        // This only promises pages, but does not assign to physical memory.
+        // We over subscribe this mapping and only use what is required.
+        const adjusted_size = adjust_map_size(size, self.page_size(), cuda.device_total_memory(self.device_id));
 
         const ptr: [*]u8 = @ptrCast(@alignCast(cuda.mem_map(self.device_id, adjusted_size) orelse
             return Error.DeviceOOM));

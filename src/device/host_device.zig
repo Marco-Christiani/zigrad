@@ -8,11 +8,14 @@ const RandType = @import("device_common.zig").RandType;
 const TransferDirection = @import("device_common.zig").TransferDirection;
 const ByteMask = std.bit_set.IntegerBitSet(8);
 const round_to_next_page = @import("../allocators.zig").round_to_next_page;
+const round_to_prev_page = @import("../allocators.zig").round_to_prev_page;
+const adjust_map_size = @import("../allocators.zig").adjust_map_size;
 const CachingAllocator = @import("../allocators.zig").CachingAllocator(DataHandler);
 const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
 const opspec = @import("opspec.zig");
 pub const Options = CachingAllocator.Options;
+const zg = @import("../zigrad.zig");
 
 pub const using_mkl: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -31,9 +34,14 @@ const c = switch (builtin.target.os.tag) {
 };
 
 const DataHandler = struct {
+    pub const min_split_size = 64; // bytes
+
     // zig fmt: off
-    pub fn map(self: DataHandler, size: usize) ![]u8 {
-        const adjusted_size = round_to_next_page(size, self.page_size());
+    pub fn map(self: DataHandler, size: ?usize) ![]u8 {
+        // This only promises pages, but does not assign to physical memory.
+        // We over subscribe this mapping and only use what is required.
+        const adjusted_size = adjust_map_size(size, self.page_size(), host_total_memory());
+        
         return @ptrCast(@alignCast(try std.posix.mmap(
             null, adjusted_size,
             std.posix.PROT.READ | std.posix.PROT.WRITE,
@@ -68,6 +76,38 @@ const DataHandler = struct {
     pub inline fn reset(_: DataHandler) void {}
     // zig fmt: on
 };
+
+pub fn host_total_memory() usize {
+    switch (comptime builtin.target.os.tag) {
+        .linux => {
+            const file = std.fs.openFileAbsolute("/proc/meminfo", .{}) catch
+                @panic("Failed to find /proc/meminfo file");
+
+            defer file.close();
+
+            var buffer: [1024]u8 = undefined;
+            const n = file.readAll(&buffer) catch @panic("Buffer overflow reading /proc/meminfo");
+
+            var lines = std.mem.splitSequence(u8, buffer[0..n], "\n");
+
+            const target: []const u8 = "MemTotal:";
+
+            while (lines.next()) |line| {
+                if (!std.mem.startsWith(u8, line, target))
+                    continue;
+
+                const parsed = std.fmt.parseInt(usize, std.mem.trim(u8, line[target.len..], " kKbB"), 10) catch
+                    @panic("Failed to parse total memory from TotalMem field in /proc/meminfo");
+
+                // TODO: Do a check for mem_info unit to ensure that it's kB
+                return parsed * zg.constants.@"1kB";
+            } else {
+                @panic("Failed to find 'MemTotal' in /proc/meminfo file");
+            }
+        },
+        else => @compileError("host_total_memory not implemented for OS"),
+    }
+}
 
 /////////////////////////////
 // Host Device Implementation

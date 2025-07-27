@@ -74,10 +74,6 @@ pub const Settings = struct {
 /// more optimizations tbd if it will be added back in the future.
 pub const runtime = struct {
     pub var grad_enabled: bool = true;
-    // TODO: At some point, I'd rather turn this into
-    // a system memory check to verify availability.
-    // Right now, 64 gigs until more research...
-    pub var max_cache_size: usize = constants.@"1Gb" * 16;
 };
 
 var prng = std.Random.DefaultPrng.init(settings.seed);
