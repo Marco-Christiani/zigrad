@@ -122,7 +122,8 @@ const TensorOpts = @import("ndtensor.zig").TensorOpts;
 
 // limit memory usage for testing
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_cache_size = zg.constants.@"1Kb", // probably still excessive
+    .small_pool_size = null, // probably still excessive
+    .large_pool_size = null, // probably still excessive
 };
 
 comptime {

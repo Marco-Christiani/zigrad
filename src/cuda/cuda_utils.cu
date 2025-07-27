@@ -405,27 +405,6 @@ extern "C" void* mem_map(unsigned device_id, size_t virtual_buffer_size) {
       CURESULT_ASSERT(cuDevicePrimaryCtxRetain(&ctx, static_cast<int>(device_id)));
       CURESULT_ASSERT(cuCtxSetCurrent(ctx));
       CURESULT_ASSERT(cuMemAddressReserve(dptr_ref, virtual_buffer_size, mem_page_size(device_id), 0, 0));
-
-      //CUmemAllocationProp prop;
-      //CUmemAccessDesc access_desc;
-
-      //prop = {};
-      //prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-      //prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-      //prop.location.id = static_cast<int>(device_id);
-
-      //access_desc = {};
-      //access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-      //access_desc.location.id = static_cast<int>(device_id);
-      //access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-      //
-
-      //CUmemGenericAllocationHandle handle;
-      //CURESULT_ASSERT(cuMemCreate(&handle, mem_page_size(device_id), &prop, 0));
-      //CURESULT_ASSERT(cuMemMap(*dptr_ref, mem_page_size(device_id), 0, handle, 0));
-      //CURESULT_ASSERT(cuMemSetAccess(*dptr_ref, mem_page_size(device_id), &access_desc, 1));
-
  }, &base_address);
 
   ctx_thread.join();

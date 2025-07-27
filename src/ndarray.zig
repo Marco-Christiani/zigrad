@@ -843,7 +843,8 @@ pub const Range = struct {
 };
 
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_cache_size = zg.constants.@"1Mb" / 2,
+    .large_pool_size = null,
+    .small_pool_size = null,
 };
 
 test "NDArray._clip_norm,l2_norm" {

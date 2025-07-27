@@ -58,11 +58,6 @@ const ArenaUnmanaged = @import("arena_unmanaged.zig");
 const DeviceData = @import("device_data.zig").DeviceData;
 const round_to_next_page = @import("../allocators.zig").round_to_next_page;
 
-pub const MAX_ORDER = 36;
-pub const MIN_ORDER = 8; // minium block that can be split is 512
-pub const NUM_ORDERS = (MAX_ORDER - MIN_ORDER + 1);
-pub const MAX_BLOCK_SPLITS = 100; // TODO: unusec
-
 const OrderList = @import("order_list.zig");
 
 pub const Block = struct {
@@ -103,8 +98,18 @@ const FreeList = struct {
 /// requested for the incoming allocation.
 pub const Error = error{Overflow} || std.mem.Allocator.Error;
 
-pub fn BockPool(DataHandler: type) type {
+pub fn BockPool(DataHandler: type, comptime config: struct {
+    min_order: usize,
+    max_order: usize,
+}) type {
+    std.debug.assert(config.min_order < config.max_order);
+
     return struct {
+        pub const MIN_ORDER = config.min_order; // minium block that can be split is 512
+        pub const MAX_ORDER = config.max_order;
+        pub const NUM_ORDERS = (MAX_ORDER - MIN_ORDER + 1);
+        pub const MAX_BLOCK_SPLITS = 100; // TODO: unusec
+
         const Self = @This();
         const use_map_alloc = @hasDecl(DataHandler, "map_alloc");
 
@@ -121,7 +126,7 @@ pub fn BockPool(DataHandler: type) type {
 
         /// Small optimization for preventing scans beyond the higest available order. At
         /// most this is MAX_ORDER + 1 and acts like an exclusive end ragne for orders.
-        order_sentinel: usize = 0,
+        index_sentinel: usize = 0,
 
         /// Array of Linked lists where blocks can register themselves as free for reuse
         block_orders: [NUM_ORDERS]OrderList = @splat(OrderList{}),
@@ -141,19 +146,17 @@ pub fn BockPool(DataHandler: type) type {
         pub fn init(
             data_handler: DataHandler,
             allocator: Allocator,
-            max_cache_size: usize,
+            max_pool_size: ?usize,
         ) Self {
-            std.debug.assert(max_cache_size > 0);
-
-            const mem_buf = data_handler.map(max_cache_size) catch
-                std.debug.panic("Unable to map cache size of: {}", .{max_cache_size});
+            const mem_buf = data_handler.map(max_pool_size) catch
+                std.debug.panic("Unable to map cache size of: {?}", .{max_pool_size});
 
             var self = Self{
                 .top_block = undefined,
                 .mem_buf = @ptrCast(@alignCast(mem_buf)),
                 .mem_rem = mem_buf.len,
                 .mem_end_ptr = if (comptime Self.use_map_alloc) mem_buf.ptr else {},
-                .order_sentinel = @min(size_to_lower_order(mem_buf.len) + 1, NUM_ORDERS),
+                .index_sentinel = @min(order_to_index(size_to_lower_order(mem_buf.len)) + 1, NUM_ORDERS),
             };
 
             self.top_block = self.create_block(allocator) catch
@@ -186,28 +189,23 @@ pub fn BockPool(DataHandler: type) type {
             size: usize,
         ) Error!DeviceData(T) {
             const byte_size = size * @sizeOf(T);
-            const lower_order = size_to_lower_order(byte_size);
             const upper_order = size_to_upper_order(byte_size);
             const split_size = order_to_size(upper_order);
 
-            // These should have been picked up by the caching allocator.
-            // Blocks can be a minimum size of 256, thus the smallest block
-            // that can be split is 512.
-            std.debug.assert(byte_size > 128);
-
             // TODO: This current design doesn't account for holes,
             // but we'd have to get a lot more fancy to deal with that.
-            if (self.mem_rem < byte_size)
+            const max_size = comptime order_to_size(MAX_ORDER);
+
+            if (self.mem_rem < byte_size or max_size < byte_size)
                 return Error.Overflow;
 
             // scan up to and including the the max reserved order
-            const lhs = scan: for (upper_order..self.order_sentinel) |i| {
+            const lhs = scan: for (order_to_index(upper_order)..self.index_sentinel) |i| {
                 const rhs = self.release_block(i) orelse
                     continue;
 
-                // Upper orders only match perfectly if this block
-                // was exactly the size of the order itself.
-                if (i == lower_order)
+                // no need to split
+                if (split_size == rhs.data.len)
                     break :scan rhs;
 
                 const lhs = try self.create_block(allocator);
@@ -349,47 +347,47 @@ pub fn BockPool(DataHandler: type) type {
             block.used = true;
             return block;
         }
+
+        pub fn order_to_size(order: usize) usize {
+            std.debug.assert(MIN_ORDER <= order and order <= MAX_ORDER);
+            return @as(usize, 1) << @as(u6, @truncate(order));
+        }
+
+        pub fn size_to_upper_order(size: usize) usize {
+            var order: usize = MIN_ORDER;
+            var bsize: usize = 1 << MIN_ORDER;
+            while (bsize < size and order < MAX_ORDER) {
+                bsize <<= 1;
+                order += 1;
+            }
+            return order;
+        }
+
+        pub fn size_to_lower_order(size: usize) usize {
+            // TODO: should this be an inline for? need to benchmark...
+            return inline for (MIN_ORDER..MAX_ORDER + 1) |order| {
+                const order_size = comptime order_to_size(order);
+                if (size < order_size)
+                    break @max(order - 1, MIN_ORDER);
+            } else MAX_ORDER;
+        }
+
+        pub fn size_to_lower_index(size: usize) usize {
+            return order_to_index(size_to_lower_order(size));
+        }
+
+        pub fn order_to_index(order: usize) usize {
+            std.debug.assert(order >= MIN_ORDER);
+            return order - MIN_ORDER;
+        }
+
+        pub fn index_to_order(index: usize) usize {
+            std.debug.assert(index < NUM_ORDERS);
+            return index + MIN_ORDER;
+        }
+
+        pub fn size_to_upper_index(size: usize) usize {
+            return order_to_index(size_to_upper_order(size));
+        }
     };
-}
-
-pub fn order_to_size(order: usize) usize {
-    std.debug.assert(MIN_ORDER <= order and order <= MAX_ORDER);
-    return @as(usize, 1) << @as(u6, @truncate(order));
-}
-
-pub fn size_to_upper_order(size: usize) usize {
-    var order: usize = MIN_ORDER;
-    var bsize: usize = 1 << MIN_ORDER;
-    while (bsize < size and order < MAX_ORDER) {
-        bsize <<= 1;
-        order += 1;
-    }
-    return order;
-}
-
-pub fn size_to_lower_order(size: usize) usize {
-    // TODO: should this be an inline for? need to benchmark...
-    return inline for (MIN_ORDER..MAX_ORDER + 1) |order| {
-        const order_size = comptime order_to_size(order);
-        if (size < order_size)
-            break @max(order - 1, MIN_ORDER);
-    } else MAX_ORDER;
-}
-
-pub fn size_to_lower_index(size: usize) usize {
-    return order_to_index(size_to_lower_order(size));
-}
-
-pub fn order_to_index(order: usize) usize {
-    std.debug.assert(order >= MIN_ORDER);
-    return order - MIN_ORDER;
-}
-
-pub fn index_to_order(index: usize) usize {
-    std.debug.assert(index < NUM_ORDERS);
-    return index + MIN_ORDER;
-}
-
-pub fn size_to_upper_index(size: usize) usize {
-    return order_to_index(size_to_upper_order(size));
 }
