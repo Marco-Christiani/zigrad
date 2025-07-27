@@ -700,7 +700,7 @@ pub fn NDTensor(comptime T: type) type {
             (self.grad orelse return error.NoGradient)._clamp(vmin, vmax, self.device);
         }
 
-        /// Differentiable
+        /// Clamp values to $[vmin, vmax]$
         pub fn clamp(self: *Self, vmin: T, vmax: T) !*Self {
             std.debug.assert(vmin <= vmax);
 
@@ -1396,7 +1396,7 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        /// Differentiable scatter with additive aggregation: dst[indices[i]] += src[i]
+        /// Scatter with additive aggregation: dst[indices[i]] += src[i]
         pub fn scatter_add(src: *Self, offsets: []const usize, dst_shape: []const usize) !*Self {
             std.debug.assert(src.data.size() == offsets.len);
 
@@ -1430,128 +1430,6 @@ pub fn NDTensor(comptime T: type) type {
                     .offsets = offsets_copy,
                 },
                 .op = .SCATTER_ADD,
-            });
-        }
-
-        /// Differentiable scatter with additive aggregation for strided data:
-        /// `dst[indices[i]*stride:(indices[i]+1)*stride] += src[i*stride:(i+1)*stride]`
-        pub fn scatter_add_strided(
-            src: *Self,
-            indices: []const usize,
-            stride: usize,
-            dst_shape: []const usize,
-        ) !*Self {
-            std.debug.assert(src.data.size() == indices.len * stride);
-            std.debug.assert(dst_shape[dst_shape.len - 1] == stride or
-                (dst_shape.len >= 2 and dst_shape[dst_shape.len - 1] * dst_shape[dst_shape.len - 2] % stride == 0));
-
-            const ScatterAddStridedBwd = struct {
-                indices: []usize,
-                stride: usize,
-
-                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
-                    defer y.device.mem_free(ctx.indices);
-
-                    const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
-                    const grad_input = try input_tensor.ensure_grad(0);
-                    const grad_output = y.assume_grad();
-
-                    // Gather from scattered positions
-                    // grad_output[i*stride:(i+1)*stride] += grad_input[indices[i]*stride:(indices[i]+1)*stride]
-                    grad_input.scatter_add_strided_(ctx.indices, ctx.stride, grad_output, input_tensor.device);
-                }
-            };
-
-            var output = try DataType.zeros(dst_shape, src.device);
-            src.data.scatter_add_strided_(indices, stride, &output, src.device);
-
-            const indices_copy = try src.device.mem_dupe(usize, indices);
-
-            return create_dependent(ScatterAddStridedBwd, .{
-                .data = output,
-                .children = &.{&src.node},
-                .device = src.device,
-                .gb = src.node.gb,
-                .callback = .{
-                    .indices = indices_copy,
-                    .stride = stride,
-                },
-            });
-        }
-
-        pub fn segment_sum_csr(
-            src: *Self,
-            row_ptr: []const usize,
-            dst_shape: []const usize,
-        ) !*Self {
-            std.debug.assert(row_ptr.len >= 2);
-
-            const SegmentSumCsrBwd = struct {
-                row_ptr: []usize,
-
-                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
-                    defer y.device.mem_free(ctx.row_ptr);
-                    const grad_output = y.assume_grad();
-                    const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
-                    const grad_input = try input_tensor.ensure_grad(0);
-
-                    grad_output.scatter_add_csr_(ctx.row_ptr, grad_input, y.device);
-                }
-            };
-
-            var output = try DataType.zeros(dst_shape, src.device);
-            src.data.segment_sum_csr_(row_ptr, &output, src.device);
-
-            const row_ptr_copy = try src.device.mem_dupe(usize, row_ptr);
-
-            return create_dependent(SegmentSumCsrBwd, .{
-                .data = output,
-                .children = &.{&src.node},
-                .device = src.device,
-                .gb = src.node.gb,
-                .callback = .{
-                    .row_ptr = row_ptr_copy,
-                },
-            });
-        }
-
-        /// Differentiable scatter with additive aggregation for CSR sparse matrices:
-        /// Scatter values to segments defined by CSR row pointers
-        pub fn scatter_add_csr(
-            src: *Self,
-            row_ptr: []const usize,
-            dst_shape: []const usize,
-        ) !*Self {
-            std.debug.assert(row_ptr.len >= 2);
-            std.debug.assert(src.data.size() + 1 == row_ptr.len);
-
-            const ScatterAddCsrBwd = struct {
-                row_ptr: []usize,
-
-                pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
-                    defer y.device.mem_free(ctx.row_ptr);
-                    const grad_output = y.assume_grad();
-                    const input_tensor = children.get_bwd_upcast(Self, 0) orelse return;
-                    const grad_input = try input_tensor.ensure_grad(0);
-
-                    // Reverse operation: segment_sum_csr gradients back to scatter positions
-                    grad_output.segment_sum_csr_(ctx.row_ptr, grad_input, y.device);
-                }
-            };
-
-            var output = try DataType.zeros(dst_shape, src.device);
-            src.data.scatter_add_csr_(row_ptr, &output, src.device);
-
-            const row_ptr_copy = try src.device.mem_dupe(usize, row_ptr);
-
-            return create_dependent(ScatterAddCsrBwd, .{
-                .data = output,
-                .children = &.{&src.node},
-                .device = src.device,
-                .gb = src.node.gb,
-                .callback = .{
-                    .row_ptr = row_ptr_copy,
-                },
             });
         }
 

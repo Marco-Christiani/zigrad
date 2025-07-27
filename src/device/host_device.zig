@@ -1032,18 +1032,19 @@ pub fn scatter_add(_: *const Self, T: type, p: opspec.scatter_add(T)) void {
     // }
 }
 
-/// Scatter add with contiguous subseqences in a strided layout. Conflicted what to name this,
-/// `segment_sum_contig`, `segment_sum_2d`? `segment_sum` is often used to refer to a reduction
-/// and this is a reduction for each subsequence with scattered accmulation.
+/// Scatter add with contiguous subseqences in a strided layout.
+/// This is a reduction for each subsequence with scattered accmulation.
 ///
 /// Sums blocks of `stride` contiguous elements from `src` into corresponding blocks in `dst`
 /// based on segment assignment in `indices`.
-/// Each src[i*stride:(i+1)*stride] is added to dst[indices[i]*stride:(indices[i]+1)*stride].
+/// Each `src[i*stride:(i+1)*stride]` is added to `dst[indices[i]*stride:(indices[i]+1)*stride]`. I.e.,
+///
+/// `dst[indices[i], :] += src[i, :]`
 ///
 /// This is equivalent to segment_sum but optimized for cases where
 /// data is organized in fixed-size contiguous blocks and elements within a block
 /// belong to the same segment
-pub fn scatter_add_strided(_: *const Self, T: type, p: opspec.scatter_add_strided(T)) void {
+pub fn scatter_add_2d(_: *const Self, T: type, p: opspec.scatter_add_strided(T)) void {
     for (0..p.indices.len) |block_idx| {
         const target_segment = p.indices[block_idx];
         const src_offset = block_idx * p.stride;
@@ -1143,7 +1144,7 @@ fn vadd_native(T: type, a: []const T, inca: usize, b: []const T, incb: usize, r:
 //
 
 /// Vector Sum
-fn vsum(T: type, a: []const T, inca: usize) T {
+pub fn vsum(T: type, a: []const T, inca: usize) T {
     if (inca == 1) {
         return vsum_contig(T, a);
     } else {
@@ -1154,7 +1155,7 @@ fn vsum(T: type, a: []const T, inca: usize) T {
 /// Vector Sum with arbitrary stride
 fn vsum_strided(T: type, a: []const T, inca: usize) T {
     switch (T) {
-        f32 => if (@hasDecl(c, "vsSumI")) {
+        f32 => if (@hasDecl(c, "vsSumI")) { // VML
             var result: f32 = undefined;
             _ = c.vsSumI(
                 @intCast(a.len),
@@ -1164,7 +1165,7 @@ fn vsum_strided(T: type, a: []const T, inca: usize) T {
             );
             return result;
         },
-        f64 => if (@hasDecl(c, "vdSumI")) {
+        f64 => if (@hasDecl(c, "vdSumI")) { // VML
             var result: f64 = undefined;
             _ = c.vdSumI(
                 @intCast(a.len),
@@ -1182,7 +1183,7 @@ fn vsum_strided(T: type, a: []const T, inca: usize) T {
 /// Vector Sum for contiguous arrays
 fn vsum_contig(T: type, a: []const T) T {
     switch (T) {
-        f32 => if (@hasDecl(c, "vvsumf")) {
+        f32 => if (@hasDecl(c, "vvsumf")) { // Accelerate
             var result: f32 = undefined;
             _ = c.vvsumf(
                 @ptrCast(&result),
@@ -1190,12 +1191,12 @@ fn vsum_contig(T: type, a: []const T) T {
                 @ptrCast(&@as(c_int, @intCast(a.len))),
             );
             return result;
-        } else if (@hasDecl(c, "vsSum")) {
+        } else if (@hasDecl(c, "vsSum")) { // VML
             var result: f32 = undefined;
             _ = c.vsSum(@intCast(a.len), @ptrCast(a.ptr), @ptrCast(&result));
             return result;
         },
-        f64 => if (@hasDecl(c, "vvsum")) {
+        f64 => if (@hasDecl(c, "vvsum")) { // Accelerate
             var result: f64 = undefined;
             _ = c.vvsum(
                 @ptrCast(&result),
@@ -1203,7 +1204,7 @@ fn vsum_contig(T: type, a: []const T) T {
                 @ptrCast(&@as(c_int, @intCast(a.len))),
             );
             return result;
-        } else if (@hasDecl(c, "vdSum")) {
+        } else if (@hasDecl(c, "vdSum")) { // VML
             var result: f64 = undefined;
             _ = c.vdSum(@intCast(a.len), @ptrCast(a.ptr), @ptrCast(&result));
             return result;
@@ -1245,7 +1246,7 @@ pub fn scatter_add_csr(_: *const Self, T: type, p: opspec.scatter_add_csr(T)) vo
 
 pub fn segment_sum_csr(_: *const Self, T: type, p: opspec.segment_sum_csr(T)) void {
     const src = p.src;
-    const row_ptr = p.row_ptr;
+    const row_ptr = p.row_offsets;
     const dst = p.dst;
 
     std.debug.assert(row_ptr.len >= 2);

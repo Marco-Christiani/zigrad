@@ -651,67 +651,6 @@ pub fn NDArray(comptime T: type) type {
             });
         }
 
-        /// Scatter with additive aggregation for strided data:
-        /// `dst[indices[i]*stride:(indices[i]+1)*stride] += src[i*stride:(i+1)*stride]`
-        pub fn scatter_add_strided_(
-            /// Source values organized as (n_blocks, stride)
-            src: Self,
-            /// Segment indices for each block
-            indices: []const usize,
-            /// Number of elements per block
-            stride: usize,
-            /// Destination buffer organized as (n_segments, stride)
-            dst: *Self,
-            device: DeviceReference,
-        ) void {
-            std.debug.assert(indices.len * stride == src.size());
-            std.debug.assert(dst.size() % stride == 0);
-
-            device.dispatch(opspec.scatter_add_strided(T){
-                .src = src.get_data(),
-                .indices = indices,
-                .dst = dst.get_data(),
-                .stride = stride,
-            });
-        }
-
-        pub fn scatter_add_csr_(
-            /// Values to scatter (n_segments,)
-            src: Self,
-            /// CSR segment ptrs (n_segments + 1,)
-            row_ptr: []const usize,
-            /// Output buffer (total_elements,)
-            dst: *Self,
-            device: DeviceReference,
-        ) void {
-            std.debug.assert(row_ptr.len >= 2);
-            std.debug.assert(src.size() + 1 == row_ptr.len);
-            std.debug.assert(row_ptr[row_ptr.len - 1] == dst.size());
-
-            device.dispatch(opspec.scatter_add_csr(T){
-                .src = src.get_data(),
-                .row_ptr = row_ptr,
-                .dst = dst.get_data(),
-            });
-        }
-
-        pub fn segment_sum_csr_(
-            src: Self,
-            row_ptr: []const usize,
-            dst: *Self,
-            device: DeviceReference,
-        ) void {
-            std.debug.assert(row_ptr.len >= 2);
-            std.debug.assert(dst.size() + 1 == row_ptr.len);
-            std.debug.assert(row_ptr[row_ptr.len - 1] == src.size());
-
-            device.dispatch(opspec.segment_sum_csr(T){
-                .src = src.get_data(),
-                .row_ptr = row_ptr,
-                .dst = dst.get_data(),
-            });
-        }
-
         /// COM
         pub fn take(self: Self, offsets: []const usize, device: DeviceReference) !Self {
             const result = try Self.empty(&.{offsets.len}, device);

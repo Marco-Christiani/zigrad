@@ -540,9 +540,9 @@ pub fn scatter_add(T: type) type {
     };
 }
 
-pub fn scatter_add_strided(T: type) type {
+pub fn scatter_add_2d(T: type) type {
     return struct {
-        pub const __name__ = "scatter_add_strided";
+        pub const __name__ = "scatter_add_2d";
         pub const __type__ = T;
 
         /// Source data organized as contiguous blocks of `stride` elements each.
@@ -589,7 +589,7 @@ pub fn segment_sum_csr(T: type) type {
         src: []const T,
 
         /// CSR offsets (segment boundaries), shape: [n_segments + 1]
-        row_ptr: []const usize,
+        row_offsets: []const usize,
 
         /// Output buffer, shape: [n_segments]
         dst: []T,
