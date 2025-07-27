@@ -19,12 +19,12 @@ pub fn CachingAllocator(DataHandler: type) type {
 
         const SmallPool = BlockPool(DataHandler, .{
             .min_order = std.math.log2_int(usize, DataHandler.min_split_size),
-            .max_order = 19, // largest split is 500kB
+            .max_order = 20, // largest split is 500kB
         });
 
         const LargePool = BlockPool(DataHandler, .{
             .min_order = 20, // smallest split is 1MiB
-            .max_order = 30, // largest split is 1GiB
+            .max_order = 32, // largest split is arbitrary
         });
 
         data_handler: DataHandler,

@@ -194,7 +194,9 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
 
             // TODO: This current design doesn't account for holes,
             // but we'd have to get a lot more fancy to deal with that.
-            if (self.mem_rem < byte_size)
+            const max_size = comptime order_to_size(MAX_ORDER);
+
+            if (self.mem_rem < byte_size or max_size < byte_size)
                 return Error.Overflow;
 
             // scan up to and including the the max reserved order
