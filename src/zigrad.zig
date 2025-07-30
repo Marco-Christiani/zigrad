@@ -8,6 +8,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 
+pub const stz = @import("safetensors_zg");
+
 pub const NDArray = @import("ndarray.zig").NDArray;
 pub const Shape = @import("ndarray.zig").Shape;
 pub const arrayutils = @import("ndarray.zig").utils;
@@ -95,6 +97,8 @@ pub fn global_graph_deinit() void {
 pub fn global_graph_get() *Graph {
     return &(global_graph orelse @panic("Global graph is uninitialized, call init_global_graph first."));
 }
+
+pub const LayerMap = @import("utils/layer_map.zig");
 
 // see zls
 // The type of `log_level` is not `std.log.Level`.

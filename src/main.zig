@@ -1,63 +1,95 @@
 const std = @import("std");
-
 const zg = @import("zigrad");
+//const ParamTree = @import("utils/param_tree.zig").ParamTree;
+const LayerMap = zg.LayerMap;
 
-const T = f32;
-const Tensor = zg.NDTensor(T);
-const Array = zg.NDArray(T);
+pub fn main() !void {}
 
-const TestOpts: zg.device.HostDevice.Options = .{
-    .max_cache_size = zg.constants.@"1Mb" / 2,
-};
+test "visitors" {
+    const allocator = std.testing.allocator;
 
-pub fn main() !void {
-    var cpu = zg.device.HostDevice.init_advanced(TestOpts);
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
-    {
-        var graph = zg.Graph.init(std.heap.smp_allocator, .{});
-        defer graph.deinit();
-        const x = try Tensor.from_slice(cpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-            .requires_grad = true,
-            .graph = &graph,
-        });
+    var graph = zg.Graph.init(allocator, .{});
+    defer graph.deinit();
 
-        const y = try x.clamp(-1.0, 1.0);
+    zg.global_graph_init(allocator, .{});
+    defer zg.global_graph_deinit();
 
-        try y.backward();
-        const expected_output: []const f32 = &.{ -1.0, -0.5, 0.5, 1.0 };
-        const expected_grad: []const f32 = &.{ 0.0, 1.0, 1.0, 0.0 };
+    const x = try zg.NDTensor(f32).random(cpu.reference(), &.{ 2, 6 }, .uniform, .{
+        .label = "x: f32",
+        .graph = &graph,
+    });
+    defer x.deinit();
 
-        try std.testing.expectEqualSlices(T, expected_output, y.get_data());
-        try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
+    const y = try zg.NDTensor(f64).random(cpu.reference(), &.{ 2, 2 }, .uniform, .{
+        .label = "y: f64",
+        .graph = &graph,
+    });
+    defer y.deinit();
 
-        x.deinit();
-        y.deinit();
-    }
+    var lmap = LayerMap.init(allocator);
+    defer lmap.deinit();
 
-    if (zg.has_cuda) {
-        var graph = zg.Graph.init(std.heap.smp_allocator, .{});
-        defer graph.deinit();
-        var gpu = zg.device.CudaDevice.init(0);
-        defer gpu.deinit();
+    try lmap.put("layer_a.foo.bar.weights", x, .{ .owned = false });
+    try lmap.put("layer_a.foo.bar.bias", y, .{ .owned = false });
 
-        const x = try Tensor.from_slice(gpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-            .requires_grad = true,
-            .graph = &graph,
-        });
-        const x2 = try Tensor.from_slice(gpu.reference(), &.{ -2.0, -0.5, 0.5, 2.0 }, &.{ 2, 2 }, .{
-            .requires_grad = true,
-            .graph = &graph,
-        });
+    lmap.for_each(struct { // target every node in the graph (auto-cast)
+        pub fn visit(_: @This(), key: []const u8, t: anytype) void {
+            std.debug.print("LABEL (ALL): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
 
-        const y = try x.add(x2);
-        // NOTE: add_scalar needs tweaking for cuda
-        // const y = try x.add_scalar(1.0);
+    lmap.for_each_type(struct { // only target NDTensor(f32)
+        pub fn visit(_: @This(), key: []const u8, t: *zg.NDTensor(f32)) void {
+            std.debug.print("LABEL (f32): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
 
-        // try y.backward();
+    lmap.for_each_type(struct { // only target NDTensor(f64)
+        pub fn visit(_: @This(), key: []const u8, t: *zg.NDTensor(f64)) void {
+            std.debug.print("LABEL (f64): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
 
-        x.deinit();
-        x2.deinit();
-        y.deinit();
-    }
+    var counter: struct {
+        total_params: usize = 0,
+        total_tensors: u32 = 0,
+        largest_tensor: usize = 0,
+        largest_tensor_key: []const u8 = "",
+        pub fn visit(self: *@This(), key: []const u8, t: anytype) void {
+            const param_count = t.get_size();
+            self.total_tensors += 1;
+            self.total_params += param_count;
+
+            if (self.largest_tensor < param_count) {
+                self.largest_tensor = param_count;
+                self.largest_tensor_key = key;
+            }
+        }
+    } = .{};
+
+    lmap.for_each(&counter);
+    std.debug.print(
+        \\Parameter Statistics:
+        \\  Total tensors: {d}
+        \\  Largest tensor: {d} at '{s}'
+        \\
+    , .{
+        counter.total_tensors,
+        counter.largest_tensor,
+        counter.largest_tensor_key,
+    });
+
+    lmap.print_tree();
+
+    try lmap.save_to_file("here.stz", std.heap.smp_allocator);
+
+    var tree = try LayerMap.load_from_file("here.stz", std.heap.smp_allocator, cpu.reference(), .{
+        .owning = true,
+    });
+    defer tree.deinit();
+
+    tree.print_tree();
 }

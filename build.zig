@@ -34,6 +34,8 @@ pub fn build(b: *Build) !void {
             .{ .name = "build_options", .module = build_options_module },
         },
     });
+    const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
+    zigrad.addImport("safetensors_zg", safetensors_zg_dep.module("safetensors_zg"));
 
     switch (target.result.os.tag) {
         .linux => {
@@ -87,14 +89,13 @@ pub fn build(b: *Build) !void {
     run_step.dependOn(&run_cmd.step);
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/zigrad.zig"),
+        .root_module = zigrad,
         .target = target,
         .optimize = optimize,
     });
 
     unit_tests.root_module.addImport("build_options", build_options_module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    link(target, unit_tests, enable_mkl);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
 
