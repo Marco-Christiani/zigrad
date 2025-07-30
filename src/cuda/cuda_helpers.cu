@@ -3,8 +3,8 @@
 
 #include <cutensor/types.h>
 #include <stdio.h>
-#include "/usr/local/cuda/include/cuda.h"
-#include "/usr/local/cuda/include/cublas_v2.h"
+#include <cuda.h>
+#include <cublas_v2.h>
 #include "cuda_includes.cu"
 #include "decls.h"
 

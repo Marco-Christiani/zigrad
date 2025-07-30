@@ -20,10 +20,10 @@ pub fn run_cora(data_dir: []const u8) !void {
         }
     }
 
-    zg.init_global_graph(allocator, .{
+    zg.global_graph_init(allocator, .{
         .eager_teardown = true,
     });
-    defer zg.deinit_global_graph();
+    defer zg.global_graph_deinit();
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
@@ -32,7 +32,7 @@ pub fn run_cora(data_dir: []const u8) !void {
 
     var buf1: [1024]u8 = undefined;
     var buf2: [1024]u8 = undefined;
-    const edge_path = try std.fmt.bufPrint(&buf1, "{s}/cora/csv/cites.csv", .{data_dir});
+    const edge_path = try std.fmt.bufPrint(&buf1, "{s}/cora/csv/cities.csv", .{data_dir});
     const node_path = try std.fmt.bufPrint(&buf2, "{s}/cora/csv/papers.csv", .{data_dir});
     const dataset = try Dataset(T).load_cora(allocator, device, node_path, edge_path);
     defer dataset.deinit();
@@ -62,6 +62,8 @@ pub fn run_cora(data_dir: []const u8) !void {
 
     var timer = try std.time.Timer.start();
 
+    var max_train_time = std.math.floatMin(f64);
+    var max_test_time = std.math.floatMin(f64);
     const num_epochs = 50;
     for (0..num_epochs) |epoch| {
         var loss_val: T = 0;
@@ -69,7 +71,7 @@ pub fn run_cora(data_dir: []const u8) !void {
         var train_time_ms: f64 = 0;
         var test_time_ms: f64 = 0;
         {
-            zg.rt_grad_enabled = true;
+            zg.runtime.grad_enabled = true;
             timer.reset();
 
             const output = try model.forward(dataset.x, dataset.edge_index);
@@ -89,10 +91,11 @@ pub fn run_cora(data_dir: []const u8) !void {
 
             train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
             total_train_time += train_time_ms;
+            max_train_time = @max(max_train_time, train_time_ms);
         }
 
         {
-            zg.rt_grad_enabled = false;
+            zg.runtime.grad_enabled = false;
             timer.reset();
 
             const output = try model.forward(dataset.x, dataset.edge_index);
@@ -110,14 +113,16 @@ pub fn run_cora(data_dir: []const u8) !void {
                 for (0..total) |j| {
                     const start = j * dataset.num_classes;
                     const end = start + dataset.num_classes;
-                    const yh = std.mem.indexOfMax(T, output_.data.data[start..end]);
-                    const y = std.mem.indexOfMax(T, label_.data.data[start..end]);
+                    // TODO: update for device compatablity
+                    const yh = std.mem.indexOfMax(T, output_.get_data()[start..end]);
+                    const y = std.mem.indexOfMax(T, label_.get_data()[start..end]);
                     correct += if (yh == y) 1 else 0;
                 }
                 acc[i] = correct / @as(f32, @floatFromInt(total));
             }
             test_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
             total_test_time += test_time_ms;
+            max_test_time = @max(max_test_time, test_time_ms);
         }
         std.debug.print(
             "Epoch: {d:>2}, Loss: {d:<5.4}, Train_acc: {d:<2.2}, Val_acc: {d:<2.2}, Test_acc: {d:<2.2}, Train_time {d:<3.2} ms, Test_time {d:<3.2} ms\n",
@@ -126,6 +131,17 @@ pub fn run_cora(data_dir: []const u8) !void {
     }
     std.debug.print("Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{ total_train_time / num_epochs, total_test_time / num_epochs });
     std.debug.print("Total train time: {d:.2} ms, Total test time: {d:.2} ms\n", .{ total_train_time, total_test_time });
+
+    const total_train_time_ms_trimmed = total_train_time - max_train_time;
+    const total_test_time_ms_trimmed = total_test_time - max_test_time;
+    std.debug.print("(trimmed) Avg epoch train time: {d:.2} ms, Avg epoch test time: {d:.2} ms\n", .{
+        total_train_time_ms_trimmed / (num_epochs - 1),
+        total_test_time_ms_trimmed / (num_epochs - 1),
+    });
+    std.debug.print("(trimmed) Total train time: {d:.2} ms, Total test time: {d:.2} ms\n", .{
+        total_train_time_ms_trimmed,
+        total_test_time_ms_trimmed,
+    });
 }
 
 pub fn main() !void {

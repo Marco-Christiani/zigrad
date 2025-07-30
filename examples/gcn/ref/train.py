@@ -1,6 +1,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
+#     "scipy",
 #     "torch",
 #     "torch-geometric",
 # ]
@@ -38,8 +39,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--device",
-        choices=["cuda", "cpu"],
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=["cuda", "cpu", "mps"],
+        default="cpu",
         help="Device to use",
     )
     args = parser.parse_args()
@@ -86,23 +87,38 @@ if __name__ == "__main__":
     total_train_time = 0
     total_test_time = 0
 
+    import array
+
+    train_times = array.array("d", [0] * 50)
+    test_times = array.array("d", [0] * 50)
+
     for epoch in range(0, 50):
         with PerfTimer("train") as train_timer:
             loss = train()
         with PerfTimer("test") as test_timer:
             train_acc, val_acc, test_acc = test()
 
+        train_times[epoch] = train_timer.duration
+        test_times[epoch] = test_timer.duration
         total_train_time += train_timer.duration
         total_test_time += test_timer.duration
         print(
             f"Epoch: {epoch + 1:02d}, Loss: {loss:.4f}, "
-            f"Train_acc: {train_acc:.2f}, Val_acc: {val_acc:.2f}, Test_acc: {test_acc:.2f}, "
+            f"Train_acc: {train_acc:.4f}, Val_acc: {val_acc:.4f}, Test_acc: {test_acc:.4f}, "
             f"Train_time {train_timer.duration:.2f} ms, Test_time {test_timer.duration:.2f} ms"
         )
 
+    print(f"Avg epoch train time: {total_train_time / 50:.2f} ms, Avg epoch test time: {total_test_time / 50:.2f} ms")
+    print(f"Total train time: {total_train_time:.2f} ms, Total test time: {total_test_time:.2f} ms")
+
+    total_train_time_ms_trimmed = sum(train_times) - max(train_times)
+    total_test_time_ms_trimmed = sum(test_times) - max(test_times)
     print(
-        f"Avg epoch train time: {total_train_time / 50:.2f} ms, Avg epoch test time: {total_test_time / 50:.2f} ms"
+        f"(trimmed) Avg epoch train time: {total_train_time_ms_trimmed / (len(train_times) - 1):.2f} ms, "
+        + f"(trimmed) Avg epoch test time: {total_test_time_ms_trimmed / (len(test_times) - 1):.2f} ms"
     )
+
     print(
-        f"Total train time: {total_train_time:.2f} ms, Total test time: {total_test_time:.2f} ms"
+        f"(trimmed) Total train time: {total_train_time_ms_trimmed:.2f} ms, "
+        + f"(trimmed) Total test time: {total_test_time_ms_trimmed:.2f} ms"
     )

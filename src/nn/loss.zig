@@ -1,5 +1,7 @@
-// TODO: fused softmax-ce
+// TODO: these ops to be migrated into the new device API design
 const std = @import("std");
+const builtin = @import("builtin");
+const debug: bool = (builtin.mode == .Debug);
 
 const zg = @import("../zigrad.zig");
 const DeviceReference = zg.DeviceReference;
@@ -11,22 +13,24 @@ const NDTensor = zg.NDTensor;
 const Graph = zg.Graph;
 const Node = Graph.Node;
 
-// NOTE: Reductions return NaN when "reduce" is set to false.
-// This is for c-compatibility and this value is instead traded for null.
-
-// nll entry point
+/// NLL entry point
+/// NOTE: Reductions return NaN when "reduce" is set to false.
+/// This is for c-compatibility and this value is instead traded for null.
 pub fn nll(T: type, comptime config: NLLConfig) NLLType(T, config) {
     return .{};
 }
 
 pub const NLLConfig = struct {
-    // dimensions of input tensor
+    /// Dimensions of input tensor
     dimensions: usize,
-    // nll expecting logits - if true, softmax will be used on input
+
+    /// NLL expecting logits - if true, softmax will be used on input
     input_logits: bool,
-    // specifies that the target type will be provided as an index
+
+    /// Specifies that the target type will be provided as an index
     target_type: enum { indices, encoding },
-    // specifies the reduce type used
+
+    /// Specifies the reduce type used
     reduce_type: ReduceType,
 };
 
@@ -132,7 +136,7 @@ pub fn softmax_cross_entropy_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T)
     const batch_size = if (y_pred.data.shape.len > 1) y_pred.data.shape.get(0) else 1;
     const last_dim = if (y_pred.data.shape.len > 1) y_pred.data.shape.len - 1 else 0;
     const sm_preds = try _softmax_fwd(T, y_pred, last_dim);
-    sm_preds.set_label("sm_preds");
+    if (debug) sm_preds.set_label("sm_preds");
 
     for (sm_preds.get_data(), 0..) |pred, i| {
         const target = y.data.data.raw[i];
@@ -301,6 +305,8 @@ pub fn smooth_l1_loss(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), beta: T) !
 }
 
 /// Naive softmax 1D that uses on autograd.
+/// This autograd variant is intended to by used as part of autograd system test and verification
+/// dedicated kernels should generally be used for such operations.
 pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
     const max_val = try input.max();
     const exp_input = try (try input.sub(max_val)).exp();
@@ -309,63 +315,24 @@ pub fn ag_softmax_1d(T: type, input: *NDTensor(T)) !*NDTensor(T) {
 }
 
 /// Naive Mean Squared Error 1D loss that uses on autograd.
+/// This autograd variant is intended to by used as part of autograd system test and verification
+/// dedicated kernels should generally be used for such operations.
 pub fn ag_mse_1d(T: type, y_pred: *NDTensor(T), y: *NDTensor(T), device: DeviceReference) !*NDTensor(T) {
     var diff = try y_pred.sub(y);
-    try diff.set_label("diff");
+    if (debug) try diff.set_label("diff");
 
-    const diff2 = try NDTensor(T).from_slice(diff.get_data(), diff.data.shape.slice(), true, device);
-    try diff2.set_label("diff2");
-    // const diff2 = (try y_pred.sub(y, allocator)).set_label("diff2");
-    const sq_diff = try diff.mul(diff2);
-    try sq_diff.set_label("sq_diff");
+    const sq_diff = try diff.pow(2);
+    if (debug) try sq_diff.set_label("sq_diff");
 
     const sum_sq_diff = try sq_diff.sum();
-    try sum_sq_diff.set_label("sum_sq_diff");
+    if (debug) try sum_sq_diff.set_label("sum_sq_diff");
 
     const coef = @as(T, @floatFromInt(y.get_size()));
     const coef_tensor = try NDTensor(T).from_slice(&.{coef}, null, true, device);
-    try coef_tensor.set_label("coef");
+    if (debug) try coef_tensor.set_label("coef");
 
     const out = try sum_sq_diff.div(coef_tensor);
-    try out.set_label("mse");
+    if (debug) try out.set_label("mse");
 
     return out;
 }
-
-// TODO: This is outdated! This is a reminder to write add an example to the docs (and some comments may be useful).
-// Documented outline for adding new custom operations
-// pub fn myop(T: type, input: *const NDTensor(T), dim: usize, device: DeviceReference) !*NDTensor(T) {
-//     // implement forward... (could be a separate function)
-//     const bw_fn = struct {
-//         fn backward(bw_tensor: NDTensor(T), bw_device: DeviceReference) !void {
-//             // An example of retreiving data that was saved for backward
-//             // in this example, we saved the dim (we cannot cross scope boundary in closure, so this is necessary)
-//             // We CAN reuse "T", though in the function signature since this is comptime known
-//             // Prefixing variable names with bw_ to avoid collisions with variables in the parent function scope.
-//             // We can access the operands for upstream gradients/data.
-//             const bw_self_children = bw_tensor.children orelse return error.NoChildren;
-//             const bw_input = bw_self_children[0];
-//             _ = bw_input; // autofix
-//             // We saved a *usize, so we retreive it and reify type information
-//             const bw_ctx: *usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-//             const bw_dim = bw_ctx.*;
-//             _ = bw_dim; // autofix
-//             _ = bw_dim; // autofix
-//             defer bw_allocator.destroy(bw_ctx);
-//             // ...
-//         }
-//     }.backward;
-//     // save for backward (will be stored internally as a type erased pointer)
-//     const ctx = try allocator.create(usize);
-//     ctx.* = dim;
-//
-//     return try NDTensor(T).create_dependent(.{
-//         .data = result, // *NDArray
-//         .children = &[_]*const NDTensor(T){input},
-//         .label = "myop",
-//         .requires_gradient = input.requires_gradient,
-//         .allocator = allocator,
-//         ._backward = bw_fn,
-//         ._backward_ctx = ctx,
-//     });
-// }

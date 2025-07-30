@@ -426,9 +426,11 @@ const StoragePointer = struct {
     fn init(T: type, ptr: *T) StoragePointer {
         const free = struct {
             pub fn impl(_ptr: *anyopaque, allocator: std.mem.Allocator) void {
-                allocator.destroy(@ptrCast(@alignCast(_ptr)));
+                var self: *T = @ptrCast(@alignCast(_ptr));
+                if (@hasDecl(T, "deinit")) self.deinit();
+                allocator.destroy(self);
             }
-        }.free;
+        }.impl;
         return .{ .held = ptr, .free = free };
     }
     fn deinit(self: *StoragePointer, allocator: std.mem.Allocator) void {

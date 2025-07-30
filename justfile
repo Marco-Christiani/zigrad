@@ -1,7 +1,16 @@
 set unstable
 
 default:
-  @just mnist
+    @just gcn
+
+[script("bash")]
+gcn +opts="--release=fast -Denable_mkl=true":
+    set -e
+    export ZG_DATA_DIR=$(realpath data)
+    cd examples/gcn
+    uv run ref/dataset.py
+    zig build {{opts}}
+    zig-out/bin/main
 
 alias b := build
 alias bf := build-fast
@@ -87,6 +96,10 @@ example-mnist:
   docker run -it -v $(pwd):/workspace -e DEBIAN_FRONTEND="noninteractive" debian bash -c "\
   apt-get update -y && apt-get install -y make curl xz-utils libopenblas-dev python3-minimal && \
   cd /workspace/examples/mnist/ && bash"
+
+docker-br:
+    docker build -t zigrad-cuda-unstable -f Dockerfile .
+    docker run --rm --gpus all -it -v .:/app zigrad-cuda-unstable
 
 pattern := '\[gpa\] \(err\)*'
 run_pattern:

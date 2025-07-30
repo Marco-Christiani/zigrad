@@ -1,81 +1,24 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const Py = @import("python.zig");
+const lib = @import("lib.zig");
 const NDTensor = zg.NDTensor;
 const Graph = zg.Graph;
 
-pub fn main() !void {
-    Py.init();
-    defer Py.finalize();
-
-    const allocator = std.heap.smp_allocator;
-    const T = f32;
-
-    var cpu = zg.device.HostDevice.init();
-    defer cpu.deinit();
-
-    try test_add_broadcast(T, cpu.reference(), allocator);
-    try test_mul_backward(T, cpu.reference(), allocator);
-    try test_div_backward(T, cpu.reference(), allocator);
-    try test_matmul_backward(T, cpu.reference(), allocator);
-    try test_matvec_backward(T, cpu.reference(), allocator);
-    try test_dot_backward(T, cpu.reference(), allocator);
-    try test_non_square_matmul(T, cpu.reference(), allocator);
-
-    switch (zg.backend) {
-        .CUDA => {
-            var cuda = zg.device.CudaDevice.init();
-            defer cuda.deinit();
-            try test_add_broadcast(T, cuda.reference(), allocator);
-            try test_mul_backward(T, cuda.reference(), allocator);
-            try test_div_backward(T, cuda.reference(), allocator);
-            try test_matmul_backward(T, cuda.reference(), allocator);
-            try test_matvec_backward(T, cuda.reference(), allocator);
-            try test_dot_backward(T, cuda.reference(), allocator);
-            try test_non_square_matmul(T, cuda.reference(), allocator);
-        },
-        .HOST => {},
-    }
-
-    std.debug.print("Verified.\n", .{});
+pub fn run_tests(T: type, device: zg.DeviceReference) !void {
+    try test_add_broadcast(T, device);
+    try test_mul_backward(T, device);
+    try test_div_backward(T, device);
+    try test_matmul_backward(T, device);
+    try test_matvec_backward(T, device);
+    try test_dot_backward(T, device);
+    try test_non_square_matmul(T, device);
+    try test_pow(T, device);
+    try test_sqrt(T, device);
 }
 
-test "verification tests" {
-    Py.init();
-    defer Py.finalize();
-
-    const allocator = std.testing.allocator;
-    const T = f32;
-
-    var cpu = zg.device.HostDevice.init();
-    defer cpu.deinit();
-
-    try test_add_broadcast(T, cpu.reference(), allocator);
-    try test_mul_backward(T, cpu.reference(), allocator);
-    try test_div_backward(T, cpu.reference(), allocator);
-    try test_matmul_backward(T, cpu.reference(), allocator);
-    try test_matvec_backward(T, cpu.reference(), allocator);
-    try test_dot_backward(T, cpu.reference(), allocator);
-    try test_non_square_matmul(T, cpu.reference(), allocator);
-
-    switch (zg.backend) {
-        .CUDA => {
-            var cuda = zg.device.CudaDevice.init();
-            defer cuda.deinit();
-            try test_add_broadcast(T, cuda.reference(), allocator);
-            try test_mul_backward(T, cuda.reference(), allocator);
-            try test_div_backward(T, cuda.reference(), allocator);
-            try test_matmul_backward(T, cuda.reference(), allocator);
-            try test_matvec_backward(T, cuda.reference(), allocator);
-            try test_dot_backward(T, cuda.reference(), allocator);
-            try test_non_square_matmul(T, cuda.reference(), allocator);
-        },
-        .HOST => {},
-    }
-}
-
-fn test_add_broadcast(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_add_broadcast(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -102,8 +45,8 @@ fn test_add_broadcast(T: type, device: zg.DeviceReference, allocator: std.mem.Al
 
     try py_mod.run(
         \\import torch
-        \\t1 = torch.tensor([[[0, 1, 2], [3, 4, 5], [6, 7, 8]], 
-        \\                   [[0, 1, 2], [3, 4, 5], [6, 7, 8]]], 
+        \\t1 = torch.tensor([[[0, 1, 2], [3, 4, 5], [6, 7, 8]],
+        \\                   [[0, 1, 2], [3, 4, 5], [6, 7, 8]]],
         \\                  dtype=torch.float32, requires_grad=True)
         \\t2 = torch.tensor([1, 1, 1], dtype=torch.float32, requires_grad=True)
         \\t4 = t1 + t2
@@ -132,8 +75,8 @@ fn test_add_broadcast(T: type, device: zg.DeviceReference, allocator: std.mem.Al
 
     try py_mod2.run(
         \\import torch
-        \\t1 = torch.tensor([[[0, 1, 2], [3, 4, 5], [6, 7, 8]], 
-        \\                   [[0, 1, 2], [3, 4, 5], [6, 7, 8]]], 
+        \\t1 = torch.tensor([[[0, 1, 2], [3, 4, 5], [6, 7, 8]],
+        \\                   [[0, 1, 2], [3, 4, 5], [6, 7, 8]]],
         \\                  dtype=torch.float32, requires_grad=True)
         \\t5 = torch.tensor([[[1, 1, 1]], [[1, 1, 1]]], dtype=torch.float32, requires_grad=True)
         \\t6 = t1 + t5
@@ -149,8 +92,8 @@ fn test_add_broadcast(T: type, device: zg.DeviceReference, allocator: std.mem.Al
     try std.testing.expectEqualSlices(T, expected_t5_grad, t5.assume_grad_data());
 }
 
-fn test_mul_backward(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_mul_backward(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -191,8 +134,8 @@ fn test_mul_backward(T: type, device: zg.DeviceReference, allocator: std.mem.All
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
 }
 
-fn test_div_backward(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_div_backward(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -233,8 +176,8 @@ fn test_div_backward(T: type, device: zg.DeviceReference, allocator: std.mem.All
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
 }
 
-fn test_matmul_backward(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_matmul_backward(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -362,8 +305,8 @@ fn test_matmul_backward(T: type, device: zg.DeviceReference, allocator: std.mem.
     try std.testing.expectEqualSlices(T, expected_t2_grad_trans_ab, t2.assume_grad_data());
 }
 
-fn test_matvec_backward(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_matvec_backward(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -406,8 +349,8 @@ fn test_matvec_backward(T: type, device: zg.DeviceReference, allocator: std.mem.
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
 }
 
-fn test_dot_backward(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_dot_backward(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -448,8 +391,8 @@ fn test_dot_backward(T: type, device: zg.DeviceReference, allocator: std.mem.All
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
 }
 
-fn test_non_square_matmul(T: type, device: zg.DeviceReference, allocator: std.mem.Allocator) !void {
-    var graph = Graph.init(allocator, .{});
+fn test_non_square_matmul(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
     defer graph.deinit();
 
     const Tensor = NDTensor(T);
@@ -476,9 +419,9 @@ fn test_non_square_matmul(T: type, device: zg.DeviceReference, allocator: std.me
 
     try py_mod.run(
         \\import torch
-        \\t1 = torch.tensor([[[1, 2, 3], [4, 5, 6]], 
+        \\t1 = torch.tensor([[[1, 2, 3], [4, 5, 6]],
         \\                   [[7, 8, 9], [10, 11, 12]]], dtype=torch.float32, requires_grad=True)
-        \\t2 = torch.tensor([[[1, 0], [0, 1], [1, 1]], 
+        \\t2 = torch.tensor([[[1, 0], [0, 1], [1, 1]],
         \\                   [[0, 1], [1, 0], [1, 1]]], dtype=torch.float32, requires_grad=True)
         \\t3 = torch.bmm(t1, t2)
         \\t3.sum().backward()
@@ -491,4 +434,81 @@ fn test_non_square_matmul(T: type, device: zg.DeviceReference, allocator: std.me
 
     try std.testing.expectEqualSlices(T, expected_t1_grad, t1.assume_grad_data());
     try std.testing.expectEqualSlices(T, expected_t2_grad, t2.assume_grad_data());
+}
+
+fn test_pow(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(T);
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    const x = try Tensor.from_slice(device, &.{ 1.0, 2.0, 3.0, 4.0 }, null, opts);
+    defer x.deinit();
+
+    // Forward: y = x^3
+    const y = try x.pow(3.0);
+    defer y.deinit();
+
+    try y.backward();
+
+    // PyTorch verification
+    var py_mod = try Py.create_module("test_pow_all_cases");
+    defer py_mod.deinit();
+
+    try py_mod.run(
+        \\import torch
+        \\x = torch.tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        \\y = x.pow(3.0)
+        \\y.sum().backward()
+        \\x_grad = x.grad.numpy()
+        \\y_out = y.detach().numpy()
+    );
+
+    const expected_out = try py_mod.get_slice(T, "y_out");
+    const expected_grad = try py_mod.get_slice(T, "x_grad");
+
+    try std.testing.expectEqualSlices(T, expected_out, y.get_data());
+    try std.testing.expectEqualSlices(T, expected_grad, x.assume_grad_data());
+}
+
+fn test_sqrt(T: type, device: zg.DeviceReference) !void {
+    var graph = Graph.init(std.heap.smp_allocator, .{});
+    defer graph.deinit();
+
+    const Tensor = NDTensor(T);
+    const opts: zg.TensorOpts = .{
+        .requires_grad = true,
+        .graph = &graph,
+    };
+
+    const x = try Tensor.from_slice(device, &.{ 1.0, 4.0, 9.0, 16.0 }, null, opts);
+    defer x.deinit();
+
+    const y = try x.sqrt();
+    defer y.deinit();
+
+    try (try y.sum()).backward();
+
+    // PyTorch verification
+    var py_mod = try Py.create_module("test_sqrt");
+    defer py_mod.deinit();
+
+    try py_mod.run(
+        \\import torch
+        \\x = torch.tensor([1.0, 4.0, 9.0, 16.0], requires_grad=True)
+        \\y = x.sqrt()
+        \\y.sum().backward()
+        \\x_grad = x.grad.numpy()
+        \\y_out = y.detach().numpy()
+    );
+
+    const expected_out = try py_mod.get_slice(T, "y_out");
+    const expected_grad = try py_mod.get_slice(T, "x_grad");
+
+    try lib.expectApproxEqRelSlices(T, expected_out, y.get_data(), 1e-5);
+    try lib.expectApproxEqRelSlices(T, expected_grad, x.assume_grad_data(), 1e-5);
 }

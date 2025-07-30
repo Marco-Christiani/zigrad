@@ -202,9 +202,13 @@ pub const Adam = struct {
                 const m, const v = blk: { // initialize m and v
                     const gop = try self.map.getOrPut(@intFromPtr(param));
                     if (!gop.found_existing) {
+                        const m_bytes = try param.device.mem_alloc(u8, param_size * @sizeOf(T));
+                        const v_bytes = try param.device.mem_alloc(u8, param_size * @sizeOf(T));
+                        param.device.mem_fill(u8, m_bytes, 0);
+                        param.device.mem_fill(u8, v_bytes, 0);
                         gop.value_ptr.* = .{
-                            .m = try param.device.mem_alloc(u8, param_size * @sizeOf(T)),
-                            .v = try param.device.mem_alloc(u8, param_size * @sizeOf(T)),
+                            .m = m_bytes,
+                            .v = v_bytes,
                             .device = param.device,
                         };
                     }

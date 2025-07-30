@@ -1,12 +1,8 @@
 ///! A minimal Python C API wrapper for verification testing
 const std = @import("std");
 
-const c = switch (@import("builtin").target.os.tag) {
-    // .macos => @cImport(@cInclude("/opt/homebrew/Cellar/python@3.11/3.11.10/Frameworks/Python.framework/Versions/3.11/include/python3.11/Python.h")),
-    inline else => @cImport(@cInclude("Python.h")),
-};
+const c = @cImport(@cInclude("Python.h"));
 
-pub const PyError = error{PythonError};
 var mutex = std.Thread.Mutex{};
 var initialized = false;
 globals: c.PyObject,
@@ -76,14 +72,114 @@ pub fn get_var_slice(globals: *c.PyObject, T: type, name: [:0]const u8) ![]const
     return try py_obj.get_slice(T);
 }
 
-/// Check if a Python object is not null and return it
-/// If the object is null, prints the Python error and returns an error
-pub fn check(obj: ?*c.PyObject) !*c.PyObject {
-    if (obj == null) {
-        c.PyErr_Print();
-        return PyError.PythonError;
+fn py_str(obj: *c.PyObject) ![]const u8 {
+    const str_obj = try check(c.PyObject_Str(obj));
+    defer c.Py_DECREF(str_obj);
+
+    const utf8 = c.PyUnicode_AsUTF8(str_obj);
+    if (utf8 == null) return PyError.PythonError;
+    return std.mem.span(utf8); // assuming null-terminated
+}
+
+const PyError = error{
+    ModuleNotFoundError,
+    ImportError,
+    TypeError,
+    ValueError,
+    KeyError,
+    OSError,
+    NameError,
+    AttributeError,
+    IndexError,
+    RuntimeError,
+    SyntaxError,
+    ZeroDivisionError,
+    UnicodeError,
+    PythonError, // fallback
+};
+
+// Map errors with table
+// fn convert_err(ptype: [*c]c.PyObject) !void {
+//     inline for (.{
+//         .{ c.PyExc_ModuleNotFoundError, PyError.ModuleNotFoundError },
+//         .{ c.PyExc_ImportError, PyError.ImportError },
+//     }) |e| {
+//         const e_py = e[0];
+//         const e_zig = e[1];
+//         // if (c.PyErr_GivenExceptionMatches(ptype, e_py) != 0) return e_zig;
+//         if (@hasDecl(c, "PyExc_" ++ @errorName(e_zig))) {
+//             if (c.PyErr_GivenExceptionMatches(ptype, e_py) != 0) return e_zig;
+//         } else return PyError.PythonError;
+//     }
+// }
+
+// Lookup errors from CPython error
+// fn convert_err(ptype: [*c]c.PyObject) !void {
+//     inline for (
+//         .{ c.PyExc_ModuleNotFoundError, c.PyExc_ImportError },
+//     ) |e| {
+//         const ename = @typeName(@TypeOf(e))["PyExc_".len..];
+//         // not sure how to do a field/decl look up on an error type, apparently thats special
+//         if (@hasDecl(PyError, ename)) {
+//             if (c.PyErr_GivenExceptionMatches(ptype, e) != 0) return @field(PyError, ename);
+//         }
+//     }
+//     return PyError.PythonError;
+// }
+
+// Lookup errors from zig errors
+fn convert_err(ptype: [*c]c.PyObject) !void {
+    inline for (
+        .{
+            PyError.ModuleNotFoundError,
+            PyError.ImportError,
+            PyError.TypeError,
+            PyError.ValueError,
+            PyError.KeyError,
+            PyError.OSError,
+            PyError.NameError,
+            PyError.AttributeError,
+            PyError.IndexError,
+            PyError.RuntimeError,
+            PyError.SyntaxError,
+            PyError.ZeroDivisionError,
+            PyError.UnicodeError,
+        },
+    ) |e| {
+        const e_py_name = "PyExc_" ++ @errorName(e);
+        if (@hasDecl(c, e_py_name)) {
+            if (c.PyErr_GivenExceptionMatches(ptype, @field(c, e_py_name)) != 0) return e;
+        }
     }
-    return obj.?;
+    return PyError.PythonError;
+}
+
+fn check(obj: ?*c.PyObject) !*c.PyObject {
+    if (obj != null) return obj.?;
+
+    var ptype: ?*c.PyObject = null;
+    var pvalue: ?*c.PyObject = null;
+    var ptrace: ?*c.PyObject = null;
+
+    if (std.posix.getenv("PY_ERRS")) |env| if (!std.mem.eql(u8, env, "0")) {
+        c.PyErr_Print();
+        // NOTE: printing will cause the error to be consumed and we wont be able to do anything
+        // meaningful with what we fetch after this, so as it is currently written we will eventually
+        // return the generic PyError.PythonError so we can do that here to be explicit.
+        return PyError.PythonError;
+    };
+    c.PyErr_Fetch(&ptype, &pvalue, &ptrace);
+    c.PyErr_NormalizeException(&ptype, &pvalue, &ptrace);
+
+    defer {
+        if (ptype) |x| c.Py_DECREF(x);
+        if (pvalue) |x| c.Py_DECREF(x);
+        if (ptrace) |x| c.Py_DECREF(x);
+    }
+
+    const t = ptype orelse return PyError.PythonError;
+    try convert_err(t);
+    return PyError.PythonError;
 }
 
 /// Evaluate a Python expression and return the resulting PyObject wrapper.
@@ -92,10 +188,10 @@ pub fn eval(expr: [:0]const u8, globals: *c.PyObject) !PyObject {
     return PyObject{ .obj = obj };
 }
 
-pub fn eval_float(expr: [:0]const u8, globals: *c.PyObject) !f64 {
+pub fn eval_f64(expr: [:0]const u8, globals: *c.PyObject) !f64 {
     const obj = try eval(expr, globals);
     defer obj.deinit();
-    return try obj.to_float();
+    return try obj.double();
 }
 
 pub fn eval_slice(comptime T: type, expr: [:0]const u8, globals: *c.PyObject) ![]const T {
@@ -137,7 +233,7 @@ pub const PyModule = struct {
     /// Evaluate a Python expression evaluating to a float-coerceable in this module's namespace
     pub fn eval_float(self: Self, expr: [:0]const u8) !f64 {
         const pyobj = try self.eval(expr);
-        return try pyobj.to_float();
+        return try pyobj.double();
     }
 
     /// Get a variable from this module by name
@@ -229,13 +325,17 @@ pub const PyObject = struct {
     //     .F32 => c.PyFloat_AsDouble(self.obj),
     //     .F64 => c.PyLong_AsDouble(self.obj),
     // };
-    pub fn to_float(self: PyObject) !f64 {
+    pub fn double(self: PyObject) !f64 {
         const result = c.PyFloat_AsDouble(self.obj);
         if (result == -1.0 and c.PyErr_Occurred() != null) {
             c.PyErr_Print();
             return PyError.PythonError;
         }
         return result;
+    }
+
+    pub fn float(self: PyObject, T: type) !T {
+        return @floatCast(try self.double());
     }
 };
 
