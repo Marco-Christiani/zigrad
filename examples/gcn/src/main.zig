@@ -20,10 +20,10 @@ pub fn run_cora(data_dir: []const u8) !void {
         }
     }
 
-    zg.init_global_graph(allocator, .{
+    zg.global_graph_init(allocator, .{
         .eager_teardown = true,
     });
-    defer zg.deinit_global_graph();
+    defer zg.global_graph_deinit();
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
@@ -69,7 +69,7 @@ pub fn run_cora(data_dir: []const u8) !void {
         var train_time_ms: f64 = 0;
         var test_time_ms: f64 = 0;
         {
-            zg.rt_grad_enabled = true;
+            zg.runtime.grad_enabled = true;
             timer.reset();
 
             const output = try model.forward(dataset.x, dataset.edge_index);
@@ -92,7 +92,7 @@ pub fn run_cora(data_dir: []const u8) !void {
         }
 
         {
-            zg.rt_grad_enabled = false;
+            zg.runtime.grad_enabled = false;
             timer.reset();
 
             const output = try model.forward(dataset.x, dataset.edge_index);
@@ -110,8 +110,8 @@ pub fn run_cora(data_dir: []const u8) !void {
                 for (0..total) |j| {
                     const start = j * dataset.num_classes;
                     const end = start + dataset.num_classes;
-                    const yh = std.mem.indexOfMax(T, output_.data.data[start..end]);
-                    const y = std.mem.indexOfMax(T, label_.data.data[start..end]);
+                    const yh = std.mem.indexOfMax(T, output_.get_data()[start..end]);
+                    const y = std.mem.indexOfMax(T, label_.get_data()[start..end]);
                     correct += if (yh == y) 1 else 0;
                 }
                 acc[i] = correct / @as(f32, @floatFromInt(total));

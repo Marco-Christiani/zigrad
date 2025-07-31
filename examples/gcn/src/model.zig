@@ -134,7 +134,7 @@ pub fn GraphConvLayer(comptime T: type) type {
                 errdefer adj_mat.deinit();
                 const adj_mat_data = adj_mat.get_data();
 
-                const deg = try self.device.mem_scratch(T, n_node);
+                const deg = self.device.mem_scratch(T, n_node);
                 self.device.mem_fill(T, deg, 1); // the initial is 1 (self loop)
                 for (0..n_edge) |i| {
                     const source = edge_index_data[i * 2];
@@ -176,11 +176,11 @@ pub fn MaskLayer(comptime T: type) type {
                     const buf_end = count * num_feature + num_feature;
                     const x_start = i * num_feature;
                     const x_end = i * num_feature + num_feature;
-                    device.mem_copy(T, x.data.data[x_start..x_end], buf[buf_start..buf_end]);
+                    device.mem_copy(T, x.get_data()[x_start..x_end], buf[buf_start..buf_end]);
                     count += 1;
                 }
             }
-            const y = try Tensor.DataType.init(
+            const y = try Tensor.DataType.from_slice(
                 buf[0 .. count * num_feature],
                 &.{ count, num_feature },
                 x.device,
