@@ -51,11 +51,6 @@ pub fn logEnabled(comptime message_level: Level, comptime scope: Scope) bool {
     } else false;
 }
 
-/// Determine if a specific log message level using the default log scope is enabled for logging.
-pub fn defaultLogEnabled(comptime message_level: Level) bool {
-    return comptime logEnabled(message_level, default_log_scope);
-}
-
 /// The default implementation for the log function, custom log functions may
 /// forward log messages to this function.
 pub fn default_callback(
@@ -122,26 +117,3 @@ pub fn scoped(comptime scope: Scope) type {
         }
     };
 }
-
-pub const default_log_scope = .default;
-
-/// The default scoped logging namespace.
-pub const default = scoped(default_log_scope);
-
-/// Log an error message using the default scope. This log level is intended to
-/// be used when something has gone wrong. This might be recoverable or might
-/// be followed by the program exiting.
-pub const err = default.err;
-
-/// Log a warning message using the default scope. This log level is intended
-/// to be used if it is uncertain whether something has gone wrong or not, but
-/// the circumstances would be worth investigating.
-pub const warn = default.warn;
-
-/// Log an info message using the default scope. This log level is intended to
-/// be used for general messages about the state of the program.
-pub const info = default.info;
-
-/// Log a debug message using the default scope. This log level is intended to
-/// be used for messages which are only useful for debugging.
-pub const debug = default.debug;
