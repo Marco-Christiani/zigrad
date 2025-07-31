@@ -22,10 +22,10 @@ pub const TensorOpts = @import("ndtensor/utils.zig").TensorOpts;
 //pub const Model = @import("nn/model.zig").Model;
 pub const conv_utils = @import("nn/conv_utils.zig");
 pub const utils = @import("nn/utils.zig");
-//pub const layer = @import("nn/layer.zig");
 pub const optim = @import("nn/optim.zig");
 pub const Optimizer = optim.Optimizer;
 pub const nn = @import("nn/nn.zig");
+pub const logging = @import("logging.zig");
 
 /// The category tag is used to categorize different
 /// mathematical objects based on their mathematical
@@ -67,6 +67,12 @@ pub const Settings = struct {
     backward_children_capacity: usize = 8,
     label_capacity: usize = 32,
     thread_safe: bool = !builtin.single_threaded,
+
+    logging: struct {
+        level: logging.Level = .err,
+        scopes: []const logging.ScopeLevel = &.{},
+        callback: ?logging.LoggingFunction = null,
+    } = .{},
 };
 
 /// Global flag for enabling/disabling gradient tracking.

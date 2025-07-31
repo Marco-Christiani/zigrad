@@ -5,6 +5,8 @@ const DeviceData = @import("device_data.zig").DeviceData;
 const Error = @import("device_data.zig").Error;
 const zg = @import("../zigrad.zig");
 
+const logger = @import("../logging.zig").scoped(.caching_allocator);
+
 // I understand the philosophy of passing in allocators, but this data structure
 // itself doesn't benefit from having its internal state managed by yet another
 // allocator. This is similar to the original "GPA" allocator in this sense.
@@ -75,21 +77,33 @@ pub fn CachingAllocator(DataHandler: type) type {
             self.data_handler.reset();
         }
 
-        pub fn alloc(self: *Self, T: type, size: usize) Error!DeviceData(T) {
-            if (size == 0) {
+        pub fn alloc(self: *Self, T: type, len: usize) Error!DeviceData(T) {
+            if (len == 0) {
                 // "Nothing! It does nothing. But it does it in style!"
                 //    ~Andrei Alexandrescu
                 return .{ .raw = &.{}, .ctx = 0 };
             }
 
-            const result = if (size * @sizeOf(T) <= pool_threshold)
-                self.small_pool.alloc(T, self.data_handler, allocator, size)
+            const total_bytes = @sizeOf(T) * len;
+            const is_small = (total_bytes <= pool_threshold);
+
+            logger.debug("alloc - type: {s}, len: {} bytes: {}, pool: {s}", .{
+                @typeName(T), len, total_bytes, if (is_small) "small" else "large",
+            });
+
+            const result = if (is_small)
+                self.small_pool.alloc(T, self.data_handler, allocator, len)
             else
-                self.large_pool.alloc(T, self.data_handler, allocator, size);
+                self.large_pool.alloc(T, self.data_handler, allocator, len);
 
             return if (result) |r| r else |err| switch (err) {
                 Allocator.Error.OutOfMemory => @panic("Page allocator ran out of memory"),
-                else => error.DeviceOOM,
+                else => blk: {
+                    logger.err("alloc - pool: {s}, {s}", .{
+                        if (is_small) "small" else "large", @errorName(err),
+                    });
+                    break :blk error.DeviceOOM;
+                },
             };
         }
 
@@ -97,9 +111,15 @@ pub fn CachingAllocator(DataHandler: type) type {
             if (data.raw.len == 0)
                 return;
 
-            const byte_size = data.raw.len * @sizeOf(std.meta.Child(@TypeOf(data.raw)));
+            const T = std.meta.Child(@TypeOf(data.raw));
+            const total_bytes = data.raw.len * @sizeOf(T);
+            const is_small = (total_bytes < pool_threshold);
 
-            if (byte_size <= pool_threshold)
+            logger.debug("free - type: {s}, len: {} bytes: {}, pool: {s}", .{
+                @typeName(T), data.raw.len, total_bytes, if (is_small) "small" else "large",
+            });
+
+            if (is_small)
                 self.small_pool.free(data)
             else
                 self.large_pool.free(data);
@@ -116,9 +136,10 @@ pub fn CachingAllocator(DataHandler: type) type {
             const total: usize = @sizeOf(T) * n;
             // check if we have enough scratch to provide a payload
             if (self.scratch.total < total) {
-                if (self.scratch.total != 0)
+                if (self.scratch.total != 0) {
+                    logger.debug("alloc_scratch - freeing: {}", .{self.scratch.total});
                     self.data_handler.free(self.scratch.ptr[0..self.scratch.total]);
-
+                }
                 // Hard error - we cannot fail to allocate scratch memory.
                 // After warmup, you'll likely have sufficient scratch.
                 self.scratch.ptr = self.data_handler.alloc(total) orelse
@@ -126,6 +147,11 @@ pub fn CachingAllocator(DataHandler: type) type {
 
                 self.scratch.total = total;
             }
+
+            logger.debug("alloc_scratch - type: {s}, len: {} bytes: {}", .{
+                @typeName(T), n, total,
+            });
+
             return cast_to_slice(T, self.scratch.ptr, n);
         }
     };

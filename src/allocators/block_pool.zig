@@ -57,8 +57,9 @@ const constants = @import("constants.zig");
 const ArenaUnmanaged = @import("arena_unmanaged.zig");
 const DeviceData = @import("device_data.zig").DeviceData;
 const round_to_next_page = @import("../allocators.zig").round_to_next_page;
-
 const OrderList = @import("order_list.zig");
+
+const logger = @import("../logging.zig").scoped(.block_pool);
 
 pub const Block = struct {
     data: []u8,
@@ -96,7 +97,7 @@ const FreeList = struct {
 
 /// Overflow means that the BlockPool cannot support the requested memory size
 /// requested for the incoming allocation.
-pub const Error = error{Overflow} || std.mem.Allocator.Error;
+pub const Error = error{ Overflow, Fragmented, ExceedsMax } || std.mem.Allocator.Error;
 
 pub fn BockPool(DataHandler: type, comptime config: struct {
     min_order: usize,
@@ -196,8 +197,13 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
             // but we'd have to get a lot more fancy to deal with that.
             const max_size = comptime order_to_size(MAX_ORDER);
 
-            if (self.mem_rem < byte_size or max_size < byte_size)
+            if (self.mem_rem < byte_size) {
+                @branchHint(.unlikely);
                 return Error.Overflow;
+            } else if (max_size < byte_size) {
+                @branchHint(.unlikely);
+                return Error.ExceedsMax;
+            }
 
             // scan up to and including the the max reserved order
             const lhs = scan: for (order_to_index(upper_order)..self.index_sentinel) |i| {
@@ -233,7 +239,10 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
 
                 break :scan lhs;
             } else {
-                return Error.Overflow;
+                // We already checked that the cummulative remaining memory
+                // is large enough to support the request, but no singular
+                // chunk was large enough.
+                return Error.Fragmented;
             };
 
             self.mem_rem -= lhs.data.len;
