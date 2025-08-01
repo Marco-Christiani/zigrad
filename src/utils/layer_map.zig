@@ -68,9 +68,20 @@ pub fn put(
     /// Control ownership behavior
     opts: PutOpts,
 ) !void {
+    try self.put_closure(key, ClosurePointer.init(ptr, opts.owned));
+}
+
+/// Lower-level version of `put()` operating on type-erased values.
+pub fn put_closure(
+    self: *Self,
+    /// Hierarchical key path
+    key: []const u8,
+    /// Type-erased pointer to store
+    ptr: ClosurePointer,
+) !void {
     const _key = try self.arena.dupe(self.allocator, u8, key);
     errdefer self.arena.free(_key);
-    try self.map.put(self.allocator, _key, ClosurePointer.init(ptr, opts.owned));
+    try self.map.put(self.allocator, _key, ptr);
 }
 
 /// Extracts items from the layer map by populating the provided struct type
