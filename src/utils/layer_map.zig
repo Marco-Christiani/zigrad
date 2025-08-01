@@ -1,3 +1,17 @@
+//! Hierarchical parameter storage. Stores tensors in a key-value map using
+//! dot-separated paths (e.g., "encoder.layer1.weights") and can perform
+//! strongly typed extraction through type introspection and comptime
+//! metaprogramming.
+//!
+//! Supports serialization to SafeTensors format.
+//!
+//! Example usage:
+//! ```zig
+//! var map = LayerMap.init(allocator);
+//! try map.put("model.weights", tensor, .{});
+//! const MyModel = struct { model: struct { weights: NDTensor(f32) } };
+//! const params = map.extract(MyModel, "", .{});
+//! ```
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const NDTensor = @import("../ndtensor.zig").NDTensor;
@@ -7,10 +21,11 @@ const TypeID = rtti.TypeID;
 const ArenaUnmanaged = @import("../allocators.zig").ArenaUnmanaged;
 const TensorOpts = @import("../zigrad.zig").TensorOpts;
 
+const Self = @This();
 const stz = @import("../zigrad.zig").stz;
 const zg = @import("../zigrad.zig");
 
-const Self = @This();
+/// Stores type erased values
 const ParamMap = std.StringArrayHashMapUnmanaged(ClosurePointer);
 
 const SUPPORTED_TYPES: []const type = &.{
@@ -24,6 +39,7 @@ const PopulateOpts = struct {
 
 allocator: Allocator,
 arena: ArenaUnmanaged,
+/// Backing storage for entries as type erased values
 map: ParamMap,
 
 pub fn init(allocator: Allocator) Self {
@@ -42,20 +58,33 @@ pub const PutOpts = struct {
     owned: bool = false,
 };
 
-pub fn put(self: *Self, key: []const u8, ptr: anytype, opts: PutOpts) !void {
-    return self.put_closure(key, ClosurePointer.init(ptr, opts.owned));
-}
-
-pub fn put_closure(self: *Self, key: []const u8, ptr: ClosurePointer) !void {
+/// Stores a value in the map at the specified key path.
+pub fn put(
+    self: *Self,
+    /// Hierarchical key path (e.g., "layer.weights")
+    key: []const u8,
+    /// Pointer to value to store (e.g., a `*zg.NDTensor`)
+    ptr: anytype,
+    /// Control ownership behavior
+    opts: PutOpts,
+) !void {
     const _key = try self.arena.dupe(self.allocator, u8, key);
     errdefer self.arena.free(_key);
-    try self.map.put(self.allocator, _key, ptr);
+    try self.map.put(self.allocator, _key, ClosurePointer.init(ptr, opts.owned));
 }
 
+/// Extracts items from the layer map by populating the provided struct type
+/// with entries from the map based on field names. Recurses on the fields of
+/// `ParamType` until one of `SUPPORTED_TYPES` is found.
+///
+/// Field paths are built with "." as the delimeter (e.g., "layer.weights").
 pub fn extract(
     self: *Self,
+    /// The struct type to populate from the map
     ParamType: type,
+    /// The root path prefix for all field lookups in the map
     root: []const u8,
+    /// Configure ownership during population
     opts: PopulateOpts,
 ) ParamType {
     var tmp: ParamType = undefined;
@@ -63,10 +92,19 @@ pub fn extract(
     return tmp;
 }
 
+/// Extracts multiple parameter groups from the map based on shared prefixes.
+/// Returns a hashmap where keys are the discovered prefixes and values are
+/// the populated parameter structures.
+///
+/// For example, given keys "model1.weights" and "model2.weights" and using
+/// prefix "model" returns map with "model1" and "model2" entries.
 pub fn extract_map(
     self: *Self,
+    /// The struct type to populate for each group
     ParamType: type,
+    /// The common prefix to search for
     prefix: []const u8,
+    /// Configure ownership during population
     opts: PopulateOpts,
 ) !std.StringArrayHashMapUnmanaged(ParamType) {
     var strings: std.StringArrayHashMapUnmanaged(void) = .empty;
@@ -88,7 +126,21 @@ pub fn extract_map(
     return output;
 }
 
-pub fn for_each_type(self: *Self, visitor: anytype) void {
+/// Visits entries matching a specific type specified by signature of the vistor's `visit()` method.
+///
+/// Example visitor:
+/// ```zig
+/// struct {
+///     pub fn visit(_: @This(), key: []const u8, entry: *zg.NDTensor(f32)) void {
+///         // ...
+///     }
+/// }
+/// ```
+pub fn for_each_type(
+    self: *Self,
+    /// Visitor with `visit(self: @This(), key: []const u8, entry: *SomeCustomType)` method
+    visitor: anytype,
+) void {
     const T = @TypeOf(visitor);
     const U = if (@typeInfo(T) == .pointer) std.meta.Child(T) else T;
     comptime std.debug.assert(@typeInfo(U) == .@"struct");
@@ -108,7 +160,23 @@ pub fn for_each_type(self: *Self, visitor: anytype) void {
     }
 }
 
-pub fn for_each(self: *Self, visitor: anytype) void {
+/// Applies a visitor to every leaf.
+///
+/// A valid visitor must have a valid `visit` method.
+///
+/// Example visitor:
+/// ```zig
+/// struct {
+///     pub fn visit(_: @This(), key: []const u8, entry: anytype) void {
+///         // ...
+///     }
+/// }
+/// ```
+pub fn for_each(
+    self: *Self,
+    /// Visitor with `visit(self: @This(), key: []const u8, entry: anytype)` method
+    visitor: anytype,
+) void {
     const T = @TypeOf(visitor);
     const U = if (@typeInfo(T) == .pointer) std.meta.Child(T) else T;
     comptime std.debug.assert(@typeInfo(U) == .@"struct");
@@ -201,10 +269,17 @@ pub fn print_tree(self: *Self) void {
 
 const PathBuffer = std.BoundedArray(u8, 1024);
 
+/// Populates an existing struct with entries from the map.
+/// Lower-level function used by `extract()`.
+///
+/// E.g., `var params: MyStruct = undefined; populate(&params, "root", .{});`
 pub fn populate(
     self: *Self,
+    /// Struct instance to populate
     ptr: anytype,
+    /// Root path prefix for lookups
     root: []const u8,
+    /// Configure ownership during population
     opts: PopulateOpts,
 ) void {
     var buf = PathBuffer.fromSlice(root) catch unreachable;
@@ -243,8 +318,13 @@ fn recursive_populate(
     }
 }
 
-/// Serialize the parameter tree to safetensors format
-pub fn serialize(self: *Self, allocator: Allocator) ![]u8 {
+/// Serializes param tensors to SafeTensors binary format.
+/// Returns allocated byte buffer. COM.
+pub fn serialize(
+    self: *Self,
+    /// Allocator passed to `stz.serialize_tensors()` (from `safetensors-zg`)
+    allocator: Allocator,
+) ![]u8 {
     const TensorCollector = struct {
         tensor_list: std.ArrayList(stz.Tensor),
 
@@ -285,10 +365,16 @@ pub fn serialize(self: *Self, allocator: Allocator) ![]u8 {
     return stz.serialize_tensors(collector.tensor_list, allocator);
 }
 
+/// Creates `LayerMap` from SafeTensors binary data.
+/// Tensors are allocated on the specified device.
 pub fn deserialize(
+    /// SafeTensors binary data
     data: []const u8,
+    /// Allocator for new `LayerMap`
     allocator: Allocator,
+    /// Target device for tensors
     device: zg.DeviceReference,
+    /// Control tensor ownership and graph
     opts: LoadOpts,
 ) !Self {
     const graph = opts.graph orelse zg.global_graph_get();
@@ -348,10 +434,13 @@ fn create_tensor_from_view(
     };
 }
 
-// Save parameter tree to file
+/// Saves parameters to a SafeTensors file.
+/// Convenience wrapper around `serialize()`.
 pub fn save_to_file(
     self: *Self,
+    /// Output file path
     file_path: []const u8,
+    /// Allocator for temporary buffer
     allocator: Allocator,
 ) !void {
     const serialized_data = try self.serialize(allocator);
@@ -369,7 +458,8 @@ pub const LoadOpts = struct {
     graph: ?*zg.Graph = null,
 };
 
-// Load parameter tree from file
+/// Loads parameters from a SafeTensors file.
+/// Convenience wrapper around `deserialize()`.
 pub fn load_from_file(
     file_path: []const u8,
     allocator: std.mem.Allocator,
@@ -383,9 +473,8 @@ pub fn load_from_file(
 }
 
 test {
-    const LayerMap = @This();
+    const LayerMap = Self;
     const allocator = std.testing.allocator;
-    // const allocator = std.heap.smp_allocator;
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
