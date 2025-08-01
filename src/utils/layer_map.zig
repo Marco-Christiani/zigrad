@@ -31,8 +31,7 @@ pub fn init(allocator: Allocator) Self {
 }
 
 pub fn deinit(self: *Self) void {
-    for (self.map.values()) |*v|
-        v.deinit();
+    for (self.map.values()) |*v| v.deinit();
 
     self.arena.deinit(self.allocator);
     self.map.deinit(self.allocator);
@@ -164,8 +163,10 @@ pub fn print_tree(self: *Self) void {
             if (key_pos == 0)
                 std.debug.print("{s}\n", .{key[key_pos..sep_pos]})
             else if (key_pos != sep_pos) {
-                std.debug.print("{s}∟{s}\n", .{
+                std.debug.print("{s}{s}{s}{s}\n", .{
                     prefix[0..stack.len],
+                    "\u{2514}", // └
+                    "\u{2500}", // ─
                     key[key_pos..sep_pos],
                 });
             }
@@ -179,7 +180,7 @@ pub fn print_tree(self: *Self) void {
             key[0..key_pos],
         )) : (key_idx += 1) {
             std.debug.print("{s}.{s}\n", .{
-                prefix[0 .. stack.len + 1],
+                prefix[0 .. stack.len + 2],
                 keys[key_idx][key_pos..],
             });
         }
@@ -218,23 +219,26 @@ fn recursive_populate(
 ) void {
     const T = @TypeOf(ptr.*);
 
+    // Check if this is a supported tensor type first
+    inline for (SUPPORTED_TYPES) |supported_type| {
+        if (T == supported_type) {
+            const entry = map.get(buf.slice()) orelse unreachable;
+            ptr.* = entry.cast(T).*;
+            if (!shared) _ = map.orderedRemove(buf.slice());
+            return;
+        }
+    }
+
+    // If not a supported tensor type recurse into struct fields
     switch (@typeInfo(T)) {
         .@"struct" => |s| inline for (s.fields) |field| {
-            const ext = if (buf.len > 0)
-                "." ++ field.name
-            else
-                field.name;
-
+            const ext = if (buf.len > 0) "." ++ field.name else field.name;
             buf.appendSlice(ext) catch unreachable;
-            recursive_populate(&@field(ptr.*, field.name), map, buf);
+            recursive_populate(&@field(ptr.*, field.name), map, buf, shared);
             buf.len -= ext.len;
         },
         else => {
-            const entry = map.get(buf.slice()) orelse unreachable;
-            ptr.* = entry.cast(T);
-            if (!shared) {
-                _ = map.orderedRemove(buf.slice());
-            }
+            @compileError("Unsupported leaf type in parameter structure" ++ @typeName(T));
         },
     }
 }
@@ -376,4 +380,112 @@ pub fn load_from_file(
     defer allocator.free(file_data);
 
     return deserialize(file_data, allocator, device, opts);
+}
+
+test {
+    const LayerMap = @This();
+    const allocator = std.testing.allocator;
+    // const allocator = std.heap.smp_allocator;
+
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+
+    var graph = zg.Graph.init(allocator, .{});
+    defer graph.deinit();
+
+    zg.global_graph_init(allocator, .{});
+    defer zg.global_graph_deinit();
+
+    const x = try zg.NDTensor(f32).random(cpu.reference(), &.{ 2, 6 }, .uniform, .{
+        .label = "x: f32",
+        .graph = &graph,
+    });
+    defer x.deinit();
+
+    const y = try zg.NDTensor(f64).random(cpu.reference(), &.{ 2, 2 }, .uniform, .{
+        .label = "y: f64",
+        .graph = &graph,
+    });
+    defer y.deinit();
+
+    var lmap = LayerMap.init(allocator);
+    defer lmap.deinit();
+
+    try lmap.put("layer_a.foo.bar.weights", x, .{ .owned = false });
+    try lmap.put("layer_a.foo.bar.bias", y, .{ .owned = false });
+
+    lmap.for_each(struct { // target every node in the graph (auto-cast)
+        pub fn visit(_: @This(), key: []const u8, t: anytype) void {
+            std.debug.print("LABEL (ALL): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
+
+    lmap.for_each_type(struct { // only target NDTensor(f32)
+        pub fn visit(_: @This(), key: []const u8, t: *zg.NDTensor(f32)) void {
+            std.debug.print("LABEL (f32): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
+
+    lmap.for_each_type(struct { // only target NDTensor(f64)
+        pub fn visit(_: @This(), key: []const u8, t: *zg.NDTensor(f64)) void {
+            std.debug.print("LABEL (f64): {?s}, key: {s}\n", .{ t.get_label(), key });
+        }
+    }{});
+
+    var counter: struct {
+        total_params: usize = 0,
+        total_tensors: u32 = 0,
+        largest_tensor: usize = 0,
+        largest_tensor_key: []const u8 = "",
+        pub fn visit(self: *@This(), key: []const u8, t: anytype) void {
+            const param_count = t.get_size();
+            self.total_tensors += 1;
+            self.total_params += param_count;
+
+            if (self.largest_tensor < param_count) {
+                self.largest_tensor = param_count;
+                self.largest_tensor_key = key;
+            }
+        }
+    } = .{};
+
+    lmap.for_each(&counter);
+    std.debug.print(
+        \\Parameter Statistics:
+        \\  Total tensors: {d}
+        \\  Largest tensor: {d} at '{s}'
+        \\
+    , .{
+        counter.total_tensors,
+        counter.largest_tensor,
+        counter.largest_tensor_key,
+    });
+
+    lmap.print_tree();
+
+    try lmap.save_to_file("here.stz", allocator);
+
+    var tree = try LayerMap.load_from_file("here.stz", allocator, cpu.reference(), .{
+        .owning = true,
+    });
+    defer tree.deinit();
+
+    tree.print_tree();
+
+    // ----------------------------
+    // Extract
+    // ----------------------------
+    const w = lmap.extract(zg.NDTensor(f32), "layer_a.foo.bar.weights", .{});
+    std.debug.print("Extracted tensor: {s}\n", .{w.get_label().?});
+    const LayerA = struct {
+        foo: struct {
+            bar: struct {
+                weights: zg.NDTensor(f32),
+                bias: zg.NDTensor(f64),
+            },
+        },
+    };
+    // TODO: proper error handling for extract(). try passing a bad prefix (e.g., "") to see what I mean.
+    const la = lmap.extract(LayerA, "layer_a", .{});
+    std.debug.print("Extracted struct: {}\n", .{la});
 }
