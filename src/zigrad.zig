@@ -95,7 +95,7 @@ pub fn global_graph_deinit() void {
     if (global_graph) |*gg| gg.deinit();
 }
 pub fn global_graph_get() *Graph {
-    return &(global_graph orelse @panic("Global graph is uninitialized, call init_global_graph first."));
+    return &(global_graph orelse @panic("Global graph is uninitialized, call global_graph_init first."));
 }
 
 pub const LayerMap = @import("utils/layer_map.zig");
