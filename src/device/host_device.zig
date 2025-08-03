@@ -77,33 +77,79 @@ const DataHandler = struct {
     // zig fmt: on
 };
 
+// TODO Remove this once stdlib support is available
+pub const Sysinfo = switch (builtin.abi) {
+    .gnux32, .muslx32 => extern struct {
+        /// Seconds since boot
+        uptime: i64,
+        /// 1, 5, and 15 minute load averages
+        loads: [3]u64,
+        /// Total usable main memory size
+        totalram: u64,
+        /// Available memory size
+        freeram: u64,
+        /// Amount of shared memory
+        sharedram: u64,
+        /// Memory used by buffers
+        bufferram: u64,
+        /// Total swap space size
+        totalswap: u64,
+        /// swap space still available
+        freeswap: u64,
+        /// Number of current processes
+        procs: u16,
+        /// Explicit padding for m68k
+        pad: u16,
+        /// Total high memory size
+        totalhigh: u64,
+        /// Available high memory size
+        freehigh: u64,
+        /// Memory unit size in bytes
+        mem_unit: u32,
+    },
+    else => extern struct {
+        /// Seconds since boot
+        uptime: isize,
+        /// 1, 5, and 15 minute load averages
+        loads: [3]usize,
+        /// Total usable main memory size
+        totalram: usize,
+        /// Available memory size
+        freeram: usize,
+        /// Amount of shared memory
+        sharedram: usize,
+        /// Memory used by buffers
+        bufferram: usize,
+        /// Total swap space size
+        totalswap: usize,
+        /// swap space still available
+        freeswap: usize,
+        /// Number of current processes
+        procs: u16,
+        /// Explicit padding for m68k
+        pad: u16,
+        /// Total high memory size
+        totalhigh: usize,
+        /// Available high memory size
+        freehigh: usize,
+        /// Memory unit size in bytes
+        mem_unit: u32,
+        /// Pad
+        _f: [20 - 2 * @sizeOf(usize) - @sizeOf(u32)]u8,
+    },
+};
+
+fn sysinfo(info: *Sysinfo) void {
+    if (std.os.linux.syscall1(.sysinfo, @intFromPtr(info)) != 0)
+        @panic("Failed to query sysinfo");
+}
+
 pub fn host_total_memory() usize {
     switch (comptime builtin.target.os.tag) {
         .linux => {
-            const file = std.fs.openFileAbsolute("/proc/meminfo", .{}) catch
-                @panic("Failed to find /proc/meminfo file");
-
-            defer file.close();
-
-            var buffer: [1024]u8 = undefined;
-            const n = file.readAll(&buffer) catch @panic("Buffer overflow reading /proc/meminfo");
-
-            var lines = std.mem.splitSequence(u8, buffer[0..n], "\n");
-
-            const target: []const u8 = "MemTotal:";
-
-            while (lines.next()) |line| {
-                if (!std.mem.startsWith(u8, line, target))
-                    continue;
-
-                const parsed = std.fmt.parseInt(usize, std.mem.trim(u8, line[target.len..], " kKbB"), 10) catch
-                    @panic("Failed to parse total memory from TotalMem field in /proc/meminfo");
-
-                // TODO: Do a check for mem_info unit to ensure that it's kB
-                return parsed * zg.constants.@"1kB";
-            } else {
-                @panic("Failed to find 'MemTotal' in /proc/meminfo file");
-            }
+            var si: Sysinfo = undefined;
+            _ = sysinfo(&si);
+            return si.totalram * si.mem_unit;
         },
         else => @compileError("host_total_memory not implemented for OS"),
     }
