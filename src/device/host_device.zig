@@ -139,17 +139,21 @@ pub const Sysinfo = switch (builtin.abi) {
     },
 };
 
-fn sysinfo(info: *Sysinfo) void {
-    if (std.os.linux.syscall1(.sysinfo, @intFromPtr(info)) != 0)
-        @panic("Failed to query sysinfo");
-}
-
 pub fn host_total_memory() usize {
     switch (comptime builtin.target.os.tag) {
         .linux => {
             var si: Sysinfo = undefined;
-            _ = sysinfo(&si);
+            if (std.os.linux.syscall1(.sysinfo, @intFromPtr(&si)) != 0)
+                @panic("Failed to query sysinfo");
             return si.totalram * si.mem_unit;
+        },
+        .macos => {
+            var total: usize = 0;
+            var len: usize = @sizeOf(usize);
+            std.posix.sysctlbynameZ("hw.memsize", &total, &len, null, 0) catch |err| {
+                std.debug.panic("Failed to get hw.memsize: {}", .{err});
+            };
+            return total;
         },
         else => @compileError("host_total_memory not implemented for OS"),
     }
