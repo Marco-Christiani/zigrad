@@ -10,7 +10,7 @@ const Node = zg.Graph.Node;
 pub fn nn(comptime T: type) type {
     return struct {
         const Tensor = zg.NDTensor(T);
-        /// Linear transformation: y = x @ weights^T + bias
+        /// Linear transformation: $y = x @ w' + b$
         ///
         /// Returns output tensor of shape [..., out_features]
         pub fn linear(
@@ -232,6 +232,48 @@ pub fn nn(comptime T: type) type {
                 .children = &.{},
             });
         }
+
+        /// Mean Squared Error $\text{loss} = (\hat{y}- y)^2 / n$
+        pub fn mse(
+            pred: *Tensor,
+            target: *Tensor,
+        ) !*Tensor {
+            std.debug.assert(std.mem.eql(usize, pred.get_shape(), target.get_shape()));
+
+            const MseBwd = struct {
+                pub fn backward(loss: *Tensor, children: *Node.Children) !void {
+                    const pred_tensor = children.get_bwd_upcast(Tensor, 0) orelse return;
+                    const target_tensor = children.get_bwd_upcast(Tensor, 1) orelse return;
+
+                    if (pred_tensor.grad) |_| {
+                        loss.device.dispatch(opspec.mse_bwd(T){
+                            .pred = pred_tensor.get_data(),
+                            .target = target_tensor.get_data(),
+                            .pred_grad = try pred_tensor.ensure_grad_data(0),
+                            .loss_grad = loss.assume_grad_data(),
+                            .n = pred_tensor.get_size(),
+                        });
+                    }
+                }
+            };
+
+            const output = try Tensor.DataType.empty(&.{1}, pred.device);
+
+            pred.device.dispatch(opspec.mse_fwd(T){
+                .pred = pred.get_data(),
+                .target = target.get_data(),
+                .loss = output.get_data(),
+                .n = pred.get_size(),
+            });
+
+            return try Tensor.create_dependent(MseBwd, .{
+                .data = output,
+                .children = &.{ &pred.node, &target.node },
+                .device = pred.device,
+                .gb = pred.node.gb,
+                .callback = .{},
+            });
+        }
     };
 }
 
@@ -440,35 +482,40 @@ test "functional API" {
 
     const device = cpu.reference();
 
-    // Create and init params
-    const linear_params = try init.init_linear(
-        f32,
-        device,
-        784,
-        128,
-        .{
-            .requires_grad = true,
-        },
-    );
-
-    const input = try zg.NDTensor(f32).random(device, &.{ 32, 784 }, .normal, .{
-        .requires_grad = true,
-    });
-    defer input.deinit();
-
-    // Forward
-    const linear_out = try nn(f32).linear(input, linear_params.weights, linear_params.bias);
-    defer linear_out.deinit();
-
-    const relu_out = try nn(f32).relu(linear_out);
-    defer relu_out.deinit();
-
-    // Check shapes
-    try testing.expectEqual(32, relu_out.get_dim(0));
-    try testing.expectEqual(128, relu_out.get_dim(1));
-
     {
-        zg.runtime.grad_enabled = false;
+        const input = try zg.NDTensor(f32).random(device, &.{ 32, 784 }, .normal, .{
+            .requires_grad = true,
+        });
+        defer input.deinit();
+
+        // Create and init params
+        const linear_params = try init.init_linear(
+            f32,
+            device,
+            784,
+            128,
+            .{
+                .requires_grad = true,
+            },
+        );
+
+        // Forward
+        const linear_out = try nn(f32).linear(input, linear_params.weights, linear_params.bias);
+        defer linear_out.deinit();
+
+        const relu_out = try nn(f32).relu(linear_out);
+        defer relu_out.deinit();
+
+        // Check shapes
+        try testing.expectEqual(32, relu_out.get_dim(0));
+        try testing.expectEqual(128, relu_out.get_dim(1));
+    }
+    {
+        // zg.runtime.grad_enabled = false;
+        const input = try zg.NDTensor(f32).random(device, &.{ 32, 784 }, .normal, .{
+            .requires_grad = true,
+        });
+        defer input.deinit();
         const mlp = blocks.MLP(f32){
             .layer_sizes = &.{ 784, 128, 64, 10 },
             .activation = .relu,
@@ -480,5 +527,30 @@ test "functional API" {
         const output = try mlp.forward(params, input);
 
         try testing.expectEqual(10, output.get_dim(1));
+    }
+    {
+        const preds = try zg.NDTensor(f32).from_slice(
+            device,
+            &.{ 2, 3, 5 },
+            &.{3},
+            .{
+                .requires_grad = true,
+            },
+        );
+        defer preds.deinit();
+
+        const targets = try zg.NDTensor(f32).from_slice(
+            device,
+            &.{ 1, 2, 2 },
+            &.{3},
+            .{},
+        );
+        defer targets.deinit();
+
+        // [(1-2)^2 + (2-3)^2 + (5-2)^2] / 3
+        // = [1 + 1 + 9] / 3
+        const loss = try nn(f32).mse(preds, targets);
+        loss.deinit();
+        try testing.expectApproxEqAbs(11.0 / 3.0, loss.get(0), 0.001);
     }
 }

@@ -1311,3 +1311,21 @@ pub fn scatter_gcn_deg_scaled_bwd(_: *const Self, T: type, p: opspec.scatter_gcn
         p.grad_deg[tgt] += grad_deg_tgt;
     }
 }
+
+/// MSE forward: loss = sum((pred - target)^2) / n
+pub fn mse_fwd(_: *const Self, T: type, p: opspec.mse_fwd(T)) void {
+    var s: T = 0;
+    for (p.pred, p.target) |pred_val, target_val| {
+        const diff = pred_val - target_val;
+        s += diff * diff;
+    }
+    p.loss[0] = s / @as(T, @floatFromInt(p.n));
+}
+
+/// MSE backward: pred_grad += 2 * (pred - target) / n * loss_grad
+pub fn mse_bwd(_: *const Self, T: type, p: opspec.mse_bwd(T)) void {
+    const _scale = 2.0 / @as(T, @floatFromInt(p.n)) * p.loss_grad[0];
+    for (p.pred, p.target, p.pred_grad) |pred_val, target_val, *grad_val| {
+        grad_val.* += _scale * (pred_val - target_val);
+    }
+}
