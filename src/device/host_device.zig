@@ -15,11 +15,14 @@ const TransferDirection = @import("device_common.zig").TransferDirection;
 
 const ByteMask = std.bit_set.IntegerBitSet(8);
 const round_to_next_page = @import("../allocators.zig").round_to_next_page;
+const round_to_prev_page = @import("../allocators.zig").round_to_prev_page;
+const adjust_map_size = @import("../allocators.zig").adjust_map_size;
 const CachingAllocator = @import("../allocators.zig").CachingAllocator(DataHandler);
 const DeviceData = @import("../allocators.zig").DeviceData;
 const Error = @import("../allocators.zig").Error;
 const opspec = @import("opspec.zig");
 pub const Options = CachingAllocator.Options;
+const zg = @import("../zigrad.zig");
 
 pub const using_mkl_blas: bool = blk: {
     const decls = @typeInfo(c).Struct.decls;
@@ -45,9 +48,14 @@ const c = switch (builtin.target.os.tag) {
 };
 
 const DataHandler = struct {
+    pub const min_split_size = 64; // bytes
+
     // zig fmt: off
-    pub fn map(self: DataHandler, size: usize) ![]u8 {
-        const adjusted_size = round_to_next_page(size, self.page_size());
+    pub fn map(self: DataHandler, size: ?usize) ![]u8 {
+        // This only promises pages, but does not assign to physical memory.
+        // We over subscribe this mapping and only use what is required.
+        const adjusted_size = adjust_map_size(size, self.page_size(), host_total_memory());
+        
         return @ptrCast(@alignCast(try std.posix.mmap(
             null, adjusted_size,
             std.posix.PROT.READ | std.posix.PROT.WRITE,
@@ -82,6 +90,88 @@ const DataHandler = struct {
     pub inline fn reset(_: DataHandler) void {}
     // zig fmt: on
 };
+
+// TODO Remove this once stdlib support is available
+pub const Sysinfo = switch (builtin.abi) {
+    .gnux32, .muslx32 => extern struct {
+        /// Seconds since boot
+        uptime: i64,
+        /// 1, 5, and 15 minute load averages
+        loads: [3]u64,
+        /// Total usable main memory size
+        totalram: u64,
+        /// Available memory size
+        freeram: u64,
+        /// Amount of shared memory
+        sharedram: u64,
+        /// Memory used by buffers
+        bufferram: u64,
+        /// Total swap space size
+        totalswap: u64,
+        /// swap space still available
+        freeswap: u64,
+        /// Number of current processes
+        procs: u16,
+        /// Explicit padding for m68k
+        pad: u16,
+        /// Total high memory size
+        totalhigh: u64,
+        /// Available high memory size
+        freehigh: u64,
+        /// Memory unit size in bytes
+        mem_unit: u32,
+    },
+    else => extern struct {
+        /// Seconds since boot
+        uptime: isize,
+        /// 1, 5, and 15 minute load averages
+        loads: [3]usize,
+        /// Total usable main memory size
+        totalram: usize,
+        /// Available memory size
+        freeram: usize,
+        /// Amount of shared memory
+        sharedram: usize,
+        /// Memory used by buffers
+        bufferram: usize,
+        /// Total swap space size
+        totalswap: usize,
+        /// swap space still available
+        freeswap: usize,
+        /// Number of current processes
+        procs: u16,
+        /// Explicit padding for m68k
+        pad: u16,
+        /// Total high memory size
+        totalhigh: usize,
+        /// Available high memory size
+        freehigh: usize,
+        /// Memory unit size in bytes
+        mem_unit: u32,
+        /// Pad
+        _f: [20 - 2 * @sizeOf(usize) - @sizeOf(u32)]u8,
+    },
+};
+
+pub fn host_total_memory() usize {
+    switch (comptime builtin.target.os.tag) {
+        .linux => {
+            var si: Sysinfo = undefined;
+            if (std.os.linux.syscall1(.sysinfo, @intFromPtr(&si)) != 0)
+                @panic("Failed to query sysinfo");
+            return si.totalram * si.mem_unit;
+        },
+        .macos => {
+            var total: usize = 0;
+            var len: usize = @sizeOf(usize);
+            std.posix.sysctlbynameZ("hw.memsize", &total, &len, null, 0) catch |err| {
+                std.debug.panic("Failed to get hw.memsize: {}", .{err});
+            };
+            return total;
+        },
+        else => @compileError("host_total_memory not implemented for OS"),
+    }
+}
 
 /////////////////////////////
 // Host Device Implementation
