@@ -85,7 +85,7 @@ pub fn CachingAllocator(DataHandler: type) type {
             }
 
             const total_bytes = @sizeOf(T) * len;
-            const is_small = (total_bytes <= pool_threshold);
+            const is_small = is_small_alloc(total_bytes);
 
             logger.debug("alloc - type: {s}, len: {} bytes: {}, pool: {s}", .{
                 @typeName(T), len, total_bytes, if (is_small) "small" else "large",
@@ -113,7 +113,7 @@ pub fn CachingAllocator(DataHandler: type) type {
 
             const T = std.meta.Child(@TypeOf(data.raw));
             const total_bytes = data.raw.len * @sizeOf(T);
-            const is_small = (total_bytes < pool_threshold);
+            const is_small = is_small_alloc(total_bytes);
 
             logger.debug("free - type: {s}, len: {} bytes: {}, pool: {s}", .{
                 @typeName(T), data.raw.len, total_bytes, if (is_small) "small" else "large",
@@ -153,6 +153,10 @@ pub fn CachingAllocator(DataHandler: type) type {
             });
 
             return cast_to_slice(T, self.scratch.ptr, n);
+        }
+
+        fn is_small_alloc(total_bytes: usize) bool {
+            return total_bytes <= pool_threshold;
         }
     };
 }

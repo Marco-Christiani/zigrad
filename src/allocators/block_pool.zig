@@ -52,6 +52,7 @@
 ///!
 ///! If a block has "ordered" siblings, then it must be in a cache (thus it is unused).
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const constants = @import("constants.zig");
 const ArenaUnmanaged = @import("arena_unmanaged.zig");
@@ -216,6 +217,8 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
 
                 const lhs = try self.create_block(allocator);
 
+                logger.debug("Splitting: {} -> {}", .{ rhs.data.len, split_size });
+
                 lhs.* = .{
                     .data = rhs.data[0..split_size],
                     .split = .{
@@ -266,6 +269,14 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
         pub fn free(self: *Self, data: anytype) void {
             const block: *Block = @ptrFromInt(data.ctx);
             self.mem_rem += block.data.len;
+
+            if (comptime builtin.mode == .Debug) {
+                // check to ensure that we own this block
+                const head: usize = @intFromPtr(self.mem_buf.ptr);
+                const body: usize = @intFromPtr(block.data.ptr);
+                const tail: usize = head + self.mem_buf.len;
+                std.debug.assert(head <= body and body < tail);
+            }
 
             // fuse the left-side with block
             const fused: *Block = scope: {
