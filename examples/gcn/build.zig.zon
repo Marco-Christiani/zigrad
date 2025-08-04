@@ -2,7 +2,7 @@
     .name = .gcn,
     .fingerprint = 0x5603708c5d375198,
     .version = "0.0.0",
-
+    .minimum_zig_version = "0.14.1",
     .dependencies = .{
         .zigrad = .{ .path = "../../" },
     },

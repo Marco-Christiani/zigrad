@@ -1,10 +1,11 @@
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+# FROM nvidia/cuda:12.2.2-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 ENV PATH="/root/.zig/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
-ENV LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:${LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+ENV LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH}"
 ENV CPATH="/opt/intel/mkl/include:/usr/local/cuda/include:${CPATH}"
 ENV CUDA_HOME="/usr/local/cuda"
 # ENV DEBIAN_FRONTEND=noninteractive \
@@ -14,29 +15,45 @@ ENV CUDA_HOME="/usr/local/cuda"
 #     LIBRARY_PATH="/opt/intel/oneapi/mkl/latest/lib/intel64:/usr/local/cuda/lib64:${LIBRARY_PATH}" \
 #     CPATH="/opt/intel/oneapi/mkl/latest/include:/usr/local/cuda/include"
 
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     wget \
+#     gpg-agent \
+#     curl \
+#     git \
+#     build-essential \
+#     ninja-build \
+#     unzip \
+#     pkg-config \
+#     libssl-dev \
+#     libtbb-dev \
+#     python3 \
+#     python3-pip \
+#     python3-setuptools \
+#     python3-wheel \
+#     && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
-    gpg-agent \
     curl \
-    git \
-    build-essential \
-    ninja-build \
-    unzip \
-    pkg-config \
-    libssl-dev \
-    libtbb-dev \
+    gpg-agent \
+    # build-essential \
+    # ninja-build \
+    # unzip \
+    # pkg-config \
+    # libssl-dev \
+    # libtbb-dev \
     python3 \
-    python3-pip \
-    python3-setuptools \
-    python3-wheel \
+    # python3-pip \
+    # python3-setuptools \
+    # python3-wheel \
     && rm -rf /var/lib/apt/lists/*
 
 # Zig
-RUN wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz && \
-    tar -xf zig-linux-x86_64-0.13.0.tar.xz && \
-    mv zig-linux-x86_64-0.13.0 /root/.zig && \
+RUN wget -q https://ziglang.org/download/0.14.1/zig-x86-linux-0.14.1.tar.xz && \
+    tar -xf zig-x86-linux-0.14.1.tar.xz && \
+    mv zig-x86-linux-0.14.1 /root/.zig && \
     ln -s /root/.zig/zig /usr/local/bin/zig && \
-    rm zig-linux-x86_64-0.13.0.tar.xz
+    rm zig-x86-linux-0.14.1.tar.xz
 
 # MKL (oneapi)
 # https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html?packages=dl-essentials&dl-essentials-os=linux&dl-lin=apt
@@ -57,8 +74,11 @@ RUN wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
 # cutensor, cudnn
 RUN apt-get update && apt-get install -y \
     libcutensor2 \
-    libcutensor2-dev \
-    cudnn9-cuda-12 \
+    libcutensor-dev \
+    # cudnn9-cuda-12 \
+    libcudnn9-cuda-12 \
+    libcudnn9-dev-cuda-12 \
+    libcudnn9-headers-cuda-12 \
     && rm -rf /var/lib/apt/lists/*
 
 # CMake.
@@ -71,5 +91,10 @@ RUN wget -qO- "https://github.com/Kitware/CMake/releases/download/v3.27.6/cmake-
 WORKDIR /app
 
 COPY . .
+
+COPY <<EOF /root/.bash_aliases
+alias build="zig build -Denable_mkl=true -Denable_cuda=true -Dtarget=x86_64-linux-gnu"
+alias run="LD_PRELOAD=/app/src/cuda/build/libamalgamate.so /app/zig-out/bin/main"
+EOF
 
 CMD ["/bin/bash"]

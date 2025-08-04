@@ -30,48 +30,49 @@ deps:
         wget \
         && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
-    RUN pip3 install --break-system-packages numpy torch --index-url https://download.pytorch.org/whl/${COMPUTE_TARGET}
+    RUN pip3 install --break-system-packages numpy torch~=2.7.0  --index-url https://download.pytorch.org/whl/${COMPUTE_TARGET}
+    IF bash -c '[[ ! "$COMPUTE_TARGET" =~ rocm ]]'
+        RUN echo "WARNING: torch-scatter does not have rocm support" >&2
+    ELSE
+      RUN pip3 install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+${COMPUTE_TARGET}.html
+    END
     DO +ZIG
     SAVE IMAGE zigrad-base:latest
 
-build-zig:
-    ARG ZIGRAD_BACKEND=HOST
+build:
+    ARG ENABLE_CUDA=false
+    ARG ENABLE_MKL=false
     FROM +deps
     COPY --dir src scripts ./
     COPY *.zig .
     COPY *.zon .
-    ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
-    RUN zig build
+    RUN zig build test
+    RUN zig build -Doptimize=ReleaseFast -Denable_cuda=${ENABLE_CUDA} -Denable_mkl=${ENABLE_MKL}
     CMD ["./zig-out/bin/main"]
     SAVE IMAGE zigrad:latest
 
-build-zig-tests:
-  FROM +build-zig
-  ARG ZIGRAD_BACKEND=HOST
+test:
+  FROM +build
+  ARG ENABLE_CUDA=false
+  ARG ENABLE_MKL=false
   COPY --dir tests ./
-  ENV ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
   RUN cd tests && zig build
+  RUN zig build test
   RUN ["tests/zig-out/bin/zg-test-exe"]
 
 
 test-matrix:
     FROM alpine:3.18
-    LET ZIGRAD_BACKENDS="HOST CUDA"
-    FOR backend IN $ZIGRAD_BACKENDS
-        BUILD +test --ZIGRAD_BACKEND=$backend
+    LET MKL_VALS="false true"
+    LET CUDA_VALS="false true"
+    FOR cuda IN $CUDA_VALS
+      FOR mkl IN $MKL_VALS
+          BUILD +test --ENABLE_CUDA=$cuda --ENABLE_MKL=$mkl
+      END
     END
-
-test:
-    ARG ZIGRAD_BACKEND=HOST
-    FROM +build-zig --ZIGRAD_BACKEND=${ZIGRAD_BACKEND}
-    RUN zig build test
-    COPY --dir tests ./
-    WORKDIR tests
-    RUN zig build test
 
 local-test:
     LOCALLY
-    ARG ZIGRAD_BACKEND=HOST
     RUN source .venv/bin/activate
     RUN cd tests && zig build
     ENV PYTHONPATH=$(realpath .venv/lib/python*/site-packages)

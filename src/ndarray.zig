@@ -90,12 +90,11 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn fill(self: Self, val: T, device: DeviceReference) void {
-            // std.debug.print("FILLING: {}\n", .{val});
             device.mem_fill(T, self.get_data(), val);
         }
 
         pub fn log_shape(self: Self, comptime msg: ?[]const u8) void {
-            log.debug("{s} shape: {}", .{ if (msg) |n| n else "", self.shape.slice() });
+            log.debug("{s} shape: {d}", .{ if (msg) |n| n else "", self.shape.slice() });
         }
 
         pub fn reshape(self: *const Self, new_shape: []const usize) Shape {
@@ -127,8 +126,11 @@ pub fn NDArray(comptime T: type) type {
         fn print_to_writer_impl(self: Self, _data: []T, writer: anytype, is_host: bool, device: DeviceReference) !void {
             if (!is_host) {
                 device.sync();
-                const _host_data = try device.allocator.alloc(T, _data.len);
-                defer device.allocator.free(_host_data);
+                const cpu = zg.device.HostDevice.init();
+                const _host_data = try cpu.mem_alloc(T, _data.len);
+                defer cpu.mem_free(_host_data);
+                // const _host_data = try device.allocator.alloc(T, _data.len);
+                // defer device.allocator.free(_host_data);
                 device.mem_transfer(T, _data, _host_data, .DtoH);
                 device.sync();
                 return self.print_to_writer_impl(_host_data, writer, true, device);
@@ -326,6 +328,50 @@ pub fn NDArray(comptime T: type) type {
             device.dispatch(opspec.exp_fwd(T){ .x = self.get_data(), .y = self.get_data() });
         }
 
+        /// Element-wise power operation: y = x^p
+        pub fn pow(self: Self, p: T, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.pow_fwd(T){ .x = self.get_data(), .exp = p, .y = result.get_data() });
+            return result;
+        }
+
+        /// In-place element-wise power operation: x = x^p
+        pub fn _pow(self: *Self, p: T, device: DeviceReference) void {
+            device.dispatch(opspec.pow_fwd_(T){
+                .x = self.get_data(),
+                .exp = p,
+            });
+        }
+
+        /// Element-wise square root operation: y = sqrt(x)
+        pub fn sqrt(self: Self, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.sqrt_fwd(T){
+                .x = self.get_data(),
+                .y = result.get_data(),
+            });
+            return result;
+        }
+
+        /// In-place element-wise square root operation: x = sqrt(x)
+        pub fn _sqrt(self: *Self, device: DeviceReference) void {
+            device.dispatch(opspec.sqrt_fwd_(T){
+                .x = self.get_data(),
+            });
+        }
+
+        /// Element-wise inverse square root operation: y = 1/sqrt(x)
+        pub fn rsqrt(self: Self, device: DeviceReference) !Self {
+            const result = try Self.empty(self.shape.slice(), device);
+            device.dispatch(opspec.rsqrt_fwd(T){
+                .x = self.get_data(),
+                .y = result.get_data(),
+                .eps = zg.settings.eps,
+            });
+            return result;
+        }
+
+        /// In-place element-wise scaling: x = ax
         pub fn _scale(self: *Self, alpha: T, device: DeviceReference) void {
             device.dispatch(opspec.scale(T){ .x = self.get_data(), .alpha = alpha });
         }
@@ -468,7 +514,7 @@ pub fn NDArray(comptime T: type) type {
         /// Shapes must match (although practically the op is possible under other conditions)
         pub fn _axpy(self: Self, other: Self, alpha: T, device: DeviceReference) void {
             std.debug.assert(self.shape.equal(other.shape));
-            device.dispatch(opspec.axpy(T){ .x = other.data, .y = self.get_data(), .alpha = &alpha });
+            device.dispatch(opspec.axpy(T){ .x = other.get_data(), .y = self.get_data(), .alpha = &alpha });
         }
 
         pub const SumOpts = struct {
@@ -536,18 +582,16 @@ pub fn NDArray(comptime T: type) type {
             values: Self,
             offsets: ?[]usize, // offsets taken, so they dont have to be recomputed
             device: DeviceReference, // reference for both offsets and values
-            allocator: std.mem.Allocator,
             pub fn deinit(self: *GatherResult) void {
                 self.values.deinit(self.device);
                 if (self.offsets) |o|
-                    self.allocator.free(o); // TODO: cache?
+                    self.device.mem_free(o); // TODO: cache?
             }
         };
 
         // TODO: proper gather backend kernel.
         pub fn gather(
             self: Self,
-            allocator: std.mem.Allocator,
             device: DeviceReference,
             opts: GatherOptions,
         ) !GatherResult {
@@ -560,8 +604,8 @@ pub fn NDArray(comptime T: type) type {
             }
             // to-owned-slice allows us to properly free regardless of exit, otherwise
             // we could try to free on error and because the user didn't ask for offsets
-            var offsets = try allocator.alloc(usize, indices.size()); // TODO: cache?
-            defer if (!opts.return_offsets) allocator.free(offsets); // TODO: cache?
+            var offsets = try device.mem_alloc(usize, indices.size()); // TODO: cache?
+            defer if (!opts.return_offsets) device.mem_free(offsets); // TODO: cache?
 
             const values = try Self.empty(indices.shape.slice(), device);
             const idx_strides = indices.shape.strides();
@@ -584,15 +628,33 @@ pub fn NDArray(comptime T: type) type {
             return .{
                 .values = values,
                 .offsets = if (opts.return_offsets) offsets else null,
-                .allocator = allocator,
                 .device = device,
             };
+        }
+
+        /// Scatter with additive aggregation: dst[indices[i]] += src[i]
+        pub fn scatter_add_(
+            /// Source values
+            src: Self,
+            /// Flat scatter offsets
+            offsets: []const usize,
+            /// Destination
+            dst: *Self,
+            device: DeviceReference,
+        ) void {
+            std.debug.assert(offsets.len == src.size());
+
+            device.dispatch(opspec.scatter_add(T){
+                .src = src.get_data(),
+                .offsets = offsets,
+                .dst = dst.get_data(),
+            });
         }
 
         /// COM
         pub fn take(self: Self, offsets: []const usize, device: DeviceReference) !Self {
             const result = try Self.empty(&.{offsets.len}, device);
-            device.mem_take(T, self.get_data(), offsets, result.data);
+            device.mem_take(T, self.get_data(), offsets, result.get_data());
             return result;
         }
 
@@ -636,7 +698,7 @@ pub fn NDArray(comptime T: type) type {
             std.debug.assert(self.size() % out.size() == 0);
             std.debug.assert(self != out);
 
-            const scratch: []T = outer: {
+            const scratch_mem: []T = outer: {
                 const delta = self.shape.len - out.shape.len;
                 // we need enough scratch memory for at least the first reduce
                 // but if that yields the same size as the out.shape, then we know only
@@ -661,7 +723,7 @@ pub fn NDArray(comptime T: type) type {
                 .x_shape = self.shape.slice(),
                 .y = out.get_data(),
                 .y_shape = out.shape.slice(),
-                .scratch = scratch,
+                .scratch = scratch_mem,
                 .alpha = config.alpha,
                 .beta = config.beta,
             });
@@ -745,7 +807,6 @@ pub fn NDArray(comptime T: type) type {
                     self.shape.get(1),
                     self.shape.get(0),
                 }),
-                .vies = false,
             };
         }
     };
@@ -862,7 +923,7 @@ test "NDArray._clip_norm,l2_norm" {
     defer initial_norm_ndarray.deinit(cpu.reference());
 
     try std.testing.expectEqual(1, initial_norm_ndarray.size());
-    const initial_norm = initial_norm_ndarray.data.raw[0];
+    const initial_norm = initial_norm_ndarray.get_data()[0];
     try std.testing.expectEqual(@as(T, 5.0), initial_norm);
 
     const max_norm: T = 4.0;
@@ -873,7 +934,7 @@ test "NDArray._clip_norm,l2_norm" {
     var clipped_norm_ndarray = try array.l2_norm(cpu.reference());
     defer clipped_norm_ndarray.deinit(cpu.reference());
 
-    const clipped_norm = clipped_norm_ndarray.data.raw[0];
+    const clipped_norm = clipped_norm_ndarray.get_data()[0];
     try std.testing.expect(clipped_norm <= max_norm);
 
     const expected_values = &[_]T{
@@ -884,7 +945,7 @@ test "NDArray._clip_norm,l2_norm" {
     };
 
     for (0..array.size()) |i| {
-        try std.testing.expectApproxEqAbs(expected_values[i], array.data.raw[i], 1e-5);
+        try std.testing.expectApproxEqAbs(expected_values[i], array.get_data()[i], 1e-5);
     }
 }
 
@@ -1332,7 +1393,7 @@ test "NDArray.gather" {
     var index = try NDArray(usize).from_slice(&index_data, &index_shape, cpu.reference());
     defer index.deinit(cpu.reference());
 
-    var output = try input.gather(std.testing.allocator, cpu.reference(), .{
+    var output = try input.gather(cpu.reference(), .{
         .indices = index,
         .dim = 1,
         .return_offsets = true,

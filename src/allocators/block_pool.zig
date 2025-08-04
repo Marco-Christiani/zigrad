@@ -105,7 +105,6 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
     max_order: usize,
 }) type {
     std.debug.assert(config.min_order < config.max_order);
-
     return struct {
         pub const MIN_ORDER = config.min_order; // minium block that can be split is 512
         pub const MAX_ORDER = config.max_order;
