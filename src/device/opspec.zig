@@ -657,3 +657,28 @@ pub fn scatter_gcn_deg_scaled_bwd(T: type) type {
         n_edge: usize,
     };
 }
+
+/// MSE forward: loss = sum((pred - target)^2) / n
+pub fn mse_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "mse_fwd";
+        pub const __type__ = T;
+        pred: []const T,
+        target: []const T,
+        loss: []T,
+        n: usize,
+    };
+}
+
+/// MSE backward: pred_grad += 2 * (pred - target) / n * loss_grad
+pub fn mse_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "mse_bwd";
+        pub const __type__ = T;
+        pred: []const T,
+        target: []const T,
+        pred_grad: []T,
+        loss_grad: []const T,
+        n: usize,
+    };
+}
