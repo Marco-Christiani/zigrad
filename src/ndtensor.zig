@@ -463,6 +463,7 @@ pub fn NDTensor(comptime T: type) type {
         pub fn _reshape(self: *Self, shape: []const usize) void {
             self.data._reshape(shape);
             if (self.grad) |*g| g._reshape(shape);
+            if (self.requires_grad() or self.node.flags.get(.grad_operand)) self.node.version +%= 1;
         }
 
         /// Copies. COM.
@@ -629,12 +630,10 @@ pub fn NDTensor(comptime T: type) type {
             return tmp;
         }
 
-        /// Tensor value-setter.
-        ///
         /// Create a tensor that shares underlying memory, but does not share
-        /// shape or gradient. This is useful for reshaping operations.
-        pub fn view(self: *Self) !*Self {
-            const ViewBwds = struct {
+        /// shape or gradient.
+        pub fn alias(self: *Self) !*Self {
+            const AliasBwd = struct {
                 pub fn backward(y: *Self, children: *Node.Children) !void {
                     const x = children.get_bwd_upcast(Self, 0) orelse return;
                     const x_grad_data = try x.ensure_grad_data(0);
@@ -645,7 +644,7 @@ pub fn NDTensor(comptime T: type) type {
                     });
                 }
             };
-            const tmp = try create_dependent(ViewBwds, .{
+            const tmp = try create_dependent(AliasBwd, .{
                 .data = self.data,
                 .gb = self.node.gb,
                 .children = &.{&self.node},
@@ -1034,29 +1033,6 @@ pub fn NDTensor(comptime T: type) type {
         pub fn bmm(self: *Self, other: *Self, opts: BmmOpts) !*Self {
             return create_dependent(BmmAccBwd, .{
                 .data = try self.data.bmm(other.data, self.device, .{
-                    .trans_a = opts.trans_a,
-                    .trans_b = opts.trans_b,
-                    .alpha = 1.0,
-                    .beta = 0.0,
-                }),
-                .children = &.{ &self.node, &other.node },
-                .device = self.device,
-                .gb = self.node.gb,
-                .callback = .{},
-                .op = Op.matmul_tag(opts.trans_a, opts.trans_b),
-            });
-        }
-
-        pub fn bmm_acc(
-            self: *Self,
-            other: *Self,
-            // I'm passing usize here because its more likely that
-            // the user wants slices on the frontend instead of Shape
-            out_shape: []const usize,
-            opts: BmmOpts,
-        ) !*Self {
-            return create_dependent(BmmAccBwd, .{
-                .data = try self.data.bmm_acc(other.data, Shape.init(out_shape), self.device, .{
                     .trans_a = opts.trans_a,
                     .trans_b = opts.trans_b,
                     .alpha = 1.0,
