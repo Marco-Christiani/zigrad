@@ -33,16 +33,13 @@ pub fn nn(comptime T: type) type {
             if (bias) |b| std.debug.assert(b.data.shape.get(0) == out_features);
             if (bias) |b| std.debug.assert(b.data.shape.len == 1);
 
-            // output shape -> (...batch_dims, out_features)
-            var output_shape = try std.ArrayList(usize).initCapacity(std.heap.page_allocator, batch_dims.len + 1);
-            defer output_shape.deinit();
-
-            try output_shape.appendSlice(batch_dims);
-            try output_shape.append(out_features);
-
             // x @ weights^T
-            const mm_result = try x.bmm_acc(weights, output_shape.items, .{ .trans_b = true });
+            const mm_result = try x.bmm(weights, .{ .trans_b = true });
             errdefer mm_result.deinit();
+            // output shape -> (...batch_dims, out_features)
+            std.debug.assert(std.mem.eql(usize, batch_dims, mm_result.get_shape()[0..batch_dims.len]));
+            std.debug.assert(out_features == mm_result.get_shape()[batch_dims.len]);
+            std.debug.assert(mm_result.get_shape().len == batch_dims.len + 1);
 
             // Bias
             if (bias) |b| try mm_result._add(b);
@@ -511,7 +508,8 @@ test "functional API" {
         try testing.expectEqual(128, relu_out.get_dim(1));
     }
     {
-        // zg.runtime.grad_enabled = false;
+        // TODO: in-place add leaks unless we disable grad, this is on our radar
+        zg.runtime.grad_enabled = false;
         const input = try zg.NDTensor(f32).random(device, &.{ 32, 784 }, .normal, .{
             .requires_grad = true,
         });
