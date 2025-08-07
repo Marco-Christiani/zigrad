@@ -142,6 +142,20 @@ pub fn run_cora(data_dir: []const u8) !void {
         total_train_time_ms_trimmed,
         total_test_time_ms_trimmed,
     });
+
+    const json_obj = try std.json.stringifyAlloc(allocator, .{
+        .avg_epoch_train_fbs_ms = total_train_time / num_epochs,
+        .avg_epoch_test_fbs_ms = total_test_time / num_epochs,
+        .total_train_fbs_ms = total_train_time,
+        .total_test_fbs_ms = total_test_time,
+        .avg_epoch_train_fbs_trimmed_ms = total_train_time_ms_trimmed / (num_epochs - 1),
+        .avg_epoch_test_fbs_trimmed_ms = total_test_time_ms_trimmed / (num_epochs - 1),
+        .total_train_fbs_trimmed_ms = total_train_time_ms_trimmed,
+        .total_test_fbs_trimmed_ms = total_test_time_ms_trimmed,
+    }, .{ .whitespace = .indent_2 });
+    defer allocator.free(json_obj);
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("{s}\n", .{json_obj});
 }
 
 pub fn main() !void {

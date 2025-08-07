@@ -9,8 +9,9 @@ gcn +opts="--release=fast -Denable_mkl=true":
     export ZG_DATA_DIR=$(realpath data)
     cd examples/gcn
     uv run ref/dataset.py
+    uv run ref/train.py > torch_timing.json
     zig build {{opts}}
-    zig-out/bin/main
+    zig-out/bin/main > zg_timing.json
 
 alias b := build
 alias bf := build-fast
