@@ -10,6 +10,7 @@ const winit = zg.winit;
 pub fn GCN(comptime T: type) type {
     return struct {
         const Self = @This();
+        const nn = zg.nn(T);
         const Layers = 3;
         conv1: GraphConvLayer(T),
         conv2: GraphConvLayer(T),
@@ -33,7 +34,7 @@ pub fn GCN(comptime T: type) type {
             const c1 = try self.conv1.forward(x, edge_index);
             errdefer c1.deinit();
 
-            try zg.nn.relu_(T, c1);
+            try nn.relu_(c1);
 
             const c2 = try self.conv2.forward(c1, edge_index);
             errdefer c2 = c2.deinit();
