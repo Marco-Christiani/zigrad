@@ -151,7 +151,8 @@ pub fn LinearLayer(comptime T: type) type {
         pub fn forward(self: *Self, x: *NDTensor(T)) !*NDTensor(T) {
             const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
             const n_features = self.weights.data.shape.get(0);
-            const b_y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
+            const b_y = try x.bmm(self.weights, .{ .trans_b = true });
+            std.debug.assert(std.mem.eql(usize, &.{ batch_size, n_features }, b_y.get_shape()));
             return self.bias.add(b_y);
         }
 
