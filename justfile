@@ -39,10 +39,10 @@ cuda_compile:
    popd
 
 export ZG_DATA_DIR := env("ZG_DATA_DIR", "examples/mnist/data")
-mnist:
+mnist args="":
   @python examples/mnist/mnist_data.py
   @echo "Compiling zigrad mnist example"
-  @cd examples/mnist && zig build -Doptimize=ReleaseFast
+  @cd examples/mnist && zig build -Doptimize=ReleaseFast {{args}}
   @echo "Running zigrad mnist example"
   examples/mnist/zig-out/bin/main
 

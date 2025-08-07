@@ -4,7 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const cfg = .{ "src/main.zig", "main" };
     const enable_mkl = b.option(bool, "enable_mkl", "Enable MKL") orelse false;
 
     const zigrad_dep = b.dependency("zigrad", .{
@@ -14,8 +13,8 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = cfg[1],
-        .root_source_file = b.path(cfg[0]),
+        .name = "main",
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
