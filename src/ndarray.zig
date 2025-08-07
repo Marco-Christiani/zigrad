@@ -426,13 +426,6 @@ pub fn NDArray(comptime T: type) type {
             _ = try bmm_acc_impl(T, self, &other, out, config.alpha, config.beta, config.trans_a, config.trans_b, device);
         }
 
-        pub fn bmm_acc(self: *const Self, other: Self, out_shape: Shape, device: DeviceReference, config: BmmConfig) !Self {
-            var out = try Self.empty(out_shape.slice(), device);
-            errdefer out.deinit(device);
-            try self.bmm_acc_(other, &out, device, config);
-            return out;
-        }
-
         pub fn dot(self: Self, other: Self, device: DeviceReference) !Self {
             std.debug.assert(self.shape.len == 1 and other.shape.len == 1);
             std.debug.assert(self.size() == other.size());
