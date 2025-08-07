@@ -98,9 +98,9 @@ pub fn GraphConvLayer(comptime T: type) type {
             }
         }
         pub fn forward(self: *Self, x: *Tensor, edge_index: *NDTensor(usize)) !*Tensor {
-            const shape: []const usize = &.{ x.get_dim(0), self.weights.get_dim(0) };
-            const h = try x.bmm_acc(self.weights, shape, .{ .trans_b = true });
+            const h = try x.bmm(self.weights, .{ .trans_b = true });
             errdefer h.deinit();
+            std.debug.assert(std.mem.eql(usize, &.{ x.get_dim(0), self.weights.get_dim(0) }, h.get_shape()));
 
             const y = try self.propagate(h, edge_index);
             errdefer y.deinit();
