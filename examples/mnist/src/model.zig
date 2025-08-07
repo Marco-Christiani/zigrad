@@ -8,134 +8,90 @@ const NDTensor = zg.NDTensor;
 
 pub fn MnistModel(comptime T: type) type {
     return struct {
+        const nn = zg.nn(T);
         const Self = @This();
         const Tensor = NDTensor(T);
-        const Layers = 3;
-        linear_layers: [Layers]LinearLayer(T) = undefined,
-        flatten: FlattenLayer(T) = .{},
+        const dims = [_]usize{ 784, 128, 64, 10 };
+        const depth = dims.len - 1;
+        weights: [depth]*Tensor = undefined,
+        biases: [depth]*Tensor = undefined,
 
         pub fn init(device: DeviceReference, opts: struct {
             optim: ?zg.Optimizer = null,
         }) !Self {
-            return .{
-                .linear_layers = .{
-                    try LinearLayer(T).init(device, 28 * 28, 128, .{ .optim = opts.optim }),
-                    try LinearLayer(T).init(device, 128, 64, .{ .optim = opts.optim }),
-                    try LinearLayer(T).init(device, 64, 10, .{ .optim = opts.optim }),
-                },
-            };
+            var self = Self{};
+            inline for (&self.weights, &self.biases, 0..depth) |*w, *b, d| {
+                const in_features = dims[d];
+                const out_features = dims[d + 1];
+                w.* = try Tensor.random(
+                    device,
+                    &.{ out_features, in_features },
+                    .{ .kaiming = in_features },
+                    .{
+                        .label = std.fmt.comptimePrint("fc{d}.w", .{d}),
+                        .requires_grad = true,
+                        .acquired = true,
+                    },
+                );
+                errdefer w.*.deinit();
+                b.* = try Tensor.zeros(
+                    device,
+                    &.{out_features},
+                    .{
+                        .label = std.fmt.comptimePrint("fc{d}.b", .{d}),
+                        .requires_grad = true,
+                        .acquired = true,
+                    },
+                );
+                errdefer b.*.deinit();
+                if (opts.optim) |optim| {
+                    try optim.attach(w.*);
+                    try optim.attach(b.*);
+                }
+            }
+            return self;
         }
 
         pub fn deinit(self: *Self) void {
-            for (&self.linear_layers) |*l| l.deinit();
+            for (&self.weights, &self.biases) |*w, *b| {
+                w.*.release();
+                w.*.deinit();
+                b.*.release();
+                b.*.deinit();
+            }
             self.* = undefined;
         }
 
         pub fn forward(self: *Self, x: *Tensor) !*Tensor {
-            const flat = try self.flatten.forward(x);
+            const batch_dim = x.data.shape.get(0);
+            const other_dims = x.data.shape.crop(1, 0);
+            const flattened_dim = zg.arrayutils.prod(other_dims);
+            const flat = try x.alias();
+            flat.data._reshape(&.{ batch_dim, flattened_dim });
+            flat.set_label("flattened");
             errdefer flat.deinit();
 
-            const z0 = try self.linear_layers[0].forward(flat);
+            const z0 = try nn.linear(flat, self.weights[0], self.biases[0]);
             errdefer z0.deinit();
-            try zg.nn.relu_(T, z0);
+            try nn.relu_(z0);
 
             flat.soft_deinit();
 
-            const z1 = try self.linear_layers[1].forward(z0);
+            const z1 = try nn.linear(z0, self.weights[1], self.biases[1]);
             errdefer z1.deinit();
-            try zg.nn.relu_(T, z1);
+            try nn.relu_(z1);
 
             z0.soft_deinit();
 
-            const z2 = try self.linear_layers[2].forward(z1);
-
+            const z2 = try nn.linear(z1, self.weights[2], self.biases[2]);
             z1.soft_deinit();
 
             return z2;
         }
 
         pub fn zero_grad(self: *Self) void {
-            for (&self.linear_layers) |*l| {
-                if (l.weights.grad) |_| l.weights.setup_grad(0) catch {};
-                if (l.bias.grad) |_| l.bias.setup_grad(0) catch {};
-            }
-        }
-    };
-}
-
-pub fn LinearLayer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Tensor = NDTensor(T);
-        weights: *Tensor,
-        bias: *Tensor,
-        pub fn init(device: DeviceReference, in_features: usize, out_features: usize, opts: struct {
-            optim: ?zg.Optimizer = null,
-        }) !Self {
-            const weights = try Tensor.random(device, &.{ out_features, in_features }, .{ .kaiming = in_features }, .{
-                .label = "linear_weights",
-                .requires_grad = true,
-                .acquired = true,
-            });
-            errdefer weights.deinit();
-
-            const bias = try Tensor.zeros(device, &.{out_features}, .{
-                .label = "linear_bias",
-                .requires_grad = true,
-                .acquired = true,
-            });
-            errdefer bias.deinit();
-
-            if (opts.optim) |optim| {
-                try optim.attach(weights);
-                try optim.attach(bias);
-            }
-
-            return .{ .weights = weights, .bias = bias };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.weights.release();
-            self.weights.deinit();
-            self.bias.release();
-            self.bias.deinit();
-        }
-
-        pub fn forward(self: *const Self, x: *Tensor) !*Tensor {
-            const batch_size = if (x.data.shape.len > 1) x.get_dim(0) else 1;
-            const n_features = self.weights.data.shape.get(0);
-            const y = try x.bmm_acc(self.weights, &.{ batch_size, n_features }, .{ .trans_b = true });
-            try self.bias.add_(y);
-            return y;
-        }
-    };
-}
-
-pub fn FlattenLayer(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Tensor = NDTensor(T);
-
-        pub fn forward(_: Self, input: *Tensor) !*Tensor {
-            const batch_dim = input.data.shape.get(0);
-            const other_dims = input.data.shape.crop(1, 0);
-            const flattened_dim = zg.arrayutils.prod(other_dims);
-
-            // view of input tensor with new shape
-            const result = try input.view();
-            result.data._reshape(&.{ batch_dim, flattened_dim });
-            result.set_label("flattened");
-            return result;
-        }
-
-        pub fn backward(y: *Tensor, children: *zg.Graph.Node.Children) !void {
-            const x = children.get_bwd_upcast(Tensor, 0) orelse return;
-            const x_grad = try x.ensure_grad(0);
-            y.device.dispatch(opspec.add(T){
-                .x = x_grad.get_data(),
-                .y = y.assume_grad_data(),
-                .z = x_grad.get_data(),
-            });
+            for (&self.weights) |*w| w.*.setup_grad(0) catch {};
+            for (&self.biases) |*b| b.*.setup_grad(0) catch {};
         }
     };
 }
