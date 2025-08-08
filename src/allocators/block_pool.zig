@@ -216,7 +216,7 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
 
                 const lhs = try self.create_block(allocator);
 
-                logger.debug("Splitting: {} -> {}", .{ rhs.data.len, split_size });
+                logger.debug("splitting: {} -> {}", .{ rhs.data.len, split_size });
 
                 lhs.* = .{
                     .data = rhs.data[0..split_size],

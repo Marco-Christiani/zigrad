@@ -26,6 +26,8 @@ const stz = @import("../zigrad.zig").stz;
 const zg = @import("../zigrad.zig");
 const log = zg.logging.scoped(.zg_layer_map);
 
+const logger = @import("../logging.zig").scoped(.zg_layer_map);
+
 /// Stores type erased values
 const ParamMap = std.StringArrayHashMapUnmanaged(ClosurePointer);
 
@@ -98,9 +100,9 @@ pub fn extract(
     root: []const u8,
     /// Configure ownership during population
     opts: PopulateOpts,
-) ParamType {
+) PopulateError!ParamType {
     var tmp: ParamType = undefined;
-    self.populate(&tmp, root, opts);
+    try self.populate(&tmp, root, opts);
     return tmp;
 }
 
@@ -280,6 +282,7 @@ pub fn print_tree(self: *Self) void {
 }
 
 const PathBuffer = std.BoundedArray(u8, 1024);
+const PopulateError = error{BadPathKey};
 
 /// Populates an existing struct with entries from the map.
 /// Lower-level function used by `extract()`.
@@ -293,9 +296,9 @@ pub fn populate(
     root: []const u8,
     /// Configure ownership during population
     opts: PopulateOpts,
-) void {
+) PopulateError!void {
     var buf = PathBuffer.fromSlice(root) catch unreachable;
-    recursive_populate(ptr, &self.map, &buf, opts.shared);
+    try recursive_populate(ptr, &self.map, &buf, opts.shared);
 }
 
 fn recursive_populate(
@@ -303,19 +306,16 @@ fn recursive_populate(
     map: *ParamMap,
     buf: *PathBuffer,
     shared: bool,
-) void {
+) PopulateError!void {
     const T = @TypeOf(ptr.*);
 
     // Check if this is a supported tensor type first
     inline for (SUPPORTED_TYPES) |supported_type| {
-        if (T == supported_type) {
-            const entry = map.get(buf.slice()) orelse unreachable;
-            ptr.* = entry.cast(T).*;
-            if (!shared) _ = map.orderedRemove(buf.slice());
-            return;
-        }
         if (T == *supported_type) {
-            const entry = map.get(buf.slice()) orelse unreachable;
+            const entry = map.get(buf.slice()) orelse {
+                logger.err("Path not found: {s}", .{buf.slice()});
+                return error.BadPathKey;
+            };
             ptr.* = entry.cast(std.meta.Child(T));
             if (!shared) _ = map.orderedRemove(buf.slice());
             return;
@@ -327,14 +327,14 @@ fn recursive_populate(
         .@"struct" => |s| inline for (s.fields) |field| {
             const ext = if (buf.len > 0) "." ++ field.name else field.name;
             buf.appendSlice(ext) catch unreachable;
-            recursive_populate(&@field(ptr.*, field.name), map, buf, shared);
+            try recursive_populate(&@field(ptr.*, field.name), map, buf, shared);
             buf.len -= ext.len;
         },
         .array => inline for (ptr, 0..) |*item, i| {
             const name = std.fmt.comptimePrint("{d}", .{i});
             const ext = if (buf.len > 0) "." ++ name else name;
             buf.appendSlice(ext) catch unreachable;
-            recursive_populate(item, map, buf, shared);
+            try recursive_populate(item, map, buf, shared);
             buf.len -= ext.len;
         },
         else => {

@@ -13,7 +13,8 @@ const zg = @import("zigrad.zig");
 /// - zg_ndarray
 /// - zg_block_pool
 /// - zg_caching_allocator
-const Scope = @TypeOf(.EnumLiteral);
+///
+const Scope = @Type(.enum_literal);
 
 pub const Level = std.log.Level;
 
