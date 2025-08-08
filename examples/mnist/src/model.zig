@@ -13,12 +13,13 @@ pub fn MnistModel(comptime T: type) type {
         const Tensor = NDTensor(T);
         const dims = [_]usize{ 784, 128, 64, 10 };
         const depth = dims.len - 1;
+
         weights: [depth]*Tensor = undefined,
         biases: [depth]*Tensor = undefined,
 
         pub fn init(device: DeviceReference) !Self {
             var self = Self{};
-            inline for (&self.weights, &self.biases, 0..depth) |*w, *b, d| {
+            inline for (&self.weights, &self.biases, 0..) |*w, *b, d| {
                 const in_features = dims[d];
                 const out_features = dims[d + 1];
                 w.* = try Tensor.random(
@@ -26,17 +27,18 @@ pub fn MnistModel(comptime T: type) type {
                     &.{ out_features, in_features },
                     .{ .kaiming = in_features },
                     .{
-                        .label = std.fmt.comptimePrint("weights.{d}", .{d}),
+                        .label = std.fmt.comptimePrint("fc{d}.w", .{d}),
                         .requires_grad = true,
                         .acquired = true,
                     },
                 );
+
                 errdefer w.*.deinit();
                 b.* = try Tensor.zeros(
                     device,
                     &.{out_features},
                     .{
-                        .label = std.fmt.comptimePrint("biases.{d}", .{d}),
+                        .label = std.fmt.comptimePrint("fc{d}.b", .{d}),
                         .requires_grad = true,
                         .acquired = true,
                     },
@@ -106,11 +108,41 @@ pub fn MnistModel(comptime T: type) type {
             try params.save_to_file(path, allocator);
         }
 
-        pub fn load(path: []const u8, device: DeviceReference, opts: zg.LayerMap.LoadOpts) !Self {
+        pub fn load(path: []const u8, device: DeviceReference) !Self {
             const allocator = std.heap.smp_allocator;
-            var params = try zg.LayerMap.load_from_file(path, allocator, device, opts);
+
+            var params = try zg.LayerMap.load_from_file(path, allocator, device, .{
+                .owning = false,
+            });
             defer params.deinit();
-            return params.extract(Self, "", .{});
+
+            var self: Self = .{};
+
+            for (0..self.weights.len) |i| {
+                const w_label = Node.format_label("fc{d}.w", .{i});
+                const b_label = Node.format_label("fc{d}.b", .{i});
+
+                const w = (params.map.get(w_label.slice()) orelse {
+                    std.debug.panic("Unable to find: {s}", .{w_label.slice()});
+                }).cast(Tensor);
+
+                w.set_label(w_label.slice());
+                w.enable_grad();
+                w.acquire();
+
+                const b = (params.map.get(b_label.slice()) orelse {
+                    std.debug.panic("Unable to find: {s}", .{b_label.slice()});
+                }).cast(Tensor);
+
+                b.set_label(b_label.slice());
+                b.enable_grad();
+                b.acquire();
+
+                self.weights[i] = w;
+                self.biases[i] = b;
+            }
+
+            return self;
         }
     };
 }

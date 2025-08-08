@@ -446,3 +446,9 @@ pub fn as_label(slice: ?[]const u8) Label {
     const l = slice orelse return .{};
     return Label.fromSlice(l) catch @panic(std.fmt.comptimePrint("Label size is too large - max {d} characters", .{LABEL_SIZE}));
 }
+
+pub fn format_label(comptime fmt: []const u8, args: anytype) Node.Label {
+    var label: Node.Label = .{};
+    label.writer().print(fmt, args) catch @panic("Label overflow");
+    return label;
+}
