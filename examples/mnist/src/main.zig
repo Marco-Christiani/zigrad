@@ -44,7 +44,8 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     const optim = sgd.optimizer();
 
     std.debug.print("Loading model..\n", .{});
-    var model = MnistModel(T).load("mnist.stz", device, .{}) catch |err| switch (err) {
+
+    var model = MnistModel(T).load("mnist.stz", device) catch |err| switch (err) {
         std.fs.File.OpenError.FileNotFound => try MnistModel(f32).init(device),
         else => return err,
     };
