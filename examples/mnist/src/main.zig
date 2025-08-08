@@ -5,7 +5,6 @@ const MnistDataset = @import("dataset.zig").MnistDataset;
 const MnistModel = @import("model.zig").MnistModel;
 
 const std_options = .{ .log_level = .info };
-const log = std.log.scoped(.mnist);
 const T = f32;
 
 pub const zigrad_settings: zg.Settings = .{
@@ -38,17 +37,22 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     const optim = sgd.optimizer();
 
-    var model = try MnistModel(f32).init(device, .{
-        .optim = optim,
-    });
+    std.debug.print("Loading model..\n", .{});
+    var model = MnistModel(T).load("mnist.stz", device, .{}) catch |err| switch (err) {
+        std.fs.File.OpenError.FileNotFound => try MnistModel(f32).init(device),
+        else => return err,
+    };
     defer model.deinit();
 
-    std.debug.print("Loading train data...\n", .{});
+    try model.attach_optimizer(optim);
+
+    const verbose = (std.posix.getenv("ZG_VERBOSE") orelse "0")[0] == '1';
+    if (verbose) std.debug.print("Loading train data...\n", .{});
     const batch_size = 64;
     const train_dataset = try MnistDataset(T).load(allocator, device, train_path, batch_size);
 
     // Train -------------------------------------------------------------------
-    std.debug.print("Training...\n", .{});
+    if (verbose) std.debug.print("Training...\n", .{});
     const num_epochs = 3;
     var timer = try std.time.Timer.start();
     var step_timer = try std.time.Timer.start();
@@ -79,7 +83,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             const ms_per_sample = t1 / @as(f64, @floatFromInt(std.time.ns_per_ms * batch_size));
             total_loss += loss_val;
 
-            std.debug.print("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]\n", .{
+            if (verbose) std.debug.print("train_loss: {d:<5.5} [{d}/{d}] [ms/sample: {d}]\n", .{
                 loss_val,
                 i,
                 train_dataset.images.len,
@@ -87,7 +91,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
             });
         }
         const avg_loss = total_loss / @as(f32, @floatFromInt(train_dataset.images.len));
-        std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
+        if (verbose) std.debug.print("Epoch {d}: Avg Loss = {d:.4}\n", .{ epoch + 1, avg_loss });
     }
     const train_time_ms = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
 
@@ -110,6 +114,9 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     std.debug.print("Training complete ({d} epochs). [{d}ms]\n", .{ num_epochs, train_time_ms });
     std.debug.print("Eval train: {d:.2} (n={d}) [{d}ms]\n", .{ train_eval.acc * 100, train_eval.n, eval_train_time_ms });
     std.debug.print("Eval test: {d:.2} (n={d}) {d}ms\n", .{ test_eval.acc * 100, test_eval.n, eval_test_time_ms });
+
+    std.debug.print("Saving model..\n", .{});
+    try model.save("mnist.stz");
 }
 
 fn eval_mnist(model: *MnistModel(T), dataset: MnistDataset(T)) !struct { correct: f32, n: u32, acc: f32 } {

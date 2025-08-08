@@ -16,9 +16,7 @@ pub fn MnistModel(comptime T: type) type {
         weights: [depth]*Tensor = undefined,
         biases: [depth]*Tensor = undefined,
 
-        pub fn init(device: DeviceReference, opts: struct {
-            optim: ?zg.Optimizer = null,
-        }) !Self {
+        pub fn init(device: DeviceReference) !Self {
             var self = Self{};
             inline for (&self.weights, &self.biases, 0..depth) |*w, *b, d| {
                 const in_features = dims[d];
@@ -44,10 +42,6 @@ pub fn MnistModel(comptime T: type) type {
                     },
                 );
                 errdefer b.*.deinit();
-                if (opts.optim) |optim| {
-                    try optim.attach(w.*);
-                    try optim.attach(b.*);
-                }
             }
             return self;
         }
@@ -92,6 +86,31 @@ pub fn MnistModel(comptime T: type) type {
         pub fn zero_grad(self: *Self) void {
             for (&self.weights) |*w| w.*.setup_grad(0) catch {};
             for (&self.biases) |*b| b.*.setup_grad(0) catch {};
+        }
+
+        pub fn attach_optimizer(self: *Self, optim: zg.Optimizer) !void {
+            for (&self.weights, &self.biases) |*w, *b| {
+                try optim.attach(w.*);
+                try optim.attach(b.*);
+            }
+        }
+
+        pub fn save(self: *Self, path: []const u8) !void {
+            const allocator = std.heap.smp_allocator;
+            var params = zg.LayerMap.init(allocator);
+            defer params.deinit();
+            for (&self.weights, &self.biases) |*w, *b| {
+                try params.put(w.*.get_label().?, w.*, .{});
+                try params.put(b.*.get_label().?, b.*, .{});
+            }
+            try params.save_to_file(path, allocator);
+        }
+
+        pub fn load(path: []const u8, device: DeviceReference, opts: zg.LayerMap.LoadOpts) !Self {
+            const allocator = std.heap.smp_allocator;
+            var params = try zg.LayerMap.load_from_file(path, allocator, device, opts);
+            defer params.deinit();
+            return params.extract(Self, "", .{});
         }
     };
 }
