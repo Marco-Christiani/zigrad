@@ -313,6 +313,12 @@ fn recursive_populate(
             if (!shared) _ = map.orderedRemove(buf.slice());
             return;
         }
+        if (T == *supported_type) {
+            const entry = map.get(buf.slice()) orelse unreachable;
+            ptr.* = entry.cast(std.meta.Child(T));
+            if (!shared) _ = map.orderedRemove(buf.slice());
+            return;
+        }
     }
 
     // If not a supported tensor type recurse into struct fields
@@ -323,8 +329,15 @@ fn recursive_populate(
             recursive_populate(&@field(ptr.*, field.name), map, buf, shared);
             buf.len -= ext.len;
         },
+        .array => inline for (ptr, 0..) |*item, i| {
+            const name = std.fmt.comptimePrint("{d}", .{i});
+            const ext = if (buf.len > 0) "." ++ name else name;
+            buf.appendSlice(ext) catch unreachable;
+            recursive_populate(item, map, buf, shared);
+            buf.len -= ext.len;
+        },
         else => {
-            @compileError("Unsupported leaf type in parameter structure" ++ @typeName(T));
+            @compileError("Unsupported leaf type in parameter structure " ++ @typeName(T));
         },
     }
 }
