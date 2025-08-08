@@ -1,7 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const std_options = .{ .log_level = .info };
-const log = std.log.scoped(.mnist);
+const log = std.log.scoped(.hello_world);
 const T = f32;
 
 pub const zigrad_settings: zg.Settings = .{
@@ -11,8 +11,8 @@ pub const zigrad_settings: zg.Settings = .{
     .logging = .{
         .level = .debug,
         .scopes = &.{
-            .{ .scope = .block_pool, .level = .debug },
-            .{ .scope = .caching_allocator, .level = .debug },
+            .{ .scope = .zg_block_pool, .level = .debug },
+            .{ .scope = .zg_caching_allocator, .level = .debug },
         },
     },
 };

@@ -5,7 +5,7 @@ const DeviceData = @import("device_data.zig").DeviceData;
 const Error = @import("device_data.zig").Error;
 const zg = @import("../zigrad.zig");
 
-const logger = @import("../logging.zig").scoped(.caching_allocator);
+const logger = @import("../logging.zig").scoped(.zg_caching_allocator);
 
 // I understand the philosophy of passing in allocators, but this data structure
 // itself doesn't benefit from having its internal state managed by yet another

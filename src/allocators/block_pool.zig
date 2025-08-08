@@ -60,7 +60,7 @@ const DeviceData = @import("device_data.zig").DeviceData;
 const round_to_next_page = @import("../allocators.zig").round_to_next_page;
 const OrderList = @import("order_list.zig");
 
-const logger = @import("../logging.zig").scoped(.block_pool);
+const logger = @import("../logging.zig").scoped(.zg_block_pool);
 
 pub const Block = struct {
     data: []u8,

@@ -5,7 +5,7 @@ const random = zg.random;
 const Op = zg.Op;
 const NDTensor = zg.NDTensor;
 
-const log = std.log.scoped(.zigrad_trainer);
+const log = @import("../logging.zig").scoped(.zg_utils);
 
 pub const PrintOptions = struct {
     add_symbol: []const u8,

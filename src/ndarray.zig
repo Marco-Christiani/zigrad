@@ -1,8 +1,8 @@
 const std = @import("std");
 pub const utils = @import("ndarray/utils.zig");
 pub const Shape = @import("ndarray/shape.zig");
-const log = std.log.scoped(.zg_ndarray);
 const zg = @import("zigrad.zig");
+const log = zg.logging.scoped(.zg_ndarray);
 const DeviceReference = zg.DeviceReference;
 const backend = zg.backend;
 const builtin = @import("builtin");
