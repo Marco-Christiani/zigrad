@@ -12,7 +12,7 @@ OR := \033[38;5;208m
 
 PYTHON := python3
 ZG_DATA_DIR ?= data
-BUILD_MODE ?= ReleaseFast
+BUILD_MODE ?= Debug
 ZVM_HASH=233a41c579fd2eeb602d51efa10499e083cd64d0
 ZIG := $(shell which zig 2>/dev/null)
 DEFAULT_ZIG_VERSION := 0.14.0 # if we have to install it
