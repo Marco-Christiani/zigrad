@@ -8,11 +8,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zg = @import("zigrad.zig");
 
-// supported modules in zigrad
-const Scope = enum {
-    block_pool,
-    caching_allocator,
-};
+/// Examples of supported modules in Zigrad:
+/// - zg_ndtensor
+/// - zg_ndarray
+/// - zg_block_pool
+/// - zg_caching_allocator
+const Scope = @TypeOf(.EnumLiteral);
 
 pub const Level = std.log.Level;
 

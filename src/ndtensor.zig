@@ -17,7 +17,7 @@ const ndarray = @import("ndarray.zig");
 const Range = ndarray.Range;
 const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
-const log = std.log.scoped(.zg_tensor);
+const log = zg.logging.scoped(.zg_ndtensor);
 
 pub fn NDTensor(comptime T: type) type {
     return struct {

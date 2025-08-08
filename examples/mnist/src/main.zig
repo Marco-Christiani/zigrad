@@ -12,9 +12,9 @@ pub const zigrad_settings: zg.Settings = .{
     .logging = .{
         .level = .debug,
         .scopes = &.{
-            .{ .scope = .layer_map, .level = .debug },
-            //.{ .scope = .caching_allocator, .level = .err },
-            //.{ .scope = .block_pool, .level = .debug },
+            .{ .scope = .zg_layer_map, .level = .debug },
+            //.{ .scope = .zg_caching_allocator, .level = .err },
+            //.{ .scope = .zg_block_pool, .level = .debug },
         },
     },
 };

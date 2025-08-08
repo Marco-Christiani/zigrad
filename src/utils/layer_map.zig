@@ -24,6 +24,7 @@ const TensorOpts = @import("../zigrad.zig").TensorOpts;
 const Self = @This();
 const stz = @import("../zigrad.zig").stz;
 const zg = @import("../zigrad.zig");
+const log = zg.logging.scoped(.zg_layer_map);
 
 /// Stores type erased values
 const ParamMap = std.StringArrayHashMapUnmanaged(ClosurePointer);
