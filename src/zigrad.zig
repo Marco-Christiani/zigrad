@@ -22,10 +22,10 @@ pub const TensorOpts = @import("ndtensor/utils.zig").TensorOpts;
 //pub const Model = @import("nn/model.zig").Model;
 pub const conv_utils = @import("nn/conv_utils.zig");
 pub const utils = @import("nn/utils.zig");
-//pub const layer = @import("nn/layer.zig");
 pub const optim = @import("nn/optim.zig");
 pub const Optimizer = optim.Optimizer;
-pub const nn = @import("nn/nn.zig").nn;
+pub const nn = @import("nn/nn.zig");
+pub const logging = @import("logging.zig");
 
 /// The category tag is used to categorize different
 /// mathematical objects based on their mathematical
@@ -68,6 +68,12 @@ pub const Settings = struct {
     label_capacity: usize = 32,
     thread_safe: bool = !builtin.single_threaded,
     eps: f32 = 1e-12,
+
+    logging: struct {
+        level: logging.Level = .err,
+        scopes: []const logging.ScopeLevel = &.{},
+        callback: ?logging.LoggingFunction = null,
+    } = .{},
 };
 
 /// Global flag for enabling/disabling gradient tracking.
@@ -75,10 +81,6 @@ pub const Settings = struct {
 /// more optimizations tbd if it will be added back in the future.
 pub const runtime = struct {
     pub var grad_enabled: bool = true;
-    // TODO: At some point, I'd rather turn this into
-    // a system memory check to verify availability.
-    // Right now, 64 gigs until more research...
-    pub var max_cache_size: usize = constants.@"1Gb" * 16;
 };
 
 var prng = std.Random.DefaultPrng.init(settings.seed);

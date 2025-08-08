@@ -1,14 +1,10 @@
 .{
-    .name = "hello-world",
+    .name = .hello_world,
+    .fingerprint = 0xf73eae9164c8bf58,
     .version = "0.0.0",
-    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     .dependencies = .{
-        .zigrad = .{
-            .url = "git+https://github.com/Marco-Christiani/zigrad/#ec76bc862f6f88d938e66143212d64f6a84adcaa",
-            .hash = "122017ff0176b837b7228ea8fb7d40ef622f1bda790dffe3fdb15ed36419ca409efe",
-        },
+        .zigrad = .{ .path = "../../" },
     },
-
     .paths = .{
         "build.zig",
         "build.zig.zon",

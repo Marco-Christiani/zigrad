@@ -585,6 +585,8 @@ test {
 
     tree.print_tree();
 
+    try std.fs.cwd().deleteFile("here.stz");
+
     // ----------------------------
     // Extract
     // ----------------------------

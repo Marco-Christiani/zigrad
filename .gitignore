@@ -1,5 +1,6 @@
 # exts
 *.json
+*.stz
 *.so
 *.png
 *.svg

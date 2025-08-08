@@ -1520,7 +1520,8 @@ pub fn NDTensor(comptime T: type) type {
 }
 
 const TestOpts: zg.device.HostDevice.Options = .{
-    .max_cache_size = zg.constants.@"1Mb" / 2,
+    .small_pool_size = null,
+    .large_pool_size = null,
 };
 
 test "ndtensor/clamp fw,bw,_clamp,_clamp_grad" {
