@@ -24,6 +24,7 @@ pub const utils = @import("nn/utils.zig");
 pub const optim = @import("nn/optim.zig");
 pub const Optimizer = optim.Optimizer;
 pub const nn = @import("nn/nn.zig").nn;
+pub const logging = @import("logging.zig");
 
 /// The category tag is used to categorize different
 /// mathematical objects based on their mathematical
