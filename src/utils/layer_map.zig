@@ -336,6 +336,19 @@ fn recursive_populate(
     }
 }
 
+pub fn sort(self: *Self, comptime dir: enum { asc, desc }) void {
+    const Context = struct {
+        keys: []const u8,
+        pub fn lessThan(ctx: @This(), i: usize, j: usize) bool {
+            return if (comptime dir == .asc)
+                std.mem.lessThan(u8, ctx.keys[i], ctx.keys[j])
+            else
+                std.mem.lessThan(u8, ctx.keys[j], ctx.keys[i]);
+        }
+    };
+    self.map.sort(Context{ .keys = self.map.keys() });
+}
+
 /// Serializes param tensors to SafeTensors binary format.
 /// Returns allocated byte buffer. COM.
 pub fn serialize(
@@ -395,8 +408,6 @@ pub fn deserialize(
     /// Control tensor ownership and graph
     opts: LoadOpts,
 ) !Self {
-    const graph = opts.graph orelse zg.global_graph_get();
-
     var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
     defer st_file.deinit();
 
@@ -404,8 +415,8 @@ pub fn deserialize(
     errdefer tree.deinit();
 
     for (st_file.tensors) |tensor_info| {
-        const tensor_view = try st_file.get(tensor_info.name);
-        const ndtensor = try create_tensor_from_view(tensor_view, device, graph, opts.owning);
+        const name = tensor_info.name;
+        const ndtensor = try create_tensor_from_view(name, try st_file.get(name), device, opts);
         try tree.put_closure(tensor_info.name, ndtensor);
     }
     return tree;
@@ -416,8 +427,8 @@ fn closure_tensor(
     device: zg.DeviceReference,
     bytes: []align(8) const u8,
     shape: []const usize,
-    owned: bool,
     opts: zg.TensorOpts,
+    owned: bool,
 ) !ClosurePointer {
     const slice: []const T = std.mem.bytesAsSlice(T, bytes);
     return ClosurePointer.init(try NDTensor(T).from_slice(device, slice, shape, opts), owned);
@@ -425,29 +436,31 @@ fn closure_tensor(
 
 // Helper function to create NDTensor from TensorView
 fn create_tensor_from_view(
+    name: []const u8,
     view: stz.TensorView,
     device: zg.DeviceReference,
-    graph: *zg.Graph,
-    owned: bool,
+    opts: LoadOpts,
 ) !ClosurePointer {
-    const opts = TensorOpts{
-        .requires_grad = true,
-        .graph = graph,
+    const ten_opts = TensorOpts{
+        .acquired = opts.acquired,
+        .requires_grad = opts.requires_grad,
+        .graph = opts.graph,
+        .label = name,
     };
 
     return switch (view.info.dtype) {
-        .u8 => closure_tensor(u8, device, view.data, view.info.shape, owned, opts),
-        .bool => closure_tensor(bool, device, view.data, view.info.shape, owned, opts),
-        .i8 => closure_tensor(i8, device, view.data, view.info.shape, owned, opts),
-        .i16 => closure_tensor(i16, device, view.data, view.info.shape, owned, opts),
-        .u16 => closure_tensor(u16, device, view.data, view.info.shape, owned, opts),
-        .u32 => closure_tensor(u32, device, view.data, view.info.shape, owned, opts),
-        .u64 => closure_tensor(u64, device, view.data, view.info.shape, owned, opts),
-        .f16 => closure_tensor(f16, device, view.data, view.info.shape, owned, opts),
-        .f32 => closure_tensor(f32, device, view.data, view.info.shape, owned, opts),
-        .f64 => closure_tensor(f64, device, view.data, view.info.shape, owned, opts),
-        .i32 => closure_tensor(i32, device, view.data, view.info.shape, owned, opts),
-        .i64 => closure_tensor(i64, device, view.data, view.info.shape, owned, opts),
+        .u8 => closure_tensor(u8, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .bool => closure_tensor(bool, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .i8 => closure_tensor(i8, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .i16 => closure_tensor(i16, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .u16 => closure_tensor(u16, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .u32 => closure_tensor(u32, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .u64 => closure_tensor(u64, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .f16 => closure_tensor(f16, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .f32 => closure_tensor(f32, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .f64 => closure_tensor(f64, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .i32 => closure_tensor(i32, device, view.data, view.info.shape, ten_opts, opts.owning),
+        .i64 => closure_tensor(i64, device, view.data, view.info.shape, ten_opts, opts.owning),
         else => return error.UnsupportedDtype,
     };
 }
@@ -472,6 +485,8 @@ pub fn save_to_file(
 }
 
 pub const LoadOpts = struct {
+    requires_grad: bool = false,
+    acquired: bool = true,
     owning: bool = true,
     graph: ?*zg.Graph = null,
 };

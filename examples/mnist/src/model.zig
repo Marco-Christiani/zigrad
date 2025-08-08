@@ -112,8 +112,11 @@ pub fn MnistModel(comptime T: type) type {
             const allocator = std.heap.smp_allocator;
 
             var params = try zg.LayerMap.load_from_file(path, allocator, device, .{
+                .requires_grad = true,
+                .acquired = true,
                 .owning = false,
             });
+
             defer params.deinit();
 
             var self: Self = .{};
@@ -126,17 +129,9 @@ pub fn MnistModel(comptime T: type) type {
                     std.debug.panic("Unable to find: {s}", .{w_label.slice()});
                 }).cast(Tensor);
 
-                w.set_label(w_label.slice());
-                w.enable_grad();
-                w.acquire();
-
                 const b = (params.map.get(b_label.slice()) orelse {
                     std.debug.panic("Unable to find: {s}", .{b_label.slice()});
                 }).cast(Tensor);
-
-                b.set_label(b_label.slice());
-                b.enable_grad();
-                b.acquire();
 
                 self.weights[i] = w;
                 self.biases[i] = b;
