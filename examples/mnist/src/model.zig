@@ -26,7 +26,7 @@ pub fn MnistModel(comptime T: type) type {
                     &.{ out_features, in_features },
                     .{ .kaiming = in_features },
                     .{
-                        .label = std.fmt.comptimePrint("fc{d}.w", .{d}),
+                        .label = std.fmt.comptimePrint("weights.{d}", .{d}),
                         .requires_grad = true,
                         .acquired = true,
                     },
@@ -36,7 +36,7 @@ pub fn MnistModel(comptime T: type) type {
                     device,
                     &.{out_features},
                     .{
-                        .label = std.fmt.comptimePrint("fc{d}.b", .{d}),
+                        .label = std.fmt.comptimePrint("biases.{d}", .{d}),
                         .requires_grad = true,
                         .acquired = true,
                     },
