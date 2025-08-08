@@ -9,6 +9,14 @@ const T = f32;
 
 pub const zigrad_settings: zg.Settings = .{
     .thread_safe = false,
+    .logging = .{
+        .level = .debug,
+        .scopes = &.{
+            .{ .scope = .layer_map, .level = .debug },
+            //.{ .scope = .caching_allocator, .level = .err },
+            //.{ .scope = .block_pool, .level = .debug },
+        },
+    },
 };
 
 pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
