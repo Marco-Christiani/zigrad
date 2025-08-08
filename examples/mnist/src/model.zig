@@ -125,16 +125,13 @@ pub fn MnistModel(comptime T: type) type {
                 const w_label = Node.format_label("fc{d}.w", .{i});
                 const b_label = Node.format_label("fc{d}.b", .{i});
 
-                const w = (params.map.get(w_label.slice()) orelse {
+                self.weights[i] = (params.map.get(w_label.slice()) orelse {
                     std.debug.panic("Unable to find: {s}", .{w_label.slice()});
                 }).cast(Tensor);
 
-                const b = (params.map.get(b_label.slice()) orelse {
+                self.biases[i] = (params.map.get(b_label.slice()) orelse {
                     std.debug.panic("Unable to find: {s}", .{b_label.slice()});
                 }).cast(Tensor);
-
-                self.weights[i] = w;
-                self.biases[i] = b;
             }
 
             return self;
