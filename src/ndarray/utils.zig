@@ -7,27 +7,6 @@ pub fn prod(dims: []const usize) usize {
     return s;
 }
 
-/// Flexibly select index allowing for indices.len > shape.len
-/// Effectively mocks batch dimensions (e.g. shape=(2,2), indices=(0, 0) == indices=(1, 0, 0) == indices= (..., 0, 0))
-fn flex_select_offset(shape: []const usize, indices: []const usize) !usize {
-    if (indices.len < shape.len) {
-        return error.InvalidIndex; // should be slicing, not selecting a single index
-    }
-    var index: usize = 0;
-    var stride: usize = 1;
-    for (0..shape.len) |i| {
-        const shape_i = shape.len - i - 1;
-        const indices_i = indices.len - i - 1;
-        const dimSize = shape[shape_i];
-        const idx = indices[indices_i];
-        std.debug.assert(idx < dimSize);
-
-        index += idx * stride;
-        stride *= dimSize;
-    }
-    return index;
-}
-
 fn _print_slice(comptime T: type, arr: []const T, shape: []const usize, writer: anytype, index: *usize) !void {
     if (shape.len == 1) {
         try writer.writeAll("[");
@@ -81,18 +60,4 @@ test print_ndslice {
         try print_ndslice(f64, &arr2, &shape2, buffer2.writer());
         try std.testing.expectEqualStrings("[[[1], [2]], [[3], [4]], [[5], [6]]]", buffer2.items);
     }
-}
-
-test "flex_pos_to_index" {
-    // arr = [[0, 1, 2]
-    //        [3, 4, 5]]
-    // arr[1, 1] == 4
-    try std.testing.expectEqual(4, flex_select_offset(&[_]usize{ 2, 3 }, &[_]usize{ 1, 1 }));
-    // arr[1, 1, 1] == 4
-    try std.testing.expectEqual(4, flex_select_offset(&[_]usize{ 2, 3 }, &[_]usize{ 1, 1, 1 }));
-
-    // arr = [[[0, 1, 2]
-    //        [3, 4, 5]]]
-    // arr[1, 1, 1] == 4
-    try std.testing.expectEqual(4, flex_select_offset(&[_]usize{ 1, 2, 3 }, &[_]usize{ 0, 1, 1 }));
 }
