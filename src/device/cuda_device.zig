@@ -347,7 +347,7 @@ pub fn max_bwd(self: *const Self, T: type, p: opspec.max_bwd(T)) void {
     cuda.max_bwd(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.y_g.ptr, p.x_g.ptr, p.x.len);
 }
 
-pub fn exp(self: *const Self, T: type, p: opspec.exp_fwd(T)) void {
+pub fn exp_fwd(self: *const Self, T: type, p: opspec.exp_fwd(T)) void {
     cuda.pow_exp(dtype(T), self.context.stream, p.x.ptr, p.y.ptr, p.x.len);
 }
 
