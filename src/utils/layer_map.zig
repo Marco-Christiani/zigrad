@@ -330,6 +330,13 @@ fn recursive_populate(
             try recursive_populate(&@field(ptr.*, field.name), map, buf, shared);
             buf.len -= ext.len;
         },
+        .array => inline for (ptr, 0..) |*item, i| {
+            const name = std.fmt.comptimePrint("{d}", .{i});
+            const ext = if (buf.len > 0) "." ++ name else name;
+            buf.appendSlice(ext) catch unreachable;
+            try recursive_populate(item, map, buf, shared);
+            buf.len -= ext.len;
+        },
         else => {
             @compileError("Unsupported leaf type in parameter structure " ++ @typeName(T));
         },
