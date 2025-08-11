@@ -27,18 +27,18 @@ pub fn MnistModel(comptime T: type) type {
                     &.{ out_features, in_features },
                     .{ .kaiming = in_features },
                     .{
-                        .label = std.fmt.comptimePrint("fc{d}.w", .{d}),
+                        .label = std.fmt.comptimePrint("weights.{d}", .{d}),
                         .requires_grad = true,
                         .acquired = true,
                     },
                 );
-
                 errdefer w.*.deinit();
+
                 b.* = try Tensor.zeros(
                     device,
                     &.{out_features},
                     .{
-                        .label = std.fmt.comptimePrint("fc{d}.b", .{d}),
+                        .label = std.fmt.comptimePrint("biases.{d}", .{d}),
                         .requires_grad = true,
                         .acquired = true,
                     },
@@ -49,11 +49,11 @@ pub fn MnistModel(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (&self.weights, &self.biases) |*w, *b| {
-                w.*.release();
-                w.*.deinit();
-                b.*.release();
-                b.*.deinit();
+            for (&self.weights, &self.biases) |w, b| {
+                w.release();
+                w.deinit();
+                b.release();
+                b.deinit();
             }
             self.* = undefined;
         }
@@ -101,9 +101,9 @@ pub fn MnistModel(comptime T: type) type {
             const allocator = std.heap.smp_allocator;
             var params = zg.LayerMap.init(allocator);
             defer params.deinit();
-            for (&self.weights, &self.biases) |*w, *b| {
-                try params.put(w.*.get_label().?, w.*, .{});
-                try params.put(b.*.get_label().?, b.*, .{});
+            for (&self.weights, &self.biases) |w, b| {
+                try params.put(w.get_label().?, w, .{});
+                try params.put(b.get_label().?, b, .{});
             }
             try params.save_to_file(path, allocator);
         }
@@ -116,25 +116,9 @@ pub fn MnistModel(comptime T: type) type {
                 .acquired = true,
                 .owning = false,
             });
-
             defer params.deinit();
 
-            var self: Self = .{};
-
-            for (0..self.weights.len) |i| {
-                const w_label = Node.format_label("fc{d}.w", .{i});
-                const b_label = Node.format_label("fc{d}.b", .{i});
-
-                self.weights[i] = (params.map.get(w_label.slice()) orelse {
-                    std.debug.panic("Unable to find: {s}", .{w_label.slice()});
-                }).cast(Tensor);
-
-                self.biases[i] = (params.map.get(b_label.slice()) orelse {
-                    std.debug.panic("Unable to find: {s}", .{b_label.slice()});
-                }).cast(Tensor);
-            }
-
-            return self;
+            return params.extract(Self, "", .{});
         }
     };
 }
