@@ -18,32 +18,44 @@ pub fn MnistModel(comptime T: type) type {
         biases: [depth]*Tensor = undefined,
 
         pub fn init(device: DeviceReference) !Self {
-            var self = Self{};
-            inline for (&self.weights, &self.biases, 0..) |*w, *b, d| {
-                const in_features = dims[d];
-                const out_features = dims[d + 1];
+            var w_i: usize = 0;
+            var b_i: usize = 0;
+
+            var self: Self = .{};
+
+            errdefer { // free everything up to last value
+                for (self.weights[0..w_i]) |w|
+                    w.deinit();
+
+                for (self.biases[0..b_i]) |b|
+                    b.deinit();
+            }
+
+            inline for (&self.weights, &self.biases, 0..) |*w, *b, i| {
+                const in_features, const out_features = .{ dims[i], dims[i + 1] };
+
                 w.* = try Tensor.random(
                     device,
                     &.{ out_features, in_features },
                     .{ .kaiming = in_features },
                     .{
-                        .label = std.fmt.comptimePrint("weights.{d}", .{d}),
+                        .label = std.fmt.comptimePrint("weights.{d}", .{i}),
                         .requires_grad = true,
                         .acquired = true,
                     },
                 );
-                errdefer w.*.deinit();
+                w_i += 1;
 
                 b.* = try Tensor.zeros(
                     device,
                     &.{out_features},
                     .{
-                        .label = std.fmt.comptimePrint("biases.{d}", .{d}),
+                        .label = std.fmt.comptimePrint("biases.{d}", .{i}),
                         .requires_grad = true,
                         .acquired = true,
                     },
                 );
-                errdefer b.*.deinit();
+                b_i += 1;
             }
             return self;
         }
