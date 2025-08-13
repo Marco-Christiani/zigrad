@@ -1,6 +1,7 @@
 //! Functional Neural Network Ops
 
 const std = @import("std");
+
 const zg = @import("../zigrad.zig");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
@@ -42,6 +43,7 @@ pub fn nn(comptime T: type) type {
             std.debug.assert(mm_result.get_shape().len == batch_dims.len + 1);
 
             // Bias
+            // TODO: in-place add leaks a node reference unless we disable grad, this is on our radar
             if (bias) |b| try mm_result._add(b);
 
             return mm_result;
@@ -274,200 +276,6 @@ pub fn nn(comptime T: type) type {
     };
 }
 
-/// Parameter initialization utilities
-pub const init = struct {
-    pub const InitOpts = struct {
-        optim: ?zg.Optimizer = null,
-        bias_init: ?enum { zeros, ones, normal } = .zeros,
-        weight_init: zg.RandType = .normal,
-        requires_grad: bool = true,
-        /// Comptime-known suffix to add to tensor labels
-        label_suffix: []const u8 = "",
-    };
-
-    /// Linear layer parameters
-    pub fn LinearParams(comptime T: type) type {
-        return struct {
-            const Tensor = zg.NDTensor(T);
-            weights: *Tensor,
-            bias: ?*Tensor,
-
-            const Self = @This();
-
-            /// Free weight and bias
-            pub fn deinit(self: *Self) void {
-                self.weights.release();
-                self.weights.deinit();
-                if (self.bias) |b| {
-                    b.release();
-                    b.deinit();
-                }
-                self.* = undefined;
-            }
-        };
-    }
-
-    /// Convenience method to initialize linear layer parameters
-    pub fn init_linear(
-        comptime T: type,
-        /// Target device
-        device: DeviceReference,
-        /// Input feature dimension
-        in_features: usize,
-        /// Output feature dimension
-        out_features: usize,
-        /// Initialization options
-        comptime opts: InitOpts,
-    ) !LinearParams(T) {
-        const Tensor = zg.NDTensor(T);
-        const weights = switch (opts.weight_init) {
-            .kaiming => try Tensor.random(
-                device,
-                &.{ out_features, in_features },
-                .{ .kaiming = in_features },
-                .{ .label = "linear_weights" ++ opts.label_suffix, .requires_grad = opts.requires_grad, .acquired = true },
-            ),
-            .uniform => try Tensor.random(
-                device,
-                &.{ out_features, in_features },
-                .uniform,
-                .{ .label = "linear_weights" ++ opts.label_suffix, .requires_grad = opts.requires_grad, .acquired = true },
-            ),
-            .normal => try Tensor.random(
-                device,
-                &.{ out_features, in_features },
-                .normal,
-                .{ .label = "linear_weights" ++ opts.label_suffix, .requires_grad = opts.requires_grad, .acquired = true },
-            ),
-        };
-        errdefer weights.deinit();
-
-        const bias = if (opts.bias_init) |bi| switch (bi) {
-            .zeros => try Tensor.zeros(
-                device,
-                &.{out_features},
-                .{ .label = "linear_bias" ++ opts.label_suffix, .requires_grad = opts.requires_grad, .acquired = true },
-            ),
-            .ones => try Tensor.ones(
-                device,
-                &.{out_features},
-                .{ .label = "linear_bias" ++ opts.label_suffix, .requires_grad = opts.requires_grad, .acquired = true },
-            ),
-            .normal => try Tensor.random(
-                device,
-                &.{out_features},
-                .normal,
-                .{ .label = "linear_bias" ++ opts.label_suffix, .requires_grad = opts.requires_grad, .acquired = true },
-            ),
-        } else null;
-        errdefer if (bias) |b| b.deinit();
-
-        if (opts.optim) |optim| {
-            try optim.attach(weights);
-            if (bias) |b| try optim.attach(b);
-        }
-
-        return .{ .weights = weights, .bias = bias };
-    }
-};
-
-/// Higher-level functional model construction utilities
-pub const blocks = struct {
-    /// Convenience for building Multi-layer perceptron blocks
-    ///
-    /// ## Example usage
-    /// ```zig
-    /// const mlp = blocks.MLP(f32){
-    ///     .layer_sizes = &.{ 784, 128, 64, 10 },
-    ///     .activation = .relu,
-    /// };
-    ///
-    /// var params = try mlp.init_params(device, .{ .optim = optimizer });
-    /// defer params.deinit();
-    ///
-    /// const output = try mlp.forward(params, input);
-    /// ```
-    pub fn MLP(comptime T: type) type {
-        return struct {
-            const Tensor = zg.NDTensor(T);
-            layer_sizes: []const usize,
-            activation: enum { relu, tanh, sigmoid },
-
-            const Self = @This();
-
-            /// MLP Parameters
-            pub const MLPParams = struct {
-                layers: []init.LinearParams(T),
-                allocator: std.mem.Allocator,
-
-                pub fn deinit(self: *@This()) void {
-                    for (self.layers) |*layer| {
-                        layer.deinit();
-                    }
-                    self.allocator.free(self.layers);
-                    self.* = undefined;
-                }
-            };
-
-            /// Initialize MLP parameters
-            pub fn init_params(
-                self: Self,
-                /// Allocator for layer param ptrs
-                allocator: std.mem.Allocator,
-                /// Target device
-                device: DeviceReference,
-                /// Initialization options
-                comptime opts: struct {
-                    optim: ?zg.Optimizer = null,
-                },
-            ) !MLPParams {
-                const layers = try allocator.alloc(init.LinearParams(T), self.layer_sizes.len - 1);
-                errdefer allocator.free(layers);
-
-                for (layers, 0..) |*layer, i| {
-                    layer.* = try init.init_linear(
-                        T,
-                        device,
-                        self.layer_sizes[i],
-                        self.layer_sizes[i + 1],
-                        .{ .optim = opts.optim },
-                    );
-                }
-
-                return .{ .layers = layers, .allocator = allocator };
-            }
-
-            /// Forward pass through the MLP
-            pub fn forward(
-                self: Self,
-                /// MLP state
-                params: MLPParams,
-                /// Input
-                x: *Tensor,
-            ) !*Tensor {
-                var current = x;
-
-                for (params.layers, 0..) |layer, i| {
-                    const linear_out = try nn(T).linear(current, layer.weights, layer.bias);
-
-                    if (i < params.layers.len - 1) {
-                        defer linear_out.soft_deinit();
-                        switch (self.activation) {
-                            .relu => try nn(T).relu_(linear_out),
-                            .tanh => try nn(T).tanh_(linear_out),
-                            .sigmoid => try nn(T).sigmoid_(linear_out),
-                        }
-                    }
-
-                    current = linear_out;
-                }
-
-                return current;
-            }
-        };
-    }
-};
-
 test "functional API" {
     const testing = std.testing;
 
@@ -486,18 +294,11 @@ test "functional API" {
         defer input.deinit();
 
         // Create and init params
-        const linear_params = try init.init_linear(
-            f32,
-            device,
-            784,
-            128,
-            .{
-                .requires_grad = true,
-            },
-        );
+        const weights = try zg.NDTensor(f32).random(device, &.{ 128, 784 }, .uniform, .{ .acquired = true, .requires_grad = true });
+        const bias = try zg.NDTensor(f32).zeros(device, &.{128}, .{ .acquired = true, .requires_grad = true });
 
         // Forward
-        const linear_out = try nn(f32).linear(input, linear_params.weights, linear_params.bias);
+        const linear_out = try nn(f32).linear(input, weights, bias);
         defer linear_out.deinit();
 
         const relu_out = try nn(f32).relu(linear_out);
@@ -507,25 +308,7 @@ test "functional API" {
         try testing.expectEqual(32, relu_out.get_dim(0));
         try testing.expectEqual(128, relu_out.get_dim(1));
     }
-    {
-        // TODO: in-place add leaks unless we disable grad, this is on our radar
-        zg.runtime.grad_enabled = false;
-        const input = try zg.NDTensor(f32).random(device, &.{ 32, 784 }, .normal, .{
-            .requires_grad = true,
-        });
-        defer input.deinit();
-        const mlp = blocks.MLP(f32){
-            .layer_sizes = &.{ 784, 128, 64, 10 },
-            .activation = .relu,
-        };
 
-        var params = try mlp.init_params(testing.allocator, device, .{ .optim = null });
-        defer params.deinit();
-
-        const output = try mlp.forward(params, input);
-
-        try testing.expectEqual(10, output.get_dim(1));
-    }
     {
         const preds = try zg.NDTensor(f32).from_slice(
             device,
