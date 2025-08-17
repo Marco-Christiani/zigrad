@@ -50,7 +50,9 @@ pub fn init(allocator: Allocator) Self {
 }
 
 pub fn deinit(self: *Self) void {
-    for (self.map.values()) |*v| v.deinit();
+    for (self.map.values()) |*v| {
+        if v.deinit();
+    }
 
     self.arena.deinit(self.allocator);
     self.map.deinit(self.allocator);
@@ -493,7 +495,7 @@ pub fn save_to_file(
 
 pub const LoadOpts = struct {
     requires_grad: bool = false,
-    acquired: bool = true,
+    acquired: bool = false,
     owning: bool = true,
     graph: ?*zg.Graph = null,
 };
