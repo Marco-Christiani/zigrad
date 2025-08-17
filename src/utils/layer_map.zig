@@ -50,10 +50,7 @@ pub fn init(allocator: Allocator) Self {
 }
 
 pub fn deinit(self: *Self) void {
-    for (self.map.values()) |*v| {
-        if v.deinit();
-    }
-
+    for (self.map.values()) |*v| v.deinit();
     self.arena.deinit(self.allocator);
     self.map.deinit(self.allocator);
     self.* = undefined;
