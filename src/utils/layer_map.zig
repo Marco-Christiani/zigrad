@@ -595,6 +595,8 @@ test {
     try lmap.save_to_file("here.stz", allocator);
 
     var tree = try LayerMap.load_from_file("here.stz", allocator, cpu.reference(), .{
+        .requires_grad = false,
+        .acquired = false,
         .owning = true,
     });
     defer tree.deinit();
@@ -606,17 +608,18 @@ test {
     // ----------------------------
     // Extract
     // ----------------------------
-    const w = lmap.extract(zg.NDTensor(f32), "layer_a.foo.bar.weights", .{});
+    const w = try lmap.extract(*zg.NDTensor(f32), "layer_a.foo.bar.weights", .{});
     std.debug.print("Extracted tensor: {s}\n", .{w.get_label().?});
+
     const LayerA = struct {
         foo: struct {
             bar: struct {
-                weights: zg.NDTensor(f32),
-                bias: zg.NDTensor(f64),
+                weights: *zg.NDTensor(f32),
+                bias: *zg.NDTensor(f64),
             },
         },
     };
-    // TODO: proper error handling for extract(). try passing a bad prefix (e.g., "") to see what I mean.
-    const la = lmap.extract(LayerA, "layer_a", .{});
+    //// TODO: proper error handling for extract(). try passing a bad prefix (e.g., "") to see what I mean.
+    const la = try lmap.extract(LayerA, "layer_a", .{});
     std.debug.print("Extracted struct: {}\n", .{la});
 }
