@@ -1,59 +1,221 @@
 const std = @import("std");
+
 const zg = @import("zigrad");
 const NDTensor = zg.NDTensor;
-const Layer = zg.layer.Layer;
-const LinearLayer = zg.layer.LinearLayer;
-const ReLULayer = zg.layer.ReLULayer;
-const Model = zg.Model;
+const DeviceReference = zg.DeviceReference;
 
-pub fn DQNModel(comptime T: type) type {
+pub fn DQNModel(
+    /// Type
+    comptime T: type,
+    /// Number of affine layers
+    comptime depth: usize,
+) type {
     return struct {
         const Self = @This();
+        const nn = zg.nn(T);
+        const Tensor = NDTensor(T);
 
-        allocator: std.mem.Allocator,
-        model: Model(T),
-        params: []*const NDTensor(T),
+        weights: [depth]*Tensor = undefined,
+        biases: [depth]*Tensor = undefined,
+        input_size: usize,
+        output_size: usize,
 
-        pub fn init(allocator: std.mem.Allocator, input_size: usize, hidden_size: usize, output_size: usize) !*Self {
-            var model = try Model(T).init(allocator);
+        pub fn init(device: DeviceReference, input_size: usize, hidden_size: usize, output_size: usize) !Self {
+            var w_i: usize = 0;
+            var b_i: usize = 0;
 
-            try model.addLayer((try LinearLayer(T).init(allocator, input_size, hidden_size)).asLayer());
-            try model.addLayer((try ReLULayer(T).init(allocator)).asLayer());
-            try model.addLayer((try LinearLayer(T).init(allocator, hidden_size, hidden_size)).asLayer());
-            try model.addLayer((try ReLULayer(T).init(allocator)).asLayer());
-            try model.addLayer((try LinearLayer(T).init(allocator, hidden_size, output_size)).asLayer());
-            const self = try allocator.create(Self);
-            self.* = .{
-                .allocator = allocator,
-                .model = model,
-                .params = model.getParameters(),
+            var self: Self = .{
+                .input_size = input_size,
+                .output_size = output_size,
             };
+
+            // -2 for input and output, +1 since depth == dims-1
+            const layer_dims = [_]usize{input_size} ++ ([_]usize{hidden_size} ** (depth - 2 + 1)) ++ [_]usize{output_size};
+
+            errdefer { // free everything up to last value
+                for (self.weights[0..w_i]) |w|
+                    w.deinit();
+
+                for (self.biases[0..b_i]) |b|
+                    b.deinit();
+            }
+
+            inline for (&self.weights, &self.biases, 0..) |*w, *b, i| {
+                const in_features, const out_features = .{ layer_dims[i], layer_dims[i + 1] };
+
+                w.* = try Tensor.random(
+                    device,
+                    &.{ out_features, in_features },
+                    .{ .kaiming = in_features },
+                    .{
+                        .label = std.fmt.comptimePrint("weights.{d}", .{i}),
+                        .requires_grad = true,
+                        .acquired = true,
+                    },
+                );
+                w_i += 1;
+
+                b.* = try Tensor.zeros(
+                    device,
+                    &.{out_features},
+                    .{
+                        .label = std.fmt.comptimePrint("biases.{d}", .{i}),
+                        .requires_grad = true,
+                        .acquired = true,
+                    },
+                );
+                b_i += 1;
+            }
             return self;
         }
 
         pub fn deinit(self: *Self) void {
-            self.model.deinit();
-            self.allocator.destroy(self);
+            for (&self.weights, &self.biases) |w, b| {
+                w.release();
+                w.deinit();
+                b.release();
+                b.deinit();
+            }
+            self.* = undefined;
         }
 
-        pub fn forward(self: *Self, input: *NDTensor(T), allocator: std.mem.Allocator) !*NDTensor(T) {
-            return try self.model.forward(input, allocator);
+        /// Forward pass through the DQN network
+        /// Input shape: [..., input_size] or [..., flattened_features]
+        /// Output shape: [..., output_size]
+        pub fn forward(self: *Self, x: *Tensor) !*Tensor {
+            // Flatten
+            const batch_dim = x.data.shape.get(0);
+            const other_dims = x.data.shape.crop(1, 0);
+            const flattened_dim = zg.arrayutils.prod(other_dims);
+
+            const flat = try x.alias();
+            flat.data._reshape(&.{ batch_dim, flattened_dim });
+            flat.set_label("dqn_flattened");
+            errdefer flat.deinit();
+
+            std.debug.assert(flattened_dim == self.input_size);
+
+            // Layer 1 Forward
+            const z0 = try nn.linear(flat, self.weights[0], self.biases[0]);
+            errdefer z0.deinit();
+            try nn.relu_(z0);
+
+            flat.soft_deinit(); // Safe to free flattened input
+
+            // Layer 2 Forward
+            const z1 = try nn.linear(z0, self.weights[1], self.biases[1]);
+            errdefer z1.deinit();
+            try nn.relu_(z1);
+
+            z0.soft_deinit(); // Safe to free layer 1 output
+
+            // Layer 3 Forward
+            const z2 = try nn.linear(z1, self.weights[2], self.biases[2]);
+
+            z1.soft_deinit(); // Safe to free layer 2 output
+
+            return z2;
         }
 
-        pub fn getParameters(self: *Self) []*const NDTensor(T) {
-            return self.model.getParameters();
+        /// Zero out gradients for all parameters
+        pub fn zero_grad(self: *Self) void {
+            for (&self.weights) |*w| w.*.setup_grad(0) catch {};
+            for (&self.biases) |*b| b.*.setup_grad(0) catch {};
         }
 
-        pub fn train(self: Self) void {
-            for (self.model.layers.items) |layer| layer.enableGrad();
+        /// Attach optimizer to all parameters
+        pub fn attach_optimizer(self: *Self, optim: zg.Optimizer) !void {
+            for (&self.weights, &self.biases) |*w, *b| {
+                try optim.attach(w.*);
+                try optim.attach(b.*);
+            }
         }
 
-        pub fn eval(self: Self) void {
-            for (self.model.layers.items) |layer| layer.disableGrad();
+        /// Save model parameters to file
+        pub fn save(self: *Self, path: []const u8) !void {
+            const allocator = std.heap.smp_allocator;
+            var params = zg.LayerMap.init(allocator);
+            defer params.deinit();
+
+            for (&self.weights, &self.biases) |w, b| {
+                try params.put(w.get_label().?, w, .{});
+                try params.put(b.get_label().?, b, .{});
+            }
+            try params.save_to_file(path, allocator);
         }
 
-        pub fn zeroGrad(self: Self) void {
-            for (self.model.layers.items) |layer| layer.zeroGrad();
+        /// Load model parameters from file
+        pub fn load(path: []const u8, device: DeviceReference, input_size: usize, output_size: usize) !Self {
+            const allocator = std.heap.smp_allocator;
+
+            var params = try zg.LayerMap.load_from_file(path, allocator, device, .{
+                .requires_grad = true,
+                .acquired = true,
+                .owning = false,
+            });
+            defer params.deinit();
+
+            var model = params.extract(Self, "", .{});
+            model.input_size = input_size;
+            model.output_size = output_size;
+
+            return model;
+        }
+
+        /// Copy parameters from another model
+        pub fn copy_from(self: *Self, other: *const Self) !void {
+            std.debug.assert(self.input_size == other.input_size);
+            std.debug.assert(self.output_size == other.output_size);
+
+            for (&self.weights, &self.biases, &other.weights, &other.biases) |*w_dst, *b_dst, w_src, b_src| {
+                try w_dst.*.copy_(w_src);
+                try b_dst.*.copy_(b_src);
+            }
+        }
+
+        /// Soft update parameters from another model with interpolation factor tau
+        /// self = tau * other + (1 - tau) * self
+        pub fn soft_update_from(self: *Self, other: *const Self, tau: T) !void {
+            std.debug.assert(self.input_size == other.input_size);
+            std.debug.assert(self.output_size == other.output_size);
+            std.debug.assert(tau >= 0.0 and tau <= 1.0);
+
+            for (&self.weights, &self.biases, &other.weights, &other.biases) |*w_dst, *b_dst, w_src, b_src| {
+                // w_dst = tau * w_src + (1 - tau) * w_dst
+                try w_dst.*.mul_scalar_(1.0 - tau);
+                const temp_w = try w_src.mul_scalar(tau);
+                defer temp_w.soft_deinit();
+                try w_dst.*._add(temp_w);
+
+                // b_dst = tau * b_src + (1 - tau) * b_dst
+                try b_dst.*.mul_scalar_(1.0 - tau);
+                const temp_b = try b_src.mul_scalar(tau);
+                defer temp_b.soft_deinit();
+                try b_dst.*._add(temp_b);
+            }
+        }
+
+        /// Get number of trainable parameters
+        pub fn parameter_count(self: *const Self) usize {
+            var count: usize = 0;
+            for (&self.weights, &self.biases) |w, b| {
+                count += w.get_size();
+                count += b.get_size();
+            }
+            return count;
+        }
+
+        /// Enable/disable gradient computation for all parameters
+        pub fn set_requires_grad(self: *Self, requires_grad: bool) void {
+            for (&self.weights, &self.biases) |*w, *b| {
+                if (requires_grad) {
+                    w.*.enable_grad();
+                    b.*.enable_grad();
+                } else {
+                    w.*.disable_grad();
+                    b.*.disable_grad();
+                }
+            }
         }
     };
 }

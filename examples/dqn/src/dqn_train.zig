@@ -8,6 +8,10 @@ const tb = @import("tensorboard");
 const T = f32;
 
 pub fn trainDQN() !void {
+    const cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+    const device = cpu.reference();
+
     // Use ArenaAllocator for bulk allocations (old)
     var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer arena.deinit();
@@ -28,10 +32,15 @@ pub fn trainDQN() !void {
     const tau = 0.005;
 
     // Configure optimizer with clipping
-    var optimizer = zg.optim.Adam(T).init(allocator, 1e-4, 0.9, 0.999, 1e-8);
-    optimizer.grad_clip_enabled = true;
+    var optimizer = zg.optim.Adam.init(allocator, .{
+        .lr = 1e-4,
+        .beta1 = 0.9,
+        .beta2 = 0.999,
+        .epsilon = 1e-8,
+        .grad_clip_enabled = true,
+    });
 
-    var agent = try DQNAgent(T, 10_000).init(allocator, .{
+    var agent = try DQNAgent(T, 10_000, 3).init(allocator, .{
         .input_size = 4,
         .hidden_size = 128,
         .output_size = 2,
@@ -39,10 +48,9 @@ pub fn trainDQN() !void {
         .eps_start = 0.9,
         .eps_end = 0.05,
         .eps_decay = 1000,
-        .optimizer = optimizer.optimizer(),
     });
     defer agent.deinit();
-    agent.target_net.eval();
+    agent.policy_net.attach_optimizer(optimizer); // train the policy net, fuse the optimizer step with the backward pass
 
     const num_episodes = 10_000;
     var total_rewards = try allocator.alloc(T, num_episodes);
@@ -59,7 +67,7 @@ pub fn trainDQN() !void {
 
         // Training loop
         while (true) {
-            const action = try agent.selectAction(state, total_steps, im_alloc);
+            const action = try agent.select_action(state, total_steps, device);
             action_sum += @as(T, @floatFromInt(action));
             const step_result = env.step(action);
 
