@@ -7,12 +7,14 @@ const Alignment = std.mem.Alignment;
 const Error = Allocator.Error;
 const ArenaUnmanaged = @This();
 
+const SinglyLinkedList = @import("singly_linked_list.zig").SinglyLinkedList;
+
 /// Copied from std.ArenaAllocator and modified. This is now an unmanged version
 /// that isn't meant to be used with the allocator interface. Also changing functions
 /// to snake case. Not including independent "free" function because we don't have
 /// a use-case for that in zigrad. This will typically be used to contain and
 /// teardown whole computation graphs. This exists to facility "create" and "reset".
-const BufNode = std.SinglyLinkedList(usize).Node;
+const BufNode = SinglyLinkedList(usize).Node;
 const BufNode_alignment: mem.Alignment = .fromByteUnits(@alignOf(BufNode));
 
 pub const empty: ArenaUnmanaged = .{
@@ -20,7 +22,7 @@ pub const empty: ArenaUnmanaged = .{
     .end_index = 0,
 };
 
-buffer_list: std.SinglyLinkedList(usize),
+buffer_list: SinglyLinkedList(usize),
 end_index: usize,
 
 pub fn deinit(self: ArenaUnmanaged, allocator: Allocator) void {

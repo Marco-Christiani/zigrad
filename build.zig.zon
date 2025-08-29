@@ -10,8 +10,8 @@
             .lazy = true,
         },
         .safetensors_zg = .{
-            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#798b3792dc74731e986cc76a870cae4f250f52b2",
-            .hash = "safetensors_zg-0.0.1-dRXUiGzrAAAGmUQUd1d8ZwHNl0xSnnwetLvob--z_1P6",
+            .url = "git+https://github.com/andrewCodeDev/safetensors-zg/?ref=HEAD#fd99cdc3252e455e761da6b3afaf4913aab12617",
+            .hash = "safetensors_zg-0.0.1-dRXUiGDtAAAS8GBHZT5IfFha7hG6KXCtVUuUxB-ob4Jc",
         },
     },
     .paths = .{""},

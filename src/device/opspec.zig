@@ -16,6 +16,7 @@
 //       dx = dz + dx (add assign)
 //       dy = dz + dy (add assign)
 //
+//
 pub fn add(T: type) type {
     return struct {
         pub const __name__ = "add";
@@ -53,6 +54,30 @@ pub fn div(T: type) type {
         x: []const T,
         y: []const T,
         z: []T,
+    };
+}
+
+pub fn add_scalar(T: type) type {
+    return struct {
+        pub const __name__ = "add_scalar";
+        pub const __type__ = T;
+        x: []const T,
+        s: T,
+        z: []T,
+    };
+}
+
+pub fn sub_scalar(T: type) type {
+    return struct {
+        pub const __name__ = "sub_scalar";
+        pub const __type__ = T;
+        x: []const T,
+        s: T,
+        z: []T,
+        // This flag is helpful for scalar situations
+        // where a tensor needs to be subtracted from
+        // a scalar
+        commute: bool,
     };
 }
 

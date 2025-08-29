@@ -68,7 +68,8 @@ pub const Optimizer = struct {
 };
 
 pub const SGD = struct {
-    params: ParamList,
+    params: ParamList = .empty,
+    gpa: std.mem.Allocator,
     grad_clip_enabled: bool,
     grad_clip_max_norm: f32,
     grad_clip_delta: f32,
@@ -81,7 +82,7 @@ pub const SGD = struct {
         lr: f64,
     }) SGD {
         return .{
-            .params = ParamList.init(allocator),
+            .gpa = allocator,
             .grad_clip_enabled = opts.grad_clip_enabled,
             .grad_clip_max_norm = opts.grad_clip_max_norm,
             .grad_clip_delta = opts.grad_clip_delta,
@@ -90,7 +91,7 @@ pub const SGD = struct {
     }
 
     pub fn deinit(self: *SGD) void {
-        self.params.deinit();
+        self.params.deinit(self.gpa);
     }
 
     pub fn optimizer(self: *SGD) Optimizer {
@@ -126,8 +127,9 @@ pub const Adam = struct {
     const MapEntry = struct { m: []u8, v: []u8, device: zg.DeviceReference };
     const ParamMap = std.AutoArrayHashMap(usize, MapEntry);
 
-    params: ParamList,
+    params: ParamList = .empty,
     map: ParamMap,
+    gpa: std.mem.Allocator,
 
     lr: f64,
     beta1: f64,
@@ -148,8 +150,8 @@ pub const Adam = struct {
         grad_clip_delta: f32 = settings.grad_clip_delta,
     }) Adam {
         return .{
-            .params = ParamList.init(allocator),
             .map = ParamMap.init(allocator),
+            .gpa = allocator,
             .lr = opts.lr,
             .beta1 = opts.beta1,
             .beta2 = opts.beta2,
@@ -162,7 +164,7 @@ pub const Adam = struct {
     }
 
     pub fn deinit(self: *Adam) void {
-        self.params.deinit();
+        self.params.deinit(self.gpa);
         for (self.map.values()) |entry| {
             entry.device.mem_free(entry.m);
             entry.device.mem_free(entry.v);

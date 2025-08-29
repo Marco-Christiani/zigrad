@@ -4,6 +4,7 @@ const debug: bool = (builtin.mode == .Debug);
 const Graph = @import("../graph.zig");
 const zg = @import("../zigrad.zig");
 const TypeID = @import("../utils/rtti.zig").TypeID;
+pub const Label = @import("../utils/label.zig");
 
 const Node = @This();
 
@@ -36,6 +37,30 @@ callbacks: struct {
     /// the parent node type. Always the same call
     /// and used for graph teardowns.
     del: *const fn (*Node) void,
+
+    pub fn prepend(
+        self: *@This(),
+        NodeParentType: type,
+        BwdClosureType: type,
+        bwd_instance: BwdClosureType,
+        bwd_children: []const *Node,
+    ) !void {
+        const ctx: *Node = @alignCast(@fieldParentPtr("callbacks", self));
+
+        const root = try BackwardContext.init(
+            NodeParentType,
+            BwdClosureType,
+            ctx.gb.allocator,
+            bwd_instance,
+            bwd_children,
+        );
+
+        if (self.bwd) |*bwd| {
+            try bwd.prepend(root, ctx.gb.allocator);
+        } else {
+            self.bwd = root;
+        }
+    }
 },
 
 pub fn init(
@@ -50,7 +75,7 @@ pub fn init(
         .flags = Flags.init(flag_config),
         .type_id = TypeID.init(NodeParentType),
         .version = 0,
-        .label = as_label(label_bytes),
+        .label = .init(label_bytes orelse ""),
         .callbacks = .{
             .bwd = bwd_context,
             .del = struct {
@@ -87,7 +112,7 @@ pub fn get_label(self: *const Node) ?[]const u8 {
 }
 
 pub fn set_label(self: *Node, new_label: []const u8) void {
-    self.label = as_label(new_label);
+    self.label = .init(new_label);
 }
 
 pub fn upcast(self: *Node, T: type) *T {
@@ -438,11 +463,3 @@ const StoragePointer = struct {
         self.* = undefined;
     }
 };
-
-const LABEL_SIZE: usize = zg.settings.label_capacity;
-pub const Label = std.BoundedArray(u8, LABEL_SIZE);
-
-pub fn as_label(slice: ?[]const u8) Label {
-    const l = slice orelse return .{};
-    return Label.fromSlice(l) catch @panic(std.fmt.comptimePrint("Label size is too large - max {d} characters", .{LABEL_SIZE}));
-}

@@ -108,6 +108,8 @@ pub fn CachingAllocator(DataHandler: type) type {
         }
 
         pub fn free(self: *Self, data: anytype) void {
+            std.debug.assert(data.ctx != 0);
+
             if (data.raw.len == 0)
                 return;
 

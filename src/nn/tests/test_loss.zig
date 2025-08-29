@@ -49,9 +49,9 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
     const input = try NDTensor(f32).from_slice(device, case.input, case.shape, config);
     defer input.deinit();
 
-    std.log.info("{s} {d}\n", .{ name, case.shape });
-    std.log.info("input: {d}\n", .{input.get_data()});
-    std.log.info("target: {d}\n", .{case.target});
+    std.log.info("{s} {any}\n", .{ name, case.shape });
+    std.log.info("input: {any}\n", .{input.get_data()});
+    std.log.info("target: {any}\n", .{case.target});
 
     const target = try NDTensor(f32).from_slice(device, case.target, case.shape, config);
     defer target.deinit();
@@ -61,10 +61,10 @@ fn verify_smce_loss(comptime name: []const u8, case: SmceTestCase, allocator: st
 
     try loss.backward();
 
-    std.log.info("loss: {d}\n", .{loss.get_data()});
-    std.log.info("expected: {d}\n", .{case.loss});
-    std.log.info("input grad      : {d}\n", .{input.assume_grad_data()});
-    std.log.info("expected grad   : {d}\n\n", .{case.input_grad});
+    std.log.info("loss: {}\n", .{loss.get(0)});
+    std.log.info("expected: {}\n", .{case.loss});
+    std.log.info("input grad      : {any}\n", .{input.assume_grad_data()});
+    std.log.info("expected grad   : {any}\n\n", .{case.input_grad});
 
     try std.testing.expectApproxEqAbs(case.loss, loss.get(0), 1e-4);
 
@@ -119,19 +119,19 @@ fn verify_smooth_l1_loss(case: SmoothL1TestCase, allocator: std.mem.Allocator) !
     defer target.deinit();
 
     std.log.info("Smooth L1 Loss Test", .{});
-    std.log.info("Input: {d}", .{input.get_data()});
-    std.log.info("Target: {d}", .{target.get_data()});
-    std.log.info("Beta: {d}", .{case.beta});
+    std.log.info("Input: {any}", .{input.get_data()});
+    std.log.info("Target: {any}", .{target.get_data()});
+    std.log.info("Beta: {}", .{case.beta});
 
     const loss = try zg.loss.smooth_l1_loss(f32, input, target, case.beta);
     defer loss.deinit();
 
     try loss.backward();
 
-    std.log.info("Calculated loss: {d}n", .{loss.get(0)});
-    std.log.info("Expected loss: {d}", .{case.loss});
-    std.log.info("Calculated input grad: {d}", .{input.assume_grad_data()});
-    std.log.info("Expected input grad: {d}", .{case.input_grad});
+    std.log.info("Calculated loss: {}n", .{loss.get(0)});
+    std.log.info("Expected loss: {}", .{case.loss});
+    std.log.info("Calculated input grad: {any}", .{input.assume_grad_data()});
+    std.log.info("Expected input grad: {any}", .{case.input_grad});
 
     try std.testing.expectApproxEqAbs(case.loss, loss.get(0), 1e-4);
     try std.testing.expectEqualSlices(f32, case.input_grad, input.assume_grad_data());
