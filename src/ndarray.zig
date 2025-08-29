@@ -78,17 +78,6 @@ pub fn NDArray(comptime T: type) type {
             return .{ .data = try device.mem_cache_dupe(T, self.get_data()), .shape = self.shape };
         }
 
-        pub fn cast(self: *Self, K: type, _: DeviceReference) !NDArray(K) {
-            _ = self;
-            @compileError("Not implemented");
-            // defer allocator.destroy(self);
-            // const result = try allocator.create(NDArray(K));
-            // result.* = .{
-            //     .data = ,
-            //     .shape = self.shape,
-            // };
-        }
-
         pub fn fill(self: Self, val: T, device: DeviceReference) void {
             device.mem_fill(T, self.get_data(), val);
         }
@@ -112,7 +101,11 @@ pub fn NDArray(comptime T: type) type {
         }
 
         pub fn print(self: Self, device: DeviceReference) void {
-            self.print_to_writer(std.io.getStdErr().writer(), device) catch @panic("print failure");
+            var buffer: [1024]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&buffer);
+            const stdout = &stdout_writer.interface;
+            self.print_to_writer(stdout, device) catch @panic("Failed to print tensor to stdout");
+            stdout.flush() catch @panic("Failed to flush to stdout");
         }
 
         pub fn print_to_writer(self: Self, writer: anytype, device: DeviceReference) !void {
@@ -136,24 +129,15 @@ pub fn NDArray(comptime T: type) type {
                 return self.print_to_writer_impl(_host_data, writer, true, device);
             }
 
-            const alloc = std.heap.smp_allocator;
-            const shape_str: []u8 = alloc.alloc(u8, @as(usize, self.shape.len) * @sizeOf(usize)) catch @panic("allocation failed in print");
-            defer alloc.free(shape_str);
-            var j: usize = 0;
+            var shape_buf: [128]u8 = undefined;
+
             var bytes_written: usize = 0;
-            for (self.shape.slice(), 0..) |s, i| {
-                const b = std.fmt.formatIntBuf(shape_str[bytes_written..shape_str.len], s, 10, .lower, .{});
-                bytes_written += b;
-                if (i < self.shape.len - 1 and j + b < shape_str.len - 1) {
-                    shape_str[j + b] = 'x';
-                    bytes_written += 1;
-                } else {
-                    break;
-                }
-                j += 2;
+            for (self.shape.slice()) |s| {
+                bytes_written += (try std.fmt.bufPrint(shape_buf[bytes_written..shape_buf.len], "{}x", .{s})).len;
             }
-            const preamble = std.fmt.allocPrint(alloc, "NDArray<{any},{s}>", .{ T, shape_str[0..bytes_written] }) catch @panic("allocation failed in print");
-            try writer.writeAll(preamble);
+
+            bytes_written -= 1; // remove trailing x
+            try writer.print("NDArray<{any}>,{s}>", .{ T, shape_buf[0..bytes_written] });
             try utils.print_ndslice(T, _data, self.shape.slice(), writer);
         }
 
@@ -230,7 +214,7 @@ pub fn NDArray(comptime T: type) type {
 
         inline fn elwise(x: *const Self, y: *const Self, z: *Self, device: DeviceReference, Op: type) !void {
             if (builtin.mode == .Debug and !x.shape.compatible(y.shape)) {
-                log.err("_" ++ Op.__name__ ++ "() self.shape={} other.shape={}", .{ x.shape, y.shape });
+                log.err("_" ++ Op.__name__ ++ "() self.shape={f} other.shape={f}", .{ x.shape, y.shape });
                 return error.IncompatibleShapes;
             }
             device.dispatch(Op{ .x = x.get_data(), .y = y.get_data(), .z = z.get_data() });
@@ -247,13 +231,26 @@ pub fn NDArray(comptime T: type) type {
         pub fn add_scalar(self: *const Self, s: T, device: DeviceReference) !Self {
             var z = try Self.empty(self.shape.slice(), device);
             errdefer z.deinit(device);
-            // kernel needs to handle memory transfer of scalars
-            device.dispatch(opspec.add(T){ .x = self.get_data(), .y = &.{s}, .z = z.get_data() });
+            device.dispatch(opspec.add_scalar(T){
+                .x = self.get_data(),
+                .s = s,
+                .z = z.get_data(),
+            });
             return z;
         }
 
-        pub fn sub_scalar(self: *const Self, s: T, device: DeviceReference) !Self {
-            return self.add_scalar(-s, device);
+        pub fn sub_scalar(self: *const Self, s: T, device: DeviceReference, opts: struct {
+            commute: bool = false,
+        }) !Self {
+            var z = try Self.empty(self.shape.slice(), device);
+            errdefer z.deinit(device);
+            device.dispatch(opspec.sub_scalar(T){
+                .x = self.get_data(),
+                .s = s,
+                .z = z.get_data(),
+                .commute = opts.commute,
+            });
+            return z;
         }
 
         // element wise operations (broadcasting)
@@ -864,12 +861,12 @@ fn bmm_acc_impl(
     if (builtin.mode == .Debug) {
         if (accumulator) |_| {
             if (!C.shape.compatible(C_shape)) {
-                std.debug.panic("Expected accumulator shape {} but got {}", .{ C_shape, C.shape });
+                std.debug.panic("Expected accumulator shape {f} but got {f}", .{ C_shape, C.shape });
             }
         }
 
         if ((if (trans_a) a_rows else a_cols) != (if (trans_b) b_cols else b_rows)) {
-            std.debug.panic("Incompatible matrix dimensions for matmul: {}x{} and {}x{} bcasted batch dims {} (trans_a={}, trans_b={})", .{
+            std.debug.panic("Incompatible matrix dimensions for matmul: {}x{} and {}x{} bcasted batch dims {f} (trans_a={}, trans_b={})", .{
                 a_rows, a_cols, b_rows, b_cols, broadcast_batch_dims, trans_a, trans_b,
             });
         }

@@ -313,6 +313,14 @@ pub fn crop(self: anytype, lhs: u64, rhs: u64) MatchedSlice(@TypeOf(&self.buffer
         &.{};
 }
 
+/// Swaps new shape in and returns old one. Debug asserts that both new and old are same size.
+pub fn exchange(self: *Shape, new_shape: []const u64) Shape {
+    const old = self.*;
+    self.* = Shape.init(new_shape);
+    std.debug.assert(old.size() == self.size());
+    return old;
+}
+
 /// This is an aligned mismatch - useful for comparing likewise
 /// modes. Consider the following cases:
 ///
@@ -383,13 +391,8 @@ pub fn strides(self: Shape) Strides {
     };
 }
 
-pub fn format(
-    shape: Shape,
-    comptime _: []const u8,
-    _: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    try writer.print("{d}", .{shape.slice()});
+pub fn format(shape: Shape, writer: *std.io.Writer) std.io.Writer.Error!void {
+    try writer.print("{any}", .{shape.slice()});
 }
 
 pub fn MatchedSlice(T: type) type {

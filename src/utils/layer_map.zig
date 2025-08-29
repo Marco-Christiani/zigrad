@@ -20,7 +20,6 @@ const ClosurePointer = rtti.ClosurePointer;
 const TypeID = rtti.TypeID;
 const ArenaUnmanaged = @import("../allocators.zig").ArenaUnmanaged;
 const TensorOpts = @import("../zigrad.zig").TensorOpts;
-
 const Self = @This();
 const stz = @import("../zigrad.zig").stz;
 const zg = @import("../zigrad.zig");
@@ -229,7 +228,8 @@ pub fn print_tree(self: *Self) void {
     const keys = sorted_keys;
     const prefix: [128]u8 = @splat(' ');
 
-    var stack: std.BoundedArray(usize, 64) = .{};
+    var stack = zg.utils.Array(usize, 64).empty;
+
     var key_idx: usize = 0;
     var key_pos: usize = 0;
 
@@ -237,7 +237,7 @@ pub fn print_tree(self: *Self) void {
         const key = keys[key_idx];
 
         while (std.mem.indexOfScalarPos(u8, key, key_pos, '.')) |sep_pos| {
-            stack.append(sep_pos) catch unreachable;
+            stack.push(sep_pos) catch unreachable;
 
             if (key_pos == 0)
                 std.debug.print("{s}\n", .{key[key_pos..sep_pos]})
@@ -278,7 +278,7 @@ pub fn print_tree(self: *Self) void {
     }
 }
 
-const PathBuffer = std.BoundedArray(u8, 1024);
+const PathBuffer = zg.utils.Array(u8, 1024);
 
 /// Populates an existing struct with entries from the map.
 /// Lower-level function used by `extract()`.
@@ -293,7 +293,7 @@ pub fn populate(
     /// Configure ownership during population
     opts: PopulateOpts,
 ) void {
-    var buf = PathBuffer.fromSlice(root) catch unreachable;
+    var buf = PathBuffer.from_slice(root) catch unreachable;
     recursive_populate(ptr, &self.map, &buf, opts.shared);
 }
 
@@ -319,7 +319,7 @@ fn recursive_populate(
     switch (@typeInfo(T)) {
         .@"struct" => |s| inline for (s.fields) |field| {
             const ext = if (buf.len > 0) "." ++ field.name else field.name;
-            buf.appendSlice(ext) catch unreachable;
+            buf.push_slice(ext) catch unreachable;
             recursive_populate(&@field(ptr.*, field.name), map, buf, shared);
             buf.len -= ext.len;
         },
@@ -369,7 +369,7 @@ pub fn serialize(
     var collector = TensorCollector{
         .tensor_list = try std.ArrayList(stz.Tensor).initCapacity(self.allocator, self.map.count()),
     };
-    defer collector.tensor_list.deinit();
+    defer collector.tensor_list.deinit(self.allocator);
 
     self.for_each(&collector);
 

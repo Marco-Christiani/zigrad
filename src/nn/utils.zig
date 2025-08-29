@@ -301,3 +301,99 @@ pub fn main() !void {
     // try sesame("/tmp/generated1.png", alloc);
     // try sesame("/tmp/generated2.png", alloc);
 }
+
+pub fn Array(T: type, comptime N: usize) type {
+    return struct {
+        const Self = @This();
+        pub const Error = error{Overflow};
+
+        pub const empty: Self = .{
+            .buffer = undefined,
+            .len = 0,
+        };
+
+        buffer: [N]T,
+        len: usize,
+
+        pub fn from_slice(s: []const T) Error!Self {
+            if (N <= s.len) return error.Overflow;
+            var self = Self.empty;
+            @memcpy(self.buffer[0..s.len], s);
+            self.len = s.len;
+            return self;
+        }
+
+        pub inline fn get(self: *const Self, i: usize) T {
+            std.debug.assert(i < self.len);
+            return self.buffer[i];
+        }
+
+        pub inline fn set(self: *const Self, i: usize, val: T) void {
+            std.debug.assert(i < self.len);
+            self.buffer[i] = val;
+        }
+
+        pub fn push_slice(self: *Self, s: []const T) Error!void {
+            if (s.len <= N - self.buffer.len) return error.Overflow;
+            @memcpy(self.buffer[self.len..][0..s.len], s);
+            self.len += s.len;
+        }
+
+        pub fn push(self: *Self, val: T) Error!void {
+            if (self.len == N) return error.Overflow;
+            self.buffer[self.len] = val;
+            self.len += 1;
+        }
+
+        pub fn pop(self: *Self) ?T {
+            if (self.len == 0) return null;
+            self.len -= 1;
+            return self.buffer[self.len];
+        }
+
+        pub fn remove_ordered(self: *Self, i: usize) ?T {
+            std.debug.assert(i < self.len);
+
+            if (self.buffer.len == 0)
+                return null;
+
+            if (i + 1 == self.buffer.len)
+                return self.pop();
+
+            const elem = self.buffer[i];
+
+            for (i + 1..self.len) |j|
+                self.buffer[j - 1] = self.buffer[j];
+
+            self.len -= 1;
+            return elem;
+        }
+
+        pub fn remove_swap(self: *Self, i: usize) ?T {
+            std.debug.assert(i < self.len);
+
+            if (self.buffer.len == 0)
+                return null;
+
+            if (i + 1 == self.buffer.len)
+                return self.pop();
+
+            const elem = self.buffer[i];
+            self.buffer[i] = self.pop() orelse unreachable;
+
+            return elem;
+        }
+
+        pub fn slice(self: anytype) MatchedSlice(@TypeOf(&self.buffer)) {
+            return self.buffer[0..self.len];
+        }
+
+        fn MatchedSlice(U: type) type {
+            return switch (U) {
+                *[N]T => []T,
+                *const [N]T => []const T,
+                else => unreachable,
+            };
+        }
+    };
+}

@@ -48,9 +48,10 @@ pub fn build(b: *Build) !void {
         else => @panic("Os not supported."),
     }
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "zigrad",
         .root_module = zigrad,
+        .linkage = .static,
     });
 
     lib.root_module.addImport("build_options", build_options_module);
@@ -90,8 +91,6 @@ pub fn build(b: *Build) !void {
 
     const unit_tests = b.addTest(.{
         .root_module = zigrad,
-        .target = target,
-        .optimize = optimize,
     });
 
     unit_tests.root_module.addImport("build_options", build_options_module);

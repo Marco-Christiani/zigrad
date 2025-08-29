@@ -66,9 +66,9 @@ test print_ndslice {
     {
         const arr1 = [_]f64{ 1, 2, 3, 4, 5, 6 };
         const shape1 = [_]usize{ 3, 2 };
-        var buffer1 = std.ArrayList(u8).init(allocator);
-        defer buffer1.deinit();
-        try print_ndslice(f64, &arr1, &shape1, buffer1.writer());
+        var buffer1 = std.ArrayList(u8).empty;
+        defer buffer1.deinit(allocator);
+        try print_ndslice(f64, &arr1, &shape1, buffer1.writer(allocator));
         try std.testing.expectEqualStrings("[[1, 2], [3, 4], [5, 6]]", buffer1.items);
     }
 
@@ -76,9 +76,9 @@ test print_ndslice {
     {
         const arr2 = [_]f64{ 1, 2, 3, 4, 5, 6 };
         const shape2 = [_]usize{ 3, 2, 1 };
-        var buffer2 = std.ArrayList(u8).init(allocator);
-        defer buffer2.deinit();
-        try print_ndslice(f64, &arr2, &shape2, buffer2.writer());
+        var buffer2 = std.ArrayList(u8).empty;
+        defer buffer2.deinit(allocator);
+        try print_ndslice(f64, &arr2, &shape2, buffer2.writer(allocator));
         try std.testing.expectEqualStrings("[[[1], [2]], [[3], [4]], [[5], [6]]]", buffer2.items);
     }
 }

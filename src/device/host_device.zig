@@ -218,6 +218,18 @@ pub fn div(_: *const Self, T: type, p: opspec.div(T)) void {
     return elwise_binop(T, p.x, p.y, p.z, div_op);
 }
 
+pub fn add_scalar(_: *const Self, T: type, p: opspec.add_scalar(T)) void {
+    for (p.x, p.z) |x, *z| z.* = x + p.s;
+}
+
+pub fn sub_scalar(_: *const Self, T: type, p: opspec.sub_scalar(T)) void {
+    if (p.commute) {
+        for (p.x, p.z) |x, *z| z.* = x - p.s;
+    } else {
+        for (p.x, p.z) |x, *z| z.* = p.s - x;
+    }
+}
+
 /////////////////////////////////
 // linear algebra ops
 
@@ -708,7 +720,7 @@ fn _prod(sizes: []const usize) usize {
 
 pub fn unbroadcast(self: *Self, T: type, p: opspec.unbroadcast(T)) void {
     const local = @import("reduce.zig");
-    const Array = std.BoundedArray(usize, 8);
+    const Array = zg.utils.Array(usize, 8);
 
     if (p.x.len == p.y.len) {
         return local.scaled_copy(T, .{
@@ -722,12 +734,12 @@ pub fn unbroadcast(self: *Self, T: type, p: opspec.unbroadcast(T)) void {
     // remove any leading ones because they contribute nothing to the reduction
     var x_shape = blk: {
         const trimmed = std.mem.trimLeft(usize, p.x_shape, &.{1});
-        break :blk Array.fromSlice(trimmed) catch unreachable;
+        break :blk Array.from_slice(trimmed) catch unreachable;
     };
 
     var y_shape = blk: {
         const trimmed = std.mem.trim(usize, p.y_shape, &.{1});
-        break :blk Array.fromSlice(trimmed) catch unreachable;
+        break :blk Array.from_slice(trimmed) catch unreachable;
     };
 
     // check if we have to deal with any body reductions
@@ -748,7 +760,7 @@ pub fn unbroadcast(self: *Self, T: type, p: opspec.unbroadcast(T)) void {
         if (ones == 0) return;
 
         // remove the indices we just reduced for next round
-        x_shape = Array.fromSlice(x_shape.slice()[dif..]) catch unreachable;
+        x_shape = Array.from_slice(x_shape.slice()[dif..]) catch unreachable;
     }
 
     var i: usize = 0;
@@ -770,8 +782,8 @@ pub fn unbroadcast(self: *Self, T: type, p: opspec.unbroadcast(T)) void {
                 .beta = p.beta,
             });
 
-            _ = x_shape.orderedRemove(i);
-            _ = y_shape.orderedRemove(i);
+            _ = x_shape.remove_ordered(i);
+            _ = y_shape.remove_ordered(i);
             ones -= 1;
             continue;
         }
