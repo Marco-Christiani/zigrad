@@ -597,7 +597,6 @@ test {
         .requires_grad = false,
         .acquired = false,
         .owning = true,
-        .acquired = false,
     });
     defer tree.deinit();
 
