@@ -1,9 +1,10 @@
 import ctypes
 import pathlib
-from ctypes import POINTER, c_double, c_uint32, c_uint64
+from ctypes import POINTER, c_uint32, c_uint64, c_float
 
 import numpy as np
 
+T = c_float
 libpath = pathlib.Path("./libcartpole_wrapper.so").absolute()
 if libpath.exists() or (libpath := libpath.with_suffix(".dylib")).exists():
     lib = ctypes.CDLL(str(libpath))
@@ -14,13 +15,13 @@ lib.cartpole_init.argtypes = [c_uint64]
 lib.cartpole_init.restype = ctypes.c_void_p
 
 lib.cartpole_reset.argtypes = [ctypes.c_void_p]
-lib.cartpole_reset.restype = POINTER(c_double * 4)
+lib.cartpole_reset.restype = POINTER(T * 4)
 
 lib.cartpole_step.argtypes = [
     ctypes.c_void_p,
     c_uint32,
-    POINTER(c_double * 4),
-    POINTER(c_double),
+    POINTER(T * 4),
+    POINTER(T),
     POINTER(ctypes.c_ubyte),
 ]
 lib.cartpole_step.restype = None
@@ -40,8 +41,8 @@ class CartPole:
         return list(result.contents)
 
     def step(self, action):
-        state = (c_double * 4)()
-        reward = c_double()
+        state = (T * 4)()
+        reward = T()
         done = ctypes.c_ubyte()
         lib.cartpole_step(self.obj, action, state, ctypes.byref(reward), ctypes.byref(done))
         return list(state), reward.value, bool(done.value)

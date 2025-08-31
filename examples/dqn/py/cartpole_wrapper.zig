@@ -1,5 +1,5 @@
 const std = @import("std");
-const CartPole = @import("src/CartPole.zig");
+const CartPole = @import("CartPole.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
@@ -20,8 +20,7 @@ pub export fn cartpole_reset(pole: *CartPole) [*c]T {
 
 pub export fn cartpole_step(pole: *CartPole, action: u32, state: [*c]T, reward: [*c]T, done: [*c]u8) void {
     const result = pole.step(action);
-    var dest = result.state;
-    std.mem.copyForwards(T, &dest, state[0..4]);
+    std.mem.copyForwards(T, state[0..4], &result.state);
     reward.* = result.reward;
     done.* = if (result.done == 1) 1 else 0;
 }

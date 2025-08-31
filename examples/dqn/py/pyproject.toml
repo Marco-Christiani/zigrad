@@ -1,0 +1,9 @@
+[project]
+name = "dqn-py"
+version = "0.1.0"
+requires-python = ">=3.12.0"
+dependencies = [
+  "torch>=2.8.0",
+  "numpy>=2.3.2",
+  "tensorboard>=2.20.0",
+]

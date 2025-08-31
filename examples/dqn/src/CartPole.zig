@@ -22,7 +22,7 @@ x_dot: T = 0,
 theta: T = 0,
 theta_dot: T = 0,
 steps_beyond_done: ?i32 = null,
-rng: std.rand.DefaultPrng,
+rng: std.Random.DefaultPrng,
 
 pub fn init(seed: u64) Self {
     var self = Self{
