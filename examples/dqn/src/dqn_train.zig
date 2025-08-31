@@ -1,5 +1,8 @@
 ///! NOTE: The underlying device abstractions have changed and this example has not yet been migrated
 /// please disregard code surround allocators in this example until its migrated, everything else is fine.
+///
+/// NOTE: the replay buffer needs thought to optimize for device agnosticism + performance. I could write
+/// it here, but this might hint at primitives we should provide the user.
 const std = @import("std");
 const zg = @import("zigrad");
 const CartPole = @import("CartPole.zig");
@@ -8,19 +11,25 @@ const tb = @import("tensorboard");
 const T = f32;
 
 pub fn trainDQN() !void {
-    const cpu = zg.device.HostDevice.init();
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
     const device = cpu.reference();
 
-    // Use ArenaAllocator for bulk allocations (old)
-    var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // Zigrad has a global graph that can be overriden for user-provided graphs.
+    zg.global_graph_init(std.heap.smp_allocator, .{
+        .eager_teardown = true,
+    });
+    defer zg.global_graph_deinit();
 
-    // Separate pool for intermediate tensors (old)
+    // TODO: device side replay buffer, rm this allocator
     var im_pool = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
     defer im_pool.deinit();
     const im_alloc = im_pool.allocator();
+
+    // For tracking stats
+    var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Initialize environment and logger (old)
     const s = std.crypto.random.int(usize);
@@ -40,7 +49,7 @@ pub fn trainDQN() !void {
         .grad_clip_enabled = true,
     });
 
-    var agent = try DQNAgent(T, 10_000, 3).init(allocator, .{
+    var agent = try DQNAgent(T, 10_000, 3).init(device, .{
         .input_size = 4,
         .hidden_size = 128,
         .output_size = 2,
@@ -50,7 +59,7 @@ pub fn trainDQN() !void {
         .eps_decay = 1000,
     });
     defer agent.deinit();
-    agent.policy_net.attach_optimizer(optimizer); // train the policy net, fuse the optimizer step with the backward pass
+    try agent.policy_net.attach_optimizer(optimizer.optimizer()); // train the policy net, fuse the optimizer step with the backward pass
 
     const num_episodes = 10_000;
     var total_rewards = try allocator.alloc(T, num_episodes);
@@ -71,7 +80,7 @@ pub fn trainDQN() !void {
             action_sum += @as(T, @floatFromInt(action));
             const step_result = env.step(action);
 
-            agent.storeTransition(.{
+            agent.store_transition(.{
                 .state = state,
                 .action = action,
                 .next_state = step_result.state,
@@ -84,12 +93,13 @@ pub fn trainDQN() !void {
             state = step_result.state;
 
             if (total_steps > 128) {
-                agent.policy_net.train();
-                const loss = try agent.train(im_alloc, tb_logger);
+                agent.policy_net.set_requires_grad(true);
+                const loss = try agent.train(im_alloc, tb_logger, device);
+                try optimizer.optimizer().step();
                 loss_sum += loss;
                 loss_count += 1;
-                try agent.updateTargetNetwork(tau);
-                agent.policy_net.eval();
+                try agent.update_target_network(tau);
+                agent.policy_net.set_requires_grad(false);
 
                 // Log training metrics to tensorboard
                 try tb_logger.addScalar("training/loss", loss, @intCast(total_steps));

@@ -1,10 +1,11 @@
 .{
-    .name = "dqn",
+    .name = .dqn,
     .version = "0.0.0",
+    .fingerprint = 0x2cb1be068c9d3cc3,
     .dependencies = .{
         .zigrad = .{
-            .url = "git+https://github.com/Marco-Christiani/zigrad/#70003c6ac0398de555302a7876876393f97dde50",
-            .hash = "1220950360cc9b32128e360234310c7eb8c0707ae4f4dda74955f075b8451f4ad82e",
+            .url = "git+https://github.com/Marco-Christiani/zigrad/#61debb0195aed8d313c318a0591aebec3ddfd092",
+            .hash = "1220295793019a2c134ca70404928c64b1e8719e9ba5e7cc5b7ff58e46ba16dd73f8",
         },
         .tensorboard = .{
             .path = "../../tensorboard/",

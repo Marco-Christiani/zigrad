@@ -18,7 +18,6 @@ pub fn DQNAgent(
 ) type {
     return struct {
         const Self = @This();
-        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
 
         policy_net: DQNModel(T, depth),
         target_net: DQNModel(T, depth),
@@ -49,13 +48,11 @@ pub fn DQNAgent(
         };
 
         pub fn init(device: DeviceReference, config: DqnConfig) !Self {
-            const policy_net = try DQNModel(T, depth).init(device, config.input_size, config.hidden_size, config.output_size);
+            var policy_net = try DQNModel(T, depth).init(device, config.input_size, config.hidden_size, config.output_size);
             errdefer policy_net.deinit();
-            const target_net = try DQNModel(T, depth).init(device, config.input_size, config.hidden_size, config.output_size);
-            errdefer target_net.deinit();
-
             // initialize target network weights to match policy network
-            try target_net.copy_from(policy_net);
+            var target_net = try policy_net.clone();
+            errdefer target_net.deinit();
 
             // Not training the target net
             target_net.set_requires_grad(false);
@@ -63,7 +60,7 @@ pub fn DQNAgent(
             return Self{
                 .policy_net = policy_net,
                 .target_net = target_net,
-                .replay_buffer = ReplayBuffer(Transition, buffer_capacity).init(...),
+                .replay_buffer = ReplayBuffer(Transition, buffer_capacity).init(),
                 .eps = config.eps_start,
                 .eps_start = config.eps_start,
                 .eps_end = config.eps_end,
@@ -73,10 +70,10 @@ pub fn DQNAgent(
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
             self.policy_net.deinit();
             self.target_net.deinit();
-            // FIXME: self or clarify lifetime in docs
+            self.* = undefined;
         }
 
         pub fn select_action(self: *Self, state: [4]T, step: usize, device: DeviceReference) !u32 {
@@ -96,7 +93,7 @@ pub fn DQNAgent(
             const q_values = try self.policy_net.forward(state_tensor);
             defer q_values.deinit();
 
-            std.debug.assert(try q_values.data.shape.realdims() == 1);
+            std.debug.assert(q_values.data.shape.realdims() == 1);
             std.debug.assert(q_values.get_shape().len == 2);
 
             return if (q_values.get(0) > q_values.get(1)) 0 else 1;
@@ -107,12 +104,17 @@ pub fn DQNAgent(
         }
 
         pub fn update_target_network(self: *Self, tau: T) !void {
-            try self.target_net.soft_update_from(self.policy_net, tau);
+            try self.target_net.soft_update_from(&self.policy_net, tau);
         }
 
-        pub fn train(self: *Self, allocator: std.mem.Allocator, tb_logger: tb.TensorBoardLogger, device: DeviceReference) !T {
+        pub fn train(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            tb_logger: tb.TensorBoardLogger,
+            device: DeviceReference,
+        ) !T {
             const bs = 128;
-            var batch = try self.replay_buffer.sample2(bs);
+            var batch = try self.replay_buffer.sample2(bs, allocator);
             defer batch.deinit(allocator);
 
             // Setup input tensors
@@ -131,7 +133,7 @@ pub fn DQNAgent(
             const states = try NDTensor(T).from_slice(device, states_flat, &[_]usize{ bs, 4 }, .{ .requires_grad = true });
             const actions = try NDTensor(usize).from_slice(device, batch.items(.action), &[_]usize{ bs, 1 }, .{});
             const next_states = try NDTensor(T).from_slice(device, next_states_flat, &[_]usize{ bs, 4 }, .{});
-            const rewards = try NDTensor(T).from_slice(device, batch.items(.reward), &[_]usize{bs});
+            const rewards = try NDTensor(T).from_slice(device, batch.items(.reward), &[_]usize{bs}, .{});
             const dones = try NDTensor(T).from_slice(device, batch.items(.done), &[_]usize{bs}, .{});
 
             defer {
@@ -144,7 +146,7 @@ pub fn DQNAgent(
 
             // compute all target values with gradients disabled
             zg.runtime.grad_enabled = false;
-            const all_next_q_values = try self.target_net.forward(next_states, allocator);
+            const all_next_q_values = try self.target_net.forward(next_states);
             defer all_next_q_values.deinit();
             all_next_q_values.set_label("all_next_q_values");
 
@@ -153,8 +155,7 @@ pub fn DQNAgent(
             const q_min: T = -100.0;
             all_next_q_values._clamp(q_min, q_max);
 
-            // TODO: NDTensor.max_over_dim
-            const max_next_q_values: NDTensor(T) = try all_next_q_values.maxOverDim(allocator, .{ .dim = 1, .keep_dims = false });
+            const max_next_q_values = try all_next_q_values.max_along(.{ .dim = 1, .keep_dims = false });
             defer max_next_q_values.deinit();
 
             // compute targets
@@ -186,10 +187,10 @@ pub fn DQNAgent(
 
             // clip predicted Q-values
             // NOTE: this is illegal in the incoming device api
-            for (all_q_values.data.data) |*q| q.* = std.math.clamp(q.*, q_min, q_max);
+            // for (all_q_values.data.data) |*q| q.* = std.math.clamp(q.*, q_min, q_max);
             all_q_values._clamp(q_min, q_max);
 
-            const q_values = try all_q_values.gather(actions, 1);
+            const q_values = try all_q_values.gather(actions.data, 1);
             defer q_values.deinit();
             q_values.set_label("q_values");
 
@@ -199,6 +200,7 @@ pub fn DQNAgent(
 
             // log metrics
             // TODO: update for device compat but make it opt-in
+            _ = tb_logger;
             // try tb_logger.addHistogram("training/q_values", q_values.data.data, @intCast(self.steps_done));
             // try tb_logger.addHistogram("training/target_values", targets.data.data, @intCast(self.steps_done));
             // try tb_logger.addScalar("training/loss", loss.get(&.{0}), @intCast(self.steps_done));
@@ -210,7 +212,7 @@ pub fn DQNAgent(
 
             self.steps_done += 1;
             zg.runtime.grad_enabled = false;
-            return loss.get(&.{0});
+            return loss.get(0); // TODO: item
         }
     };
 }

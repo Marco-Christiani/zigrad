@@ -47,6 +47,10 @@ mnist args="":
   @echo "Running zigrad mnist example"
   examples/mnist/zig-out/bin/main
 
+
+dqn +args="":
+  cd examples/dqn && make {{args}}
+
 benchmark +verbose="":
   @python examples/mnist/mnist_data.py
   @echo "Running pytorch mnist"

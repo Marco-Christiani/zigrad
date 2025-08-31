@@ -5,14 +5,13 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
     return struct {
         const Self = @This();
         const Sample = std.MultiArrayList(T);
-        allocator: std.mem.Allocator,
         data: [capacity]T,
         size: usize,
         idx: usize, // make sure oldest item gets replaced
 
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init() Self {
             const buf: [capacity]T = undefined;
-            return Self{ .allocator = allocator, .data = buf, .size = 0, .idx = 0 };
+            return Self{ .data = buf, .size = 0, .idx = 0 };
         }
 
         /// Add an item to the buffer
@@ -24,17 +23,17 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
         }
 
         /// Sample with replacement. COM.
-        pub fn sample(self: Self, n: usize) !Sample {
+        pub fn sample(self: Self, n: usize, allocator: std.mem.Allocator) !Sample {
             var soa = Sample{};
             for (0..n) |_| {
                 const i = std.crypto.random.uintLessThan(usize, self.size);
-                try soa.append(self.allocator, self.data[i]);
+                try soa.append(allocator, self.data[i]);
             }
             return soa;
         }
 
         /// Sample without replacement. COM.
-        pub fn sample2(self: Self, n: usize) !Sample {
+        pub fn sample2(self: Self, n: usize, allocator: std.mem.Allocator) !Sample {
             std.debug.assert(n <= capacity);
             var soa = Sample{};
             var zeros: [capacity]usize = undefined;
@@ -49,7 +48,7 @@ pub fn ReplayBuffer(T: type, capacity: usize) type {
                     if (retries >= n - n / 2) log.debug("retry:{d} idx:{d} n:{d} size:{d} capacity:{d}\n", .{ retries, idx, n, self.size, capacity });
                 }
                 taken[i] = idx;
-                try soa.append(self.allocator, self.data[idx]);
+                try soa.append(allocator, self.data[idx]);
             }
             return soa;
         }

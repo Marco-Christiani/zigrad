@@ -69,6 +69,33 @@ pub fn DQNModel(
             return self;
         }
 
+        /// Duplicate model
+        pub fn clone(self: Self) !Self {
+            var result = self;
+
+            // Cleanup logic
+            var w_i: usize = 0;
+            var b_i: usize = 0;
+            errdefer { // free everything up to last value
+                for (self.weights[0..w_i]) |w|
+                    w.deinit();
+
+                for (self.biases[0..b_i]) |b|
+                    b.deinit();
+            }
+
+            // Clone tensors
+            inline for (0..self.weights.len) |i| {
+                result.weights[i] = try self.weights[i].clone();
+                result.weights[i].detach();
+                w_i += 1;
+                result.biases[i] = try self.biases[i].clone();
+                result.biases[i].detach();
+                b_i += 1;
+            }
+            return result;
+        }
+
         pub fn deinit(self: *Self) void {
             for (&self.weights, &self.biases) |w, b| {
                 w.release();
@@ -162,17 +189,6 @@ pub fn DQNModel(
             return model;
         }
 
-        /// Copy parameters from another model
-        pub fn copy_from(self: *Self, other: *const Self) !void {
-            std.debug.assert(self.input_size == other.input_size);
-            std.debug.assert(self.output_size == other.output_size);
-
-            for (&self.weights, &self.biases, &other.weights, &other.biases) |*w_dst, *b_dst, w_src, b_src| {
-                try w_dst.*.copy_(w_src);
-                try b_dst.*.copy_(b_src);
-            }
-        }
-
         /// Soft update parameters from another model with interpolation factor tau
         /// self = tau * other + (1 - tau) * self
         pub fn soft_update_from(self: *Self, other: *const Self, tau: T) !void {
@@ -180,18 +196,24 @@ pub fn DQNModel(
             std.debug.assert(self.output_size == other.output_size);
             std.debug.assert(tau >= 0.0 and tau <= 1.0);
 
-            for (&self.weights, &self.biases, &other.weights, &other.biases) |*w_dst, *b_dst, w_src, b_src| {
+            for (&self.weights, &self.biases, &other.weights, &other.biases) |w_dst, b_dst, w_src, b_src| {
+                std.debug.assert(w_dst.device.is_compatible(w_src.device));
+                std.debug.assert(b_dst.device.is_compatible(b_src.device));
+                const device = w_src.device;
+
                 // w_dst = tau * w_src + (1 - tau) * w_dst
-                try w_dst.*.mul_scalar_(1.0 - tau);
-                const temp_w = try w_src.mul_scalar(tau);
-                defer temp_w.soft_deinit();
-                try w_dst.*._add(temp_w);
+                w_dst.data._scale(1.0 - tau, device);
+                var temp_w = try w_src.data.copy(device);
+                temp_w._scale(tau, device);
+                try w_dst.data._add(temp_w, device);
+                temp_w.deinit(device);
 
                 // b_dst = tau * b_src + (1 - tau) * b_dst
-                try b_dst.*.mul_scalar_(1.0 - tau);
-                const temp_b = try b_src.mul_scalar(tau);
-                defer temp_b.soft_deinit();
-                try b_dst.*._add(temp_b);
+                b_dst.data._scale(1.0 - tau, device);
+                var temp_b = try b_src.data.copy(device);
+                temp_b._scale(tau, device);
+                try b_dst.data._add(temp_b, device);
+                temp_b.deinit(device);
             }
         }
 
