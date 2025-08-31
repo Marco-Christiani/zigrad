@@ -31,7 +31,7 @@ deps:
         && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
     RUN pip3 install --break-system-packages numpy torch~=2.7.0  --index-url https://download.pytorch.org/whl/${COMPUTE_TARGET}
-    IF bash -c '[[ ! "$COMPUTE_TARGET" =~ rocm ]]'
+    IF bash -c '[[ "$COMPUTE_TARGET" =~ ^rocm ]]'
         RUN echo "WARNING: torch-scatter does not have rocm support" >&2
     ELSE
       RUN pip3 install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+${COMPUTE_TARGET}.html
