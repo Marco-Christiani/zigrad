@@ -15,7 +15,7 @@ pub fn init(log_dir: []const u8, allocator: std.mem.Allocator) !Self {
     defer allocator.free(full_log_dir);
 
     std.fs.makeDirAbsolute(full_log_dir) catch |err| switch (err) {
-        error.FileNotFound => std.debug.panicExtra(@errorReturnTrace(), @returnAddress(), "Path does not exist at {s}", .{log_dir}),
+        error.FileNotFound => std.debug.panicExtra(@returnAddress(), "Path does not exist at {s}", .{log_dir}),
         inline else => return err,
     };
 
