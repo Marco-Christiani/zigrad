@@ -19,6 +19,14 @@ const Shape = ndarray.Shape;
 const NDArray = ndarray.NDArray;
 const log = zg.logging.scoped(.zg_ndtensor);
 
+pub const MaxAlongOptions = struct {
+    dim: usize,
+    keep_dims: bool = false,
+    return_indices: bool = false,
+    // TODO: Add checkpoint support later
+    // checkpoint: bool = false,
+};
+
 pub fn NDTensor(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -421,29 +429,26 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        // NOTE: Check callsites and see if we can fix the comments here
-        /// Only data and grad are copied. Child references and other metadata is not retained aside from _requires_grad.
-        /// Passed allocator used for allocations, not the owned one (i.e. not `@This()` one).
+        /// Backing data and grad are copied, uses the same graph body
+        /// for AD node, requires_grad status is retained.
         ///
-        /// ---
-        /// # ADR
-        ///   - The choice to have an allocator provided is important, intended to be used for backward
-        ///   - If the tensor backing `DataType` changes its allocator ownership contract, then this needs to be changed
+        /// Other metadata is not retained and is reset to defaults,
+        /// such as attached and acquired statuses.
         pub fn clone(self: *const Self) !*Self {
             const result = try self.node.gb.create_node(Self);
             errdefer self.node.gb.destroy_node(result);
 
             var data = try self.data.copy(self.device);
             errdefer data.deinit(self.device);
-
+            const default_opts = TensorOpts{};
             result.* = Self{
                 .data = data,
                 .grad = if (self.grad) |*g| try g.copy(self.device) else null,
                 .device = self.device,
                 .node = .init(Self, self.node.gb, null, null, .{
                     .requires_grad = self.requires_grad(),
-                    .acquired = self.acquired(),
-                    .attached = self.attached(),
+                    .acquired = default_opts.acquired,
+                    .attached = default_opts.attached,
                 }),
             };
 
@@ -1266,66 +1271,65 @@ pub fn NDTensor(comptime T: type) type {
             });
         }
 
-        //pub fn max_along(self: *Self, device: DeviceReference, opts: MaxAlongOptions) !*Self {
-        //    const max_backward = struct {
-        //        // NOTE: See gather() comments, same apply here;;
-        //        fn bw_impl(_self: Self) !void {
-        //            const bw_children = _self.get_children() orelse return error.NoNode.Children;
-        //            const bw_input = bw_children[0];
-        //            if (bw_input.grad == null) return;
-        //            const raw_offsets: [*:0]usize = @ptrCast(@alignCast(_self._backward_ctx orelse return error.NoBackwardContext));
-        //            const offsets: []usize = std.mem.span(raw_offsets);
-        //            for (0.._self.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += _self.grad.?.data[i];
-        //            _self.device.allocator.free(offsets);
-        //        }
-        //    }.bw_impl;
+        /// # ADR
+        ///
+        /// NOTE: I'm considering several designs right now for the device
+        /// layer and how checkpointing should work and what that means for
+        /// lifetimes in the autograd system. Additionally, I do not think
+        /// we have use cases for differentiable max_along so I'm not going
+        /// to implement the backward for now since it will likely end up
+        /// needing a refactor.
+        pub fn max_along(self: *Self, opts: MaxAlongOptions) !*Self {
+            defer if (self.requires_grad()) {
+                @panic(
+                    \\Do you need differentiable `max_along`? If so, open an
+                    \\ issue. If not, disable grad for this op.
+                );
+            };
 
-        //    const max_result = try self.data.max_over_dim(device, .{
-        //        .dim = opts.dim,
-        //        .keep_dims = opts.keep_dims,
-        //        .return_offsets = true,
-        //    });
-        //    const ctx = if (self.requires_grad()) try device.allocator.dupeZ(usize, max_result.offsets.?) else null;
-        //    if (max_result.offsets) |offs| device.allocator.free(offs);
+            // TODO: MaxAlongBwd once I settle on device layer decisions
+            const MaxAlongBwd = struct {
+                pub fn backward(_: *Self, _: *Node.Children) !void {
+                    return error.NotImplemented;
+                }
+            };
+            // const MaxAlongBwd = struct {
+            //     indices: []usize,
+            //     dim: usize,
+            //     src_shape: Shape,
+            //     keep_dims: bool,
+            //
+            //     pub fn backward(y: *Self, children: *Node.Children, ctx: *@This()) !void {
+            //         defer if (ctx.indices.len > 0) y.device.mem_free(ctx.indices);
+            //
+            //         const input = children.get_bwd_upcast(Self, 0) orelse return;
+            //         const grad_output = y.assume_grad_data();
+            //         const grad_input = try input.ensure_grad_data(0);
+            //
+            //         // scatter to max positions
+            //         y.device.dispatch(opspec.scatter_add(T){
+            //             .src = grad_output,
+            //             .offsets = ctx.indices,
+            //             .dst = grad_input,
+            //         });
+            //
+            //         // We could be agnostic to checkpointing with a scatter reduce...
+            //     }
+            // };
 
-        //    return create_dependent(.{
-        //        .data = max_result.values,
-        //        .op = null,
-        //        .children = &.{self},
-        //        ._requires_grad = self._requires_grad,
-        //        .device = device,
-        //        ._backward = max_backward,
-        //        ._backward_ctx = if (ctx) |c| c.ptr else null,
-        //    });
-        //}
+            const max_result = try self.data.max_along(self.device, .{
+                .dim = opts.dim,
+                .keep_dims = opts.keep_dims,
+            });
 
-        //pub fn gather(self: *Self, device: DeviceReference, opts: GatherOptions) !*Self {;;
-        //    const gatherBackward = struct {;;
-        //        fn bw_impl(bw_tensor: NDTensor(T)) !void {
-        //            const bw_children = bw_tensor.get_children() orelse return error.NoNode.Children;
-        //            const bw_input = bw_children[0];
-        //            if (bw_input.grad == null) return;
-        //            const offsets: [*]usize = @ptrCast(@alignCast(bw_tensor._backward_ctx orelse return error.NoBackwardContext));
-        //            // defer _self.device.raw(offsets);
-        //            // bw_tensor must/should be the same len as indices used to index (note that offsets is a raw c ptr without a len)
-        //            // std.debug.assert(offsets.len == bw_tensor.data.data.len); // can make this a real check when its a  null term alloc
-        //            for (0..bw_tensor.data.data.len) |i| bw_input.grad.?.data[offsets[i]] += bw_tensor.grad.?.data[i];
-        //        }
-        //    }.bw_impl;
-
-        //    const gather_result = try self.data.gather(device, .{ .indices = opts.indices.data, .dim = opts.dim, .return_offsets = true });;;
-        //    const ctx = if (self.requires_grad()) try device.allocator.dupe(usize, gather_result.offsets.?) else null;;;
-
-        //    return create_dependent(.{
-        //        .data = gather_result.values,;;
-        //        .op = null,
-        //        .children = &.{self},
-        //        ._requires_grad = self._requires_grad,
-        //        .device = device,
-        //        ._backward = gatherBackward,;;
-        //        ._backward_ctx = if (ctx) |c| c.ptr else null,
-        //    });
-        //}
+            return create_dependent(MaxAlongBwd, .{
+                .data = max_result,
+                .children = &.{&self.node},
+                .device = self.device,
+                .gb = self.node.gb,
+                .callback = .{},
+            });
+        }
 
         pub fn gather(self: *Self, indices: NDArray(usize), dim: usize) !*Self {
             var gather_result = try self.data.gather(self.device, .{
