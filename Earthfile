@@ -71,6 +71,15 @@ test-matrix:
       END
     END
 
+build-examples:
+  FROM +build
+  COPY --dir examples ./
+  RUN cd examples/gcn && make build
+  COPY --dir tensorboard ./
+  RUN cd examples/dqn && make build
+  RUN cd examples/mnist && make build
+
+
 local-test:
     LOCALLY
     RUN source .venv/bin/activate
