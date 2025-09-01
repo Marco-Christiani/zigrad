@@ -68,7 +68,7 @@ test ReplayBuffer {
     };
 
     const allocator = std.testing.allocator;
-    var rb = ReplayBuffer(Transition, 4).init(allocator);
+    var rb = ReplayBuffer(Transition, 4).init();
 
     rb.add(.{
         .idx = 0,
@@ -93,17 +93,17 @@ test ReplayBuffer {
 
     try std.testing.expectEqual(3, rb.size);
 
-    var s = try rb.sample2(2);
+    var s = try rb.sample2(2, allocator);
     try std.testing.expectEqual(2, s.len);
     s.deinit(allocator);
     // larger than current size, smaller than capacity
-    s = try rb.sample(4);
+    s = try rb.sample(4, allocator);
     try std.testing.expectEqual(4, s.len);
     std.debug.print("{any} {any}\n", .{ s.items(.idx), s.items(.state) });
     s.deinit(allocator);
 
     // larger than capacity
-    s = try rb.sample(5);
+    s = try rb.sample(5, allocator);
     try std.testing.expectEqual(5, s.len);
     std.debug.print("{any} {any}\n", .{ s.items(.idx), s.items(.state) });
     s.deinit(allocator);
@@ -122,12 +122,12 @@ test ReplayBuffer {
         .reward = -0.4,
         .state = .{ 1.4, 2.4, 3.4, 4.4 },
     });
-    s = try rb.sample(3);
+    s = try rb.sample(3, allocator);
     try std.testing.expectEqual(3, s.len);
     s.deinit(allocator);
     std.debug.print("repeating\n", .{});
     const bs = 3;
-    s = try rb.sample2(bs);
+    s = try rb.sample2(bs, allocator);
     for (0..2 * bs) |_| {
         std.debug.print("{any} {any}\n", .{ s.items(.idx), s.items(.state) });
         var states_flat = try allocator.alloc(f32, bs * 4);
@@ -143,7 +143,7 @@ test ReplayBuffer {
             std.debug.print("]\n", .{});
         }
         s.deinit(allocator);
-        s = try rb.sample2(bs);
+        s = try rb.sample2(bs, allocator);
     }
     s.deinit(allocator);
 }

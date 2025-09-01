@@ -59,7 +59,7 @@ pub fn trainDQN() !void {
         .eps_decay = 1000,
     });
     defer agent.deinit();
-    try agent.policy_net.attach_optimizer(optimizer.optimizer()); // train the policy net, fuse the optimizer step with the backward pass
+    try agent.policy_net.attach_optimizer(optimizer.optimizer()); // register policy net params for training
 
     const num_episodes = 10_000;
     var total_rewards = try allocator.alloc(T, num_episodes);

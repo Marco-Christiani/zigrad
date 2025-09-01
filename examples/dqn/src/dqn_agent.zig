@@ -186,8 +186,6 @@ pub fn DQNAgent(
             all_q_values.set_label("all_q_values");
 
             // clip predicted Q-values
-            // NOTE: this is illegal in the incoming device api
-            // for (all_q_values.data.data) |*q| q.* = std.math.clamp(q.*, q_min, q_max);
             all_q_values._clamp(q_min, q_max);
 
             const q_values = try all_q_values.gather(actions.data, 1);
@@ -208,7 +206,7 @@ pub fn DQNAgent(
 
             // backward pass and optimization
             self.policy_net.zero_grad();
-            try loss.backward(); // fused step in backward
+            try loss.backward();
 
             self.steps_done += 1;
             zg.runtime.grad_enabled = false;
