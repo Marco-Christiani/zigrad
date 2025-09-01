@@ -13,8 +13,8 @@ pub const zigrad_settings: zg.Settings = .{
         .level = .debug,
         .scopes = &.{
             .{ .scope = .zg_layer_map, .level = .debug },
-            //.{ .scope = .zg_caching_allocator, .level = .err },
-            //.{ .scope = .zg_block_pool, .level = .debug },
+            .{ .scope = .zg_caching_allocator, .level = .debug },
+            .{ .scope = .zg_block_pool, .level = .debug },
         },
     },
 };
@@ -28,9 +28,7 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer zg.global_graph_deinit();
 
-    var cpu = zg.device.HostDevice.init_advanced(.{
-        .max_cache_size = zg.constants.@"1Gb" * 2,
-    });
+    var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
 
     const device = cpu.reference();
