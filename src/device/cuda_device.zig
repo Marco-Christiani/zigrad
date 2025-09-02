@@ -320,7 +320,7 @@ pub fn nrm2(self: *const Self, T: type, p: opspec.nrm2(T)) void {
 }
 
 pub fn clip_nrm2(self: *Self, T: type, p: opspec.clip_nrm2(T)) void {
-    const scratch = self.mem_scratch(T, 1) catch unreachable;
+    const scratch = self.mem_scratch(T, 1);
     cuda.clip_nrm2(dtype(T), self.context.cublas, p.x.ptr, scratch.ptr, p.x.len, p.max_norm, p.delta);
 }
 

@@ -12,9 +12,9 @@ pub const zigrad_settings: zg.Settings = .{
     .logging = .{
         .level = .debug,
         .scopes = &.{
-            .{ .scope = .zg_layer_map, .level = .debug },
-            .{ .scope = .zg_caching_allocator, .level = .debug },
-            .{ .scope = .zg_block_pool, .level = .debug },
+            .{ .scope = .zg_layer_map, .level = .info },
+            .{ .scope = .zg_caching_allocator, .level = .info },
+            .{ .scope = .zg_block_pool, .level = .info },
         },
     },
 };
@@ -30,8 +30,13 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
 
     var cpu = zg.device.HostDevice.init();
     defer cpu.deinit();
-
     const device = cpu.reference();
+
+    // std.debug.print("initializing device...", .{});
+    // var gpu = zg.device.CudaDevice.init(0);
+    // defer gpu.deinit();
+    // std.debug.print("Done\n", .{});
+    // const device = gpu.reference();
 
     var sgd = zg.optim.SGD.init(std.heap.smp_allocator, .{
         .lr = 0.01,

@@ -1,13 +1,14 @@
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+# FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
 # FROM nvidia/cuda:12.2.2-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 ENV PATH="/root/.zig/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
-ENV LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH}"
-ENV CPATH="/opt/intel/mkl/include:/usr/local/cuda/include:${CPATH}"
-ENV CUDA_HOME="/usr/local/cuda"
+#ENV LD_LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+#ENV LIBRARY_PATH="/opt/intel/mkl/lib/intel64:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH}"
+#ENV CPATH="/opt/intel/mkl/include:/usr/local/cuda/include:${CPATH}"
+#ENV CUDA_HOME="/usr/local/cuda"
 # ENV DEBIAN_FRONTEND=noninteractive \
 #     TZ=Etc/UTC \
 #     PATH="/root/.zig/bin:${PATH}" \
@@ -49,11 +50,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Zig
-RUN wget -q https://ziglang.org/download/0.14.1/zig-x86-linux-0.14.1.tar.xz && \
-    tar -xf zig-x86-linux-0.14.1.tar.xz && \
-    mv zig-x86-linux-0.14.1 /root/.zig && \
+RUN wget -q https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz && \
+    tar -xf zig-x86_64-linux-0.14.1.tar.xz && \
+    mv zig-x86_64-linux-0.14.1 /root/.zig && \
     ln -s /root/.zig/zig /usr/local/bin/zig && \
-    rm zig-x86-linux-0.14.1.tar.xz
+    rm zig-x86_64-linux-0.14.1.tar.xz
 
 # MKL (oneapi)
 # https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html?packages=dl-essentials&dl-essentials-os=linux&dl-lin=apt
@@ -88,13 +89,26 @@ RUN wget -qO- "https://github.com/Kitware/CMake/releases/download/v3.27.6/cmake-
 
 # RUN echo 'options nvidia "NVreg_RestrictProfiling=0"' >> /etc/modprobe.d/nvidia.conf
 
+RUN mkdir /app
 WORKDIR /app
 
-COPY . .
+#COPY . .
 
 COPY <<EOF /root/.bash_aliases
-alias build="zig build -Denable_mkl=true -Denable_cuda=true -Dtarget=x86_64-linux-gnu"
+alias build="zig build -Denable_mkl=true -Denable_cuda=true"
 alias run="LD_PRELOAD=/app/src/cuda/build/libamalgamate.so /app/zig-out/bin/main"
 EOF
 
 CMD ["/bin/bash"]
+
+# RUN apt-get update && apt-get install -y \
+#   build-essential \
+#   pkg-config \
+#   libc6-dev \
+#   libc6-dev-i386 \
+#   gcc-multilib
+
+COPY build.zig build.zig.zon .
+COPY src src
+COPY scripts /app/scripts
+COPY examples/mnist /app/examples/mnist
