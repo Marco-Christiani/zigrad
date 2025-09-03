@@ -393,6 +393,9 @@ extern "C" len_t mem_page_size(unsigned device_id) {
   return page_size;
 }
 
+static inline size_t round_up(size_t x, size_t a) {
+  return (x + a - 1) & ~(a - 1);
+}
 
 extern "C" void* mem_map(unsigned device_id, size_t virtual_buffer_size) {
   CUdeviceptr base_address = 0;  
@@ -404,7 +407,11 @@ extern "C" void* mem_map(unsigned device_id, size_t virtual_buffer_size) {
       CUcontext ctx;
       CURESULT_ASSERT(cuDevicePrimaryCtxRetain(&ctx, static_cast<int>(device_id)));
       CURESULT_ASSERT(cuCtxSetCurrent(ctx));
-      CURESULT_ASSERT(cuMemAddressReserve(dptr_ref, virtual_buffer_size, mem_page_size(device_id), 0, 0));
+      // CURESULT_ASSERT(cuMemAddressReserve(dptr_ref, virtual_buffer_size, mem_page_size(device_id), 0, 0));
+      const size_t page = static_cast<size_t>(mem_page_size(device_id));
+      const size_t size = round_up(virtual_buffer_size ? virtual_buffer_size : page, page);
+      const size_t align = page;
+      CURESULT_ASSERT(cuMemAddressReserve(dptr_ref, size, align, /*addr=*/0, /*flags=*/0));
  }, &base_address);
 
   ctx_thread.join();
