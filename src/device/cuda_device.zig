@@ -283,20 +283,32 @@ pub fn matmul(self: *const Self, T: type, p: opspec.matmul(T)) void {
 
 pub fn bmm_acc(self: *Self, T: type, p: opspec.bmm_acc(T)) void {
     std.debug.assert(p.A_shape.len == 3 and p.B_shape.len == 3);
-    const A_modes: []const u8 = if (p.trans_a) "ikj" else "ijk";
-    const B_modes: []const u8 = if (p.trans_b) "imk" else "ikm";
-    const C_modes: []const u8 = "ijm";
+
     const _alpha = p.alpha;
     const _beta = p.beta;
-
     const id = dtype(T);
+
+    // The shapes we receive should be logical shapes for the contraction
+    // A_shape = [batch, M, K] where M, K account for trans_a
+    // B_shape = [batch, K, N] where K, N account for trans_b
+    // C_shape = [batch, M, N]
+
+    // for cutensor
+    // We want: A[i,j,k] * B[i,k,m] -> C[i,j,m]
+    // The shapes we received should already be in this logical form
+
+    const A_modes: []const u8 = "ijk"; // A[batch, M, K]
+    const B_modes: []const u8 = "ikm"; // B[batch, K, N]
+    const C_modes: []const u8 = "ijm"; // C[batch, M, N]
+
+    std.debug.assert(p.A_shape[2] == p.B_shape[1]); // K dimensions must match
 
     // zig fmt: off
     const w = cuda.get_contraction_plan(
         self.context.cutensor, id,
-        p.A_shape.ptr, A_modes.ptr, p.A_shape.len,
-        p.B_shape.ptr, B_modes.ptr, p.B_shape.len,
-        p.C_shape.ptr, C_modes.ptr, p.C_shape.len,
+        p.A_shape.ptr, @ptrCast(A_modes), p.A_shape.len,
+        p.B_shape.ptr, @ptrCast(B_modes), p.B_shape.len,
+        p.C_shape.ptr, @ptrCast(C_modes), p.C_shape.len,
     );
     // zig fmt: on
 
