@@ -28,15 +28,15 @@ pub fn run_mnist(train_path: []const u8, test_path: []const u8) !void {
     });
     defer zg.global_graph_deinit();
 
-    // var cpu = zg.device.HostDevice.init();
-    // defer cpu.deinit();
-    // const device = cpu.reference();
+    var cpu = zg.device.HostDevice.init();
+    defer cpu.deinit();
+    const device = cpu.reference();
 
-    std.debug.print("initializing device...", .{});
-    var gpu = zg.device.CudaDevice.init(0);
-    defer gpu.deinit();
-    std.debug.print("Done\n", .{});
-    const device = gpu.reference();
+    // std.debug.print("initializing device...", .{});
+    // var gpu = zg.device.CudaDevice.init(0);
+    // defer gpu.deinit();
+    // std.debug.print("Done\n", .{});
+    // const device = gpu.reference();
 
     var sgd = zg.optim.SGD.init(std.heap.smp_allocator, .{
         .lr = 0.01,
