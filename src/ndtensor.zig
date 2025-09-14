@@ -188,6 +188,10 @@ pub fn NDTensor(comptime T: type) type {
             return self.data.shape.get(i);
         }
 
+        pub fn get_ndim(self: *const Self) usize {
+            return self.get_shape().len;
+        }
+
         pub fn cast(self: *Self, K: type) !*NDTensor(K) {
             _ = self;
             @compileError("Not implemented");

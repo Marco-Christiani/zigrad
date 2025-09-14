@@ -312,6 +312,13 @@ pub const segment_sum_csr = math.segment_sum_csr;
 pub const scatter_gcn_deg_scaled = math.scatter_gcn_deg_scaled;
 pub const scatter_gcn_deg_scaled_bwd = math.scatter_gcn_deg_scaled_bwd;
 
+pub const clamp_fwd = math.clamp_fwd;
+pub const clamp_bwd = math.clamp_bwd;
+pub const clamp_mask_fwd = math.clamp_mask_fwd;
+pub const clamp_mask_bwd = math.clamp_mask_bwd;
+
+pub const accumulate_scaled_delta = math.accumulate_scaled_delta;
+
 ////////////////////////////////////////
 const nn = @import("host_device/nn.zig");
 
@@ -327,11 +334,14 @@ pub const sigm_fwd = nn.sigm_fwd;
 pub const sigm_bwd = nn.sigm_bwd;
 pub const sigm_inplace_bwd = nn.sigm_inplace_bwd;
 
-pub const smax_fwd = nn.smax_fwd;
-pub const smax_bwd = nn.smax_bwd;
+pub const softmax_fwd = nn.softmax_fwd;
+pub const softmax_bwd = nn.softmax_bwd;
 
 pub const mse_fwd = nn.mse_fwd;
 pub const mse_bwd = nn.mse_bwd;
+
+pub const nll_fwd = nn.nll_fwd;
+pub const nll_bwd = nn.nll_bwd;
 
 ////////////////////////////////////////
 const reduce = @import("host_device/reduce.zig");

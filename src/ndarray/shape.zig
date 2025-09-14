@@ -177,16 +177,22 @@ pub fn simd(self: Shape) SimdType {
 }
 
 pub fn set(self: *Shape, i: u64, value: u64) void {
+    std.debug.assert(i < self.len);
     self.buffer[i] = value;
 }
 
-pub fn get(self: Shape, i: u64) u64 {
+pub fn get(self: *const Shape, i: u64) u64 {
+    std.debug.assert(i < self.len);
     return self.buffer[i];
 }
 
-pub fn last(self: Shape) u64 {
+pub fn last(self: *const Shape) u64 {
+    return self.get(self.last_index());
+}
+
+pub fn last_index(self: *const Shape) u64 {
     std.debug.assert(self.len > 1);
-    return self.buffer[self.len - 1];
+    return self.len - 1;
 }
 
 pub fn remove(self: *Shape, i: u64) void {

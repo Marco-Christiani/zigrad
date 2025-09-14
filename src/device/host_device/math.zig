@@ -145,6 +145,10 @@ pub fn sqrt_bwd(_: *const HostDevice, T: type, p: opspec.sqrt_bwd(T)) void {
     }
 }
 
+pub fn accumulate_scaled_delta(_: *const HostDevice, T: type, p: opspec.accumulate_scaled_delta(T)) void {
+    for (p.x, p.y, p.z) |x, y, *z| z.* += p.coef * (x - y);
+}
+
 /// L2 Inverse Sqrt
 fn vrsqrt(T: type, a: []const T, inca: usize, r: []T, incr: usize, n: usize, eps: f32) void {
     if (inca == 1 and incr == 1) {

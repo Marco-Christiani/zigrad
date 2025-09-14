@@ -1,7 +1,5 @@
 //! Functional Neural Network Ops
-
 const std = @import("std");
-
 const zg = @import("../zigrad.zig");
 const opspec = zg.opspec;
 const DeviceReference = zg.DeviceReference;
@@ -67,7 +65,8 @@ pub fn nn(comptime T: type) type {
                 }
             };
 
-            const output = try Tensor.DataType.empty(x.get_shape(), x.device);
+            var output = try Tensor.DataType.empty(x.get_shape(), x.device);
+            errdefer output.deinit(x.device);
 
             x.device.dispatch(opspec.relu_fwd(T){
                 .x = x.get_data(),
@@ -128,14 +127,15 @@ pub fn nn(comptime T: type) type {
                 }
             };
 
-            const output = try Tensor.DataType.empty(x.get_shape(), x.device);
+            var output = try Tensor.DataType.empty(x.get_shape(), x.device);
+            errdefer output.deinit(x.device);
 
             x.device.dispatch(opspec.tanh_fwd(T){
                 .x = x.get_data(),
                 .y = output.get_data(),
             });
 
-            return try Tensor.create_dependent(TanhBwd, .{
+            return Tensor.create_dependent(TanhBwd, .{
                 .data = output,
                 .children = &.{&x.node},
                 .device = x.device,
@@ -189,14 +189,15 @@ pub fn nn(comptime T: type) type {
                 }
             };
 
-            const output = try Tensor.DataType.empty(x.get_shape(), x.device);
+            var output = try Tensor.DataType.empty(x.get_shape(), x.device);
+            errdefer output.deinit(x.device);
 
             x.device.dispatch(opspec.sigm_fwd(T){
                 .x = x.get_data(),
                 .y = output.get_data(),
             });
 
-            return try Tensor.create_dependent(SigmoidBwd, .{
+            return Tensor.create_dependent(SigmoidBwd, .{
                 .data = output,
                 .children = &.{&x.node},
                 .device = x.device,
@@ -232,11 +233,75 @@ pub fn nn(comptime T: type) type {
             });
         }
 
+        pub fn softmax(x: *Tensor, dim: usize) !*Tensor(T) {
+            const SmaxBwd = struct {
+                dim: usize,
+                pub fn backward(y: *Tensor, children: *Node.Children, ctx: *@This()) !void {
+                    const input = children.get_bwd_upcast(Tensor, 0) orelse return;
+                    x.device.dispatch(opspec.softmax_bwd(T){
+                        .x_g = try input.ensure_grad_data(0),
+                        .x_shape = input.get_shape(),
+                        .dim = ctx.dim,
+                        .y = y.get_data(),
+                        .y_g = y.assume_grad_data(),
+                    });
+                }
+            };
+
+            var y_data = try Tensor.DataType.empty(x.get_shape(), x.device);
+            errdefer y_data.deinit();
+
+            x.device.dispatch(opspec.softmax_fwd(T){
+                .x = x.get_data(),
+                .x_shape = x.get_shape(),
+                .dim = dim,
+                .y = y_data.get_data(),
+            });
+
+            return Tensor.create_dependent(SmaxBwd, .{
+                .data = y_data,
+                .children = &.{&x.node},
+                .label = "softmax",
+                .device = x.device,
+                .gb = x.node.gb,
+                .callback = .{ .dim = dim },
+            });
+        }
+
+        pub fn softmax_(x: *Tensor, dim: usize) !void {
+            const SmaxBwd = struct {
+                dim: usize,
+                version: u8,
+                pub fn backward(y: *Tensor, _: *Node.Children, ctx: *@This()) !void {
+                    std.debug.assert(ctx.version == y.node.version);
+                    x.device.dispatch(opspec.softmax_bwd(T){
+                        .x_g = try y.ensure_grad_data(0),
+                        .x_shape = y.get_shape(),
+                        .dim = ctx.dim,
+                        .y = y.get_data(),
+                        .y_g = y.assume_grad_data(),
+                    });
+                }
+            };
+
+            const y_data = try Tensor.DataType.empty(x.get_shape(), x.device);
+            errdefer y_data.deinit();
+
+            x.device.dispatch(opspec.smax_fwd(T){
+                .x = x.get_data(),
+                .x_shape = x.get_shape(),
+                .dim = dim,
+                .y = y_data.get_data(),
+            });
+
+            try Tensor.prepend_dependent(SmaxBwd, x, .{
+                .callback = .{ .dim = dim, .version = x.node.version +% 1 },
+                .children = &.{},
+            });
+        }
+
         /// Mean Squared Error $\text{loss} = (\hat{y}- y)^2 / n$
-        pub fn mse(
-            pred: *Tensor,
-            target: *Tensor,
-        ) !*Tensor {
+        pub fn mse(pred: *Tensor, target: *Tensor) !*Tensor {
             std.debug.assert(std.mem.eql(usize, pred.get_shape(), target.get_shape()));
 
             const MseBwd = struct {
@@ -256,7 +321,8 @@ pub fn nn(comptime T: type) type {
                 }
             };
 
-            const output = try Tensor.DataType.empty(&.{1}, pred.device);
+            var output = try Tensor.DataType.empty(&.{1}, pred.device);
+            errdefer output.deinit(pred.device);
 
             pred.device.dispatch(opspec.mse_fwd(T){
                 .pred = pred.get_data(),
@@ -265,7 +331,7 @@ pub fn nn(comptime T: type) type {
                 .n = pred.get_size(),
             });
 
-            return try Tensor.create_dependent(MseBwd, .{
+            return Tensor.create_dependent(MseBwd, .{
                 .data = output,
                 .children = &.{ &pred.node, &target.node },
                 .device = pred.device,
