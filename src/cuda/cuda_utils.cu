@@ -1,3 +1,4 @@
+#include <cmath>
 #include <stdio.h>
 #include "cuda_utils.h"
 #include "cuda_helpers.cu"
@@ -211,6 +212,20 @@ struct NormalRandom {
     }
 };
 
+
+template <typename T>
+struct KaimingRandom {
+    unsigned seed;
+    T std_dev;
+    __host__ __device__
+    T operator()(unsigned n) const {
+        thrust::default_random_engine rng(this->seed);
+        thrust::normal_distribution<T> dist(T(0), T(1));
+        rng.discard(n);
+        return dist(rng) * this->std_dev;
+    }
+};
+
 struct GraphBackend {
   cudaGraph_t graph = nullptr;
   cudaGraphExec_t instance = nullptr;
@@ -247,16 +262,34 @@ void __mem_random(void* x, len_t n, randtype op, unsigned seed, StreamWrapper st
   const auto _stream = __cast_stream(stream);
   thrust::counting_iterator<unsigned> idxs(0);
   if (op == UNIFORM) {
-    thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs+ n, static_cast<T*>(x), UniformRandom<T>{ .seed = seed });
+    thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs + n, static_cast<T*>(x), UniformRandom<T>{ .seed = seed });
   } else {
-    thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs+ n, static_cast<T*>(x), NormalRandom<T>{ .seed = seed });
+    thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs + n, static_cast<T*>(x), NormalRandom<T>{ .seed = seed });
   }
+}
+
+
+template <typename T>
+void __mem_random_kaiming(void* x, len_t n, len_t dim, unsigned seed, StreamWrapper stream) {
+  const auto _stream = __cast_stream(stream);
+  thrust::counting_iterator<unsigned> idxs(0);
+  thrust::transform(thrust::cuda::par.on(_stream), idxs, idxs + n, static_cast<T*>(x), KaimingRandom<T>{ .seed = seed, .std_dev = static_cast<T>(dim) / T(2) });
+
+  
 }
 
 extern "C" void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, StreamWrapper stream) {
   switch (id) {
     case SINGLE: return __mem_random<f32>(x, n, op, seed, stream);
     case DOUBLE: return __mem_random<f64>(x, n, op, seed, stream);
+    default: SYSTEM_EXIT("Unsupported data type");
+  }
+}
+
+extern "C" void mem_random_kaiming(dtype id, void* x, len_t n, len_t dim, unsigned seed, StreamWrapper stream) {
+  switch (id) {
+    case SINGLE: return __mem_random_kaiming<f32>(x, n, dim, seed, stream);
+    case DOUBLE: return __mem_random_kaiming<f64>(x, n, dim, seed, stream);
     default: SYSTEM_EXIT("Unsupported data type");
   }
 }
@@ -430,7 +463,9 @@ extern "C" void mem_unmap(unsigned device_id, void* base_address, size_t virtual
       CURESULT_ASSERT(cuDevicePrimaryCtxRetain(&ctx, static_cast<int>(device_id)));
       CURESULT_ASSERT(cuCtxSetCurrent(ctx));
       CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(base_address);
-      CURESULT_ASSERT(cuMemAddressFree(dptr, virtual_buffer_size));
+      const size_t page = static_cast<size_t>(mem_page_size(device_id));
+      const size_t size = round_up(virtual_buffer_size ? virtual_buffer_size : page, page);
+      CURESULT_ASSERT(cuMemAddressFree(dptr, size));
   });
 
   ctx_thread.join();
