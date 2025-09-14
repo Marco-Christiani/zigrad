@@ -475,6 +475,65 @@ pub fn relu_mask_bwd(T: type) type {
     };
 }
 
+pub fn softmax_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "softmax_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_shape: []const usize,
+        dim: usize,
+        y: []T,
+    };
+}
+
+pub fn softmax_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "softmax_bwd";
+        pub const __type__ = T;
+        x_g: []T,
+        x_shape: []const usize,
+        dim: usize,
+        y: []const T,
+        y_g: []const T,
+    };
+}
+
+// Common fusion for loss backwards:
+//
+// z[i] += coef * (x[i] - y[i])
+pub fn accumulate_scaled_delta(T: type) type {
+    return struct {
+        pub const __name__ = "accumulate_scaled_delta";
+        pub const __type__ = T;
+        x: []const T,
+        y: []const T,
+        coef: T,
+        z: []T,
+    };
+}
+
+pub fn nll_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "nll_fwd";
+        pub const __type__ = T;
+        y_pred: []const T,
+        y: []const T,
+        batch_size: usize,
+        loss: []T,
+    };
+}
+
+pub fn nll_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "nll_bwd";
+        pub const __type__ = T;
+        y_pred: []const T,
+        y_pred_g: []const T,
+        batch_size: usize,
+        y: []const T,
+    };
+}
+
 pub fn unbroadcast(T: type) type {
     return struct {
         pub const __name__ = "unbroadcast";

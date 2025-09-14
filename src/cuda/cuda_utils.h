@@ -11,6 +11,7 @@ EXTERN_C void memcpy_DtoD(void* hptr, void const* dptr, len_t N, StreamWrapper);
 EXTERN_C void mem_fill(dtype id, void* data, len_t n, const void* value, StreamWrapper);
 EXTERN_C void mem_sequence(dtype id, void* data, len_t n, const void* init, const void* step, StreamWrapper);
 EXTERN_C void mem_random(dtype id, void* x, len_t n, randtype op, unsigned seed, StreamWrapper);
+EXTERN_C void mem_random_kaiming(dtype id, void* x, len_t n, len_t dim, unsigned seed, StreamWrapper);
 EXTERN_C void mem_free(void* dptr, StreamWrapper);
 EXTERN_C void mem_take(dtype id, const void* src, len_t src_len, const len_t* idxs, len_t idxs_len, void* dst, StreamWrapper);
 EXTERN_C len_t mem_page_size(unsigned device_id);

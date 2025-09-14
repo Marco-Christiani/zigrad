@@ -193,14 +193,6 @@ pub fn smaxtype(op: SmaxType) cuda.dtype {
     };
 }
 
-pub fn randtype(op: RandType) cuda.dtype {
-    return switch (op) {
-        .uniform => cuda.UNIFORM,
-        .normal => cuda.NORMAL,
-        .kaiming => @panic("Unimplemented"),
-    };
-}
-
 ///////////////////
 // element wise ops
 
@@ -534,7 +526,11 @@ pub fn mem_copy(self: Self, T: type, src: []const T, dst: []T) void {
 
 pub fn mem_random(self: Self, T: type, slice: []T, op: RandType, rand: std.Random) void {
     // at some point, I should put in u64 support for the device random.
-    cuda.mem_random(dtype(T), slice.ptr, slice.len, randtype(op), rand.int(u32), self.context.stream);
+    return switch (op) {
+        .uniform => cuda.mem_random(dtype(T), slice.ptr, slice.len, cuda.UNIFORM, rand.int(u32), self.context.stream),
+        .normal => cuda.mem_random(dtype(T), slice.ptr, slice.len, cuda.NORMAL, rand.int(u32), self.context.stream),
+        .kaiming => |dim| cuda.mem_random_kaiming(dtype(T), slice.ptr, slice.len, dim, rand.int(u32), self.context.stream),
+    };
 }
 
 pub fn mem_sequence(self: Self, T: type, slice: []T, initial: T, step: T) void {

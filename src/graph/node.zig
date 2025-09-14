@@ -303,9 +303,10 @@ pub const BackwardContext = struct {
         const callback = struct {
             pub fn wrapper(_self: *BackwardContext, x: *Node) anyerror!void {
                 switch (comptime arity(BwdClosureDeep.backward)) {
+                    1 => try BwdClosureDeep.backward(x.upcast(NodeParentType)),
                     2 => try BwdClosureDeep.backward(x.upcast(NodeParentType), &_self.children),
                     3 => try BwdClosureDeep.backward(x.upcast(NodeParentType), &_self.children, _self.cast(BwdClosureDeep)),
-                    else => @compileError("backward callback must have artiy within [2,3]"),
+                    else => @compileError("backward callback must have artiy within [1,3]"),
                 }
             }
         }.wrapper;
