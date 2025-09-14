@@ -475,6 +475,31 @@ pub fn relu_mask_bwd(T: type) type {
     };
 }
 
+pub fn smax_fwd(T: type) type {
+    return struct {
+        pub const __name__ = "smax_fwd";
+        pub const __type__ = T;
+        x: []const T,
+        x_shape: []const usize,
+        x_strides: []const usize,
+        dim: usize,
+        y: []T,
+    };
+}
+
+pub fn smax_bwd(T: type) type {
+    return struct {
+        pub const __name__ = "smax_bwd";
+        pub const __type__ = T;
+        x_g: []T,
+        x_shape: []const usize,
+        x_strides: []const usize,
+        dim: usize,
+        y: []const T,
+        y_g: []const T,
+    };
+}
+
 pub fn unbroadcast(T: type) type {
     return struct {
         pub const __name__ = "unbroadcast";
