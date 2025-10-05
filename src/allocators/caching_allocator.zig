@@ -15,7 +15,7 @@ const allocator = std.heap.smp_allocator;
 pub fn CachingAllocator(DataHandler: type) type {
     return struct {
         const Self = @This();
-        const BlockPool = @import("block_pool.zig").BockPool;
+        const BlockPool = @import("block_pool.zig").BlockPool;
 
         const pool_threshold = zg.constants.@"1MiB";
 

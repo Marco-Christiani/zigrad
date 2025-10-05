@@ -100,10 +100,11 @@ const FreeList = struct {
 /// requested for the incoming allocation.
 pub const Error = error{ Overflow, Fragmented, ExceedsMax } || std.mem.Allocator.Error;
 
-pub fn BockPool(DataHandler: type, comptime config: struct {
+pub fn BlockPool(DataHandler: type, comptime config: struct {
     min_order: usize,
     max_order: usize,
 }) type {
+    std.debug.assert(config.min_order > 0);
     std.debug.assert(config.min_order < config.max_order);
     return struct {
         pub const MIN_ORDER = config.min_order; // minium block that can be split is 512
@@ -190,12 +191,10 @@ pub fn BockPool(DataHandler: type, comptime config: struct {
             size: usize,
         ) Error!DeviceData(T) {
             const byte_size = size * @sizeOf(T);
-            const upper_order = size_to_upper_order(byte_size);
-            const split_size = order_to_size(upper_order);
-
-            // TODO: This current design doesn't account for holes,
-            // but we'd have to get a lot more fancy to deal with that.
+            const min_size = comptime order_to_size(MIN_ORDER);
             const max_size = comptime order_to_size(MAX_ORDER);
+            const split_size = (std.math.divCeil(usize, byte_size, min_size) catch unreachable) * min_size;
+            const upper_order = size_to_upper_order(split_size);
 
             if (self.mem_rem < byte_size) {
                 @branchHint(.unlikely);
