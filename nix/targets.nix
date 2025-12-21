@@ -1,4 +1,5 @@
 # nix/targets.nix
+# TODO: in the future we need hermetic zig builds
 { pkgs, cudaPackages, gccHost, nixglhost, src, cudaArchitectures }:
 let
   cudaArchStr = pkgs.lib.concatStringsSep ";" cudaArchitectures;
@@ -11,10 +12,10 @@ in
 {
   # group targets explicitly, can extend this
   targets = {
-    main = rec {
+    example-cuda = rec {
       # hermetic build target: no host driver needed
       build = pkgs.stdenvNoCC.mkDerivation {
-        pname = "main";
+        pname = "example-cuda";
         version = "0.1";
         inherit src;
 
@@ -42,19 +43,23 @@ in
         installPhase = ''
           mkdir -p $out/bin
           # keep output names stable for tooling
-          cp build/programs/main $out/bin/main
+          cp build/programs/example-cuda $out/bin/example-cuda
         '';
       };
 
+      # NOTE: we might want to be more clear and expose the raw executable target and the wrapped target separately for clarity.
+      #   Since this is unused now, nbd, but in the future that may be preferrable to reduce hidden behavior and improve debuggability.
+      #   Also, not sure which is more appropriate for creating a distributable artifact.
+      #
       # run target: explicitly impure (host driver stack) via nixglhost wrapper
-      run = pkgs.writeShellScriptBin "main" ''
+      run = pkgs.writeShellScriptBin "example-cuda" ''
         if [ "''${NIX_ENFORCE_NO_NATIVE:-0}" = "1" ]; then
           printf "${colors.yellow}WARNING:${colors.reset} NIX_ENFORCE_NO_NATIVE=1 (no native CPU tuning).\n"
         fi
 
         # if i understand correctly, we should prefer wrapping the binary rather than global LD_LIBRARY_PATH injection.
         # nix-gl-host docs call -p a footgun, wrapping is recommended.
-        exec ${nixglhost}/bin/nixglhost ${build}/bin/main "$@"
+        exec ${nixglhost}/bin/nixglhost ${build}/bin/example-cuda "$@"
       '';
     };
 

@@ -18,6 +18,11 @@
 
       cudaCfg = import ./nix/cuda.nix;
 
+      colors = {
+        yellow = "\\033[33m";
+        reset = "\\033[0m";
+      };
+
       mkFor = system:
         let
           pkgs = import nixpkgs {
@@ -38,10 +43,10 @@
           # note to self: keep builds from accidentally capturing ./build, downloaded junk, etc.
           src = pkgs.lib.cleanSource self;
 
-          t = import ./nix/targets.nix {
+          targets = (import ./nix/targets.nix {
             inherit pkgs cudaPackages gccHost nixglhost src;
             cudaArchitectures = cudaCfg.cudaArchitectures;
-          };
+          }).targets;
 
           cudaArchStr = pkgs.lib.concatStringsSep ";" cudaCfg.cudaArchitectures;
         in
@@ -61,6 +66,7 @@
                 cudaPackages.cudatoolkit
                 cudaPackages.cuda_cudart
                 gccHost
+                stdenv.cc.cc.lib  # provides libstdc++.so.6 for PJRT plugin
 
                 # provides nixglhost binary
                 nixglhost
@@ -77,6 +83,15 @@
               shellHook = ''
                 export CUDA_HOME=${cudaPackages.cudatoolkit}
                 export CUDA_ARCHS="''${CUDA_ARCHS:-${cudaArchStr}}"
+                export PJRT_CPU_PLUGIN_PATH=lib/pjrt_c_api_cpu_plugin.so
+
+                if [[ ! -f $PJRT_CPU_PLUGIN_PATH ]]; then
+                  # TODO: pulling the .so and possibly the pjrt header should be done in either nix or build.zig.zon
+                  printf "${colors.yellow}WARNING:${colors.reset} PJRT_CPU_PLUGIN_PATH=$PJRT_CPU_PLUGIN_PATH does not exist. Leaving the env variable set but might need to pull this.${colors.reset}.\n"
+                fi
+
+                # Add libstdc++ to LD_LIBRARY_PATH for PJRT plugin
+                export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:''${LD_LIBRARY_PATH:-}"
 
                 echo "CUDA_HOME=$CUDA_HOME"
                 echo "CUDA_ARCHS=$CUDA_ARCHS"
@@ -100,26 +115,34 @@
           # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
           packages = {
             # expose group explicitly for future extension
-            main = t.targets.main.build;
-            main-run = t.targets.main.run;
+            example-cuda = targets.example-cuda.build;
+            example-cuda-run = targets.example-cuda.run;
 
-            gen-clangd = t.targets.editor.clangd;
-            gen-nvim = t.targets.editor.nvim;
+            gen-clangd = targets.editor.clangd;
+            gen-nvim = targets.editor.nvim;
+            # TODO: hermetic zig build/run targets
+            # m1 = targets.m1.build;
+            # m1 = targets.m1.run;
           };
 
           apps = {
-            main = {
+            example-cuda-target = {
               type = "app";
-              program = "${t.targets.main.run}/bin/main";
+              program = "${targets.example-cuda.run}/bin/example-cuda";
             };
+
+            m1 = {
+              # TODO: hermetic zig build/run targets
+            };
+
             gen-clangd = {
               type = "app";
-              program = "${t.targets.editor.clangd}/bin/gen-clangd";
+              program = "${targets.editor.clangd}/bin/gen-clangd";
             };
 
             gen-nvim = {
               type = "app";
-              program = "${t.targets.editor.nvim}/bin/gen-nvim";
+              program = "${targets.editor.nvim}/bin/gen-nvim";
             };
           };
         };

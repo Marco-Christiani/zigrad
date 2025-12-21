@@ -1,23 +1,47 @@
-//! By convention, root.zig is the root source file when making a library.
+/// Zigrad PJRT/XLA Backend Prototype
+///
+/// This is an orphan branch prototype evaluating PJRT/XLA as a potential backend.
 const std = @import("std");
 
-pub fn bufferedPrint() !void {
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
+// Core backend abstraction
+pub const backend = @import("backend/backend.zig");
+pub const pjrt_backend = @import("backend/pjrt.zig");
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+// PJRT bindings
+pub const pjrt = struct {
+    pub const api = @import("pjrt/api.zig");
+    pub const plugin = @import("pjrt/plugin.zig");
+    pub const types = @import("pjrt/types.zig");
+};
 
-    try stdout.flush(); // Don't forget to flush!
-}
+// Runtime utilities
+pub const runtime = struct {
+    pub const buffer = @import("runtime/buffer.zig");
+    pub const DType = buffer.DType;
+    pub const Shape = buffer.Shape;
+    pub const HostBuffer = buffer.HostBuffer;
+};
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+// MLIR/StableHLO
+pub const mlir = struct {
+    pub const program = @import("mlir/program.zig");
+    pub const Program = program.Program;
+};
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+// Re-export commonly used types
+pub const Backend = backend.Backend;
+pub const Device = backend.Device;
+pub const Executable = backend.Executable;
+pub const Buffer = backend.Buffer;
+pub const Event = backend.Event;
+pub const CompileOptions = backend.CompileOptions;
+
+pub const DType = runtime.DType;
+pub const Shape = runtime.Shape;
+pub const HostBuffer = runtime.HostBuffer;
+
+pub const Program = mlir.Program;
+
+test "all tests" {
+    std.testing.refAllDecls(@This());
 }
