@@ -75,6 +75,34 @@ pub fn build(b: *std.Build) void {
     const run_m2_step = b.step("run-m2", "Run the M2 test executable");
     run_m2_step.dependOn(&run_m2_cmd.step);
 
+    // M2 fusion proof executable
+    const exe_m2_fusion = b.addExecutable(.{
+        .name = "zigrad-pjrt-m2-fusion",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/m2_fusion.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigrad", .module = zigrad_mod },
+            },
+        }),
+    });
+
+    exe_m2_fusion.linkLibC();
+    exe_m2_fusion.root_module.addIncludePath(b.path("src"));
+
+    b.installArtifact(exe_m2_fusion);
+
+    const run_m2_fusion_cmd = b.addRunArtifact(exe_m2_fusion);
+    run_m2_fusion_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_m2_fusion_cmd.addArgs(args);
+    }
+
+    const run_m2_fusion_step = b.step("run-m2-fusion", "Run the M2 fusion proof executable");
+    run_m2_fusion_step.dependOn(&run_m2_fusion_cmd.step);
+
     // Unit tests
     const lib_tests = b.addTest(.{
         .root_module = zigrad_mod,

@@ -29,3 +29,4 @@ data
 !docs/architecture.norg
 !docs/roadmap.norg
 !docs/*.png
+artifacts/
