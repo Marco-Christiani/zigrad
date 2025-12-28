@@ -15,14 +15,30 @@ pub const Client = struct {
 
     pub fn create(api: *Api) !Client {
         var args = api_mod.initArgs(c.PJRT_Client_Create_Args);
-        args.create_options = null;
+        // args.create_options = null;
+        // args.num_options = 0;
+        // args.kv_get_callback = null;
+        // args.kv_get_user_arg = null;
+        // args.kv_put_callback = null;
+        // args.kv_put_user_arg = null;
+        // args.kv_try_get_callback = null;
+        // args.kv_try_get_user_arg = null;
+        // args.client = null;
+        //
+        // try api.call("PJRT_Client_Create", &args);
+
+        const empty_opts: [0]c.PJRT_NamedValue = .{};
+        args.create_options = @ptrCast(&empty_opts);
         args.num_options = 0;
+
+        // callbacks/user args: null
         args.kv_get_callback = null;
         args.kv_get_user_arg = null;
         args.kv_put_callback = null;
         args.kv_put_user_arg = null;
         args.kv_try_get_callback = null;
         args.kv_try_get_user_arg = null;
+
         args.client = null;
 
         try api.call("PJRT_Client_Create", &args);

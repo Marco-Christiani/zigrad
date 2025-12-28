@@ -1,7 +1,7 @@
 /// PJRT C-API Bindings
 ///
 /// Low-level wrapper around PJRT C-API with:
-/// - Reflection-based call dispatch (inspired by ZML pattern)
+/// - Reflection-based call dispatch
 /// - Struct-size-safe initialization
 /// - Error handling and conversion
 ///
@@ -32,7 +32,7 @@ pub const Api = struct {
         };
     }
 
-    /// Reflection-based call wrapper (ZML pattern)
+    /// Reflection-based call wrapper
     ///
     /// Usage:
     ///   try api.call("PJRT_Client_Create", .{ .client = &client_ptr });
@@ -75,6 +75,9 @@ pub fn initArgs(comptime Args: type) Args {
 
     if (@hasField(Args, "struct_size")) {
         a.struct_size = @sizeOf(Args);
+    }
+    if (@hasField(Args, "extension_start")) {
+        @field(a, "extension_start") = null;
     }
     if (@hasField(Args, "priv")) {
         a.priv = null;
@@ -141,16 +144,58 @@ pub const PjrtError = struct {
         const code = self.getCode() catch return error.UnknownPjrtError;
         self.deinit();
 
-        // Map PJRT error codes to Zig errors
-        // For now, use generic errors—refine with actual PJRT error codes
         return switch (code) {
-            0 => {}, // Success (shouldn't happen)
-            1 => error.InvalidArgument,
-            2 => error.NotFound,
-            3 => error.AlreadyExists,
-            4 => error.ResourceExhausted,
-            5 => error.Unimplemented,
-            6 => error.Internal,
+            // PJRT_Error_Code_OK = 0
+            0 => {},
+
+            // PJRT_Error_Code_CANCELLED = 1
+            1 => error.Cancelled,
+
+            // PJRT_Error_Code_UNKNOWN = 2
+            2 => error.UnknownPjrtError,
+
+            // PJRT_Error_Code_INVALID_ARGUMENT = 3
+            3 => error.InvalidArgument,
+
+            // PJRT_Error_Code_DEADLINE_EXCEEDED = 4
+            4 => error.DeadlineExceeded,
+
+            // PJRT_Error_Code_NOT_FOUND = 5
+            5 => error.NotFound,
+
+            // PJRT_Error_Code_ALREADY_EXISTS = 6
+            6 => error.AlreadyExists,
+
+            // PJRT_Error_Code_PERMISSION_DENIED = 7
+            7 => error.PermissionDenied,
+
+            // PJRT_Error_Code_RESOURCE_EXHAUSTED = 8
+            8 => error.ResourceExhausted,
+
+            // PJRT_Error_Code_FAILED_PRECONDITION = 9
+            9 => error.FailedPrecondition,
+
+            // PJRT_Error_Code_ABORTED = 10
+            10 => error.Aborted,
+
+            // PJRT_Error_Code_OUT_OF_RANGE = 11
+            11 => error.OutOfRange,
+
+            // PJRT_Error_Code_UNIMPLEMENTED = 12
+            12 => error.Unimplemented,
+
+            // PJRT_Error_Code_INTERNAL = 13
+            13 => error.Internal,
+
+            // PJRT_Error_Code_UNAVAILABLE = 14
+            14 => error.Unavailable,
+
+            // PJRT_Error_Code_DATA_LOSS = 15
+            15 => error.DataLoss,
+
+            // PJRT_Error_Code_UNAUTHENTICATED = 16
+            16 => error.Unauthenticated,
+
             else => error.UnknownPjrtError,
         };
     }
