@@ -1,12 +1,12 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # nix-gl-host.url = "github:numtide/nix-gl-host";
+    nix-gl-host.url = "github:numtide/nix-gl-host";
     # this fork isnt exactly as correct but i hope its faster bc the mainline one is really slow like 20-30s startup
     #   i should fork and fix one of them or write my own idk but if this works and is faster then im happy.
     #   that being said, this seems like it may be bringing in gigs of deps (ironically, given the stated motivations)
     #   although i would need to actually check this to be confident in that idea.
-    nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
+    # nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
   };
 
   outputs = { self, nixpkgs, nix-gl-host }:
@@ -49,6 +49,11 @@
           }).targets;
 
           cudaArchStr = pkgs.lib.concatStringsSep ";" cudaCfg.cudaArchitectures;
+
+          pjrtCudaWheels = import ./nix/pjrt-cuda-wheels.nix;
+          pjrtCudaBundle = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
+            wheelSources = pjrtCudaWheels;
+          };
         in
         {
           # primary deliverable are devshells. their intended purpose is really just fast iteration and pinned
@@ -66,7 +71,7 @@
                 cudaPackages.cudatoolkit
                 cudaPackages.cuda_cudart
                 gccHost
-                stdenv.cc.cc.lib  # provides libstdc++.so.6 for PJRT plugin
+                stdenv.cc.cc.lib # provides libstdc++.so.6 for PJRT plugin
 
                 # provides nixglhost binary
                 nixglhost
@@ -123,6 +128,8 @@
             # TODO: hermetic zig build/run targets
             # m1 = targets.m1.build;
             # m1 = targets.m1.run;
+
+            pjrt-cuda-bundle = pjrtCudaBundle;
           };
 
           apps = {
@@ -131,9 +138,9 @@
               program = "${targets.example-cuda.run}/bin/example-cuda";
             };
 
-            m1 = {
-              # TODO: hermetic zig build/run targets
-            };
+            # m1 = {
+            #   # TODO: hermetic zig build/run targets
+            # };
 
             gen-clangd = {
               type = "app";
