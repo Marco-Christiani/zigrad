@@ -91,6 +91,30 @@ fn preloadRuntimeDeps() void {
         "libnvidia-ml.so.1",
     });
 
+    const venv_site = ".venv/lib/python3.14/site-packages";
+    preloadGlobal(&[_][]const u8{
+        // cuDNN from the JAX/NVIDIA wheel
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn.so",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn.so.9",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn.so.8",
+        "libcudnn.so",
+    });
+
+    preloadGlobal(&[_][]const u8{
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn_graph.so.9",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn_ops.so.9",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn_cnn.so.9",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn_adv.so.9",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn_engines_precompiled.so.9",
+        venv_site ++ "/nvidia/cudnn/lib/libcudnn_engines_runtime_compiled.so.9",
+    });
+
+    preloadGlobal(&[_][]const u8{
+        "/lib/x86_64-linux-gnu/libz.so.1",
+        "/usr/lib/x86_64-linux-gnu/libz.so.1",
+        "libz.so.1",
+    });
+
     probeCudaDriver();
 }
 
@@ -138,16 +162,21 @@ fn loadFromHandle(handle: *anyopaque) !Api {
 
     var api = try Api.init(handle, get_api_fn);
 
-    if (c.dlsym(handle, "PJRT_Plugin_Initialize")) |init_sym| {
-        const init_fn: *const fn (*c.PJRT_Plugin_Initialize_Args) callconv(.c) ?*c.PJRT_Error =
-            @ptrCast(@alignCast(init_sym));
+    // if (c.dlsym(handle, "PJRT_Plugin_Initialize")) |init_sym| {
+    //     const init_fn: *const fn (*c.PJRT_Plugin_Initialize_Args) callconv(.c) ?*c.PJRT_Error =
+    //         @ptrCast(@alignCast(init_sym));
+    //
+    //     var init_args = api_mod.initArgs(c.PJRT_Plugin_Initialize_Args);
+    //     if (init_fn(&init_args)) |pjrt_err| {
+    //         const pjrt_error = api_mod.PjrtError.fromHandle(&api, pjrt_err);
+    //         defer pjrt_error.deinit();
+    //         return error.PluginInitFailed;
+    //     }
+    // }
 
+    if (@field(api.pjrt_api, "PJRT_Plugin_Initialize")) |_| {
         var init_args = api_mod.initArgs(c.PJRT_Plugin_Initialize_Args);
-        if (init_fn(&init_args)) |pjrt_err| {
-            const pjrt_error = api_mod.PjrtError.fromHandle(&api, pjrt_err);
-            defer pjrt_error.deinit();
-            return error.PluginInitFailed;
-        }
+        try api.call("PJRT_Plugin_Initialize", &init_args);
     }
 
     const ver = api.version();
