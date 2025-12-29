@@ -4,7 +4,7 @@
 }:
 
 let
-  inherit (pkgs) fetchurl unzip;
+  inherit (pkgs) fetchurl unzip patchelf;
 
   # Flatten the attrset into a list of fetched wheel derivations
   wheels =
@@ -27,7 +27,7 @@ pkgs.stdenvNoCC.mkDerivation {
 
   dontUnpack = true;
 
-  nativeBuildInputs = [ unzip ];
+  nativeBuildInputs = [ unzip patchelf ];
 
   installPhase = ''
     mkdir -p $out/runtime
@@ -55,20 +55,68 @@ pkgs.stdenvNoCC.mkDerivation {
     # if [ -d tmp/nvidia ]; then
     #   cp -r tmp/nvidia $out/runtime/
     # fi
-    # Being a bit more precise, although this hardcodes, not sure if I like 
-    #  the explicitness more than the risk of missing things in the general/future case.
     mkdir -p $out/runtime/nvidia
     for pkg in cu13 cudnn cublas nccl nvshmem cuda_nvrtc nvjitlink; do
-      if [ -d "tmp/nvidia/$pkg/lib" ]; then
-        mkdir -p "$out/runtime/nvidia/$pkg/lib"
-        cp -P tmp/nvidia/$pkg/lib/*.so* "$out/runtime/nvidia/$pkg/lib/"
+      if [ "$withHeaders" != "1" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
+        # prune headers
+        rm -r tmp/nvidia/$pkg/include
+      fi
+      if [ -d "tmp/nvidia/$pkg" ]; then
+        cp -r -P "tmp/nvidia/$pkg" "$out/runtime/nvidia/"
       fi
     done
-    # optionally pull in the headers if requested
-    if [ "$withHeaders" = "1" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
-      mkdir -p "$out/runtime/nvidia/$pkg/include"
-      cp -r tmp/nvidia/$pkg/include/* "$out/runtime/nvidia/$pkg/include/"
-    fi
+
+    # cpp deps
+    mkdir -p $out/runtime/sys/lib
+
+   # cpp runtime
+    cp ${pkgs.stdenv.cc.cc.lib}/lib/libstdc++.so.6 $out/runtime/sys/lib/
+    cp ${pkgs.stdenv.cc.cc.lib}/lib/libgcc_s.so.1  $out/runtime/sys/lib/
+
+    # zlib (wanted by cudnn)
+    cp ${pkgs.zlib}/lib/libz.so.1 $out/runtime/sys/lib/
+
+    # patch DSOs so they look in our bundle
+    sys_rpath='$ORIGIN/../../sys/lib'
+
+    patch_append_rpath() {
+      local so="$1"
+      local add="$2"
+      local old
+      old="$(patchelf --print-rpath "$so" 2>/dev/null || true)"
+      [ -n "$old" ] || old=""
+      case ":$old:" in
+        *":$add:"*) return 0 ;;
+      esac
+      if [ -n "$old" ]; then
+        patchelf --set-rpath "$old:$add" "$so"
+      else
+        patchelf --set-rpath "$add" "$so"
+      fi
+    }
+
+    # Plugin: jax_plugins/xla_cuda13 -> runtime/sys/lib is ../../sys/lib
+    plugin="$out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so"
+    patch_append_rpath "$plugin" '$ORIGIN/../../sys/lib'
+
+    # NVIDIA DSOs: nvidia/<pkg>/lib -> runtime/sys/lib is ../../../sys/lib
+    for so in $out/runtime/nvidia/*/lib/*.so*; do
+      [ -f "$so" ] || continue
+      patch_append_rpath "$so" '$ORIGIN/../../../sys/lib'
+    done
+
+    # cudnn version handling (still need this? TODO: ablation test)
+    cudnn_dir="$out/runtime/nvidia/cudnn/lib"
+    cd "$cudnn_dir"
+
+    # Required for XLA: dlopen("libcudnn.so")
+    ln -sfn libcudnn.so.9 libcudnn.so
+
+    # might need toprovide unversioned names for component libs too
+    # for f in libcudnn_*.so.9; do
+    #   base="''${f%.9}"
+    #   ln -sfn "$f" "$base"
+    # done
 
     # Cleanup 
     rm -rf tmp

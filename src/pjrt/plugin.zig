@@ -19,105 +19,6 @@ fn dlErrMsg() []const u8 {
     return std.mem.span(p);
 }
 
-/// Preload one of the candidate libraries into the global namespace.
-/// This avoids relying on LD_LIBRARY_PATH and avoids Nix/glibc search-path weirdness.
-fn preloadGlobal(candidates: []const []const u8) void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    for (candidates) |cand| {
-        const cand_z = std.fmt.bufPrintZ(&buf, "{s}", .{cand}) catch continue;
-
-        _ = c.dlerror(); // clear
-        const h: DlHandle = c.dlopen(cand_z, c.RTLD_NOW | c.RTLD_GLOBAL);
-        if (h != null) {
-            std.debug.print("preloaded: {s}\n", .{cand});
-            return;
-        }
-    }
-
-    // If all failed, print last dlerror for debugging (but do not hard-fail here).
-    std.debug.print("preload failed (last): {s}\n", .{dlErrMsg()});
-}
-
-fn probeCudaDriver() void {
-    const CUresult = c_uint;
-    // Resolve symbols from the global namespace (libcuda preloaded RTLD_GLOBAL).
-    const cuInit_sym = c.dlsym(null, "cuInit") orelse {
-        std.debug.print("probe: dlsym(cuInit) failed: {s}\n", .{dlErrMsg()});
-        return;
-    };
-    const cuDeviceGetCount_sym = c.dlsym(null, "cuDeviceGetCount") orelse {
-        std.debug.print("probe: dlsym(cuDeviceGetCount) failed: {s}\n", .{dlErrMsg()});
-        return;
-    };
-
-    const cuInit: *const fn (c_uint) callconv(.c) CUresult = @ptrCast(@alignCast(cuInit_sym));
-    const cuDeviceGetCount: *const fn (*c_int) callconv(.c) CUresult = @ptrCast(@alignCast(cuDeviceGetCount_sym));
-
-    const r0 = cuInit(0);
-    std.debug.print("probe: cuInit -> {d}\n", .{r0});
-
-    var n: c_int = -1;
-    const r1 = cuDeviceGetCount(&n);
-    std.debug.print("probe: cuDeviceGetCount -> {d}, n={d}\n", .{ r1, n });
-}
-
-fn preloadRuntimeDeps() void {
-    // C++ runtime (needed by jaxlib / XLA pieces)
-    preloadGlobal(&[_][]const u8{
-        "/lib/x86_64-linux-gnu/libstdc++.so.6",
-        "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
-        "libstdc++.so.6",
-    });
-
-    // Often required by libstdc++
-    preloadGlobal(&[_][]const u8{
-        "/lib/x86_64-linux-gnu/libgcc_s.so.1",
-        "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
-        "libgcc_s.so.1",
-    });
-
-    // NVIDIA driver (must come from host driver inside container)
-    preloadGlobal(&[_][]const u8{
-        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
-        "/usr/lib64/libcuda.so.1",
-        "/usr/local/nvidia/lib64/libcuda.so.1",
-        "libcuda.so.1",
-    });
-
-    preloadGlobal(&[_][]const u8{
-        "/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
-        "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
-        "libnvidia-ml.so.1",
-    });
-
-    const venv_site = ".venv/lib/python3.14/site-packages";
-    preloadGlobal(&[_][]const u8{
-        // cuDNN from the JAX/NVIDIA wheel
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn.so",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn.so.9",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn.so.8",
-        "libcudnn.so",
-    });
-
-    preloadGlobal(&[_][]const u8{
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn_graph.so.9",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn_ops.so.9",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn_cnn.so.9",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn_adv.so.9",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn_engines_precompiled.so.9",
-        venv_site ++ "/nvidia/cudnn/lib/libcudnn_engines_runtime_compiled.so.9",
-    });
-
-    preloadGlobal(&[_][]const u8{
-        "/lib/x86_64-linux-gnu/libz.so.1",
-        "/usr/lib/x86_64-linux-gnu/libz.so.1",
-        "libz.so.1",
-    });
-
-    probeCudaDriver();
-}
-
 /// Load PJRT plugin from explicit path
 ///
 /// Steps:
@@ -127,9 +28,8 @@ fn preloadRuntimeDeps() void {
 /// 4. Optionally call PJRT_Plugin_Initialize
 ///
 pub fn loadPlugin(path: []const u8) !Api {
-    preloadRuntimeDeps();
-
-    // Null-terminate path for C
+    // preloadDriver();
+    probeCudnn("/nix/store/iq2pg0wz4r26ybbhsmnkkashhlzv4k6c-pjrt-cuda-bundle-0.8.3.dev20251228-cuda13/runtime");
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
 
@@ -148,6 +48,64 @@ pub fn loadPlugin(path: []const u8) !Api {
 
     return try loadFromHandle(handle);
 }
+
+fn preloadDriver() void {
+    const flags = c.RTLD_NOW | c.RTLD_GLOBAL;
+
+    const libs = [_][]const u8{
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        // "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+        "/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+    };
+
+    for (libs) |p| {
+        const handle = c.dlopen(p.ptr, flags);
+        if (handle == null) {
+            std.debug.print("dlopen failed for {s}\n", .{p});
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------
+
+fn probeDlopen(label: []const u8, path: [:0]const u8, flags: c_int) ?*anyopaque {
+    _ = c.dlerror(); // clear
+    const h = c.dlopen(path.ptr, flags);
+    if (h == null) {
+        std.debug.print("probe dlopen FAIL {s}: {s} -> {s}\n", .{ label, path, dlErrMsg() });
+        return null;
+    }
+    std.debug.print("probe dlopen OK   {s}: {s}\n", .{ label, path });
+    return h;
+}
+
+fn probeCudnn(runtime_root: []const u8) void {
+    const flags = c.RTLD_NOW | c.RTLD_LOCAL;
+
+    // 1) try host driver libs (absolute path only, no search paths)
+    _ = probeDlopen("libcuda", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
+    _ = probeDlopen("libcuda", "/lib/x86_64-linux-gnu/libcuda.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
+    _ = probeDlopen("nvml", "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
+    _ = probeDlopen("nvml", "/lib/x86_64-linux-gnu/libnvidia-ml.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
+
+    // 2) try dlopen by name (this is what XLA effectively does)
+    _ = probeDlopen("cudnn(name)", "libcudnn.so", flags);
+
+    // 3) try dlopen by absolute path into bundle (should always work if deps are present)
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = std.fmt.bufPrintZ(&buf, "{s}/nvidia/cudnn/lib/libcudnn.so", .{runtime_root}) catch return;
+    const h = probeDlopen("cudnn(abs)", abs, flags) orelse return;
+
+    // 4) symbol check
+    _ = c.dlerror();
+    const sym = c.dlsym(h, "cudnnGetProperty");
+    if (sym == null) {
+        std.debug.print("probe dlsym FAIL cudnnGetProperty -> {s}\n", .{dlErrMsg()});
+    } else {
+        std.debug.print("probe dlsym OK   cudnnGetProperty\n", .{});
+    }
+}
+// ----------------------------------------------------------------------------------------------------
 
 fn loadFromHandle(handle: *anyopaque) !Api {
     errdefer _ = c.dlclose(handle);

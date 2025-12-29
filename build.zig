@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Optional path to an already-built runtime bundle root directory.
+    // E.g., zig build -Druntime=/nix/store/...-pjrt-cuda-bundle/runtime
+    const runtime_root_opt = b.option([]const u8, "runtime", "Path to PJRT runtime bundle root");
+
     // Library module
     const zigrad_mod = b.addModule("zigrad", .{
         .root_source_file = b.path("src/root.zig"),
@@ -82,15 +86,16 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/m2_fusion.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
             .imports = &.{
                 .{ .name = "zigrad", .module = zigrad_mod },
             },
         }),
     });
 
-    exe_m2_fusion.linkLibC();
     exe_m2_fusion.root_module.addIncludePath(b.path("src"));
-
+    addRuntimeBundle(b, exe_m2_fusion, runtime_root_opt);
     b.installArtifact(exe_m2_fusion);
 
     const run_m2_fusion_cmd = b.addRunArtifact(exe_m2_fusion);
@@ -100,7 +105,7 @@ pub fn build(b: *std.Build) void {
         run_m2_fusion_cmd.addArgs(args);
     }
 
-    const run_m2_fusion_step = b.step("run-m2-fusion", "Run the M2 fusion proof executable");
+    const run_m2_fusion_step = b.step("run-m2-fusion", "Run the M2 fusion executable");
     run_m2_fusion_step.dependOn(&run_m2_fusion_cmd.step);
 
     // Unit tests
@@ -112,4 +117,50 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_tests.step);
+}
+
+fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root_opt: ?[]const u8) void {
+    const rpaths = [_][]const u8{
+        // assume layout is $prefix/bin/zigrad and $prefix/runtime/...
+        "$ORIGIN",
+        "$ORIGIN/../runtime",
+        "$ORIGIN/../runtime/jax_plugins/xla_cuda13",
+        "$ORIGIN/../runtime/nvidia/cudnn/lib",
+        "$ORIGIN/../runtime/nvidia/cu13/lib",
+        "$ORIGIN/../runtime/nvidia/cublas/lib",
+        "$ORIGIN/../runtime/nvidia/nccl/lib",
+        "$ORIGIN/../runtime/nvidia/nvshmem/lib",
+        "$ORIGIN/../runtime/nvidia/cuda_nvrtc/lib",
+        "$ORIGIN/../runtime/sys/lib",
+        // need to be careful about doing this due to re-entry and glibc conflicts this can create (same is true for LD_PRELOAD)
+        // "/lib/x86_64-linux-gnu",
+        // "/usr/lib/x86_64-linux-gnu",
+        // // if we get here, I didnt plan for that, sorry
+        // "/lib64",
+        // "/usr/lib64",
+        // "/lib",
+        // "/usr/lib",
+    };
+    inline for (rpaths) |p| exe.root_module.addRPathSpecial(p);
+    // Dev convenience (to avoid copying gb every build): symlink zig-out/runtime -> runtime_root (if provided)
+    if (runtime_root_opt) |runtime_root| {
+        const link_step = b.addSystemCommand(&[_][]const u8{
+            "bash",
+            "-lc",
+            // make sure prefix exists then update symlink
+            // ee create sibling runtime at that same install prefix as everything else (zig-out/ by default)
+            std.fmt.allocPrint(b.allocator,
+                \\set -euo pipefail
+                \\prefix="{s}"
+                \\mkdir -p "$prefix"
+                \\ln -sfn "{s}" "$prefix/runtime"
+            , .{ b.install_prefix, runtime_root }) catch @panic("OOM"),
+        });
+
+        // run after install so prefix exists
+        // const install_step = b.getInstallStep();
+
+        // link_step.step.dependOn(install_step);
+        exe.step.dependOn(&link_step.step);
+    }
 }
