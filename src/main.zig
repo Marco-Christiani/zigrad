@@ -1,7 +1,7 @@
 /// M1 Milestone Test: Basic PJRT Execution
 ///
 /// Demonstrates:
-/// 1. Loading CPU PJRT plugin
+/// 1. Loading PJRT plugin
 /// 2. Compiling a simple StableHLO program (add op)
 /// 3. Creating input buffers
 /// 4. Executing the program
@@ -32,15 +32,13 @@ pub fn main() !void {
     try stdout.print("=== Zigrad PJRT/XLA Backend Prototype - M1 Test ===\n", .{});
 
     // Step 1: Get plugin path
-    const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_CPU_PLUGIN_PATH") catch |err| {
-        try stdout.print("Error: PJRT_CPU_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
-        try stdout.print("Please set PJRT_CPU_PLUGIN_PATH to the path of your PJRT CPU plugin.\n", .{});
-        try stdout.print("Example: export PJRT_CPU_PLUGIN_PATH=/path/to/pjrt_cpu_plugin.so\n", .{});
+    const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |err| {
+        try stdout.print("Error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
         return err;
     };
     defer allocator.free(plugin_path);
 
-    try stdout.print("1. Loading PJRT CPU plugin from: {s}\n", .{plugin_path});
+    try stdout.print("1. Loading PJRT plugin from: {s}\n", .{plugin_path});
 
     // Step 2: Initialize backend
     var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {

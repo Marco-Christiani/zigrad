@@ -29,16 +29,15 @@ pub fn main() !void {
     try stdout.print("=== Zigrad PJRT/XLA Backend Prototype - M2 Test ===\n", .{});
 
     // Step 1: Get plugin path from environment
-    const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_CPU_PLUGIN_PATH") catch |err| {
-        try stdout.print("Error: PJRT_CPU_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
-        try stdout.print("Please set PJRT_CPU_PLUGIN_PATH to the path of your PJRT CPU plugin.\n", .{});
-        try stdout.print("Example: export PJRT_CPU_PLUGIN_PATH=/path/to/pjrt_cpu_plugin.so\n", .{});
+    const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |err| {
+        try stdout.print("Error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
+        try stdout.print("Please set PJRT_PLUGIN_PATH to the path of your PJRT plugin.\n", .{});
         return err;
     };
     defer allocator.free(plugin_path);
 
     // Step 2: Initialize backend
-    try stdout.print("1. Loading PJRT CPU plugin from: {s}\n", .{plugin_path});
+    try stdout.print("1. Loading PJRT plugin from: {s}\n", .{plugin_path});
     var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
         try stdout.print("   ✗ Failed to initialize backend: {s}\n", .{@errorName(err)});
         return err;

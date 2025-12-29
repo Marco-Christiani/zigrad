@@ -6,9 +6,7 @@
 /// - (If enabled) XLA HLO dumping and summarize any evidence of fusion we find
 ///
 /// Env vars:
-/// - Plugin path:
-///   - `PJRT_PLUGIN_PATH` (preferred, works for CPU/GPU)
-///   - `PJRT_CPU_PLUGIN_PATH` (legacy fallback, not sure what to do ab this rn)
+/// - Plugin path: `PJRT_PLUGIN_PATH`
 /// - (If enabled) Dumping:
 ///   - `ZIGRAD_XLA_DUMP=1` to auto-configure `XLA_FLAGS` for HLO text dumps
 ///   - `ZIGRAD_XLA_DUMP_TO=<path>` to override dump directory (default: artifacts/xla_dumps/<ts>-<pid>)
@@ -174,12 +172,10 @@ fn getPluginPath(allocator: std.mem.Allocator, out: anytype) ![]const u8 {
         return p;
     } else |_| {}
 
-    if (std.process.getEnvVarOwned(allocator, "PJRT_CPU_PLUGIN_PATH")) |p| {
+    if (std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH")) |p| {
         return p;
     } else |err| {
-        try out.print("Error: PJRT_PLUGIN_PATH / PJRT_CPU_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
-        try out.print("Example (CPU): export PJRT_CPU_PLUGIN_PATH=lib/pjrt_c_api_cpu_plugin.so\n", .{});
-        try out.print("Example (generic): export PJRT_PLUGIN_PATH=/path/to/pjrt_plugin.so\n", .{});
+        try out.print("Error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
         return err;
     }
 }
