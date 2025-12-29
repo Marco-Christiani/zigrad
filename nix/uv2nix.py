@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import re
-from dataclasses import dataclass
-from pathlib import Path
 import logging
-import tomllib
+import re
 import sys
-
-VERBOSE = sys.stdin.isatty()
+import tomllib
+from dataclasses import dataclass
+from enum import StrEnum, auto
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +20,45 @@ class Wheel:
     sha256: str
 
 
+class Arch(StrEnum):
+    x86_64 = auto()
+    aarch64 = auto()
+    none = auto()
+
+    @classmethod
+    def parse(cls, s: str) -> Arch:
+        """Extract cpu arch from platform specifier (or a wheel name or similar).
+
+        plat: proper platform specifier or something close,
+            e.g. manylinux_2_27_x86_64 or manylinux_2_27_aarch64 or foo_aarch64.whl
+
+        Some other things that exist that I havnt thought about (ofc the version numbers can vary):
+          macosx_11_0_arm64
+          win_amd64
+          win_arm64
+          macosx_10_13_universal2
+          musllinux_1_2_aarch64
+          musllinux_1_2_x86_64
+        """
+        s = s.lower()
+        if "x86_64" in s or "amd64" in s:
+            return cls.x86_64
+        if "aarch64" in s or "arm64" in s:
+            return cls.aarch64
+        logger.warning(
+            "Didnt recognize arch in string '%s', returning `Arch.none` good luck (could cause a failure downstream, prob fix me).",
+            s,
+        )
+        return cls.none
+
+
+def _is_linux_wheel(base: str) -> bool:
+    base_l = base.lower()
+    if "win_" in base_l or "macosx" in base_l:
+        return False
+    return ("manylinux" in base_l) or ("musllinux" in base_l)
+
+
 def _wheel_matches(url: str, *, py_tag: str, plat: str) -> bool:
     # Match wheel filename tags in the URL. We only need a robust-enough heuristic.
     # Example:
@@ -30,39 +68,69 @@ def _wheel_matches(url: str, *, py_tag: str, plat: str) -> bool:
     if not base.endswith(".whl"):
         return False
 
-    # Require platform tag
-    if plat not in base:
+    # Determine target arch from the requested platform specifier
+    try:
+        target_arch = Arch.parse(plat)
+    except ValueError:
+        # plat should always encode arch for our use
+        raise
+
+    if not _is_linux_wheel(base):
         return False
 
-    # Require python tag for "cp..." wheels, allow py3-none wheels regardless of py_tag.
+    # Wheel arch must match target arch
+    try:
+        wheel_arch = Arch.parse(base)
+    except ValueError:
+        return False
+    if wheel_arch != target_arch:
+        return False
+
+    # Pure wheels: accept any linux wheel for correct arch
     if "-py3-none-" in base:
         return True
 
+    # abi-bound extension wheels (cp*), require exact python tag
     return f"-{py_tag}-" in base
 
 
 def collect_wheels(
     uv_lock: Path,
     *,
-    wanted_pkgs: set[str],
+    roots: set[str],
     py_tag: str,
     plat: str,
 ) -> list[Wheel]:
     data = tomllib.loads(uv_lock.read_text(encoding="utf-8"))
-    out: list[Wheel] = []
+    pkgs = {p["name"]: p for p in data["package"]}
 
-    for pkg in data.get("package", []):
-        name = str(pkg.get("name", ""))
-        if name == "jax-cuda13-plugin":
-            od = pkg["optional-dependencies"]
-            odn = {e["name"] for e in od["with-cuda"]}
-            logger.debug(f"{set(wanted_pkgs) - odn} {odn - set(wanted_pkgs)}")
-        if name not in wanted_pkgs and not name.startswith("nvidia-"):
-            logger.debug("skipping pkg.name: %s", name)
+    seen = set()
+    queue = list(roots)
+
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+
+        pkg = pkgs.get(name)
+        if not pkg:
             continue
 
-        version = str(pkg.get("version", ""))
+        for dep in pkg.get("dependencies", []):
+            logger.debug(f"{pkg['name']}->{dep['name']}")
+            queue.append(dep["name"])
 
+        for deps in pkg.get("optional-dependencies", {}).values():
+            for dep in deps:
+                if dep["name"] in pkgs:
+                    queue.append(dep["name"])
+    for i, e in enumerate(seen):
+        logger.debug(f"seen {i}: {e}")
+    wheels: list[Wheel] = []
+    for name in seen:
+        pkg = pkgs[name]
+        version = str(pkg.get("version", ""))
         for w in pkg.get("wheels", []):
             url = str(w["url"])
             h = str(w["hash"])
@@ -71,13 +139,14 @@ def collect_wheels(
             if m is None:
                 raise ValueError(f"Unexpected hash format: {h} for {name}")
             sha256_hex = m.group(1).lower()
+            if _wheel_matches(w["url"], py_tag=py_tag, plat=plat):
+                wheels.append(
+                    Wheel(pkg=name, version=version, url=url, sha256=sha256_hex)
+                )
 
-            if _wheel_matches(url, py_tag=py_tag, plat=plat):
-                out.append(Wheel(pkg=name, version=version, url=url, sha256=sha256_hex))
-
-    # Stable ordering
-    out.sort(key=lambda x: (x.pkg, x.version, x.url))
-    return out
+    # stable ordering
+    wheels.sort(key=lambda x: (x.pkg, x.version, x.url))
+    return wheels
 
 
 def to_nix_fetchurls(wheels: list[Wheel]) -> str:
@@ -121,41 +190,28 @@ def main() -> None:
         "--pkgs",
         nargs="+",
         default=[
-            # dont think we need these
-            # "jax",
-            # "jaxlib",
             "jax-cuda13-pjrt",
             "jax-cuda13-plugin",
-            # TODO: The proper approach is to follow the delcared dependencies...
-            #   Anyways, you can find this list under jax-cuda13-plugin package.optional-dependencies.with-cuda
-            "nvidia-cublas",
-            "nvidia-cuda-cupti",
-            "nvidia-cuda-nvrtc",
-            "nvidia-cuda-nvcc",
-            "nvidia-cuda-runtime",
-            "nvidia-cudnn-cu13",
-            "nvidia-cufft",
-            "nvidia-cusolver",
-            "nvidia-cusparse",
-            "nvidia-nccl-cu13",
-            "nvidia-nvjitlink",
-            "nvidia-nvshmem-cu13",
         ],
     )
+    ap.add_argument("--verbose", "-v", action="store_true", help="verbose")
     args = ap.parse_args()
+    logger.setLevel(logging.DEBUG if args.verbose else logging.WARNING)
 
     wheels = collect_wheels(
         args.uv_lock,
-        wanted_pkgs=set(args.pkgs),
+        roots=set(args.pkgs),
         py_tag=str(args.py_tag),
         plat=str(args.plat),
     )
+    for w in wheels:
+        logger.debug(w.pkg)
     print(to_nix_fetchurls(wheels), end="")
 
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.DEBUG if VERBOSE else logging.INFO,
+        level=logging.WARNING,
         format="%(asctime)sZ [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
         handlers=[logging.StreamHandler(sys.stderr)],
