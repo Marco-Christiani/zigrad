@@ -54,6 +54,11 @@
           pjrtCudaBundle = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
             wheelSources = pjrtCudaWheels;
           };
+          pjrtCudaBundleDevel =
+            pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
+              wheelSources = pjrtCudaWheels;
+              withHeaders = true;
+            };
         in
         {
           # primary deliverable are devshells. their intended purpose is really just fast iteration and pinned
@@ -130,6 +135,9 @@
             # m1 = targets.m1.run;
 
             pjrt-cuda-bundle = pjrtCudaBundle;
+
+            # devel option includes headers in the bundle
+            pjrt-cuda-bundle-devel = pjrtCudaBundleDevel;
           };
 
           apps = {
