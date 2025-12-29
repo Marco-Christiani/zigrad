@@ -4,8 +4,13 @@ import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
-
+import logging
 import tomllib
+import sys
+
+VERBOSE = sys.stdin.isatty()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -48,7 +53,12 @@ def collect_wheels(
 
     for pkg in data.get("package", []):
         name = str(pkg.get("name", ""))
-        if name not in wanted_pkgs:
+        if name == "jax-cuda13-plugin":
+            od = pkg["optional-dependencies"]
+            odn = {e["name"] for e in od["with-cuda"]}
+            logger.debug(f"{set(wanted_pkgs) - odn} {odn - set(wanted_pkgs)}")
+        if name not in wanted_pkgs and not name.startswith("nvidia-"):
+            logger.debug("skipping pkg.name: %s", name)
             continue
 
         version = str(pkg.get("version", ""))
@@ -99,30 +109,37 @@ def to_nix_fetchurls(wheels: list[Wheel]) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--uv-lock", type=Path, default=Path("uv.lock"))
-    ap.add_argument("--py-tag", required=True, help="e.g. cp314-cp314 or cp314-cp314t") # can we avoid this?
-    ap.add_argument("--plat", required=True, help="e.g. manylinux_2_27_x86_64 or manylinux_2_27_aarch64") # can we avoid this?
-    ap.add_argument( # is harcoding the right idea? should at minimum make cuda version configurable
+    ap.add_argument(
+        "--py-tag", required=True, help="e.g. cp314-cp314 or cp314-cp314t"
+    )  # can we avoid this?
+    ap.add_argument(
+        "--plat",
+        required=True,
+        help="e.g. manylinux_2_27_x86_64 or manylinux_2_27_aarch64",
+    )  # can we avoid this?
+    ap.add_argument(  # is harcoding the right idea? should at minimum make cuda version configurable
         "--pkgs",
         nargs="+",
         default=[
             # dont think we need these
             # "jax",
             # "jaxlib",
-            "jax-cuda13-plugin",
             "jax-cuda13-pjrt",
-            # add the nvidia-* packages we need
-            "nvidia-cublas-cu13",
-            "nvidia-cuda-cupti-cu13",
-            "nvidia-cuda-runtime-cu13",
+            "jax-cuda13-plugin",
+            # TODO: The proper approach is to follow the delcared dependencies...
+            #   Anyways, you can find this list under jax-cuda13-plugin package.optional-dependencies.with-cuda
+            "nvidia-cublas",
+            "nvidia-cuda-cupti",
+            "nvidia-cuda-nvrtc",
+            "nvidia-cuda-nvcc",
+            "nvidia-cuda-runtime",
             "nvidia-cudnn-cu13",
-            "nvidia-cufft-cu13",
-            "nvidia-cusolver-cu13",
-            "nvidia-cusparse-cu13",
+            "nvidia-cufft",
+            "nvidia-cusolver",
+            "nvidia-cusparse",
             "nvidia-nccl-cu13",
-            "nvidia-nvjitlink-cu13",
+            "nvidia-nvjitlink",
             "nvidia-nvshmem-cu13",
-            "nvidia-cuda-nvrtc-cu13",
-            "nvidia-cuda-nvcc-cu13",
         ],
     )
     args = ap.parse_args()
@@ -137,4 +154,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.DEBUG if VERBOSE else logging.INFO,
+        format="%(asctime)sZ [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stderr)],
+    )
     main()
