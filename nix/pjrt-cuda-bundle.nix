@@ -51,10 +51,6 @@ pkgs.stdenvNoCC.mkDerivation {
     fi
 
     # Copy NVIDIA user-space libs
-    # This is fine, but will cause headers to be included
-    # if [ -d tmp/nvidia ]; then
-    #   cp -r tmp/nvidia $out/runtime/
-    # fi
     mkdir -p $out/runtime/nvidia
     for pkg in cu13 cudnn cublas nccl nvshmem cuda_nvrtc nvjitlink; do
       if [ "$withHeaders" != "1" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
@@ -104,19 +100,6 @@ pkgs.stdenvNoCC.mkDerivation {
       [ -f "$so" ] || continue
       patch_append_rpath "$so" '$ORIGIN/../../../sys/lib'
     done
-
-    # cudnn version handling (still need this? TODO: ablation test)
-    cudnn_dir="$out/runtime/nvidia/cudnn/lib"
-    cd "$cudnn_dir"
-
-    # Required for XLA: dlopen("libcudnn.so")
-    ln -sfn libcudnn.so.9 libcudnn.so
-
-    # might need toprovide unversioned names for component libs too
-    # for f in libcudnn_*.so.9; do
-    #   base="''${f%.9}"
-    #   ln -sfn "$f" "$base"
-    # done
 
     # Cleanup 
     rm -rf tmp
