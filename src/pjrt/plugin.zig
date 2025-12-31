@@ -1,7 +1,6 @@
 /// PJRT Plugin Loader
 ///
 /// Loads PJRT plugins from explicit paths using dlopen.
-/// No Bazel runfiles, no environment mutation, no platform detection.
 ///
 /// Usage:
 ///   const api = try loadPlugin("/path/to/pjrt_cpu_plugin.so");
