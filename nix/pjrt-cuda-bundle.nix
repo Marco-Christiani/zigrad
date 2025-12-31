@@ -53,7 +53,7 @@ pkgs.stdenvNoCC.mkDerivation {
     # Copy NVIDIA user-space libs
     mkdir -p $out/runtime/nvidia
     for pkg in cu13 cudnn cublas nccl nvshmem cuda_nvrtc nvjitlink; do
-      if [ "$withHeaders" != "1" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
+      if [ "${pkgs.lib.boolToString withHeaders}" != "true" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
         # prune headers
         rm -r tmp/nvidia/$pkg/include
       fi
