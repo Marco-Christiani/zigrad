@@ -22,9 +22,30 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addIncludePath(b.path("src"));
 
     // MLIR C API support (for M4+)
-    // Using LLVM 22.0.0git from nixpkgs (matches JAX's LLVM version)
-    zigrad_mod.linkSystemLibrary("MLIR-C");
-    zigrad_mod.linkSystemLibrary("mlir_c_runner_utils");
+    // Using MLIR static libraries from ZML's bazel build (all 66 libraries)
+    const zml_mlir_path = "reference/zml/bazel-bin/external/+llvm+llvm-project/mlir";
+    const zml_stablehlo_path = "reference/zml/bazel-bin/external/+xla+stablehlo";
+
+    // Link ALL MLIR static libraries (sledgehammer approach - links all 66 .a files)
+    const mlir_libs_dir = std.fs.cwd().openDir(zml_mlir_path, .{ .iterate = true }) catch @panic("Failed to open MLIR libs dir");
+    var mlir_libs_iter = mlir_libs_dir.iterate();
+    while (mlir_libs_iter.next() catch null) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".a")) {
+            const full_path = b.fmt("{s}/{s}", .{ zml_mlir_path, entry.name });
+            zigrad_mod.addObjectFile(.{ .cwd_relative = full_path });
+        }
+    }
+
+    // Link StableHLO C API
+    zigrad_mod.addObjectFile(b.path(zml_stablehlo_path ++ "/libstablehlo_dialect_capi.a"));
+
+    // Link LLVM libraries from ZML's bazel build (needed for MLIR dependencies)
+    const zml_llvm_path = "reference/zml/bazel-bin/external/+llvm+llvm-project/llvm";
+    zigrad_mod.addObjectFile(b.path(zml_llvm_path ++ "/libSupport.a"));
+    zigrad_mod.addObjectFile(b.path(zml_llvm_path ++ "/libDemangle.a"));
+
+    // Add vendored MLIR and StableHLO C headers (extracted from ZML's bazel build)
+    zigrad_mod.addIncludePath(b.path("vendor"));
 
     // M1 test executable
     const exe = b.addExecutable(.{
@@ -114,34 +135,34 @@ pub fn build(b: *std.Build) void {
     run_m2_fusion_step.dependOn(&run_m2_fusion_cmd.step);
 
     // M4 test executable (in-memory MLIR construction)
-    // NOTE: Commented out until MLIR libraries are available
-    // const exe_m4 = b.addExecutable(.{
-    //     .name = "zigrad-pjrt-m4",
-    //     .root_module = b.createModule(.{
-    //         .root_source_file = b.path("src/m4_matmul.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //         .link_libc = true,
-    //         .link_libcpp = true,
-    //         .imports = &.{
-    //             .{ .name = "zigrad", .module = zigrad_mod },
-    //         },
-    //     }),
-    // });
-    //
-    // exe_m4.root_module.addIncludePath(b.path("src"));
-    // addRuntimeBundle(b, exe_m4, runtime_root_opt);
-    // b.installArtifact(exe_m4);
-    //
-    // const run_m4_cmd = b.addRunArtifact(exe_m4);
-    // run_m4_cmd.step.dependOn(b.getInstallStep());
-    //
-    // if (b.args) |args| {
-    //     run_m4_cmd.addArgs(args);
-    // }
-    //
-    // const run_m4_step = b.step("run-m4", "Run the M4 test executable");
-    // run_m4_step.dependOn(&run_m4_cmd.step);
+    const exe_m4 = b.addExecutable(.{
+        .name = "zigrad-pjrt-m4",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/m4_matmul.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+            .imports = &.{
+                .{ .name = "zigrad", .module = zigrad_mod },
+            },
+        }),
+    });
+
+    exe_m4.root_module.addIncludePath(b.path("src"));
+    exe_m4.root_module.addIncludePath(b.path("vendor"));  // MLIR/StableHLO headers
+    addRuntimeBundle(b, exe_m4, runtime_root_opt);
+    b.installArtifact(exe_m4);
+
+    const run_m4_cmd = b.addRunArtifact(exe_m4);
+    run_m4_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_m4_cmd.addArgs(args);
+    }
+
+    const run_m4_step = b.step("run-m4", "Run the M4 test executable");
+    run_m4_step.dependOn(&run_m4_cmd.step);
 
     // Unit tests
     const lib_tests = b.addTest(.{

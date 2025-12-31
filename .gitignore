@@ -25,6 +25,10 @@ data
 *ignore
 .direnv
 .env
+vendor/
+reference/
+result
+result-*
 
 !docs/architecture.norg
 !docs/roadmap.norg
