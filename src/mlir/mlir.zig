@@ -2,16 +2,19 @@
 // Adapted from ZML (https://github.com/zml/zml)
 // Original Copyright (c) 2024 ZML Contributors
 // Apache License 2.0
-//
-// Modifications for Zigrad:
-// - Adapted import paths for Zigrad build system
-// - Replaced stdx dependencies with std equivalents
-// - Added integration with Zigrad PJRT backend
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-const c = @import("c.zig");
+const c = @cImport({
+    @cInclude("mlir-c/IR.h");
+    @cInclude("mlir-c/BuiltinTypes.h");
+    @cInclude("mlir-c/BuiltinAttributes.h");
+    @cInclude("mlir-c/Dialect/Func.h");
+    @cInclude("mlir-c/Pass.h");
+    // Transforms.h requires generated headers we dont have yet
+    // @cInclude("mlir-c/Transforms.h");
+});
 
 const log = std.log.scoped(.mlir);
 
@@ -760,23 +763,27 @@ pub const Operation = struct {
             state.addOperands(operands);
         } else if (args.variadic_operands) |operands_segments| {
             const MAX_SEGMENTS = 32;
-            var segments = std.BoundedArray(i32, MAX_SEGMENTS){};
+            var segments_buf: [MAX_SEGMENTS]i32 = undefined;
+            var segments_len: usize = 0;
 
             for (operands_segments) |operands| {
                 state.addOperands(operands);
-                segments.appendAssumeCapacity(@intCast(operands.len));
+                segments_buf[segments_len] = @intCast(operands.len);
+                segments_len += 1;
             }
-            state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
+            state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(segments_len)}, .i32, segments_buf[0..segments_len]));
         } else if (args.tt_variadic_operands) |operands_segments| {
             // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
             const MAX_SEGMENTS = 32;
-            var segments = std.BoundedArray(i32, MAX_SEGMENTS){};
+            var segments_buf: [MAX_SEGMENTS]i32 = undefined;
+            var segments_len: usize = 0;
 
             for (operands_segments) |operands| {
                 state.addOperands(operands);
-                segments.appendAssumeCapacity(@intCast(operands.len));
+                segments_buf[segments_len] = @intCast(operands.len);
+                segments_len += 1;
             }
-            state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments.constSlice()));
+            state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments_buf[0..segments_len]));
         }
         if (args.result_type_inference) |enable| {
             state.resultTypeInference(enable);

@@ -2,14 +2,17 @@
 // Adapted from ZML (https://github.com/zml/zml)
 // Original Copyright (c) 2024 ZML Contributors
 // Apache License 2.0
-//
-// Modifications for Zigrad:
-// - Adapted import paths for Zigrad build system
-// - Replaced stdx dependencies with std equivalents
 
 const std = @import("std");
 
-const c = @import("../c.zig");
+const c = @cImport({
+    @cInclude("mlir-c/IR.h");
+    @cInclude("mlir-c/BuiltinTypes.h");
+    @cInclude("mlir-c/BuiltinAttributes.h");
+    @cInclude("stablehlo-c/StablehloDialect.h");
+    @cInclude("stablehlo-c/StablehloAttributes.h");
+    @cInclude("stablehlo-c/StablehloTypes.h");
+});
 const mlir = @import("../mlir.zig");
 
 pub const abs = functors.unary_fn("stablehlo.abs").call;
