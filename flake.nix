@@ -64,6 +64,16 @@
           # primary deliverable are devshells. their intended purpose is really just fast iteration and pinned
           #   toolchain with relaxed hermeticity requirements as needed for productivity.
           devShells = {
+            # Minimal shell for M4 MLIR work (fast to enter)
+            m4 = pkgs.mkShellNoCC {
+              packages = with pkgs; [
+                zig
+                # MLIR/LLVM for M4 (matches JAX's LLVM 22.0.0git from Dec 28, 2025)
+                llvmPackages_git.llvm
+                llvmPackages_git.libllvm
+              ];
+            };
+
             default = pkgs.mkShellNoCC {
               packages = with pkgs; [
                 go-task
@@ -80,6 +90,10 @@
 
                 # provides nixglhost binary
                 nixglhost
+
+                # MLIR/LLVM for M4 (matches JAX's LLVM 22.0.0git from Dec 28, 2025)
+                llvmPackages_git.llvm
+                llvmPackages_git.libllvm
               ];
 
               # pin the host compiler nvcc will use

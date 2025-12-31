@@ -21,6 +21,11 @@ pub fn build(b: *std.Build) void {
     // Add include path for PJRT C headers
     zigrad_mod.addIncludePath(b.path("src"));
 
+    // MLIR C API support (for M4+)
+    // Using LLVM 22.0.0git from nixpkgs (matches JAX's LLVM version)
+    zigrad_mod.linkSystemLibrary("MLIR-C");
+    zigrad_mod.linkSystemLibrary("mlir_c_runner_utils");
+
     // M1 test executable
     const exe = b.addExecutable(.{
         .name = "zigrad-pjrt-m1",
@@ -107,6 +112,36 @@ pub fn build(b: *std.Build) void {
 
     const run_m2_fusion_step = b.step("run-m2-fusion", "Run the M2 fusion executable");
     run_m2_fusion_step.dependOn(&run_m2_fusion_cmd.step);
+
+    // M4 test executable (in-memory MLIR construction)
+    // NOTE: Commented out until MLIR libraries are available
+    // const exe_m4 = b.addExecutable(.{
+    //     .name = "zigrad-pjrt-m4",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("src/m4_matmul.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .link_libc = true,
+    //         .link_libcpp = true,
+    //         .imports = &.{
+    //             .{ .name = "zigrad", .module = zigrad_mod },
+    //         },
+    //     }),
+    // });
+    //
+    // exe_m4.root_module.addIncludePath(b.path("src"));
+    // addRuntimeBundle(b, exe_m4, runtime_root_opt);
+    // b.installArtifact(exe_m4);
+    //
+    // const run_m4_cmd = b.addRunArtifact(exe_m4);
+    // run_m4_cmd.step.dependOn(b.getInstallStep());
+    //
+    // if (b.args) |args| {
+    //     run_m4_cmd.addArgs(args);
+    // }
+    //
+    // const run_m4_step = b.step("run-m4", "Run the M4 test executable");
+    // run_m4_step.dependOn(&run_m4_cmd.step);
 
     // Unit tests
     const lib_tests = b.addTest(.{
