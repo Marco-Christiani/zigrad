@@ -20,6 +20,7 @@
       colors = {
         yellow = "\\033[33m";
         reset = "\\033[0m";
+        green = "\\032[0m";
       };
 
       mkFor = system:
@@ -47,8 +48,6 @@
             cudaArchitectures = cudaCfg.cudaArchitectures;
           }).targets;
 
-          cudaArchStr = pkgs.lib.concatStringsSep ";" cudaCfg.cudaArchitectures;
-
           lockFile = ./nix/lock.json;
 
           pjrtCudaBundle =
@@ -66,76 +65,59 @@
           xlaMlirStablehloCapiSdk =
             pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
               inherit lockFile;
-            };
-        in
-        {
-          # primary deliverable are devshells. their intended purpose is really just fast iteration and pinned
-          #   toolchain with relaxed hermeticity requirements as needed for productivity.
-          devShells = {
-            # Minimal shell for M4 MLIR work (fast to enter)
-            m4 = pkgs.mkShellNoCC {
-              packages = with pkgs; [
-                zig
-                # MLIR/LLVM for M4 (matches JAX's LLVM 22.0.0git from Dec 28, 2025)
-                llvmPackages_git.llvm
-                llvmPackages_git.libllvm
-              ];
+              enableCcache = builtins.getEnv "ZG_IMPURE_CCACHE" == "1";
+              ccache = pkgs.ccache;
             };
 
+          # Convenience aggregate.
+          #   others are individually targetable mostly for development reasons
+          zigradExternalSdk = pkgs.symlinkJoin {
+                name = "zigrad-external-sdk";
+                paths = [
+                  pjrtCudaBundleDevel
+                  xlaMlirStablehloCapiSdk
+                ];
+              };
+        in
+        {
+          # devshells intended purpose is really just fast iteration and pinned toolchain with
+          #   relaxed hermeticity requirements as needed for productivity.
+          devShells = {
             default = pkgs.mkShellNoCC {
               packages = with pkgs; [
                 go-task
-                cmake
-                gnumake
-
                 zig
                 zls
-
-                cudaPackages.cudatoolkit
-                cudaPackages.cuda_cudart
                 gccHost
-                stdenv.cc.cc.lib # provides libstdc++.so.6 for PJRT plugin
+                # llvmPackages_git.llvm
+                # llvmPackages_git.libllvm
 
-                # provides nixglhost binary
-                nixglhost
-
-                # MLIR/LLVM for M4 (matches JAX's LLVM 22.0.0git from Dec 28, 2025)
-                llvmPackages_git.llvm
-                llvmPackages_git.libllvm
+                zigradExternalSdk
               ];
 
-              # pin the host compiler nvcc will use
               CC = "${gccHost}/bin/gcc";
               CXX = "${gccHost}/bin/g++";
-              CUDACXX = "${cudaPackages.cudatoolkit}/bin/nvcc";
+              ZG_EXTERNAL_SDK_ROOT = builtins.toString zigradExternalSdk;
+              PJRT_PLUGIN_PATH = "result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
 
-              # dev-time override for CUDA arches without editing nix:
-              #   export CUDA_ARCHS="86;89"  (CMake list syntax)
-              #   task conf
               shellHook = ''
-                export CUDA_HOME=${cudaPackages.cudatoolkit}
-                export CUDA_ARCHS="''${CUDA_ARCHS:-${cudaArchStr}}"
-                export PJRT_CPU_PLUGIN_PATH=lib/pjrt_c_api_cpu_plugin.so
-
-                if [[ ! -f $PJRT_CPU_PLUGIN_PATH ]]; then
-                  # TODO: pulling the .so and possibly the pjrt header should be done in either nix or build.zig.zon
-                  printf "${colors.yellow}WARNING:${colors.reset} PJRT_CPU_PLUGIN_PATH=$PJRT_CPU_PLUGIN_PATH does not exist. Leaving the env variable set but might need to pull this.${colors.reset}.\n"
+                yellow=${colors.yellow}
+                green=${colors.green}
+                reset=${colors.reset}
+                if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
+                  printf "$yellow[WARNING]$reset PJRT_PLUGIN_PATH=$PJRT_PLUGIN_PATH does not exist. \
+                          Leaving the env variable set but you may need to materialize this.\n"
                 fi
-
-                # Add libstdc++ to LD_LIBRARY_PATH for PJRT plugin
-                export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:''${LD_LIBRARY_PATH:-}"
-
-                echo "CUDA_HOME=$CUDA_HOME"
-                echo "CUDA_ARCHS=$CUDA_ARCHS"
-                echo "note: run GPU binaries via nixglhost (wrap the program):"
-                echo "  nixglhost ./build/programs/main"
+                printf "SDK path: ZG_EXTERNAL_SDK_ROOT=$ZG_EXTERNAL_SDK_ROOT"
               '';
             };
+
 
             # convenience shell that DOES do global LD_LIBRARY_PATH injection 
             #   NOTE: discouraged by nix-gl-host docs. we keep it separate so default stays sane.
             impure-driver = pkgs.mkShellNoCC {
               inputsFrom = [ self.devShells.${system}.default ];
+              packages = [nix-gl-host];
               shellHook = ''
                 # nix-gl-host docs: -p is discouraged / footgun, this is for convenience only.
                 export LD_LIBRARY_PATH="$(${nixglhost}/bin/nixglhost -p):''${LD_LIBRARY_PATH:-}"
@@ -157,6 +139,10 @@
 
           # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
           packages = {
+            # Convenience aggregate and primary target.
+            #   others are individually targetable mostly for development reasons
+            zigrad-external-sdk = zigradExternalSdk;
+
             # Runtime-only PJRT bundle
             pjrt-cuda-runtime = pjrtCudaBundle;
 
@@ -166,15 +152,6 @@
             # Compile-time SDK (PJRT headers + MLIR + StableHLO)
             xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
-            # convenience aggregate for zig
-            zigrad-pjrt-sdk =
-              pkgs.symlinkJoin {
-                name = "zigrad-pjrt-sdk";
-                paths = [
-                  pjrtCudaBundleDevel
-                  xlaMlirStablehloCapiSdk
-                ];
-              };
 
             gen-clangd = targets.editor.clangd;
             gen-nvim = targets.editor.nvim;

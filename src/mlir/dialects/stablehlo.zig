@@ -9,9 +9,9 @@ const c = @cImport({
     @cInclude("mlir-c/IR.h");
     @cInclude("mlir-c/BuiltinTypes.h");
     @cInclude("mlir-c/BuiltinAttributes.h");
-    @cInclude("stablehlo-c/StablehloDialect.h");
-    @cInclude("stablehlo-c/StablehloAttributes.h");
-    @cInclude("stablehlo-c/StablehloTypes.h");
+    @cInclude("stablehlo/integrations/c/StablehloDialect.h");
+    @cInclude("stablehlo/integrations/c/StablehloAttributes.h");
+    @cInclude("stablehlo/integrations/c/StablehloTypes.h");
 });
 const mlir = @import("../mlir.zig");
 

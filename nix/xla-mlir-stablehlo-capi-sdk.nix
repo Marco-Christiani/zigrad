@@ -16,6 +16,8 @@
 , libedit
 , libffi
 , lockFile
+, enableCcache ? false
+, ccache ? null
 }:
 
 let
@@ -79,7 +81,7 @@ stdenv.mkDerivation {
   dontConfigure = true;
   dontStrip = true;
 
-  nativeBuildInputs = [ cmake ninja python3 perl ];
+  nativeBuildInputs = [ cmake ninja python3 perl ccache ];
   buildInputs = [ zlib zstd libxml2 ncurses libedit libffi ];
 
   # buildPhase = ''
@@ -116,20 +118,44 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     set -euo pipefail
-    export HOME="$TMPDIR/home"
-    mkdir -p "$HOME"
+
+    # HACK: dev only. remove this.
+    # CCACHE_DIR=$HOME/.cache/ccache nix build .#xla-mlir-stablehlo-capi-sdk \
+    #   --option sandbox false \
+    #   --impure \
+    #   --override-input enableCcache true
+
+    if [ "${lib.boolToString enableCcache}" = "true" ]; then
+      export CCACHE_DIR="''${CCACHE_DIR:-/var/tmp/ccache}"
+      export CCACHE_BASEDIR="$PWD"
+      export CCACHE_COMPRESS=1
+      export CCACHE_SLOPPINESS=time_macros
+      echo "****************CCACHE ENABLED - IMPURE****************" >&2
+    fi
+
+    cmake_flags=(
+      -DCMAKE_BUILD_TYPE=Release
+      -DLLVM_ENABLE_PROJECTS=mlir
+      -DLLVM_TARGETS_TO_BUILD=host
+      -DLLVM_INCLUDE_TESTS=OFF
+      -DLLVM_INCLUDE_EXAMPLES=OFF
+      -DLLVM_INCLUDE_DOCS=OFF
+      -DMLIR_INCLUDE_TESTS=OFF
+      -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
+      -DMLIR_BUILD_MLIR_C_DYLIB=ON
+    )
+
+    if [ "${lib.boolToString enableCcache}" = "true" ]; then
+      cmake_flags+=(
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        -DCMAKE_ASM_COMPILER=gcc
+      )
+    fi
 
     mkdir -p llvm-build
-    cmake -S ${llvmSrc}/llvm -B llvm-build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DLLVM_ENABLE_PROJECTS=mlir \
-      -DLLVM_TARGETS_TO_BUILD=host \
-      -DLLVM_INCLUDE_TESTS=OFF \
-      -DLLVM_INCLUDE_EXAMPLES=OFF \
-      -DLLVM_INCLUDE_DOCS=OFF \
-      -DMLIR_INCLUDE_TESTS=OFF \
-      -DMLIR_ENABLE_BINDINGS_PYTHON=OFF \
-      -DMLIR_BUILD_MLIR_C_DYLIB=ON
+    cmake -S ${llvmSrc}/llvm -B llvm-build -G Ninja "''${cmake_flags[@]}"
+
 
     # Tools StableHLO headers generation might expect (safe even if unused later, tbd whats needed still)
     cmake --build llvm-build --target llvm-tblgen mlir-tblgen mlir-pdll

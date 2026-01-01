@@ -3,7 +3,7 @@
 /// Multiple @cImport calls create incompatible types, so we centralize here.
 pub const c = @cImport({
     @cInclude("dlfcn.h");
-    @cInclude("pjrt/c/pjrt_c_api.h");
+    @cInclude("xla/pjrt/c/pjrt_c_api.h");
 });
 
 // Re-export commonly used types
