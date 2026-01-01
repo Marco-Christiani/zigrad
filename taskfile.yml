@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+env:
+  PJRT_PLUGIN_PATH:
+    sh: realpath result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
+    # sh: realpath zig-out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
+  CCACHE_DIR: /tmp/ccache
+
+tasks:
+  sdk:
+    cmd: nix build .#zigrad-external-sdk
+
+  sdk-ccache:
+    cmd: |
+      nix build .#zigrad-external-sdk \
+        --option sandbox false \
+        --impure \
+        --override-input enableCcache true
+
+  ccache:
+    cmd: ccache {{.CLI_ARGS}}
+
+  build:
+    cmd: zig build
+
+  test:
+    cmd: zig build test
+
+  m2:
+    deps: [build]
+    cmd: ./zig-out/bin/zigrad-pjrt-m2
+
+  m2-fusion:
+    deps: [build]
+    cmd: ./zig-out/bin/zigrad-pjrt-m2-fusion
+
+  m4:
+    deps: [build]
+    cmd: ./zig-out/bin/zigrad-pjrt-m4
