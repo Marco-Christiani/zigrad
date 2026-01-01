@@ -1,80 +1,92 @@
+# nix/pjrt-cuda-bundle.nix
 { pkgs
-, wheelSources
-, withHeaders ? false
+, lockFile
+, withNvidiaHeaders ? false
 }:
 
 let
-  inherit (pkgs) fetchurl unzip patchelf;
+  inherit (pkgs) fetchurl unzip patchelf lib;
 
-  # Flatten the attrset into a list of fetched wheel derivations
-  wheels =
-    pkgs.lib.flatten (
-      pkgs.lib.mapAttrsToList
-        (_pkg: entries:
-          map
-            (e: fetchurl {
-              inherit (e) url sha256;
-            })
-            entries
-        )
-        wheelSources
-    );
+  lock = builtins.fromJSON (builtins.readFile lockFile);
+  wheels = lock.wheels;
+
+  # Fetch all wheels listed in lock.json
+  wheelFetches =
+    map
+      (w:
+        fetchurl {
+          url = w.url;
+          hash = w.hash_sri;
+        }
+      )
+      wheels;
+
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "pjrt-cuda-bundle";
-  version = "0.8.3.dev20251228-cuda13";
-  src = null;
+  version =
+    let
+      jax = lock.pins.jax.git_hash;
+    in
+    "jax-${builtins.substring 0 7 jax}";
 
   dontUnpack = true;
-
   nativeBuildInputs = [ unzip patchelf ];
 
   installPhase = ''
+    set -euo pipefail
     mkdir -p $out/runtime
 
-    for whl in ${pkgs.lib.concatStringsSep " " wheels}; do
+    # ------------------------------------------------------------------
+    # Unpack wheels
+    # ------------------------------------------------------------------
+    mkdir tmp
+    for whl in ${lib.concatStringsSep " " wheelFetches}; do
       echo "Extracting $whl"
-      ${unzip}/bin/unzip -q "$whl" -d tmp
+      ${unzip}/bin/unzip -oq "$whl" -d tmp
     done
 
-    # Copy PJRT CUDA plugin
+    # ------------------------------------------------------------------
+    # PJRT CUDA plugin
+    # ------------------------------------------------------------------
     if [ -d tmp/jax_plugins ]; then
-      mkdir -p $out/runtime
       cp -r tmp/jax_plugins $out/runtime/
+    else
+      echo "ERROR: jax_plugins not found in wheels"
+      exit 1
     fi
-    rm -f $out/runtime/jax_plugins/xla_cuda13/__init__.py
-    rm -f $out/runtime/jax_plugins/xla_cuda13/version.py
 
-    # Copy PJRT runtime package if its there
+    # ------------------------------------------------------------------
+    # Optional PJRT runtime Python package
+    # ------------------------------------------------------------------
     if [ -d tmp/jax_cuda13_pjrt ]; then
       cp -r tmp/jax_cuda13_pjrt $out/runtime/
     fi
 
-    # Copy NVIDIA user-space libs
+    # ------------------------------------------------------------------
+    # NVIDIA user-space libraries
+    # ------------------------------------------------------------------
     mkdir -p $out/runtime/nvidia
     for pkg in cu13 cudnn cublas nccl nvshmem cuda_nvrtc nvjitlink; do
-      if [ "${pkgs.lib.boolToString withHeaders}" != "true" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
-        # prune headers
-        rm -r tmp/nvidia/$pkg/include
-      fi
       if [ -d "tmp/nvidia/$pkg" ]; then
+        if [ "${lib.boolToString withNvidiaHeaders}" != "true" ] && [ -d "tmp/nvidia/$pkg/include" ]; then
+          rm -r tmp/nvidia/$pkg/include
+        fi
         cp -r -P "tmp/nvidia/$pkg" "$out/runtime/nvidia/"
       fi
     done
 
-    # cpp deps
+    # ------------------------------------------------------------------
+    # C++ runtime dependencies
+    # ------------------------------------------------------------------
     mkdir -p $out/runtime/sys/lib
-
-   # cpp runtime
     cp ${pkgs.stdenv.cc.cc.lib}/lib/libstdc++.so.6 $out/runtime/sys/lib/
     cp ${pkgs.stdenv.cc.cc.lib}/lib/libgcc_s.so.1  $out/runtime/sys/lib/
-
-    # zlib (wanted by cudnn)
     cp ${pkgs.zlib}/lib/libz.so.1 $out/runtime/sys/lib/
 
-    # patch DSOs so they look in our bundle
-    sys_rpath='$ORIGIN/../../sys/lib'
-
+    # ------------------------------------------------------------------
+    # RPATH patching
+    # ------------------------------------------------------------------
     patch_append_rpath() {
       local so="$1"
       local add="$2"
@@ -91,23 +103,30 @@ pkgs.stdenvNoCC.mkDerivation {
       fi
     }
 
-    # Plugin: jax_plugins/xla_cuda13 -> runtime/sys/lib is ../../sys/lib
+    # Plugin: runtime/jax_plugins/xla_cuda13 -> runtime/sys/lib
     plugin="$out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so"
     patch_append_rpath "$plugin" '$ORIGIN/../../sys/lib'
 
-    # NVIDIA DSOs: nvidia/<pkg>/lib -> runtime/sys/lib is ../../../sys/lib
+    # NVIDIA DSOs: runtime/nvidia/<pkg>/lib -> runtime/sys/lib
     for so in $out/runtime/nvidia/*/lib/*.so*; do
       [ -f "$so" ] || continue
       patch_append_rpath "$so" '$ORIGIN/../../../sys/lib'
     done
 
-    # Cleanup 
+    # ------------------------------------------------------------------
+    # Provenance
+    # ------------------------------------------------------------------
+    mkdir -p $out/runtime
+    cat > $out/runtime/PROVENANCE.json <<EOF
+    ${builtins.toJSON lock}
+    EOF
+
+    # Cleanup
     rm -rf tmp
   '';
 
   meta = {
-    description = "PJRT CUDA runtime bundle";
+    description = "PJRT CUDA runtime bundle (wheel-derived, hermetic)";
     platforms = [ "x86_64-linux" ];
   };
 }
-

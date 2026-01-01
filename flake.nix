@@ -7,18 +7,8 @@
     #   that being said, this seems like it may be bringing in gigs of deps (ironically, given the stated motivations)
     #   although i would need to actually check this to be confident in that idea.
     # nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
-
-    xla-src = {
-      # local checkout layout
-      # url = "path:./reference/xla";
-      # For fully remote hermeticity, "" and run (run `nix flake lock`)
-      # Get commit hash with: `git -C reference/xla/ checkout $XLA_TAG && git -C reference/xla/ rev-parse HEAD`
-      url = "github:openxla/xla/913ae2eaa3cb88971003592a90959685a78c9e30";
-      flake = false;
-    };
   };
-
-  outputs = { self, nixpkgs, nix-gl-host, xla-src }:
+  outputs = { self, nixpkgs, nix-gl-host }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
 
@@ -59,19 +49,23 @@
 
           cudaArchStr = pkgs.lib.concatStringsSep ";" cudaCfg.cudaArchitectures;
 
-          pjrtCudaWheels = import ./nix/pjrt-cuda-wheels.nix;
-          pjrtCudaBundle = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
-            wheelSources = pjrtCudaWheels;
-          };
-          pjrtCudaBundleDevel =
+          lockFile = ./nix/lock.json;
+
+          pjrtCudaBundle =
             pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
-              wheelSources = pjrtCudaWheels;
-              withHeaders = true;
+              inherit lockFile;
+              withNvidiaHeaders = false;
             };
 
-          xlaMlirStablehloSdk =
+          pjrtCudaBundleDevel =
+            pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
+              inherit lockFile;
+              withNvidiaHeaders = true;
+            };
+
+          xlaMlirStablehloCapiSdk =
             pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-              inherit xla-src;
+              inherit lockFile;
             };
         in
         {
@@ -149,44 +143,44 @@
               '';
             };
 
-            xla-mlir = pkgs.mkShellNoCC {
-              packages = with pkgs; [
-                xlaMlirStablehloSdk
-                cmake
-                ninja
+            devShells.pjrt = pkgs.mkShellNoCC {
+              packages = [
+                xlaMlirStablehloCapiSdk
               ];
 
               shellHook = ''
-                export XLA_CAPI_SDK=${xlaMlirStablehloSdk}
-                export CPATH=$XLA_CAPI_SDK/include:$CPATH
-                export LIBRARY_PATH=$XLA_CAPI_SDK/lib:$LIBRARY_PATH
-                export LD_LIBRARY_PATH=$XLA_CAPI_SDK/lib:$LD_LIBRARY_PATH
-
-                echo "Using XLA-derived MLIR+StableHLO C API SDK:"
-                echo "  XLA_CAPI_SDK=$XLA_CAPI_SDK"
+                echo "PJRT / XLA SDK shell"
+                echo "SDK path: ${xlaMlirStablehloCapiSdk}"
               '';
             };
           };
 
           # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
           packages = {
-            # expose group explicitly for future extension
-            example-cuda = targets.example-cuda.build;
-            example-cuda-run = targets.example-cuda.run;
+            # Runtime-only PJRT bundle
+            pjrt-cuda-runtime = pjrtCudaBundle;
+
+            # Runtime + NVIDIA headers
+            pjrt-cuda-runtime-devel = pjrtCudaBundleDevel;
+
+            # Compile-time SDK (PJRT headers + MLIR + StableHLO)
+            xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
+
+            # convenience aggregate for zig
+            zigrad-pjrt-sdk =
+              pkgs.symlinkJoin {
+                name = "zigrad-pjrt-sdk";
+                paths = [
+                  pjrtCudaBundleDevel
+                  xlaMlirStablehloCapiSdk
+                ];
+              };
 
             gen-clangd = targets.editor.clangd;
             gen-nvim = targets.editor.nvim;
             # TODO: hermetic zig build/run targets
             # m1 = targets.m1.build;
             # m1 = targets.m1.run;
-
-            pjrt-cuda-bundle = pjrtCudaBundle;
-
-            # devel option includes headers in the bundle
-            pjrt-cuda-bundle-devel = pjrtCudaBundleDevel;
-
-            # hermetic MLIR / StableHLO C API SDK derived from XLA
-            xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloSdk;
           };
 
           apps = {
