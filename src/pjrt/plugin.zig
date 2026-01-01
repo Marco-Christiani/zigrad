@@ -28,7 +28,7 @@ fn dlErrMsg() []const u8 {
 ///
 pub fn loadPlugin(path: []const u8) !Api {
     // preloadDriver();
-    probeCudnn("/nix/store/iq2pg0wz4r26ybbhsmnkkashhlzv4k6c-pjrt-cuda-bundle-0.8.3.dev20251228-cuda13/runtime");
+    probeCudnn("result/runtime");
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
 
@@ -81,19 +81,21 @@ fn probeDlopen(label: []const u8, path: [:0]const u8, flags: c_int) ?*anyopaque 
 fn probeCudnn(runtime_root: []const u8) void {
     const flags = c.RTLD_NOW | c.RTLD_LOCAL;
 
-    // 1) try host driver libs (absolute path only, no search paths)
+    // host driver libs
     _ = probeDlopen("libcuda", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
     _ = probeDlopen("libcuda", "/lib/x86_64-linux-gnu/libcuda.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
     _ = probeDlopen("nvml", "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
     _ = probeDlopen("nvml", "/lib/x86_64-linux-gnu/libnvidia-ml.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
 
-    // 2) try dlopen by name (this is what XLA effectively does)
-    _ = probeDlopen("cudnn(name)", "libcudnn.so", flags);
-
-    // 3) try dlopen by absolute path into bundle (should always work if deps are present)
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = std.fmt.bufPrintZ(&buf, "{s}/nvidia/cudnn/lib/libcudnn.so", .{runtime_root}) catch return;
-    const h = probeDlopen("cudnn(abs)", abs, flags) orelse return;
+    // rely on search path
+    const h = blk: {
+        const hh = probeDlopen("cudnn(name)", "libcudnn.so.9", flags);
+        if (hh != null) break :blk hh;
+        // try dlopen by absolute path into bundle (should always work if deps are present)
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrintZ(&buf, "{s}/nvidia/cudnn/lib/libcudnn.so.9", .{runtime_root}) catch return;
+        break :blk probeDlopen("cudnn(abs)", abs, flags) orelse return;
+    };
 
     // 4) symbol check
     _ = c.dlerror();
