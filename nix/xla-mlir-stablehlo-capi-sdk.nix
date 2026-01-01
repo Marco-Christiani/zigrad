@@ -128,10 +128,12 @@ stdenv.mkDerivation {
       -DLLVM_INCLUDE_EXAMPLES=OFF \
       -DLLVM_INCLUDE_DOCS=OFF \
       -DMLIR_INCLUDE_TESTS=OFF \
-      -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
+      -DMLIR_ENABLE_BINDINGS_PYTHON=OFF \
+      -DMLIR_BUILD_MLIR_C_DYLIB=ON
 
-    # Tools StableHLO headers generation might expect (safe even if unused later)
+    # Tools StableHLO headers generation might expect (safe even if unused later, tbd whats needed still)
     cmake --build llvm-build --target llvm-tblgen mlir-tblgen mlir-pdll
+    cmake --build llvm-build --target MLIR-C
 
     mkdir -p stablehlo-build
     cmake -S ${stablehloSrc} -B stablehlo-build -G Ninja \
@@ -216,6 +218,13 @@ stdenv.mkDerivation {
     find llvm-build -type f \
       \( -name "libMLIRCAPI*.a" -o -name "libMLIRCAPI*.so*" -o -name "libMLIR-C*.a" -o -name "libMLIR-C*.so*" \) \
       -print -exec cp -v {} "$out/lib/" \;
+
+    # Ensure the unversioned linker name exists (Zig searches libMLIR-C.so)
+    mlir_c_so="$(ls -1 "$out/lib/libMLIR-C.so."* 2>/dev/null | head -n1 || true)"
+    if [ -n "$mlir_c_so" ]; then
+      ln -sfn "$(basename "$mlir_c_so")" "$out/lib/libMLIR-C.so"
+    fi
+
 
     # Hard check: we expect at least one MLIR CAPI library
     if ! find "$out/lib" -maxdepth 1 -type f -name "libMLIRCAPI*" | grep -q .; then
