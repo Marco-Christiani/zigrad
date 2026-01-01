@@ -104,7 +104,7 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_Extension_Base, next);
 // Changes include:
 // * Adding a new field to the PJRT_Api or argument structs
 // * Renaming a method or argument (doesn't affect ABI)
-#define PJRT_API_MINOR 88
+#define PJRT_API_MINOR 85
 
 // The plugin should set the major_version and minor_version of
 // PJRT_Api.pjrt_api_version to be the `PJRT_API_MAJOR` and `PJRT_API_MINOR` in
@@ -1437,36 +1437,6 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_Device_PoisonExecution_Args, poisoned);
 typedef PJRT_Error* PJRT_Device_PoisonExecution(
     PJRT_Device_PoisonExecution_Args* args);
 
-// --------------------------- AsyncTrackingEvent ------------------------------
-
-typedef struct PJRT_AsyncTrackingEvent PJRT_AsyncTrackingEvent;
-
-struct PJRT_Device_CreateAsyncTrackingEvent_Args {
-  size_t struct_size;
-  PJRT_Extension_Base* extension_start;
-  PJRT_Device* device;
-  const char* description;
-  size_t description_size;
-  PJRT_AsyncTrackingEvent* event;  // out
-};
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_Device_CreateAsyncTrackingEvent_Args, event);
-
-// Creates an async tracking event. The caller is responsible for destroying the
-// event.
-typedef PJRT_Error* PJRT_Device_CreateAsyncTrackingEvent(
-    PJRT_Device_CreateAsyncTrackingEvent_Args* args);
-
-struct PJRT_AsyncTrackingEvent_Destroy_Args {
-  size_t struct_size;
-  PJRT_Extension_Base* extension_start;
-  PJRT_AsyncTrackingEvent* event;
-};
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_AsyncTrackingEvent_Destroy_Args, event);
-
-// Destroys the async tracking event.
-typedef PJRT_Error* PJRT_AsyncTrackingEvent_Destroy(
-    PJRT_AsyncTrackingEvent_Destroy_Args* args);
-
 //-------------------------------- Memory --------------------------------------
 
 struct PJRT_Memory_Id_Args {
@@ -2031,8 +2001,6 @@ typedef PJRT_Error* PJRT_Executable_OutputMemoryKinds(
 
 typedef struct PJRT_SerializedExecutable PJRT_SerializedExecutable;
 
-typedef struct PJRT_SerializedCompileOptions PJRT_SerializedCompileOptions;
-
 struct PJRT_Executable_Serialize_Args {
   size_t struct_size;
   PJRT_Extension_Base* extension_start;
@@ -2055,29 +2023,6 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_Executable_Serialize_Args,
 // is not guaranteed to be stable over time.
 typedef PJRT_Error* PJRT_Executable_Serialize(
     PJRT_Executable_Serialize_Args* args);
-
-struct PJRT_Executable_GetCompileOptions_Args {
-  size_t struct_size;
-  PJRT_Extension_Base* extension_start;
-  PJRT_Executable* executable;
-
-  // Lives only as long as serialized_compile_options
-  const char* serialized_bytes;  // out
-  size_t serialized_bytes_size;  // out
-
-  PJRT_SerializedCompileOptions*
-      serialized_compile_options;  // backs serialized_bytes.
-  // cleanup fn must be called to free the backing memory for serialized_bytes.
-  // Should only be called once on serialized_compile_options.
-  void (*serialized_compile_options_deleter)(
-      PJRT_SerializedCompileOptions* options);  // out
-};
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_Executable_GetCompileOptions_Args,
-                          serialized_compile_options_deleter);
-
-// Returns the CompileOptions that were used to compile this executable.
-typedef PJRT_Error* PJRT_Executable_GetCompileOptions(
-    PJRT_Executable_GetCompileOptions_Args* args);
 
 struct PJRT_Executable_DeserializeAndLoad_Args {
   size_t struct_size;
@@ -2464,33 +2409,6 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args,
 typedef PJRT_Error* PJRT_Buffer_OpaqueDeviceMemoryDataPointer(
     PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args* args);
 
-struct PJRT_Buffer_DonateWithControlDependency_Callback_Args {
-  size_t struct_size;
-  void* callback_data;
-  PJRT_Error_Code error_code;
-  const char* error_message;
-  size_t error_message_size;
-};
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_Buffer_DonateWithControlDependency_Callback_Args,
-                          error_message_size);
-
-struct PJRT_Buffer_DonateWithControlDependency_Args {
-  size_t struct_size;
-  PJRT_Extension_Base* extension_start;
-  PJRT_Buffer* buffer;
-
-  void* callback_data;  // out
-  void (*dependency_ready_callback)(
-      PJRT_Buffer_DonateWithControlDependency_Callback_Args* args);  // out
-
-  PJRT_Buffer* out_buffer;  // out
-};
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_Buffer_DonateWithControlDependency_Args,
-                          out_buffer);
-
-typedef PJRT_Error* PJRT_Buffer_DonateWithControlDependency(
-    PJRT_Buffer_DonateWithControlDependency_Args* args);
-
 // ---------------------------- CopyToDeviceStream -----------------------------
 
 struct PJRT_CopyToDeviceStream_Destroy_Args {
@@ -2876,15 +2794,10 @@ typedef struct PJRT_Api {
   _PJRT_API_STRUCT_FIELD(PJRT_AsyncHostToDeviceTransferManager_TransferLiteral);
   _PJRT_API_STRUCT_FIELD(PJRT_Buffer_CopyRawToHostFuture);
   _PJRT_API_STRUCT_FIELD(PJRT_Device_PoisonExecution);
-  _PJRT_API_STRUCT_FIELD(PJRT_Device_CreateAsyncTrackingEvent);
-  _PJRT_API_STRUCT_FIELD(PJRT_AsyncTrackingEvent_Destroy);
-  _PJRT_API_STRUCT_FIELD(PJRT_Executable_GetCompileOptions);
-  _PJRT_API_STRUCT_FIELD(PJRT_Buffer_DonateWithControlDependency);
 } PJRT_Api;
 
 enum {
-  PJRT_Api_STRUCT_SIZE =
-      PJRT_STRUCT_SIZE(PJRT_Api, PJRT_Buffer_DonateWithControlDependency)
+  PJRT_Api_STRUCT_SIZE = PJRT_STRUCT_SIZE(PJRT_Api, PJRT_Device_PoisonExecution)
 };
 
 #undef _PJRT_API_STRUCT_FIELD

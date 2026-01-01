@@ -7,9 +7,18 @@
     #   that being said, this seems like it may be bringing in gigs of deps (ironically, given the stated motivations)
     #   although i would need to actually check this to be confident in that idea.
     # nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
+
+    xla-src = {
+      # local checkout layout
+      # url = "path:./reference/xla";
+      # For fully remote hermeticity, "" and run (run `nix flake lock`)
+      # Get commit hash with: `git -C reference/xla/ checkout $XLA_TAG && git -C reference/xla/ rev-parse HEAD`
+      url = "github:openxla/xla/913ae2eaa3cb88971003592a90959685a78c9e30";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, nix-gl-host }:
+  outputs = { self, nixpkgs, nix-gl-host, xla-src }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
 
@@ -58,6 +67,11 @@
             pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
               wheelSources = pjrtCudaWheels;
               withHeaders = true;
+            };
+
+          xlaMlirStablehloSdk =
+            pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
+              inherit xla-src;
             };
         in
         {
@@ -134,6 +148,24 @@
                 echo "LD_LIBRARY_PATH injected via nixglhost -p (convenience shell)."
               '';
             };
+
+            xla-mlir = pkgs.mkShellNoCC {
+              packages = with pkgs; [
+                xlaMlirStablehloSdk
+                cmake
+                ninja
+              ];
+
+              shellHook = ''
+                export XLA_CAPI_SDK=${xlaMlirStablehloSdk}
+                export CPATH=$XLA_CAPI_SDK/include:$CPATH
+                export LIBRARY_PATH=$XLA_CAPI_SDK/lib:$LIBRARY_PATH
+                export LD_LIBRARY_PATH=$XLA_CAPI_SDK/lib:$LD_LIBRARY_PATH
+
+                echo "Using XLA-derived MLIR+StableHLO C API SDK:"
+                echo "  XLA_CAPI_SDK=$XLA_CAPI_SDK"
+              '';
+            };
           };
 
           # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
@@ -152,6 +184,9 @@
 
             # devel option includes headers in the bundle
             pjrt-cuda-bundle-devel = pjrtCudaBundleDevel;
+
+            # hermetic MLIR / StableHLO C API SDK derived from XLA
+            xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloSdk;
           };
 
           apps = {
