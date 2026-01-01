@@ -20,7 +20,7 @@
       colors = {
         yellow = "\\033[33m";
         reset = "\\033[0m";
-        green = "\\032[0m";
+        green = "\\033[32m";
       };
 
       mkFor = system:
@@ -65,7 +65,8 @@
           xlaMlirStablehloCapiSdk =
             pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
               inherit lockFile;
-              enableCcache = builtins.getEnv "ZG_IMPURE_CCACHE" == "1";
+              enableCcache = builtins.getEnv "ZG_SDK_IMPURE_CCACHE" == "1";
+              devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
               ccache = pkgs.ccache;
             };
 
@@ -101,11 +102,8 @@
               PJRT_PLUGIN_PATH = "result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
 
               shellHook = ''
-                yellow=${colors.yellow}
-                green=${colors.green}
-                reset=${colors.reset}
                 if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
-                  printf "$yellow[WARNING]$reset PJRT_PLUGIN_PATH=$PJRT_PLUGIN_PATH does not exist. \
+                  printf "${colors.yellow}[WARNING]${colors.reset} PJRT_PLUGIN_PATH=$PJRT_PLUGIN_PATH does not exist. \
                           Leaving the env variable set but you may need to materialize this.\n"
                 fi
                 printf "SDK path: ZG_EXTERNAL_SDK_ROOT=$ZG_EXTERNAL_SDK_ROOT"
