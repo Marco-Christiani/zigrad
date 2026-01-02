@@ -46,10 +46,11 @@ pub fn main() !void {
     // Step 2: Build MLIR IR in memory
     try stdout.print("1. Constructing MLIR IR in memory (via C API)...\n", .{});
 
-    // Create MLIR context and allow unregistered dialects
-    // This avoids needing to link the full StableHLO C++ library
     var mlir_ctx = try mlir.Context.init();
     defer mlir_ctx.deinit();
+
+    // TEMPORARY: Allow unregistered dialects until SDK includes libMLIR.so/libLLVM.so
+    // Proper registration via mlirGetDialectHandle__stablehlo__() requires C++ implementation
     mlir_ctx.allowUnregisteredDialects(true);
 
     const loc = mlir.Location.unknown(mlir_ctx);

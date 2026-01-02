@@ -89,7 +89,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .link_libcpp = true,
+            // NOTE: SDK artifacts were built against libstdc++ ABI, we will NOT link cpp with this flag. See linkMlirStablehloCapi().
+            // .link_libcpp = true,
             .imports = &.{.{ .name = "zigrad", .module = zigrad_mod }},
         }),
     });
@@ -111,7 +112,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .link_libcpp = true,
+            // NOTE: SDK artifacts were built against libstdc++ ABI, we will NOT link cpp with this flag. See linkMlirStablehloCapi().
+            // .link_libcpp = true,
             .imports = &.{.{ .name = "zigrad", .module = zigrad_mod }},
         }),
     });
@@ -130,6 +132,34 @@ pub fn build(b: *std.Build) void {
     b.step("run-m4", "Run the M4 test executable").dependOn(&run_m4_cmd.step);
 
     // ---------------------------------------------------------------------------------------------
+    // M4.2 (custom call boundaries)
+    const exe_m4_custom = b.addExecutable(.{
+        .name = "zigrad-pjrt-m4-custom",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/m4_custom_call.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            // NOTE: SDK artifacts were built against libstdc++ ABI, we will NOT link cpp with this flag. See linkMlirStablehloCapi().
+            // .link_libcpp = true,
+            .imports = &.{.{ .name = "zigrad", .module = zigrad_mod }},
+        }),
+    });
+
+    exe_m4_custom.root_module.addIncludePath(b.path("src"));
+    exe_m4_custom.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
+
+    linkMlirStablehloCapi(b, exe_m4_custom, sdk_lib);
+
+    addRuntimeBundle(b, exe_m4_custom, runtime_root_opt orelse sdk_runtime);
+    b.installArtifact(exe_m4_custom);
+
+    const run_m4_custom_cmd = b.addRunArtifact(exe_m4_custom);
+    run_m4_custom_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_m4_custom_cmd.addArgs(args);
+    b.step("run-m4-custom", "Run the M4.2 custom call test").dependOn(&run_m4_custom_cmd.step);
+
+    // ---------------------------------------------------------------------------------------------
     // Unit tests
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
     const run_lib_tests = b.addRunArtifact(lib_tests);
@@ -137,36 +167,55 @@ pub fn build(b: *std.Build) void {
 }
 
 fn linkMlirStablehloCapi(b: *std.Build, exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
-    // const libs = [_][]const u8{
-    //     "libMLIRCAPIIR.a",
-    //     "libMLIRCAPIArith.a",
-    //     "libMLIRCAPIMath.a",
-    //     "libMLIRCAPISCF.a",
-    //     "libMLIRCAPITransforms.a",
-    //     "libMLIRCAPIFunc.a",
-    //     "libMLIRCAPITensor.a",
-    //     "libStablehloCAPI.a",
-    // };
-    //
-    // inline for (libs) |name| {
-    //     const full = b.fmt("{s}/{s}", .{ sdk_lib, name });
-    //     exe.addObjectFile(.{ .cwd_relative = full });
-    // }
-
-    // Prefer shared libs. This avoids manually enumerating the huge static dependency closure
-    // behind the MLIR C API wrappers.
     exe.addLibraryPath(.{ .cwd_relative = sdk_lib });
 
-    // libMLIR-C.so
+    // Shared MLIR C boundary (we ensured libMLIR-C.so symlink exists in the SDK)
     exe.linkSystemLibrary("MLIR-C");
 
-    // StableHLO C API may be static or shared depending on build; handle both.
-    // If the derivation produces libStablehloCAPI.so, this works.
-    // If it produces only libStablehloCAPI.a, we add it as an object file.
-    exe.linkSystemLibrary("StablehloCAPI");
+    // StableHLO C API is currently a static archive in our SDK.
+    // Link it explicitly so we don't depend on system library resolution.
+    const stablehlo_a = b.fmt("{s}/libStablehloCAPI.a", .{sdk_lib});
+    exe.addObjectFile(.{ .cwd_relative = stablehlo_a });
 
-    _ = b;
+    // C++ runtime: MLIR/StableHLO were built with libstdc++ ABI.
+    exe.linkSystemLibrary("stdc++");
+
+    // dlopen is used by PJRT loader code.
+    exe.linkSystemLibrary("dl");
 }
+
+// OLD -- Kept for reference as we are still determining how to fix the build so dialect registration works
+// fn linkMlirStablehloCapi(b: *std.Build, exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
+//     // const libs = [_][]const u8{
+//     //     "libMLIRCAPIIR.a",
+//     //     "libMLIRCAPIArith.a",
+//     //     "libMLIRCAPIMath.a",
+//     //     "libMLIRCAPISCF.a",
+//     //     "libMLIRCAPITransforms.a",
+//     //     "libMLIRCAPIFunc.a",
+//     //     "libMLIRCAPITensor.a",
+//     //     "libStablehloCAPI.a",
+//     // };
+//     //
+//     // inline for (libs) |name| {
+//     //     const full = b.fmt("{s}/{s}", .{ sdk_lib, name });
+//     //     exe.addObjectFile(.{ .cwd_relative = full });
+//     // }
+//
+//     // Prefer shared libs. This avoids manually enumerating the huge static dependency closure
+//     // behind the MLIR C API wrappers.
+//     exe.addLibraryPath(.{ .cwd_relative = sdk_lib });
+//
+//     // libMLIR-C.so
+//     exe.linkSystemLibrary("MLIR-C");
+//
+//     // StableHLO C API may be static or shared depending on build; handle both.
+//     // If the derivation produces libStablehloCAPI.so, this works.
+//     // If it produces only libStablehloCAPI.a, we add it as an object file.
+//     exe.linkSystemLibrary("StablehloCAPI");
+//
+//     _ = b;
+// }
 
 fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root_opt: ?[]const u8) void {
     const rpaths = [_][]const u8{
@@ -196,6 +245,10 @@ fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root_op
     inline for (rpaths) |p| exe.root_module.addRPathSpecial(p);
     // Dev convenience (to avoid copying gb every build): symlink zig-out/runtime -> runtime_root (if provided)
     if (runtime_root_opt) |runtime_root| {
+        const runtime_root_abs = if (std.fs.path.isAbsolute(runtime_root))
+            runtime_root
+        else
+            std.fs.cwd().realpathAlloc(b.allocator, runtime_root) catch @panic("realpathAlloc failed");
         const link_step = b.addSystemCommand(&[_][]const u8{
             "bash",
             "-lc",
@@ -206,7 +259,7 @@ fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root_op
                 \\prefix="{s}"
                 \\mkdir -p "$prefix"
                 \\ln -sfn "{s}" "$prefix/runtime"
-            , .{ b.install_prefix, runtime_root }) catch @panic("OOM"),
+            , .{ b.install_prefix, runtime_root_abs }) catch @panic("OOM"),
         });
 
         // run after install so prefix exists

@@ -52,3 +52,7 @@ tasks:
   m4:
     deps: [_pjrt, build]
     cmd: ./zig-out/bin/zigrad-pjrt-m4
+
+  m4-custom:
+    deps: [_pjrt, build]
+    cmd: ./zig-out/bin/zigrad-pjrt-m4-custom
