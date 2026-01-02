@@ -274,6 +274,24 @@ stdenv.mkDerivation {
     # MLIR C API headers
     copy_headers "${llvmSrc}/mlir/include/mlir-c" "$out/include/mlir-c"
 
+    # MLIR generated C-API include files.
+    # Needed because mlir-c/*.h includes files like:
+    #   #include 'mlir/Transforms/Transforms.capi.h.inc'
+    # which are generated into the build include tree.
+    if [ -d llvm-build/include/mlir ]; then
+      mkdir -p "$out/include/mlir"
+      cp -r llvm-build/include/mlir/* "$out/include/mlir/"
+    fi
+    if [ -d llvm-build/tools/mlir/include/mlir ]; then
+      mkdir -p "$out/include/mlir"
+      cp -r llvm-build/tools/mlir/include/mlir/* "$out/include/mlir/" || true
+    fi
+    # copy more just to be sure we have full ctx although these are probably all the pre-gen counterparts and above are post-gen.
+    if [ -d "${llvmSrc}/mlir/include/mlir" ]; then
+      mkdir -p "$out/include/mlir"
+      cp -r "${llvmSrc}/mlir/include/mlir/"* "$out/include/mlir/" || true
+    fi
+
     # StableHLO C API headers
     copy_headers "${stablehloSrc}/stablehlo/integrations/c" \
                 "$out/include/stablehlo/integrations/c"

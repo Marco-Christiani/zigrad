@@ -12,8 +12,7 @@ const c = @cImport({
     @cInclude("mlir-c/BuiltinAttributes.h");
     @cInclude("mlir-c/Dialect/Func.h");
     @cInclude("mlir-c/Pass.h");
-    // Transforms.h requires generated headers we dont have yet
-    // @cInclude("mlir-c/Transforms.h");
+    @cInclude("mlir-c/Transforms.h");
 });
 
 const log = std.log.scoped(.mlir);
