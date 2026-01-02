@@ -22,6 +22,8 @@ pub const runtime = struct {
     pub const HostBuffer = buffer.HostBuffer;
 };
 
+pub const diagnostics = @import("diagnostics.zig");
+
 // MLIR/StableHLO
 pub const mlir = struct {
     pub const program = @import("mlir/program.zig");

@@ -8,6 +8,7 @@ const backend = @import("backend.zig");
 const plugin_mod = @import("../pjrt/plugin.zig");
 const pjrt_types = @import("../pjrt/types.zig");
 const pjrt_api = @import("../pjrt/api.zig");
+const reporting = @import("reporting.zig");
 
 const Backend = backend.Backend;
 const Device = backend.Device;
@@ -21,11 +22,15 @@ pub const PjrtBackend = struct {
     api: pjrt_api.Api,
     client: pjrt_types.Client,
     allocator: std.mem.Allocator,
+    plugin_path: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, plugin_path: []const u8) !Backend {
         // Load PJRT plugin
         const api = try plugin_mod.loadPlugin(plugin_path);
         errdefer plugin_mod.unloadPlugin(api);
+
+        const plugin_path_copy = try allocator.dupe(u8, plugin_path);
+        errdefer allocator.free(plugin_path_copy);
 
         // Allocate backend state first
         const self = try allocator.create(PjrtBackend);
@@ -33,6 +38,7 @@ pub const PjrtBackend = struct {
             .api = api,
             .client = undefined, // will be initialized below
             .allocator = allocator,
+            .plugin_path = plugin_path_copy,
         };
         errdefer allocator.destroy(self);
 
@@ -57,6 +63,7 @@ pub const PjrtBackend = struct {
         const self: *PjrtBackend = @ptrCast(@alignCast(ptr));
         self.client.deinit();
         plugin_mod.unloadPlugin(self.api);
+        self.allocator.free(self.plugin_path);
         self.allocator.destroy(self);
     }
 
@@ -89,6 +96,10 @@ pub const PjrtBackend = struct {
         const self: *PjrtBackend = @ptrCast(@alignCast(ptr));
         const dev_wrapper: *PjrtDeviceWrapper = @ptrCast(@alignCast(device.ptr));
 
+        var report = reporting.emitCompileReport(self.allocator, &self.api, self.plugin_path, options) catch
+            return backend.Error.OutOfMemory;
+        errdefer report.deinit(self.allocator);
+
         // Convert format
         const format: pjrt_types.ProgramFormat = switch (options.format) {
             .stablehlo_mlir_text, .mlir_text => .mlir_text,
@@ -108,6 +119,7 @@ pub const PjrtBackend = struct {
         exec_wrapper.* = PjrtExecutableWrapper{
             .pjrt_executable = pjrt_exec,
             .allocator = self.allocator,
+            .report = report,
         };
 
         return Executable{
@@ -211,6 +223,7 @@ const PjrtDeviceWrapper = struct {
 const PjrtExecutableWrapper = struct {
     pjrt_executable: pjrt_types.LoadedExecutable,
     allocator: std.mem.Allocator,
+    report: reporting.CompileReport,
 
     const vtable = Executable.VTable{
         .deinit = deinitImpl,
@@ -221,11 +234,14 @@ const PjrtExecutableWrapper = struct {
     fn deinitImpl(ptr: *anyopaque) void {
         const self: *PjrtExecutableWrapper = @ptrCast(@alignCast(ptr));
         self.pjrt_executable.deinit();
+        self.report.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
     fn executeImpl(ptr: *anyopaque, inputs: []const Buffer, allocator: std.mem.Allocator) backend.Error!ExecuteResult {
         const self: *PjrtExecutableWrapper = @ptrCast(@alignCast(ptr));
+
+        reporting.emitExecuteReport(&self.report);
 
         // Unwrap input buffers
         const pjrt_inputs = try allocator.alloc(pjrt_types.Buffer, inputs.len);

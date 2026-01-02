@@ -4,6 +4,7 @@
 pub const c = @cImport({
     @cInclude("dlfcn.h");
     @cInclude("xla/pjrt/c/pjrt_c_api.h");
+    @cInclude("xla/pjrt/c/pjrt_c_api_gpu_extension.h");
 });
 
 // Re-export commonly used types
