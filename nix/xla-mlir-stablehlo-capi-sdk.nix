@@ -246,22 +246,58 @@ stdenv.mkDerivation {
     mkdir -p "$out/include" "$out/lib"
 
     # Devel path: copy everything
+    # Devel path: copy everything (but keep the curated include layout as a superset)
     if [ "${lib.boolToString devel}" = "true" ]; then
-      log "Devel mode enabled: copying ALL build artifacts"
+      log "Devel mode enabled: copying ALL build artifacts (curated layout + full dumps)"
 
-      # Copy everything we built, verbatim, for inspection/debugging
+      # 1) Install curated headers so a single SDK root works for Zig @cImport
+      copy_headers "${llvmSrc}/mlir/include/mlir-c" "$out/include/mlir-c"
 
-      mkdir -p "$out/include/llvm" "$out/include/stablehlo"
+      # MLIR generated + source headers required by mlir-c/*
+      if [ -d llvm-build/include/mlir ]; then
+        mkdir -p "$out/include/mlir"
+        cp -r llvm-build/include/mlir/* "$out/include/mlir/"
+      fi
+      if [ -d llvm-build/tools/mlir/include/mlir ]; then
+        mkdir -p "$out/include/mlir"
+        cp -r llvm-build/tools/mlir/include/mlir/* "$out/include/mlir/" || true
+      fi
+      if [ -d "${llvmSrc}/mlir/include/mlir" ]; then
+        mkdir -p "$out/include/mlir"
+        cp -r "${llvmSrc}/mlir/include/mlir/"* "$out/include/mlir/" || true
+      fi
 
-      cp -r "${llvmSrc}/mlir/include" "$out/include/llvm/"
-      cp -r "${stablehloSrc}/stablehlo" "$out/include/stablehlo/"
+      copy_headers "${stablehloSrc}/stablehlo/integrations/c" \
+                   "$out/include/stablehlo/integrations/c"
 
-      cp -r "${xlaSrc}/xla/pjrt" "$out/include/xla/"
+      mkdir -p "$out/include/xla/pjrt/c"
+      cp -v "${xlaSrc}/xla/pjrt/c/"*.h "$out/include/xla/pjrt/c/"
 
-      # Copy all libs produced by LLVM + StableHLO builds
+      # 2) Dump full source headers under a separate namespace for inspection
+      # Dereference symlinks so we never write through to /nix/store
+      log "Devel: resetting _full dump dir"
+      rm -rf "$out/include/_full"
+      mkdir -p "$out/include/_full/llvm/include" "$out/include/_full/llvm/mlir_include" \
+              "$out/include/_full/stablehlo" "$out/include/_full/xla"
+
+      log "Devel: dumping full LLVM/MLIR headers (dereferenced)"
+      cp -rL "${llvmSrc}/llvm/include/"* "$out/include/_full/llvm/include/"
+      cp -rL "${llvmSrc}/mlir/include/"* "$out/include/_full/llvm/mlir_include/"
+
+      log "Devel: dumping full StableHLO + XLA PJRT headers (dereferenced)"
+      cp -rL "${stablehloSrc}/stablehlo" "$out/include/_full/stablehlo/"
+      cp -rL "${xlaSrc}/xla/pjrt" "$out/include/_full/xla/"
+
+      # 3) Copy all libs produced by LLVM + StableHLO builds
       find llvm-build stablehlo-build -type f \
         \( -name "*.a" -o -name "*.so*" \) \
         -print -exec cp -v {} "$out/lib/" \;
+
+      # Ensure linker-visible MLIR-C name exists if a versioned .so was produced
+      mlir_c_so="$(ls -1 "$out/lib/libMLIR-C.so."* 2>/dev/null | head -n1 || true)"
+      if [ -n "$mlir_c_so" ]; then
+        ln -sfn "$(basename "$mlir_c_so")" "$out/lib/libMLIR-C.so"
+      fi
 
       log "Devel SDK install complete (no validation performed)"
       exit 0
