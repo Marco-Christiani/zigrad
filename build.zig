@@ -167,15 +167,16 @@ pub fn build(b: *std.Build) void {
 }
 
 fn linkMlirStablehloCapi(b: *std.Build, exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
+    _ = b;
     exe.addLibraryPath(.{ .cwd_relative = sdk_lib });
 
     // Shared MLIR C boundary (we ensured libMLIR-C.so symlink exists in the SDK)
     exe.linkSystemLibrary("MLIR-C");
 
-    // StableHLO C API is currently a static archive in our SDK.
-    // Link it explicitly so we don't depend on system library resolution.
-    const stablehlo_a = b.fmt("{s}/libStablehloCAPI.a", .{sdk_lib});
-    exe.addObjectFile(.{ .cwd_relative = stablehlo_a });
+    // StableHLO C API is not needed for the raw op-construction path.
+    // Avoid pulling in its C++ symbol dependencies.
+    // const stablehlo_a = b.fmt("{s}/libStablehloCAPI.a", .{sdk_lib});
+    // exe.addObjectFile(.{ .cwd_relative = stablehlo_a });
 
     // C++ runtime: MLIR/StableHLO were built with libstdc++ ABI.
     exe.linkSystemLibrary("stdc++");
