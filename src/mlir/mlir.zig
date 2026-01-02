@@ -6,13 +6,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("mlir-c/IR.h");
     @cInclude("mlir-c/BuiltinTypes.h");
     @cInclude("mlir-c/BuiltinAttributes.h");
     @cInclude("mlir-c/Dialect/Func.h");
     @cInclude("mlir-c/Pass.h");
     @cInclude("mlir-c/Transforms.h");
+    @cInclude("stablehlo/integrations/c/StablehloDialect.h");
+    @cInclude("stablehlo/integrations/c/StablehloAttributes.h");
+    @cInclude("stablehlo/integrations/c/StablehloTypes.h");
 });
 
 const log = std.log.scoped(.mlir);

@@ -7,11 +7,35 @@ const std = @import("std");
 const mlir = @import("../mlir.zig");
 
 // Use the shared c namespace from mlir.zig to avoid type incompatibility
-// The mlir.zig already includes stablehlo headers
-const c = @cImport({
-    @cInclude("stablehlo/integrations/c/StablehloAttributes.h");
-    @cInclude("stablehlo/integrations/c/StablehloTypes.h");
-});
+const c = mlir.c;
+
+fn BoundedArray(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        buffer: [capacity]T = undefined,
+        len: usize = 0,
+
+        const Self = @This();
+
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
+            self.buffer[self.len] = item;
+            self.len += 1;
+        }
+
+        pub fn appendSliceAssumeCapacity(self: *Self, items: []const T) void {
+            @memcpy(self.buffer[self.len..][0..items.len], items);
+            self.len += items.len;
+        }
+
+        pub fn appendSlice(self: *Self, items: []const T) error{Overflow}!void {
+            if (self.len + items.len > capacity) return error.Overflow;
+            self.appendSliceAssumeCapacity(items);
+        }
+
+        pub fn constSlice(self: *const Self) []const T {
+            return self.buffer[0..self.len];
+        }
+    };
+}
 
 pub const abs = functors.unary_fn("stablehlo.abs").call;
 pub const cosine = functors.unary_fn("stablehlo.cosine").call;
@@ -762,7 +786,7 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         std.debug.assert(backend_config.isA(mlir.DictionaryAttribute));
     }
 
-    var attrs = std.BoundedArray(mlir.AttrTuple, 32){};
+    var attrs = BoundedArray(mlir.AttrTuple, 32){};
     attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
         .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
         .{ "call_target_name", .string(ctx, opts.call_target_name) },
@@ -771,7 +795,7 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     });
 
     {
-        var output_operand_aliases = std.BoundedArray(mlir.Attribute, MAX_RESULTS){};
+        var output_operand_aliases = BoundedArray(mlir.Attribute, MAX_RESULTS){};
         for (opts.output_operand_aliases) |alias| {
             output_operand_aliases.appendAssumeCapacity(
                 OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
@@ -790,14 +814,14 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     };
 
     if (opts.operand_layouts) |layouts| {
-        var operand_layouts = std.BoundedArray(mlir.Attribute, MAX_OPERANDS){};
+        var operand_layouts = BoundedArray(mlir.Attribute, MAX_OPERANDS){};
         for (layouts) |ol| {
             operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
         }
         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
     } else {
         const operand_layouts = blk: {
-            var ret = std.BoundedArray(mlir.Attribute, MAX_OPERANDS){};
+            var ret = BoundedArray(mlir.Attribute, MAX_OPERANDS){};
             for (inputs) |input| {
                 const ranked_type = input.getType().as(mlir.RankedTensorType).?;
                 const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
@@ -809,14 +833,14 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     }
 
     if (opts.result_layouts) |layouts| {
-        var result_layouts = std.BoundedArray(mlir.Attribute, MAX_RESULTS){};
+        var result_layouts = BoundedArray(mlir.Attribute, MAX_RESULTS){};
         for (layouts) |rl| {
             result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
         }
         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
     } else {
         const result_layouts = blk: {
-            var ret = std.BoundedArray(mlir.Attribute, MAX_RESULTS){};
+            var ret = BoundedArray(mlir.Attribute, MAX_RESULTS){};
             for (res_types) |t| {
                 const ranked_t = t.as(mlir.RankedTensorType).?;
                 const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];
