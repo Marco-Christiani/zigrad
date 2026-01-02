@@ -1,14 +1,7 @@
 /// M1 Milestone Test: Basic PJRT Execution
-///
-/// Demonstrates:
-/// 1. Loading PJRT plugin
-/// 2. Compiling a simple StableHLO program (add op)
-/// 3. Creating input buffers
-/// 4. Executing the program
-/// 5. Reading back results
-/// 6. Verifying numerical correctness
 const std = @import("std");
 const zigrad = @import("zigrad");
+const term_color = @import("util/term_color.zig");
 
 const Backend = zigrad.Backend;
 const HostBuffer = zigrad.HostBuffer;
@@ -29,27 +22,25 @@ pub fn main() !void {
         error.WriteFailed => @panic("write failed on flush"),
     };
 
-    try stdout.print("=== Zigrad PJRT/XLA Backend Prototype - M1 Test ===\n", .{});
+    var tty = term_color.Tty.initForStderr(stdout);
+    try stdout.print("Zigrad PJRT/XLA backend (M1)\n", .{});
 
-    // Step 1: Get plugin path
     const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |err| {
-        try stdout.print("Error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
+        try tty.print(.red, "error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
         return err;
     };
     defer allocator.free(plugin_path);
 
-    try stdout.print("1. Loading PJRT plugin from: {s}\n", .{plugin_path});
+    try stdout.print("Loading PJRT plugin from: {s}\n", .{plugin_path});
 
-    // Step 2: Initialize backend
     var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
-        try stdout.print("   ✗ Failed to initialize backend: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Failed to initialize backend: {s}\n", .{@errorName(err)});
         return err;
     };
     defer backend.deinit();
-    try stdout.print("   ✓ Backend initialized\n", .{});
+    try tty.print(.green, "Backend initialized\n", .{});
 
-    // Step 3: Get devices
-    try stdout.print("2. Querying devices...\n", .{});
+    try stdout.print("Querying devices...\n", .{});
     const devices = try backend.getDevices(allocator);
     defer {
         for (devices) |device| {
@@ -59,17 +50,16 @@ pub fn main() !void {
     }
 
     if (devices.len == 0) {
-        try stdout.print("   ✗ No devices found\n", .{});
+        try tty.print(.red, "No devices found\n", .{});
         return error.NoDevices;
     }
 
-    try stdout.print("   ✓ Found {d} device(s)\n", .{devices.len});
+    try tty.print(.green, "Found {d} device(s)\n", .{devices.len});
     const device = &devices[0];
     const device_kind = device.getKind();
     const device_id = try device.getId();
     try stdout.print("   Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
 
-    // Step 4: Load or create program
     const program_text =
         \\func.func @main(%arg0: tensor<4xf32>, %arg1: tensor<4xf32>) -> tensor<4xf32> {
         \\  %0 = stablehlo.add %arg0, %arg1 : tensor<4xf32>
@@ -77,13 +67,12 @@ pub fn main() !void {
         \\}
     ;
 
-    try stdout.print("3. Creating StableHLO program (elementwise add)...\n", .{});
+    try stdout.print("Creating StableHLO program (elementwise add)...\n", .{});
     var program = try Program.fromBytecode(allocator, .mlir_text, program_text);
     defer program.deinit();
-    try stdout.print("   ✓ Program created\n", .{});
+    try tty.print(.green, "Program created\n", .{});
 
-    // Step 5: Compile program
-    try stdout.print("4. Compiling program...\n", .{});
+    try stdout.print("Compiling program...\n", .{});
     const compile_options = zigrad.CompileOptions{
         .format = .stablehlo_mlir_text,
         .bytecode = program.bytecode,
@@ -93,14 +82,13 @@ pub fn main() !void {
     };
 
     var executable = backend.compile(device, compile_options) catch |err| {
-        try stdout.print("   ✗ Compilation failed: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Compilation failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer executable.deinit();
-    try stdout.print("   ✓ Compilation succeeded\n", .{});
+    try tty.print(.green, "Compilation succeeded\n", .{});
 
-    // Step 6: Prepare inputs
-    try stdout.print("5. Preparing input buffers...\n", .{});
+    try stdout.print("Preparing input buffers...\n", .{});
 
     var input_a = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
     var input_b = [_]f32{ 5.0, 6.0, 7.0, 8.0 };
@@ -120,33 +108,30 @@ pub fn main() !void {
     try buf_b.print(stdout);
     try stdout.print("\n", .{});
 
-    // Step 7: Upload to device
-    try stdout.writeAll("6. Uploading buffers to device...\n");
+    try stdout.writeAll("Uploading buffers to device...\n");
     const dev_buf_a = try backend.bufferFromHost(device, buf_a.data, .f32, shape);
     defer dev_buf_a.deinit();
     const dev_buf_b = try backend.bufferFromHost(device, buf_b.data, .f32, shape);
     defer dev_buf_b.deinit();
 
     const inputs = [_]zigrad.Buffer{ dev_buf_a, dev_buf_b };
-    try stdout.writeAll("   ✓ Buffers uploaded\n\n");
+    try tty.print(.green, "Buffers uploaded\n", .{});
 
-    // Step 8: Execute
-    try stdout.writeAll("7. Executing program...\n");
+    try stdout.writeAll("Executing program...\n");
     var result = executable.execute(&inputs, allocator) catch |err| {
-        try stdout.print("   ✗ Execution failed: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Execution failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer result.deinit(allocator);
 
     if (result.outputs.len == 0) {
-        try stdout.writeAll("   ✗ No outputs returned\n");
+        try tty.print(.red, "No outputs returned\n", .{});
         return error.NoOutputs;
     }
 
-    try stdout.print("   ✓ Execution succeeded ({d} output(s))\n\n", .{result.outputs.len});
+    try tty.print(.green, "Execution succeeded ({d} output(s))\n", .{result.outputs.len});
 
-    // Step 9: Read back results
-    try stdout.writeAll("8. Reading results from device...\n");
+    try stdout.writeAll("Reading results from device...\n");
     const output_buffer = result.outputs[0];
 
     var output_host = try HostBuffer.init(allocator, shape, .f32);
@@ -161,24 +146,23 @@ pub fn main() !void {
     try output_host.print(stdout);
     try stdout.writeAll("\n");
 
-    // Step 10: Verify correctness
-    try stdout.writeAll("9. Verifying numerical correctness...\n");
+    try stdout.writeAll("Verifying numerical correctness...\n");
     const output_slice = output_host.asSlice(f32);
 
     var all_correct = true;
     for (output_slice, 0..) |val, i| {
         const diff = @abs(val - expected[i]);
         if (diff > 1e-5) {
-            try stdout.print("   ✗ Mismatch at index {d}: got {d:.2}, expected {d:.2}\n", .{ i, val, expected[i] });
+            try tty.print(.red, "Mismatch at index {d}: got {d:.2}, expected {d:.2}\n", .{ i, val, expected[i] });
             all_correct = false;
         }
     }
 
     if (all_correct) {
-        try stdout.writeAll("   ✓ All values correct!\n\n");
-        try stdout.writeAll("=== M1 PASSED ===\n");
+        try tty.print(.green, "All values correct\n", .{});
+        try tty.print(.green, "M1 PASSED\n", .{});
     } else {
-        try stdout.writeAll("\n=== M1 FAILED ===\n");
+        try tty.print(.red, "M1 FAILED\n", .{});
         return error.NumericalMismatch;
     }
 }

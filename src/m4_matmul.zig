@@ -1,18 +1,10 @@
 /// M4 Milestone Test: In-Memory MLIR IR Construction
-///
-/// Tests:
-/// - In-memory IR construction via MLIR C API (no string templates)
-/// - Using StableHLO dialect via Zig APIs
-/// - MLIR module serialization to bytecode
-/// - Numerical correctness against M2
-/// - Demonstrates full control over IR generation
-///
-/// This replaces M2's string-based IR with programmatic construction,
-/// proving we can interpose compiler logic at the IR level.
 const std = @import("std");
 const zigrad = @import("zigrad");
 const mlir = @import("mlir/mlir.zig");
+const mlir_diag = @import("mlir/diagnostics.zig");
 const stablehlo = @import("mlir/dialects/stablehlo.zig");
+const term_color = @import("util/term_color.zig");
 
 const Backend = zigrad.Backend;
 const HostBuffer = zigrad.HostBuffer;
@@ -32,26 +24,36 @@ pub fn main() !void {
         error.WriteFailed => @panic("write failed on flush"),
     };
 
-    try stdout.print("=== Zigrad PJRT/XLA Backend Prototype - M4.1 Test ===\n", .{});
-    try stdout.print("=== In-Memory MLIR IR Construction ===\n\n", .{});
+    var tty = term_color.Tty.initForStderr(stdout);
+    try stdout.print("Zigrad PJRT/XLA backend (M4.1)\n", .{});
 
-    // Step 1: Get plugin path from environment
     const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |err| {
-        try stdout.print("Error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
-        try stdout.print("Please set PJRT_PLUGIN_PATH to the path of your PJRT plugin.\n", .{});
+        try tty.print(.red, "error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
+        try stdout.print("Set PJRT_PLUGIN_PATH to the path of your PJRT plugin.\n", .{});
         return err;
     };
     defer allocator.free(plugin_path);
 
-    // Step 2: Build MLIR IR in memory
-    try stdout.print("1. Constructing MLIR IR in memory (via C API)...\n", .{});
+    try stdout.print("Constructing MLIR IR in memory (via C API)...\n", .{});
 
     var mlir_ctx = try mlir.Context.init();
     defer mlir_ctx.deinit();
 
-    // TEMPORARY: Allow unregistered dialects until SDK includes libMLIR.so/libLLVM.so
-    // Proper registration via mlirGetDialectHandle__stablehlo__() requires C++ implementation
+    // Default: allow unregistered dialects to keep the C-path working.
     mlir_ctx.allowUnregisteredDialects(true);
+    zigrad.diagnostics.markUnregisteredDialects();
+    try tty.print(.yellow, "allowUnregisteredDialects enabled (default)\n", .{});
+    const diag = mlir_diag.checkStablehloDialectSupport();
+    try stdout.print(
+        "   ! Dialect registration diagnostics: issue={s} missing_libmlir={any} missing_libllvm={any} symbol_in_process={any} symbol_in_libmlir={any}\n",
+        .{
+            @tagName(diag.issue),
+            diag.missing_libmlir,
+            diag.missing_libllvm,
+            diag.symbol_in_process,
+            diag.symbol_in_libmlir,
+        },
+    );
 
     const loc = mlir.Location.unknown(mlir_ctx);
 
@@ -103,7 +105,7 @@ pub fn main() !void {
     // Add function to module
     module.getBody().appendOperation(func_op);
 
-    try stdout.print("   ✓ IR constructed: func.func @main with stablehlo.dot\n", .{});
+    try tty.print(.green, "IR constructed: func.func @main with stablehlo.dot\n", .{});
 
     // Print IR to verify (debug)
     if (false) {
@@ -115,8 +117,7 @@ pub fn main() !void {
         try stdout.print("--- End IR ---\n\n", .{});
     }
 
-    // Step 3: Serialize module to bytecode
-    try stdout.print("2. Serializing MLIR module to bytecode...\n", .{});
+    try stdout.print("Serializing MLIR module to bytecode...\n", .{});
 
     // serialize
     var bytecode_buffer_fixed: [1024 * 1024]u8 = undefined;
@@ -126,23 +127,20 @@ pub fn main() !void {
     const bytecode_buffer = try allocator.dupe(u8, bytecode_writer.buffered());
     defer allocator.free(bytecode_buffer);
 
-    try stdout.print("   ✓ Bytecode generated ({d} bytes)\n", .{bytecode_buffer.len});
+    try tty.print(.green, "Bytecode generated ({d} bytes)\n", .{bytecode_buffer.len});
 
-    // Step 4: Create Program from bytecode
     var program = try Program.fromBytecode(allocator, .mlir_bytecode, bytecode_buffer);
     defer program.deinit();
 
-    // Step 5: Initialize backend
-    try stdout.print("3. Loading PJRT plugin from: {s}\n", .{plugin_path});
+    try stdout.print("Loading PJRT plugin from: {s}\n", .{plugin_path});
     var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
-        try stdout.print("   ✗ Failed to initialize backend: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Failed to initialize backend: {s}\n", .{@errorName(err)});
         return err;
     };
     defer backend.deinit();
-    try stdout.print("   ✓ Backend initialized\n", .{});
+    try tty.print(.green, "Backend initialized\n", .{});
 
-    // Step 6: Get devices
-    try stdout.print("4. Querying devices...\n", .{});
+    try stdout.print("Querying devices...\n", .{});
     const devices = try backend.getDevices(allocator);
     defer {
         for (devices) |device| {
@@ -152,18 +150,17 @@ pub fn main() !void {
     }
 
     if (devices.len == 0) {
-        try stdout.print("   ✗ No devices found\n", .{});
+        try tty.print(.red, "No devices found\n", .{});
         return error.NoDevices;
     }
 
-    try stdout.print("   ✓ Found {d} device(s)\n", .{devices.len});
+    try tty.print(.green, "Found {d} device(s)\n", .{devices.len});
     const device = &devices[0];
     const device_kind = device.getKind();
     const device_id = try device.getId();
     try stdout.print("   Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
 
-    // Step 7: Compile program
-    try stdout.print("5. Compiling program...\n", .{});
+    try stdout.print("Compiling program...\n", .{});
     const compile_options = zigrad.CompileOptions{
         .format = .mlir_bytecode,
         .bytecode = program.bytecode,
@@ -173,14 +170,13 @@ pub fn main() !void {
     };
 
     var executable = backend.compile(device, compile_options) catch |err| {
-        try stdout.print("   ✗ Compilation failed: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Compilation failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer executable.deinit();
-    try stdout.print("   ✓ Compilation succeeded\n", .{});
+    try tty.print(.green, "Compilation succeeded\n", .{});
 
-    // Step 8: Prepare inputs (same as M2)
-    try stdout.print("6. Preparing input matrices...\n", .{});
+    try stdout.print("Preparing input matrices...\n", .{});
 
     // Matrix A: 2x3
     // [[1, 2, 3],
@@ -224,39 +220,36 @@ pub fn main() !void {
     try buf_b.print(stdout);
     try stdout.print("\n", .{});
 
-    // Step 9: Upload to device
-    try stdout.print("7. Uploading matrices to device...\n", .{});
+    try stdout.print("Uploading matrices to device...\n", .{});
     const dev_buf_a = try backend.bufferFromHost(device, buf_a.data, .f32, shape_a);
     defer dev_buf_a.deinit();
     const dev_buf_b = try backend.bufferFromHost(device, buf_b.data, .f32, shape_b);
     defer dev_buf_b.deinit();
 
     const inputs = [_]zigrad.Buffer{ dev_buf_a, dev_buf_b };
-    try stdout.print("   ✓ Matrices uploaded\n\n", .{});
+    try tty.print(.green, "Matrices uploaded\n", .{});
 
-    // Step 10: Execute
-    try stdout.print("8. Executing matrix multiplication...\n", .{});
+    try stdout.print("Executing matrix multiplication...\n", .{});
     var result = executable.execute(&inputs, allocator) catch |err| {
-        try stdout.print("   ✗ Execution failed: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Execution failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer result.deinit(allocator);
 
     if (result.outputs.len == 0) {
-        try stdout.print("   ✗ No outputs returned\n", .{});
+        try tty.print(.red, "No outputs returned\n", .{});
         return error.NoOutputs;
     }
 
-    try stdout.print("   ✓ Execution succeeded ({d} output(s))\n\n", .{result.outputs.len});
+    try tty.print(.green, "Execution succeeded ({d} output(s))\n", .{result.outputs.len});
 
-    // Step 11: Read back results
-    try stdout.print("9. Reading result matrix from device...\n", .{});
+    try stdout.print("Reading result matrix from device...\n", .{});
     const output_buffer = result.outputs[0];
 
     // Verify output shape
     const output_shape = output_buffer.getShape();
     if (output_shape.dims.len != 2 or output_shape.dims[0] != 2 or output_shape.dims[1] != 2) {
-        try stdout.print("   ✗ Unexpected output shape: expected [2, 2], got [", .{});
+        try tty.print(.red, "Unexpected output shape: expected [2, 2], got [", .{});
         for (output_shape.dims, 0..) |dim, i| {
             if (i > 0) try stdout.print(", ", .{});
             try stdout.print("{d}", .{dim});
@@ -277,8 +270,7 @@ pub fn main() !void {
     try output_host.print(stdout);
     try stdout.print("\n", .{});
 
-    // Step 12: Verify correctness
-    try stdout.print("10. Verifying numerical correctness vs M2 baseline...\n", .{});
+    try stdout.print("Verifying numerical correctness vs M2 baseline...\n", .{});
     const output_slice = output_host.asSlice(f32);
 
     var all_correct = true;
@@ -287,17 +279,16 @@ pub fn main() !void {
         const col = i % 2;
         const diff = @abs(val - expected[i]);
         if (diff > 1e-5) {
-            try stdout.print("   ✗ Mismatch at [{d},{d}]: got {d:.2}, expected {d:.2}\n", .{ row, col, val, expected[i] });
+            try tty.print(.red, "Mismatch at [{d},{d}]: got {d:.2}, expected {d:.2}\n", .{ row, col, val, expected[i] });
             all_correct = false;
         }
     }
 
     if (all_correct) {
-        try stdout.print("   ✓ All values match M2 baseline!\n\n", .{});
-        try stdout.print("=== M4.1 PASSED ===\n", .{});
-        try stdout.print("Success: In-memory IR construction produces identical results to M2\n", .{});
+        try tty.print(.green, "All values match M2 baseline\n", .{});
+        try tty.print(.green, "M4.1 PASSED\n", .{});
     } else {
-        try stdout.print("\n=== M4.1 FAILED ===\n", .{});
+        try tty.print(.red, "M4.1 FAILED\n", .{});
         return error.NumericalMismatch;
     }
 }

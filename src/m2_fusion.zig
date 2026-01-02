@@ -1,17 +1,7 @@
 /// M2 Milestone: Get evidence of optimization (op fusion)
-///
-/// Goal:
-/// - Compile+execute a long elementwise chain on a large tensor
-/// - Verify numerical correctness against a CPU reference
-/// - (If enabled) XLA HLO dumping and summarize any evidence of fusion we find
-///
-/// Env vars:
-/// - Plugin path: `PJRT_PLUGIN_PATH`
-/// - (If enabled) Dumping:
-///   - `ZIGRAD_XLA_DUMP=1` to auto-configure `XLA_FLAGS` for HLO text dumps
-///   - `ZIGRAD_XLA_DUMP_TO=<path>` to override dump directory (default: artifacts/xla_dumps/<ts>-<pid>)
 const std = @import("std");
 const zigrad = @import("zigrad");
+const term_color = @import("util/term_color.zig");
 
 const HostBuffer = zigrad.HostBuffer;
 const Shape = zigrad.Shape;
@@ -35,7 +25,8 @@ pub fn main() !void {
         error.WriteFailed => @panic("write failed on flush"),
     };
 
-    try out.print("=== Zigrad PJRT/XLA Backend Prototype - M2 Fusion Proof ===\n", .{});
+    var tty = term_color.Tty.initForStderr(out);
+    try out.print("Zigrad PJRT/XLA backend (M2 fusion proof)\n", .{});
 
     const dump_cfg = try DumpConfig.init(allocator, out);
     defer dump_cfg.deinit(allocator);
@@ -43,15 +34,15 @@ pub fn main() !void {
     const plugin_path = try getPluginPath(allocator, out);
     defer allocator.free(plugin_path);
 
-    try out.print("1. Loading PJRT plugin from: {s}\n", .{plugin_path});
+    try out.print("Loading PJRT plugin from: {s}\n", .{plugin_path});
     var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
-        try out.print("   ✗ Failed to initialize backend: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Failed to initialize backend: {s}\n", .{@errorName(err)});
         return err;
     };
     defer backend.deinit();
-    try out.print("   ✓ Backend initialized\n", .{});
+    try tty.print(.green, "Backend initialized\n", .{});
 
-    try out.print("2. Querying devices...\n", .{});
+    try out.print("Querying devices...\n", .{});
     const devices = try backend.getDevices(allocator);
     defer {
         for (devices) |device| device.deinit();
@@ -62,18 +53,18 @@ pub fn main() !void {
     const device = &devices[0];
     const device_kind = device.getKind();
     const device_id = try device.getId();
-    try out.print("   ✓ Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
+    try tty.print(.green, "Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
 
     const shape = Shape{ .dims = &[_]usize{ 1024, 1024 } };
     const element_count: usize = 1024 * 1024;
 
-    try out.print("3. Building StableHLO program (elementwise chain, f32[1024x1024])...\n", .{});
+    try out.print("Building StableHLO program (elementwise chain, f32[1024x1024])...\n", .{});
     const program_text = fusionProgramText();
     var program = try Program.fromBytecode(allocator, .mlir_text, program_text);
     defer program.deinit();
-    try out.print("   ✓ Program created\n", .{});
+    try tty.print(.green, "Program created\n", .{});
 
-    try out.print("4. Compiling program...\n", .{});
+    try out.print("Compiling program...\n", .{});
     const compile_options = zigrad.CompileOptions{
         .format = .stablehlo_mlir_text,
         .bytecode = program.bytecode,
@@ -83,17 +74,17 @@ pub fn main() !void {
     };
 
     var executable = backend.compile(device, compile_options) catch |err| {
-        try out.print("   ✗ Compilation failed: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Compilation failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer executable.deinit();
-    try out.print("   ✓ Compilation succeeded\n", .{});
+    try tty.print(.green, "Compilation succeeded\n", .{});
 
     if (dump_cfg.enabled) {
         try out.print("   Dump dir: {s}\n", .{dump_cfg.dump_dir});
     }
 
-    try out.print("5. Preparing input tensors...\n", .{});
+    try out.print("Preparing input tensors...\n", .{});
     const input_a = try allocator.alloc(f32, element_count);
     defer allocator.free(input_a);
     const input_b = try allocator.alloc(f32, element_count);
@@ -109,22 +100,22 @@ pub fn main() !void {
     var host_b = try HostBuffer.fromSlice(allocator, input_b, shape, .f32);
     defer host_b.deinit();
 
-    try out.print("6. Uploading tensors to device...\n", .{});
+    try out.print("Uploading tensors to device...\n", .{});
     const dev_a = try backend.bufferFromHost(device, host_a.data, .f32, shape);
     defer dev_a.deinit();
     const dev_b = try backend.bufferFromHost(device, host_b.data, .f32, shape);
     defer dev_b.deinit();
     const inputs = [_]zigrad.Buffer{ dev_a, dev_b };
 
-    try out.print("7. Executing...\n", .{});
+    try out.print("Executing...\n", .{});
     var result = executable.execute(&inputs, allocator) catch |err| {
-        try out.print("   ✗ Execution failed: {s}\n", .{@errorName(err)});
+        try tty.print(.red, "Execution failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer result.deinit(allocator);
     if (result.outputs.len != 1) return error.UnexpectedOutputCount;
 
-    try out.print("8. Reading output back...\n", .{});
+    try out.print("Reading output back...\n", .{});
     const output_buffer = result.outputs[0];
     const out_shape = output_buffer.getShape();
     if (out_shape.dims.len != 2 or out_shape.dims[0] != 1024 or out_shape.dims[1] != 1024) return error.ShapeMismatch;
@@ -135,7 +126,7 @@ pub fn main() !void {
     defer transfer_event.deinit();
     try transfer_event.await_();
 
-    try out.print("9. Verifying correctness...\n", .{});
+    try out.print("Verifying correctness...\n", .{});
     const got = host_out.asSlice(f32);
     const stats = compareOutputs(got, ref_out);
     try out.print(
@@ -145,7 +136,7 @@ pub fn main() !void {
     if (stats.mismatch_count != 0) return error.NumericalMismatch;
 
     if (dump_cfg.enabled) {
-        try out.print("10. Dump summary...\n", .{});
+        try out.print("Dump summary...\n", .{});
         const summary = try summarizeXlaDumps(allocator, dump_cfg.dump_dir);
         try out.print(
             "   hlo_files_scanned={d} bytes_scanned={d} fusion_occurrences={d} elementwise_occurrences={d} fusion_per_elementwise={d:.4}\n",
@@ -161,10 +152,10 @@ pub fn main() !void {
             try out.print("   NOTE: no dump files found. Plugin may not honor XLA_FLAGS on CPU.\n", .{});
         }
     } else {
-        try out.print("   (XLA dump disabled. Set ZIGRAD_XLA_DUMP=1 for evidence via XLA_FLAGS)\n", .{});
+        try out.print("XLA dump disabled (set ZIGRAD_XLA_DUMP=1 to enable)\n", .{});
     }
 
-    try out.print("\n=== M2 FUSION PROOF: PASS (correctness) ===\n", .{});
+    try tty.print(.green, "M2 FUSION PROOF PASS (correctness)\n", .{});
 }
 
 fn getPluginPath(allocator: std.mem.Allocator, out: anytype) ![]const u8 {
