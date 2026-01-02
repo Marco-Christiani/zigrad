@@ -4,16 +4,14 @@
 // Apache License 2.0
 
 const std = @import("std");
+const mlir = @import("../mlir.zig");
 
+// Use the shared c namespace from mlir.zig to avoid type incompatibility
+// The mlir.zig already includes stablehlo headers
 const c = @cImport({
-    @cInclude("mlir-c/IR.h");
-    @cInclude("mlir-c/BuiltinTypes.h");
-    @cInclude("mlir-c/BuiltinAttributes.h");
-    @cInclude("stablehlo/integrations/c/StablehloDialect.h");
     @cInclude("stablehlo/integrations/c/StablehloAttributes.h");
     @cInclude("stablehlo/integrations/c/StablehloTypes.h");
 });
-const mlir = @import("../mlir.zig");
 
 pub const abs = functors.unary_fn("stablehlo.abs").call;
 pub const cosine = functors.unary_fn("stablehlo.cosine").call;

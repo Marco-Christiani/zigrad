@@ -105,6 +105,10 @@ pub const Context = struct {
     pub fn location(self: Context, src: std.builtin.SourceLocation) Location {
         return Location.fromSrc(self, src);
     }
+
+    pub fn allowUnregisteredDialects(self: Context, allow: bool) void {
+        c.mlirContextSetAllowUnregisteredDialects(self._inner, allow);
+    }
 };
 
 pub const Module = struct {

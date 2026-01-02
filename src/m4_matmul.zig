@@ -46,14 +46,11 @@ pub fn main() !void {
     // Step 2: Build MLIR IR in memory
     try stdout.print("1. Constructing MLIR IR in memory (via C API)...\n", .{});
 
-    // Create MLIR context with required dialects
-    const mlir_registry = try mlir.Registry.init();
-    mlir.DialectHandle.fromString("func").insertDialect(mlir_registry);
-    // Note: StableHLO dialect handle not available in C API, will be loaded via loadAllAvailableDialects()
-
-    var mlir_ctx = try mlir.Context.initWithRegistry(mlir_registry, false);
+    // Create MLIR context and allow unregistered dialects
+    // This avoids needing to link the full StableHLO C++ library
+    var mlir_ctx = try mlir.Context.init();
     defer mlir_ctx.deinit();
-    mlir_ctx.loadAllAvailableDialects();
+    mlir_ctx.allowUnregisteredDialects(true);
 
     const loc = mlir.Location.unknown(mlir_ctx);
 
@@ -94,7 +91,7 @@ pub fn main() !void {
     // Create function operation with constructed block
     const func_op = mlir.Operation.make(mlir_ctx, "func.func", .{
         .results = &.{},
-        .blocks = &.{entry_block},  // Pass constructed block, not .n_regions
+        .blocks = &.{entry_block},
         .attributes = &.{
             .{ "sym_name", mlir.Attribute.string(mlir_ctx, "main") },
             .{ "function_type", mlir.Attribute.type_(func_type) },
@@ -110,31 +107,23 @@ pub fn main() !void {
     // Print IR to verify (debug)
     if (false) {
         try stdout.print("\n--- Generated IR ---\n", .{});
-        var print_buffer = try std.ArrayList(u8).initCapacity(allocator, 0);
-        defer print_buffer.deinit();
-        var print_writer_instance = print_buffer.writer(allocator);
-        const print_writer_any = print_writer_instance.any();
-        try module.op().print(@constCast(&print_writer_any), .{});
-        try stdout.print("{s}\n", .{print_buffer.items});
+        var print_buffer: [8192]u8 = undefined;
+        var print_writer: std.Io.Writer = .fixed(&print_buffer);
+        try module.op().print(&print_writer, .{});
+        try stdout.print("{s}\n", .{print_writer.buffered()});
         try stdout.print("--- End IR ---\n\n", .{});
     }
 
     // Step 3: Serialize module to bytecode
     try stdout.print("2. Serializing MLIR module to bytecode...\n", .{});
 
-    // Temporary workaround for Zig 0.15 writer API changes using temp file
-    const tmp_path = "/tmp/zigrad_m4_module.mlirbc";
-    {
-        const tmp_file = try std.fs.createFileAbsolute(tmp_path, .{});
-        defer tmp_file.close();
-        var tmp_file_buffer: [4096]u8 = undefined;
-        var tmp_writer = tmp_file.writer(&tmp_file_buffer);
-        try module.op().writeBytecode(&tmp_writer.interface);
-    }
+    // serialize
+    var bytecode_buffer_fixed: [1024 * 1024]u8 = undefined;
+    var bytecode_writer: std.Io.Writer = .fixed(&bytecode_buffer_fixed);
+    try module.op().writeBytecode(&bytecode_writer);
 
-    const bytecode_buffer = try std.fs.cwd().readFileAlloc(allocator, tmp_path, 10 * 1024 * 1024);
+    const bytecode_buffer = try allocator.dupe(u8, bytecode_writer.buffered());
     defer allocator.free(bytecode_buffer);
-    try std.fs.deleteFileAbsolute(tmp_path);
 
     try stdout.print("   ✓ Bytecode generated ({d} bytes)\n", .{bytecode_buffer.len});
 
