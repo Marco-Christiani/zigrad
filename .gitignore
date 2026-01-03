@@ -30,6 +30,7 @@ data
 *ignore
 .direnv
 .env
+!.envrc
 vendor/
 reference/
 result
@@ -39,3 +40,5 @@ result-*
 !docs/roadmap.norg
 !docs/*.png
 artifacts/
+
+!nix/**/*ccache*

@@ -34,8 +34,6 @@
 , libffi
 , lockFile
 , devel ? false
-, enableCcache ? false
-, ccache ? null
 }:
 
 let
@@ -158,25 +156,11 @@ stdenv.mkDerivation {
   dontConfigure = true;
   dontStrip = true;
 
-  nativeBuildInputs = [ cmake ninja python3 perl patchelf ccache ];
+  nativeBuildInputs = [ cmake ninja python3 perl patchelf ];
   buildInputs = [ zlib zstd libxml2 ncurses libedit libffi ];
 
   buildPhase = ''
     set -euo pipefail
-
-    # HACK: dev only.
-    # CCACHE_DIR=$HOME/.cache/ccache nix build .#xla-mlir-stablehlo-capi-sdk \
-    #   --option sandbox false \
-    #   --impure \
-    #   --override-input enableCcache true
-
-    if [ "${lib.boolToString enableCcache}" = "true" ]; then
-      export CCACHE_DIR="''${CCACHE_DIR:-/var/tmp/ccache}"
-      export CCACHE_BASEDIR="$PWD"
-      export CCACHE_COMPRESS=1
-      export CCACHE_SLOPPINESS=time_macros
-      echo "****************CCACHE ENABLED - IMPURE****************" >&2
-    fi
 
     cmake_flags=(
       -DCMAKE_BUILD_TYPE=Release
@@ -192,14 +176,6 @@ stdenv.mkDerivation {
       -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
       -DMLIR_BUILD_MLIR_C_DYLIB=ON
     )
-
-    if [ "${lib.boolToString enableCcache}" = "true" ]; then
-      cmake_flags+=(
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-        -DCMAKE_ASM_COMPILER=gcc
-      )
-    fi
 
     mkdir -p llvm-build
     cmake -S ${llvmSrc}/llvm -B llvm-build -G Ninja "''${cmake_flags[@]}"

@@ -27,6 +27,9 @@
         let
           pkgs = import nixpkgs {
             inherit system;
+            overlays = [
+              (import ./nix/overlays/ccache.nix)
+            ];
             config = {
               allowUnfree = true;
               # note to self: avoid enabling cudaSupport globally unless you need nixpkgs packages to flip CUDA paths.
@@ -56,6 +59,8 @@
               withNvidiaHeaders = false;
             };
 
+          devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
+
           pjrtCudaBundleDevel =
             pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
               inherit lockFile;
@@ -64,21 +69,34 @@
 
           xlaMlirStablehloCapiSdk =
             pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-              inherit lockFile;
-              enableCcache = builtins.getEnv "ZG_SDK_IMPURE_CCACHE" == "1";
-              devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
-              ccache = pkgs.ccache;
+              inherit lockFile devel;
             };
+
+          xlaMlirStablehloCapiSdkCcache =
+            pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
+              inherit lockFile devel;
+              stdenv = pkgs.ccacheStdenv;
+           };
 
           # Convenience aggregate.
           #   others are individually targetable mostly for development reasons
           zigradExternalSdk = pkgs.symlinkJoin {
-                name = "zigrad-external-sdk";
-                paths = [
-                  pjrtCudaBundleDevel
-                  xlaMlirStablehloCapiSdk
-                ];
-              };
+              name = "zigrad-external-sdk";
+              paths = [
+                pjrtCudaBundleDevel
+                xlaMlirStablehloCapiSdk
+              ];
+          };
+          sdkRootCcache = builtins.toString zigradExternalSdkCcache;
+
+          # Used for devshells where we accept impurity for speed
+          zigradExternalSdkCcache = pkgs.symlinkJoin {
+            name = "zigrad-external-sdk-ccache";
+            paths = [
+              pjrtCudaBundleDevel
+              xlaMlirStablehloCapiSdkCcache
+            ];
+          };
         in
         {
           # devshells intended purpose is really just fast iteration and pinned toolchain with
@@ -93,13 +111,14 @@
                 # llvmPackages_git.llvm
                 # llvmPackages_git.libllvm
 
-                zigradExternalSdk
+                # zigradExternalSdk
+                zigradExternalSdkCcache
               ];
 
               CC = "${gccHost}/bin/gcc";
               CXX = "${gccHost}/bin/g++";
-              ZG_EXTERNAL_SDK_ROOT = builtins.toString zigradExternalSdk;
-              PJRT_PLUGIN_PATH = "result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+              ZG_EXTERNAL_SDK_ROOT = sdkRootCcache;
+              PJRT_PLUGIN_PATH = "${sdkRootCcache}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
 
               shellHook = ''
                 if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
@@ -140,6 +159,8 @@
             # Convenience aggregate and primary target.
             #   others are individually targetable mostly for development reasons
             zigrad-external-sdk = zigradExternalSdk;
+
+            zigrad-external-sdk-ccache = zigradExternalSdkCcache;
 
             # Runtime-only PJRT bundle
             pjrt-cuda-runtime = pjrtCudaBundle;

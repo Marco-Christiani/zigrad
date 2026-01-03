@@ -19,7 +19,6 @@ dotenv: [".env"]
 env:
   PJRT_PLUGIN_PATH: result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
   # sh: realpath zig-out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
-  CCACHE_DIR: /var/tmp/ccache
 
 tasks:
   _pjrt:
@@ -32,18 +31,7 @@ tasks:
 
   sdk:
     cmds:
-      - echo ZG_SDK_IMPURE_CCACHE=$ZG_SDK_IMPURE_CCACHE
-      - nix build .#zigrad-external-sdk {{.CLI_ARGS}}
-
-  sdk-ccache:
-    cmds:
-      - task: sdk
-        vars: { CLI_ARGS: "{{.CLI_ARGS}} --option sandbox false --impure" }
-    env:
-      ZG_SDK_IMPURE_CCACHE: 1
-
-  ccache:
-    cmd: ccache {{.CLI_ARGS}}
+      - nix build .#zigrad-external-sdk --impure {{.CLI_ARGS}}
 
   build:
     cmd: zig build
@@ -105,3 +93,16 @@ tasks:
     cmds:
       - |
         {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}} ./ {{.REMOTE}}/
+
+  nix-ccache-setup:
+    cmds:
+      - sudo mkdir -m0770 -p /nix/var/cache/ccache
+      - sudo chown --reference=/nix/store /nix/var/cache/ccache
+      - |
+        before=$(stat -c %Y /etc/nix/nix.custom.conf)
+        sudo sed -i '/^extra-sandbox-paths = \/nix\/var\/cache\/ccache$/!{
+          $a\
+        extra-sandbox-paths = /nix/var/cache/ccache
+        }' /etc/nix/nix.custom.conf
+        after=$(stat -c %Y /etc/nix/nix.conf)
+        [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
