@@ -12,6 +12,11 @@
 *.trace
 *.air.*
 *.lock
+*.bak
+*.gz
+*.tar
+*.zip
+*.local.*
 
 # paths
 zig-out
