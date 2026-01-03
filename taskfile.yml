@@ -106,3 +106,18 @@ tasks:
         }' /etc/nix/nix.custom.conf
         after=$(stat -c %Y /etc/nix/nix.conf)
         [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
+
+  sync:pull:dry:
+    desc: "Dry-run remote -> local (optional verbose output)"
+    vars:
+      VERBOSE: '{{.VERBOSE | default "off"}}'
+      RSYNC_VERBOSE_FLAGS: >-
+        {{if eq .VERBOSE "on"}}--itemize-changes --human-readable{{end}}
+    requires:
+      vars:
+        - REMOTE
+        - name: VERBOSE
+          enum: [off, on]
+    cmds:
+      - |
+        {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}}  {{.REMOTE}}:/ ./
