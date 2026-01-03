@@ -43,10 +43,10 @@
           # note to self: keep builds from accidentally capturing ./build, downloaded junk, etc.
           src = pkgs.lib.cleanSource self;
 
-          targets = (import ./nix/targets.nix {
+          inherit (import ./nix/targets.nix {
             inherit pkgs cudaPackages gccHost nixglhost src;
-            cudaArchitectures = cudaCfg.cudaArchitectures;
-          }).targets;
+            inherit (cudaCfg) cudaArchitectures;
+          }) targets;
 
           lockFile = ./nix/lock.json;
 
