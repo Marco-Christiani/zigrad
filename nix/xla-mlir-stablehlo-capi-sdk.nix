@@ -191,10 +191,6 @@ stdenv.mkDerivation {
       -DMLIR_INCLUDE_TESTS=OFF
       -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
       -DMLIR_BUILD_MLIR_C_DYLIB=ON
-      -DMLIR_BUILD_MLIR_DYLIB=ON
-      -DMLIR_LINK_MLIR_DYLIB=ON
-      -DLLVM_BUILD_LLVM_DYLIB=ON
-      -DLLVM_LINK_LLVM_DYLIB=ON
     )
 
     if [ "${lib.boolToString enableCcache}" = "true" ]; then
@@ -212,7 +208,6 @@ stdenv.mkDerivation {
     # Tools StableHLO headers generation might expect (safe even if unused later, tbd whats needed still)
     cmake --build llvm-build --target llvm-tblgen mlir-tblgen mlir-pdll
     cmake --build llvm-build --target MLIR-C
-    cmake --build llvm-build --target LLVM MLIR
 
     mkdir -p stablehlo-build
     cmake -S ${stablehloSrc} -B stablehlo-build -G Ninja \
@@ -254,7 +249,6 @@ stdenv.mkDerivation {
 
     mkdir -p "$out/include" "$out/lib"
 
-    # Devel path: copy everything
     # Devel path: copy everything (but keep the curated include layout as a superset)
     if [ "${lib.boolToString devel}" = "true" ]; then
       log "Devel mode enabled: copying ALL build artifacts (curated layout + full dumps)"
@@ -360,25 +354,10 @@ stdenv.mkDerivation {
       -name "libMLIR-C.so*" \
       -o -name "libMLIRCAPI*.a"
 
-    # MLIR/LLVM C++ dylibs for dialect registration
-    copy_libs_matching llvm-build \
-      -name "libMLIR.so*" \
-      -o -name "libLLVM.so*"
-
     # Ensure linker-visible MLIR-C name
     mlir_c_so="$(ls -1 "$out/lib/libMLIR-C.so."* 2>/dev/null | head -n1 || true)"
     if [ -n "$mlir_c_so" ]; then
       ln -sfn "$(basename "$mlir_c_so")" "$out/lib/libMLIR-C.so"
-    fi
-
-    mlir_cpp_so="$(ls -1 "$out/lib/libMLIR.so."* 2>/dev/null | head -n1 || true)"
-    if [ -n "$mlir_cpp_so" ]; then
-      ln -sfn "$(basename "$mlir_cpp_so")" "$out/lib/libMLIR.so"
-    fi
-
-    llvm_so="$(ls -1 "$out/lib/libLLVM.so."* 2>/dev/null | head -n1 || true)"
-    if [ -n "$llvm_so" ]; then
-      ln -sfn "$(basename "$llvm_so")" "$out/lib/libLLVM.so"
     fi
 
     log "Verifying outputs"
@@ -395,7 +374,7 @@ stdenv.mkDerivation {
 
     log "Fixing RPATHs"
     rpath="\$ORIGIN:\$ORIGIN/../runtime/sys/lib:${lib.makeLibraryPath [ zlib zstd libxml2 ncurses libedit libffi stdenv.cc.cc.lib ]}"
-    for f in "$out/lib/libMLIR-C.so."* "$out/lib/libMLIR.so."* "$out/lib/libLLVM.so."*; do
+    for f in "$out/lib/libMLIR-C.so."*; do
       if [ -f "$f" ]; then
         patchelf --set-rpath "$rpath" "$f"
       fi
