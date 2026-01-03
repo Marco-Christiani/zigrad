@@ -45,6 +45,7 @@
 
           # note to self: keep builds from accidentally capturing ./build, downloaded junk, etc.
           src = pkgs.lib.cleanSource self;
+          shimSrc = pkgs.lib.cleanSource (self + "/shim");
 
           inherit (import ./nix/targets.nix {
             inherit pkgs cudaPackages gccHost nixglhost src;
@@ -89,12 +90,21 @@
           };
           sdkRootCcache = builtins.toString zigradExternalSdkCcache;
 
+          zigradMlirShim =
+            pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+              inherit xlaMlirStablehloCapiSdk;
+              src = shimSrc;
+              devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
+            };
+
+
           # Used for devshells where we accept impurity for speed
           zigradExternalSdkCcache = pkgs.symlinkJoin {
             name = "zigrad-external-sdk-ccache";
             paths = [
               pjrtCudaBundleDevel
               xlaMlirStablehloCapiSdkCcache
+              zigradMlirShim
             ];
           };
         in
@@ -108,10 +118,6 @@
                 zig
                 zls
                 gccHost
-                # llvmPackages_git.llvm
-                # llvmPackages_git.libllvm
-
-                # zigradExternalSdk
                 zigradExternalSdkCcache
               ];
 
