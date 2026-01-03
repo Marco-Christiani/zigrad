@@ -1,6 +1,13 @@
 # nix/targets.nix
 # TODO: in the future we need hermetic zig builds
-{ pkgs, cudaPackages, gccHost, nixglhost, src, cudaArchitectures }:
+{
+  pkgs,
+  cudaPackages,
+  gccHost,
+  nixglhost,
+  src,
+  cudaArchitectures,
+}:
 let
   cudaArchStr = pkgs.lib.concatStringsSep ";" cudaArchitectures;
 
@@ -98,7 +105,6 @@ in
           mv "$tmp" "$root/.clangd"
           echo "Wrote $root/.clangd"
       '';
-
 
       nvim = pkgs.writeShellScriptBin "gen-nvim" ''
         set -euo pipefail

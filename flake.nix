@@ -8,12 +8,26 @@
     #   although i would need to actually check this to be confident in that idea.
     # nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
   };
-  outputs = { self, nixpkgs, nix-gl-host }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      nix-gl-host,
+    }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
 
-      forAllSystems = f:
-        builtins.listToAttrs (map (system: { name = system; value = f system; }) systems);
+      forAllSystems =
+        f:
+        builtins.listToAttrs (
+          map (system: {
+            name = system;
+            value = f system;
+          }) systems
+        );
 
       cudaCfg = import ./nix/cuda.nix;
 
@@ -23,7 +37,8 @@
         green = "\\033[32m";
       };
 
-      mkFor = system:
+      mkFor =
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
@@ -47,56 +62,59 @@
           src = pkgs.lib.cleanSource self;
           shimSrc = pkgs.lib.cleanSource (self + "/shim");
 
-          inherit (import ./nix/targets.nix {
-            inherit pkgs cudaPackages gccHost nixglhost src;
-            inherit (cudaCfg) cudaArchitectures;
-          }) targets;
+          inherit
+            (import ./nix/targets.nix {
+              inherit
+                pkgs
+                cudaPackages
+                gccHost
+                nixglhost
+                src
+                ;
+              inherit (cudaCfg) cudaArchitectures;
+            })
+            targets
+            ;
 
           lockFile = ./nix/lock.json;
 
-          pjrtCudaBundle =
-            pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
-              inherit lockFile;
-              withNvidiaHeaders = false;
-            };
+          pjrtCudaBundle = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
+            inherit lockFile;
+            withNvidiaHeaders = false;
+          };
 
           devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
 
-          pjrtCudaBundleDevel =
-            pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
-              inherit lockFile;
-              withNvidiaHeaders = true;
-            };
+          pjrtCudaBundleDevel = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
+            inherit lockFile;
+            withNvidiaHeaders = true;
+          };
 
-          xlaMlirStablehloCapiSdk =
-            pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-              inherit lockFile devel;
-            };
+          xlaMlirStablehloCapiSdk = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
+            inherit lockFile devel;
+          };
 
-          xlaMlirStablehloCapiSdkCcache =
-            pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-              inherit lockFile devel;
-              stdenv = pkgs.ccacheStdenv;
-           };
+          xlaMlirStablehloCapiSdkCcache = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
+            inherit lockFile devel;
+            stdenv = pkgs.ccacheStdenv;
+          };
 
           # Convenience aggregate.
           #   others are individually targetable mostly for development reasons
           zigradExternalSdk = pkgs.symlinkJoin {
-              name = "zigrad-external-sdk";
-              paths = [
-                pjrtCudaBundleDevel
-                xlaMlirStablehloCapiSdk
-              ];
+            name = "zigrad-external-sdk";
+            paths = [
+              pjrtCudaBundleDevel
+              xlaMlirStablehloCapiSdk
+            ];
           };
           sdkRootCcache = builtins.toString zigradExternalSdkCcache;
 
-          zigradMlirShim =
-            pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
-              inherit xlaMlirStablehloCapiSdk;
-              src = shimSrc;
-              devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
-            };
-
+          zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+            inherit xlaMlirStablehloCapiSdk;
+            src = shimSrc;
+            devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
+          };
 
           # Used for devshells where we accept impurity for speed
           zigradExternalSdkCcache = pkgs.symlinkJoin {
@@ -135,12 +153,11 @@
               '';
             };
 
-
-            # convenience shell that DOES do global LD_LIBRARY_PATH injection 
+            # convenience shell that DOES do global LD_LIBRARY_PATH injection
             #   NOTE: discouraged by nix-gl-host docs. we keep it separate so default stays sane.
             impure-driver = pkgs.mkShellNoCC {
               inputsFrom = [ self.devShells.${system}.default ];
-              packages = [nix-gl-host];
+              packages = [ nix-gl-host ];
               shellHook = ''
                 # nix-gl-host docs: -p is discouraged / footgun, this is for convenience only.
                 export LD_LIBRARY_PATH="$(${nixglhost}/bin/nixglhost -p):''${LD_LIBRARY_PATH:-}"
@@ -177,7 +194,6 @@
             # Compile-time SDK (PJRT headers + MLIR + StableHLO)
             xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
-
             gen-clangd = targets.editor.clangd;
             gen-nvim = targets.editor.nvim;
             # TODO: hermetic zig build/run targets
@@ -211,6 +227,12 @@
       devShells = forAllSystems (s: (mkFor s).devShells);
       packages = forAllSystems (s: (mkFor s).packages);
       apps = forAllSystems (s: (mkFor s).apps);
-      formatter = forAllSystems (system: let pkgs = import nixpkgs { inherit system; }; in pkgs.nixpkgs-fmt);
+      formatter = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        pkgs.nixpkgs-fmt
+      );
     };
 }

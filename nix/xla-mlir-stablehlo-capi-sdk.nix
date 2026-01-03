@@ -15,25 +15,26 @@
 #   additionally copy:
 #    - all MLIR + StableHLO libs from build dirs
 #    - optional CMake configs (lib/cmake/*)
-{ lib
-, stdenv
-, fetchurl
-, runCommand
-, cmake
-, ninja
-, python3
-, perl
-, unzip
-, patch
-, patchelf
-, zlib
-, zstd
-, libxml2
-, ncurses
-, libedit
-, libffi
-, lockFile
-, devel ? false
+{
+  lib,
+  stdenv,
+  fetchurl,
+  runCommand,
+  cmake,
+  ninja,
+  python3,
+  perl,
+  unzip,
+  patch,
+  patchelf,
+  zlib,
+  zstd,
+  libxml2,
+  ncurses,
+  libedit,
+  libffi,
+  lockFile,
+  devel ? false,
 }:
 
 let
@@ -45,7 +46,7 @@ let
   stablehlo = pins.stablehlo;
 
   xlaTar = fetchurl {
-    url  = xla.tarball_url;
+    url = xla.tarball_url;
     hash = xla.hash_sri;
   };
 
@@ -75,89 +76,105 @@ let
     "temporary.patch"
   ];
 
-  xlaSrc = runCommand "xla-src-${builtins.substring 0 12 xla.commit}" {} ''
+  xlaSrc = runCommand "xla-src-${builtins.substring 0 12 xla.commit}" { } ''
     mkdir -p $out
     tar -xzf ${xlaTar} -C $out --strip-components=1
   '';
 
-  llvmSrc = runCommand "llvm-src-${builtins.substring 0 12 llvm.commit}"
-    { nativeBuildInputs = [ patch ]; }
-    ''
-      set -euo pipefail
+  llvmSrc =
+    runCommand "llvm-src-${builtins.substring 0 12 llvm.commit}" { nativeBuildInputs = [ patch ]; }
+      ''
+        set -euo pipefail
 
-      mkdir -p "$out"
-      tar -xzf ${llvmTar} -C "$out" --strip-components=1
-      cd "$out"
+        mkdir -p "$out"
+        tar -xzf ${llvmTar} -C "$out" --strip-components=1
+        cd "$out"
 
-      echo "[llvm] Verifying patch set"
+        echo "[llvm] Verifying patch set"
 
-      expected_patches="${lib.concatStringsSep " " llvmPatches} ${lib.concatStringsSep " " llvmIgnoredPatches}"
-      actual_patches="$(cd ${xlaSrc}/third_party/llvm && ls *.patch | tr '\n' ' ')"
+        expected_patches="${lib.concatStringsSep " " llvmPatches} ${lib.concatStringsSep " " llvmIgnoredPatches}"
+        actual_patches="$(cd ${xlaSrc}/third_party/llvm && ls *.patch | tr '\n' ' ')"
 
-      for p in $actual_patches; do
-        case " $expected_patches " in
-          *" $p "*) ;;
-          *)
-            echo "ERROR: New or unexpected LLVM patch detected: $p" >&2
-            echo "       Please audit and update llvmPatches / llvmIgnoredPatches." >&2
-            exit 1
-            ;;
-        esac
-      done
+        for p in $actual_patches; do
+          case " $expected_patches " in
+            *" $p "*) ;;
+            *)
+              echo "ERROR: New or unexpected LLVM patch detected: $p" >&2
+              echo "       Please audit and update llvmPatches / llvmIgnoredPatches." >&2
+              exit 1
+              ;;
+          esac
+        done
 
-      for p in ${lib.concatStringsSep " " llvmPatches}; do
-        echo "[llvm] Applying $p"
-        patch -p1 < "${xlaSrc}/third_party/llvm/$p"
-      done
-    '';
+        for p in ${lib.concatStringsSep " " llvmPatches}; do
+          echo "[llvm] Applying $p"
+          patch -p1 < "${xlaSrc}/third_party/llvm/$p"
+        done
+      '';
 
-  stablehloSrc = runCommand "stablehlo-src-${builtins.substring 0 12 stablehlo.commit}"
-    { nativeBuildInputs = [ unzip patch ]; }
-    ''
-      set -euo pipefail
+  stablehloSrc =
+    runCommand "stablehlo-src-${builtins.substring 0 12 stablehlo.commit}"
+      {
+        nativeBuildInputs = [
+          unzip
+          patch
+        ];
+      }
+      ''
+        set -euo pipefail
 
-      mkdir -p "$out"
-      unzip -q ${stablehloZip} -d "$out"
-      mv "$out"/*/* "$out"/
-      cd "$out"
+        mkdir -p "$out"
+        unzip -q ${stablehloZip} -d "$out"
+        mv "$out"/*/* "$out"/
+        cd "$out"
 
-      echo "[stablehlo] Verifying patch set"
+        echo "[stablehlo] Verifying patch set"
 
-      expected_patches="${lib.concatStringsSep " " stablehloPatches}"
-      actual_patches="$(cd ${xlaSrc}/third_party/stablehlo && ls *.patch | tr '\n' ' ')"
+        expected_patches="${lib.concatStringsSep " " stablehloPatches}"
+        actual_patches="$(cd ${xlaSrc}/third_party/stablehlo && ls *.patch | tr '\n' ' ')"
 
-      for p in $actual_patches; do
-        case " $expected_patches " in
-          *" $p "*) ;;
-          *)
-            echo "ERROR: New or unexpected StableHLO patch detected: $p" >&2
-            echo "       Please audit and update stablehloPatches." >&2
-            exit 1
-            ;;
-        esac
-      done
+        for p in $actual_patches; do
+          case " $expected_patches " in
+            *" $p "*) ;;
+            *)
+              echo "ERROR: New or unexpected StableHLO patch detected: $p" >&2
+              echo "       Please audit and update stablehloPatches." >&2
+              exit 1
+              ;;
+          esac
+        done
 
-      for p in $expected_patches; do
-        echo "[stablehlo] Applying $p"
-        patch -p1 < "${xlaSrc}/third_party/stablehlo/$p"
-      done
-    '';
+        for p in $expected_patches; do
+          echo "[stablehlo] Applying $p"
+          patch -p1 < "${xlaSrc}/third_party/stablehlo/$p"
+        done
+      '';
 in
 
 stdenv.mkDerivation {
   pname = "xla-mlir-stablehlo-capi-sdk";
-  version =
-    "xla-${builtins.substring 0 12 xla.commit}"
-    + lib.optionalString devel "-devel";
-
+  version = "xla-${builtins.substring 0 12 xla.commit}" + lib.optionalString devel "-devel";
 
   strictDeps = true;
   dontUnpack = true;
   dontConfigure = true;
   dontStrip = true;
 
-  nativeBuildInputs = [ cmake ninja python3 perl patchelf ];
-  buildInputs = [ zlib zstd libxml2 ncurses libedit libffi ];
+  nativeBuildInputs = [
+    cmake
+    ninja
+    python3
+    perl
+    patchelf
+  ];
+  buildInputs = [
+    zlib
+    zstd
+    libxml2
+    ncurses
+    libedit
+    libffi
+  ];
 
   buildPhase = ''
     set -euo pipefail
@@ -349,7 +366,17 @@ stdenv.mkDerivation {
     fi
 
     log "Fixing RPATHs"
-    rpath="\$ORIGIN:\$ORIGIN/../runtime/sys/lib:${lib.makeLibraryPath [ zlib zstd libxml2 ncurses libedit libffi stdenv.cc.cc.lib ]}"
+    rpath="\$ORIGIN:\$ORIGIN/../runtime/sys/lib:${
+      lib.makeLibraryPath [
+        zlib
+        zstd
+        libxml2
+        ncurses
+        libedit
+        libffi
+        stdenv.cc.cc.lib
+      ]
+    }"
     for f in "$out/lib/libMLIR-C.so."*; do
       if [ -f "$f" ]; then
         patchelf --set-rpath "$rpath" "$f"

@@ -1,25 +1,29 @@
 # nix/pjrt-cuda-bundle.nix
-{ pkgs
-, lockFile
-, withNvidiaHeaders ? false
+{
+  pkgs,
+  lockFile,
+  withNvidiaHeaders ? false,
 }:
 
 let
-  inherit (pkgs) fetchurl unzip patchelf lib;
+  inherit (pkgs)
+    fetchurl
+    unzip
+    patchelf
+    lib
+    ;
 
   lock = builtins.fromJSON (builtins.readFile lockFile);
   wheels = lock.wheels;
 
   # Fetch all wheels listed in lock.json
-  wheelFetches =
-    map
-      (w:
-        fetchurl {
-          url = w.url;
-          hash = w.hash_sri;
-        }
-      )
-      wheels;
+  wheelFetches = map (
+    w:
+    fetchurl {
+      url = w.url;
+      hash = w.hash_sri;
+    }
+  ) wheels;
 
 in
 pkgs.stdenvNoCC.mkDerivation {
@@ -31,7 +35,10 @@ pkgs.stdenvNoCC.mkDerivation {
     "jax-${builtins.substring 0 7 jax}";
 
   dontUnpack = true;
-  nativeBuildInputs = [ unzip patchelf ];
+  nativeBuildInputs = [
+    unzip
+    patchelf
+  ];
 
   installPhase = ''
     set -euo pipefail
