@@ -1,16 +1,59 @@
 # Always ignore VCS internals
 - .git/
 
-# Large / generated artifacts (example)
+# git ignore defaults #################
+# exts
+# - *.json
+- *.so
+- *.png
+- *.svg
+- *.d2
+- *.log
+- .*vim*
+- *.csv
+- *.norg
+- *.org
+- *.trace
+- *.air.*
+- *.lock
+- *.bak
+- *.gz
+- *.tar
+- *.zip
+# - *.local.*
+
+# paths
+- zig-out
+- *cache*
+- .DS_Store
+- *venv
+- outputs*/
+- .python-version
+- drafts/
+- data/
+- *ignore
+- .direnv
+- .env
+- vendor/
+# - reference/
+- /result/
+- /result-*/
+- artifacts/
+#######################################
+
+# artifacts
 - *.pt
 - *.ckpt
 - *.tar
 - *.zip
 - __pycache__/
 - .*cache/
-- reference/*/
 
-# Explicit overrides (kept in sync even if ignored by git)
+# overrides-ish things
+- reference/*/
 + scratch/**
 + notes/**
 + *.ipynb
++ .*/**/settings*.json
++ .*/**/config*
+

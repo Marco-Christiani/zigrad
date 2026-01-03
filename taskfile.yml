@@ -8,12 +8,12 @@ vars:
   RSYNC_BASE: >-
     rsync -avz
     -e "{{.RSYNC_SSH | default "ssh"}}"
-    --progress
-    --human-readable
-    --itemize-changes
+    --checksum
+    --no-perms
+    --no-owner
+    --no-group
+    --no-times
     --filter=':- .rsync-filter'
-    --filter=':- .gitignore'
-    --filter=':- .git/info/exclude'
 
 dotenv: [".env"]
 env:
@@ -71,7 +71,7 @@ tasks:
     desc: "Sync local -> remote (no deletes)"
     cmds:
       - |
-        {{.RSYNC_BASE}} {{.CLI_ARGS}} ./ {{.REMOTE}}:
+        {{.RSYNC_BASE}} {{.CLI_ARGS}} --progress ./ {{.REMOTE}}/
     requires:
       vars: [REMOTE]
 
@@ -79,7 +79,7 @@ tasks:
     desc: "Sync remote -> local (no deletes)"
     cmds:
       - |
-        {{.RSYNC_BASE}} {{.CLI_ARGS}} {{.REMOTE}}:/ ./
+        {{.RSYNC_BASE}} {{.CLI_ARGS}} --progress {{.REMOTE}}:/ ./
     requires:
       vars: [REMOTE]
 
@@ -87,14 +87,21 @@ tasks:
     desc: "Mirror local -> remote (DELETES remote files)"
     cmds:
       - |
-        {{.RSYNC_BASE}} {{.CLI_ARGS}} --delete ./ {{.REMOTE}}:
+        {{.RSYNC_BASE}} {{.CLI_ARGS}} --progress --delete ./ {{.REMOTE}}/
     requires:
       vars: [REMOTE]
 
   sync:push:dry:
-    desc: "Dry-run local -> remote"
+    desc: "Dry-run local -> remote (optional verbose output)"
+    vars:
+      VERBOSE: '{{.VERBOSE | default "off"}}'
+      RSYNC_VERBOSE_FLAGS: >-
+        {{if eq .VERBOSE "on"}}--itemize-changes --human-readable{{end}}
+    requires:
+      vars:
+        - REMOTE
+        - name: VERBOSE
+          enum: [off, on]
     cmds:
       - |
-        {{.RSYNC_BASE}} --dry-run --itemize-changes ./ {{.REMOTE}}:
-    requires:
-      vars: [REMOTE]
+        {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}} ./ {{.REMOTE}}/
