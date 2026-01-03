@@ -1,0 +1,16 @@
+# Always ignore VCS internals
+- .git/
+
+# Large / generated artifacts (example)
+- *.pt
+- *.ckpt
+- *.tar
+- *.zip
+- __pycache__/
+- .*cache/
+- reference/*/
+
+# Explicit overrides (kept in sync even if ignored by git)
++ scratch/**
++ notes/**
++ *.ipynb

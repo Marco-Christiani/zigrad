@@ -5,7 +5,17 @@ version: "3"
 vars:
   RED:
     sh: tput setaf 1
+  RSYNC_BASE: >-
+    rsync -avz
+    -e "{{.RSYNC_SSH | default "ssh"}}"
+    --progress
+    --human-readable
+    --itemize-changes
+    --filter=':- .rsync-filter'
+    --filter=':- .gitignore'
+    --filter=':- .git/info/exclude'
 
+dotenv: [".env"]
 env:
   PJRT_PLUGIN_PATH: result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
   # sh: realpath zig-out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
@@ -56,3 +66,35 @@ tasks:
   m4-custom:
     deps: [_pjrt, build]
     cmd: ./zig-out/bin/zigrad-pjrt-m4-custom
+
+  sync:push:
+    desc: "Sync local -> remote (no deletes)"
+    cmds:
+      - |
+        {{.RSYNC_BASE}} {{.CLI_ARGS}} ./ {{.REMOTE}}:
+    requires:
+      vars: [REMOTE]
+
+  sync:pull:
+    desc: "Sync remote -> local (no deletes)"
+    cmds:
+      - |
+        {{.RSYNC_BASE}} {{.CLI_ARGS}} {{.REMOTE}}:/ ./
+    requires:
+      vars: [REMOTE]
+
+  sync:push:mirror:
+    desc: "Mirror local -> remote (DELETES remote files)"
+    cmds:
+      - |
+        {{.RSYNC_BASE}} {{.CLI_ARGS}} --delete ./ {{.REMOTE}}:
+    requires:
+      vars: [REMOTE]
+
+  sync:push:dry:
+    desc: "Dry-run local -> remote"
+    cmds:
+      - |
+        {{.RSYNC_BASE}} --dry-run --itemize-changes ./ {{.REMOTE}}:
+    requires:
+      vars: [REMOTE]
