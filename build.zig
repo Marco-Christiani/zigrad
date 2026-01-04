@@ -173,10 +173,10 @@ fn linkMlirStablehloCapi(b: *std.Build, exe: *std.Build.Step.Compile, sdk_lib: [
     // Shared MLIR C boundary (we ensured libMLIR-C.so symlink exists in the SDK)
     exe.linkSystemLibrary("MLIR-C");
 
-    // StableHLO C API is not needed for the raw op-construction path.
-    // Avoid pulling in its C++ symbol dependencies.
-    // const stablehlo_a = b.fmt("{s}/libStablehloCAPI.a", .{sdk_lib});
-    // exe.addObjectFile(.{ .cwd_relative = stablehlo_a });
+    // StableHLO C API boundary (shared library). This provides the StableHLO dialect handle symbol:
+    //   mlirGetDialectHandle__stablehlo__()
+    // and depends on the MLIR/LLVM DSOs shipped in the SDK lib/.
+    exe.linkSystemLibrary("StablehloCAPI");
 
     // C++ runtime: MLIR/StableHLO were built with libstdc++ ABI.
     exe.linkSystemLibrary("stdc++");

@@ -36,22 +36,44 @@ pub fn main() !void {
 
     try stdout.print("Constructing MLIR IR in memory (via C API)...\n", .{});
 
-    var mlir_ctx = try mlir.Context.init();
+    var registry = try mlir.Registry.init();
+    defer registry.deinit();
+
+    // Dialect registry: register the dialects we will use in this test.
+    // This should work without allowing unregistered dialects, provided the DSOs are linked and loadable:
+    // - libMLIR-C.so
+    // - libStablehloCAPI.so (exports mlirGetDialectHandle__stablehlo__)
+    mlir.DialectHandle.fromString("func").insertDialect(registry);
+    mlir.DialectHandle.fromString("stablehlo").insertDialect(registry);
+
+    var mlir_ctx = try mlir.Context.initWithRegistry(registry, false);
     defer mlir_ctx.deinit();
 
-    // Default: allow unregistered dialects to keep the C-path working.
-    mlir_ctx.allowUnregisteredDialects(true);
-    zigrad.diagnostics.markUnregisteredDialects();
-    try tty.print(.yellow, "allowUnregisteredDialects enabled (default)\n", .{});
+    mlir_ctx.allowUnregisteredDialects(false);
+
+    // Register + load dialects explicitly.
+    const func_handle = mlir.DialectHandle.fromString("func");
+    func_handle.registerDialect(mlir_ctx);
+    _ = func_handle.loadDialect(mlir_ctx);
+
+    const stablehlo_handle = mlir.DialectHandle.fromString("stablehlo");
+    stablehlo_handle.registerDialect(mlir_ctx);
+    _ = stablehlo_handle.loadDialect(mlir_ctx);
+
+    // Correctness checks: ensure the context recognizes the ops we will create.
+    if (!mlir_ctx.isRegisteredOperation("func.func")) return error.DialectRegistrationFailed;
+    if (!mlir_ctx.isRegisteredOperation("func.return")) return error.DialectRegistrationFailed;
+    if (!mlir_ctx.isRegisteredOperation("stablehlo.dot")) return error.DialectRegistrationFailed;
+
     const diag = mlir_diag.checkStablehloDialectSupport();
     try stdout.print(
-        "   ! Dialect registration diagnostics: issue={s} missing_libmlir={any} missing_libllvm={any} symbol_in_process={any} symbol_in_libmlir={any}\n",
+        "   ! Dialect registration diagnostics: issue={s} missing_libmlir_c={any} missing_libstablehlo_capi={any} symbol_in_process={any} symbol_in_libstablehlo_capi={any}\n",
         .{
             @tagName(diag.issue),
-            diag.missing_libmlir,
-            diag.missing_libllvm,
+            diag.missing_libmlir_c,
+            diag.missing_libstablehlo_capi,
             diag.symbol_in_process,
-            diag.symbol_in_libmlir,
+            diag.symbol_in_libstablehlo_capi,
         },
     );
 
@@ -87,6 +109,9 @@ pub fn main() !void {
     // Build return operation
     const return_op = mlir.Operation.make(mlir_ctx, "func.return", .{
         .operands = &.{dot_op.result(0)},
+        // func.return verification expects it to be nested under func.func.
+        // We construct the block before attaching it to the func.func op, so defer verification.
+        .verify = false,
         .location = loc,
     });
     entry_block.appendOperation(return_op);
