@@ -115,7 +115,7 @@
           zigradExternalSdkDevel = pkgs.symlinkJoin {
             name = "zigrad-external-sdk-devel";
             paths = [
-              pjrtCudaBundle
+              pjrtCudaBundleDevel
               xlaMlirStablehloCapiDevel
               # zigradMlirShimDevel
             ];

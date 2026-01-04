@@ -6,6 +6,11 @@ final: prev: {
       export CCACHE_SLOPPINESS=random_seed
       export CCACHE_DIR="/nix/var/cache/ccache"
       export CCACHE_UMASK=007
+      export CCACHE_UMASK=007
+
+      export CCACHE_COMPILERCHECK=content
+      export CCACHE_BASEDIR="$NIX_BUILD_TOP"
+
       if [ ! -d "$CCACHE_DIR" ]; then
         echo "====="
         echo "Directory '$CCACHE_DIR' does not exist"
