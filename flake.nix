@@ -106,12 +106,20 @@
             paths = [
               pjrtCudaBundleDevel
               xlaMlirStablehloCapiSdk
+              zigradMlirShim
             ];
           };
-          sdkRootCcache = builtins.toString zigradExternalSdkCcache;
+          sdkRootCcache = toString zigradExternalSdkCcache;
 
           zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
             inherit xlaMlirStablehloCapiSdk;
+            src = shimSrc;
+            devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
+          };
+
+          zigradMlirShimCcache = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+            inherit xlaMlirStablehloCapiSdk;
+            stdenv = pkgs.ccacheStdenv;
             src = shimSrc;
             devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
           };
@@ -122,7 +130,7 @@
             paths = [
               pjrtCudaBundleDevel
               xlaMlirStablehloCapiSdkCcache
-              zigradMlirShim
+              zigradMlirShimCcache
             ];
           };
         in
