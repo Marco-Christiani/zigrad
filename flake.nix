@@ -194,6 +194,8 @@
             # Compile-time SDK (PJRT headers + MLIR + StableHLO)
             xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
+            xla-mlir-stablehlo-capi-sdk-ccache = xlaMlirStablehloCapiSdkCcache;
+
             gen-clangd = targets.editor.clangd;
             gen-nvim = targets.editor.nvim;
             # TODO: hermetic zig build/run targets
@@ -219,6 +221,11 @@
             gen-nvim = {
               type = "app";
               program = "${targets.editor.nvim}/bin/gen-nvim";
+            };
+
+            ccache = {
+              type = "app";
+              program = "${pkgs.ccache}/bin/ccache";
             };
           };
         };
