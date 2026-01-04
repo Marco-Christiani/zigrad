@@ -60,7 +60,7 @@
 
           # note to self: keep builds from accidentally capturing ./build, downloaded junk, etc.
           src = pkgs.lib.cleanSource self;
-          shimSrc = pkgs.lib.cleanSource (self + "/shim");
+          # shimSrc = pkgs.lib.cleanSource (self + "/shim");
 
           inherit
             (import ./nix/targets.nix {
@@ -83,74 +83,73 @@
             withNvidiaHeaders = false;
           };
 
-          devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
-
           pjrtCudaBundleDevel = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
             inherit lockFile;
             withNvidiaHeaders = true;
           };
 
           xlaMlirStablehloCapiSdk = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-            inherit lockFile devel;
+            inherit lockFile;
           };
 
-          xlaMlirStablehloCapiSdkCcache = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-            inherit lockFile devel;
+          xlaMlirStablehloCapiDevel = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
+            inherit lockFile;
             stdenv = pkgs.ccacheStdenv;
+            devel = true;
           };
+
 
           # Convenience aggregate.
           #   others are individually targetable mostly for development reasons
           zigradExternalSdk = pkgs.symlinkJoin {
             name = "zigrad-external-sdk";
             paths = [
-              pjrtCudaBundleDevel
+              pjrtCudaBundle
               xlaMlirStablehloCapiSdk
-              zigradMlirShim
+              # zigradMlirShim
             ];
           };
-          sdkRootCcache = toString zigradExternalSdkCcache;
+          sdkRoot = toString zigradExternalSdk;
 
-          zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
-            inherit xlaMlirStablehloCapiSdk;
-            src = shimSrc;
-            devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
-          };
-
-          zigradMlirShimCcache = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
-            inherit xlaMlirStablehloCapiSdk;
-            stdenv = pkgs.ccacheStdenv;
-            src = shimSrc;
-            devel = builtins.getEnv "ZG_SDK_DEVEL" == "1";
-          };
-
-          # Used for devshells where we accept impurity for speed
-          zigradExternalSdkCcache = pkgs.symlinkJoin {
-            name = "zigrad-external-sdk-ccache";
+          # Dev: ccache + devel (save more build artifacts + NVIDIA headers)
+          zigradExternalSdkDevel = pkgs.symlinkJoin {
+            name = "zigrad-external-sdk-devel";
             paths = [
-              pjrtCudaBundleDevel
-              xlaMlirStablehloCapiSdkCcache
-              zigradMlirShimCcache
+              pjrtCudaBundle
+              xlaMlirStablehloCapiDevel
+              # zigradMlirShimDevel
             ];
           };
+          sdkRootDevel = toString zigradExternalSdkDevel;
+
+          # zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+          #   inherit xlaMlirStablehloCapiSdk;
+          #   src = shimSrc;
+          #   devel = false;
+          # };
+          #
+          # zigradMlirShimDevel = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+          #   inherit xlaMlirStablehloCapiSdk;
+          #   stdenv = pkgs.ccacheStdenv;
+          #   src = shimSrc;
+          #   devel = true;
+          # };
+          baseDevShellPkgs = with pkgs; [
+            zig
+            zls
+            go-task
+            binutils
+            patchelf
+          ];
         in
         {
           # devshells intended purpose is really just fast iteration and pinned toolchain with
           #   relaxed hermeticity requirements as needed for productivity.
           devShells = {
             default = pkgs.mkShellNoCC {
-              packages = with pkgs; [
-                go-task
-                zig
-                zls
-                gccHost
-                zigradExternalSdkCcache
-              ];
-
-              CC = "${gccHost}/bin/gcc";
-              CXX = "${gccHost}/bin/g++";
-              ZG_EXTERNAL_SDK_ROOT = sdkRootCcache;
-              PJRT_PLUGIN_PATH = "${sdkRootCcache}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+              packages = baseDevShellPkgs ++  [ zigradExternalSdkDevel ];
+              ZG_EXTERNAL_SDK_ROOT = sdkRootDevel;
+              PJRT_PLUGIN_PATH = "${sdkRootDevel}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
 
               shellHook = ''
                 if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
@@ -161,26 +160,19 @@
               '';
             };
 
-            # convenience shell that DOES do global LD_LIBRARY_PATH injection
-            #   NOTE: discouraged by nix-gl-host docs. we keep it separate so default stays sane.
-            impure-driver = pkgs.mkShellNoCC {
-              inputsFrom = [ self.devShells.${system}.default ];
-              packages = [ nix-gl-host ];
-              shellHook = ''
-                # nix-gl-host docs: -p is discouraged / footgun, this is for convenience only.
-                export LD_LIBRARY_PATH="$(${nixglhost}/bin/nixglhost -p):''${LD_LIBRARY_PATH:-}"
-                echo "LD_LIBRARY_PATH injected via nixglhost -p (convenience shell)."
-              '';
-            };
-
-            devShells.pjrt = pkgs.mkShellNoCC {
-              packages = [
-                xlaMlirStablehloCapiSdk
-              ];
+            # A purer target that uses the real derivations with devel=true, no extra copies, no ccache.
+            #   Can sandbox.
+            pure = pkgs.mkShellNoCC {
+              packages = baseDevShellPkgs ++  [ zigradExternalSdk ];
+              ZG_EXTERNAL_SDK_ROOT = sdkRoot;
+              PJRT_PLUGIN_PATH = "${sdkRoot}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
 
               shellHook = ''
-                echo "PJRT / XLA SDK shell"
-                echo "SDK path: ${xlaMlirStablehloCapiSdk}"
+                if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
+                  printf "${colors.yellow}[WARNING]${colors.reset} PJRT_PLUGIN_PATH=$PJRT_PLUGIN_PATH does not exist. \
+                          Leaving the env variable set but you may need to materialize this.\n"
+                fi
+                printf "SDK path: ZG_EXTERNAL_SDK_ROOT=$ZG_EXTERNAL_SDK_ROOT"
               '';
             };
           };
@@ -191,18 +183,20 @@
             #   others are individually targetable mostly for development reasons
             zigrad-external-sdk = zigradExternalSdk;
 
-            zigrad-external-sdk-ccache = zigradExternalSdkCcache;
+            # Dev target: ccache + devel
+            zigrad-external-sdk-devel = zigradExternalSdkDevel;
 
-            # Runtime-only PJRT bundle
+            # Runtime bundle (PJRT + Vendor DSOs as self-contained closure)
             pjrt-cuda-runtime = pjrtCudaBundle;
 
-            # Runtime + NVIDIA headers
+            # Runtime bundle - Dev target: ccache + devel (NVIDIA Headers)
             pjrt-cuda-runtime-devel = pjrtCudaBundleDevel;
 
             # Compile-time SDK (PJRT headers + MLIR + StableHLO)
             xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
-            xla-mlir-stablehlo-capi-sdk-ccache = xlaMlirStablehloCapiSdkCcache;
+            # Comptile-time SDK - Dev target: ccache + devel
+            xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
 
             gen-clangd = targets.editor.clangd;
             gen-nvim = targets.editor.nvim;
