@@ -14,11 +14,15 @@ vars:
     --no-group
     --no-times
     --filter=':- .rsync-filter'
+  ZG_EXTERNAL_SDK_ROOT:
+    sh: realpath $ZG_EXTERNAL_SDK_ROOT || echo "DNE"
+  PJRT_PLUGIN_PATH:
+    sh: realpath {{.ZG_EXTERNAL_SDK_ROOT}}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so || echo "DNE"
 
 dotenv: [".env"]
-env:
-  PJRT_PLUGIN_PATH: result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
-  # sh: realpath zig-out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
+# env:
+#   PJRT_PLUGIN_PATH: ZG_EXTERNAL_SDK_ROOT/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
+#   # sh: realpath zig-out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
 
 tasks:
   _pjrt:
@@ -34,26 +38,46 @@ tasks:
       - nix build .#zigrad-external-sdk --impure {{.CLI_ARGS}}
 
   build:
-    cmd: zig build
+    cmd: zig build -Dsdk={{.ZG_EXTERNAL_SDK_ROOT}}
+    requires:
+      vars: [ZG_EXTERNAL_SDK_ROOT]
 
   test:
-    cmd: zig build test
+    cmd: zig build -Dsdk={{.ZG_EXTERNAL_SDK_ROOT}} test
+    requires:
+      vars: [ZG_EXTERNAL_SDK_ROOT]
 
   m2:
     deps: [_pjrt, build]
     cmd: ./zig-out/bin/zigrad-pjrt-m2
+    env:
+      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
+    requires:
+      vars: [PJRT_PLUGIN_PATH]
 
   m2-fusion:
     deps: [_pjrt, build]
     cmd: ./zig-out/bin/zigrad-pjrt-m2-fusion
+    env:
+      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
+    requires:
+      vars: [PJRT_PLUGIN_PATH]
 
   m4:
     deps: [_pjrt, build]
     cmd: ./zig-out/bin/zigrad-pjrt-m4
+    env:
+      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
+    requires:
+      vars: [PJRT_PLUGIN_PATH]
 
   m4-custom:
     deps: [_pjrt, build]
     cmd: ./zig-out/bin/zigrad-pjrt-m4-custom
+    env:
+      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
+    requires:
+      vars: [PJRT_PLUGIN_PATH]
 
   sync:push:
     desc: "Sync local -> remote (no deletes)"
@@ -94,19 +118,6 @@ tasks:
       - |
         {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}} ./ {{.REMOTE}}/
 
-  nix-ccache-setup:
-    cmds:
-      - sudo mkdir -m0770 -p /nix/var/cache/ccache
-      - sudo chown --reference=/nix/store /nix/var/cache/ccache
-      - |
-        before=$(stat -c %Y /etc/nix/nix.custom.conf)
-        sudo sed -i '/^extra-sandbox-paths = \/nix\/var\/cache\/ccache$/!{
-          $a\
-        extra-sandbox-paths = /nix/var/cache/ccache
-        }' /etc/nix/nix.custom.conf
-        after=$(stat -c %Y /etc/nix/nix.conf)
-        [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
-
   sync:pull:dry:
     desc: "Dry-run remote -> local (optional verbose output)"
     vars:
@@ -121,3 +132,47 @@ tasks:
     cmds:
       - |
         {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}}  {{.REMOTE}}:/ ./
+
+  nix-ccache-setup:
+    cmds:
+      - sudo mkdir -m0770 -p /nix/var/cache/ccache
+      - sudo chown --reference=/nix/store /nix/var/cache/ccache
+      - |
+        before=$(stat -c %Y /etc/nix/nix.custom.conf)
+        sudo sed -i '/^extra-sandbox-paths = \/nix\/var\/cache\/ccache$/!{
+        $a\
+        extra-sandbox-paths = /nix/var/cache/ccache
+        }' /etc/nix/nix.custom.conf
+        after=$(stat -c %Y /etc/nix/nix.conf)
+        [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
+
+  nix-ccache:
+    cmd: sudo $(which nix) run .#ccache -- --dir /nix/var/cache/ccache {{.CLI_ARGS}}
+
+  nix-ccache:increase-size:
+    cmd:
+      task: nix-ccache
+      vars:
+        CLI_ARGS: --max-size 50G
+
+  nix-ccache:stats:
+    cmd:
+      task: nix-ccache
+      vars:
+        CLI_ARGS: --show-stats
+
+  nix-ccache:bundle:
+    cmd: |
+      sudo tar \
+        --numeric-owner \
+        --xattrs --acls \
+        --exclude='./tmp' \
+        --exclude='./lock' \
+        -C /nix/var/cache \
+        -czf /tmp/ccache-seed.tgz ccache
+
+  nix-ccache:populate:
+    cmds:
+      - sudo mkdir -p /nix/var/cache/ccache
+      - sudo tar --numeric-owner --xattrs --acls -C /nix/var/cache -xzf ccache-seed.tgz
+
