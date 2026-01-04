@@ -130,6 +130,11 @@ pub fn main() !void {
     // Add function to module
     module.getBody().appendOperation(func_op);
 
+    // Final verification after assembly (we deferred verification of func.return until it is nested under func.func).
+    if (!module.op().verify()) {
+        return error.InvalidMlir;
+    }
+
     try tty.print(.green, "IR constructed: func.func @main with stablehlo.dot\n", .{});
 
     // Print IR to verify (debug)

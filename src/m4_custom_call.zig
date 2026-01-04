@@ -113,6 +113,11 @@ pub fn main() !void {
 
     module.getBody().appendOperation(func_op);
 
+    // Final verification after assembly (we deferred verification of func.return until it is nested under func.func).
+    if (!module.op().verify()) {
+        return error.InvalidMlir;
+    }
+
     try tty.print(.green, "IR constructed with stablehlo.custom_call\n", .{});
 
     if (false) {
