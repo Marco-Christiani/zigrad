@@ -48,6 +48,14 @@ tasks:
     cmds:
       - nix build .#zigrad-external-sdk --impure {{.CLI_ARGS}}
 
+  check-sdk:
+    cmd: uv run ./scripts/check_sdk.py {{.CLI_ARGS}}
+    vars:
+      # default args to support overriding completely
+      CLI_ARGS: --sdk-root {{.ZG_EXTERNAL_SDK_ROOT}}
+    requires:
+      vars: [ZG_EXTERNAL_SDK_ROOT]
+
   build:
     cmd: zig build -Dsdk={{.ZG_EXTERNAL_SDK_ROOT}}
     requires:
