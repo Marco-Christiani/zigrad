@@ -8,7 +8,6 @@
   xlaMlirStablehloCapiSdk,
   devel ? false,
 }:
-
 stdenv.mkDerivation {
   pname = "zigrad-mlir-shim";
   version = xlaMlirStablehloCapiSdk.version + lib.optionalString devel "-devel";

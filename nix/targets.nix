@@ -7,16 +7,14 @@
   nixglhost,
   src,
   cudaArchitectures,
-}:
-let
+}: let
   cudaArchStr = pkgs.lib.concatStringsSep ";" cudaArchitectures;
 
   colors = {
     yellow = "\\033[33m";
     reset = "\\033[0m";
   };
-in
-{
+in {
   # group targets explicitly, can extend this
   targets = {
     example-cuda = rec {

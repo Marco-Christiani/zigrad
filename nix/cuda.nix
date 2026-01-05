@@ -6,7 +6,7 @@
   # If you want multi-arch binaries, put multiple entries here.
   #
   # For dev convenience you can override at runtime via CUDA_ARCHS, see devShell.
-  cudaArchitectures = [ "86" ];
+  cudaArchitectures = ["86"];
 
   # prefer explicit host compiler for nvcc to avoid it discovering something else.
   gccHostAttr = "gcc13";
