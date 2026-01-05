@@ -23,22 +23,19 @@
   devel ? false,
 }: let
   lock = builtins.fromJSON (builtins.readFile lockFile);
-  pins = lock.pins;
-
-  xla = pins.xla;
-  llvm = pins.llvm;
-  stablehlo = pins.stablehlo;
+  inherit (lock) pins;
+  inherit (pins) xla llvm stablehlo;
 
   xlaTar = fetchurl {
     url = xla.tarball_url;
     hash = xla.hash_sri;
   };
   llvmTar = fetchurl {
-    urls = llvm.urls;
+    inherit (llvm) urls;
     hash = llvm.hash_sri;
   };
   stablehloZip = fetchurl {
-    urls = stablehlo.urls;
+    inherit (stablehlo) urls;
     hash = stablehlo.hash_sri;
   };
 
@@ -248,7 +245,7 @@ in
       else
         log "Minimal mode: copying MLIR-C + StablehloCAPI and DT_NEEDED closure"
 
-        # Copy the two “roots”
+        # Copy the two "roots"
         cp -v llvm-build/lib/libMLIR-C.so* "$out/lib/" || true
         cp -v stablehlo-build/lib/libStablehloCAPI.so* "$out/lib/" || true
 
@@ -269,7 +266,7 @@ in
             fi
             seen["$base"]=1
 
-            # Ensure it’s present in output
+            # Ensure it's present in output
             if [ ! -f "$out/lib/$base" ]; then
               cp -v "$libpath" "$out/lib/"
             fi

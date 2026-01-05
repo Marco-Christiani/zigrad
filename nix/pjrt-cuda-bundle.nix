@@ -13,14 +13,14 @@
     ;
 
   lock = builtins.fromJSON (builtins.readFile lockFile);
-  wheels = lock.wheels;
+  inherit (lock) wheels;
 
   # Fetch all wheels listed in lock.json
   wheelFetches =
     map (
       w:
         fetchurl {
-          url = w.url;
+          inherit (w) url;
           hash = w.hash_sri;
         }
     )
