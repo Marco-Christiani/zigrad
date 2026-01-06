@@ -24,7 +24,7 @@ fn dlErrMsg() []const u8 {
 
 fn debugEnabled() bool {
     const allocator = std.heap.page_allocator;
-    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_PJRT_DEBUG")) |val| {
+    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DEBUG")) |val| {
         defer allocator.free(val);
         if (val.len == 0) return false;
         return val[0] != '0';

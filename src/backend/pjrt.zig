@@ -2,7 +2,6 @@
 ///
 /// Implements backend.zig interface using PJRT.
 /// This module connects generic Backend interface to specific PJRT types.
-
 const std = @import("std");
 const backend = @import("backend.zig");
 const plugin_mod = @import("../pjrt/plugin.zig");
@@ -21,7 +20,7 @@ const CompileOptions = backend.CompileOptions;
 
 fn debugEnabled() bool {
     const allocator = std.heap.page_allocator;
-    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_PJRT_DEBUG")) |val| {
+    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DEBUG")) |val| {
         defer allocator.free(val);
         if (val.len == 0) return false;
         return val[0] != '0';

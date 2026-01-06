@@ -152,7 +152,7 @@ pub fn main() !void {
             try out.print("   NOTE: no dump files found. Plugin may not honor XLA_FLAGS on CPU.\n", .{});
         }
     } else {
-        try out.print("XLA dump disabled (set ZIGRAD_XLA_DUMP=1 to enable)\n", .{});
+        try out.print("XLA dump disabled (set ZG_XLA_DUMP=1 to enable)\n", .{});
     }
 
     try tty.print(.green, "M2 FUSION PROOF PASS (correctness)\n", .{});
@@ -177,7 +177,7 @@ const DumpConfig = struct {
     xla_flags_value: ?[:0]u8,
 
     pub fn init(allocator: std.mem.Allocator, out: anytype) !DumpConfig {
-        const enabled = envTruthy(allocator, "ZIGRAD_XLA_DUMP") catch false;
+        const enabled = envTruthy(allocator, "ZG_XLA_DUMP") catch false;
         if (!enabled) {
             return .{ .enabled = false, .dump_dir = &[_]u8{}, .xla_flags_value = null };
         }
@@ -202,7 +202,7 @@ const DumpConfig = struct {
             return error.SetEnvFailed;
         }
 
-        try out.print("XLA dump enabled via XLA_FLAGS (ZIGRAD_XLA_DUMP=1)\n", .{});
+        try out.print("XLA dump enabled via XLA_FLAGS (ZG_XLA_DUMP=1)\n", .{});
         return .{ .enabled = true, .dump_dir = dump_dir, .xla_flags_value = flags };
     }
 
@@ -225,7 +225,7 @@ fn envTruthy(allocator: std.mem.Allocator, key: []const u8) !bool {
 }
 
 fn computeDumpDir(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_XLA_DUMP_TO")) |override| {
+    if (std.process.getEnvVarOwned(allocator, "ZG_XLA_DUMP_TO")) |override| {
         return override;
     } else |_| {}
 

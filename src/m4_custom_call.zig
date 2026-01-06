@@ -25,7 +25,7 @@ const CALL_TARGET_NAME = "zg_custom_zero";
 
 fn debugEnabled() bool {
     const allocator = std.heap.page_allocator;
-    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_PJRT_DEBUG")) |val| {
+    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DEBUG")) |val| {
         defer allocator.free(val);
         if (val.len == 0) return false;
         return val[0] != '0';
@@ -489,6 +489,23 @@ pub fn main() !void {
     const mode = if (with_handler) "POSITIVE" else "NEGATIVE";
     try tty.print(.cyan, "=== M4.2 Custom Call Test ({s} MODE) ===\n", .{mode});
 
+    {
+        const tmp = std.process.getEnvVarOwned(allocator, "PJRT_GPU_PLUGIN_PATH") catch |e| switch (e) {
+            error.EnvironmentVariableNotFound => null,
+            inline else => return e,
+        };
+        defer if (tmp) |t| allocator.free(t);
+        try tty.print(.yellow, "PJRT_GPU_PLUGIN_PATH: {?s}\n", .{tmp});
+    }
+    {
+        const tmp = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |e| switch (e) {
+            error.EnvironmentVariableNotFound => null,
+            inline else => return e,
+        };
+        defer if (tmp) |t| allocator.free(t);
+        try tty.print(.yellow, "PJRT_PLUGIN_PATH: {?s}\n", .{tmp});
+    }
+
     // Initialize MLIR context and dialects
     try stdout.print("Initializing MLIR context...\n", .{});
 
@@ -528,12 +545,13 @@ pub fn main() !void {
     try stdout.print("Loading PJRT CUDA plugin...\n", .{});
     var plugin_path_owned: ?[]u8 = null;
     const plugin_path: []const u8 = blk: {
-        if (std.process.getEnvVarOwned(allocator, "PJRT_CUDA_PLUGIN_PATH")) |p| {
+        if (std.process.getEnvVarOwned(allocator, "PJRT_GPU_PLUGIN_PATH")) |p| {
             plugin_path_owned = p;
             break :blk p;
         } else |_| {}
         break :blk "result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
     };
+    try tty.print(.yellow, "Loading plugin: {s}\n", .{plugin_path});
     defer if (plugin_path_owned) |p| allocator.free(p);
     var api = try pjrt_plugin.loadPlugin(plugin_path);
 
