@@ -32,6 +32,7 @@ SYSTEM_ALLOWLIST = {
     "libpthread.so.0",
     "libgcc_s.so.1",
     "libstdc++.so.6",
+    "libcuda.so.1",
 }
 
 
@@ -47,9 +48,9 @@ def die(msg: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(verbose: bool) -> None:
     logging.basicConfig(
-        level=getattr(logging, level),
+        level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
         stream=sys.stderr,
     )
@@ -179,16 +180,21 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Path to SDK root dir (default: $ZG_EXTERNAL_SDK_ROOT, fallback ./result)",
     )
 
-    ap.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
+    ap.add_argument("--verbose", action="store_true")
 
     ap.add_argument("--expand-origin", action="store_true")
     ap.add_argument("--resolve-symlinks", action="store_true")
     ap.add_argument("--fail-fast", action="store_true")
-    ap.add_argument("--allow-system", action="store_true")
+    ap.add_argument(
+        "--allow-host",
+        action="store_true",
+        help="Allow host-provided system libs (glibc/driver) to satisfy deps.",
+    )
+    ap.add_argument(
+        "--check-host",
+        action="store_true",
+        help="Search common host lib paths when resolving deps.",
+    )
     ap.add_argument("--json", action="store_true")
 
     return ap
@@ -196,7 +202,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_argparser().parse_args()
-    configure_logging(args.log_level)
+    configure_logging(args.verbose)
 
     sdk_root, sdk_root_source = resolve_sdk_root(args.sdk_root)
     lib_dir = sdk_root / "lib"
@@ -204,11 +210,14 @@ def main() -> None:
 
     target = args.target or (lib_dir / "libStablehloCAPI.so")
     target_source = "cli" if args.target else "<sdk-root>/lib default"
+    target_abs = target.resolve()
 
     if not target.exists():
-        die(f"Target not found: {target}")
+        if target.is_absolute() and target_abs == target:
+            die(f"Target not found: {target}")
+        else:
+            die(f"Target not found: {target} (absolute path: {target_abs})")
 
-    target_abs = target.resolve()
     origin = target_abs.parent
 
     # Context
@@ -228,6 +237,20 @@ def main() -> None:
     search_dirs.append(lib_dir)
     if runtime_sys.exists():
         search_dirs.append(runtime_sys)
+    runtime_nvidia = sdk_root / "runtime" / "nvidia"
+    if runtime_nvidia.exists():
+        for d in runtime_nvidia.glob("*/lib"):
+            search_dirs.append(d)
+
+    if args.check_host:
+        for d in [
+            Path("/lib"),
+            Path("/lib64"),
+            Path("/usr/lib"),
+            Path("/usr/lib64"),
+            Path("/usr/lib/x86_64-linux-gnu"),
+        ]:
+            search_dirs.append(d)
 
     search_dirs = unique_dirs(search_dirs)
 
@@ -235,9 +258,9 @@ def main() -> None:
     deps_json: list[dict[str, object]] = []
 
     for name in needed:
-        if name in SYSTEM_ALLOWLIST:
-            LOG.debug("[OK sys] %s", name)
-            deps_json.append({"name": name, "status": "ok", "classification": "sys"})
+        if name in SYSTEM_ALLOWLIST and args.allow_host:
+            LOG.debug("[OK host] %s", name)
+            deps_json.append({"name": name, "status": "ok", "classification": "host"})
             continue
 
         found: FoundDep | None = None
@@ -250,7 +273,7 @@ def main() -> None:
         if not found:
             LOG.warning("[MISSING] %s", name)
             deps_json.append({"name": name, "status": "missing"})
-            if not args.allow_system:
+            if not args.allow_host:
                 missing_any = True
                 if args.fail_fast:
                     die(f"Unresolved dependency: {name}")
