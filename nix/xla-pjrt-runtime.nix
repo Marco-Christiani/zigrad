@@ -12,12 +12,42 @@
   cudaSupport ? false,
   cudaPackages ? null,
   cudaArchitectures ? null,
+  # Copy CUDA runtime libs from nixpkgs into the bundle (can be huge).
+  copyCudaFromNix ? false,
+  # Use cudaPackages.backendStdenv for CUDA builds. This can pull a large
+  # toolchain closure into the build environment.
+  useCudaStdenv ? true,
   lockFile,
   devel ? false,
   # Dev-speed knobs (keep false for hermetic builds)
   persistentBazelOutputBase ? false,
   bazelLogEvents ? false,
 }: let
+  # -----------------------------------------------------------------------------
+  # XLA PJRT runtime bundle
+  #
+  # Outputs:
+  #   $out/runtime/xla/pjrt/c/pjrt_c_api_{cpu,gpu}_plugin.so
+  #   $out/runtime/sys/lib/{libstdc++.so.6,libgcc_s.so.1}
+  #   $out/runtime/nvidia/... (CUDA runtime + tools when cudaSupport=true)
+  #
+  # CUDA bundle strategy:
+  #   - Default: copy CUDA/NVSHMEM DSOs + tools from Bazel runfiles/_solib
+  #     (hermetic, avoids nixpkgs CUDA runtime closure).
+  #   - Optional: copy from nixpkgs CUDA packages (copyCudaFromNix=true).
+  #
+  # Key switches:
+  #   - cudaSupport: build GPU plugin and populate runtime/nvidia
+  #   - copyCudaFromNix: include nixpkgs CUDA runtime DSOs in bundle
+  #   - useCudaStdenv: use cudaPackages.backendStdenv (can enlarge build closure)
+  #   - devel: keep symbols, copy extra bazel-bin artifacts, write debug logs
+  #   - bazelLogEvents: write BEP/exec logs (can be multi-GB) when devel=true
+  #
+  # Expected Bazel output layout (for runfiles discovery):
+  #   bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/...
+  #   bazel-out/.../xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/...
+  #   or under Bazel output_base (queried via `bazel info output_base`).
+  # -----------------------------------------------------------------------------
   lock = builtins.fromJSON (builtins.readFile lockFile);
   xla = lock.pins.xla;
 
@@ -33,11 +63,11 @@
   '';
 
   effectiveStdenv =
-    if cudaSupport
+    if cudaSupport && useCudaStdenv
     then
       (
         if cudaPackages == null
-        then throw "cudaSupport=true requires cudaPackages"
+        then throw "cudaSupport=true and useCudaStdenv=true require cudaPackages"
         else cudaPackages.backendStdenv
       )
     else stdenv;
@@ -246,6 +276,7 @@ in
 
     buildPhase = ''
       runHook preBuild
+      bazel info output_base > ./.bazel-output-base-path
       ${lib.optionalString devel ''
         bazel info output_base
         bazel info repository_cache
@@ -286,7 +317,7 @@ in
       cp -v ${stdenv.cc.cc.lib}/lib/libstdc++.so.6 "$out/runtime/sys/lib/"
       cp -v ${stdenv.cc.cc.lib}/lib/libgcc_s.so.1 "$out/runtime/sys/lib/"
 
-      ${lib.optionalString cudaSupport ''
+      ${lib.optionalString (cudaSupport && copyCudaFromNix) ''
         # Copy CUDA runtime libs into runtime/nvidia/<pkg>/lib
         copy_cuda_lib() {
           local name="$1"
@@ -306,11 +337,16 @@ in
         }
       ''}
 
-      ${lib.optionalString cudaSupport (lib.concatStringsSep "\n" (map (entry: ''
+      ${lib.optionalString (cudaSupport && copyCudaFromNix) (lib.concatStringsSep "\n" (map (entry: ''
         copy_cuda_lib "${entry.name}" "${entry.pkg}"
       '') cudaRuntimeLibs))}
 
       ${lib.optionalString cudaSupport ''
+        output_base=""
+        if [ -f ./.bazel-output-base-path ]; then
+          output_base="$(cat ./.bazel-output-base-path)"
+        fi
+
         # Prefer Bazel runfiles (_solib) for hermetic CUDA/NVSHMEM DSOs.
         log_copy() {
           echo "[cuda-copy] $*"
@@ -382,17 +418,40 @@ in
           local dest="$2"
           log_copy "fallback find pattern=$pattern"
           mkdir -p "$dest"
+          local find_roots=()
+          if [ -d "bazel-bin" ]; then
+            find_roots+=("bazel-bin")
+          fi
+          if [ -d "bazel-out" ]; then
+            find_roots+=("bazel-out")
+          fi
+          if [ -n "$output_base" ] && [ -d "$output_base" ]; then
+            find_roots+=("$output_base")
+          fi
+          if [ "''${#find_roots[@]}" -eq 0 ]; then
+            log_copy "fallback find skipped: no bazel roots found"
+            return 0
+          fi
           while IFS= read -r -d $'\0' f; do
             copy_one "$f" "$dest"
-          done < <(find -L bazel-bin bazel-out -type f -name "$pattern" -print0 2>/dev/null || true)
+          done < <(find -L "''${find_roots[@]}" -type f -name "$pattern" -print0 2>/dev/null || true)
           chmod -R u+w "$dest"
         }
 
+        copy_find "libcublas*.so*" "$out/runtime/nvidia/cublas/lib"
+        copy_find "libcublasLt*.so*" "$out/runtime/nvidia/cublas/lib"
+        copy_find "libcudnn*.so*" "$out/runtime/nvidia/cudnn/lib"
+        copy_find "libcufft*.so*" "$out/runtime/nvidia/cufft/lib"
+        copy_find "libcupti*.so*" "$out/runtime/nvidia/cupti/lib"
+        copy_find "libcusparse*.so*" "$out/runtime/nvidia/cusparse/lib"
+        copy_find "libcudart*.so*" "$out/runtime/nvidia/cudart/lib"
+        copy_find "libnvrtc*.so*" "$out/runtime/nvidia/nvrtc/lib"
+        copy_find "libnvJitLink*.so*" "$out/runtime/nvidia/nvjitlink/lib"
+        copy_find "libnccl*.so*" "$out/runtime/nvidia/nccl/lib"
         copy_find "libnvshmem_host.so.3*" "$out/runtime/nvidia/nvshmem/lib"
         copy_find "nvshmem_bootstrap_uid.so.3*" "$out/runtime/nvidia/nvshmem/lib"
         copy_find "nvshmem_transport_ibrc.so.3*" "$out/runtime/nvidia/nvshmem/lib"
-        copy_find "libnvJitLink.so.12*" "$out/runtime/nvidia/nvjitlink/lib"
-        copy_find "libnvrtc-builtins.so.12.9*" "$out/runtime/nvidia/nvrtc/lib"
+        copy_find "libnvrtc-builtins.so.*" "$out/runtime/nvidia/nvrtc/lib"
 
         # Prefer runfiles cuda_nvcc tools if present.
         tool_candidates=(
@@ -457,6 +516,11 @@ in
           [ -f "$so" ] || continue
           patchelf --set-rpath '$ORIGIN/../../../sys/lib' "$so" || true
         done
+
+        if ! find "$out/runtime/nvidia" -type f -name "*.so*" -print -quit | grep -q .; then
+          echo "ERROR: no CUDA DSOs copied into runtime/nvidia; check Bazel runfiles paths." >&2
+          exit 1
+        fi
       ''}
 
       # Patch plugin rpaths to the bundled runtime lib dirs
@@ -488,10 +552,41 @@ in
       cat > "$out/runtime/PROVENANCE.json" <<EOF
       ${builtins.toJSON lock}
       EOF
+      # Lightweight README for consumers inspecting the runtime bundle.
+      cat > "$out/runtime/README.txt" <<'EOF'
+      zigrad XLA PJRT runtime bundle
+
+      Layout:
+        runtime/xla/pjrt/c/            PJRT C API plugins (cpu/gpu)
+        runtime/sys/lib/              libstdc++ and libgcc_s for plugin rpaths
+        runtime/nvidia/               CUDA runtime DSOs, tools, nvvm/libdevice
+
+      CUDA bundle behavior:
+        - Default: copy CUDA/NVSHMEM DSOs + tools from Bazel runfiles/_solib.
+        - copyCudaFromNix=true: also copy CUDA runtime libs from nixpkgs.
+
+      Build options of note:
+        - cudaSupport: build GPU plugin and populate runtime/nvidia
+        - useCudaStdenv: use cudaPackages.backendStdenv (larger build closure)
+        - devel: copy extra bazel-bin artifacts into $out/lib
+        - bazelLogEvents: emit BEP/exec logs (can be huge) when devel=true
+
+      Expected Bazel paths:
+        bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/...
+        bazel-out/.../xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/...
+        output_base (from `bazel info output_base`)
+      EOF
     '';
 
     meta = {
       description = "XLA PJRT C API runtime plugins";
+      longDescription = ''
+        Bundles XLA PJRT CPU/GPU plugins plus a self-contained CUDA runtime
+        tree. By default the CUDA/NVSHMEM DSOs are copied from Bazel runfiles
+        (_solib) to avoid dragging the full nixpkgs CUDA runtime closure. The
+        bundle layout lives under $out/runtime; see $out/runtime/README.txt for
+        details on layout, switches, and expected Bazel paths.
+      '';
       platforms = lib.platforms.linux;
     };
 
