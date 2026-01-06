@@ -74,16 +74,6 @@
 
       lockFile = ./nix/lock.json;
 
-      pjrtCudaBundle = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
-        inherit lockFile;
-        withNvidiaHeaders = false;
-      };
-
-      pjrtCudaBundleDevel = pkgs.callPackage ./nix/pjrt-cuda-bundle.nix {
-        inherit lockFile;
-        withNvidiaHeaders = true;
-      };
-
       xlaMlirStablehloCapiSdk = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
         inherit lockFile;
       };
@@ -99,7 +89,7 @@
       zigradExternalSdk = pkgs.symlinkJoin {
         name = "zigrad-external-sdk";
         paths = [
-          pjrtCudaBundle
+          xlaPjrtPluginsCuda
           xlaMlirStablehloCapiSdk
           # zigradMlirShim
         ];
@@ -110,7 +100,6 @@
       zigradExternalSdkDevel = pkgs.symlinkJoin {
         name = "zigrad-external-sdk-devel";
         paths = [
-          # pjrtCudaBundleDevel
           xlaPjrtPluginsCudaDevel
           xlaMlirStablehloCapiDevel
           # zigradMlirShimDevel
@@ -234,7 +223,7 @@
         pure = pkgs.mkShellNoCC {
           packages = baseDevShellPkgs ++ [zigradExternalSdk];
           ZG_EXTERNAL_SDK_ROOT = sdkRoot;
-          PJRT_PLUGIN_PATH = "${sdkRoot}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+          PJRT_PLUGIN_PATH = "${sdkRoot}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
 
           shellHook = ''
             if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
@@ -254,12 +243,6 @@
 
         # Dev target: ccache + devel
         zigrad-external-sdk-devel = zigradExternalSdkDevel;
-
-        # Runtime bundle (PJRT + Vendor DSOs as self-contained closure)
-        pjrt-cuda-runtime = pjrtCudaBundle;
-
-        # Runtime bundle - Dev target: ccache + devel (NVIDIA Headers)
-        pjrt-cuda-runtime-devel = pjrtCudaBundleDevel;
 
         # ----------------------------------------------------------------
         # Bazel PJRT plugin build
