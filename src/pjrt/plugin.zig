@@ -12,10 +12,41 @@ const c_mod = @import("c.zig");
 const c = c_mod.c;
 const DlHandle = ?*anyopaque;
 
+var cached_api: ?Api = null;
+var cached_path: ?[]const u8 = null;
+var cached_refcount: usize = 0;
+
 fn dlErrMsg() []const u8 {
     // dlerror() can return null
     const p = c.dlerror() orelse return "dlerror() returned null";
     return std.mem.span(p);
+}
+
+fn debugEnabled() bool {
+    const allocator = std.heap.page_allocator;
+    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_PJRT_DEBUG")) |val| {
+        defer allocator.free(val);
+        if (val.len == 0) return false;
+        return val[0] != '0';
+    } else |_| {
+        return false;
+    }
+}
+
+fn logDladdr(label: []const u8, addr: *const anyopaque) void {
+    if (!debugEnabled()) return;
+    var info: c.Dl_info = undefined;
+    if (c.dladdr(addr, &info) == 0) {
+        std.debug.print("[pjrt-debug] dladdr {s}: <unresolved> addr={*}\n", .{ label, addr });
+        return;
+    }
+    const fname = if (info.dli_fname) |p| std.mem.span(p) else "<null>";
+    const sname = if (info.dli_sname) |p| std.mem.span(p) else "<null>";
+    std.debug.print("[pjrt-debug] dladdr {s}: dso={s} sym={s} addr={*}\n", .{ label, fname, sname, addr });
+}
+
+fn canonicalizePath(path: []const u8) ![]const u8 {
+    return std.fs.cwd().realpathAlloc(std.heap.page_allocator, path);
 }
 
 /// Load PJRT plugin from explicit path
@@ -29,8 +60,34 @@ fn dlErrMsg() []const u8 {
 pub fn loadPlugin(path: []const u8) !Api {
     // preloadDriver();
     probeCudnn("result/runtime");
+    const debug = debugEnabled();
+
+    const canonical = try canonicalizePath(path);
+    errdefer std.heap.page_allocator.free(canonical);
+
+    if (cached_path) |existing| {
+        if (!std.mem.eql(u8, existing, canonical)) {
+            if (debug) {
+                std.debug.print("[pjrt-debug] loadPlugin called with different path\n", .{});
+                std.debug.print("[pjrt-debug] existing={s}\n", .{existing});
+                std.debug.print("[pjrt-debug] requested={s}\n", .{canonical});
+            }
+            return error.PluginAlreadyLoaded;
+        }
+        cached_refcount += 1;
+        if (debug) {
+            std.debug.print("[pjrt-debug] loadPlugin reuse: path={s} handle={*} refcount={}\n", .{
+                existing,
+                cached_api.?.handle,
+                cached_refcount,
+            });
+        }
+        std.heap.page_allocator.free(canonical);
+        return cached_api.?;
+    }
+
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
+    const path_z = try std.fmt.bufPrintZ(&path_buf, "{s}", .{canonical});
 
     // Open plugin library
     // const handle = c.dlopen(path_z, c.RTLD_NOW | c.RTLD_LOCAL) orelse {
@@ -42,10 +99,18 @@ pub fn loadPlugin(path: []const u8) !Api {
             std.debug.print("dlopen retry (GLOBAL) failed: {s}\n", .{dlErrMsg()});
             return error.PluginLoadFailed;
         };
-        return try loadFromHandle(handle2);
+        const api = try loadFromHandle(handle2, canonical);
+        cached_api = api;
+        cached_path = canonical;
+        cached_refcount = 1;
+        return api;
     };
 
-    return try loadFromHandle(handle);
+    const api = try loadFromHandle(handle, canonical);
+    cached_api = api;
+    cached_path = canonical;
+    cached_refcount = 1;
+    return api;
 }
 
 fn preloadDriver() void {
@@ -108,7 +173,7 @@ fn probeCudnn(runtime_root: []const u8) void {
 }
 // ----------------------------------------------------------------------------------------------------
 
-fn loadFromHandle(handle: *anyopaque) !Api {
+fn loadFromHandle(handle: *anyopaque, canonical_path: []const u8) !Api {
     errdefer _ = c.dlclose(handle);
 
     const get_api_sym = c.dlsym(handle, "GetPjrtApi") orelse {
@@ -118,6 +183,11 @@ fn loadFromHandle(handle: *anyopaque) !Api {
 
     const get_api_fn: *const fn () callconv(.c) ?*const c.PJRT_Api =
         @ptrCast(@alignCast(get_api_sym));
+
+    if (debugEnabled()) {
+        std.debug.print("[pjrt-debug] dlopen path={s} handle={*}\n", .{ canonical_path, handle });
+        logDladdr("GetPjrtApi", @ptrCast(@constCast(get_api_sym)));
+    }
 
     var api = try Api.init(handle, get_api_fn);
 
@@ -138,6 +208,16 @@ fn loadFromHandle(handle: *anyopaque) !Api {
         try api.call("PJRT_Plugin_Initialize", &init_args);
     }
 
+    if (debugEnabled()) {
+        std.debug.print("[pjrt-debug] PJRT_Api ptr={*} extension_start={*}\n", .{
+            api.pjrt_api,
+            api.pjrt_api.extension_start,
+        });
+        if (api.pjrt_api.extension_start) |ext_ptr| {
+            logDladdr("PJRT_Api extension_start", @ptrCast(@constCast(ext_ptr)));
+        }
+    }
+
     const ver = api.version();
     std.debug.print("PJRT api version from plugin: {}.{}\n", .{ ver.major, ver.minor });
     std.debug.print("sizeof(PJRT_Client_Create_Args) = {}\n", .{@sizeOf(c.PJRT_Client_Create_Args)});
@@ -154,6 +234,24 @@ fn loadFromHandle(handle: *anyopaque) !Api {
 
 /// Unload PJRT plugin
 pub fn unloadPlugin(api: Api) void {
+    if (cached_api) |cached| {
+        if (cached.handle == api.handle) {
+            if (cached_refcount > 0) cached_refcount -= 1;
+            if (debugEnabled()) {
+                std.debug.print("[pjrt-debug] unloadPlugin handle={*} refcount={}\n", .{
+                    api.handle,
+                    cached_refcount,
+                });
+            }
+            if (cached_refcount == 0) {
+                _ = c.dlclose(api.handle);
+                if (cached_path) |p| std.heap.page_allocator.free(p);
+                cached_api = null;
+                cached_path = null;
+            }
+            return;
+        }
+    }
     _ = c.dlclose(api.handle);
 }
 

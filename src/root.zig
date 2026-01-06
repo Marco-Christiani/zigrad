@@ -12,6 +12,7 @@ pub const pjrt = struct {
     pub const api = @import("pjrt/api.zig");
     pub const plugin = @import("pjrt/plugin.zig");
     pub const types = @import("pjrt/types.zig");
+    pub const c = @import("pjrt/c.zig");
 };
 
 // Runtime utilities

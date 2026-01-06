@@ -8,6 +8,7 @@ const backend = @import("backend.zig");
 const plugin_mod = @import("../pjrt/plugin.zig");
 const pjrt_types = @import("../pjrt/types.zig");
 const pjrt_api = @import("../pjrt/api.zig");
+const c = @import("../pjrt/c.zig").c;
 const reporting = @import("reporting.zig");
 
 const Backend = backend.Backend;
@@ -17,6 +18,27 @@ const ExecuteResult = backend.ExecuteResult;
 const Buffer = backend.Buffer;
 const Event = backend.Event;
 const CompileOptions = backend.CompileOptions;
+
+fn debugEnabled() bool {
+    const allocator = std.heap.page_allocator;
+    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_PJRT_DEBUG")) |val| {
+        defer allocator.free(val);
+        if (val.len == 0) return false;
+        return val[0] != '0';
+    } else |_| {
+        return false;
+    }
+}
+
+fn logApiPointers(label: []const u8, api: *const c.PJRT_Api, handle: *anyopaque) void {
+    if (!debugEnabled()) return;
+    std.debug.print("[pjrt-debug] {s}: handle={*} PJRT_Api={*} extension_start={*}\n", .{
+        label,
+        handle,
+        api,
+        api.extension_start,
+    });
+}
 
 pub const PjrtBackend = struct {
     api: pjrt_api.Api,
@@ -28,6 +50,7 @@ pub const PjrtBackend = struct {
         // Load PJRT plugin
         const api = try plugin_mod.loadPlugin(plugin_path);
         errdefer plugin_mod.unloadPlugin(api);
+        logApiPointers("backend.init", api.pjrt_api, api.handle);
 
         const plugin_path_copy = try allocator.dupe(u8, plugin_path);
         errdefer allocator.free(plugin_path_copy);
@@ -95,6 +118,8 @@ pub const PjrtBackend = struct {
     fn compileImpl(ptr: *anyopaque, device: *const Device, options: CompileOptions) backend.Error!Executable {
         const self: *PjrtBackend = @ptrCast(@alignCast(ptr));
         const dev_wrapper: *PjrtDeviceWrapper = @ptrCast(@alignCast(device.ptr));
+
+        logApiPointers("backend.compile", self.api.pjrt_api, self.api.handle);
 
         var report = reporting.emitCompileReport(self.allocator, &self.api, self.plugin_path, options) catch
             return backend.Error.OutOfMemory;

@@ -1,62 +1,366 @@
-/// M4.2 Milestone Test: Custom Call Boundaries
+/// M4.2 Milestone Test: Custom Call Boundaries with Typed FFI
+///
+/// Tests custom call execution with handler registration via PJRT FFI extension.
+/// Runs in two modes:
+/// - --no-handler: Negative test (should fail without registered handler)
+/// - --with-handler: Positive test (should succeed with registered handler)
+///
 const std = @import("std");
 const zigrad = @import("zigrad");
 const mlir = @import("mlir/mlir.zig");
 const stablehlo = @import("mlir/dialects/stablehlo.zig");
 const term_color = @import("util/term_color.zig");
+const pjrt_plugin = zigrad.pjrt.plugin;
+const pjrt_api = zigrad.pjrt.api;
+const c_mod = zigrad.pjrt.c;
+const c = c_mod.c;
 
 const Backend = zigrad.Backend;
 const HostBuffer = zigrad.HostBuffer;
 const Shape = zigrad.Shape;
 const Program = zigrad.Program;
-const PjrtBackend = zigrad.pjrt_backend.PjrtBackend;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// Custom call target name
+const CALL_TARGET_NAME = "zg_custom_zero";
 
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stderr().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    defer stdout.flush() catch |e| switch (e) {
-        error.WriteFailed => @panic("write failed on flush"),
+fn debugEnabled() bool {
+    const allocator = std.heap.page_allocator;
+    if (std.process.getEnvVarOwned(allocator, "ZIGRAD_PJRT_DEBUG")) |val| {
+        defer allocator.free(val);
+        if (val.len == 0) return false;
+        return val[0] != '0';
+    } else |_| {
+        return false;
+    }
+}
+
+fn logDladdr(label: []const u8, addr: *const anyopaque) void {
+    if (!debugEnabled()) return;
+    var info: c.Dl_info = undefined;
+    if (c.dladdr(addr, &info) == 0) {
+        std.debug.print("[pjrt-debug] dladdr {s}: <unresolved> addr={*}\n", .{ label, addr });
+        return;
+    }
+    const fname = if (info.dli_fname) |p| std.mem.span(p) else "<null>";
+    const sname = if (info.dli_sname) |p| std.mem.span(p) else "<null>";
+    std.debug.print("[pjrt-debug] dladdr {s}: dso={s} sym={s} addr={*}\n", .{ label, fname, sname, addr });
+}
+
+fn logApiPointers(api: *const c.PJRT_Api, ffi_ext: ?*c.PJRT_FFI_Extension) void {
+    if (!debugEnabled()) return;
+    const ext_base = api.extension_start;
+    std.debug.print("[pjrt-debug] PJRT_Api ptr={*} extension_start={*}\n", .{ api, ext_base });
+    if (ext_base) |ptr| {
+        logDladdr("PJRT_Api extension_start", @ptrCast(@constCast(ptr)));
+    }
+    if (ffi_ext) |ffi| {
+        std.debug.print("[pjrt-debug] PJRT_FFI_Extension ptr={*} register_handler={*}\n", .{
+            ffi,
+            ffi.register_handler,
+        });
+        if (ffi.register_handler) |reg_fn| {
+            logDladdr("PJRT_FFI_Extension.register_handler", @ptrCast(@constCast(reg_fn)));
+        }
+    }
+}
+
+//
+// MINIMAL TYPED-FFI HANDLER
+//
+// This handler zeroes all output buffers, demonstrating the minimal working pattern.
+//
+export fn zg_custom_zero(call_frame: [*c]c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
+    if (call_frame == null) return null;
+    const frame_ptr: *c.XLA_FFI_CallFrame = @ptrCast(@alignCast(call_frame));
+    const frame = frame_ptr.*;
+
+    // Decode output buffers from call frame
+    // For minimal implementation, we zero-fill all outputs
+    const num_rets: usize = @intCast(frame.rets.size);
+    var i: usize = 0;
+    while (i < num_rets) : (i += 1) {
+        // Cast void* to XLA_FFI_Buffer*
+        const buf_ptr: *c.XLA_FFI_Buffer = @ptrCast(@alignCast(frame.rets.rets[i]));
+        const buf = buf_ptr.*;
+
+        // Calculate buffer size
+        var size: usize = 1;
+        var dim_idx: usize = 0;
+        while (dim_idx < buf.rank) : (dim_idx += 1) {
+            size *= @intCast(buf.dims[dim_idx]);
+        }
+
+        // Get element size from dtype
+        const elem_size: usize = switch (buf.dtype) {
+            c.XLA_FFI_DataType_F32 => 4,
+            c.XLA_FFI_DataType_F64 => 8,
+            c.XLA_FFI_DataType_S32 => 4,
+            c.XLA_FFI_DataType_S64 => 8,
+            else => 4, // Default to 4 bytes
+        };
+
+        const total_bytes = size * elem_size;
+
+        // Zero-fill the output buffer
+        const data_ptr: [*]u8 = @ptrCast(buf.data);
+        @memset(data_ptr[0..total_bytes], 0);
+    }
+
+    return null; // Success
+}
+
+/// Walk PJRT extension chain to find FFI extension
+fn findFfiExtension(api: *const c.PJRT_Api) ?*c.PJRT_FFI_Extension {
+    var ext: ?*c.PJRT_Extension_Base = api.extension_start;
+
+    while (ext) |e| {
+        if (e.type == c.PJRT_Extension_Type_FFI) {
+            return @ptrCast(@alignCast(e));
+        }
+        ext = e.next;
+    }
+
+    return null;
+}
+
+/// Register custom call handler via PJRT FFI extension
+fn registerHandler(api: *const c.PJRT_Api, platform: []const u8, size_variant: u8) !void {
+    const ffi_ext = findFfiExtension(api) orelse {
+        std.debug.print("ERROR: PJRT_Extension_Type_FFI not found\n", .{});
+        return error.FfiExtensionNotFound;
     };
 
-    var tty = term_color.Tty.initForStderr(stdout);
-    try stdout.print("Zigrad PJRT/XLA backend (M4.2 custom call)\n", .{});
+    logApiPointers(api, ffi_ext);
 
-    try stdout.print("Constructing MLIR IR with custom_call...\n", .{});
+    std.debug.print("Found PJRT FFI extension\n", .{});
 
-    var registry = try mlir.Registry.init();
-    defer registry.deinit();
+    // Compute sizes based on variant
+    const target_size: usize = switch (size_variant) {
+        0 => CALL_TARGET_NAME.len, // Variant A: exclude NUL
+        1 => CALL_TARGET_NAME.len + 1, // Variant B: include NUL
+        2 => 0, // Variant C: let runtime compute
+        else => CALL_TARGET_NAME.len,
+    };
+    const platform_size: usize = switch (size_variant) {
+        0 => platform.len, // Variant A: exclude NUL
+        1 => platform.len + 1, // Variant B: include NUL
+        2 => 0, // Variant C: let runtime compute
+        else => platform.len,
+    };
 
-    // Dialect registry: register the dialects we will use in this test.
-    // This should work without allowing unregistered dialects, provided the DSOs are linked and loadable:
-    // - libMLIR-C.so
-    // - libStablehloCAPI.so (exports mlirGetDialectHandle__stablehlo__)
-    mlir.DialectHandle.fromString("func").insertDialect(registry);
-    mlir.DialectHandle.fromString("stablehlo").insertDialect(registry);
+    // Prepare registration args - pass raw function pointer as XLA_FFI_Handler*
+    var register_args = pjrt_api.initArgs(c.PJRT_FFI_Register_Handler_Args);
+    register_args.target_name = CALL_TARGET_NAME.ptr;
+    register_args.target_name_size = target_size;
+    register_args.handler = @ptrCast(@constCast(&zg_custom_zero)); // Raw function pointer
+    register_args.platform_name = platform.ptr;
+    register_args.platform_name_size = platform_size;
+    register_args.traits = 0; // No special traits
 
-    var mlir_ctx = try mlir.Context.initWithRegistry(registry, false);
-    defer mlir_ctx.deinit();
+    // DEBUG: Print exact registration parameters
+    std.debug.print("=== REGISTRATION DEBUG (Variant {}) ===\n", .{size_variant});
+    std.debug.print("  target_name: '{s}' (ptr={*})\n", .{ CALL_TARGET_NAME, CALL_TARGET_NAME.ptr });
+    std.debug.print("  target_name_size: {} (computed len={})\n", .{ register_args.target_name_size, CALL_TARGET_NAME.len });
+    std.debug.print("  platform_name: '{s}' (ptr={*})\n", .{ platform, platform.ptr });
+    std.debug.print("  platform_name_size: {} (computed len={})\n", .{ register_args.platform_name_size, platform.len });
+    std.debug.print("  handler: {*}\n", .{register_args.handler});
+    std.debug.print("  traits: 0x{x}\n", .{register_args.traits});
+    std.debug.print("  struct_size: {} (expected={})\n", .{ register_args.struct_size, @sizeOf(c.PJRT_FFI_Register_Handler_Args) });
+    std.debug.print("=====================================\n", .{});
 
-    mlir_ctx.allowUnregisteredDialects(false);
+    // Register handler
+    const register_fn = ffi_ext.register_handler orelse {
+        std.debug.print("ERROR: register_handler function pointer is null\n", .{});
+        return error.RegisterHandlerNotAvailable;
+    };
 
-    // Register + load dialects explicitly.
-    const func_handle = mlir.DialectHandle.fromString("func");
-    func_handle.registerDialect(mlir_ctx);
-    _ = func_handle.loadDialect(mlir_ctx);
+    if (register_fn(&register_args)) |pjrt_err| {
+        std.debug.print("ERROR: Handler registration failed\n", .{});
 
-    const stablehlo_handle = mlir.DialectHandle.fromString("stablehlo");
-    stablehlo_handle.registerDialect(mlir_ctx);
-    _ = stablehlo_handle.loadDialect(mlir_ctx);
+        // Try to get error message
+        var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+        @field(msg_args, "error") = pjrt_err;
+        if (api.PJRT_Error_Message) |msg_fn| {
+            _ = msg_fn(&msg_args);
+            if (msg_args.message) |msg| {
+                const message = msg[0..msg_args.message_size];
+                std.debug.print("  Error message: {s}\n", .{message});
+            }
+        }
 
-    // Correctness checks: ensure the context recognizes the ops we will create.
-    if (!mlir_ctx.isRegisteredOperation("func.func")) return error.DialectRegistrationFailed;
-    if (!mlir_ctx.isRegisteredOperation("func.return")) return error.DialectRegistrationFailed;
-    if (!mlir_ctx.isRegisteredOperation("stablehlo.custom_call")) return error.DialectRegistrationFailed;
+        return error.HandlerRegistrationFailed;
+    }
 
+    std.debug.print("Successfully registered handler '{s}' for platform '{s}'\n", .{ CALL_TARGET_NAME, platform });
+}
+
+/// Test registration API with invalid arguments to validate it's actually functioning
+fn testRegistrationSanity(api: *const c.PJRT_Api) !void {
+    const ffi_ext = findFfiExtension(api) orelse {
+        std.debug.print("ERROR: PJRT_Extension_Type_FFI not found\n", .{});
+        return error.FfiExtensionNotFound;
+    };
+
+    const register_fn = ffi_ext.register_handler orelse {
+        std.debug.print("ERROR: register_handler function pointer is null\n", .{});
+        return error.RegisterHandlerNotAvailable;
+    };
+
+    std.debug.print("\n", .{});
+    std.debug.print("╔════════════════════════════════════════════════════════╗\n", .{});
+    std.debug.print("║  FFI REGISTRATION SANITY CHECKS                        ║\n", .{});
+    std.debug.print("╚════════════════════════════════════════════════════════╝\n", .{});
+    std.debug.print("\n", .{});
+
+    // Test 1: Invalid platform name
+    {
+        std.debug.print("[Test 1] Invalid platform name: 'not_a_platform'\n", .{});
+        const invalid_platform = "not_a_platform";
+        var register_args = pjrt_api.initArgs(c.PJRT_FFI_Register_Handler_Args);
+        register_args.target_name = CALL_TARGET_NAME.ptr;
+        register_args.target_name_size = CALL_TARGET_NAME.len;
+        register_args.handler = @ptrCast(@constCast(&zg_custom_zero));
+        register_args.platform_name = invalid_platform.ptr;
+        register_args.platform_name_size = invalid_platform.len;
+        register_args.traits = 0;
+
+        if (register_fn(&register_args)) |pjrt_err| {
+            std.debug.print("  ✓ Registration REJECTED (as expected)\n", .{});
+            var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+            @field(msg_args, "error") = pjrt_err;
+            if (api.PJRT_Error_Message) |msg_fn| {
+                _ = msg_fn(&msg_args);
+                if (msg_args.message) |msg| {
+                    const message = msg[0..msg_args.message_size];
+                    std.debug.print("    Error: {s}\n", .{message});
+                }
+            }
+        } else {
+            std.debug.print("  ⚠ Registration SUCCEEDED (unexpected!)\n", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+
+    // Test 2: Null handler pointer
+    {
+        std.debug.print("[Test 2] Null handler pointer\n", .{});
+        var register_args = pjrt_api.initArgs(c.PJRT_FFI_Register_Handler_Args);
+        register_args.target_name = CALL_TARGET_NAME.ptr;
+        register_args.target_name_size = CALL_TARGET_NAME.len;
+        register_args.handler = null; // NULL handler
+        register_args.platform_name = "cuda".ptr;
+        register_args.platform_name_size = 4;
+        register_args.traits = 0;
+
+        if (register_fn(&register_args)) |pjrt_err| {
+            std.debug.print("  ✓ Registration REJECTED (as expected)\n", .{});
+            var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+            @field(msg_args, "error") = pjrt_err;
+            if (api.PJRT_Error_Message) |msg_fn| {
+                _ = msg_fn(&msg_args);
+                if (msg_args.message) |msg| {
+                    const message = msg[0..msg_args.message_size];
+                    std.debug.print("    Error: {s}\n", .{message});
+                }
+            }
+        } else {
+            std.debug.print("  ⚠ Registration SUCCEEDED (unexpected!)\n", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+
+    // Test 3: Empty target name
+    {
+        std.debug.print("[Test 3] Empty target name (size=0)\n", .{});
+        var register_args = pjrt_api.initArgs(c.PJRT_FFI_Register_Handler_Args);
+        register_args.target_name = CALL_TARGET_NAME.ptr; // Non-null but size 0
+        register_args.target_name_size = 0; // Empty
+        register_args.handler = @ptrCast(@constCast(&zg_custom_zero));
+        register_args.platform_name = "cuda".ptr;
+        register_args.platform_name_size = 4;
+        register_args.traits = 0;
+
+        if (register_fn(&register_args)) |pjrt_err| {
+            std.debug.print("  ✓ Registration REJECTED (as expected)\n", .{});
+            var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+            @field(msg_args, "error") = pjrt_err;
+            if (api.PJRT_Error_Message) |msg_fn| {
+                _ = msg_fn(&msg_args);
+                if (msg_args.message) |msg| {
+                    const message = msg[0..msg_args.message_size];
+                    std.debug.print("    Error: {s}\n", .{message});
+                }
+            }
+        } else {
+            std.debug.print("  ⚠ Registration SUCCEEDED (unexpected!)\n", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+
+    // Test 4: Duplicate registration
+    {
+        std.debug.print("[Test 4] Duplicate registration (register same handler twice)\n", .{});
+
+        // First registration
+        std.debug.print("  First registration...\n", .{});
+        var register_args1 = pjrt_api.initArgs(c.PJRT_FFI_Register_Handler_Args);
+        register_args1.target_name = CALL_TARGET_NAME.ptr;
+        register_args1.target_name_size = CALL_TARGET_NAME.len;
+        register_args1.handler = @ptrCast(@constCast(&zg_custom_zero));
+        register_args1.platform_name = "cuda".ptr;
+        register_args1.platform_name_size = 4;
+        register_args1.traits = 0;
+
+        if (register_fn(&register_args1)) |pjrt_err| {
+            std.debug.print("    ✗ First registration FAILED\n", .{});
+            var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+            @field(msg_args, "error") = pjrt_err;
+            if (api.PJRT_Error_Message) |msg_fn| {
+                _ = msg_fn(&msg_args);
+                if (msg_args.message) |msg| {
+                    const message = msg[0..msg_args.message_size];
+                    std.debug.print("      Error: {s}\n", .{message});
+                }
+            }
+        } else {
+            std.debug.print("    ✓ First registration succeeded\n", .{});
+
+            // Second registration (duplicate)
+            std.debug.print("  Second registration (duplicate)...\n", .{});
+            var register_args2 = pjrt_api.initArgs(c.PJRT_FFI_Register_Handler_Args);
+            register_args2.target_name = CALL_TARGET_NAME.ptr;
+            register_args2.target_name_size = CALL_TARGET_NAME.len;
+            register_args2.handler = @ptrCast(@constCast(&zg_custom_zero));
+            register_args2.platform_name = "cuda".ptr;
+            register_args2.platform_name_size = 4;
+            register_args2.traits = 0;
+
+            if (register_fn(&register_args2)) |pjrt_err| {
+                std.debug.print("    ✓ Duplicate registration REJECTED (as expected)\n", .{});
+                var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+                @field(msg_args, "error") = pjrt_err;
+                if (api.PJRT_Error_Message) |msg_fn| {
+                    _ = msg_fn(&msg_args);
+                    if (msg_args.message) |msg| {
+                        const message = msg[0..msg_args.message_size];
+                        std.debug.print("      Error: {s}\n", .{message});
+                    }
+                }
+            } else {
+                std.debug.print("    ⚠ Duplicate registration SUCCEEDED (unexpected - no uniqueness check?)\n", .{});
+            }
+        }
+        std.debug.print("\n", .{});
+    }
+
+    std.debug.print("╔════════════════════════════════════════════════════════╗\n", .{});
+    std.debug.print("║  SANITY CHECKS COMPLETE                                ║\n", .{});
+    std.debug.print("╚════════════════════════════════════════════════════════╝\n", .{});
+    std.debug.print("\n", .{});
+}
+
+/// Build MLIR module with custom_call using typed FFI
+fn buildModule(mlir_ctx: mlir.Context, allocator: std.mem.Allocator) ![]const u8 {
     const loc = mlir.Location.unknown(mlir_ctx);
 
     // Create module
@@ -75,26 +379,29 @@ pub fn main() !void {
 
     const arg0_val = entry_block.argument(0);
 
-    // Build stablehlo.custom_call operation manually
-    // This demonstrates an explicit boundary - XLA must call our custom implementation
-    // Note: We construct this directly to avoid linking StablehloCAPI.a
+    // Build stablehlo.custom_call with TYPED_FFI api_version
     const custom_call_op = mlir.Operation.make(mlir_ctx, "stablehlo.custom_call", .{
         .operands = &.{arg0_val},
         .results = &.{output_type},
         .attributes = &.{
-            .{ "call_target_name", mlir.Attribute.string(mlir_ctx, "zigrad_custom_relu") },
+            .{ "call_target_name", mlir.Attribute.string(mlir_ctx, CALL_TARGET_NAME) },
             .{ "has_side_effect", mlir.Attribute.boolean(mlir_ctx, false) },
-            .{ "api_version", mlir.Attribute.int(mlir_ctx, .i32, 1) }, // original = 1
+            .{ "api_version", mlir.Attribute.int(mlir_ctx, .i32, 4) }, // TYPED_FFI = 4
         },
         .location = loc,
     });
     entry_block.appendOperation(custom_call_op);
 
+    // DEBUG: Print custom_call emission details
+    std.debug.print("=== CUSTOM_CALL EMISSION DEBUG ===\n", .{});
+    std.debug.print("  call_target_name: '{s}'\n", .{CALL_TARGET_NAME});
+    std.debug.print("  call_target_name length: {}\n", .{CALL_TARGET_NAME.len});
+    std.debug.print("  api_version: 4 (TYPED_FFI)\n", .{});
+    std.debug.print("===================================\n", .{});
+
     // Build return operation
     const return_op = mlir.Operation.make(mlir_ctx, "func.return", .{
         .operands = &.{custom_call_op.result(0)},
-        // func.return verification expects it to be nested under func.func.
-        // We construct the block before attaching it to the func.func op, so defer verification.
         .verify = false,
         .location = loc,
     });
@@ -113,41 +420,314 @@ pub fn main() !void {
 
     module.getBody().appendOperation(func_op);
 
-    // Final verification after assembly (we deferred verification of func.return until it is nested under func.func).
+    // Verify module
     if (!module.op().verify()) {
         return error.InvalidMlir;
     }
 
-    try tty.print(.green, "IR constructed with stablehlo.custom_call\n", .{});
-
-    if (false) {
-        try stdout.print("\n--- Generated IR ---\n", .{});
-        var print_buffer: [8192]u8 = undefined;
-        var print_writer: std.Io.Writer = .fixed(&print_buffer);
-        try module.op().print(&print_writer, .{});
-        try stdout.print("{s}\n", .{print_writer.buffered()});
-        try stdout.print("--- End IR ---\n\n", .{});
-    }
-
-    try stdout.print("Serializing MLIR module to bytecode...\n", .{});
-
+    // Serialize to bytecode
     var bytecode_buffer_fixed: [1024 * 1024]u8 = undefined;
     var bytecode_writer: std.Io.Writer = .fixed(&bytecode_buffer_fixed);
     try module.op().writeBytecode(&bytecode_writer);
 
-    const bytecode_buffer = try allocator.dupe(u8, bytecode_writer.buffered());
-    defer allocator.free(bytecode_buffer);
+    return try allocator.dupe(u8, bytecode_writer.buffered());
+}
 
-    try tty.print(.green, "Bytecode generated ({d} bytes)\n", .{bytecode_buffer.len});
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    const has_custom_call = std.mem.indexOf(u8, bytecode_buffer, "zigrad_custom_relu") != null;
-    if (has_custom_call) {
-        try tty.print(.green, "Custom call target name found in bytecode\n", .{});
-    } else {
-        try tty.print(.red, "Custom call target name NOT found in bytecode\n", .{});
-        return error.CustomCallMissing;
+    var stdout_buffer: [2048]u8 = undefined;
+    var stdout_writer = std.fs.File.stderr().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch |e| switch (e) {
+        error.WriteFailed => @panic("write failed on flush"),
+    };
+
+    var tty = term_color.Tty.initForStderr(stdout);
+
+    // Parse arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var with_handler = false;
+    var size_variant: u8 = 0; // Default: exclude NUL (Variant A)
+    var ffi_reg_sanity = false;
+
+    if (args.len > 1) {
+        if (std.mem.eql(u8, args[1], "--with-handler")) {
+            with_handler = true;
+        } else if (std.mem.eql(u8, args[1], "--no-handler")) {
+            with_handler = false;
+        } else {
+            try stdout.print("Usage: {s} [--with-handler|--no-handler] [--size-variant=0|1|2] [--ffi-reg-sanity]\n", .{args[0]});
+            try stdout.print("  Size variants: 0=exclude NUL (default), 1=include NUL, 2=size=0\n", .{});
+            try stdout.print("  --ffi-reg-sanity: Run registration API validation experiments\n", .{});
+            return error.InvalidArguments;
+        }
     }
 
-    try tty.print(.green, "M4.2 PASSED\n", .{});
-    try stdout.print("Note: Execution with PJRT requires registering a custom call handler.\n", .{});
+    // Optional parameters
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.startsWith(u8, args[i], "--size-variant=")) {
+            const variant_str = args[i]["--size-variant=".len..];
+            size_variant = std.fmt.parseInt(u8, variant_str, 10) catch {
+                try stdout.print("Invalid size variant: {s}\n", .{variant_str});
+                return error.InvalidArguments;
+            };
+            if (size_variant > 2) {
+                try stdout.print("Size variant must be 0, 1, or 2\n", .{});
+                return error.InvalidArguments;
+            }
+        } else if (std.mem.eql(u8, args[i], "--ffi-reg-sanity")) {
+            ffi_reg_sanity = true;
+        }
+    }
+
+    const mode = if (with_handler) "POSITIVE" else "NEGATIVE";
+    try tty.print(.cyan, "=== M4.2 Custom Call Test ({s} MODE) ===\n", .{mode});
+
+    // Initialize MLIR context and dialects
+    try stdout.print("Initializing MLIR context...\n", .{});
+
+    var registry = try mlir.Registry.init();
+    defer registry.deinit();
+
+    mlir.DialectHandle.fromString("func").insertDialect(registry);
+    mlir.DialectHandle.fromString("stablehlo").insertDialect(registry);
+
+    var mlir_ctx = try mlir.Context.initWithRegistry(registry, false);
+    defer mlir_ctx.deinit();
+
+    mlir_ctx.allowUnregisteredDialects(false);
+
+    const func_handle = mlir.DialectHandle.fromString("func");
+    func_handle.registerDialect(mlir_ctx);
+    _ = func_handle.loadDialect(mlir_ctx);
+
+    const stablehlo_handle = mlir.DialectHandle.fromString("stablehlo");
+    stablehlo_handle.registerDialect(mlir_ctx);
+    _ = stablehlo_handle.loadDialect(mlir_ctx);
+
+    if (!mlir_ctx.isRegisteredOperation("stablehlo.custom_call")) {
+        return error.DialectRegistrationFailed;
+    }
+
+    try tty.print(.green, "Dialects registered\n", .{});
+
+    // Build MLIR module with typed FFI custom call
+    try stdout.print("Building MLIR module with typed FFI custom call...\n", .{});
+    const bytecode = try buildModule(mlir_ctx, allocator);
+    defer allocator.free(bytecode);
+
+    try tty.print(.green, "Bytecode generated ({d} bytes)\n", .{bytecode.len});
+
+    // Load PJRT plugin
+    try stdout.print("Loading PJRT CUDA plugin...\n", .{});
+    var plugin_path_owned: ?[]u8 = null;
+    const plugin_path: []const u8 = blk: {
+        if (std.process.getEnvVarOwned(allocator, "PJRT_CUDA_PLUGIN_PATH")) |p| {
+            plugin_path_owned = p;
+            break :blk p;
+        } else |_| {}
+        break :blk "result/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+    };
+    defer if (plugin_path_owned) |p| allocator.free(p);
+    var api = try pjrt_plugin.loadPlugin(plugin_path);
+
+    try tty.print(.green, "PJRT plugin loaded\n", .{});
+
+    // Create PJRT client (this initializes XLA service)
+    try stdout.print("Creating PJRT client...\n", .{});
+    var client_args = pjrt_api.initArgs(c.PJRT_Client_Create_Args);
+    client_args.client = null;
+
+    try api.call("PJRT_Client_Create", &client_args);
+    const client = client_args.client orelse return error.ClientCreationFailed;
+    defer {
+        var destroy_args = pjrt_api.initArgs(c.PJRT_Client_Destroy_Args);
+        destroy_args.client = client;
+        api.call("PJRT_Client_Destroy", &destroy_args) catch {};
+    }
+
+    try tty.print(.green, "Client created\n", .{});
+
+    // Query actual platform name from client
+    var platform_args = pjrt_api.initArgs(c.PJRT_Client_PlatformName_Args);
+    platform_args.client = client;
+    try api.call("PJRT_Client_PlatformName", &platform_args);
+    const actual_platform = platform_args.platform_name[0..platform_args.platform_name_size];
+    try stdout.print("Actual platform name from client: '{s}'\n", .{actual_platform});
+
+    // Run registration sanity checks if requested
+    if (ffi_reg_sanity) {
+        try tty.print(.yellow, "Running FFI registration sanity checks...\n", .{});
+        try testRegistrationSanity(api.pjrt_api);
+        try tty.print(.green, "Sanity checks complete. Exiting.\n", .{});
+        return;
+    }
+
+    // Register handler if in positive mode (AFTER creating client, when XLA service is initialized)
+    if (with_handler) {
+        try stdout.print("Registering custom call handler for platform '{s}'...\n", .{actual_platform});
+
+        // CRITICAL EXPERIMENT: Register with multiple platform name variants
+        // to test if case sensitivity or canonicalization is the issue
+        try stdout.print("  Registering with lowercase 'cuda'...\n", .{});
+        try registerHandler(api.pjrt_api, "cuda", size_variant);
+
+        try stdout.print("  Registering with uppercase 'CUDA'...\n", .{});
+        try registerHandler(api.pjrt_api, "CUDA", size_variant);
+
+        try stdout.print("  Registering with lowercase 'gpu'...\n", .{});
+        try registerHandler(api.pjrt_api, "gpu", size_variant);
+
+        try stdout.print("  Registering with uppercase 'GPU'...\n", .{});
+        try registerHandler(api.pjrt_api, "GPU", size_variant);
+
+        try tty.print(.green, "Handler registered via PJRT FFI extension (4 variants)\n", .{});
+    } else {
+        try stdout.print("Skipping handler registration (negative test)\n", .{});
+    }
+
+    // Compile program
+    try stdout.print("Compiling program...\n", .{});
+
+    // Create PJRT_Program struct
+    var program = pjrt_api.initArgs(c.PJRT_Program);
+    program.code = @constCast(bytecode.ptr);
+    program.code_size = bytecode.len;
+    program.format = "mlir".ptr;
+    program.format_size = 4;
+
+    // Minimal compile options (protobuf-encoded)
+    const minimal_compile_opts = [_]u8{
+        // CompileOptionsProto.executable_build_options (field 3, message)
+        (3 << 3) | 2, 4, // tag 26, length 4
+
+        // ExecutableBuildOptionsProto.num_replicas (field 4, int64) = 1
+        (4 << 3) | 0, 0x01, // tag 32, value 1
+
+        // ExecutableBuildOptionsProto.num_partitions (field 5, int64) = 1
+        (5 << 3) | 0, 0x01, // tag 40, value 1
+    };
+
+    var compile_args = pjrt_api.initArgs(c.PJRT_Client_Compile_Args);
+    compile_args.client = client;
+    compile_args.program = &program;
+    compile_args.compile_options = &minimal_compile_opts;
+    compile_args.compile_options_size = minimal_compile_opts.len;
+    compile_args.executable = null;
+
+    api.call("PJRT_Client_Compile", &compile_args) catch |err| {
+        if (!with_handler) {
+            try tty.print(.yellow, "Compilation failed as expected (no handler): {any}\n", .{err});
+            try tty.print(.green, "=== NEGATIVE TEST PASSED ===\n", .{});
+            return;
+        } else {
+            try tty.print(.red, "Compilation failed unexpectedly: {any}\n", .{err});
+            return err;
+        }
+    };
+
+    const executable = compile_args.executable orelse return error.CompilationFailed;
+    defer {
+        var destroy_args = pjrt_api.initArgs(c.PJRT_LoadedExecutable_Destroy_Args);
+        destroy_args.executable = executable;
+        api.call("PJRT_LoadedExecutable_Destroy", &destroy_args) catch {};
+    }
+
+    try tty.print(.green, "Program compiled\n", .{});
+
+    // Create input buffer with non-zero values
+    try stdout.print("Creating input buffer...\n", .{});
+    const input_data = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }; // 2x3
+
+    var buffer_args = pjrt_api.initArgs(c.PJRT_Client_BufferFromHostBuffer_Args);
+    buffer_args.client = client;
+    buffer_args.data = @ptrCast(@constCast(&input_data));
+    buffer_args.type = c.PJRT_Buffer_Type_F32;
+    buffer_args.dims = &[_]i64{ 2, 3 };
+    buffer_args.num_dims = 2;
+    buffer_args.buffer = null;
+
+    try api.call("PJRT_Client_BufferFromHostBuffer", &buffer_args);
+    const input_buffer = buffer_args.buffer orelse return error.BufferCreationFailed;
+    defer {
+        var destroy_args = pjrt_api.initArgs(c.PJRT_Buffer_Destroy_Args);
+        destroy_args.buffer = input_buffer;
+        api.call("PJRT_Buffer_Destroy", &destroy_args) catch {};
+    }
+
+    try tty.print(.green, "Input buffer created\n", .{});
+
+    // Execute
+    try stdout.print("Executing...\n", .{});
+
+    // Allocate output buffer pointer (PJRT will fill this in)
+    var output_ptrs = [_]?*c.PJRT_Buffer{null};
+    const output_list: [*c]*c.PJRT_Buffer = @ptrCast(&output_ptrs);
+    var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
+
+    var arg_list = [_]?*c.PJRT_Buffer{input_buffer};
+    var arg_lists = [_][*c]?*c.PJRT_Buffer{&arg_list};
+
+    var execute_args = pjrt_api.initArgs(c.PJRT_LoadedExecutable_Execute_Args);
+    execute_args.executable = executable;
+    execute_args.options = null;
+    execute_args.num_devices = 1;
+    execute_args.num_args = 1;
+    execute_args.argument_lists = &arg_lists;
+    execute_args.output_lists = @ptrCast(&output_lists);
+    execute_args.device_complete_events = null;
+    execute_args.execute_device = null;
+
+    api.call("PJRT_LoadedExecutable_Execute", &execute_args) catch |err| {
+        if (!with_handler) {
+            try tty.print(.yellow, "Execution failed as expected (no handler): {any}\n", .{err});
+            try tty.print(.green, "=== NEGATIVE TEST PASSED ===\n", .{});
+            return;
+        } else {
+            try tty.print(.red, "Execution failed: {any}\n", .{err});
+            return err;
+        }
+    };
+
+    const output_buffer = output_ptrs[0] orelse return error.NullOutputBuffer;
+    defer {
+        var destroy_args = pjrt_api.initArgs(c.PJRT_Buffer_Destroy_Args);
+        destroy_args.buffer = output_buffer;
+        api.call("PJRT_Buffer_Destroy", &destroy_args) catch {};
+    }
+
+    try tty.print(.green, "Execution completed\n", .{});
+
+    // Read output buffer
+    try stdout.print("Reading output buffer...\n", .{});
+    var output_data: [6]f32 = undefined;
+    var tohost_args = pjrt_api.initArgs(c.PJRT_Buffer_ToHostBuffer_Args);
+    tohost_args.src = output_buffer;
+    tohost_args.dst = @ptrCast(&output_data);
+    tohost_args.dst_size = @sizeOf(@TypeOf(output_data));
+
+    try api.call("PJRT_Buffer_ToHostBuffer", &tohost_args);
+
+    // Validate output is all zeros
+    try stdout.print("Output values: [ ", .{});
+    var all_zero = true;
+    for (output_data) |val| {
+        try stdout.print("{d:.1} ", .{val});
+        if (val != 0.0) all_zero = false;
+    }
+    try stdout.print("]\n", .{});
+
+    if (!all_zero) {
+        try tty.print(.red, "ERROR: Expected all zeros, but got non-zero values\n", .{});
+        return error.ValidationFailed;
+    }
+
+    try tty.print(.green, "Output validated: all zeros as expected\n", .{});
+    try tty.print(.green, "=== POSITIVE TEST PASSED ===\n", .{});
 }
