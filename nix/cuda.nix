@@ -12,5 +12,5 @@
   gccHostAttr = "gcc13";
 
   # NOTE: pick the CUDA toolchain once. change here, not in random shells.
-  cudaPackagesAttr = "cudaPackages_13";
+  cudaPackagesAttr = "cudaPackages_12";
 }

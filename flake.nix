@@ -110,7 +110,8 @@
       zigradExternalSdkDevel = pkgs.symlinkJoin {
         name = "zigrad-external-sdk-devel";
         paths = [
-          pjrtCudaBundleDevel
+          # pjrtCudaBundleDevel
+          xlaPjrtPluginsCudaDevel
           xlaMlirStablehloCapiDevel
           # zigradMlirShimDevel
         ];
@@ -129,6 +130,50 @@
       #   src = shimSrc;
       #   devel = true;
       # };
+
+      # ------------------------------------------------------------------
+      # Bazel-built PJRT C API plugins from XLA
+      xlaPjrtPlugins = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile;
+        devel = false;
+        cudaSupport = false;
+        cudaPackages = null;
+        persistentBazelOutputBase = false;
+      };
+
+      xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile cudaPackages;
+        inherit (cudaCfg) cudaArchitectures;
+        devel = false;
+        cudaSupport = true;
+        persistentBazelOutputBase = false;
+      };
+
+      # Dev: ccache + devel.
+      # TODO: Can flip cudaSupport=true once we plumb CUDA env/toolchain.
+      xlaPjrtPluginsDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile;
+        stdenv = pkgs.ccacheStdenv;
+        devel = true;
+
+        # FIXME: CPU-only rn.
+        cudaSupport = false;
+        cudaPackages = null;
+
+        # Bazel incremental cache outside store
+        persistentBazelOutputBase = true;
+      };
+
+      # Dev: ccache + devel + CUDA.
+      xlaPjrtPluginsCudaDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile cudaPackages;
+        inherit (cudaCfg) cudaArchitectures;
+        stdenv = pkgs.ccacheStdenv;
+        devel = true;
+        cudaSupport = true;
+        persistentBazelOutputBase = true;
+      };
+      # ------------------------------------------------------------------
       baseDevShellPkgs = with pkgs; [
         zig
         zls
@@ -143,14 +188,44 @@
         default = pkgs.mkShellNoCC {
           packages = baseDevShellPkgs ++ [zigradExternalSdkDevel];
           ZG_EXTERNAL_SDK_ROOT = sdkRootDevel;
-          PJRT_PLUGIN_PATH = "${sdkRootDevel}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+          # PJRT_PLUGIN_PATH = "${sdkRootDevel}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+          PJRT_CPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
+          PJRT_GPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
 
           shellHook = ''
-            if [[ ! -f $PJRT_PLUGIN_PATH ]]; then
-              printf "${colors.yellow}[WARNING]${colors.reset} PJRT_PLUGIN_PATH=$PJRT_PLUGIN_PATH does not exist. \
-                      Leaving the env variable set but you may need to materialize this.\n"
+            [[ -f "$PJRT_CPU_PLUGIN_PATH" ]]
+            cpu_plugin_exists=$?
+
+            [[ -f "$PJRT_GPU_PLUGIN_PATH" ]]
+            gpu_plugin_exists=$?
+
+            if (( cpu_plugin_exists != 0 )); then
+              printf "%b[WARNING]%b PJRT_CPU_PLUGIN_PATH=%s does not exist. Leaving the env variable set but you may need to materialize this.\n" \
+                "${colors.yellow}" "${colors.reset}" "$PJRT_CPU_PLUGIN_PATH"
             fi
-            printf "SDK path: ZG_EXTERNAL_SDK_ROOT=$ZG_EXTERNAL_SDK_ROOT"
+
+            if (( gpu_plugin_exists != 0 )); then
+              printf "%b[WARNING]%b PJRT_GPU_PLUGIN_PATH=%s does not exist. Leaving the env variable set but you may need to materialize this.\n" \
+                "${colors.yellow}" "${colors.reset}" "$PJRT_GPU_PLUGIN_PATH"
+            fi
+
+            # Selection logic:
+            # - If both plugins exist, GPU is preferred
+            # - If only GPU exists, use GPU
+            # - Otherwise fall back to CPU (warnings already emitted)
+            if (( gpu_plugin_exists == 0 )); then
+              if (( cpu_plugin_exists == 0 )); then
+                printf "%b[INFO]%b Both CPU and GPU plugins exist. Selecting GPU plugin as the preferred option.\n" \
+                  "${colors.yellow}" "${colors.reset}"
+              fi
+              PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH"
+            else
+              PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH"
+            fi
+            export PJRT_PLUGIN_PATH
+
+            printf "Plugin path: PJRT_PLUGIN_PATH=%s\n" "$PJRT_PLUGIN_PATH"
+            printf "SDK path: ZG_EXTERNAL_SDK_ROOT=%s\n" "$ZG_EXTERNAL_SDK_ROOT"
           '';
         };
 
@@ -185,6 +260,20 @@
 
         # Runtime bundle - Dev target: ccache + devel (NVIDIA Headers)
         pjrt-cuda-runtime-devel = pjrtCudaBundleDevel;
+
+        # ----------------------------------------------------------------
+        # Bazel PJRT plugin build
+        xla-pjrt-plugins = xlaPjrtPlugins;
+
+        # Bazel PJRT plugin build - Dev target: ccache + devel
+        xla-pjrt-plugins-devel = xlaPjrtPluginsDevel;
+
+        # Bazel PJRT plugin build - CUDA
+        xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
+
+        # Bazel PJRT plugin build - CUDA + devel
+        xla-pjrt-plugins-cuda-devel = xlaPjrtPluginsCudaDevel;
+        # ----------------------------------------------------------------
 
         # Compile-time SDK (PJRT headers + MLIR + StableHLO)
         xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
