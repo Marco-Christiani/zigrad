@@ -14,20 +14,13 @@ vars:
     --no-group
     --no-times
     --filter=':- .rsync-filter'
-  ZG_EXTERNAL_SDK_ROOT:
-    sh: |
-      set -e
-      root="${ZG_EXTERNAL_SDK_ROOT:-}"
-      [ -n "$root" ] || root="$(nix build --print-out-paths .#zigrad-external-sdk-devel 2>/dev/null || true)"
-      [ -n "$root" ] || root=./result
-      root="$(realpath "$root" 2>/dev/null)" || exit 1
-      [ -d "$root" ] || exit 1
-      echo "$root"
+  # using this for now, abs paths may an issue, removed previous dynamic logic
+  ZG_EXTERNAL_SDK_ROOT: ./result
   PJRT_PLUGIN_PATH:
     sh: |
       set -e
-      p="{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so"
-      p="$(realpath "$p" 2>/dev/null)" || exit 1
+      p="${PJRT_PLUGIN_PATH:-{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so}"
+      # realpath "$p" 2>/dev/null || exit 1
       echo "$p"
 
 dotenv: [".env"]
@@ -36,17 +29,31 @@ dotenv: [".env"]
 #   # sh: realpath zig-out/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so
 
 tasks:
-  _pjrt:
-    internal: true
-    silent: true
-    cmd: |
-      if [ ! -f "$PJRT_PLUGIN_PATH" ]; then
-        echo "{{.RED}}PJRT_PLUGIN_PATH=$PJRT_PLUGIN_PATH doesnt exist. May need to materialize it w nix or set PJRT_PLUGIN_PATH yourself"
-      fi
-
-  sdk:
+  task_timer:
+    # https://github.com/go-task/task/discussions/1479#discussioncomment-12007037
+    desc: "Calculate timing of the calling task"
+    # Call this task at the end of the caller task with following parameters:
+    #   - task: task_timer
+    #     vars:
+    #       start_time: '{{ now | unixEpoch }}'
+    summary: |
+      This task is a helper task to calulate the duration in seconds
+      for the caller task
+    vars:
+      end_time: '{{now | unixEpoch}}'
+    requires:
+      vars: [start_time]
     cmds:
-      - nix build .#zigrad-external-sdk --impure {{.CLI_ARGS}}
+      - 'tmux display-message "{{.CLI_ARGS }} elapsed={{ sub .end_time .start_time | duration }}"'
+    silent: true
+    internal: true
+  sdk-devel:
+    cmds:
+      - nix build .#zigrad-external-sdk-devel --print-out-paths
+      - direnv reload
+      - task: task_timer
+        vars:
+          start_time: '{{ now | unixEpoch }}'
 
   check-sdk:
     cmd: uv run ./scripts/check_sdk.py {{.CLI_ARGS}}
@@ -67,7 +74,7 @@ tasks:
       vars: [ZG_EXTERNAL_SDK_ROOT]
 
   m2:
-    deps: [_pjrt, build]
+    deps: [build]
     cmd: ./zig-out/bin/zigrad-pjrt-m2
     env:
       PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
@@ -75,7 +82,7 @@ tasks:
       vars: [PJRT_PLUGIN_PATH]
 
   m2-fusion:
-    deps: [_pjrt, build]
+    deps: [build]
     cmd: ./zig-out/bin/zigrad-pjrt-m2-fusion
     env:
       PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
@@ -83,7 +90,7 @@ tasks:
       vars: [PJRT_PLUGIN_PATH]
 
   m4:
-    deps: [_pjrt, build]
+    deps: [build]
     cmd: ./zig-out/bin/zigrad-pjrt-m4
     env:
       PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
@@ -91,7 +98,7 @@ tasks:
       vars: [PJRT_PLUGIN_PATH]
 
   m4-custom:
-    deps: [_pjrt, build]
+    deps: [build]
     cmd: ./zig-out/bin/zigrad-pjrt-m4-custom
     env:
       PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
@@ -142,6 +149,23 @@ tasks:
     cmds:
       - sudo mkdir -p /nix/var/cache/ccache
       - sudo tar --numeric-owner --xattrs --acls -C /nix/var/cache -xzf ccache-seed.tgz
+
+  # Nix bazel cache ------------------------------------------------------------
+  nix-bazel-cache-setup:
+    cmds:
+      - sudo mkdir -m0770 -p /nix/var/cache/bazel
+      - sudo chown --reference=/nix/store /nix/var/cache/bazel
+      - |
+        before=$(stat -c %Y /etc/nix/nix.custom.conf)
+        sudo sed -i '/^extra-sandbox-paths = \/nix\/var\/cache\/bazel$/!{
+        $a\
+        extra-sandbox-paths = /nix/var/cache/bazel
+        }' /etc/nix/nix.custom.conf
+        after=$(stat -c %Y /etc/nix/nix.conf)
+        [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
+
+  nix-bazel-cache:usage:
+    cmd: sudo du -sh /nix/var/cache/bazel
 
   # Rsync ----------------------------------------------------------------------
   sync:push:
