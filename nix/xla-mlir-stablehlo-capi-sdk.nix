@@ -238,6 +238,10 @@ in
       mkdir -p "$out/include/xla/pjrt/c"
       cp -v "${xlaSrc}/xla/pjrt/c/"*.h "$out/include/xla/pjrt/c/"
 
+      # XLA FFI C API headers (for typed FFI custom call handlers)
+      mkdir -p "$out/include/xla/ffi/api"
+      cp -v "${xlaSrc}/xla/ffi/api/"*.h "$out/include/xla/ffi/api/"
+
       # --- Libraries ---
       if [ "${lib.boolToString devel}" = "true" ]; then
         log "Devel mode: copying ALL build artifacts (*.so*, *.a)"
