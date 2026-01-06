@@ -42,55 +42,6 @@
       )
     else stdenv;
 
-  cudnnMerged =
-    if cudaSupport
-    then symlinkJoin {
-      name = "cudnn-merged";
-      paths = with cudaPackages; [(lib.getDev cudnn) (lib.getLib cudnn)];
-    }
-    else null;
-
-  cudaLibsJoined =
-    if cudaSupport
-    then symlinkJoin {
-      name = "cuda-libs-joined";
-      paths = with cudaPackages; [
-        (lib.getLib cuda_cudart)
-        (lib.getLib cuda_cupti)
-        (lib.getLib libcublas)
-        (lib.getLib libcufft)
-        # TODO: No DT_NEEDED evidence yet for curand/cusolver. Keep commented unless required.
-        # (lib.getLib libcurand)
-        # (lib.getLib libcusolver)
-        (lib.getLib libcusparse)
-      ];
-    }
-    else null;
-
-  cudaBuildDepsJoined =
-    if cudaSupport
-    then symlinkJoin {
-      name = "cuda-build-deps-joined";
-      paths = with cudaPackages; [
-        cudaLibsJoined
-        (lib.getBin cuda_nvcc)
-        (lib.getOutput "static" cuda_cudart)
-        (lib.getDev cuda_cccl)
-        (lib.getDev cuda_cudart)
-        (lib.getDev cuda_cupti)
-        (lib.getDev cuda_nvcc)
-        (lib.getDev cuda_nvml_dev)
-        (lib.getDev cuda_nvtx)
-        (lib.getDev libcublas)
-        (lib.getDev libcufft)
-        (lib.getDev libcurand)
-        (lib.getDev libcusolver)
-        (lib.getDev libcusparse)
-      ];
-      # TODO: Trim build deps to the minimum required for Bazel CUDA toolchain.
-    }
-    else null;
-
   cudaRuntimeLibs =
     lib.optionals cudaSupport
       (
@@ -213,11 +164,7 @@
     ''
     + lib.optionalString cudaSupport ''
       build --config=cuda
-      build --action_env CUDA_TOOLKIT_PATH="${cudaBuildDepsJoined}"
-      build --action_env CUDNN_INSTALL_PATH="${cudnnMerged}"
-      build --action_env TF_CUDA_PATHS="${cudaBuildDepsJoined},${cudnnMerged}"
       build --action_env TF_CUDA_VERSION="${cudaPackages.cudaMajorMinorVersion}"
-      build --action_env TF_CUDNN_VERSION="${lib.versions.major cudaPackages.cudnn.version}"
       ${lib.optionalString (cudaComputeCapabilities != null)
         "build --action_env TF_CUDA_COMPUTE_CAPABILITIES=\"${cudaComputeCapabilities}\""}
     '';
@@ -252,7 +199,6 @@ in
     ];
 
     buildInputs = lib.optionals cudaSupport [
-      cudaPackages.cudatoolkit
     ];
 
     # Remove any Bazel pin file if present, and patch python repo glue.
