@@ -23,6 +23,59 @@ const Program = zigrad.Program;
 // Custom call target name
 const CALL_TARGET_NAME = "zg_custom_zero";
 
+const CudaMemsetAsyncFn = *const fn (?*anyopaque, c_int, usize, ?*anyopaque) callconv(.c) c_int;
+
+fn makeFfiError(frame: *const c.XLA_FFI_CallFrame, code: c.XLA_FFI_Error_Code, msg: []const u8) ?*c.XLA_FFI_Error {
+    if (frame.api == null) return null;
+    const create_fn = frame.api.*.XLA_FFI_Error_Create orelse return null;
+    var args = std.mem.zeroes(c.XLA_FFI_Error_Create_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_Error_Create_Args);
+    args.extension_start = null;
+    args.message = msg.ptr;
+    args.errc = code;
+    return create_fn(&args);
+}
+
+fn getCudaMemsetAsync() ?CudaMemsetAsyncFn {
+    const sym = c.dlsym(c.RTLD_DEFAULT, "cudaMemsetAsync") orelse return null;
+    return @ptrCast(sym);
+}
+
+fn getCudaStream(frame: *const c.XLA_FFI_CallFrame) ?*anyopaque {
+    if (frame.api == null) return null;
+    const get_fn = frame.api.*.XLA_FFI_Stream_Get orelse return null;
+
+    var args = std.mem.zeroes(c.XLA_FFI_Stream_Get_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_Stream_Get_Args);
+    args.extension_start = null;
+    args.ctx = frame.ctx;
+    args.stream = null;
+
+    if (get_fn(&args) != null) return null;
+    return args.stream;
+}
+
+fn maybeFillMetadata(frame: *const c.XLA_FFI_CallFrame) bool {
+    var ext: ?*c.XLA_FFI_Extension_Base = frame.extension_start;
+    while (ext) |e| {
+        if (e.type == c.XLA_FFI_Extension_Metadata) {
+            const meta_ext: *c.XLA_FFI_Metadata_Extension = @ptrCast(@alignCast(e));
+            if (meta_ext.metadata) |meta| {
+                const meta_ptr: *c.XLA_FFI_Metadata = @ptrCast(@alignCast(meta));
+                meta_ptr.*.api_version.struct_size = @sizeOf(c.XLA_FFI_Api_Version);
+                meta_ptr.*.api_version.extension_start = null;
+                meta_ptr.*.api_version.major_version = c.XLA_FFI_API_MAJOR;
+                meta_ptr.*.api_version.minor_version = c.XLA_FFI_API_MINOR;
+                meta_ptr.*.traits = 0;
+                meta_ptr.*.state_type_id = .{ .type_id = 0 };
+            }
+            return true;
+        }
+        ext = e.next;
+    }
+    return false;
+}
+
 fn debugEnabled() bool {
     const allocator = std.heap.page_allocator;
     if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DEBUG")) |val| {
@@ -69,44 +122,49 @@ fn logApiPointers(api: *const c.PJRT_Api, ffi_ext: ?*c.PJRT_FFI_Extension) void 
 //
 // This handler zeroes all output buffers, demonstrating the minimal working pattern.
 //
-export fn zg_custom_zero(call_frame: [*c]c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
-    if (call_frame == null) return null;
-    const frame_ptr: *c.XLA_FFI_CallFrame = @ptrCast(@alignCast(call_frame));
-    const frame = frame_ptr.*;
+export fn zg_custom_zero(call_frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
+    const frame = call_frame.*;
 
-    // Decode output buffers from call frame
-    // For minimal implementation, we zero-fill all outputs
+    if (maybeFillMetadata(&frame)) {
+        return null;
+    }
+
+    const memset_async = getCudaMemsetAsync() orelse {
+        return makeFfiError(&frame, c.XLA_FFI_Error_Code_INTERNAL, "cudaMemsetAsync not available");
+    };
+    const stream = getCudaStream(&frame) orelse {
+        return makeFfiError(&frame, c.XLA_FFI_Error_Code_INTERNAL, "XLA FFI stream not available");
+    };
+
+    // Zero-fill all output buffers on the device stream.
     const num_rets: usize = @intCast(frame.rets.size);
     var i: usize = 0;
     while (i < num_rets) : (i += 1) {
-        // Cast void* to XLA_FFI_Buffer*
         const buf_ptr: *c.XLA_FFI_Buffer = @ptrCast(@alignCast(frame.rets.rets[i]));
         const buf = buf_ptr.*;
 
-        // Calculate buffer size
         var size: usize = 1;
         var dim_idx: usize = 0;
         while (dim_idx < buf.rank) : (dim_idx += 1) {
             size *= @intCast(buf.dims[dim_idx]);
         }
 
-        // Get element size from dtype
         const elem_size: usize = switch (buf.dtype) {
             c.XLA_FFI_DataType_F32 => 4,
             c.XLA_FFI_DataType_F64 => 8,
             c.XLA_FFI_DataType_S32 => 4,
             c.XLA_FFI_DataType_S64 => 8,
-            else => 4, // Default to 4 bytes
+            else => 4,
         };
 
         const total_bytes = size * elem_size;
-
-        // Zero-fill the output buffer
-        const data_ptr: [*]u8 = @ptrCast(buf.data);
-        @memset(data_ptr[0..total_bytes], 0);
+        const rc = memset_async(buf.data, 0, total_bytes, stream);
+        if (rc != 0) {
+            return makeFfiError(&frame, c.XLA_FFI_Error_Code_INTERNAL, "cudaMemsetAsync failed");
+        }
     }
 
-    return null; // Success
+    return null;
 }
 
 /// Walk PJRT extension chain to find FFI extension
@@ -123,8 +181,51 @@ fn findFfiExtension(api: *const c.PJRT_Api) ?*c.PJRT_FFI_Extension {
     return null;
 }
 
+fn findGpuCustomCallExtension(api: *const c.PJRT_Api) ?*c.PJRT_Gpu_Custom_Call {
+    var ext: ?*c.PJRT_Extension_Base = api.extension_start;
+
+    while (ext) |e| {
+        if (e.type == c.PJRT_Extension_Type_Gpu_Custom_Call) {
+            return @ptrCast(@alignCast(e));
+        }
+        ext = e.next;
+    }
+
+    return null;
+}
+
 /// Register custom call handler via PJRT FFI extension
 fn registerHandler(api: *const c.PJRT_Api, platform: []const u8, size_variant: u8) !void {
+    if (findGpuCustomCallExtension(api)) |gpu_ext| {
+        var args = pjrt_api.initArgs(c.PJRT_Gpu_Register_Custom_Call_Args);
+        args.function_name = CALL_TARGET_NAME.ptr;
+        args.function_name_size = CALL_TARGET_NAME.len;
+        args.api_version = 1;
+        args.handler_instantiate = null;
+        args.handler_prepare = null;
+        args.handler_initialize = null;
+        args.handler_execute = @ptrCast(@constCast(&zg_custom_zero));
+
+        if (gpu_ext.custom_call) |reg_fn| {
+            if (reg_fn(&args)) |pjrt_err| {
+                std.debug.print("ERROR: GPU custom call registration failed\n", .{});
+                var msg_args = pjrt_api.initArgs(c.PJRT_Error_Message_Args);
+                @field(msg_args, "error") = pjrt_err;
+                if (api.PJRT_Error_Message) |msg_fn| {
+                    _ = msg_fn(&msg_args);
+                    if (msg_args.message) |msg| {
+                        const message = msg[0..msg_args.message_size];
+                        std.debug.print("  Error message: {s}\n", .{message});
+                    }
+                }
+                return error.HandlerRegistrationFailed;
+            }
+
+            std.debug.print("Successfully registered handler '{s}' via GPU custom call extension\n", .{CALL_TARGET_NAME});
+            return;
+        }
+    }
+
     const ffi_ext = findFfiExtension(api) orelse {
         std.debug.print("ERROR: PJRT_Extension_Type_FFI not found\n", .{});
         return error.FfiExtensionNotFound;
@@ -379,17 +480,13 @@ fn buildModule(mlir_ctx: mlir.Context, allocator: std.mem.Allocator) ![]const u8
 
     const arg0_val = entry_block.argument(0);
 
-    // Build stablehlo.custom_call with TYPED_FFI api_version
-    const custom_call_op = mlir.Operation.make(mlir_ctx, "stablehlo.custom_call", .{
-        .operands = &.{arg0_val},
-        .results = &.{output_type},
-        .attributes = &.{
-            .{ "call_target_name", mlir.Attribute.string(mlir_ctx, CALL_TARGET_NAME) },
-            .{ "has_side_effect", mlir.Attribute.boolean(mlir_ctx, false) },
-            .{ "api_version", mlir.Attribute.int(mlir_ctx, .i32, 4) }, // TYPED_FFI = 4
-        },
-        .location = loc,
-    });
+    // Build stablehlo.custom_call with TYPED_FFI api_version and empty backend_config dict.
+    const custom_call_op = stablehlo.custom_call(mlir_ctx, &.{arg0_val}, .{
+        .call_target_name = CALL_TARGET_NAME,
+        .has_side_effect = false,
+        .backend_config = mlir.Attribute.dict(mlir_ctx, &.{}),
+        .api_version = .typed_ffi,
+    }, &.{output_type}, loc);
     entry_block.appendOperation(custom_call_op);
 
     // DEBUG: Print custom_call emission details
@@ -557,6 +654,23 @@ pub fn main() !void {
 
     try tty.print(.green, "PJRT plugin loaded\n", .{});
 
+    // Run registration sanity checks if requested
+    if (ffi_reg_sanity) {
+        try tty.print(.yellow, "Running FFI registration sanity checks...\n", .{});
+        try testRegistrationSanity(api.pjrt_api);
+        try tty.print(.green, "Sanity checks complete. Exiting.\n", .{});
+        return;
+    }
+
+    // Register handler if in positive mode (before client creation).
+    if (with_handler) {
+        try stdout.print("Registering custom call handler...\n", .{});
+        try registerHandler(api.pjrt_api, "cuda", size_variant);
+        try tty.print(.green, "Handler registered via PJRT FFI extension\n", .{});
+    } else {
+        try stdout.print("Skipping handler registration (negative test)\n", .{});
+    }
+
     // Create PJRT client (this initializes XLA service)
     try stdout.print("Creating PJRT client...\n", .{});
     var client_args = pjrt_api.initArgs(c.PJRT_Client_Create_Args);
@@ -578,37 +692,6 @@ pub fn main() !void {
     try api.call("PJRT_Client_PlatformName", &platform_args);
     const actual_platform = platform_args.platform_name[0..platform_args.platform_name_size];
     try stdout.print("Actual platform name from client: '{s}'\n", .{actual_platform});
-
-    // Run registration sanity checks if requested
-    if (ffi_reg_sanity) {
-        try tty.print(.yellow, "Running FFI registration sanity checks...\n", .{});
-        try testRegistrationSanity(api.pjrt_api);
-        try tty.print(.green, "Sanity checks complete. Exiting.\n", .{});
-        return;
-    }
-
-    // Register handler if in positive mode (AFTER creating client, when XLA service is initialized)
-    if (with_handler) {
-        try stdout.print("Registering custom call handler for platform '{s}'...\n", .{actual_platform});
-
-        // CRITICAL EXPERIMENT: Register with multiple platform name variants
-        // to test if case sensitivity or canonicalization is the issue
-        try stdout.print("  Registering with lowercase 'cuda'...\n", .{});
-        try registerHandler(api.pjrt_api, "cuda", size_variant);
-
-        try stdout.print("  Registering with uppercase 'CUDA'...\n", .{});
-        try registerHandler(api.pjrt_api, "CUDA", size_variant);
-
-        try stdout.print("  Registering with lowercase 'gpu'...\n", .{});
-        try registerHandler(api.pjrt_api, "gpu", size_variant);
-
-        try stdout.print("  Registering with uppercase 'GPU'...\n", .{});
-        try registerHandler(api.pjrt_api, "GPU", size_variant);
-
-        try tty.print(.green, "Handler registered via PJRT FFI extension (4 variants)\n", .{});
-    } else {
-        try stdout.print("Skipping handler registration (negative test)\n", .{});
-    }
 
     // Compile program
     try stdout.print("Compiling program...\n", .{});
