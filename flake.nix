@@ -68,6 +68,9 @@
             src
             ;
           inherit (cudaCfg) cudaArchitectures;
+          # FIXME: this is currently intentionally the impure devel variant
+          zigradExternalSdk = zigradExternalSdkDevel;
+          inherit (pkgs) zig;
         })
         targets
         ;
@@ -274,7 +277,7 @@
         gen-nvim = targets.editor.nvim;
         # TODO: hermetic zig build/run targets
         # m1 = targets.m1.build;
-        # m1 = targets.m1.run;
+        m4 = targets.zigrad-m4.build;
       };
 
       apps = {
@@ -286,6 +289,10 @@
         # m1 = {
         #   # TODO: hermetic zig build/run targets
         # };
+        m4 = {
+          type = "app";
+          program = "${targets.zigrad-m4.run}/bin/zigrad-m4";
+        };
 
         gen-clangd = {
           type = "app";

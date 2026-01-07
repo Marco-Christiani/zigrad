@@ -2,11 +2,13 @@
 # TODO: in the future we need hermetic zig builds
 {
   pkgs,
+  zig,
   cudaPackages,
   gccHost,
   nixglhost,
   src,
   cudaArchitectures,
+  zigradExternalSdk,
 }: let
   cudaArchStr = pkgs.lib.concatStringsSep ";" cudaArchitectures;
 
@@ -73,6 +75,41 @@ in {
     #   build = pkgs.stdenvNoCC.mkDerivation { ... zig build ... };
     #   run = pkgs.writeShellScriptBin "zig-app" '' exec ${nixglhost}/bin/nixglhost ${build}/bin/zig-app "$@" '';
     # };
+
+    zigrad-m4 = rec {
+      build = pkgs.stdenvNoCC.mkDerivation {
+        pname = "zigrad-m4";
+        version = "0.1";
+        inherit src;
+
+        nativeBuildInputs = [
+          zig.hook
+        ];
+
+        buildInputs = [
+          zigradExternalSdk
+        ];
+
+        zigBuildFlags = [
+          "-Doptimize=ReleaseSafe"
+          "-Dsdk=${zigradExternalSdk}"
+        ];
+
+        # tests
+        # dontUseZigCheck = true;
+
+        meta.mainProgram = "zigrad-pjrt-m4";
+      };
+
+      run = pkgs.writeShellScriptBin "zigrad-m4" ''
+        if [ "''${NIX_ENFORCE_NO_NATIVE:-0}" = "1" ]; then
+          printf "${colors.yellow}WARNING:${colors.reset} NIX_ENFORCE_NO_NATIVE=1 (no native CPU tuning).\n"
+        fi
+        export ZG_EXTERNAL_SDK_ROOT="${zigradExternalSdk}"
+        export XLA_FLAGS="--xla_gpu_cuda_data_dir=${zigradExternalSdk}/runtime/nvidia"
+        exec ${build}/bin/zigrad-pjrt-m4 "$@"
+      '';
+    };
 
     # Editor integration targets ============================================================
     editor = {
