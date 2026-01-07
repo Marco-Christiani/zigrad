@@ -106,6 +106,7 @@ in {
           printf "${colors.yellow}WARNING:${colors.reset} NIX_ENFORCE_NO_NATIVE=1 (no native CPU tuning).\n"
         fi
         export ZG_EXTERNAL_SDK_ROOT="${zigradExternalSdk}"
+        export PJRT_PLUGIN_PATH="$ZG_EXTERNAL_SDK_ROOT/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
         export XLA_FLAGS="--xla_gpu_cuda_data_dir=${zigradExternalSdk}/runtime/nvidia"
         exec ${build}/bin/zigrad-pjrt-m4 "$@"
       '';

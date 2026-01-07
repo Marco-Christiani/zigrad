@@ -14,6 +14,12 @@
   cudaArchitectures ? null,
   # Copy CUDA runtime libs from nixpkgs into the bundle (can be huge).
   copyCudaFromNix ? false,
+  # Copy NCCL/NVSHMEM DSOs into the runtime bundle (usually required for GPU).
+  copyNcclNvshmem ? true,
+  # Copy CUDA tools (ptxas/nvlink) into runtime/nvidia.
+  copyCudaTools ? true,
+  # Copy libdevice bitcode into runtime/nvidia/nvvm/libdevice.
+  copyLibdevice ? true,
   # Use cudaPackages.backendStdenv for CUDA builds. This can pull a large
   # toolchain closure into the build environment.
   useCudaStdenv ? true,
@@ -191,9 +197,10 @@
 
       # Allow Bazel sandbox actions to write to the shared ccache dir.
       build --sandbox_writable_path=/nix/var/cache/ccache
+      build --sandbox_writable_path=/tmp
     ''
     + lib.optionalString cudaSupport ''
-      build --config=cuda
+      build --config=pjrt_cuda12
       build --action_env TF_CUDA_VERSION="${cudaPackages.cudaMajorMinorVersion}"
       ${lib.optionalString (cudaComputeCapabilities != null)
         "build --action_env TF_CUDA_COMPUTE_CAPABILITIES=\"${cudaComputeCapabilities}\""}
@@ -471,59 +478,65 @@ in
         copy_find "libcudart*.so*" "$out/runtime/nvidia/cudart/lib"
         copy_find "libnvrtc*.so*" "$out/runtime/nvidia/nvrtc/lib"
         copy_find "libnvJitLink*.so*" "$out/runtime/nvidia/nvjitlink/lib"
-        copy_find "libnccl*.so*" "$out/runtime/nvidia/nccl/lib"
-        copy_find "libnvshmem_host.so.3*" "$out/runtime/nvidia/nvshmem/lib"
-        copy_find "nvshmem_bootstrap_uid.so.3*" "$out/runtime/nvidia/nvshmem/lib"
-        copy_find "nvshmem_transport_ibrc.so.3*" "$out/runtime/nvidia/nvshmem/lib"
+        ${lib.optionalString copyNcclNvshmem ''
+          copy_find "libnccl*.so*" "$out/runtime/nvidia/nccl/lib"
+          copy_find "libnvshmem_host.so.3*" "$out/runtime/nvidia/nvshmem/lib"
+          copy_find "nvshmem_bootstrap_uid.so.3*" "$out/runtime/nvidia/nvshmem/lib"
+          copy_find "nvshmem_transport_ibrc.so.3*" "$out/runtime/nvidia/nvshmem/lib"
+        ''}
         copy_find "libnvrtc-builtins.so.*" "$out/runtime/nvidia/nvrtc/lib"
 
-        # Prefer runfiles cuda_nvcc tools if present.
-        tool_candidates=(
-          "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
-          "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
-          "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
-          "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
-        )
-        for d in "''${tool_candidates[@]}"; do
-          copy_bazel_libs_from "$d" "$out/runtime/nvidia/cuda_nvcc/bin" "ptxas"
-          copy_bazel_libs_from "$d" "$out/runtime/nvidia/cuda_nvcc/bin" "nvlink"
-        done
+        ${lib.optionalString copyCudaTools ''
+          # Prefer runfiles cuda_nvcc tools if present.
+          tool_candidates=(
+            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
+            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
+            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
+            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
+          )
+          for d in "''${tool_candidates[@]}"; do
+            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cuda_nvcc/bin" "ptxas"
+            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cuda_nvcc/bin" "nvlink"
+          done
 
-        # Fallback to generic search if runfiles paths change.
-        copy_find "ptxas" "$out/runtime/nvidia/cuda_nvcc/bin"
-        copy_find "nvlink" "$out/runtime/nvidia/cuda_nvcc/bin"
+          # Fallback to generic search if runfiles paths change.
+          copy_find "ptxas" "$out/runtime/nvidia/cuda_nvcc/bin"
+          copy_find "nvlink" "$out/runtime/nvidia/cuda_nvcc/bin"
 
-        # XLA also searches <cuda_data_dir>/bin, so mirror tools there too.
-        if [ -f "$out/runtime/nvidia/cuda_nvcc/bin/ptxas" ]; then
-          copy_one "$out/runtime/nvidia/cuda_nvcc/bin/ptxas" "$out/runtime/nvidia/bin"
-        fi
-        if [ -f "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" ]; then
-          copy_one "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" "$out/runtime/nvidia/bin"
-        fi
+          # XLA also searches <cuda_data_dir>/bin, so mirror tools there too.
+          if [ -f "$out/runtime/nvidia/cuda_nvcc/bin/ptxas" ]; then
+            copy_one "$out/runtime/nvidia/cuda_nvcc/bin/ptxas" "$out/runtime/nvidia/bin"
+          fi
+          if [ -f "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" ]; then
+            copy_one "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" "$out/runtime/nvidia/bin"
+          fi
+        ''}
 
-        # libdevice bitcode for NVVM (fixes libdevice lookup warning)
-        nvvm_candidates=(
-          "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvvm/nvvm/libdevice"
-          "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvvm/nvvm/libdevice"
-          "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvvm/nvvm/libdevice"
-          "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvvm/nvvm/libdevice"
-        )
-        for d in "''${nvvm_candidates[@]}"; do
-          if [ -d "$d" ]; then
-            log_copy "copy libdevice from $d"
+        ${lib.optionalString copyLibdevice ''
+          # libdevice bitcode for NVVM (fixes libdevice lookup warning)
+          nvvm_candidates=(
+            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvvm/nvvm/libdevice"
+            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvvm/nvvm/libdevice"
+            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvvm/nvvm/libdevice"
+            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvvm/nvvm/libdevice"
+          )
+          for d in "''${nvvm_candidates[@]}"; do
+            if [ -d "$d" ]; then
+              log_copy "copy libdevice from $d"
+              mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
+              cp -aL "$d/." "$out/runtime/nvidia/nvvm/libdevice/"
+              chmod -R u+w "$out/runtime/nvidia/nvvm/libdevice"
+            fi
+          done
+          if [ ! -d "$out/runtime/nvidia/nvvm/libdevice" ]; then
+            log_copy "fallback find libdevice"
             mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
-            cp -aL "$d/." "$out/runtime/nvidia/nvvm/libdevice/"
+            while IFS= read -r -d $'\0' f; do
+              copy_one "$f" "$out/runtime/nvidia/nvvm/libdevice"
+            done < <(find -L bazel-bin bazel-out -type f -path "*/nvvm/libdevice/*" -print0 2>/dev/null || true)
             chmod -R u+w "$out/runtime/nvidia/nvvm/libdevice"
           fi
-        done
-        if [ ! -d "$out/runtime/nvidia/nvvm/libdevice" ]; then
-          log_copy "fallback find libdevice"
-          mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
-          while IFS= read -r -d $'\0' f; do
-            copy_one "$f" "$out/runtime/nvidia/nvvm/libdevice"
-          done < <(find -L bazel-bin bazel-out -type f -path "*/nvvm/libdevice/*" -print0 2>/dev/null || true)
-          chmod -R u+w "$out/runtime/nvidia/nvvm/libdevice"
-        fi
+        ''}
 
         if [[ "${lib.boolToString devel}" == "true" ]]; then
           mkdir -p "$out/logs"

@@ -138,6 +138,9 @@
         inherit (cudaCfg) cudaArchitectures;
         devel = false;
         cudaSupport = true;
+        copyNcclNvshmem = true;
+        copyCudaTools = true;
+        copyLibdevice = true;
         # Keep current behavior: use cudaPackages.backendStdenv for CUDA builds.
         # Set false to reduce build closure size if Bazel uses its own CUDA repos.
         useCudaStdenv = true;
@@ -166,6 +169,9 @@
         stdenv = pkgs.ccacheStdenv;
         devel = true;
         cudaSupport = true;
+        copyNcclNvshmem = true;
+        copyCudaTools = true;
+        copyLibdevice = true;
         # Keep current behavior: use cudaPackages.backendStdenv for CUDA builds.
         # Set false to reduce build closure size if Bazel uses its own CUDA repos.
         useCudaStdenv = true;
