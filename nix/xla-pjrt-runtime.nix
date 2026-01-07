@@ -74,79 +74,79 @@
 
   cudaRuntimeLibs =
     lib.optionals cudaSupport
-      (
-        [
-          {
-            name = "cudnn";
-            pkg = lib.getLib cudaPackages.cudnn;
-          }
-          {
-            name = "cublas";
-            pkg = lib.getLib cudaPackages.libcublas;
-          }
-          {
-            name = "cufft";
-            pkg = lib.getLib cudaPackages.libcufft;
-          }
-          # TODO: No DT_NEEDED evidence yet for curand/cusolver. Enable if runtime requires.
-          # {
-          #   name = "curand";
-          #   pkg = lib.getLib cudaPackages.libcurand;
-          # }
-          # {
-          #   name = "cusolver";
-          #   pkg = lib.getLib cudaPackages.libcusolver;
-          # }
-          {
-            name = "cusparse";
-            pkg = lib.getLib cudaPackages.libcusparse;
-          }
-          {
-            name = "cudart";
-            pkg = lib.getLib cudaPackages.cuda_cudart;
-          }
-          {
-            name = "cupti";
-            pkg = lib.getLib cudaPackages.cuda_cupti;
-          }
-          {
-            name = "nvrtc";
-            pkg = lib.getLib cudaPackages.cuda_nvrtc;
-          }
-        ]
-        ++ lib.optionals (cudaPackages ? cuda_nvjitlink) [
-          {
-            name = "nvjitlink";
-            pkg = lib.getLib cudaPackages.cuda_nvjitlink;
-          }
-        ]
-        ++ lib.optionals (cudaPackages ? nccl) [
-          {
-            name = "nccl";
-            pkg = lib.getLib cudaPackages.nccl;
-          }
-        ]
-        ++ lib.optionals (cudaPackages ? nvshmem) [
-          {
-            name = "nvshmem";
-            pkg = lib.getLib cudaPackages.nvshmem;
-          }
-        ]
-      );
+    (
+      [
+        {
+          name = "cudnn";
+          pkg = lib.getLib cudaPackages.cudnn;
+        }
+        {
+          name = "cublas";
+          pkg = lib.getLib cudaPackages.libcublas;
+        }
+        {
+          name = "cufft";
+          pkg = lib.getLib cudaPackages.libcufft;
+        }
+        # TODO: No DT_NEEDED evidence yet for curand/cusolver. Enable if runtime requires.
+        # {
+        #   name = "curand";
+        #   pkg = lib.getLib cudaPackages.libcurand;
+        # }
+        # {
+        #   name = "cusolver";
+        #   pkg = lib.getLib cudaPackages.libcusolver;
+        # }
+        {
+          name = "cusparse";
+          pkg = lib.getLib cudaPackages.libcusparse;
+        }
+        {
+          name = "cudart";
+          pkg = lib.getLib cudaPackages.cuda_cudart;
+        }
+        {
+          name = "cupti";
+          pkg = lib.getLib cudaPackages.cuda_cupti;
+        }
+        {
+          name = "nvrtc";
+          pkg = lib.getLib cudaPackages.cuda_nvrtc;
+        }
+      ]
+      ++ lib.optionals (cudaPackages ? cuda_nvjitlink) [
+        {
+          name = "nvjitlink";
+          pkg = lib.getLib cudaPackages.cuda_nvjitlink;
+        }
+      ]
+      ++ lib.optionals (cudaPackages ? nccl) [
+        {
+          name = "nccl";
+          pkg = lib.getLib cudaPackages.nccl;
+        }
+      ]
+      ++ lib.optionals (cudaPackages ? nvshmem) [
+        {
+          name = "nvshmem";
+          pkg = lib.getLib cudaPackages.nvshmem;
+        }
+      ]
+    );
 
   cudaComputeCapabilities =
     if cudaSupport && cudaArchitectures != null
-    then
-      let
-        toCap = arch:
-          let
-            len = builtins.stringLength arch;
-          in
-            if len == 2 then "${builtins.substring 0 1 arch}.${builtins.substring 1 1 arch}"
-            else if len == 3 then "${builtins.substring 0 2 arch}.${builtins.substring 2 1 arch}"
-            else arch;
+    then let
+      toCap = arch: let
+        len = builtins.stringLength arch;
       in
-        lib.concatStringsSep "," (map toCap cudaArchitectures)
+        if len == 2
+        then "${builtins.substring 0 1 arch}.${builtins.substring 1 1 arch}"
+        else if len == 3
+        then "${builtins.substring 0 2 arch}.${builtins.substring 2 1 arch}"
+        else arch;
+    in
+      lib.concatStringsSep "," (map toCap cudaArchitectures)
     else null;
 
   bazelTargets =
@@ -228,8 +228,9 @@ in
       patchelf
     ];
 
-    buildInputs = lib.optionals cudaSupport [
-    ];
+    buildInputs =
+      lib.optionals cudaSupport [
+      ];
 
     # Remove any Bazel pin file if present, and patch python repo glue.
     postPatch = ''
@@ -275,20 +276,42 @@ in
     '';
 
     buildPhase = ''
-      runHook preBuild
-      bazel info output_base > ./.bazel-output-base-path
-      ${lib.optionalString devel ''
+            runHook preBuild
+            python3 ${./parse_bazelrc.py} --output ./bazel-config.json
+
+            echo "[bazelrc] wrote ./bazel-config.json"
+            echo "[bazelrc] parsed $(python3 - <<'PY'
+      import json
+      data = json.load(open("./bazel-config.json", "r", encoding="utf-8"))
+      src = data.get("source") or "unknown"
+      count = len(data.get("available_configs", []))
+      print(f"source={src} configs={count}")
+      PY
+      )"
+            echo "[bazelrc] cuda (resolved): $(python3 - <<'PY'
+      import json
+      data = json.load(open("./bazel-config.json", "r", encoding="utf-8"))
+      for key in ("cuda", "pjrt_cuda12", "pjrt_cuda13"):
+          env = data.get("repo_env_resolved", {}).get(key, {})
+          cuda = env.get("HERMETIC_CUDA_VERSION", "n/a")
+          cudnn = env.get("HERMETIC_CUDNN_VERSION", "n/a")
+          nvsh = env.get("HERMETIC_NVSHMEM_VERSION", "n/a")
+          print(f"{key}={cuda} (cudnn={cudnn}, nvshmem={nvsh})")
+      PY
+      )"
+            bazel info output_base > ./bazel-output-base-path
+            ${lib.optionalString devel ''
         bazel info output_base
         bazel info repository_cache
       ''}
-      bazel \
-        --batch \
-        ${lib.optionalString persistentBazelOutputBase
-          "--output_base=$PWD/.bazel-output-base"} \
-        build \
-        -c opt \
-        ${lib.concatStringsSep " " bazelTargets}
-      runHook postBuild
+            bazel \
+              --batch \
+              ${lib.optionalString persistentBazelOutputBase
+        "--output_base=$PWD/.bazel-output-base"} \
+              build \
+              -c opt \
+              ${lib.concatStringsSep " " bazelTargets}
+            runHook postBuild
     '';
 
     installPhase = ''
@@ -338,13 +361,14 @@ in
       ''}
 
       ${lib.optionalString (cudaSupport && copyCudaFromNix) (lib.concatStringsSep "\n" (map (entry: ''
-        copy_cuda_lib "${entry.name}" "${entry.pkg}"
-      '') cudaRuntimeLibs))}
+          copy_cuda_lib "${entry.name}" "${entry.pkg}"
+        '')
+        cudaRuntimeLibs))}
 
       ${lib.optionalString cudaSupport ''
         output_base=""
-        if [ -f ./.bazel-output-base-path ]; then
-          output_base="$(cat ./.bazel-output-base-path)"
+        if [ -f ./bazel-output-base-path ]; then
+          output_base="$(cat ./bazel-output-base-path)"
         fi
 
         # Prefer Bazel runfiles (_solib) for hermetic CUDA/NVSHMEM DSOs.
@@ -552,6 +576,13 @@ in
       cat > "$out/runtime/PROVENANCE.json" <<EOF
       ${builtins.toJSON lock}
       EOF
+      mkdir -p "$out/runtime/logs"
+      cp -v ./bazel-config.json "$out/runtime/BAZEL_CONFIG.json"
+      cp -v ./bazel-config.json "$out/runtime/logs/bazel-config.json"
+      if [ -f tensorflow.bazelrc ]; then
+        head -n 120 tensorflow.bazelrc > "$out/runtime/logs/bazelrc-head.txt" || true
+        grep -nE '^(common|build):' tensorflow.bazelrc > "$out/runtime/logs/bazelrc-configs.txt" || true
+      fi
       # Lightweight README for consumers inspecting the runtime bundle.
       cat > "$out/runtime/README.txt" <<'EOF'
       zigrad XLA PJRT runtime bundle
