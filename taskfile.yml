@@ -49,7 +49,7 @@ tasks:
     internal: true
   sdk-devel:
     cmds:
-      - nix build .#zigrad-external-sdk-devel --print-out-paths
+      - nix build .#zigrad-external-sdk-devel --print-out-paths --option sandbox false {{.CLI_ARGS}}
       - direnv reload
       - task: task_timer
         vars:
@@ -111,14 +111,9 @@ tasks:
     cmds:
       - sudo mkdir -m0770 -p /nix/var/cache/ccache
       - sudo chown --reference=/nix/store /nix/var/cache/ccache
-      - |
-        before=$(stat -c %Y /etc/nix/nix.custom.conf)
-        sudo sed -i '/^extra-sandbox-paths = \/nix\/var\/cache\/ccache$/!{
-        $a\
-        extra-sandbox-paths = /nix/var/cache/ccache
-        }' /etc/nix/nix.custom.conf
-        after=$(stat -c %Y /etc/nix/nix.conf)
-        [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
+      - task: _nix-cache-setup
+        vars:
+          path: /nix/var/cache/ccache
 
   nix-ccache:
     cmd: sudo $(which nix) run .#ccache -- --dir /nix/var/cache/ccache {{.CLI_ARGS}}
@@ -150,19 +145,39 @@ tasks:
       - sudo mkdir -p /nix/var/cache/ccache
       - sudo tar --numeric-owner --xattrs --acls -C /nix/var/cache -xzf ccache-seed.tgz
 
+  _nix-cache-setup:
+    internal: true
+    cmd: |
+      file=/etc/nix/nix.custom.conf
+      path="{{.path}}"
+      line="extra-sandbox-paths = $path"
+
+      # ensure file exists
+      sudo touch "$file"
+
+      before=$(sha256sum "$file" | cut -d' ' -f1)
+
+      # append only if the path is not already present on any extra-sandbox-paths line
+      if ! grep -Eq '^[[:space:]]*extra-sandbox-paths[[:space:]]*=.*(^|[[:space:]])'"$path"'([[:space:]]|$)' "$file"; then
+        echo "$line" | sudo tee -a "$file" >/dev/null
+      fi
+
+      after=$(sha256sum "$file" | cut -d' ' -f1)
+
+      if [ "$before" != "$after" ]; then
+        echo "nix conf changed, restart daemon."
+      fi
+
+
   # Nix bazel cache ------------------------------------------------------------
   nix-bazel-cache-setup:
     cmds:
       - sudo mkdir -m0770 -p /nix/var/cache/bazel
       - sudo chown --reference=/nix/store /nix/var/cache/bazel
-      - |
-        before=$(stat -c %Y /etc/nix/nix.custom.conf)
-        sudo sed -i '/^extra-sandbox-paths = \/nix\/var\/cache\/bazel$/!{
-        $a\
-        extra-sandbox-paths = /nix/var/cache/bazel
-        }' /etc/nix/nix.custom.conf
-        after=$(stat -c %Y /etc/nix/nix.conf)
-        [ "$before" != "$after" ] && echo "nix conf changed, restart daemon."
+      - task: _nix-cache-setup
+        vars:
+          path: /nix/var/cache/bazel
+
 
   nix-bazel-cache:usage:
     cmd: sudo du -sh /nix/var/cache/bazel
