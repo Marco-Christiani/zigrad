@@ -13,4 +13,7 @@
 
   # NOTE: pick the CUDA toolchain once. change here, not in random shells.
   cudaPackagesAttr = "cudaPackages_12";
+
+  # Match the hermetic CUDA version in tensorflow.bazelrc (pjrt_cuda12).
+  cudaVersion = "12.9.1";
 }

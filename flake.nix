@@ -134,16 +134,15 @@
       };
 
       xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile cudaPackages;
-        inherit (cudaCfg) cudaArchitectures;
+        inherit lockFile;
+        inherit (cudaCfg) cudaArchitectures cudaVersion;
         devel = false;
         cudaSupport = true;
         copyNcclNvshmem = true;
         copyCudaTools = true;
         copyLibdevice = true;
-        # Keep current behavior: use cudaPackages.backendStdenv for CUDA builds.
-        # Set false to reduce build closure size if Bazel uses its own CUDA repos.
-        useCudaStdenv = true;
+        cudaPackages = null;
+        useCudaStdenv = false;
         persistentBazelOutputBase = false;
       };
 
@@ -164,17 +163,16 @@
 
       # Dev: ccache + devel + CUDA.
       xlaPjrtPluginsCudaDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile cudaPackages;
-        inherit (cudaCfg) cudaArchitectures;
+        inherit lockFile;
+        inherit (cudaCfg) cudaArchitectures cudaVersion;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
         cudaSupport = true;
         copyNcclNvshmem = true;
         copyCudaTools = true;
         copyLibdevice = true;
-        # Keep current behavior: use cudaPackages.backendStdenv for CUDA builds.
-        # Set false to reduce build closure size if Bazel uses its own CUDA repos.
-        useCudaStdenv = true;
+        cudaPackages = null;
+        useCudaStdenv = false;
         persistentBazelOutputBase = true;
       };
       # ------------------------------------------------------------------
