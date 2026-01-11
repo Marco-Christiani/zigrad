@@ -565,6 +565,7 @@ in
       # Runtime sys libs (self-contained)
       cp -v ${stdenv.cc.cc.lib}/lib/libstdc++.so.6 "$out/runtime/sys/lib/"
       cp -v ${stdenv.cc.cc.lib}/lib/libgcc_s.so.1 "$out/runtime/sys/lib/"
+      cp -v ${zlib}/lib/libz.so.1 "$out/runtime/sys/lib/"
 
       ${lib.optionalString (cudaSupport && copyCudaFromNix) ''
         # Copy CUDA runtime libs into runtime/nvidia/<pkg>/lib
