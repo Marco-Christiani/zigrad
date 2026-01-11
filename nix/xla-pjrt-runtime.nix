@@ -602,6 +602,15 @@ in
           echo "[cuda-copy] $*"
         }
 
+        is_valid_tool() {
+          local p="$1"
+          [ -f "$p" ] || return 1
+          [ -s "$p" ] || return 1
+          [ -x "$p" ] || return 1
+          file -L "$p" | grep -q 'ELF ' || return 1
+        }
+
+
         copy_one() {
           local src="$1"
           local dest_dir="$2"
@@ -706,30 +715,51 @@ in
         copy_find "libnvrtc-builtins.so.*" "$out/runtime/nvidia/nvrtc/lib"
 
         ${lib.optionalString copyCudaTools ''
-          # Prefer runfiles cuda_nvcc tools if present.
-          tool_candidates=(
-            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
-            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
-            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
-            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
-          )
-          for d in "''${tool_candidates[@]}"; do
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cuda_nvcc/bin" "ptxas"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cuda_nvcc/bin" "nvlink"
-          done
+          copy_tool_safe() {
+            local name="$1"
+            local dest="$2"
 
-          # Fallback to generic search if runfiles paths change.
-          copy_find "ptxas" "$out/runtime/nvidia/cuda_nvcc/bin"
-          copy_find "nvlink" "$out/runtime/nvidia/cuda_nvcc/bin"
+            mkdir -p "$dest"
 
-          # XLA also searches <cuda_data_dir>/bin, so mirror tools there too.
-          if [ -f "$out/runtime/nvidia/cuda_nvcc/bin/ptxas" ]; then
-            copy_one "$out/runtime/nvidia/cuda_nvcc/bin/ptxas" "$out/runtime/nvidia/bin"
-          fi
-          if [ -f "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" ]; then
-            copy_one "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" "$out/runtime/nvidia/bin"
-          fi
+            # 1) Prefer canonical Bazel CUDA repo location
+            if [ -n "$output_base" ]; then
+              candidate="$output_base/external/cuda_nvcc/bin/$name"
+              if is_valid_tool "$candidate"; then
+                log_copy "tool ok: $name from $candidate"
+                copy_one "$candidate" "$dest"
+                return 0
+              fi
+            fi
+
+            # 2) Try runfiles candidates
+            tool_candidates=(
+              "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
+              "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
+              "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
+              "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
+            )
+
+            for d in "''${tool_candidates[@]}"; do
+              candidate="$d/$name"
+              if is_valid_tool "$candidate"; then
+                log_copy "tool ok: $name from $candidate"
+                copy_one "$candidate" "$dest"
+                return 0
+              fi
+            done
+
+            echo "ERROR: no valid $name found (ELF + executable + non-empty)" >&2
+            return 1
+          }
+
+          copy_tool_safe "ptxas"  "$out/runtime/nvidia/cuda_nvcc/bin"
+          copy_tool_safe "nvlink" "$out/runtime/nvidia/cuda_nvcc/bin"
+
+          # Mirror into <cuda_data_dir>/bin (XLA lookup path)
+          copy_one "$out/runtime/nvidia/cuda_nvcc/bin/ptxas"  "$out/runtime/nvidia/bin"
+          copy_one "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" "$out/runtime/nvidia/bin"
         ''}
+
 
         ${lib.optionalString copyLibdevice ''
           # libdevice bitcode for NVVM (fixes libdevice lookup warning)
