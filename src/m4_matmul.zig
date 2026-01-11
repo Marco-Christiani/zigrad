@@ -24,17 +24,44 @@ pub fn main() !void {
         error.WriteFailed => @panic("write failed on flush"),
     };
 
-    var tty = term_color.Tty.initForStderr(stdout);
-    try stdout.print("Zigrad PJRT/XLA backend (M4.1)\n", .{});
+    var tty = term_color.Tty.initForStdout(stdout);
+    try tty.print(.white, "Zigrad PJRT/XLA backend (M4.1)\n", .{});
 
     const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |err| {
         try tty.print(.red, "error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
-        try stdout.print("Set PJRT_PLUGIN_PATH to the path of your PJRT plugin.\n", .{});
+        try tty.print(.red, "Set PJRT_PLUGIN_PATH to the path of your PJRT plugin.\n", .{});
         return err;
     };
     defer allocator.free(plugin_path);
+    try tty.print(.white, "Loading PJRT plugin from: {s}\n", .{plugin_path});
+    var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
+        try tty.print(.red, "Failed to initialize backend: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    defer backend.deinit();
+    try tty.print(.green, "Backend initialized\n", .{});
 
-    try stdout.print("Constructing MLIR IR in memory (via C API)...\n", .{});
+    try tty.print(.white, "Querying devices...\n", .{});
+    const devices = try backend.getDevices(allocator);
+    defer {
+        for (devices) |device| {
+            device.deinit();
+        }
+        allocator.free(devices);
+    }
+
+    if (devices.len == 0) {
+        try tty.print(.red, "No devices found\n", .{});
+        return error.NoDevices;
+    }
+
+    try tty.print(.green, "Found {d} device(s)\n", .{devices.len});
+    const device = &devices[0];
+    const device_kind = device.getKind();
+    const device_id = try device.getId();
+    try tty.print(.white, "   Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
+
+    try tty.print(.white, "Constructing MLIR IR in memory (via C API)...\n", .{});
 
     var registry = try mlir.Registry.init();
     defer registry.deinit();
@@ -66,7 +93,8 @@ pub fn main() !void {
     if (!mlir_ctx.isRegisteredOperation("stablehlo.dot")) return error.DialectRegistrationFailed;
 
     const diag = mlir_diag.checkStablehloDialectSupport();
-    try stdout.print(
+    try tty.print(
+        .red,
         "   ! Dialect registration diagnostics: issue={s} missing_libmlir_c={any} missing_libstablehlo_capi={any} symbol_in_process={any} symbol_in_libstablehlo_capi={any}\n",
         .{
             @tagName(diag.issue),
@@ -139,15 +167,15 @@ pub fn main() !void {
 
     // Print IR to verify (debug)
     if (false) {
-        try stdout.print("\n--- Generated IR ---\n", .{});
+        try tty.print(.white, "\n--- Generated IR ---\n", .{});
         var print_buffer: [8192]u8 = undefined;
         var print_writer: std.Io.Writer = .fixed(&print_buffer);
         try module.op().print(&print_writer, .{});
-        try stdout.print("{s}\n", .{print_writer.buffered()});
-        try stdout.print("--- End IR ---\n\n", .{});
+        try tty.print(.white, "{s}\n", .{print_writer.buffered()});
+        try tty.print(.white, "--- End IR ---\n\n", .{});
     }
 
-    try stdout.print("Serializing MLIR module to bytecode...\n", .{});
+    try tty.print(.white, "Serializing MLIR module to bytecode...\n", .{});
 
     // serialize
     var bytecode_buffer_fixed: [1024 * 1024]u8 = undefined;
@@ -162,35 +190,7 @@ pub fn main() !void {
     var program = try Program.fromBytecode(allocator, .mlir_bytecode, bytecode_buffer);
     defer program.deinit();
 
-    try stdout.print("Loading PJRT plugin from: {s}\n", .{plugin_path});
-    var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
-        try tty.print(.red, "Failed to initialize backend: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer backend.deinit();
-    try tty.print(.green, "Backend initialized\n", .{});
-
-    try stdout.print("Querying devices...\n", .{});
-    const devices = try backend.getDevices(allocator);
-    defer {
-        for (devices) |device| {
-            device.deinit();
-        }
-        allocator.free(devices);
-    }
-
-    if (devices.len == 0) {
-        try tty.print(.red, "No devices found\n", .{});
-        return error.NoDevices;
-    }
-
-    try tty.print(.green, "Found {d} device(s)\n", .{devices.len});
-    const device = &devices[0];
-    const device_kind = device.getKind();
-    const device_id = try device.getId();
-    try stdout.print("   Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
-
-    try stdout.print("Compiling program...\n", .{});
+    try tty.print(.white, "Compiling program...\n", .{});
     const compile_options = zigrad.CompileOptions{
         .format = .mlir_bytecode,
         .bytecode = program.bytecode,
@@ -206,7 +206,7 @@ pub fn main() !void {
     defer executable.deinit();
     try tty.print(.green, "Compilation succeeded\n", .{});
 
-    try stdout.print("Preparing input matrices...\n", .{});
+    try tty.print(.white, "Preparing input matrices...\n", .{});
 
     // Matrix A: 2x3
     // [[1, 2, 3],
@@ -244,13 +244,13 @@ pub fn main() !void {
     var buf_b = try HostBuffer.fromSlice(allocator, &input_b, shape_b, .f32);
     defer buf_b.deinit();
 
-    try stdout.print("   Matrix A (2x3): ", .{});
-    try buf_a.print(stdout);
-    try stdout.print("   Matrix B (3x2): ", .{});
-    try buf_b.print(stdout);
-    try stdout.print("\n", .{});
+    try tty.print(.white, "   Matrix A (2x3): ", .{});
+    try buf_a.print(tty.writer);
+    try tty.print(.white, "   Matrix B (3x2): ", .{});
+    try buf_b.print(tty.writer);
+    try tty.print(.white, "\n", .{});
 
-    try stdout.print("Uploading matrices to device...\n", .{});
+    try tty.print(.white, "Uploading matrices to device...\n", .{});
     const dev_buf_a = try backend.bufferFromHost(device, buf_a.data, .f32, shape_a);
     defer dev_buf_a.deinit();
     const dev_buf_b = try backend.bufferFromHost(device, buf_b.data, .f32, shape_b);
@@ -259,7 +259,7 @@ pub fn main() !void {
     const inputs = [_]zigrad.Buffer{ dev_buf_a, dev_buf_b };
     try tty.print(.green, "Matrices uploaded\n", .{});
 
-    try stdout.print("Executing matrix multiplication...\n", .{});
+    try tty.print(.white, "Executing matrix multiplication...\n", .{});
     var result = executable.execute(&inputs, allocator) catch |err| {
         try tty.print(.red, "Execution failed: {s}\n", .{@errorName(err)});
         return err;
@@ -273,7 +273,7 @@ pub fn main() !void {
 
     try tty.print(.green, "Execution succeeded ({d} output(s))\n", .{result.outputs.len});
 
-    try stdout.print("Reading result matrix from device...\n", .{});
+    try tty.print(.white, "Reading result matrix from device...\n", .{});
     const output_buffer = result.outputs[0];
 
     // Verify output shape
@@ -281,10 +281,10 @@ pub fn main() !void {
     if (output_shape.dims.len != 2 or output_shape.dims[0] != 2 or output_shape.dims[1] != 2) {
         try tty.print(.red, "Unexpected output shape: expected [2, 2], got [", .{});
         for (output_shape.dims, 0..) |dim, i| {
-            if (i > 0) try stdout.print(", ", .{});
-            try stdout.print("{d}", .{dim});
+            if (i > 0) try tty.print(.white, ", ", .{});
+            try tty.print(.white, "{d}", .{dim});
         }
-        try stdout.print("]\n", .{});
+        try tty.print(.white, "]\n", .{});
         return error.ShapeMismatch;
     }
 
@@ -296,11 +296,11 @@ pub fn main() !void {
 
     try transfer_event.await_();
 
-    try stdout.print("   Result Matrix (2x2): ", .{});
-    try output_host.print(stdout);
-    try stdout.print("\n", .{});
+    try tty.print(.white, "   Result Matrix (2x2): ", .{});
+    try output_host.print(tty.writer);
+    try tty.print(.white, "\n", .{});
 
-    try stdout.print("Verifying numerical correctness vs M2 baseline...\n", .{});
+    try tty.print(.white, "Verifying numerical correctness vs M2 baseline...\n", .{});
     const output_slice = output_host.asSlice(f32);
 
     var all_correct = true;

@@ -58,7 +58,7 @@ fn canonicalizePath(path: []const u8) ![]const u8 {
 /// 4. Optionally call PJRT_Plugin_Initialize
 ///
 pub fn loadPlugin(path: []const u8) !Api {
-    _ = try preloadHostNvidia(false);
+    _ = try preloadHostNvidia(true);
     const debug = debugEnabled();
 
     const canonical = try canonicalizePath(path);

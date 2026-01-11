@@ -34,5 +34,7 @@ pub const Tty = struct {
         try self.set(color);
         try self.writer.print(fmt, args);
         try self.reset();
+        // IMMEDIATE flush
+        try self.writer.flush();
     }
 };

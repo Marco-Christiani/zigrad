@@ -68,11 +68,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/m2_matmul.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{.{ .name = "zigrad", .module = zigrad_mod }},
         }),
     });
-    exe_m2.linkLibC();
     exe_m2.root_module.addIncludePath(b.path("src"));
+
+    // shouldnt need these two lines
+    exe_m2.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
+    linkMlirStablehloCapi(b, exe_m2, sdk_lib);
+
+    addRuntimeBundle(b, exe_m2, runtime_root_opt orelse sdk_runtime);
     b.installArtifact(exe_m2);
 
     const run_m2_cmd = b.addRunArtifact(exe_m2);
@@ -168,21 +174,18 @@ pub fn build(b: *std.Build) void {
 
 fn linkMlirStablehloCapi(b: *std.Build, exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
     _ = b;
-    exe.addLibraryPath(.{ .cwd_relative = sdk_lib });
+    exe.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
 
     // Shared MLIR C boundary (we ensured libMLIR-C.so symlink exists in the SDK)
-    exe.linkSystemLibrary("MLIR-C");
+    exe.root_module.linkSystemLibrary("MLIR-C", .{});
 
     // StableHLO C API boundary (shared library). This provides the StableHLO dialect handle symbol:
     //   mlirGetDialectHandle__stablehlo__()
     // and depends on the MLIR/LLVM DSOs shipped in the SDK lib/.
-    exe.linkSystemLibrary("StablehloCAPI");
+    exe.root_module.linkSystemLibrary("StablehloCAPI", .{});
 
     // C++ runtime: MLIR/StableHLO were built with libstdc++ ABI.
-    exe.linkSystemLibrary("stdc++");
-
-    // dlopen is used by PJRT loader code.
-    exe.linkSystemLibrary("dl");
+    exe.root_module.linkSystemLibrary("stdc++", .{});
 }
 
 // OLD -- Kept for reference as we are still determining how to fix the build so dialect registration works
@@ -219,6 +222,9 @@ fn linkMlirStablehloCapi(b: *std.Build, exe: *std.Build.Step.Compile, sdk_lib: [
 // }
 
 fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root_opt: ?[]const u8) void {
+    // dlopen is used by PJRT loader code.
+    exe.root_module.linkSystemLibrary("dl", .{});
+
     const rpaths = [_][]const u8{
         // assume layout is $prefix/bin/zigrad and $prefix/runtime/...
         "$ORIGIN",
