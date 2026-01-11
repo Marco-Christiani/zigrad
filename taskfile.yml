@@ -3,8 +3,10 @@
 version: "3"
 
 vars:
-  RED:
-    sh: tput setaf 1
+  RED: "\\033[31m"
+  GREEN: "\\033[32m"
+  YELLOW: "\\033[33m"
+  RESET: "\\033[0m"
   RSYNC_BASE: >-
     rsync -avz
     -e "{{.RSYNC_SSH | default "ssh"}}"
@@ -14,14 +16,12 @@ vars:
     --no-group
     --no-times
     --filter=':- .rsync-filter'
-  # using this for now, abs paths may an issue, removed previous dynamic logic
-  ZG_EXTERNAL_SDK_ROOT: ./result
-  PJRT_PLUGIN_PATH:
-    sh: |
-      set -e
-      p="${PJRT_PLUGIN_PATH:-{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so}"
-      # realpath "$p" 2>/dev/null || exit 1
-      echo "$p"
+  ZG_EXTERNAL_SDK_ROOT: '{{env "ZG_EXTERNAL_SDK_ROOT" | default "./result"}}'
+
+env:
+  ZG_EXTERNAL_SDK_ROOT: '{{.ZG_EXTERNAL_SDK_ROOT}}'
+  PJRT_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so'
+  XLA_FLAGS: '--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia'
 
 dotenv: [".env"]
 # env:
@@ -59,51 +59,69 @@ tasks:
     cmd: uv run ./scripts/check_sdk.py {{.CLI_ARGS}}
     vars:
       # default args to support overriding completely
-      CLI_ARGS: --sdk-root {{.ZG_EXTERNAL_SDK_ROOT}}
+      CLI_ARGS: --sdk-root $ZG_EXTERNAL_SDK_ROOT
+
+  _check-env:
+    silent: true
+    internal: true
     requires:
-      vars: [ZG_EXTERNAL_SDK_ROOT]
+      vars:
+        - name: MODE
+          enum: [build, run]
+    cmd: |
+      ZG_EXTERNAL_SDK_ROOT=${ZG_EXTERNAL_SDK_ROOT:-'<not-set>'}
+      check_env_path(){
+        local name="$1"
+        local val="${!name}"
+        if ! realpath "$val" > /dev/null 2>&1; then
+          printf "%b[WARNING] $name=$val does not exist%b\n" "{{.YELLOW}}" "{{.RESET}}"
+          return 1
+        else
+          printf "%b[OK] $name=$val%b\n" "{{.GREEN}}" "{{.RESET}}"
+          return 0
+        fi
+      }
+      status=0
+      {{if eq .MODE "build"}}check_env_path "ZG_EXTERNAL_SDK_ROOT" || status=1{{end}}
+      {{if eq .MODE "run"}}check_env_path "PJRT_PLUGIN_PATH" || status=1{{end}}
+      exit $status
+
+  check-env-bt:
+    # silent: true
+    cmd:
+      task: _check-env
+      vars:
+        MODE: build
+
+  check-env-rt:
+    silent: true
+    cmd:
+      task: _check-env
+      vars:
+        MODE: run
 
   build:
-    cmd: zig build -Dsdk={{.ZG_EXTERNAL_SDK_ROOT}}
-    requires:
-      vars: [ZG_EXTERNAL_SDK_ROOT]
+    deps: [check-env-bt]
+    cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT
 
   test:
-    cmd: zig build -Dsdk={{.ZG_EXTERNAL_SDK_ROOT}} test
-    requires:
-      vars: [ZG_EXTERNAL_SDK_ROOT]
+    cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
 
   m2:
-    deps: [build]
+    deps: [build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m2
-    env:
-      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
-    requires:
-      vars: [PJRT_PLUGIN_PATH]
 
   m2-fusion:
-    deps: [build]
+    deps: [build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m2-fusion
-    env:
-      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
-    requires:
-      vars: [PJRT_PLUGIN_PATH]
 
   m4:
-    deps: [build]
+    deps: [build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m4
-    env:
-      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
-    requires:
-      vars: [PJRT_PLUGIN_PATH]
 
   m4-custom:
-    deps: [build]
+    deps: [build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m4-custom
-    env:
-      PJRT_PLUGIN_PATH: "{{.PJRT_PLUGIN_PATH}}"
-    requires:
-      vars: [PJRT_PLUGIN_PATH]
 
   # Meta Utils =================================================================
   # Nix ccache -----------------------------------------------------------------
