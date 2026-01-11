@@ -242,6 +242,8 @@ fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root_op
         // "/usr/lib64",
         // "/lib",
         // "/usr/lib",
+        // nixos
+        "/run/opengl-driver/lib",
     };
     inline for (rpaths) |p| exe.root_module.addRPathSpecial(p);
     // Dev convenience (to avoid copying gb every build): symlink zig-out/runtime -> runtime_root (if provided)

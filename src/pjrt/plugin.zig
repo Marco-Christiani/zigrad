@@ -58,8 +58,7 @@ fn canonicalizePath(path: []const u8) ![]const u8 {
 /// 4. Optionally call PJRT_Plugin_Initialize
 ///
 pub fn loadPlugin(path: []const u8) !Api {
-    // preloadDriver();
-    probeCudnn("result/runtime");
+    _ = try preloadHostNvidia(false);
     const debug = debugEnabled();
 
     const canonical = try canonicalizePath(path);
@@ -113,64 +112,65 @@ pub fn loadPlugin(path: []const u8) !Api {
     return api;
 }
 
-fn preloadDriver() void {
-    const flags = c.RTLD_NOW | c.RTLD_GLOBAL;
-
-    const libs = [_][]const u8{
-        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
-        // "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
-        "/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
-    };
-
-    for (libs) |p| {
-        const handle = c.dlopen(p.ptr, flags);
-        if (handle == null) {
-            std.debug.print("dlopen failed for {s}\n", .{p});
-        }
-    }
-}
-
 // ----------------------------------------------------------------------------------------------------
 
-fn probeDlopen(label: []const u8, path: [:0]const u8, flags: c_int) ?*anyopaque {
+fn maybeDlopen(
+    label: []const u8,
+    soname: [:0]const u8,
+    flags: c_int,
+    verbose: bool,
+) ?*anyopaque {
     _ = c.dlerror(); // clear
-    const h = c.dlopen(path.ptr, flags);
+    const h = c.dlopen(soname.ptr, flags);
     if (h == null) {
-        std.debug.print("probe dlopen FAIL {s}: {s} -> {s}\n", .{ label, path, dlErrMsg() });
+        if (verbose) {
+            std.debug.print("dlopen FAIL {s}: {s} -> {s}\n", .{ label, soname, dlErrMsg() });
+        }
         return null;
     }
-    std.debug.print("probe dlopen OK   {s}: {s}\n", .{ label, path });
+    if (verbose) {
+        std.debug.print("dlopen OK   {s}: {s}\n", .{ label, soname });
+    }
     return h;
 }
 
-fn probeCudnn(runtime_root: []const u8) void {
-    const flags = c.RTLD_NOW | c.RTLD_LOCAL;
+pub const HostNvidiaHandles = struct {
+    cuda: *anyopaque,
+    nvml: ?*anyopaque,
+};
 
-    // host driver libs
-    _ = probeDlopen("libcuda", "/usr/lib/x86_64-linux-gnu/libcuda.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
-    _ = probeDlopen("libcuda", "/lib/x86_64-linux-gnu/libcuda.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
-    _ = probeDlopen("nvml", "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
-    _ = probeDlopen("nvml", "/lib/x86_64-linux-gnu/libnvidia-ml.so.1", c.RTLD_NOW | c.RTLD_GLOBAL);
+pub const PreloadError = error{
+    CudaDriverNotFound,
+};
 
-    // rely on search path
-    const h = blk: {
-        const hh = probeDlopen("cudnn(name)", "libcudnn.so.9", flags);
-        if (hh != null) break :blk hh;
-        // try dlopen by absolute path into bundle (should always work if deps are present)
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs = std.fmt.bufPrintZ(&buf, "{s}/nvidia/cudnn/lib/libcudnn.so.9", .{runtime_root}) catch return;
-        break :blk probeDlopen("cudnn(abs)", abs, flags) orelse return;
+/// Preload host-injected NVIDIA driver libraries.
+/// Contract:
+/// - Requires: libcuda.so.1 (stable soname)
+/// - Optional: libnvidia-ml.so.1 (NVML)
+/// This assumes your build/install/runtime has arranged for the dynamic loader
+/// to find these (e.g. Docker GPU injection, or on NixOS: /run/opengl-driver/lib
+/// in RUNPATH).
+pub fn preloadHostNvidia(verbose: bool) PreloadError!HostNvidiaHandles {
+    // RTLD_GLOBAL is often important for driver-side symbol visibility when
+    // downstream DSOs expect to resolve CUDA driver symbols.
+    const flags_driver: c_int = c.RTLD_NOW | c.RTLD_GLOBAL;
+
+    const cuda_h = maybeDlopen("CUDA driver", "libcuda.so", flags_driver, verbose) orelse {
+        // No absolute-path fallback here: if this fails, it’s an environment/packaging issue.
+        if (!verbose) {
+            std.debug.print("dlopen FAIL CUDA driver (libcuda.so) -> {s}\n", .{dlErrMsg()});
+        }
+        return error.CudaDriverNotFound;
     };
 
-    // 4) symbol check
-    _ = c.dlerror();
-    const sym = c.dlsym(h, "cudnnGetProperty");
-    if (sym == null) {
-        std.debug.print("probe dlsym FAIL cudnnGetProperty -> {s}\n", .{dlErrMsg()});
-    } else {
-        std.debug.print("probe dlsym OK   cudnnGetProperty\n", .{});
-    }
+    const nvml_h = maybeDlopen("NVML", "libnvidia-ml.so.1", flags_driver, verbose);
+
+    return .{
+        .cuda = cuda_h,
+        .nvml = nvml_h,
+    };
 }
+
 // ----------------------------------------------------------------------------------------------------
 
 fn loadFromHandle(handle: *anyopaque, canonical_path: []const u8) !Api {
