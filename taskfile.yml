@@ -121,7 +121,7 @@ tasks:
 
   m4-custom:
     deps: [build, check-env-rt]
-    cmd: ./zig-out/bin/zigrad-pjrt-m4-custom
+    cmd: ./zig-out/bin/zigrad-pjrt-m4-custom {{.CLI_ARGS}}
 
   # Meta Utils =================================================================
   # Nix ccache -----------------------------------------------------------------

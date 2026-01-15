@@ -84,6 +84,7 @@ in {
 
         nativeBuildInputs = [
           zig.hook
+          pkgs.autoAddDriverRunpath
         ];
 
         buildInputs = [
@@ -94,6 +95,12 @@ in {
           "-Doptimize=ReleaseSafe"
           "-Dsdk=${zigradExternalSdk}"
         ];
+
+        postFixup = ''
+          # fixupPhase runs `patchelf --shrink-rpath` which will remove the /run/opengl-driver/lib RPATH entry
+          #   so we need this so we can load cuda driver on nixos.
+          addDriverRunpath "$out/bin/zigrad-pjrt-m4"
+        '';
 
         # tests
         # dontUseZigCheck = true;

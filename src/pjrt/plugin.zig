@@ -155,10 +155,10 @@ pub fn preloadHostNvidia(verbose: bool) PreloadError!HostNvidiaHandles {
     // downstream DSOs expect to resolve CUDA driver symbols.
     const flags_driver: c_int = c.RTLD_NOW | c.RTLD_GLOBAL;
 
-    const cuda_h = maybeDlopen("CUDA driver", "libcuda.so", flags_driver, verbose) orelse {
+    const cuda_h = maybeDlopen("CUDA driver", "libcuda.so.1", flags_driver, verbose) orelse {
         // No absolute-path fallback here: if this fails, it’s an environment/packaging issue.
         if (!verbose) {
-            std.debug.print("dlopen FAIL CUDA driver (libcuda.so) -> {s}\n", .{dlErrMsg()});
+            std.debug.print("dlopen FAIL CUDA driver (libcuda.so.1) -> {s}\n", .{dlErrMsg()});
         }
         return error.CudaDriverNotFound;
     };
