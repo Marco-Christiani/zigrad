@@ -31,4 +31,5 @@ pub const paramHasSideEffect = core.paramHasSideEffect;
 pub const paramOutAval = core.paramOutAval;
 
 pub const ad = @import("ad.zig");
+pub const emit = @import("emit.zig");
 pub const ops = @import("ops/ops.zig");

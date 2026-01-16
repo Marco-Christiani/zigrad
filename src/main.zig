@@ -25,6 +25,9 @@ pub fn main() !void {
     const device = &devs[0];
 
     if (mode) |m| {
+        if (std.mem.eql(u8, m, "print-pr")) {
+            return printPr(gpa);
+        }
         if (std.mem.eql(u8, m, "custom-call-neg")) {
             return runCustomCallNegative(gpa, &rt, device);
         }
@@ -330,4 +333,22 @@ fn expectAllClose(label: []const u8, got: []const f32, expected: []const f32, to
             return error.NumericalMismatch;
         }
     }
+}
+
+fn printPr(allocator: std.mem.Allocator) !void {
+    var program = try zg.frontend.buildDemoProgram(allocator);
+    defer program.deinit();
+
+    const fwd = program.functions[0];
+    const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
+
+    try stdout.writeAll("=== Forward Function ===\n");
+    try zg.pr.emit.emitText(fwd, stdout);
+    try stdout.writeAll("\n=== VJP Function ===\n");
+    try zg.pr.emit.emitText(vjp_func, stdout);
 }
