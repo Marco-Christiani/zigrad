@@ -1,168 +1,249 @@
-/// M1 Milestone Test: Basic PJRT Execution
 const std = @import("std");
 const zigrad = @import("zigrad");
-const term_color = @import("util/term_color.zig");
-
-const Backend = zigrad.Backend;
-const HostBuffer = zigrad.HostBuffer;
-const DType = zigrad.DType;
-const Shape = zigrad.Shape;
-const Program = zigrad.Program;
-const PjrtBackend = zigrad.pjrt_backend.PjrtBackend;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stderr().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    defer stdout.flush() catch |e| switch (e) {
-        error.WriteFailed => @panic("write failed on flush"),
-    };
+    var arg_it = std.process.args();
+    _ = arg_it.next(); // argv0
+    const mode = arg_it.next();
 
-    var tty = term_color.Tty.initForStderr(stdout);
-    try stdout.print("Zigrad PJRT/XLA backend (M1)\n", .{});
-
-    const plugin_path = std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH") catch |err| {
-        try tty.print(.red, "error: PJRT_PLUGIN_PATH not set ({s})\n", .{@errorName(err)});
+    const plugin_path = std.process.getEnvVarOwned(gpa, "PJRT_PLUGIN_PATH") catch |err| {
+        std.log.err("PJRT_PLUGIN_PATH not set ({s})", .{@errorName(err)});
         return err;
     };
-    defer allocator.free(plugin_path);
+    defer gpa.free(plugin_path);
 
-    try stdout.print("Loading PJRT plugin from: {s}\n", .{plugin_path});
+    var rt = try zigrad.runtime.pjrt.Runtime.init(gpa, plugin_path);
+    defer rt.deinit();
 
-    var backend = PjrtBackend.init(allocator, plugin_path) catch |err| {
-        try tty.print(.red, "Failed to initialize backend: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer backend.deinit();
-    try tty.print(.green, "Backend initialized\n", .{});
+    const devs = try rt.devices(gpa);
+    defer gpa.free(devs);
+    if (devs.len == 0) return error.NoDevices;
+    const device = &devs[0];
 
-    try stdout.print("Querying devices...\n", .{});
-    const devices = try backend.getDevices(allocator);
-    defer {
-        for (devices) |device| {
-            device.deinit();
+    if (mode) |m| {
+        if (std.mem.eql(u8, m, "custom-call-neg")) {
+            return runCustomCallNegative(gpa, &rt, device);
         }
-        allocator.free(devices);
+        if (std.mem.eql(u8, m, "vjp-demo")) {
+            return runVjpDemo(gpa, &rt, device);
+        }
+        std.log.err("unknown mode: {s}", .{m});
+        return error.InvalidArguments;
     }
 
-    if (devices.len == 0) {
-        try tty.print(.red, "No devices found\n", .{});
-        return error.NoDevices;
-    }
-
-    try tty.print(.green, "Found {d} device(s)\n", .{devices.len});
-    const device = &devices[0];
-    const device_kind = device.getKind();
-    const device_id = try device.getId();
-    try stdout.print("   Using device {d} ({s})\n", .{ device_id, @tagName(device_kind) });
-
-    const program_text =
-        \\func.func @main(%arg0: tensor<4xf32>, %arg1: tensor<4xf32>) -> tensor<4xf32> {
-        \\  %0 = stablehlo.add %arg0, %arg1 : tensor<4xf32>
-        \\  return %0 : tensor<4xf32>
-        \\}
-    ;
-
-    try stdout.print("Creating StableHLO program (elementwise add)...\n", .{});
-    var program = try Program.fromBytecode(allocator, .mlir_text, program_text);
+    var program = try zigrad.frontend.buildDemoProgram(gpa);
     defer program.deinit();
-    try tty.print(.green, "Program created\n", .{});
 
-    try stdout.print("Compiling program...\n", .{});
-    const compile_options = zigrad.CompileOptions{
-        .format = .stablehlo_mlir_text,
-        .bytecode = program.bytecode,
-        .optimization_level = 3,
-        .dump_dir = null,
-        .backend_options = null, // Let PJRT use defaults
+    const func = program.functions[0];
+    var exe = try zigrad.toolchain.xla.compileMain(gpa, &rt, device, func);
+    defer exe.deinit();
+
+    // Inputs (A: 2x3, B: 3x2, C: 2x2)
+    const A = [_]f32{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    };
+    const B = [_]f32{
+        7.0,  8.0,
+        9.0,  10.0,
+        11.0, 12.0,
+    };
+    const C = [_]f32{
+        2.0, 2.0,
+        2.0, 2.0,
     };
 
-    var executable = backend.compile(device, compile_options) catch |err| {
-        try tty.print(.red, "Compilation failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer executable.deinit();
-    try tty.print(.green, "Compilation succeeded\n", .{});
+    const shape_a = zigrad.runtime.Shape{ .dims = &.{ 2, 3 } };
+    const shape_b = zigrad.runtime.Shape{ .dims = &.{ 3, 2 } };
+    const shape_c = zigrad.runtime.Shape{ .dims = &.{ 2, 2 } };
 
-    try stdout.print("Preparing input buffers...\n", .{});
+    var host_a = try zigrad.runtime.HostBuffer.fromSlice(gpa, &A, shape_a, .f32);
+    defer host_a.deinit();
+    var host_b = try zigrad.runtime.HostBuffer.fromSlice(gpa, &B, shape_b, .f32);
+    defer host_b.deinit();
+    var host_c = try zigrad.runtime.HostBuffer.fromSlice(gpa, &C, shape_c, .f32);
+    defer host_c.deinit();
 
-    var input_a = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
-    var input_b = [_]f32{ 5.0, 6.0, 7.0, 8.0 };
-    const expected = [_]f32{ 6.0, 8.0, 10.0, 12.0 };
+    const dims_a = [_]i64{ 2, 3 };
+    const dims_b = [_]i64{ 3, 2 };
+    const dims_c = [_]i64{ 2, 2 };
 
-    const shape = Shape{ .dims = &[_]usize{4} };
+    var dev_a = try rt.client.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
+    defer dev_a.deinit();
+    var dev_b = try rt.client.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
+    defer dev_b.deinit();
+    var dev_c = try rt.client.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
+    defer dev_c.deinit();
 
-    var buf_a = try HostBuffer.fromSlice(allocator, &input_a, shape, .f32);
-    defer buf_a.deinit();
-
-    var buf_b = try HostBuffer.fromSlice(allocator, &input_b, shape, .f32);
-    defer buf_b.deinit();
-
-    try stdout.print("   Input A: ", .{});
-    try buf_a.print(stdout);
-    try stdout.print("   Input B: ", .{});
-    try buf_b.print(stdout);
-    try stdout.print("\n", .{});
-
-    try stdout.writeAll("Uploading buffers to device...\n");
-    const dev_buf_a = try backend.bufferFromHost(device, buf_a.data, .f32, shape);
-    defer dev_buf_a.deinit();
-    const dev_buf_b = try backend.bufferFromHost(device, buf_b.data, .f32, shape);
-    defer dev_buf_b.deinit();
-
-    const inputs = [_]zigrad.Buffer{ dev_buf_a, dev_buf_b };
-    try tty.print(.green, "Buffers uploaded\n", .{});
-
-    try stdout.writeAll("Executing program...\n");
-    var result = executable.execute(&inputs, allocator) catch |err| {
-        try tty.print(.red, "Execution failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer result.deinit(allocator);
-
-    if (result.outputs.len == 0) {
-        try tty.print(.red, "No outputs returned\n", .{});
-        return error.NoOutputs;
+    const outputs = try exe.execute(gpa, &.{ dev_a, dev_b, dev_c });
+    defer {
+        for (outputs) |*buf| buf.deinit();
+        gpa.free(outputs);
     }
 
-    try tty.print(.green, "Execution succeeded ({d} output(s))\n", .{result.outputs.len});
+    if (outputs.len != 1) return error.UnexpectedOutputs;
 
-    try stdout.writeAll("Reading results from device...\n");
-    const output_buffer = result.outputs[0];
+    var out_host = try zigrad.runtime.HostBuffer.init(gpa, shape_c, .f32);
+    defer out_host.deinit();
+    var ev = try outputs[0].toHost(out_host.data);
+    defer ev.deinit();
+    try ev.await_();
 
-    var output_host = try HostBuffer.init(allocator, shape, .f32);
-    defer output_host.deinit();
+    const out = out_host.asSlice(f32)[0..4];
+    const expected = [_]f32{
+        120.0, 132.0,
+        282.0, 312.0,
+    };
 
-    var transfer_event = try output_buffer.toHost(output_host.data);
-    defer transfer_event.deinit();
-
-    try transfer_event.await_();
-
-    try stdout.print("   Output:  ", .{});
-    try output_host.print(stdout);
-    try stdout.writeAll("\n");
-
-    try stdout.writeAll("Verifying numerical correctness...\n");
-    const output_slice = output_host.asSlice(f32);
-
-    var all_correct = true;
-    for (output_slice, 0..) |val, i| {
-        const diff = @abs(val - expected[i]);
-        if (diff > 1e-5) {
-            try tty.print(.red, "Mismatch at index {d}: got {d:.2}, expected {d:.2}\n", .{ i, val, expected[i] });
-            all_correct = false;
+    for (out, 0..) |v, i| {
+        const diff = @abs(v - expected[i]);
+        if (diff > 1e-4) {
+            std.log.err("mismatch[{d}]: got {d}, expected {d}", .{ i, v, expected[i] });
+            return error.NumericalMismatch;
         }
     }
 
-    if (all_correct) {
-        try tty.print(.green, "All values correct\n", .{});
-        try tty.print(.green, "M1 PASSED\n", .{});
-    } else {
-        try tty.print(.red, "M1 FAILED\n", .{});
-        return error.NumericalMismatch;
+    std.log.info("OK: demo output matches expected", .{});
+}
+
+fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, device: anytype) !void {
+    var program = zigrad.pr.Program.init(allocator);
+    defer program.deinit();
+
+    var b = try zigrad.pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.paramTensor(.f32, &.{ 2, 3 });
+    const y = try b.customCall("zigrad.test.missing_handler", &.{x}, x);
+    const func = try b.finish(&.{y});
+
+    var exe = zigrad.toolchain.xla.compileMain(allocator, rt, device, func) catch |err| {
+        std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
+        return;
+    };
+    defer exe.deinit();
+
+    std.log.err("unexpected: custom_call compiled without a handler", .{});
+    return error.UnexpectedSuccess;
+}
+
+fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, device: anytype) !void {
+    var program = try zigrad.frontend.buildDemoProgram(allocator);
+    defer program.deinit();
+
+    const fwd = program.functions[0];
+    const vjp = try zigrad.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
+
+    var exe = try zigrad.toolchain.xla.compileMain(allocator, rt, device, vjp);
+    defer exe.deinit();
+
+    // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
+    const A = [_]f32{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    };
+    const B = [_]f32{
+        7.0,  8.0,
+        9.0,  10.0,
+        11.0, 12.0,
+    };
+    const C = [_]f32{
+        2.0, 2.0,
+        2.0, 2.0,
+    };
+    const CtOut = [_]f32{
+        1.0, 1.0,
+        1.0, 1.0,
+    };
+
+    const shape_a = zigrad.runtime.Shape{ .dims = &.{ 2, 3 } };
+    const shape_b = zigrad.runtime.Shape{ .dims = &.{ 3, 2 } };
+    const shape_c = zigrad.runtime.Shape{ .dims = &.{ 2, 2 } };
+
+    var host_a = try zigrad.runtime.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
+    defer host_a.deinit();
+    var host_b = try zigrad.runtime.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
+    defer host_b.deinit();
+    var host_c = try zigrad.runtime.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
+    defer host_c.deinit();
+    var host_ct = try zigrad.runtime.HostBuffer.fromSlice(allocator, &CtOut, shape_c, .f32);
+    defer host_ct.deinit();
+
+    const dims_a = [_]i64{ 2, 3 };
+    const dims_b = [_]i64{ 3, 2 };
+    const dims_c = [_]i64{ 2, 2 };
+
+    var dev_a = try rt.client.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
+    defer dev_a.deinit();
+    var dev_b = try rt.client.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
+    defer dev_b.deinit();
+    var dev_c = try rt.client.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
+    defer dev_c.deinit();
+    var dev_ct = try rt.client.bufferFromHost(device, host_ct.data, .f32, dims_c[0..]);
+    defer dev_ct.deinit();
+
+    const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
+    defer {
+        for (outputs) |*buf| buf.deinit();
+        allocator.free(outputs);
+    }
+
+    if (outputs.len != 3) return error.UnexpectedOutputs;
+
+    var out_a = try zigrad.runtime.HostBuffer.init(allocator, shape_a, .f32);
+    defer out_a.deinit();
+    var out_b = try zigrad.runtime.HostBuffer.init(allocator, shape_b, .f32);
+    defer out_b.deinit();
+    var out_c = try zigrad.runtime.HostBuffer.init(allocator, shape_c, .f32);
+    defer out_c.deinit();
+
+    var ev_a = try outputs[0].toHost(out_a.data);
+    defer ev_a.deinit();
+    var ev_b = try outputs[1].toHost(out_b.data);
+    defer ev_b.deinit();
+    var ev_c = try outputs[2].toHost(out_c.data);
+    defer ev_c.deinit();
+
+    try ev_a.await_();
+    try ev_b.await_();
+    try ev_c.await_();
+
+    const got_a = out_a.asSlice(f32)[0..6];
+    const got_b = out_b.asSlice(f32)[0..6];
+    const got_c = out_c.asSlice(f32)[0..4];
+
+    const expected_a = [_]f32{
+        30.0, 38.0, 46.0,
+        30.0, 38.0, 46.0,
+    };
+    const expected_b = [_]f32{
+        10.0, 10.0,
+        14.0, 14.0,
+        18.0, 18.0,
+    };
+    const expected_c = [_]f32{
+        62.0, 68.0,
+        143.0, 158.0,
+    };
+
+    try expectAllClose("dA", got_a, expected_a[0..], 1e-4);
+    try expectAllClose("dB", got_b, expected_b[0..], 1e-4);
+    try expectAllClose("dC", got_c, expected_c[0..], 1e-4);
+
+    std.log.info("OK: vjp-demo gradients match expected", .{});
+}
+
+fn expectAllClose(label: []const u8, got: []const f32, expected: []const f32, tol: f32) !void {
+    if (got.len != expected.len) return error.LengthMismatch;
+    for (got, 0..) |v, i| {
+        const diff = @abs(v - expected[i]);
+        if (diff > tol) {
+            std.log.err("{s} mismatch[{d}]: got {d}, expected {d}", .{ label, i, v, expected[i] });
+            return error.NumericalMismatch;
+        }
     }
 }
