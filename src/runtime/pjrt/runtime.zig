@@ -1,8 +1,19 @@
+/// PJRT Runtime
+///
+/// Manages device enumeration, buffer transfers, and execution.
+/// Compilation is handled by the toolchain layer - this module focuses on execution.
 const std = @import("std");
 
-const plugin = @import("../../bridge/pjrt/plugin.zig");
-const pjrt_api = @import("../../bridge/pjrt/api.zig");
-const pjrt_types = @import("../../bridge/pjrt/types.zig");
+const plugin = @import("../../ffi/pjrt/plugin.zig");
+const pjrt_api = @import("../../ffi/pjrt/api.zig");
+const pjrt_types = @import("../../ffi/pjrt/types.zig");
+
+// Re-export common types for convenience
+pub const LoadedExecutable = pjrt_types.LoadedExecutable;
+pub const Buffer = pjrt_types.Buffer;
+pub const Device = pjrt_types.Device;
+pub const Event = pjrt_types.Event;
+pub const BufferType = pjrt_types.BufferType;
 
 pub const Runtime = struct {
     api: *pjrt_api.Api,
@@ -16,7 +27,7 @@ pub const Runtime = struct {
         api_ptr.* = try plugin.loadPlugin(plugin_path);
         errdefer plugin.unloadPlugin(api_ptr.*);
 
-        const client = try pjrt_types.Client.create(api_ptr);
+        var client = try pjrt_types.Client.create(api_ptr);
         errdefer client.deinit();
 
         return .{
@@ -32,7 +43,29 @@ pub const Runtime = struct {
         self.allocator.destroy(self.api);
     }
 
-    pub fn devices(self: *Runtime, allocator: std.mem.Allocator) ![]pjrt_types.Device {
+    /// Get all available devices
+    pub fn getDevices(self: *Runtime, allocator: std.mem.Allocator) ![]Device {
         return self.client.getDevices(allocator);
+    }
+
+    /// Deprecated: use getDevices instead
+    pub fn devices(self: *Runtime, allocator: std.mem.Allocator) ![]Device {
+        return self.getDevices(allocator);
+    }
+
+    /// Create a buffer on device from host data
+    pub fn bufferFromHost(
+        self: *Runtime,
+        device: *const Device,
+        data: []const u8,
+        dtype: BufferType,
+        shape: []const i64,
+    ) !Buffer {
+        return self.client.bufferFromHost(device, data, dtype, shape);
+    }
+
+    /// Get the underlying client (for toolchain access)
+    pub fn getClient(self: *Runtime) *pjrt_types.Client {
+        return &self.client;
     }
 };

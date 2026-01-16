@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const pr = @import("../../pr/pr.zig");
-const mlir = @import("../../bridge/mlir/mlir.zig");
-const stablehlo = @import("../../bridge/mlir/dialects/stablehlo.zig");
+const mlir = @import("../../ffi/mlir/mlir.zig");
+const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
 
 pub const LowerError = error{
     InvalidProgram,

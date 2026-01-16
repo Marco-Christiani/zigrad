@@ -39,7 +39,7 @@ pub fn main() !void {
     defer program.deinit();
 
     const func = program.functions[0];
-    var exe = try zigrad.toolchain.xla.compileMain(gpa, &rt, device, func);
+    var exe = try zigrad.toolchain.xla.compileJit(gpa, rt.getClient(), device, func);
     defer exe.deinit();
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2)
@@ -121,7 +121,7 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.
     const y = try b.customCall("zigrad.test.missing_handler", &.{x}, x);
     const func = try b.finish(&.{y});
 
-    var exe = zigrad.toolchain.xla.compileMain(allocator, rt, device, func) catch |err| {
+    var exe = zigrad.toolchain.xla.compileJit(allocator, rt.getClient(), device, func) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -138,7 +138,7 @@ fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, de
     const fwd = program.functions[0];
     const vjp = try zigrad.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
 
-    var exe = try zigrad.toolchain.xla.compileMain(allocator, rt, device, vjp);
+    var exe = try zigrad.toolchain.xla.compileJit(allocator, rt.getClient(), device, vjp);
     defer exe.deinit();
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
