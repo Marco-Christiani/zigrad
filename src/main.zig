@@ -31,6 +31,43 @@ pub fn main() !void {
         if (std.mem.eql(u8, m, "vjp-demo")) {
             return runVjpDemo(gpa, &rt, device);
         }
+        if (std.mem.eql(u8, m, "jit-cache-save") or std.mem.eql(u8, m, "aot-save")) {
+            if (std.mem.eql(u8, m, "aot-save")) {
+                std.log.warn("mode aot-save is deprecated; use jit-cache-save", .{});
+            }
+            const path = arg_it.next() orelse {
+                std.log.err("usage: zigrad jit-cache-save <path>", .{});
+                return error.InvalidArguments;
+            };
+
+            var program = try zigrad.frontend.buildDemoProgram(gpa);
+            defer program.deinit();
+            const func = program.functions[0];
+
+            const serialized = try zigrad.toolchain.xla.compileSerializedDefault(gpa, rt.getClient(), device, func);
+            defer gpa.free(serialized);
+
+            try writeBytesToPath(path, serialized);
+            std.log.info("wrote PJRT serialized executable: {d} bytes -> {s}", .{ serialized.len, path });
+            return;
+        }
+        if (std.mem.eql(u8, m, "jit-cache-run") or std.mem.eql(u8, m, "aot-run")) {
+            if (std.mem.eql(u8, m, "aot-run")) {
+                std.log.warn("mode aot-run is deprecated; use jit-cache-run", .{});
+            }
+            const path = arg_it.next() orelse {
+                std.log.err("usage: zigrad jit-cache-run <path>", .{});
+                return error.InvalidArguments;
+            };
+
+            const serialized = try readBytesFromPath(gpa, path);
+            defer gpa.free(serialized);
+
+            var exe = try rt.loadSerializedExecutable(serialized, null);
+            defer exe.deinit();
+
+            return runDemoExecutable(gpa, &rt, device, &exe);
+        }
         std.log.err("unknown mode: {s}", .{m});
         return error.InvalidArguments;
     }
@@ -42,6 +79,33 @@ pub fn main() !void {
     var exe = try zigrad.toolchain.xla.compileJit(gpa, rt.getClient(), device, func);
     defer exe.deinit();
 
+    return runDemoExecutable(gpa, &rt, device, &exe);
+}
+
+fn writeBytesToPath(path: []const u8, bytes: []const u8) !void {
+    var file = if (std.fs.path.isAbsolute(path))
+        try std.fs.createFileAbsolute(path, .{ .truncate = true })
+    else
+        try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
+
+fn readBytesFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = if (std.fs.path.isAbsolute(path))
+        try std.fs.openFileAbsolute(path, .{})
+    else
+        try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, std.math.maxInt(usize));
+}
+
+fn runDemoExecutable(
+    allocator: std.mem.Allocator,
+    rt: *zigrad.runtime.pjrt.Runtime,
+    device: *const zigrad.runtime.pjrt.Device,
+    exe: *zigrad.runtime.pjrt.LoadedExecutable,
+) !void {
     // Inputs (A: 2x3, B: 3x2, C: 2x2)
     const A = [_]f32{
         1.0, 2.0, 3.0,
@@ -61,33 +125,33 @@ pub fn main() !void {
     const shape_b = zigrad.runtime.Shape{ .dims = &.{ 3, 2 } };
     const shape_c = zigrad.runtime.Shape{ .dims = &.{ 2, 2 } };
 
-    var host_a = try zigrad.runtime.HostBuffer.fromSlice(gpa, &A, shape_a, .f32);
+    var host_a = try zigrad.runtime.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zigrad.runtime.HostBuffer.fromSlice(gpa, &B, shape_b, .f32);
+    var host_b = try zigrad.runtime.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zigrad.runtime.HostBuffer.fromSlice(gpa, &C, shape_c, .f32);
+    var host_c = try zigrad.runtime.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try rt.client.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
+    var dev_a = try rt.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
     defer dev_a.deinit();
-    var dev_b = try rt.client.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
+    var dev_b = try rt.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
     defer dev_b.deinit();
-    var dev_c = try rt.client.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
+    var dev_c = try rt.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
     defer dev_c.deinit();
 
-    const outputs = try exe.execute(gpa, &.{ dev_a, dev_b, dev_c });
+    const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c });
     defer {
         for (outputs) |*buf| buf.deinit();
-        gpa.free(outputs);
+        allocator.free(outputs);
     }
 
     if (outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zigrad.runtime.HostBuffer.init(gpa, shape_c, .f32);
+    var out_host = try zigrad.runtime.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
     var ev = try outputs[0].toHost(out_host.data);
     defer ev.deinit();
@@ -177,13 +241,13 @@ fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, de
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try rt.client.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
+    var dev_a = try rt.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
     defer dev_a.deinit();
-    var dev_b = try rt.client.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
+    var dev_b = try rt.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
     defer dev_b.deinit();
-    var dev_c = try rt.client.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
+    var dev_c = try rt.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
     defer dev_c.deinit();
-    var dev_ct = try rt.client.bufferFromHost(device, host_ct.data, .f32, dims_c[0..]);
+    var dev_ct = try rt.bufferFromHost(device, host_ct.data, .f32, dims_c[0..]);
     defer dev_ct.deinit();
 
     const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c, dev_ct });

@@ -33,6 +33,23 @@ fn debugEnabled() bool {
     }
 }
 
+fn dlcloseEnabled() bool {
+    const allocator = std.heap.page_allocator;
+    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_SKIP_DLCLOSE")) |val| {
+        defer allocator.free(val);
+        if (val.len == 0) return false;
+        if (val[0] != '0') return false;
+    } else |_| {}
+
+    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DLCLOSE")) |val| {
+        defer allocator.free(val);
+        if (val.len == 0) return false;
+        return val[0] != '0';
+    } else |_| {
+        return false;
+    }
+}
+
 fn logDladdr(label: []const u8, addr: *const anyopaque) void {
     if (!debugEnabled()) return;
     var info: c.Dl_info = undefined;
@@ -242,7 +259,14 @@ fn loadFromHandle(handle: *anyopaque, canonical_path: []const u8) !Api {
 }
 
 /// Unload PJRT plugin
+///
+/// By default we keep the plugin loaded for process lifetime (skip `dlclose`),
+/// since some PJRT plugins can crash on unload after exercising certain paths
+/// (observed with `PJRT_Executable_DeserializeAndLoad`).
+///
+/// Set `ZG_PJRT_DLCLOSE=1` to enable `dlclose` on final unload.
 pub fn unloadPlugin(api: Api) void {
+    const do_dlclose = dlcloseEnabled();
     if (cached_api) |cached| {
         if (cached.handle == api.handle) {
             if (cached_refcount > 0) cached_refcount -= 1;
@@ -252,7 +276,7 @@ pub fn unloadPlugin(api: Api) void {
                     cached_refcount,
                 });
             }
-            if (cached_refcount == 0) {
+            if (cached_refcount == 0 and do_dlclose) {
                 _ = c.dlclose(api.handle);
                 if (cached_path) |p| std.heap.page_allocator.free(p);
                 cached_api = null;
@@ -261,7 +285,7 @@ pub fn unloadPlugin(api: Api) void {
             return;
         }
     }
-    _ = c.dlclose(api.handle);
+    if (do_dlclose) _ = c.dlclose(api.handle);
 }
 
 /// Get plugin path from environment or use default

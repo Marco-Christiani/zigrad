@@ -64,6 +64,15 @@ pub const Runtime = struct {
         return self.client.bufferFromHost(device, data, dtype, shape);
     }
 
+    /// Load a serialized executable (JIT cache path) into a ready-to-run loaded executable.
+    pub fn loadSerializedExecutable(
+        self: *Runtime,
+        serialized_executable: []const u8,
+        overridden_compile_options: ?[]const u8,
+    ) !LoadedExecutable {
+        return self.client.deserializeAndLoad(serialized_executable, overridden_compile_options);
+    }
+
     /// Get the underlying client (for toolchain access)
     pub fn getClient(self: *Runtime) *pjrt_types.Client {
         return &self.client;

@@ -135,6 +135,34 @@ pub const Client = struct {
         };
     }
 
+    pub fn deserializeAndLoad(
+        self: *Client,
+        serialized_executable: []const u8,
+        overridden_compile_options: ?[]const u8,
+    ) !LoadedExecutable {
+        var args = api_mod.initArgs(c.PJRT_Executable_DeserializeAndLoad_Args);
+        args.client = self.pjrt_client;
+        args.serialized_executable = @ptrCast(serialized_executable.ptr);
+        args.serialized_executable_size = serialized_executable.len;
+        args.loaded_executable = null;
+
+        if (overridden_compile_options) |opts| {
+            args.overridden_serialized_compile_options = @ptrCast(opts.ptr);
+            args.overridden_serialized_compile_options_size = opts.len;
+        } else {
+            args.overridden_serialized_compile_options = null;
+            args.overridden_serialized_compile_options_size = 0;
+        }
+
+        try self.api.call("PJRT_Executable_DeserializeAndLoad", &args);
+
+        const loaded_ptr = args.loaded_executable orelse return error.PjrtReturnedNullLoadedExecutable;
+        return LoadedExecutable{
+            .api = self.api,
+            .pjrt_executable = loaded_ptr,
+        };
+    }
+
     pub fn bufferFromHost(
         self: *Client,
         device: *const Device,
@@ -213,6 +241,37 @@ pub const LoadedExecutable = struct {
         var args = api_mod.initArgs(c.PJRT_LoadedExecutable_Destroy_Args);
         args.executable = self.pjrt_executable;
         self.api.call("PJRT_LoadedExecutable_Destroy", &args) catch {};
+    }
+
+    pub fn serialize(self: *LoadedExecutable, allocator: std.mem.Allocator) ![]u8 {
+        // Get the underlying PJRT_Executable to serialize
+        var get_exec_args = api_mod.initArgs(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        get_exec_args.loaded_executable = self.pjrt_executable;
+        get_exec_args.executable = null;
+        try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
+
+        const pjrt_executable = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
+        defer {
+            var destroy_args = api_mod.initArgs(c.PJRT_Executable_Destroy_Args);
+            destroy_args.executable = pjrt_executable;
+            self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+        }
+
+        var args = api_mod.initArgs(c.PJRT_Executable_Serialize_Args);
+        args.executable = pjrt_executable;
+
+        try self.api.call("PJRT_Executable_Serialize", &args);
+
+        const serialized = args.serialized_executable orelse return error.PjrtReturnedNullSerializedExecutable;
+        const deleter = args.serialized_executable_deleter orelse return error.PjrtReturnedNullSerializedExecutableDeleter;
+        defer deleter(serialized);
+
+        if (args.serialized_bytes == null and args.serialized_bytes_size != 0) {
+            return error.PjrtReturnedNullSerializedBytes;
+        }
+
+        const bytes = args.serialized_bytes[0..args.serialized_bytes_size];
+        return allocator.dupe(u8, bytes);
     }
 
     pub fn execute(
