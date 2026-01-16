@@ -34,8 +34,10 @@
     .dependencies = .{},
     .paths = .{
         "build.zig",
+        "build-experimental.zig",
         "build.zig.zon",
         "src",
+        "src_experimental",
         // For example...
         //"LICENSE",
         //"README.md",
