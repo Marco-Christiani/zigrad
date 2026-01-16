@@ -10,6 +10,19 @@ const std = @import("std");
 const c_mod = @import("c.zig");
 const c = c_mod.c;
 
+pub fn pjrtStructSize(comptime T: type) usize {
+    const maybe_struct_name: ?[]const u8 = comptime blk: {
+        const needle = ".struct_";
+        const type_name = @typeName(T);
+        const idx = std.mem.indexOf(u8, type_name, needle) orelse break :blk null;
+        break :blk type_name[idx + needle.len ..];
+    };
+    const struct_name = maybe_struct_name orelse return @sizeOf(T);
+    const size_decl_name = comptime struct_name ++ "_STRUCT_SIZE";
+    if (!@hasDecl(c, size_decl_name)) return @sizeOf(T);
+    return @field(c, size_decl_name);
+}
+
 pub const Api = struct {
     handle: *anyopaque,
     pjrt_api: *c.PJRT_Api,
@@ -74,7 +87,7 @@ pub fn initArgs(comptime Args: type) Args {
     var a: Args = std.mem.zeroes(Args);
 
     if (@hasField(Args, "struct_size")) {
-        a.struct_size = @sizeOf(Args);
+        a.struct_size = pjrtStructSize(Args);
     }
     if (@hasField(Args, "extension_start")) {
         @field(a, "extension_start") = null;
