@@ -1,15 +1,19 @@
 /// XLA Toolchain - Compilation
 ///
-/// Compiles PR functions to executable artifacts via StableHLO IM and PJRT.
+/// Compiles StableHLO IM to executable artifacts via PJRT.
 /// This module owns the compilation path; runtime owns execution.
 ///
 /// Note: This toolchain compiles via PJRT (JIT). It can optionally serialize the
-/// resulting executable for cache-style reuse, but this is not “true XLA AOT”.
+/// resulting executable for cache-style reuse, but this is not "true XLA AOT".
+///
+/// The toolchain accepts IM (interchange module), not PR (program representation).
+/// Use `zg.im.stablehlo.realize(...)` to produce IM from PR before calling this.
 const std = @import("std");
 
-const pr = @import("../../pr/pr.zig");
-const stablehlo = @import("../../im/stablehlo/lower.zig");
+const im_stablehlo = @import("../../im/stablehlo/im.zig");
 const pjrt_types = @import("../../ffi/pjrt/types.zig");
+
+pub const IM = im_stablehlo.IM;
 
 /// Compile options for the XLA toolchain
 pub const CompileOptions = struct {
@@ -59,35 +63,21 @@ pub fn buildCompileOptionsProto(allocator: std.mem.Allocator, options: CompileOp
     return out.toOwnedSlice(allocator);
 }
 
-/// Compile a PR function to a loaded executable (JIT).
+/// Compile an IM to a loaded executable (JIT).
 ///
-/// Takes a PR function, lowers it to StableHLO IM, and compiles via PJRT.
+/// Takes a StableHLO IM and compiles via PJRT.
 pub fn compile(
     allocator: std.mem.Allocator,
     client: *pjrt_types.Client,
     device: *const pjrt_types.Device,
-    func: pr.Function,
+    im: IM,
     options: CompileOptions,
 ) !pjrt_types.LoadedExecutable {
-    // Lower PR to StableHLO IM (bytecode)
-    const bytecode = try stablehlo.lowerFunctionToMlirBytecode(allocator, func);
-    defer allocator.free(bytecode);
-
     const compile_opts_pb = try buildCompileOptionsProto(allocator, options);
     defer allocator.free(compile_opts_pb);
 
     // Compile via PJRT
-    return client.compile(device, .mlir_bytecode, bytecode, compile_opts_pb);
-}
-
-/// Compile with default options
-pub fn compileJit(
-    allocator: std.mem.Allocator,
-    client: *pjrt_types.Client,
-    device: *const pjrt_types.Device,
-    func: pr.Function,
-) !pjrt_types.LoadedExecutable {
-    return compile(allocator, client, device, func, .{});
+    return client.compile(device, .mlir_bytecode, im.bytecode, compile_opts_pb);
 }
 
 /// Compile and serialize the resulting executable (JIT cache path).
@@ -95,20 +85,10 @@ pub fn compileSerialized(
     allocator: std.mem.Allocator,
     client: *pjrt_types.Client,
     device: *const pjrt_types.Device,
-    func: pr.Function,
+    im: IM,
     options: CompileOptions,
 ) ![]u8 {
-    var exe = try compile(allocator, client, device, func, options);
+    var exe = try compile(allocator, client, device, im, options);
     defer exe.deinit();
     return exe.serialize(allocator);
-}
-
-/// Compile+serialize with default options.
-pub fn compileSerializedDefault(
-    allocator: std.mem.Allocator,
-    client: *pjrt_types.Client,
-    device: *const pjrt_types.Device,
-    func: pr.Function,
-) ![]u8 {
-    return compileSerialized(allocator, client, device, func, .{});
 }

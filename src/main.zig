@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigrad = @import("zigrad");
+const zg = @import("zigrad");
 
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,7 +16,7 @@ pub fn main() !void {
     };
     defer gpa.free(plugin_path);
 
-    var rt = try zigrad.runtime.pjrt.Runtime.init(gpa, plugin_path);
+    var rt = try zg.runtime.pjrt.Runtime.init(gpa, plugin_path);
     defer rt.deinit();
 
     const devs = try rt.devices(gpa);
@@ -40,11 +40,15 @@ pub fn main() !void {
                 return error.InvalidArguments;
             };
 
-            var program = try zigrad.frontend.buildDemoProgram(gpa);
+            var program = try zg.frontend.buildDemoProgram(gpa);
             defer program.deinit();
             const func = program.functions[0];
 
-            const serialized = try zigrad.toolchain.xla.compileSerializedDefault(gpa, rt.getClient(), device, func);
+            // PR -> IM realization
+            var im = try zg.im.stablehlo.realize(gpa, func, .{});
+            defer im.deinit();
+
+            const serialized = try zg.toolchain.xla.compileSerialized(gpa, rt.getClient(), device, im, .{});
             defer gpa.free(serialized);
 
             try writeBytesToPath(path, serialized);
@@ -72,11 +76,17 @@ pub fn main() !void {
         return error.InvalidArguments;
     }
 
-    var program = try zigrad.frontend.buildDemoProgram(gpa);
+    var program = try zg.frontend.buildDemoProgram(gpa);
     defer program.deinit();
 
     const func = program.functions[0];
-    var exe = try zigrad.toolchain.xla.compileJit(gpa, rt.getClient(), device, func);
+
+    // PR -> IM realization
+    var im = try zg.im.stablehlo.realize(gpa, func, .{});
+    defer im.deinit();
+
+    // IM -> EA compilation
+    var exe = try zg.toolchain.xla.compile(gpa, rt.getClient(), device, im, .{});
     defer exe.deinit();
 
     return runDemoExecutable(gpa, &rt, device, &exe);
@@ -102,9 +112,9 @@ fn readBytesFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn runDemoExecutable(
     allocator: std.mem.Allocator,
-    rt: *zigrad.runtime.pjrt.Runtime,
-    device: *const zigrad.runtime.pjrt.Device,
-    exe: *zigrad.runtime.pjrt.LoadedExecutable,
+    rt: *zg.runtime.pjrt.Runtime,
+    device: *const zg.runtime.pjrt.Device,
+    exe: *zg.runtime.pjrt.LoadedExecutable,
 ) !void {
     // Inputs (A: 2x3, B: 3x2, C: 2x2)
     const A = [_]f32{
@@ -121,15 +131,15 @@ fn runDemoExecutable(
         2.0, 2.0,
     };
 
-    const shape_a = zigrad.runtime.Shape{ .dims = &.{ 2, 3 } };
-    const shape_b = zigrad.runtime.Shape{ .dims = &.{ 3, 2 } };
-    const shape_c = zigrad.runtime.Shape{ .dims = &.{ 2, 2 } };
+    const shape_a = zg.runtime.Shape{ .dims = &.{ 2, 3 } };
+    const shape_b = zg.runtime.Shape{ .dims = &.{ 3, 2 } };
+    const shape_c = zg.runtime.Shape{ .dims = &.{ 2, 2 } };
 
-    var host_a = try zigrad.runtime.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.runtime.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zigrad.runtime.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.runtime.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zigrad.runtime.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.runtime.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
@@ -151,7 +161,7 @@ fn runDemoExecutable(
 
     if (outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zigrad.runtime.HostBuffer.init(allocator, shape_c, .f32);
+    var out_host = try zg.runtime.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
     var ev = try outputs[0].toHost(out_host.data);
     defer ev.deinit();
@@ -174,18 +184,23 @@ fn runDemoExecutable(
     std.log.info("OK: demo output matches expected", .{});
 }
 
-fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, device: anytype) !void {
-    var program = zigrad.pr.Program.init(allocator);
+fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device: anytype) !void {
+    var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
-    var b = try zigrad.pr.FunctionBuilder.init(&program, "main");
+    var b = try zg.pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
     const x = try b.paramTensor(.f32, &.{ 2, 3 });
     const y = try b.customCall("zigrad.test.missing_handler", &.{x}, x);
     const func = try b.finish(&.{y});
 
-    var exe = zigrad.toolchain.xla.compileJit(allocator, rt.getClient(), device, func) catch |err| {
+    // PR -> IM realization
+    var im = try zg.im.stablehlo.realize(allocator, func, .{});
+    defer im.deinit();
+
+    // IM -> EA compilation (expected to fail)
+    var exe = zg.toolchain.xla.compile(allocator, rt.getClient(), device, im, .{}) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -195,14 +210,19 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.
     return error.UnexpectedSuccess;
 }
 
-fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, device: anytype) !void {
-    var program = try zigrad.frontend.buildDemoProgram(allocator);
+fn runVjpDemo(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device: anytype) !void {
+    var program = try zg.frontend.buildDemoProgram(allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
-    const vjp = try zigrad.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
+    const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
 
-    var exe = try zigrad.toolchain.xla.compileJit(allocator, rt.getClient(), device, vjp);
+    // PR -> IM realization
+    var im = try zg.im.stablehlo.realize(allocator, vjp, .{});
+    defer im.deinit();
+
+    // IM -> EA compilation
+    var exe = try zg.toolchain.xla.compile(allocator, rt.getClient(), device, im, .{});
     defer exe.deinit();
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
@@ -224,17 +244,17 @@ fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, de
         1.0, 1.0,
     };
 
-    const shape_a = zigrad.runtime.Shape{ .dims = &.{ 2, 3 } };
-    const shape_b = zigrad.runtime.Shape{ .dims = &.{ 3, 2 } };
-    const shape_c = zigrad.runtime.Shape{ .dims = &.{ 2, 2 } };
+    const shape_a = zg.runtime.Shape{ .dims = &.{ 2, 3 } };
+    const shape_b = zg.runtime.Shape{ .dims = &.{ 3, 2 } };
+    const shape_c = zg.runtime.Shape{ .dims = &.{ 2, 2 } };
 
-    var host_a = try zigrad.runtime.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.runtime.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zigrad.runtime.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.runtime.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zigrad.runtime.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.runtime.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
-    var host_ct = try zigrad.runtime.HostBuffer.fromSlice(allocator, &CtOut, shape_c, .f32);
+    var host_ct = try zg.runtime.HostBuffer.fromSlice(allocator, &CtOut, shape_c, .f32);
     defer host_ct.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
@@ -258,11 +278,11 @@ fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, de
 
     if (outputs.len != 3) return error.UnexpectedOutputs;
 
-    var out_a = try zigrad.runtime.HostBuffer.init(allocator, shape_a, .f32);
+    var out_a = try zg.runtime.HostBuffer.init(allocator, shape_a, .f32);
     defer out_a.deinit();
-    var out_b = try zigrad.runtime.HostBuffer.init(allocator, shape_b, .f32);
+    var out_b = try zg.runtime.HostBuffer.init(allocator, shape_b, .f32);
     defer out_b.deinit();
-    var out_c = try zigrad.runtime.HostBuffer.init(allocator, shape_c, .f32);
+    var out_c = try zg.runtime.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
     var ev_a = try outputs[0].toHost(out_a.data);
@@ -290,7 +310,7 @@ fn runVjpDemo(allocator: std.mem.Allocator, rt: *zigrad.runtime.pjrt.Runtime, de
         18.0, 18.0,
     };
     const expected_c = [_]f32{
-        62.0, 68.0,
+        62.0,  68.0,
         143.0, 158.0,
     };
 

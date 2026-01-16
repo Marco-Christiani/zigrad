@@ -5,10 +5,16 @@ pub const frontend = @import("frontend/frontend.zig");
 
 pub const im = struct {
     pub const stablehlo = struct {
+        pub const im_mod = @import("im/stablehlo/im.zig");
         pub const lower = @import("im/stablehlo/lower.zig");
         pub const verify = @import("im/stablehlo/verify.zig");
 
-        // Re-export main functions for convenience
+        // IM type and realization (PR -> IM boundary)
+        pub const IM = im_mod.IM;
+        pub const RealizeOptions = im_mod.RealizeOptions;
+        pub const realize = im_mod.realize;
+
+        // Re-export other functions for convenience
         pub const lowerFunctionToMlirBytecode = lower.lowerFunctionToMlirBytecode;
         pub const registerCustomCallTarget = verify.registerCustomCallTarget;
         pub const clearCustomCallTargets = verify.clearCustomCallTargets;
