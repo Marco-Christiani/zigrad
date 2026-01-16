@@ -34,6 +34,17 @@ pub const Tensor = struct {
 
 pub const VarId = u32;
 
+pub const Span = struct {
+    start: u32,
+    len: u32,
+
+    pub fn slice(self: Span, comptime T: type, backing: []const T) []const T {
+        const start: usize = @intCast(self.start);
+        const end: usize = start + @as(usize, @intCast(self.len));
+        return backing[start..end];
+    }
+};
+
 pub const Literal = union(enum) {
     f32: f32,
     f64: f64,
@@ -54,54 +65,34 @@ pub const Literal = union(enum) {
     }
 };
 
-pub const Eqn = union(enum) {
-    literal: LiteralEqn,
-    add: Binary,
-    subtract: Binary,
-    multiply: Binary,
-    maximum: Binary,
-    dot: Binary,
-    reshape: Unary,
-    broadcast_in_dim: BroadcastInDim,
-    transpose: Transpose,
-    custom_call: CustomCall,
+pub const Prim = enum {
+    literal,
+    add,
+    subtract,
+    multiply,
+    maximum,
+    dot,
+    reshape,
+    broadcast_in_dim,
+    transpose,
+    custom_call,
 };
 
-pub const LiteralEqn = struct {
-    value: Literal,
-    out: VarId,
-};
-
-pub const Binary = struct {
-    lhs: VarId,
-    rhs: VarId,
-    out: VarId,
-};
-
-pub const Unary = struct {
-    operand: VarId,
-    out: VarId,
-};
-
-pub const BroadcastInDim = struct {
-    operand: VarId,
-    out: VarId,
-    /// Maps operand dims to output dims (StableHLO `broadcast_dimensions`).
+pub const Param = union(enum) {
+    literal: Literal,
+    out_shape: []const usize,
     broadcast_dimensions: []const i64,
-};
-
-pub const Transpose = struct {
-    operand: VarId,
-    out: VarId,
-    /// Permutation of [0..rank).
     permutation: []const i64,
+    call_target_name: []const u8,
+    has_side_effect: bool,
+    out_aval: Aval,
 };
 
-pub const CustomCall = struct {
-    target: []const u8,
-    operands: []const VarId,
-    out: VarId,
-    has_side_effect: bool = false,
+pub const Eqn = struct {
+    prim: Prim,
+    inputs: Span, // []VarId (Function.varids_store)
+    outputs: Span, // []VarId (Function.varids_store)
+    params: Span, // []Param (Function.params_store)
 };
 
 pub const Function = struct {
@@ -110,6 +101,8 @@ pub const Function = struct {
     returns: []const VarId,
     avals: []const Aval,
     eqns: []const Eqn,
+    varids_store: []const VarId,
+    params_store: []const Param,
 };
 
 pub const Program = struct {
@@ -143,6 +136,8 @@ pub const Program = struct {
 pub const ValidationError = error{
     InvalidVarId,
     UnsupportedAval,
+    InvalidEqnArity,
+    InvalidParams,
     LiteralTypeMismatch,
     AddTypeMismatch,
     SubtractTypeMismatch,
@@ -195,9 +190,74 @@ fn isPermutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
-fn validateReshapeOp(operand: Tensor, out: Tensor) ValidationError!void {
-    if (operand.dtype != out.dtype) return error.ReshapeTypeMismatch;
-    if (numElements(operand.shape.dims) != numElements(out.shape.dims)) return error.ReshapeTypeMismatch;
+pub fn paramLiteral(params: []const Param) ?Literal {
+    for (params) |p| {
+        switch (p) {
+            .literal => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramOutShape(params: []const Param) ?[]const usize {
+    for (params) |p| {
+        switch (p) {
+            .out_shape => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramBroadcastDims(params: []const Param) ?[]const i64 {
+    for (params) |p| {
+        switch (p) {
+            .broadcast_dimensions => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramPermutation(params: []const Param) ?[]const i64 {
+    for (params) |p| {
+        switch (p) {
+            .permutation => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramCallTargetName(params: []const Param) ?[]const u8 {
+    for (params) |p| {
+        switch (p) {
+            .call_target_name => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramHasSideEffect(params: []const Param) ?bool {
+    for (params) |p| {
+        switch (p) {
+            .has_side_effect => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramOutAval(params: []const Param) ?Aval {
+    for (params) |p| {
+        switch (p) {
+            .out_aval => |v| return v,
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn validateBroadcastInDimOp(operand: Tensor, out: Tensor, broadcast_dimensions: []const i64) ValidationError!void {
@@ -223,80 +283,103 @@ fn validateBroadcastInDimOp(operand: Tensor, out: Tensor, broadcast_dimensions: 
     }
 }
 
-fn validateTransposeOp(operand: Tensor, out: Tensor, permutation: []const i64) ValidationError!void {
-    if (operand.dtype != out.dtype) return error.TransposeTypeMismatch;
-    if (!isPermutation(permutation, operand.shape.rank())) return error.TransposeTypeMismatch;
-    if (out.shape.rank() != operand.shape.rank()) return error.TransposeTypeMismatch;
-
-    for (permutation, 0..) |p, out_axis| {
-        const in_axis: usize = @intCast(p);
-        if (out.shape.dims[out_axis] != operand.shape.dims[in_axis]) return error.TransposeTypeMismatch;
-    }
-}
-
 pub fn validateFunction(func: Function) ValidationError!void {
     for (func.params) |p| try expectVarInRange(func, p);
     for (func.returns) |r| try expectVarInRange(func, r);
 
     for (func.eqns) |eqn| {
-        switch (eqn) {
-            .literal => |l| {
-                const out = try expectTensor(func, l.out);
-                if (out.dtype != l.value.dtype()) return error.LiteralTypeMismatch;
+        const inputs = eqn.inputs.slice(VarId, func.varids_store);
+        const outputs = eqn.outputs.slice(VarId, func.varids_store);
+        const params = eqn.params.slice(Param, func.params_store);
+
+        for (inputs) |in_id| try expectVarInRange(func, in_id);
+        for (outputs) |out_id| try expectVarInRange(func, out_id);
+
+        switch (eqn.prim) {
+            .literal => {
+                if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
+                const lit = paramLiteral(params) orelse return error.InvalidParams;
+                const out = try expectTensor(func, outputs[0]);
+                if (out.dtype != lit.dtype()) return error.LiteralTypeMismatch;
                 if (out.shape.rank() != 0) return error.LiteralTypeMismatch;
             },
-            .add => |b| {
-                const lhs = try expectTensor(func, b.lhs);
-                const rhs = try expectTensor(func, b.rhs);
-                const out = try expectTensor(func, b.out);
+            .add => {
+                if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
+                const lhs = try expectTensor(func, inputs[0]);
+                const rhs = try expectTensor(func, inputs[1]);
+                const out = try expectTensor(func, outputs[0]);
                 if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.AddTypeMismatch;
             },
-            .subtract => |b| {
-                const lhs = try expectTensor(func, b.lhs);
-                const rhs = try expectTensor(func, b.rhs);
-                const out = try expectTensor(func, b.out);
+            .subtract => {
+                if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
+                const lhs = try expectTensor(func, inputs[0]);
+                const rhs = try expectTensor(func, inputs[1]);
+                const out = try expectTensor(func, outputs[0]);
                 if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.SubtractTypeMismatch;
             },
-            .multiply => |b| {
-                const lhs = try expectTensor(func, b.lhs);
-                const rhs = try expectTensor(func, b.rhs);
-                const out = try expectTensor(func, b.out);
+            .multiply => {
+                if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
+                const lhs = try expectTensor(func, inputs[0]);
+                const rhs = try expectTensor(func, inputs[1]);
+                const out = try expectTensor(func, outputs[0]);
                 if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.MultiplyTypeMismatch;
             },
-            .maximum => |b| {
-                const lhs = try expectTensor(func, b.lhs);
-                const rhs = try expectTensor(func, b.rhs);
-                const out = try expectTensor(func, b.out);
+            .maximum => {
+                if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
+                const lhs = try expectTensor(func, inputs[0]);
+                const rhs = try expectTensor(func, inputs[1]);
+                const out = try expectTensor(func, outputs[0]);
                 if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.MaximumTypeMismatch;
             },
-            .dot => |b| {
-                const lhs = try expectTensor(func, b.lhs);
-                const rhs = try expectTensor(func, b.rhs);
-                const out = try expectTensor(func, b.out);
+            .dot => {
+                if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
+                const lhs = try expectTensor(func, inputs[0]);
+                const rhs = try expectTensor(func, inputs[1]);
+                const out = try expectTensor(func, outputs[0]);
 
                 if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotTypeMismatch;
                 if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2 or out.shape.rank() != 2) return error.DotTypeMismatch;
                 if (lhs.shape.dims[1] != rhs.shape.dims[0]) return error.DotTypeMismatch;
                 if (out.shape.dims[0] != lhs.shape.dims[0] or out.shape.dims[1] != rhs.shape.dims[1]) return error.DotTypeMismatch;
             },
-            .reshape => |u| {
-                const operand = try expectTensor(func, u.operand);
-                const out = try expectTensor(func, u.out);
-                try validateReshapeOp(operand, out);
+            .reshape => {
+                if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
+                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
+                const operand = try expectTensor(func, inputs[0]);
+                const out = try expectTensor(func, outputs[0]);
+                if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.ReshapeTypeMismatch;
+                if (operand.dtype != out.dtype) return error.ReshapeTypeMismatch;
+                if (numElements(operand.shape.dims) != numElements(out.shape.dims)) return error.ReshapeTypeMismatch;
             },
-            .broadcast_in_dim => |b| {
-                const operand = try expectTensor(func, b.operand);
-                const out = try expectTensor(func, b.out);
-                try validateBroadcastInDimOp(operand, out, b.broadcast_dimensions);
+            .broadcast_in_dim => {
+                if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
+                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
+                const bd = paramBroadcastDims(params) orelse return error.InvalidParams;
+                const operand = try expectTensor(func, inputs[0]);
+                const out = try expectTensor(func, outputs[0]);
+                if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.BroadcastInDimTypeMismatch;
+                try validateBroadcastInDimOp(operand, out, bd);
             },
-            .transpose => |t| {
-                const operand = try expectTensor(func, t.operand);
-                const out = try expectTensor(func, t.out);
-                try validateTransposeOp(operand, out, t.permutation);
+            .transpose => {
+                if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
+                const perm = paramPermutation(params) orelse return error.InvalidParams;
+                const operand = try expectTensor(func, inputs[0]);
+                const out = try expectTensor(func, outputs[0]);
+                if (operand.dtype != out.dtype) return error.TransposeTypeMismatch;
+                if (!isPermutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
+                if (out.shape.rank() != operand.shape.rank()) return error.TransposeTypeMismatch;
+                for (perm, 0..) |p, out_axis| {
+                    const in_axis: usize = @intCast(p);
+                    if (out.shape.dims[out_axis] != operand.shape.dims[in_axis]) return error.TransposeTypeMismatch;
+                }
             },
-            .custom_call => |cc| {
-                _ = try expectTensor(func, cc.out);
-                for (cc.operands) |op| _ = try expectTensor(func, op);
+            .custom_call => {
+                if (outputs.len != 1) return error.InvalidEqnArity;
+                _ = paramCallTargetName(params) orelse return error.InvalidParams;
+                _ = paramHasSideEffect(params) orelse return error.InvalidParams;
+                _ = paramOutAval(params) orelse return error.InvalidParams;
+                _ = try expectTensor(func, outputs[0]);
+                for (inputs) |in_id| _ = try expectTensor(func, in_id);
             },
         }
     }
@@ -309,6 +392,8 @@ pub const FunctionBuilder = struct {
     name: []const u8,
     avals: std.ArrayList(Aval),
     eqns: std.ArrayList(Eqn),
+    varids_store: std.ArrayList(VarId),
+    params_store: std.ArrayList(Param),
     params: std.ArrayList(VarId),
 
     pub fn init(program: *Program, name: []const u8) BuildError!FunctionBuilder {
@@ -318,6 +403,8 @@ pub const FunctionBuilder = struct {
             .name = name,
             .avals = try std.ArrayList(Aval).initCapacity(a, 16),
             .eqns = try std.ArrayList(Eqn).initCapacity(a, 16),
+            .varids_store = try std.ArrayList(VarId).initCapacity(a, 64),
+            .params_store = try std.ArrayList(Param).initCapacity(a, 64),
             .params = try std.ArrayList(VarId).initCapacity(a, 8),
         };
     }
@@ -326,6 +413,8 @@ pub const FunctionBuilder = struct {
         const a = self.program.allocator();
         self.avals.deinit(a);
         self.eqns.deinit(a);
+        self.varids_store.deinit(a);
+        self.params_store.deinit(a);
         self.params.deinit(a);
     }
 
@@ -333,26 +422,11 @@ pub const FunctionBuilder = struct {
         return self.program.allocator();
     }
 
-    fn varTensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
+    fn varWithAval(self: *FunctionBuilder, aval: Aval) BuildError!VarId {
         const a = self.alloc();
-        const dims_copy = try a.dupe(usize, dims);
         const id: VarId = @intCast(self.avals.items.len);
-        try self.avals.append(a, .{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
+        try self.avals.append(a, aval);
         return id;
-    }
-
-    pub fn paramTensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
-        const a = self.alloc();
-        const id = try self.varTensor(dtype, dims);
-        try self.params.append(a, id);
-        return id;
-    }
-
-    pub fn literalScalar(self: *FunctionBuilder, value: Literal) BuildError!VarId {
-        const a = self.alloc();
-        const out = try self.varTensor(value.dtype(), &.{});
-        try self.eqns.append(a, .{ .literal = .{ .value = value, .out = out } });
-        return out;
     }
 
     fn tensorOf(self: *FunctionBuilder, id: VarId) ValidationError!Tensor {
@@ -361,135 +435,170 @@ pub const FunctionBuilder = struct {
         return aval.asTensor() orelse error.UnsupportedAval;
     }
 
-    pub fn add(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
+    fn inferOutputAval(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!Aval {
         const a = self.alloc();
-        const lhs_t = try self.tensorOf(lhs);
-        const rhs_t = try self.tensorOf(rhs);
-        if (!sameTensorType(lhs_t, rhs_t)) return error.AddTypeMismatch;
+        switch (prim) {
+            .literal => {
+                const lit = paramLiteral(params) orelse return error.InvalidParams;
+                return .{ .tensor = .{ .dtype = lit.dtype(), .shape = .{ .dims = &.{} } } };
+            },
+            .add, .subtract, .multiply, .maximum => {
+                if (inputs.len != 2) return error.InvalidEqnArity;
+                const lhs = try self.tensorOf(inputs[0]);
+                const rhs = try self.tensorOf(inputs[1]);
+                if (!sameTensorType(lhs, rhs)) return switch (prim) {
+                    .add => error.AddTypeMismatch,
+                    .subtract => error.SubtractTypeMismatch,
+                    .multiply => error.MultiplyTypeMismatch,
+                    .maximum => error.MaximumTypeMismatch,
+                    else => unreachable,
+                };
+                return .{ .tensor = lhs };
+            },
+            .dot => {
+                if (inputs.len != 2) return error.InvalidEqnArity;
+                const lhs = try self.tensorOf(inputs[0]);
+                const rhs = try self.tensorOf(inputs[1]);
 
-        const out = try self.varTensor(lhs_t.dtype, lhs_t.shape.dims);
-        try self.eqns.append(a, .{ .add = .{ .lhs = lhs, .rhs = rhs, .out = out } });
+                if (lhs.dtype != rhs.dtype) return error.DotTypeMismatch;
+                if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2) return error.DotTypeMismatch;
+                if (lhs.shape.dims[1] != rhs.shape.dims[0]) return error.DotTypeMismatch;
+
+                const out_dims = try a.dupe(usize, &[_]usize{ lhs.shape.dims[0], rhs.shape.dims[1] });
+                return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
+            },
+            .reshape => {
+                if (inputs.len != 1) return error.InvalidEqnArity;
+                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
+                const operand = try self.tensorOf(inputs[0]);
+                if (numElements(operand.shape.dims) != numElements(out_shape)) return error.ReshapeTypeMismatch;
+                return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } } };
+            },
+            .broadcast_in_dim => {
+                if (inputs.len != 1) return error.InvalidEqnArity;
+                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
+                const bd = paramBroadcastDims(params) orelse return error.InvalidParams;
+                const operand = try self.tensorOf(inputs[0]);
+                const out_tensor = Tensor{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } };
+                try validateBroadcastInDimOp(operand, out_tensor, bd);
+                return .{ .tensor = out_tensor };
+            },
+            .transpose => {
+                if (inputs.len != 1) return error.InvalidEqnArity;
+                const perm = paramPermutation(params) orelse return error.InvalidParams;
+                const operand = try self.tensorOf(inputs[0]);
+                if (!isPermutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
+
+                const out_dims = try a.alloc(usize, operand.shape.rank());
+                for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
+                return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
+            },
+            .custom_call => {
+                const out_aval = paramOutAval(params) orelse return error.InvalidParams;
+                _ = paramCallTargetName(params) orelse return error.InvalidParams;
+                _ = paramHasSideEffect(params) orelse return error.InvalidParams;
+                _ = out_aval.asTensor() orelse return error.CustomCallTypeMismatch;
+                for (inputs) |in_id| _ = try self.tensorOf(in_id);
+                return out_aval;
+            },
+        }
+    }
+
+    pub fn emit(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!VarId {
+        const a = self.alloc();
+
+        const out_aval = try self.inferOutputAval(prim, inputs, params);
+        const out = try self.varWithAval(out_aval);
+
+        const inputs_start: u32 = @intCast(self.varids_store.items.len);
+        try self.varids_store.appendSlice(a, inputs);
+        const inputs_span: Span = .{ .start = inputs_start, .len = @intCast(inputs.len) };
+
+        const outputs_start: u32 = @intCast(self.varids_store.items.len);
+        try self.varids_store.append(a, out);
+        const outputs_span: Span = .{ .start = outputs_start, .len = 1 };
+
+        const params_start: u32 = @intCast(self.params_store.items.len);
+        try self.params_store.appendSlice(a, params);
+        const params_span: Span = .{ .start = params_start, .len = @intCast(params.len) };
+
+        try self.eqns.append(a, .{
+            .prim = prim,
+            .inputs = inputs_span,
+            .outputs = outputs_span,
+            .params = params_span,
+        });
+
         return out;
+    }
+
+    pub fn paramTensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
+        const a = self.alloc();
+        const dims_copy = try a.dupe(usize, dims);
+        const id = try self.varWithAval(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
+        try self.params.append(a, id);
+        return id;
+    }
+
+    pub fn literalScalar(self: *FunctionBuilder, value: Literal) BuildError!VarId {
+        return self.emit(.literal, &.{}, &.{.{ .literal = value }});
+    }
+
+    pub fn add(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
+        return self.emit(.add, &.{ lhs, rhs }, &.{});
     }
 
     pub fn subtract(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        const a = self.alloc();
-        const lhs_t = try self.tensorOf(lhs);
-        const rhs_t = try self.tensorOf(rhs);
-        if (!sameTensorType(lhs_t, rhs_t)) return error.SubtractTypeMismatch;
-
-        const out = try self.varTensor(lhs_t.dtype, lhs_t.shape.dims);
-        try self.eqns.append(a, .{ .subtract = .{ .lhs = lhs, .rhs = rhs, .out = out } });
-        return out;
+        return self.emit(.subtract, &.{ lhs, rhs }, &.{});
     }
 
     pub fn multiply(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        const a = self.alloc();
-        const lhs_t = try self.tensorOf(lhs);
-        const rhs_t = try self.tensorOf(rhs);
-        if (!sameTensorType(lhs_t, rhs_t)) return error.MultiplyTypeMismatch;
-
-        const out = try self.varTensor(lhs_t.dtype, lhs_t.shape.dims);
-        try self.eqns.append(a, .{ .multiply = .{ .lhs = lhs, .rhs = rhs, .out = out } });
-        return out;
+        return self.emit(.multiply, &.{ lhs, rhs }, &.{});
     }
 
     pub fn maximum(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        const a = self.alloc();
-        const lhs_t = try self.tensorOf(lhs);
-        const rhs_t = try self.tensorOf(rhs);
-        if (!sameTensorType(lhs_t, rhs_t)) return error.MaximumTypeMismatch;
-
-        const out = try self.varTensor(lhs_t.dtype, lhs_t.shape.dims);
-        try self.eqns.append(a, .{ .maximum = .{ .lhs = lhs, .rhs = rhs, .out = out } });
-        return out;
+        return self.emit(.maximum, &.{ lhs, rhs }, &.{});
     }
 
     pub fn dot(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        const a = self.alloc();
-        const lhs_t = try self.tensorOf(lhs);
-        const rhs_t = try self.tensorOf(rhs);
-
-        if (lhs_t.dtype != rhs_t.dtype) return error.DotTypeMismatch;
-        if (lhs_t.shape.rank() != 2 or rhs_t.shape.rank() != 2) return error.DotTypeMismatch;
-        if (lhs_t.shape.dims[1] != rhs_t.shape.dims[0]) return error.DotTypeMismatch;
-
-        const out_dims = [_]usize{ lhs_t.shape.dims[0], rhs_t.shape.dims[1] };
-        const out = try self.varTensor(lhs_t.dtype, &out_dims);
-        try self.eqns.append(a, .{ .dot = .{ .lhs = lhs, .rhs = rhs, .out = out } });
-        return out;
+        return self.emit(.dot, &.{ lhs, rhs }, &.{});
     }
 
     pub fn reshape(self: *FunctionBuilder, operand: VarId, out_dims: []const usize) BuildError!VarId {
         const a = self.alloc();
-        const operand_t = try self.tensorOf(operand);
-        if (numElements(operand_t.shape.dims) != numElements(out_dims)) return error.ReshapeTypeMismatch;
-
-        const out = try self.varTensor(operand_t.dtype, out_dims);
-        try self.eqns.append(a, .{ .reshape = .{ .operand = operand, .out = out } });
-        return out;
+        const out_shape = try a.dupe(usize, out_dims);
+        return self.emit(.reshape, &.{operand}, &.{.{ .out_shape = out_shape }});
     }
 
     pub fn broadcastInDim(self: *FunctionBuilder, operand: VarId, out_dims: []const usize, broadcast_dimensions: []const i64) BuildError!VarId {
         const a = self.alloc();
-        const operand_t = try self.tensorOf(operand);
-
-        const out = try self.varTensor(operand_t.dtype, out_dims);
-        const out_t = try self.tensorOf(out);
-        try validateBroadcastInDimOp(operand_t, out_t, broadcast_dimensions);
-
+        const out_shape = try a.dupe(usize, out_dims);
         const bd_copy = try a.dupe(i64, broadcast_dimensions);
-        try self.eqns.append(a, .{
-            .broadcast_in_dim = .{
-                .operand = operand,
-                .out = out,
-                .broadcast_dimensions = bd_copy,
-            },
+        return self.emit(.broadcast_in_dim, &.{operand}, &.{
+            .{ .out_shape = out_shape },
+            .{ .broadcast_dimensions = bd_copy },
         });
-        return out;
     }
 
     pub fn transpose(self: *FunctionBuilder, operand: VarId, permutation: []const i64) BuildError!VarId {
         const a = self.alloc();
-        const operand_t = try self.tensorOf(operand);
-        if (!isPermutation(permutation, operand_t.shape.rank())) return error.TransposeTypeMismatch;
-
-        const out_dims = try a.alloc(usize, operand_t.shape.rank());
-        for (permutation, 0..) |p, i| out_dims[i] = operand_t.shape.dims[@intCast(p)];
-        const out = try self.varTensor(operand_t.dtype, out_dims);
-
         const perm_copy = try a.dupe(i64, permutation);
-        try self.eqns.append(a, .{
-            .transpose = .{
-                .operand = operand,
-                .out = out,
-                .permutation = perm_copy,
-            },
-        });
-
-        return out;
+        return self.emit(.transpose, &.{operand}, &.{.{ .permutation = perm_copy }});
     }
 
     pub fn customCall(self: *FunctionBuilder, target: []const u8, operands: []const VarId, out_like: VarId) BuildError!VarId {
         const a = self.alloc();
 
-        const out_t = try self.tensorOf(out_like);
+        const out_aval = self.avals.items[@intCast(out_like)];
+        _ = out_aval.asTensor() orelse return error.CustomCallTypeMismatch;
         for (operands) |op| _ = try self.tensorOf(op);
 
-        const out = try self.varTensor(out_t.dtype, out_t.shape.dims);
-        const operands_copy = try a.dupe(VarId, operands);
         const target_copy = try a.dupe(u8, target);
-
-        try self.eqns.append(a, .{
-            .custom_call = .{
-                .target = target_copy,
-                .operands = operands_copy,
-                .out = out,
-                .has_side_effect = false,
-            },
+        return self.emit(.custom_call, operands, &.{
+            .{ .call_target_name = target_copy },
+            .{ .has_side_effect = false },
+            .{ .out_aval = out_aval },
         });
-
-        return out;
     }
 
     pub fn finish(self: *FunctionBuilder, returns: []const VarId) BuildError!Function {
@@ -500,6 +609,8 @@ pub const FunctionBuilder = struct {
             .returns = try a.dupe(VarId, returns),
             .avals = try self.avals.toOwnedSlice(a),
             .eqns = try self.eqns.toOwnedSlice(a),
+            .varids_store = try self.varids_store.toOwnedSlice(a),
+            .params_store = try self.params_store.toOwnedSlice(a),
         };
         try validateFunction(func);
         return func;

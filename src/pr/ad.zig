@@ -82,45 +82,60 @@ pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
     }
 
     for (func.eqns) |eqn| {
-        switch (eqn) {
-            .literal => |l| {
-                const out = try b.literalScalar(l.value);
-                primal_map[@intCast(l.out)] = out;
+        const inputs = eqn.inputs.slice(pr.VarId, func.varids_store);
+        const outputs = eqn.outputs.slice(pr.VarId, func.varids_store);
+        const params = eqn.params.slice(pr.Param, func.params_store);
+
+        if (outputs.len != 1) return error.UnsupportedEqn;
+        const out_id = outputs[0];
+
+        switch (eqn.prim) {
+            .literal => {
+                const lit = pr.paramLiteral(params) orelse return error.UnsupportedEqn;
+                const out = try b.literalScalar(lit);
+                primal_map[@intCast(out_id)] = out;
             },
-            .add => |op| {
-                const lhs = primal_map[@intCast(op.lhs)] orelse return error.UnsupportedEqn;
-                const rhs = primal_map[@intCast(op.rhs)] orelse return error.UnsupportedEqn;
+            .add => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const lhs = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const rhs = primal_map[@intCast(inputs[1])] orelse return error.UnsupportedEqn;
                 const out = try b.add(lhs, rhs);
-                primal_map[@intCast(op.out)] = out;
+                primal_map[@intCast(out_id)] = out;
             },
-            .subtract => |op| {
-                const lhs = primal_map[@intCast(op.lhs)] orelse return error.UnsupportedEqn;
-                const rhs = primal_map[@intCast(op.rhs)] orelse return error.UnsupportedEqn;
+            .subtract => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const lhs = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const rhs = primal_map[@intCast(inputs[1])] orelse return error.UnsupportedEqn;
                 const out = try b.subtract(lhs, rhs);
-                primal_map[@intCast(op.out)] = out;
+                primal_map[@intCast(out_id)] = out;
             },
-            .multiply => |op| {
-                const lhs = primal_map[@intCast(op.lhs)] orelse return error.UnsupportedEqn;
-                const rhs = primal_map[@intCast(op.rhs)] orelse return error.UnsupportedEqn;
+            .multiply => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const lhs = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const rhs = primal_map[@intCast(inputs[1])] orelse return error.UnsupportedEqn;
                 const out = try b.multiply(lhs, rhs);
-                primal_map[@intCast(op.out)] = out;
+                primal_map[@intCast(out_id)] = out;
             },
-            .dot => |op| {
-                const lhs = primal_map[@intCast(op.lhs)] orelse return error.UnsupportedEqn;
-                const rhs = primal_map[@intCast(op.rhs)] orelse return error.UnsupportedEqn;
+            .dot => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const lhs = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const rhs = primal_map[@intCast(inputs[1])] orelse return error.UnsupportedEqn;
                 const out = try b.dot(lhs, rhs);
-                primal_map[@intCast(op.out)] = out;
+                primal_map[@intCast(out_id)] = out;
             },
-            .reshape => |op| {
-                const operand = primal_map[@intCast(op.operand)] orelse return error.UnsupportedEqn;
-                const out_tensor = func.avals[@intCast(op.out)].asTensor() orelse return error.UnsupportedEqn;
+            .reshape => {
+                if (inputs.len != 1) return error.UnsupportedEqn;
+                const operand = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const out_tensor = func.avals[@intCast(out_id)].asTensor() orelse return error.UnsupportedEqn;
                 const out = try b.reshape(operand, out_tensor.shape.dims);
-                primal_map[@intCast(op.out)] = out;
+                primal_map[@intCast(out_id)] = out;
             },
-            .transpose => |op| {
-                const operand = primal_map[@intCast(op.operand)] orelse return error.UnsupportedEqn;
-                const out = try b.transpose(operand, op.permutation);
-                primal_map[@intCast(op.out)] = out;
+            .transpose => {
+                if (inputs.len != 1) return error.UnsupportedEqn;
+                const operand = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const perm = pr.paramPermutation(params) orelse return error.UnsupportedEqn;
+                const out = try b.transpose(operand, perm);
+                primal_map[@intCast(out_id)] = out;
             },
             .broadcast_in_dim,
             .maximum,
@@ -133,35 +148,46 @@ pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
     while (eqn_index > 0) {
         eqn_index -= 1;
         const eqn = func.eqns[eqn_index];
-        switch (eqn) {
+        const inputs = eqn.inputs.slice(pr.VarId, func.varids_store);
+        const outputs = eqn.outputs.slice(pr.VarId, func.varids_store);
+        const params = eqn.params.slice(pr.Param, func.params_store);
+
+        if (outputs.len != 1) return error.UnsupportedEqn;
+        const out_id = outputs[0];
+
+        switch (eqn.prim) {
             .literal => {},
-            .add => |op| {
-                const out_cot = cot_map[@intCast(op.out)] orelse continue;
-                try addCot(&b, cot_map, op.lhs, out_cot);
-                try addCot(&b, cot_map, op.rhs, out_cot);
+            .add => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const out_cot = cot_map[@intCast(out_id)] orelse continue;
+                try addCot(&b, cot_map, inputs[0], out_cot);
+                try addCot(&b, cot_map, inputs[1], out_cot);
             },
-            .subtract => |op| {
-                const out_cot = cot_map[@intCast(op.out)] orelse continue;
-                const rhs_tensor = func.avals[@intCast(op.rhs)].asTensor() orelse return error.UnsupportedEqn;
+            .subtract => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const out_cot = cot_map[@intCast(out_id)] orelse continue;
+                const rhs_tensor = func.avals[@intCast(inputs[1])].asTensor() orelse return error.UnsupportedEqn;
                 const neg = try negateLike(&b, rhs_tensor, out_cot);
-                try addCot(&b, cot_map, op.lhs, out_cot);
-                try addCot(&b, cot_map, op.rhs, neg);
+                try addCot(&b, cot_map, inputs[0], out_cot);
+                try addCot(&b, cot_map, inputs[1], neg);
             },
-            .multiply => |op| {
-                const out_cot = cot_map[@intCast(op.out)] orelse continue;
-                const lhs_primal = primal_map[@intCast(op.lhs)] orelse return error.UnsupportedEqn;
-                const rhs_primal = primal_map[@intCast(op.rhs)] orelse return error.UnsupportedEqn;
+            .multiply => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const out_cot = cot_map[@intCast(out_id)] orelse continue;
+                const lhs_primal = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const rhs_primal = primal_map[@intCast(inputs[1])] orelse return error.UnsupportedEqn;
 
                 const lhs_contrib = try b.multiply(out_cot, rhs_primal);
                 const rhs_contrib = try b.multiply(out_cot, lhs_primal);
 
-                try addCot(&b, cot_map, op.lhs, lhs_contrib);
-                try addCot(&b, cot_map, op.rhs, rhs_contrib);
+                try addCot(&b, cot_map, inputs[0], lhs_contrib);
+                try addCot(&b, cot_map, inputs[1], rhs_contrib);
             },
-            .dot => |op| {
-                const out_cot = cot_map[@intCast(op.out)] orelse continue;
-                const lhs_primal = primal_map[@intCast(op.lhs)] orelse return error.UnsupportedEqn;
-                const rhs_primal = primal_map[@intCast(op.rhs)] orelse return error.UnsupportedEqn;
+            .dot => {
+                if (inputs.len != 2) return error.UnsupportedEqn;
+                const out_cot = cot_map[@intCast(out_id)] orelse continue;
+                const lhs_primal = primal_map[@intCast(inputs[0])] orelse return error.UnsupportedEqn;
+                const rhs_primal = primal_map[@intCast(inputs[1])] orelse return error.UnsupportedEqn;
 
                 const rhs_t = try b.transpose(rhs_primal, &.{ 1, 0 });
                 const lhs_t = try b.transpose(lhs_primal, &.{ 1, 0 });
@@ -169,25 +195,26 @@ pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
                 const lhs_contrib = try b.dot(out_cot, rhs_t);
                 const rhs_contrib = try b.dot(lhs_t, out_cot);
 
-                try addCot(&b, cot_map, op.lhs, lhs_contrib);
-                try addCot(&b, cot_map, op.rhs, rhs_contrib);
+                try addCot(&b, cot_map, inputs[0], lhs_contrib);
+                try addCot(&b, cot_map, inputs[1], rhs_contrib);
             },
-            .reshape => |op| {
-                const out_cot = cot_map[@intCast(op.out)] orelse continue;
-                const operand_tensor = func.avals[@intCast(op.operand)].asTensor() orelse return error.UnsupportedEqn;
+            .reshape => {
+                if (inputs.len != 1) return error.UnsupportedEqn;
+                const out_cot = cot_map[@intCast(out_id)] orelse continue;
+                const operand_tensor = func.avals[@intCast(inputs[0])].asTensor() orelse return error.UnsupportedEqn;
                 const contrib = try b.reshape(out_cot, operand_tensor.shape.dims);
-                try addCot(&b, cot_map, op.operand, contrib);
+                try addCot(&b, cot_map, inputs[0], contrib);
             },
-            .transpose => |op| {
-                const out_cot = cot_map[@intCast(op.out)] orelse continue;
-
-                const perm = op.permutation;
+            .transpose => {
+                if (inputs.len != 1) return error.UnsupportedEqn;
+                const out_cot = cot_map[@intCast(out_id)] orelse continue;
+                const perm = pr.paramPermutation(params) orelse return error.UnsupportedEqn;
                 const inv = try allocator.alloc(i64, perm.len);
                 defer allocator.free(inv);
                 for (perm, 0..) |p, i| inv[@intCast(p)] = @intCast(i);
 
                 const contrib = try b.transpose(out_cot, inv);
-                try addCot(&b, cot_map, op.operand, contrib);
+                try addCot(&b, cot_map, inputs[0], contrib);
             },
             .broadcast_in_dim,
             .maximum,
