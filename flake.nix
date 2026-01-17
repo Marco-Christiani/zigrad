@@ -183,6 +183,15 @@
         binutils
         patchelf
       ];
+
+      pythonJaxCudaOverride = pkgs.python312.override {
+        packageOverrides = self: super: {
+          jax = super.jax.override {
+            # inherit cudaPackages;
+            cudaSupport = true;
+          };
+        };
+      };
     in {
       # devshells intended purpose is really just fast iteration and pinned toolchain with
       #   relaxed hermeticity requirements as needed for productivity.
@@ -245,6 +254,27 @@
             fi
             printf "SDK path: ZG_EXTERNAL_SDK_ROOT=$ZG_EXTERNAL_SDK_ROOT"
           '';
+        };
+
+        pyshell = pkgs.mkShell {
+          packages = [
+            (pkgs.python312.withPackages (ps: [
+              ps.jax
+              ps.jax-cuda12-plugin
+              ps.pyelftools
+            ]))
+          ];
+        };
+
+        # more complicated way to enable cuda via overlays, this may be better, though.
+        # unless we find cuda issues with the simpler devshell, not using this
+        # this expensive to build, especially the tests take forever
+        pyshell2 = pkgs.mkShell {
+          packages = [
+            (pythonJaxCudaOverride.withPackages (ps: [
+              ps.jax
+            ]))
+          ];
         };
       };
 
