@@ -57,6 +57,14 @@ fn vjpForwardBinaryElementwise(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!
     ctx.setPrimal(outputs[0], out);
 }
 
+// Format helper
+
+fn formatBinaryElementwise(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+    if (ctx.inputTensor(0)) |t| {
+        try writer.print("dtype={s}", .{@tagName(t.dtype)});
+    }
+}
+
 // ============================================================================
 // Add
 // ============================================================================
@@ -97,6 +105,8 @@ pub const add = struct {
         try ctx.addCot(inputs[0], out_cot);
         try ctx.addCot(inputs[1], out_cot);
     }
+
+    pub const format = formatBinaryElementwise;
 };
 
 // ============================================================================
@@ -142,6 +152,8 @@ pub const subtract = struct {
         const neg = try negateLike(ctx.builder, rhs_tensor, out_cot);
         try ctx.addCot(inputs[1], neg);
     }
+
+    pub const format = formatBinaryElementwise;
 };
 
 // ============================================================================
@@ -190,6 +202,8 @@ pub const multiply = struct {
         try ctx.addCot(inputs[0], lhs_contrib);
         try ctx.addCot(inputs[1], rhs_contrib);
     }
+
+    pub const format = formatBinaryElementwise;
 };
 
 // ============================================================================
@@ -212,6 +226,8 @@ pub const maximum = struct {
     }
 
     // No vjpForward/vjpBackward - maximum AD not yet supported
+
+    pub const format = formatBinaryElementwise;
 };
 
 // ============================================================================

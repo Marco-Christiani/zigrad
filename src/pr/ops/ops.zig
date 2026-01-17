@@ -140,6 +140,22 @@ pub fn vjpBackward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
     unreachable;
 }
 
+/// Format op-specific attributes for an equation
+pub fn format(writer: *types.Writer, func: pr.Function, eqn: pr.Eqn) types.FormatError!void {
+    const ctx = types.FormatContext{ .func = func, .eqn = eqn };
+    inline for (comptime std.enums.values(pr.Prim)) |prim| {
+        if (eqn.prim == prim) {
+            const Op = OpFor(prim);
+            if (@hasDecl(Op, "format")) {
+                return Op.format(writer, ctx);
+            } else {
+                return; // No format = nothing extra to show
+            }
+        }
+    }
+    unreachable;
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

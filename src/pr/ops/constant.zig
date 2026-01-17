@@ -64,4 +64,14 @@ pub const literal = struct {
     }
 
     // No vjpBackward needed - constants have zero gradient
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        if (pr.paramLiteral(ctx.params())) |lit| {
+            switch (lit) {
+                // currently exhaustive, but doing this explicitly if we add more later so we cant forget to
+                //  add the cases here (compiler should catch non-exhaustive)
+                .f32, .f64, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
+            }
+        }
+    }
 };

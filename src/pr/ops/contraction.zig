@@ -100,4 +100,13 @@ pub const dot = struct {
         try ctx.addCot(inputs[0], lhs_contrib);
         try ctx.addCot(inputs[1], rhs_contrib);
     }
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        const lhs = ctx.inputTensor(0) orelse return;
+        const contract_dim = lhs.shape.rank() - 1;
+        try writer.print("contracting=([{d}], [0]), K={d}", .{
+            contract_dim,
+            lhs.shape.dims[contract_dim],
+        });
+    }
 };

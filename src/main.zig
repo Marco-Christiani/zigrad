@@ -342,13 +342,13 @@ fn printPr(allocator: std.mem.Allocator) !void {
     const fwd = program.functions[0];
     const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
 
-    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
-    try stdout.writeAll("=== Forward Function ===\n");
-    try zg.pr.emit.emitText(fwd, stdout);
-    try stdout.writeAll("\n=== VJP Function ===\n");
-    try zg.pr.emit.emitText(vjp_func, stdout);
+    try stdout.writeAll("=== Forward ===\n");
+    try zg.pr.zxpr.emit(fwd, stdout);
+    try stdout.writeAll("\n=== VJP ===\n");
+    try zg.pr.zxpr.emit(vjp_func, stdout);
 }

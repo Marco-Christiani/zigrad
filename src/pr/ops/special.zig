@@ -83,6 +83,16 @@ pub const custom_call = struct {
 
     // No vjpForward/vjpBackward - custom_call AD not supported
     // (would require user-provided gradient function)
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        const params = ctx.params();
+        if (pr.paramCallTargetName(params)) |target| {
+            try writer.print("target=\"{s}\"", .{target});
+        }
+        if (pr.paramHasSideEffect(params)) |se| {
+            if (se) try writer.writeAll(", side_effect=true");
+        }
+    }
 };
 
 // ============================================================================

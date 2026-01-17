@@ -80,6 +80,15 @@ pub const reshape = struct {
         const contrib = try ctx.builder.reshape(out_cot, operand_tensor.shape.dims);
         try ctx.addCot(inputs[0], contrib);
     }
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        const src = ctx.inputTensor(0) orelse return;
+        try formatShape(writer, src.shape.dims);
+        try writer.writeAll(" -> ");
+        if (pr.paramOutShape(ctx.params())) |out_shape| {
+            try formatShape(writer, out_shape);
+        }
+    }
 };
 
 // ============================================================================
@@ -172,6 +181,17 @@ pub const transpose = struct {
         const contrib = try ctx.builder.transpose(out_cot, inv);
         try ctx.addCot(inputs[0], contrib);
     }
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        if (pr.paramPermutation(ctx.params())) |perm| {
+            try writer.writeAll("perm=[");
+            for (perm, 0..) |p, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("{d}", .{p});
+            }
+            try writer.writeByte(']');
+        }
+    }
 };
 
 // ============================================================================
@@ -229,6 +249,23 @@ pub const broadcast_in_dim = struct {
 
     // No vjpForward/vjpBackward - broadcast_in_dim AD not yet supported
     // (requires reduce_sum to sum over broadcasted dimensions)
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        const src = ctx.inputTensor(0) orelse return;
+        try formatShape(writer, src.shape.dims);
+        try writer.writeAll(" -> ");
+        if (pr.paramOutShape(ctx.params())) |out_shape| {
+            try formatShape(writer, out_shape);
+        }
+        if (pr.paramBroadcastDims(ctx.params())) |bd| {
+            try writer.writeAll(", dims=[");
+            for (bd, 0..) |d, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("{d}", .{d});
+            }
+            try writer.writeByte(']');
+        }
+    }
 };
 
 // ============================================================================
@@ -257,6 +294,15 @@ fn isPermutation(perm: []const i64, rank: usize) bool {
         seen[idx] = true;
     }
     return true;
+}
+
+fn formatShape(writer: *types.Writer, dims: []const usize) types.FormatError!void {
+    try writer.writeByte('[');
+    for (dims, 0..) |d, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.print("{d}", .{d});
+    }
+    try writer.writeByte(']');
 }
 
 fn validateBroadcastInDimOp(operand: types.Tensor, out: types.Tensor, broadcast_dimensions: []const i64) pr.ValidationError!void {

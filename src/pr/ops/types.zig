@@ -172,6 +172,39 @@ pub fn scalarLiteral(value_dtype: pr.DType, value: f64) pr.Literal {
     };
 }
 
+/// Context passed to format functions
+pub const FormatContext = struct {
+    func: pr.Function,
+    eqn: pr.Eqn,
+
+    pub fn inputs(self: FormatContext) []const pr.VarId {
+        return self.eqn.inputs.slice(pr.VarId, self.func.varids_store);
+    }
+
+    pub fn outputs(self: FormatContext) []const pr.VarId {
+        return self.eqn.outputs.slice(pr.VarId, self.func.varids_store);
+    }
+
+    pub fn params(self: FormatContext) []const pr.Param {
+        return self.eqn.params.slice(pr.Param, self.func.params_store);
+    }
+
+    pub fn inputTensor(self: FormatContext, idx: usize) ?pr.Tensor {
+        const ins = self.inputs();
+        if (idx >= ins.len) return null;
+        return self.func.avals[@intCast(ins[idx])].asTensor();
+    }
+
+    pub fn outputTensor(self: FormatContext, idx: usize) ?pr.Tensor {
+        const outs = self.outputs();
+        if (idx >= outs.len) return null;
+        return self.func.avals[@intCast(outs[idx])].asTensor();
+    }
+};
+
+pub const Writer = std.Io.Writer;
+pub const FormatError = Writer.Error;
+
 // Re-export for convenience
 pub const Tensor = pr.Tensor;
 pub const Aval = pr.Aval;
