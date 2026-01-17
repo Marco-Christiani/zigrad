@@ -20,6 +20,8 @@ vars:
 
 env:
   ZG_EXTERNAL_SDK_ROOT: '{{.ZG_EXTERNAL_SDK_ROOT}}'
+  PJRT_CPU_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so'
+  PJRT_GPU_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so'
   PJRT_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so'
   XLA_FLAGS: '--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia'
 
@@ -56,7 +58,10 @@ tasks:
           start_time: '{{ now | unixEpoch }}'
 
   check-sdk:
-    cmd: uv run ./scripts/check_sdk.py {{.CLI_ARGS}}
+    cmd:
+      task: python
+      vars:
+        CLI_ARGS: scripts/check_sdk.py {{.CLI_ARGS}}
     vars:
       # default args to support overriding completely
       CLI_ARGS: --sdk-root $ZG_EXTERNAL_SDK_ROOT
@@ -107,23 +112,92 @@ tasks:
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
 
-  m2:
+  run:
     deps: [build, check-env-rt]
+    cmd: ./zig-out/bin/zigrad {{.CLI_ARGS}}
+
+  run:cpu:
+    deps: [build]
+    cmds:
+      - |
+        if [ -z "${PJRT_CPU_PLUGIN_PATH:-}" ]; then
+          echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
+          exit 1
+        fi
+        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" XLA_FLAGS="" ./zig-out/bin/zigrad {{.CLI_ARGS}}
+
+  run:gpu:
+    deps: [build]
+    cmds:
+      - |
+        if [ -z "${PJRT_GPU_PLUGIN_PATH:-}" ]; then
+          echo "PJRT_GPU_PLUGIN_PATH is not set (run inside the devshell)."
+          exit 1
+        fi
+        PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" ./zig-out/bin/zigrad {{.CLI_ARGS}}
+
+  custom-call:neg:
+    cmd:
+      task: run
+      vars:
+        CLI_ARGS: custom-call-neg
+
+  custom-call:neg:cpu:
+    cmd:
+      task: run:cpu
+      vars:
+        CLI_ARGS: custom-call-neg
+
+  custom-call:neg:gpu:
+    cmd:
+      task: run:gpu
+      vars:
+        CLI_ARGS: custom-call-neg
+
+  vjp-demo:
+    cmd:
+      task: run
+      vars:
+        CLI_ARGS: vjp-demo
+
+  vjp-demo:cpu:
+    cmd:
+      task: run:cpu
+      vars:
+        CLI_ARGS: vjp-demo
+
+  vjp-demo:gpu:
+    cmd:
+      task: run:gpu
+      vars:
+        CLI_ARGS: vjp-demo
+
+  exp:build:
+    deps: [check-env-bt]
+    cmd: zig build --build-file build-experimental.zig -Dsdk=$ZG_EXTERNAL_SDK_ROOT
+
+  exp:m2:
+    deps: [exp:build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m2
 
-  m2-fusion:
-    deps: [build, check-env-rt]
+  exp:m2-fusion:
+    deps: [exp:build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m2-fusion
 
-  m4:
-    deps: [build, check-env-rt]
+  exp:m4:
+    deps: [exp:build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m4
 
-  m4-custom:
-    deps: [build, check-env-rt]
+  exp:m4-custom:
+    deps: [exp:build, check-env-rt]
     cmd: ./zig-out/bin/zigrad-pjrt-m4-custom {{.CLI_ARGS}}
 
   # Meta Utils =================================================================
+  python:
+    desc: Run a python command in the devshell (in lieu of uv on NixOS). E.g., `task python -- scripts/reference_experiments.py`
+    cmds:
+      - nix develop .#pyshell --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
+
   # Nix ccache -----------------------------------------------------------------
   nix-ccache-setup:
     cmds:
