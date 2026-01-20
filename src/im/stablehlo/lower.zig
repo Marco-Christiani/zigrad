@@ -6,7 +6,12 @@ const mlir = @import("../../ffi/mlir/mlir.zig");
 
 pub const LowerError = ops.types.LowerError;
 
-pub fn lowerFunctionToMlirBytecode(allocator: std.mem.Allocator, func: pr.Function) ![]u8 {
+pub const OutputFormat = enum {
+    mlir_text,
+    mlir_bytecode,
+};
+
+fn lowerFunctionToMlirInternal(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
     pr.validateFunction(func) catch return error.InvalidProgram;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -100,10 +105,19 @@ pub fn lowerFunctionToMlirBytecode(allocator: std.mem.Allocator, func: pr.Functi
 
     if (!module.op().verify()) return error.InvalidMlir;
 
-    var bytecode_buffer: [1024 * 1024]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&bytecode_buffer);
-    try module.op().writeBytecode(&writer);
-    return allocator.dupe(u8, writer.buffered());
+    var writer_state = std.Io.Writer.Allocating.init(allocator);
+    defer writer_state.deinit();
+
+    switch (out) {
+        .mlir_bytecode => try module.op().writeBytecode(&writer_state.writer),
+        .mlir_text => try module.op().print(&writer_state.writer, .{}),
+    }
+
+    return try writer_state.toOwnedSlice();
+}
+
+pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
+    return lowerFunctionToMlirInternal(allocator, func, out);
 }
 
 fn tensorToMlirType(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !mlir.Type {
@@ -117,7 +131,7 @@ test "lowering produces verified bytecode" {
     defer program.deinit();
 
     const func = program.functions[0];
-    const bc = try lowerFunctionToMlirBytecode(std.testing.allocator, func);
+    const bc = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -137,7 +151,7 @@ test "lowering supports reshape/broadcast/transpose" {
     const func = try b.finish(&.{y});
     try program.addFunction(func);
 
-    const bc = try lowerFunctionToMlirBytecode(std.testing.allocator, func);
+    const bc = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -155,7 +169,7 @@ test "lowering supports custom_call boundary" {
     const func = try b.finish(&.{y});
     try program.addFunction(func);
 
-    const bc = try lowerFunctionToMlirBytecode(std.testing.allocator, func);
+    const bc = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -167,7 +181,7 @@ test "lowering supports vjp matmul demo" {
     const fwd = program.functions[0];
     const vjp_func = try @import("../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
 
-    const bc = try lowerFunctionToMlirBytecode(std.testing.allocator, vjp_func);
+    const bc = try lowerFunctionToMlir(std.testing.allocator, vjp_func, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }

@@ -10,34 +10,42 @@ pub fn main() !void {
     _ = arg_it.next(); // argv0
     const mode = arg_it.next();
 
+    if (mode) |m| {
+        if (std.mem.eql(u8, m, "print-pr")) {
+            return printPr(gpa);
+        }
+    }
+
     const plugin_path = std.process.getEnvVarOwned(gpa, "PJRT_PLUGIN_PATH") catch |err| {
         std.log.err("PJRT_PLUGIN_PATH not set ({s})", .{@errorName(err)});
         return err;
     };
     defer gpa.free(plugin_path);
 
-    var rt = try zg.runtime.pjrt.Runtime.init(gpa, plugin_path);
-    defer rt.deinit();
+    const ps = zg.pipeline.PipelineSpec{
+        .mode = .jit,
+        .im_profile = .stablehlo_mlir_bytecode,
+        .primary = .{ .xla = .{} },
+        .runtime = .{ .pjrt = .{ .plugin_path = plugin_path } },
+    };
 
-    const devs = try rt.devices(gpa);
+    var pipe = try zg.pipeline.Pipeline.init(gpa, ps);
+    defer pipe.deinit();
+    const rt = try pipe.runtimePjrt();
+
+    const devs = try pipe.devices(gpa);
     defer gpa.free(devs);
     if (devs.len == 0) return error.NoDevices;
     const device = &devs[0];
 
     if (mode) |m| {
-        if (std.mem.eql(u8, m, "print-pr")) {
-            return printPr(gpa);
-        }
         if (std.mem.eql(u8, m, "custom-call-neg")) {
-            return runCustomCallNegative(gpa, &rt, device);
+            return runCustomCallNegative(gpa, rt, device, ps.im_profile == .stablehlo_mlir_text);
         }
         if (std.mem.eql(u8, m, "vjp-demo")) {
-            return runVjpDemo(gpa, &rt, device);
+            return runVjpDemo(gpa, rt, device, ps.im_profile == .stablehlo_mlir_text);
         }
-        if (std.mem.eql(u8, m, "jit-cache-save") or std.mem.eql(u8, m, "aot-save")) {
-            if (std.mem.eql(u8, m, "aot-save")) {
-                std.log.warn("mode aot-save is deprecated; use jit-cache-save", .{});
-            }
+        if (std.mem.eql(u8, m, "jit-cache-save")) {
             const path = arg_it.next() orelse {
                 std.log.err("usage: zigrad jit-cache-save <path>", .{});
                 return error.InvalidArguments;
@@ -47,21 +55,29 @@ pub fn main() !void {
             defer program.deinit();
             const func = program.functions[0];
 
-            // PR -> IM realization
-            var im = try zg.im.stablehlo.realize(gpa, func, .{});
-            defer im.deinit();
+            pipe.spec.mode = .jit_cache;
+            try pipe.spec.validate();
 
-            const serialized = try zg.toolchain.xla.compileSerialized(gpa, rt.getClient(), device, im, .{});
-            defer gpa.free(serialized);
-
-            try writeBytesToPath(path, serialized);
-            std.log.info("wrote PJRT serialized executable: {d} bytes -> {s}", .{ serialized.len, path });
+            const artifact = try pipe.compilePr(func, device, .{});
+            switch (artifact) {
+                .serialized => |bytes| {
+                    defer gpa.free(bytes);
+                    try writeBytesToPath(path, bytes);
+                    std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ bytes.len, path });
+                },
+                .loaded => |exe| {
+                    var owned_exe = exe;
+                    defer owned_exe.deinit();
+                    _ = &owned_exe;
+                    return error.UnexpectedOutputs;
+                },
+            }
             return;
         }
-        if (std.mem.eql(u8, m, "jit-cache-run") or std.mem.eql(u8, m, "aot-run")) {
-            if (std.mem.eql(u8, m, "aot-run")) {
-                std.log.warn("mode aot-run is deprecated; use jit-cache-run", .{});
-            }
+        if (std.mem.eql(u8, m, "jit-cache-run")) {
+            pipe.spec.mode = .jit_cache;
+            try pipe.spec.validate();
+
             const path = arg_it.next() orelse {
                 std.log.err("usage: zigrad jit-cache-run <path>", .{});
                 return error.InvalidArguments;
@@ -70,10 +86,10 @@ pub fn main() !void {
             const serialized = try readBytesFromPath(gpa, path);
             defer gpa.free(serialized);
 
-            var exe = try rt.loadSerializedExecutable(serialized, null);
+            var exe = try pipe.loadSerializedExecutable(serialized, null);
             defer exe.deinit();
 
-            return runDemoExecutable(gpa, &rt, device, &exe);
+            return runDemoExecutable(gpa, rt, device, &exe);
         }
         std.log.err("unknown mode: {s}", .{m});
         return error.InvalidArguments;
@@ -84,15 +100,18 @@ pub fn main() !void {
 
     const func = program.functions[0];
 
-    // PR -> IM realization
-    var im = try zg.im.stablehlo.realize(gpa, func, .{});
-    defer im.deinit();
-
-    // IM -> EA compilation
-    var exe = try zg.toolchain.xla.compile(gpa, rt.getClient(), device, im, .{});
-    defer exe.deinit();
-
-    return runDemoExecutable(gpa, &rt, device, &exe);
+    const artifact = try pipe.compilePr(func, device, .{});
+    switch (artifact) {
+        .loaded => |exe| {
+            var owned_exe = exe;
+            defer owned_exe.deinit();
+            return runDemoExecutable(gpa, rt, device, &owned_exe);
+        },
+        .serialized => |bytes| {
+            defer gpa.free(bytes);
+            return error.UnexpectedOutputs;
+        },
+    }
 }
 
 fn writeBytesToPath(path: []const u8, bytes: []const u8) !void {
@@ -187,7 +206,7 @@ fn runDemoExecutable(
     std.log.info("OK: demo output matches expected", .{});
 }
 
-fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device: anytype) !void {
+fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device: anytype, emit_text: bool) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -199,7 +218,7 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runt
     const func = try b.finish(&.{y});
 
     // PR -> IM realization
-    var im = try zg.im.stablehlo.realize(allocator, func, .{});
+    var im = try zg.im.stablehlo.realize(allocator, func, .{ .emit_text = emit_text });
     defer im.deinit();
 
     // IM -> EA compilation (expected to fail)
@@ -213,7 +232,7 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runt
     return error.UnexpectedSuccess;
 }
 
-fn runVjpDemo(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device: anytype) !void {
+fn runVjpDemo(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device: anytype, emit_text: bool) !void {
     var program = try zg.frontend.buildDemoProgram(allocator);
     defer program.deinit();
 
@@ -221,7 +240,7 @@ fn runVjpDemo(allocator: std.mem.Allocator, rt: *zg.runtime.pjrt.Runtime, device
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
 
     // PR -> IM realization
-    var im = try zg.im.stablehlo.realize(allocator, vjp, .{});
+    var im = try zg.im.stablehlo.realize(allocator, vjp, .{ .emit_text = emit_text });
     defer im.deinit();
 
     // IM -> EA compilation

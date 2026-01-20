@@ -76,8 +76,13 @@ pub fn compile(
     const compile_opts_pb = try buildCompileOptionsProto(allocator, options);
     defer allocator.free(compile_opts_pb);
 
+    const program_format: pjrt_types.ProgramFormat = switch (im.encoding) {
+        .mlir_text => .mlir_text,
+        .mlir_bytecode => .mlir_bytecode,
+    };
+
     // Compile via PJRT
-    return client.compile(device, .mlir_bytecode, im.bytecode, compile_opts_pb);
+    return client.compile(device, program_format, im.bytes, compile_opts_pb);
 }
 
 /// Compile and serialize the resulting executable (JIT cache path).

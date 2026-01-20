@@ -4,7 +4,7 @@
 /// This is the explicit boundary between PR (program representation) and
 /// toolchain compilation. The IM is toolchain-facing; PR is Zigrad-internal.
 ///
-/// Current form: MLIR bytecode (StableHLO dialect).
+/// Current form: MLIR (StableHLO dialect) in either text or bytecode form.
 const std = @import("std");
 
 const pr = @import("../../pr/pr.zig");
@@ -17,14 +17,20 @@ pub const RealizeOptions = struct {
     emit_text: bool = false,
 };
 
+pub const Encoding = enum {
+    mlir_text,
+    mlir_bytecode,
+};
+
 /// StableHLO IM artifact.
 pub const IM = struct {
-    /// The serialized MLIR (bytecode or text depending on realization options).
-    bytecode: []u8,
+    /// The serialized MLIR (text or bytecode depending on realization options).
+    bytes: []u8,
+    encoding: Encoding,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *IM) void {
-        self.allocator.free(self.bytecode);
+        self.allocator.free(self.bytes);
     }
 };
 
@@ -33,7 +39,10 @@ pub const IM = struct {
 /// This is the PR -> IM realization step. The resulting IM can be passed to
 /// a toolchain for compilation into an executable artifact (EA).
 pub fn realize(allocator: std.mem.Allocator, func: pr.Function, options: RealizeOptions) !IM {
-    _ = options; // TODO: emit_text support
-    const bytecode = try lower.lowerFunctionToMlirBytecode(allocator, func);
-    return IM{ .bytecode = bytecode, .allocator = allocator };
+    if (options.emit_text) {
+        const text = try lower.lowerFunctionToMlir(allocator, func, .mlir_text);
+        return IM{ .bytes = text, .encoding = .mlir_text, .allocator = allocator };
+    }
+    const bytecode = try lower.lowerFunctionToMlir(allocator, func, .mlir_bytecode);
+    return IM{ .bytes = bytecode, .encoding = .mlir_bytecode, .allocator = allocator };
 }
