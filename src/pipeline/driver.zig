@@ -82,11 +82,10 @@ pub const Pipeline = struct {
         device: *const pjrt_types.Device,
         options: xla_toolchain.CompileOptions,
     ) !ExecutableArtifact {
+        try self.spec.validate();
+
         if (self.spec.primary.kind() != .xla or self.spec.runtime.kind() != .pjrt)
             return error.UnsupportedPipeline;
-
-        if (self.spec.kernelization.enabled)
-            return error.KernelizationNotImplemented;
 
         const rt = try self.runtimePjrt();
 
@@ -114,6 +113,8 @@ pub const Pipeline = struct {
         serialized_executable: []const u8,
         overridden_compile_options: ?[]const u8,
     ) !pjrt_types.LoadedExecutable {
+        try self.spec.validate();
+
         if (self.spec.runtime.kind() != .pjrt) return error.UnsupportedPipeline;
         const rt = try self.runtimePjrt();
         return rt.loadSerializedExecutable(serialized_executable, overridden_compile_options);
