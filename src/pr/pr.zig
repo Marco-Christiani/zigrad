@@ -89,6 +89,10 @@ pub const Param = union(enum) {
     /// Steering hint: request that this equation be outlined into a separate
     /// function call boundary during lowering (best-effort).
     outline: bool,
+
+    /// Steering hint: request kernelization of this equation/region by a named provider.
+    /// This does not change semantics; it is a compilation steering annotation.
+    kernelize_provider: []const u8,
 };
 
 pub const Eqn = struct {
@@ -267,6 +271,16 @@ pub fn paramOutline(params: []const Param) ?bool {
     for (params) |p| {
         switch (p) {
             .outline => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramKernelizeProvider(params: []const Param) ?[]const u8 {
+    for (params) |p| {
+        switch (p) {
+            .kernelize_provider => |v| return v,
             else => {},
         }
     }

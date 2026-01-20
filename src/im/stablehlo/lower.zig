@@ -123,7 +123,9 @@ pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, comp
 
 fn shouldOutlineEqn(ctx: ops.types.LowerContext, eqn: pr.Eqn) bool {
     const params = ctx.params(eqn);
-    return pr.paramOutline(params) orelse false;
+    if (pr.paramOutline(params) orelse false) return true;
+    if (pr.paramKernelizeProvider(params) != null) return true;
+    return false;
 }
 
 fn lowerOutlinedEqn(
@@ -136,6 +138,7 @@ fn lowerOutlinedEqn(
 ) !void {
     const inputs = ctx.inputs(eqn);
     const outputs = ctx.outputs(eqn);
+    const params = ctx.params(eqn);
 
     // v0: all current PR ops are single-output; keep outlining strict.
     if (outputs.len != 1) return error.InvalidProgram;
@@ -199,6 +202,12 @@ fn lowerOutlinedEqn(
         .verify = false,
         .location = ctx.loc,
     });
+
+    if (pr.paramKernelizeProvider(params)) |provider| {
+        // Tag the outlined function so later pipeline/toolchain stages can identify and
+        // replace/compile it via the selected kernelization provider.
+        callee_op.setAttributeByName("zigrad.kernelize.provider", mlir.Attribute.string(mlir_ctx, provider));
+    }
     module.getBody().appendOperation(callee_op);
 
     // Emit a call in the original block.
@@ -302,4 +311,24 @@ test "lowering can outline an equation into a call boundary" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "func.call") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "outlined_0") != null);
+}
+
+test "lowering tags kernelize provider on outlined functions" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a = try b.paramTensor(.f32, &.{ 2, 3 });
+    const c = try b.paramTensor(.f32, &.{ 3, 2 });
+    const d = try b.emit(.dot, &.{ a, c }, &.{.{ .kernelize_provider = "tvm" }});
+    const func = try b.finish(&.{d});
+    try program.addFunction(func);
+
+    const text = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_text);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "zigrad.kernelize.provider") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tvm") != null);
 }

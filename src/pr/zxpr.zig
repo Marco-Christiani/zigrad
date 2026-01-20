@@ -134,6 +134,9 @@ pub const Emitter = struct {
         // Op-specific attributes via dispatch
         try ops.format(self.writer, self.func, eqn);
 
+        if (pr.paramKernelizeProvider(params)) |provider| {
+            try self.writer.print(", kernelize=\"{s}\"", .{provider});
+        }
         if (pr.paramOutline(params) orelse false) {
             try self.writer.writeAll(", outline=true");
         }
