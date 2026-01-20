@@ -118,6 +118,7 @@ pub const Emitter = struct {
     fn emitLet(self: *Self, eqn: pr.Eqn) !void {
         const outputs = eqn.outputs.slice(pr.VarId, self.func.varids_store);
         const inputs = eqn.inputs.slice(pr.VarId, self.func.varids_store);
+        const params = eqn.params.slice(pr.Param, self.func.params_store);
 
         try self.writer.writeAll("let ");
 
@@ -132,6 +133,10 @@ pub const Emitter = struct {
 
         // Op-specific attributes via dispatch
         try ops.format(self.writer, self.func, eqn);
+
+        if (pr.paramOutline(params) orelse false) {
+            try self.writer.writeAll(", outline=true");
+        }
 
         try self.writer.writeAll("](");
 

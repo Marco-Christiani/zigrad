@@ -86,6 +86,9 @@ pub const Param = union(enum) {
     call_target_name: []const u8,
     has_side_effect: bool,
     out_aval: Aval,
+    /// Steering hint: request that this equation be outlined into a separate
+    /// function call boundary during lowering (best-effort).
+    outline: bool,
 };
 
 pub const Eqn = struct {
@@ -254,6 +257,16 @@ pub fn paramOutAval(params: []const Param) ?Aval {
     for (params) |p| {
         switch (p) {
             .out_aval => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn paramOutline(params: []const Param) ?bool {
+    for (params) |p| {
+        switch (p) {
+            .outline => |v| return v,
             else => {},
         }
     }

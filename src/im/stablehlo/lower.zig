@@ -75,8 +75,13 @@ fn lowerFunctionToMlirInternal(allocator: std.mem.Allocator, func: pr.Function, 
         .arena = arena,
     };
 
+    var outlined_index: usize = 0;
     for (func.eqns) |eqn| {
-        try ops.lower(lower_ctx, eqn);
+        if (shouldOutlineEqn(lower_ctx, eqn)) {
+            try lowerOutlinedEqn(arena, &outlined_index, ctx, module, lower_ctx, eqn);
+        } else {
+            try ops.lower(lower_ctx, eqn);
+        }
     }
 
     const ret_values = try arena.alloc(mlir.Value, func.returns.len);
@@ -118,6 +123,103 @@ fn lowerFunctionToMlirInternal(allocator: std.mem.Allocator, func: pr.Function, 
 
 pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
     return lowerFunctionToMlirInternal(allocator, func, out);
+}
+
+fn shouldOutlineEqn(ctx: ops.types.LowerContext, eqn: pr.Eqn) bool {
+    const params = ctx.params(eqn);
+    return pr.paramOutline(params) orelse false;
+}
+
+fn lowerOutlinedEqn(
+    arena: std.mem.Allocator,
+    outlined_index: *usize,
+    mlir_ctx: mlir.Context,
+    module: mlir.Module,
+    ctx: ops.types.LowerContext,
+    eqn: pr.Eqn,
+) !void {
+    const inputs = ctx.inputs(eqn);
+    const outputs = ctx.outputs(eqn);
+
+    // v0: all current PR ops are single-output; keep outlining strict.
+    if (outputs.len != 1) return error.InvalidProgram;
+    if (inputs.len == 0) return error.InvalidProgram;
+
+    const out_id = outputs[0];
+    const out_tensor = try ctx.tensorOf(out_id);
+    const out_type = try ctx.tensorToMlirType(out_tensor);
+
+    const callee_name = try std.fmt.allocPrint(arena, "outlined_{d}", .{outlined_index.*});
+    outlined_index.* += 1;
+    const callee_name_z = try arena.allocSentinel(u8, callee_name.len, 0);
+    @memcpy(callee_name_z, callee_name);
+
+    // Build callee signature (inputs -> output).
+    const callee_param_types = try arena.alloc(mlir.Type, inputs.len);
+    const callee_param_locs = try arena.alloc(mlir.Location, inputs.len);
+    for (inputs, 0..) |in_id, i| {
+        const in_tensor = try ctx.tensorOf(in_id);
+        callee_param_types[i] = try ctx.tensorToMlirType(in_tensor);
+        callee_param_locs[i] = ctx.loc;
+    }
+    const callee_result_types = &[_]mlir.Type{out_type};
+    const callee_fn_type = mlir.Type.function(mlir_ctx, callee_param_types, callee_result_types);
+
+    // Build callee body.
+    const callee_entry = try mlir.Block.init(callee_param_types, callee_param_locs);
+
+    const callee_value_map = try arena.alloc(?mlir.Value, ctx.func.avals.len);
+    @memset(callee_value_map, null);
+    for (inputs, 0..) |in_id, i| callee_value_map[@intCast(in_id)] = callee_entry.argument(i);
+
+    const callee_ctx = ops.types.LowerContext{
+        .mlir_ctx = mlir_ctx,
+        .block = callee_entry,
+        .loc = ctx.loc,
+        .value_map = callee_value_map,
+        .func = ctx.func,
+        .arena = arena,
+    };
+
+    try ops.lower(callee_ctx, eqn);
+
+    const callee_out = callee_value_map[@intCast(out_id)] orelse return error.InvalidProgram;
+    const callee_ret = mlir.Operation.make(mlir_ctx, "func.return", .{
+        .operands = &.{callee_out},
+        .verify = false,
+        .location = ctx.loc,
+    });
+    callee_entry.appendOperation(callee_ret);
+
+    const callee_op = mlir.Operation.make(mlir_ctx, "func.func", .{
+        .results = &.{},
+        .blocks = &.{callee_entry},
+        .attributes = &.{
+            .{ "sym_name", mlir.Attribute.string(mlir_ctx, callee_name) },
+            .{ "function_type", mlir.Attribute.type_(callee_fn_type) },
+            // Best-effort: discourage inlining to preserve a visible boundary.
+            .{ "llvm.noinline", mlir.Attribute.unit(mlir_ctx) },
+        },
+        .verify = false,
+        .location = ctx.loc,
+    });
+    module.getBody().appendOperation(callee_op);
+
+    // Emit a call in the original block.
+    const call_operands = try arena.alloc(mlir.Value, inputs.len);
+    for (inputs, 0..) |in_id, i| call_operands[i] = ctx.getValue(in_id) orelse return error.InvalidProgram;
+
+    const call_op = mlir.Operation.make(mlir_ctx, "func.call", .{
+        .results = &.{out_type},
+        .operands = call_operands,
+        .attributes = &.{
+            .{ "callee", mlir.Attribute.symbol(mlir_ctx, callee_name_z) },
+        },
+        .verify = false,
+        .location = ctx.loc,
+    });
+    ctx.block.appendOperation(call_op);
+    ctx.setValue(out_id, call_op.result(0));
 }
 
 fn tensorToMlirType(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !mlir.Type {
@@ -184,4 +286,24 @@ test "lowering supports vjp matmul demo" {
     const bc = try lowerFunctionToMlir(std.testing.allocator, vjp_func, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
+}
+
+test "lowering can outline an equation into a call boundary" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a = try b.paramTensor(.f32, &.{ 2, 3 });
+    const c = try b.paramTensor(.f32, &.{ 3, 2 });
+    const d = try b.emit(.dot, &.{ a, c }, &.{.{ .outline = true }});
+    const func = try b.finish(&.{d});
+    try program.addFunction(func);
+
+    const text = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_text);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "func.call") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "outlined_0") != null);
 }
