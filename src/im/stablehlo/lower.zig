@@ -11,7 +11,7 @@ pub const OutputFormat = enum {
     mlir_bytecode,
 };
 
-fn lowerFunctionToMlirInternal(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
+pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
     pr.validateFunction(func) catch return error.InvalidProgram;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -119,10 +119,6 @@ fn lowerFunctionToMlirInternal(allocator: std.mem.Allocator, func: pr.Function, 
     }
 
     return try writer_state.toOwnedSlice();
-}
-
-pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
-    return lowerFunctionToMlirInternal(allocator, func, out);
 }
 
 fn shouldOutlineEqn(ctx: ops.types.LowerContext, eqn: pr.Eqn) bool {
