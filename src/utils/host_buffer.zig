@@ -65,7 +65,7 @@ pub const Shape = struct {
 };
 
 pub const HostBuffer = struct {
-    data: []u8,
+    data: []align(8) u8,
     shape: Shape,
     dtype: DType,
     allocator: std.mem.Allocator,
@@ -73,7 +73,7 @@ pub const HostBuffer = struct {
 
     pub fn init(allocator: std.mem.Allocator, shape: Shape, dtype: DType) !HostBuffer {
         const num_bytes = shape.numElements() * dtype.sizeInBytes();
-        const data = try allocator.alloc(u8, num_bytes);
+        const data = try allocator.alignedAlloc(u8, .@"8", num_bytes);
 
         // Allocate and copy shape dims
         const dims = try allocator.dupe(usize, shape.dims);
@@ -101,10 +101,11 @@ pub const HostBuffer = struct {
         }
 
         const num_bytes = shape.numElements() * dtype.sizeInBytes();
-        const data_bytes = try allocator.alloc(u8, num_bytes);
+        const data_bytes = try allocator.alignedAlloc(u8, .@"8", num_bytes);
 
         // Copy data as bytes (works for both slices and pointer-to-array)
         const src_bytes = std.mem.sliceAsBytes(data);
+        if (src_bytes.len < num_bytes) return error.InsufficientData;
         @memcpy(data_bytes, src_bytes[0..num_bytes]);
 
         const dims = try allocator.dupe(usize, shape.dims);

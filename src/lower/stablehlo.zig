@@ -1,8 +1,19 @@
+/// StableHLO Lowering
+///
+/// Lowers PR (Program Representation) to StableHLO MLIR.
+/// This is the core PR -> MLIR boundary in the pass-based pipeline.
+///
+/// Provides:
+/// - lowerPass: Pass function for pipeline integration
+/// - lowerFunctionToMlir: Direct lowering API
+///
+/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
 const std = @import("std");
 
-const pr = @import("../../pr/pr.zig");
-const ops = @import("../../pr/ops/ops.zig");
-const mlir = @import("../../ffi/mlir/mlir.zig");
+const pr = @import("../pr/pr.zig");
+const ops = @import("../pr/ops/ops.zig");
+const mlir = @import("../ffi/mlir/mlir.zig");
+const pass = @import("../pipeline/pass.zig");
 
 pub const LowerError = ops.types.LowerError;
 
@@ -11,7 +22,11 @@ pub const OutputFormat = enum {
     mlir_bytecode,
 };
 
-pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, comptime out: OutputFormat) ![]u8 {
+// ============================================================================
+// Core Lowering Implementation
+// ============================================================================
+
+pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, out: OutputFormat) ![]u8 {
     pr.validateFunction(func) catch return error.InvalidProgram;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -233,8 +248,78 @@ fn tensorToMlirType(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !
     return mlir.Type.tensor(dims_i64, ops.types.dtypeToMlirType(ctx, t.dtype));
 }
 
+// ============================================================================
+// Pass Integration
+// ============================================================================
+
+/// Lower pass: PR artifact -> MLIR artifact.
+pub fn lowerPass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyopaque) pass.PassError!void {
+    if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
+
+    const func = artifact.pr;
+
+    const mlir_bytes = switch (ctx.mlir_encoding) {
+        .text => lowerFunctionToMlir(ctx.allocator, func, .mlir_text) catch return error.LoweringFailed,
+        .bytecode => lowerFunctionToMlir(ctx.allocator, func, .mlir_bytecode) catch return error.LoweringFailed,
+    };
+
+    artifact.replace(ctx.allocator, .{
+        .mlir = .{
+            .bytes = mlir_bytes,
+            .encoding = ctx.mlir_encoding,
+        },
+    });
+}
+
+/// Metadata for the lower pass.
+pub const lower_pass_meta = pass.PassMeta{
+    .name = "stablehlo_lower",
+    .input_kind = .pr,
+    .output_kind = .mlir,
+};
+
+/// Validate pass: PR artifact -> PR artifact.
+pub fn validatePass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyopaque) pass.PassError!void {
+    _ = ctx;
+
+    if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
+
+    const func = artifact.pr;
+    pr.validateFunction(func) catch return error.ValidationFailed;
+}
+
+/// Metadata for the validate pass.
+pub const validate_pass_meta = pass.PassMeta{
+    .name = "pr_validate",
+    .input_kind = .pr,
+    .output_kind = .pr,
+};
+
+/// Convenience: lower with encoding preference.
+pub fn lower(
+    allocator: std.mem.Allocator,
+    func: pr.Function,
+    encoding: pass.MlirEncoding,
+) !pass.MlirArtifact {
+    const format: OutputFormat = switch (encoding) {
+        .text => .mlir_text,
+        .bytecode => .mlir_bytecode,
+    };
+
+    const bytes = try lowerFunctionToMlir(allocator, func, format);
+
+    return .{
+        .bytes = bytes,
+        .encoding = encoding,
+    };
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
 test "lowering produces verified bytecode" {
-    var program = try @import("../../frontend/frontend.zig").buildDemoProgram(std.testing.allocator);
+    var program = try @import("../frontend/frontend.zig").buildDemoProgram(std.testing.allocator);
     defer program.deinit();
 
     const func = program.functions[0];
@@ -282,11 +367,11 @@ test "lowering supports custom_call boundary" {
 }
 
 test "lowering supports vjp matmul demo" {
-    var program = try @import("../../frontend/frontend.zig").buildDemoProgram(std.testing.allocator);
+    var program = try @import("../frontend/frontend.zig").buildDemoProgram(std.testing.allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
-    const vjp_func = try @import("../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
+    const vjp_func = try @import("../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
 
     const bc = try lowerFunctionToMlir(std.testing.allocator, vjp_func, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
@@ -331,4 +416,28 @@ test "lowering tags kernelize provider on outlined functions" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "zigrad.kernelize.provider") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tvm") != null);
+}
+
+test "lower pass produces MLIR artifact" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+    const x = try b.paramTensor(.f32, &.{ 2, 3 });
+    const y = try b.paramTensor(.f32, &.{ 3, 2 });
+    const z = try b.dot(x, y);
+    const func = try b.finish(&.{z});
+
+    var ctx = pass.PassContext{
+        .allocator = std.testing.allocator,
+        .mlir_encoding = .bytecode,
+    };
+
+    var output = pass.Artifact{ .pr = func };
+    try lowerPass(&output, &ctx, null);
+    defer output.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(pass.ArtifactKind.mlir, output.kind());
+    try std.testing.expect(output.mlir.bytes.len > 0);
 }
