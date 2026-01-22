@@ -155,6 +155,7 @@ pub const ValidationError = error{
     BroadcastInDimTypeMismatch,
     TransposeTypeMismatch,
     CustomCallTypeMismatch,
+    DuplicateFunctionName,
 };
 
 fn expectVarInRange(func: Function, id: VarId) ValidationError!void {
@@ -409,6 +410,22 @@ pub fn validateFunction(func: Function) ValidationError!void {
                 for (inputs) |in_id| _ = try expectTensor(func, in_id);
             },
         }
+    }
+}
+
+pub fn validateProgram(program: *const Program) ValidationError!void {
+    var i: usize = 0;
+    while (i < program.functions.len) : (i += 1) {
+        var j: usize = i + 1;
+        while (j < program.functions.len) : (j += 1) {
+            if (std.mem.eql(u8, program.functions[i].name, program.functions[j].name)) {
+                return error.DuplicateFunctionName;
+            }
+        }
+    }
+
+    for (program.functions) |func| {
+        try validateFunction(func);
     }
 }
 

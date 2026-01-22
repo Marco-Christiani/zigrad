@@ -26,8 +26,13 @@ pub const OutputFormat = enum {
 // Core Lowering Implementation
 // ============================================================================
 
-pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, out: OutputFormat) ![]u8 {
-    pr.validateFunction(func) catch return error.InvalidProgram;
+pub fn lowerProgramToMlir(
+    allocator: std.mem.Allocator,
+    program: *const pr.Program,
+    entry_name: ?[]const u8,
+    out: OutputFormat,
+) ![]u8 {
+    pr.validateProgram(program) catch return error.InvalidProgram;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -56,72 +61,21 @@ pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, out:
     var module = mlir.Module.init(loc);
     defer module.deinit();
 
-    const param_types = try arena.alloc(mlir.Type, func.params.len);
-    const param_locs = try arena.alloc(mlir.Location, func.params.len);
-    for (func.params, 0..) |param_id, i| {
-        const tensor = func.avals[@intCast(param_id)].asTensor() orelse return error.InvalidProgram;
-        param_types[i] = try tensorToMlirType(ctx, tensor, arena);
-        param_locs[i] = loc;
-    }
+    const entry_index = try findEntryFunction(program, entry_name);
+    const entry_func = program.functions[entry_index];
+    const entry_sym_name = entry_name orelse entry_func.name;
 
-    const result_types = try arena.alloc(mlir.Type, func.returns.len);
-    for (func.returns, 0..) |ret_id, i| {
-        const tensor = func.avals[@intCast(ret_id)].asTensor() orelse return error.InvalidProgram;
-        result_types[i] = try tensorToMlirType(ctx, tensor, arena);
-    }
-
-    const fn_type = mlir.Type.function(ctx, param_types, result_types);
-
-    const entry_block = try mlir.Block.init(param_types, param_locs);
-
-    const value_map = try arena.alloc(?mlir.Value, func.avals.len);
-    @memset(value_map, null);
-    for (func.params, 0..) |param_id, i| {
-        value_map[@intCast(param_id)] = entry_block.argument(i);
-    }
-
-    // Use ops dispatch for lowering
-    const lower_ctx = ops.types.LowerContext{
-        .mlir_ctx = ctx,
-        .block = entry_block,
-        .loc = loc,
-        .value_map = value_map,
-        .func = func,
-        .arena = arena,
-    };
-
-    var outlined_index: usize = 0;
-    for (func.eqns) |eqn| {
-        if (shouldOutlineEqn(lower_ctx, eqn)) {
-            try lowerOutlinedEqn(arena, &outlined_index, ctx, module, lower_ctx, eqn);
-        } else {
-            try ops.lower(lower_ctx, eqn);
+    for (program.functions, 0..) |func, idx| {
+        if (idx != entry_index and std.mem.eql(u8, func.name, entry_sym_name)) {
+            return error.InvalidProgram;
         }
     }
 
-    const ret_values = try arena.alloc(mlir.Value, func.returns.len);
-    for (func.returns, 0..) |ret_id, i| {
-        ret_values[i] = value_map[@intCast(ret_id)] orelse return error.InvalidProgram;
+    for (program.functions, 0..) |func, idx| {
+        const is_entry = idx == entry_index;
+        const sym_name = if (is_entry) entry_sym_name else func.name;
+        try lowerFunctionIntoModule(arena, ctx, module, func, sym_name);
     }
-
-    const return_op = mlir.Operation.make(ctx, "func.return", .{
-        .operands = ret_values,
-        .verify = false,
-        .location = loc,
-    });
-    entry_block.appendOperation(return_op);
-
-    const func_op = mlir.Operation.make(ctx, "func.func", .{
-        .results = &.{},
-        .blocks = &.{entry_block},
-        .attributes = &.{
-            .{ "sym_name", mlir.Attribute.string(ctx, "main") },
-            .{ "function_type", mlir.Attribute.type_(fn_type) },
-        },
-        .verify = false,
-        .location = loc,
-    });
-    module.getBody().appendOperation(func_op);
 
     if (!module.op().verify()) return error.InvalidMlir;
 
@@ -136,6 +90,14 @@ pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, out:
     return try writer_state.toOwnedSlice();
 }
 
+pub fn lowerFunctionToMlir(allocator: std.mem.Allocator, func: pr.Function, out: OutputFormat) ![]u8 {
+    var program = pr.Program.init(allocator);
+    defer program.deinit();
+
+    try program.addFunction(func);
+    return lowerProgramToMlir(allocator, &program, func.name, out);
+}
+
 fn shouldOutlineEqn(ctx: ops.types.LowerContext, eqn: pr.Eqn) bool {
     const params = ctx.params(eqn);
     if (pr.paramOutline(params) orelse false) return true;
@@ -146,6 +108,7 @@ fn shouldOutlineEqn(ctx: ops.types.LowerContext, eqn: pr.Eqn) bool {
 fn lowerOutlinedEqn(
     arena: std.mem.Allocator,
     outlined_index: *usize,
+    outlined_prefix: []const u8,
     mlir_ctx: mlir.Context,
     module: mlir.Module,
     ctx: ops.types.LowerContext,
@@ -163,7 +126,7 @@ fn lowerOutlinedEqn(
     const out_tensor = try ctx.tensorOf(out_id);
     const out_type = try ctx.tensorToMlirType(out_tensor);
 
-    const callee_name = try std.fmt.allocPrint(arena, "outlined_{d}", .{outlined_index.*});
+    const callee_name = try std.fmt.allocPrint(arena, "{s}_outlined_{d}", .{ outlined_prefix, outlined_index.* });
     outlined_index.* += 1;
     const callee_name_z = try arena.allocSentinel(u8, callee_name.len, 0);
     @memcpy(callee_name_z, callee_name);
@@ -242,6 +205,101 @@ fn lowerOutlinedEqn(
     ctx.setValue(out_id, call_op.result(0));
 }
 
+fn lowerFunctionIntoModule(
+    arena: std.mem.Allocator,
+    ctx: mlir.Context,
+    module: mlir.Module,
+    func: pr.Function,
+    sym_name: []const u8,
+) !void {
+    const loc = mlir.Location.unknown(ctx);
+
+    const param_types = try arena.alloc(mlir.Type, func.params.len);
+    const param_locs = try arena.alloc(mlir.Location, func.params.len);
+    for (func.params, 0..) |param_id, i| {
+        const tensor = func.avals[@intCast(param_id)].asTensor() orelse return error.InvalidProgram;
+        param_types[i] = try tensorToMlirType(ctx, tensor, arena);
+        param_locs[i] = loc;
+    }
+
+    const result_types = try arena.alloc(mlir.Type, func.returns.len);
+    for (func.returns, 0..) |ret_id, i| {
+        const tensor = func.avals[@intCast(ret_id)].asTensor() orelse return error.InvalidProgram;
+        result_types[i] = try tensorToMlirType(ctx, tensor, arena);
+    }
+
+    const fn_type = mlir.Type.function(ctx, param_types, result_types);
+
+    const entry_block = try mlir.Block.init(param_types, param_locs);
+
+    const value_map = try arena.alloc(?mlir.Value, func.avals.len);
+    @memset(value_map, null);
+    for (func.params, 0..) |param_id, i| {
+        value_map[@intCast(param_id)] = entry_block.argument(i);
+    }
+
+    const lower_ctx = ops.types.LowerContext{
+        .mlir_ctx = ctx,
+        .block = entry_block,
+        .loc = loc,
+        .value_map = value_map,
+        .func = func,
+        .arena = arena,
+    };
+
+    var outlined_index: usize = 0;
+    const outlined_prefix = if (sym_name.len == 0) "func" else sym_name;
+    for (func.eqns) |eqn| {
+        if (shouldOutlineEqn(lower_ctx, eqn)) {
+            try lowerOutlinedEqn(arena, &outlined_index, outlined_prefix, ctx, module, lower_ctx, eqn);
+        } else {
+            try ops.lower(lower_ctx, eqn);
+        }
+    }
+
+    const ret_values = try arena.alloc(mlir.Value, func.returns.len);
+    for (func.returns, 0..) |ret_id, i| {
+        ret_values[i] = value_map[@intCast(ret_id)] orelse return error.InvalidProgram;
+    }
+
+    const return_op = mlir.Operation.make(ctx, "func.return", .{
+        .operands = ret_values,
+        .verify = false,
+        .location = loc,
+    });
+    entry_block.appendOperation(return_op);
+
+    const func_op = mlir.Operation.make(ctx, "func.func", .{
+        .results = &.{},
+        .blocks = &.{entry_block},
+        .attributes = &.{
+            .{ "sym_name", mlir.Attribute.string(ctx, sym_name) },
+            .{ "function_type", mlir.Attribute.type_(fn_type) },
+        },
+        .verify = false,
+        .location = loc,
+    });
+    module.getBody().appendOperation(func_op);
+}
+
+fn findEntryFunction(program: *const pr.Program, entry_name: ?[]const u8) !usize {
+    if (program.functions.len == 0) return error.InvalidProgram;
+
+    if (entry_name) |name| {
+        for (program.functions, 0..) |func, idx| {
+            if (std.mem.eql(u8, func.name, name)) return idx;
+        }
+        return error.InvalidProgram;
+    }
+
+    for (program.functions, 0..) |func, idx| {
+        if (std.mem.eql(u8, func.name, "main")) return idx;
+    }
+
+    if (program.functions.len == 1) return 0;
+    return error.InvalidProgram;
+}
+
 fn tensorToMlirType(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !mlir.Type {
     const dims_i64 = try arena.alloc(i64, t.shape.dims.len);
     for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
@@ -255,6 +313,7 @@ fn tensorToMlirType(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !
 /// Lower pass: PR artifact -> MLIR artifact.
 pub const LowerPassConfig = struct {
     encoding: pass.MlirEncoding = .bytecode,
+    entry_name: ?[]const u8 = null,
 };
 
 pub fn lowerPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
@@ -263,11 +322,11 @@ pub fn lowerPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*a
     const cfg_ptr = userdata orelse return error.MissingContext;
     const cfg: *LowerPassConfig = @ptrCast(@alignCast(cfg_ptr));
 
-    const func = artifact.pr;
+    const program = artifact.pr;
 
     const mlir_bytes = switch (cfg.encoding) {
-        .text => lowerFunctionToMlir(ctx.allocator, func, .mlir_text) catch return error.LoweringFailed,
-        .bytecode => lowerFunctionToMlir(ctx.allocator, func, .mlir_bytecode) catch return error.LoweringFailed,
+        .text => lowerProgramToMlir(ctx.allocator, program, cfg.entry_name, .mlir_text) catch return error.LoweringFailed,
+        .bytecode => lowerProgramToMlir(ctx.allocator, program, cfg.entry_name, .mlir_bytecode) catch return error.LoweringFailed,
     };
 
     artifact.replace(ctx.allocator, .{
@@ -295,8 +354,8 @@ pub fn validatePass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyop
 
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
-    const func = artifact.pr;
-    pr.validateFunction(func) catch return error.ValidationFailed;
+    const program = artifact.pr;
+    pr.validateProgram(program) catch return error.ValidationFailed;
 }
 
 /// Metadata for the validate pass.
@@ -310,7 +369,8 @@ pub const validate_pass = pass.Pass{
 /// Convenience: lower with encoding preference.
 pub fn lower(
     allocator: std.mem.Allocator,
-    func: pr.Function,
+    program: *const pr.Program,
+    entry_name: ?[]const u8,
     encoding: pass.MlirEncoding,
 ) !pass.MlirArtifact {
     const format: OutputFormat = switch (encoding) {
@@ -318,7 +378,7 @@ pub fn lower(
         .bytecode => .mlir_bytecode,
     };
 
-    const bytes = try lowerFunctionToMlir(allocator, func, format);
+    const bytes = try lowerProgramToMlir(allocator, program, entry_name, format);
 
     return .{
         .bytes = bytes,
@@ -334,8 +394,7 @@ test "lowering produces verified bytecode" {
     var program = try @import("../frontend/frontend.zig").buildDemoProgram(std.testing.allocator);
     defer program.deinit();
 
-    const func = program.functions[0];
-    const bc = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_bytecode);
+    const bc = try lowerProgramToMlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -355,7 +414,7 @@ test "lowering supports reshape/broadcast/transpose" {
     const func = try b.finish(&.{y});
     try program.addFunction(func);
 
-    const bc = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_bytecode);
+    const bc = try lowerProgramToMlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -373,7 +432,7 @@ test "lowering supports custom_call boundary" {
     const func = try b.finish(&.{y});
     try program.addFunction(func);
 
-    const bc = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_bytecode);
+    const bc = try lowerProgramToMlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -385,7 +444,8 @@ test "lowering supports vjp matmul demo" {
     const fwd = program.functions[0];
     const vjp_func = try @import("../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
 
-    const bc = try lowerFunctionToMlir(std.testing.allocator, vjp_func, .mlir_bytecode);
+    try program.addFunction(vjp_func);
+    const bc = try lowerProgramToMlir(std.testing.allocator, &program, "vjp", .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
 }
@@ -403,11 +463,11 @@ test "lowering can outline an equation into a call boundary" {
     const func = try b.finish(&.{d});
     try program.addFunction(func);
 
-    const text = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_text);
+    const text = try lowerProgramToMlir(std.testing.allocator, &program, null, .mlir_text);
     defer std.testing.allocator.free(text);
 
     try std.testing.expect(std.mem.indexOf(u8, text, "func.call") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "outlined_0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "main_outlined_0") != null);
 }
 
 test "lowering tags kernelize provider on outlined functions" {
@@ -423,7 +483,7 @@ test "lowering tags kernelize provider on outlined functions" {
     const func = try b.finish(&.{d});
     try program.addFunction(func);
 
-    const text = try lowerFunctionToMlir(std.testing.allocator, func, .mlir_text);
+    const text = try lowerProgramToMlir(std.testing.allocator, &program, null, .mlir_text);
     defer std.testing.allocator.free(text);
 
     try std.testing.expect(std.mem.indexOf(u8, text, "zigrad.kernelize.provider") != null);
@@ -446,7 +506,8 @@ test "lower pass produces MLIR artifact" {
     };
     var cfg = LowerPassConfig{ .encoding = .bytecode };
 
-    var output = pass.Artifact{ .pr = func };
+    try program.addFunction(func);
+    var output = pass.Artifact{ .pr = &program };
     try lowerPass(&output, &ctx, &cfg);
     defer output.deinit(std.testing.allocator);
 

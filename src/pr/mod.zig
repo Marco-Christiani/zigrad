@@ -18,6 +18,7 @@ pub const Program = core.Program;
 
 pub const ValidationError = core.ValidationError;
 pub const validateFunction = core.validateFunction;
+pub const validateProgram = core.validateProgram;
 
 pub const BuildError = core.BuildError;
 pub const FunctionBuilder = core.FunctionBuilder;

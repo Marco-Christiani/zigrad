@@ -17,5 +17,6 @@ pub const validate_pass = stablehlo.validate_pass;
 
 // Re-export direct lowering API
 pub const lower = stablehlo.lower;
+pub const lowerProgramToMlir = stablehlo.lowerProgramToMlir;
 pub const lowerFunctionToMlir = stablehlo.lowerFunctionToMlir;
 pub const OutputFormat = stablehlo.OutputFormat;

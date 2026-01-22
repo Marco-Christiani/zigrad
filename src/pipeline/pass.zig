@@ -19,7 +19,7 @@ const pjrt_types = @import("../ffi/pjrt/types.zig");
 
 /// Artifact kinds for pass input/output validation.
 pub const ArtifactKind = enum {
-    /// Zigrad PR function (internal, toolchain-neutral)
+    /// Zigrad PR program (internal, toolchain-neutral)
     pr,
 
     /// MLIR module bytes (StableHLO dialect, text or bytecode)
@@ -43,8 +43,8 @@ pub const MlirEncoding = enum {
 /// This is a tagged union representing the various forms that a program
 /// takes as it flows through compilation passes.
 pub const Artifact = union(ArtifactKind) {
-    /// PR function (Zigrad-owned)
-    pr: pr_mod.Function,
+    /// PR program (Zigrad-owned)
+    pr: *pr_mod.Program,
 
     /// MLIR module (serialized bytes)
     mlir: MlirArtifact,
@@ -62,7 +62,7 @@ pub const Artifact = union(ArtifactKind) {
     /// Free owned resources. Not all variants own memory.
     pub fn deinit(self: *Artifact, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .pr => {}, // PR is borrowed from Program, not owned here
+            .pr => {}, // PR program is borrowed, not owned here
             .mlir => |*m| m.deinit(allocator),
             .ea => |*e| e.deinit(),
             .serialized_ea => |bytes| allocator.free(bytes),
@@ -185,8 +185,9 @@ test "artifact kind tagging" {
     defer b.deinit();
     const x = try b.paramTensor(.f32, &.{ 2, 3 });
     const func = try b.finish(&.{x});
+    try program.addFunction(func);
 
-    const artifact = Artifact{ .pr = func };
+    const artifact = Artifact{ .pr = &program };
     try testing.expectEqual(ArtifactKind.pr, artifact.kind());
 }
 

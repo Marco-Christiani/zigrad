@@ -46,10 +46,8 @@ pub fn main() !void {
 
             var program = try zg.frontend.buildDemoProgram(gpa);
             defer program.deinit();
-            const func = program.functions[0];
-
             // Lower PR -> MLIR
-            const mlir_bytes = try zg.lower.lowerFunctionToMlir(gpa, func, .mlir_bytecode);
+            const mlir_bytes = try zg.lower.lowerProgramToMlir(gpa, &program, "main", .mlir_bytecode);
             defer gpa.free(mlir_bytes);
 
             // Compile and serialize
@@ -81,9 +79,10 @@ pub fn main() !void {
     var program = try zg.frontend.buildDemoProgram(gpa);
     defer program.deinit();
 
-    const func = program.functions[0];
-
-    var lower_cfg = zg.lower.LowerPassConfig{ .encoding = .bytecode };
+    var lower_cfg = zg.lower.LowerPassConfig{
+        .encoding = .bytecode,
+        .entry_name = "main",
+    };
     var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
     const passes = [_]zg.pipeline.Pass{
@@ -97,7 +96,7 @@ pub fn main() !void {
         .allocator = gpa,
     };
 
-    var artifact = try pipeline.run(.{ .pr = func }, &ctx);
+    var artifact = try pipeline.run(.{ .pr = &program }, &ctx);
     defer artifact.deinit(gpa);
 
     switch (artifact) {
@@ -210,8 +209,12 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, backend: *zg.backend.Pjrt
     const x = try b.paramTensor(.f32, &.{ 2, 3 });
     const y = try b.customCall("zigrad.test.missing_handler", &.{x}, x);
     const func = try b.finish(&.{y});
+    try program.addFunction(func);
 
-    var lower_cfg = zg.lower.LowerPassConfig{ .encoding = if (emit_text) .text else .bytecode };
+    var lower_cfg = zg.lower.LowerPassConfig{
+        .encoding = if (emit_text) .text else .bytecode,
+        .entry_name = "main",
+    };
     var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
     const passes = [_]zg.pipeline.Pass{
@@ -226,7 +229,7 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, backend: *zg.backend.Pjrt
     };
 
     // Compile (expected to fail)
-    var artifact = pipeline.run(.{ .pr = func }, &ctx) catch |err| {
+    var artifact = pipeline.run(.{ .pr = &program }, &ctx) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -242,8 +245,12 @@ fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, de
 
     const fwd = program.functions[0];
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
+    try program.addFunction(vjp);
 
-    var lower_cfg = zg.lower.LowerPassConfig{ .encoding = if (emit_text) .text else .bytecode };
+    var lower_cfg = zg.lower.LowerPassConfig{
+        .encoding = if (emit_text) .text else .bytecode,
+        .entry_name = "main_vjp",
+    };
     var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
     const passes = [_]zg.pipeline.Pass{
@@ -257,7 +264,7 @@ fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, de
         .allocator = allocator,
     };
 
-    var artifact = try pipeline.run(.{ .pr = vjp }, &ctx);
+    var artifact = try pipeline.run(.{ .pr = &program }, &ctx);
     defer artifact.deinit(allocator);
 
     const exe: *zg.backend.pjrt.LoadedExecutable = switch (artifact) {
