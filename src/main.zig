@@ -83,15 +83,29 @@ pub fn main() !void {
 
     const func = program.functions[0];
 
-    // Lower PR -> MLIR
-    const mlir_bytes = try zg.lower.lowerFunctionToMlir(gpa, func, .mlir_bytecode);
-    defer gpa.free(mlir_bytes);
+    var lower_cfg = zg.lower.LowerPassConfig{ .encoding = .bytecode };
+    var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
-    // Compile MLIR -> EA
-    var exe = try backend.compile(device, mlir_bytes, .mlir_bytecode, .{});
-    defer exe.deinit();
+    const passes = [_]zg.pipeline.Pass{
+        zg.lower.validate_pass,
+        zg.lower.lowerPassWithConfig(&lower_cfg),
+        backend.compilePass(&compile_cfg),
+    };
+    const pipeline = zg.pipeline.Pipeline{ .passes = &passes };
 
-    return runDemoExecutable(gpa, &backend, device, &exe);
+    var ctx = zg.pipeline.PassContext{
+        .allocator = gpa,
+    };
+
+    var artifact = try pipeline.run(.{ .pr = func }, &ctx);
+    defer artifact.deinit(gpa);
+
+    switch (artifact) {
+        .ea => |*ea| switch (ea.*) {
+            .pjrt => |*exe| return runDemoExecutable(gpa, &backend, device, exe),
+        },
+        else => return error.UnexpectedArtifact,
+    }
 }
 
 fn writeBytesToPath(path: []const u8, bytes: []const u8) !void {
@@ -197,19 +211,26 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, backend: *zg.backend.Pjrt
     const y = try b.customCall("zigrad.test.missing_handler", &.{x}, x);
     const func = try b.finish(&.{y});
 
-    // Lower PR -> MLIR
-    const format: zg.lower.OutputFormat = if (emit_text) .mlir_text else .mlir_bytecode;
-    const mlir_bytes = try zg.lower.lowerFunctionToMlir(allocator, func, format);
-    defer allocator.free(mlir_bytes);
+    var lower_cfg = zg.lower.LowerPassConfig{ .encoding = if (emit_text) .text else .bytecode };
+    var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
-    const program_format: zg.backend.pjrt.ProgramFormat = if (emit_text) .mlir_text else .mlir_bytecode;
+    const passes = [_]zg.pipeline.Pass{
+        zg.lower.validate_pass,
+        zg.lower.lowerPassWithConfig(&lower_cfg),
+        backend.compilePass(&compile_cfg),
+    };
+    const pipeline = zg.pipeline.Pipeline{ .passes = &passes };
 
-    // Compile MLIR -> EA (expected to fail)
-    var exe = backend.compile(device, mlir_bytes, program_format, .{}) catch |err| {
+    var ctx = zg.pipeline.PassContext{
+        .allocator = allocator,
+    };
+
+    // Compile (expected to fail)
+    var artifact = pipeline.run(.{ .pr = func }, &ctx) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
-    defer exe.deinit();
+    defer artifact.deinit(allocator);
 
     std.log.err("unexpected: custom_call compiled without a handler", .{});
     return error.UnexpectedSuccess;
@@ -222,16 +243,29 @@ fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, de
     const fwd = program.functions[0];
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
 
-    // Lower PR -> MLIR
-    const format: zg.lower.OutputFormat = if (emit_text) .mlir_text else .mlir_bytecode;
-    const mlir_bytes = try zg.lower.lowerFunctionToMlir(allocator, vjp, format);
-    defer allocator.free(mlir_bytes);
+    var lower_cfg = zg.lower.LowerPassConfig{ .encoding = if (emit_text) .text else .bytecode };
+    var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
-    const program_format: zg.backend.pjrt.ProgramFormat = if (emit_text) .mlir_text else .mlir_bytecode;
+    const passes = [_]zg.pipeline.Pass{
+        zg.lower.validate_pass,
+        zg.lower.lowerPassWithConfig(&lower_cfg),
+        backend.compilePass(&compile_cfg),
+    };
+    const pipeline = zg.pipeline.Pipeline{ .passes = &passes };
 
-    // Compile MLIR -> EA
-    var exe = try backend.compile(device, mlir_bytes, program_format, .{});
-    defer exe.deinit();
+    var ctx = zg.pipeline.PassContext{
+        .allocator = allocator,
+    };
+
+    var artifact = try pipeline.run(.{ .pr = vjp }, &ctx);
+    defer artifact.deinit(allocator);
+
+    const exe: *zg.backend.pjrt.LoadedExecutable = switch (artifact) {
+        .ea => |*ea| switch (ea.*) {
+            .pjrt => |*p| p,
+        },
+        else => return error.UnexpectedArtifact,
+    };
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
     const A = [_]f32{

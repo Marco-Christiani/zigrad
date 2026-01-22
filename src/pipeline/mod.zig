@@ -6,7 +6,7 @@
 /// - Artifact: Tagged union representing IR at various stages (PR, MLIR, EA)
 /// - PassContext: Shared state threaded through passes
 /// - Pass: Pass descriptor (metadata + run fn + config)
-/// - PassMeta: Metadata declaring input/output artifact kinds
+/// - Pass: Pass descriptor (name + input/output kinds + run)
 ///
 /// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
 pub const pass = @import("pass.zig");
@@ -18,10 +18,6 @@ pub const MlirArtifact = pass.MlirArtifact;
 pub const MlirEncoding = pass.MlirEncoding;
 pub const ExecutableArtifact = pass.ExecutableArtifact;
 pub const PassContext = pass.PassContext;
-pub const PassRunFn = pass.PassRunFn;
 pub const Pass = pass.Pass;
-pub const PassMeta = pass.PassMeta;
 pub const PassError = pass.PassError;
 pub const Pipeline = pass.Pipeline;
-
-pub const runPasses = pass.runPasses;

@@ -253,12 +253,19 @@ fn tensorToMlirType(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !
 // ============================================================================
 
 /// Lower pass: PR artifact -> MLIR artifact.
-pub fn lowerPass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyopaque) pass.PassError!void {
+pub const LowerPassConfig = struct {
+    encoding: pass.MlirEncoding = .bytecode,
+};
+
+pub fn lowerPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
+
+    const cfg_ptr = userdata orelse return error.MissingContext;
+    const cfg: *LowerPassConfig = @ptrCast(@alignCast(cfg_ptr));
 
     const func = artifact.pr;
 
-    const mlir_bytes = switch (ctx.mlir_encoding) {
+    const mlir_bytes = switch (cfg.encoding) {
         .text => lowerFunctionToMlir(ctx.allocator, func, .mlir_text) catch return error.LoweringFailed,
         .bytecode => lowerFunctionToMlir(ctx.allocator, func, .mlir_bytecode) catch return error.LoweringFailed,
     };
@@ -266,17 +273,21 @@ pub fn lowerPass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyopaqu
     artifact.replace(ctx.allocator, .{
         .mlir = .{
             .bytes = mlir_bytes,
-            .encoding = ctx.mlir_encoding,
+            .encoding = cfg.encoding,
         },
     });
 }
 
 /// Metadata for the lower pass.
-pub const lower_pass_meta = pass.PassMeta{
-    .name = "stablehlo_lower",
-    .input_kind = .pr,
-    .output_kind = .mlir,
-};
+pub fn lowerPassWithConfig(config: *LowerPassConfig) pass.Pass {
+    return .{
+        .name = "stablehlo_lower",
+        .input_kind = .pr,
+        .output_kind = .mlir,
+        .run = lowerPass,
+        .userdata = config,
+    };
+}
 
 /// Validate pass: PR artifact -> PR artifact.
 pub fn validatePass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyopaque) pass.PassError!void {
@@ -289,10 +300,11 @@ pub fn validatePass(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyop
 }
 
 /// Metadata for the validate pass.
-pub const validate_pass_meta = pass.PassMeta{
+pub const validate_pass = pass.Pass{
     .name = "pr_validate",
     .input_kind = .pr,
     .output_kind = .pr,
+    .run = validatePass,
 };
 
 /// Convenience: lower with encoding preference.
@@ -431,11 +443,11 @@ test "lower pass produces MLIR artifact" {
 
     var ctx = pass.PassContext{
         .allocator = std.testing.allocator,
-        .mlir_encoding = .bytecode,
     };
+    var cfg = LowerPassConfig{ .encoding = .bytecode };
 
     var output = pass.Artifact{ .pr = func };
-    try lowerPass(&output, &ctx, null);
+    try lowerPass(&output, &ctx, &cfg);
     defer output.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(pass.ArtifactKind.mlir, output.kind());

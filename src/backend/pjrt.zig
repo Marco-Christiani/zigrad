@@ -180,11 +180,9 @@ pub const Backend = struct {
     pub fn compilePass(self: *Backend, config: *CompilePassConfig) pass.Pass {
         config.client = &self.client;
         return .{
-            .meta = .{
-                .name = "pjrt_compile",
-                .input_kind = .mlir,
-                .output_kind = .ea,
-            },
+            .name = "pjrt_compile",
+            .input_kind = .mlir,
+            .output_kind = .ea,
             .run = compilePassRun,
             .userdata = config,
         };

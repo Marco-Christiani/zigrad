@@ -10,9 +10,10 @@ pub const stablehlo = @import("stablehlo.zig");
 
 // Re-export pass functions
 pub const lowerPass = stablehlo.lowerPass;
-pub const lower_pass_meta = stablehlo.lower_pass_meta;
+pub const LowerPassConfig = stablehlo.LowerPassConfig;
+pub const lowerPassWithConfig = stablehlo.lowerPassWithConfig;
 pub const validatePass = stablehlo.validatePass;
-pub const validate_pass_meta = stablehlo.validate_pass_meta;
+pub const validate_pass = stablehlo.validate_pass;
 
 // Re-export direct lowering API
 pub const lower = stablehlo.lower;

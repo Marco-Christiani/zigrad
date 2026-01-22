@@ -104,9 +104,6 @@ pub const ExecutableArtifact = union(enum) {
 /// and other shared resources without needing to thread them explicitly.
 pub const PassContext = struct {
     allocator: std.mem.Allocator,
-
-    /// Optional: MLIR encoding preference
-    mlir_encoding: MlirEncoding = .bytecode,
 };
 
 /// Pass execution errors
@@ -133,23 +130,12 @@ pub const PassError = error{
     OutOfMemory,
 };
 
-/// Pass metadata: declares input/output kinds for composition validation.
-pub const PassMeta = struct {
+/// Pass descriptor: metadata + function + optional user config.
+pub const Pass = struct {
     name: []const u8,
     input_kind: ArtifactKind,
     output_kind: ArtifactKind,
-};
-
-/// Pass function signature.
-///
-/// A pass mutates the provided artifact in place. If it needs to replace
-/// the artifact, use Artifact.replace().
-pub const PassRunFn = *const fn (*Artifact, *PassContext, ?*anyopaque) PassError!void;
-
-/// Pass descriptor: metadata + function + optional user config.
-pub const Pass = struct {
-    meta: PassMeta,
-    run: PassRunFn,
+    run: *const fn (*Artifact, *PassContext, ?*anyopaque) PassError!void,
     userdata: ?*anyopaque = null,
 };
 
@@ -160,7 +146,7 @@ pub const Pipeline = struct {
     pub fn validate(self: *const Pipeline) PassError!void {
         if (self.passes.len < 2) return;
         for (0..self.passes.len - 1) |i| {
-            if (self.passes[i].meta.output_kind != self.passes[i + 1].meta.input_kind) {
+            if (self.passes[i].output_kind != self.passes[i + 1].input_kind) {
                 return error.ArtifactKindMismatch;
             }
         }
@@ -169,26 +155,21 @@ pub const Pipeline = struct {
     pub fn run(self: *const Pipeline, initial: Artifact, ctx: *PassContext) PassError!Artifact {
         try self.validate();
 
-        if (self.passes.len > 0 and initial.kind() != self.passes[0].meta.input_kind) {
+        if (self.passes.len > 0 and initial.kind() != self.passes[0].input_kind) {
             return error.ArtifactKindMismatch;
         }
 
         var current = initial;
+        errdefer current.deinit(ctx.allocator);
         for (self.passes) |p| {
-            if (current.kind() != p.meta.input_kind) return error.ArtifactKindMismatch;
+            if (current.kind() != p.input_kind) return error.ArtifactKindMismatch;
             try p.run(&current, ctx, p.userdata);
-            if (current.kind() != p.meta.output_kind) return error.ArtifactKindMismatch;
+            if (current.kind() != p.output_kind) return error.ArtifactKindMismatch;
         }
 
         return current;
     }
 };
-
-/// Convenience: run a pipeline without constructing a Pipeline struct explicitly.
-pub fn runPasses(passes: []const Pass, initial: Artifact, ctx: *PassContext) PassError!Artifact {
-    const pipeline = Pipeline{ .passes = passes };
-    return pipeline.run(initial, ctx);
-}
 
 // ============================================================================
 // Tests
@@ -218,9 +199,9 @@ test "pass chain validation" {
     }.run;
 
     const passes = [_]Pass{
-        .{ .meta = .{ .name = "validate", .input_kind = .pr, .output_kind = .pr }, .run = noop },
-        .{ .meta = .{ .name = "lower", .input_kind = .pr, .output_kind = .mlir }, .run = noop },
-        .{ .meta = .{ .name = "compile", .input_kind = .mlir, .output_kind = .ea }, .run = noop },
+        .{ .name = "validate", .input_kind = .pr, .output_kind = .pr, .run = noop },
+        .{ .name = "lower", .input_kind = .pr, .output_kind = .mlir, .run = noop },
+        .{ .name = "compile", .input_kind = .mlir, .output_kind = .ea, .run = noop },
     };
 
     const pipeline = Pipeline{ .passes = &passes };
@@ -236,8 +217,8 @@ test "pass chain validation rejects mismatch" {
     }.run;
 
     const passes = [_]Pass{
-        .{ .meta = .{ .name = "validate", .input_kind = .pr, .output_kind = .pr }, .run = noop },
-        .{ .meta = .{ .name = "compile", .input_kind = .mlir, .output_kind = .ea }, .run = noop },
+        .{ .name = "validate", .input_kind = .pr, .output_kind = .pr, .run = noop },
+        .{ .name = "compile", .input_kind = .mlir, .output_kind = .ea, .run = noop },
     };
 
     const pipeline = Pipeline{ .passes = &passes };
