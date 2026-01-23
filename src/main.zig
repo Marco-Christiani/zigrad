@@ -16,7 +16,7 @@ pub fn main() !void {
 
     while (arg_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            try printUsage();
+            try print_usage();
             return;
         }
         if (std.mem.eql(u8, arg, "--dump-pr")) {
@@ -27,7 +27,7 @@ pub fn main() !void {
         if (std.mem.startsWith(u8, arg, "--dump-pr=")) {
             const path = arg["--dump-pr=".len..];
             if (path.len == 0) {
-                try printUsage();
+                try print_usage();
                 return error.InvalidArguments;
             }
             dump_pr_cfg = .{ .target = .file, .path = path };
@@ -42,7 +42,7 @@ pub fn main() !void {
         if (std.mem.startsWith(u8, arg, "--dump-mlir=")) {
             const path = arg["--dump-mlir=".len..];
             if (path.len == 0) {
-                try printUsage();
+                try print_usage();
                 return error.InvalidArguments;
             }
             dump_mlir_cfg = .{ .target = .file, .path = path };
@@ -50,20 +50,20 @@ pub fn main() !void {
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) {
-            try printUsage();
+            try print_usage();
             return error.InvalidArguments;
         }
         if (mode == null) {
             mode = arg;
         } else {
-            try printUsage();
+            try print_usage();
             return error.InvalidArguments;
         }
     }
 
     if (mode) |m| {
         if (std.mem.eql(u8, m, "print-pr")) {
-            return printPr(gpa);
+            return print_pr(gpa);
         }
     }
 
@@ -77,7 +77,7 @@ pub fn main() !void {
     var backend = try zg.backend.PjrtBackend.init(gpa, plugin_path);
     defer backend.deinit();
 
-    const devs = try backend.getDevices(gpa);
+    const devs = try backend.get_devices(gpa);
     defer gpa.free(devs);
     if (devs.len == 0) return error.NoDevices;
     const device = &devs[0];
@@ -85,65 +85,65 @@ pub fn main() !void {
     if (mode) |m| {
         if (std.mem.eql(u8, m, "custom-call-neg")) {
             const emit_text = have_dump_mlir;
-            return runCustomCallNegative(gpa, &backend, device, emit_text);
+            return run_custom_call_negative(gpa, &backend, device, emit_text);
         }
         if (std.mem.eql(u8, m, "vjp-demo")) {
             const emit_text = have_dump_mlir;
-            return runVjpDemo(gpa, &backend, device, emit_text);
+            return run_vjp_demo(gpa, &backend, device, emit_text);
         }
         if (std.mem.eql(u8, m, "jit-cache-save")) {
             const path = arg_it.next() orelse {
-                try printUsage();
+                try print_usage();
                 return error.InvalidArguments;
             };
 
-            var program = try zg.frontend.buildDemoProgram(gpa);
+            var program = try zg.frontend.build_demo_program(gpa);
             defer program.deinit();
             // Lower PR -> MLIR
-            const mlir_bytes = try zg.lower.lowerProgramToMlir(gpa, &program, "main", .mlir_bytecode);
+            const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
             defer gpa.free(mlir_bytes);
 
             // Compile and serialize
-            const serialized = try backend.compileSerialized(device, mlir_bytes, .mlir_bytecode, .{});
+            const serialized = try backend.compile_serialized(device, mlir_bytes, .mlir_bytecode, .{});
             defer gpa.free(serialized);
 
-            try writeBytesToPath(path, serialized);
+            try write_bytes_to_path(path, serialized);
             std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, path });
             return;
         }
         if (std.mem.eql(u8, m, "jit-cache-run")) {
             const path = arg_it.next() orelse {
-                try printUsage();
+                try print_usage();
                 return error.InvalidArguments;
             };
 
-            const serialized = try readBytesFromPath(gpa, path);
+            const serialized = try read_bytes_from_path(gpa, path);
             defer gpa.free(serialized);
 
-            var exe = try backend.loadSerializedExecutable(serialized, null);
+            var exe = try backend.load_serialized_executable(serialized, null);
             defer exe.deinit();
 
-            return runDemoExecutable(gpa, &backend, device, &exe);
+            return run_demo_executable(gpa, &backend, device, &exe);
         }
         std.log.err("unknown mode: {s}", .{m});
-        try printUsage();
+        try print_usage();
         return error.InvalidArguments;
     }
 
-    var program = try zg.frontend.buildDemoProgram(gpa);
+    var program = try zg.frontend.build_demo_program(gpa);
     defer program.deinit();
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (have_dump_mlir) .text else .bytecode;
-    var exe = try compileProgram(&backend, gpa, &program, device, .{
+    var exe = try compile_program(&backend, gpa, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
     }, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
     defer exe.deinit();
 
-    return runDemoExecutable(gpa, &backend, device, &exe);
+    return run_demo_executable(gpa, &backend, device, &exe);
 }
 
-fn writeBytesToPath(path: []const u8, bytes: []const u8) !void {
+fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.createFileAbsolute(path, .{ .truncate = true })
     else
@@ -152,7 +152,7 @@ fn writeBytesToPath(path: []const u8, bytes: []const u8) !void {
     try file.writeAll(bytes);
 }
 
-fn readBytesFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn read_bytes_from_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.openFileAbsolute(path, .{})
     else
@@ -161,7 +161,7 @@ fn readBytesFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return file.readToEndAlloc(allocator, std.math.maxInt(usize));
 }
 
-fn runDemoExecutable(
+fn run_demo_executable(
     allocator: std.mem.Allocator,
     backend: *zg.backend.PjrtBackend,
     device: *const zg.backend.pjrt.Device,
@@ -186,22 +186,22 @@ fn runDemoExecutable(
     const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
     const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
 
-    var host_a = try zg.utils.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zg.utils.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zg.utils.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try backend.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
+    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
     defer dev_a.deinit();
-    var dev_b = try backend.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
+    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
     defer dev_b.deinit();
-    var dev_c = try backend.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
+    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
     defer dev_c.deinit();
 
     const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c });
@@ -214,11 +214,11 @@ fn runDemoExecutable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try outputs[0].toHost(out_host.data);
+    var ev = try outputs[0].to_host(out_host.data);
     defer ev.deinit();
     try ev.await_();
 
-    const out = out_host.asSlice(f32)[0..4];
+    const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{
         120.0, 132.0,
         282.0, 312.0,
@@ -235,19 +235,19 @@ fn runDemoExecutable(
     std.log.info("OK: demo output matches expected", .{});
 }
 
-fn runCustomCallNegative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, emit_text: bool) !void {
+fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, emit_text: bool) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
     var b = try zg.pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const x = try b.paramTensor(.f32, &.{ 2, 3 });
-    const y = try b.customCall("zigrad.test.missing_handler", &.{x}, x);
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
+    const y = try b.custom_call("zigrad.test.missing_handler", &.{x}, x);
     const func = try b.finish(&.{y});
-    try program.addFunction(func);
+    try program.add_function(func);
 
-    var exe = compileProgram(backend, allocator, &program, device, .{
+    var exe = compile_program(backend, allocator, &program, device, .{
         .encoding = if (emit_text) .text else .bytecode,
         .entry_name = "main",
     }, null, null) catch |err| {
@@ -260,15 +260,15 @@ fn runCustomCallNegative(allocator: std.mem.Allocator, backend: *zg.backend.Pjrt
     return error.UnexpectedSuccess;
 }
 
-fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, emit_text: bool) !void {
-    var program = try zg.frontend.buildDemoProgram(allocator);
+fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, emit_text: bool) !void {
+    var program = try zg.frontend.build_demo_program(allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
-    try program.addFunction(vjp);
+    try program.add_function(vjp);
 
-    var exe = try compileProgram(backend, allocator, &program, device, .{
+    var exe = try compile_program(backend, allocator, &program, device, .{
         .encoding = if (emit_text) .text else .bytecode,
         .entry_name = "main_vjp",
     }, null, null);
@@ -297,26 +297,26 @@ fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, de
     const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
     const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
 
-    var host_a = try zg.utils.HostBuffer.fromSlice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zg.utils.HostBuffer.fromSlice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zg.utils.HostBuffer.fromSlice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
-    var host_ct = try zg.utils.HostBuffer.fromSlice(allocator, &CtOut, shape_c, .f32);
+    var host_ct = try zg.utils.HostBuffer.from_slice(allocator, &CtOut, shape_c, .f32);
     defer host_ct.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try backend.bufferFromHost(device, host_a.data, .f32, dims_a[0..]);
+    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
     defer dev_a.deinit();
-    var dev_b = try backend.bufferFromHost(device, host_b.data, .f32, dims_b[0..]);
+    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
     defer dev_b.deinit();
-    var dev_c = try backend.bufferFromHost(device, host_c.data, .f32, dims_c[0..]);
+    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
     defer dev_c.deinit();
-    var dev_ct = try backend.bufferFromHost(device, host_ct.data, .f32, dims_c[0..]);
+    var dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
     defer dev_ct.deinit();
 
     const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
@@ -334,20 +334,20 @@ fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, de
     var out_c = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
-    var ev_a = try outputs[0].toHost(out_a.data);
+    var ev_a = try outputs[0].to_host(out_a.data);
     defer ev_a.deinit();
-    var ev_b = try outputs[1].toHost(out_b.data);
+    var ev_b = try outputs[1].to_host(out_b.data);
     defer ev_b.deinit();
-    var ev_c = try outputs[2].toHost(out_c.data);
+    var ev_c = try outputs[2].to_host(out_c.data);
     defer ev_c.deinit();
 
     try ev_a.await_();
     try ev_b.await_();
     try ev_c.await_();
 
-    const got_a = out_a.asSlice(f32)[0..6];
-    const got_b = out_b.asSlice(f32)[0..6];
-    const got_c = out_c.asSlice(f32)[0..4];
+    const got_a = out_a.as_slice(f32)[0..6];
+    const got_b = out_b.as_slice(f32)[0..6];
+    const got_c = out_c.as_slice(f32)[0..4];
 
     const expected_a = [_]f32{
         30.0, 38.0, 46.0,
@@ -363,14 +363,14 @@ fn runVjpDemo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, de
         143.0, 158.0,
     };
 
-    try expectAllClose("dA", got_a, expected_a[0..], 1e-4);
-    try expectAllClose("dB", got_b, expected_b[0..], 1e-4);
-    try expectAllClose("dC", got_c, expected_c[0..], 1e-4);
+    try expect_all_close("dA", got_a, expected_a[0..], 1e-4);
+    try expect_all_close("dB", got_b, expected_b[0..], 1e-4);
+    try expect_all_close("dC", got_c, expected_c[0..], 1e-4);
 
     std.log.info("OK: vjp-demo gradients match expected", .{});
 }
 
-fn compileProgram(
+fn compile_program(
     backend: *zg.backend.PjrtBackend,
     allocator: std.mem.Allocator,
     program: *zg.pr.Program,
@@ -390,18 +390,18 @@ fn compileProgram(
     if (dump_pr) |cfg| {
         dump_pr_local = cfg.*;
         dump_pr_local.?.entry_name = dump_pr_local.?.entry_name orelse lower_cfg.entry_name;
-        try passes.append(allocator, zg.pipeline.dumpPrPassWithConfig(&dump_pr_local.?));
+        try passes.append(allocator, zg.pipeline.dump_pr_pass_with_config(&dump_pr_local.?));
     }
     try passes.append(allocator, zg.lower.validate_pass);
-    try passes.append(allocator, zg.lower.lowerPassWithConfig(&lower_cfg_mut));
+    try passes.append(allocator, zg.lower.lower_pass_with_config(&lower_cfg_mut));
 
     var dump_mlir_local: ?zg.pipeline.DumpConfig = null;
     if (dump_mlir) |cfg| {
         dump_mlir_local = cfg.*;
         dump_mlir_local.?.entry_name = dump_mlir_local.?.entry_name orelse lower_cfg.entry_name;
-        try passes.append(allocator, zg.pipeline.dumpMlirPassWithConfig(&dump_mlir_local.?));
+        try passes.append(allocator, zg.pipeline.dump_mlir_pass_with_config(&dump_mlir_local.?));
     }
-    try passes.append(allocator, backend.compilePass(&compile_cfg));
+    try passes.append(allocator, backend.compile_pass(&compile_cfg));
 
     const pipeline = zg.pipeline.Pipeline{ .passes = passes.items };
 
@@ -419,7 +419,7 @@ fn compileProgram(
     };
 }
 
-fn expectAllClose(label: []const u8, got: []const f32, expected: []const f32, tol: f32) !void {
+fn expect_all_close(label: []const u8, got: []const f32, expected: []const f32, tol: f32) !void {
     if (got.len != expected.len) return error.LengthMismatch;
     for (got, 0..) |v, i| {
         const diff = @abs(v - expected[i]);
@@ -430,8 +430,8 @@ fn expectAllClose(label: []const u8, got: []const f32, expected: []const f32, to
     }
 }
 
-fn printPr(allocator: std.mem.Allocator) !void {
-    var program = try zg.frontend.buildDemoProgram(allocator);
+fn print_pr(allocator: std.mem.Allocator) !void {
+    var program = try zg.frontend.build_demo_program(allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
@@ -448,7 +448,7 @@ fn printPr(allocator: std.mem.Allocator) !void {
     try zg.pr.zxpr.emit(vjp_func, stdout);
 }
 
-fn printUsage() !void {
+fn print_usage() !void {
     var buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&buffer);
     const out = &stdout_writer.interface;

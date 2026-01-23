@@ -25,5 +25,5 @@ pub const Pipeline = pass.Pipeline;
 pub const dump = @import("dump.zig");
 pub const DumpConfig = dump.DumpConfig;
 pub const DumpTarget = dump.DumpTarget;
-pub const dumpPrPassWithConfig = dump.dumpPrPassWithConfig;
-pub const dumpMlirPassWithConfig = dump.dumpMlirPassWithConfig;
+pub const dump_pr_pass_with_config = dump.dump_pr_pass_with_config;
+pub const dump_mlir_pass_with_config = dump.dump_mlir_pass_with_config;

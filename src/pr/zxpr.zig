@@ -56,7 +56,7 @@ pub const Emitter = struct {
             try w.print("; params ({d})\n", .{self.func.params.len});
             for (self.func.params) |param_id| {
                 try w.writeAll(ind);
-                try self.emitVarWithType(param_id);
+                try self.emit_var_with_type(param_id);
                 try w.writeAll("\n");
             }
         }
@@ -67,7 +67,7 @@ pub const Emitter = struct {
             try w.print("; body ({d} ops)\n", .{self.func.eqns.len});
             for (self.func.eqns) |eqn| {
                 try w.writeAll(ind);
-                try self.emitLet(eqn);
+                try self.emit_let(eqn);
                 try w.writeAll("\n");
             }
         }
@@ -80,7 +80,7 @@ pub const Emitter = struct {
             try w.writeAll("in ");
             for (self.func.returns, 0..) |ret_id, i| {
                 if (i > 0) try w.writeAll(", ");
-                try self.emitVarName(ret_id);
+                try self.emit_var_name(ret_id);
             }
             try w.writeAll("\n");
         }
@@ -92,17 +92,17 @@ pub const Emitter = struct {
     // Helpers
     // ====================================================================
 
-    fn emitVarName(self: *Self, id: pr.VarId) !void {
-        try self.writer.print("{s}", .{varName(id)});
+    fn emit_var_name(self: *Self, id: pr.VarId) !void {
+        try self.writer.print("{s}", .{var_name(id)});
     }
 
-    fn emitVarWithType(self: *Self, id: pr.VarId) !void {
-        try self.emitVarName(id);
+    fn emit_var_with_type(self: *Self, id: pr.VarId) !void {
+        try self.emit_var_name(id);
         try self.writer.writeAll(": ");
-        try self.emitType(self.func.avals[@intCast(id)]);
+        try self.emit_type(self.func.avals[@intCast(id)]);
     }
 
-    fn emitType(self: *Self, aval: pr.Aval) !void {
+    fn emit_type(self: *Self, aval: pr.Aval) !void {
         switch (aval) {
             .tensor => |t| {
                 try self.writer.print("{s}[", .{@tagName(t.dtype)});
@@ -115,7 +115,7 @@ pub const Emitter = struct {
         }
     }
 
-    fn emitLet(self: *Self, eqn: pr.Eqn) !void {
+    fn emit_let(self: *Self, eqn: pr.Eqn) !void {
         const outputs = eqn.outputs.slice(pr.VarId, self.func.varids_store);
         const inputs = eqn.inputs.slice(pr.VarId, self.func.varids_store);
         const params = eqn.params.slice(pr.Param, self.func.params_store);
@@ -125,7 +125,7 @@ pub const Emitter = struct {
         // Output binding(s)
         for (outputs, 0..) |out_id, i| {
             if (i > 0) try self.writer.writeAll(", ");
-            try self.emitVarWithType(out_id);
+            try self.emit_var_with_type(out_id);
         }
 
         try self.writer.writeAll(" = ");
@@ -134,10 +134,10 @@ pub const Emitter = struct {
         // Op-specific attributes via dispatch
         try ops.format(self.writer, self.func, eqn);
 
-        if (pr.paramKernelizeProvider(params)) |provider| {
+        if (pr.param_kernelize_provider(params)) |provider| {
             try self.writer.print(", kernelize=\"{s}\"", .{provider});
         }
-        if (pr.paramOutline(params) orelse false) {
+        if (pr.param_outline(params) orelse false) {
             try self.writer.writeAll(", outline=true");
         }
 
@@ -146,13 +146,13 @@ pub const Emitter = struct {
         // Inputs as function args
         for (inputs, 0..) |in_id, i| {
             if (i > 0) try self.writer.writeAll(", ");
-            try self.emitVarName(in_id);
+            try self.emit_var_name(in_id);
         }
 
         try self.writer.writeAll(")");
 
         // VJP annotation
-        if (ops.hasVjp(eqn.prim)) {
+        if (ops.has_vjp(eqn.prim)) {
             try self.writer.writeAll("  ; vjp");
         }
     }
@@ -163,7 +163,7 @@ pub const Emitter = struct {
 // ============================================================================
 
 /// Generate readable variable name from ID: 0->a, 1->b, ..., 26->aa, etc.
-fn varName(id: pr.VarId) []const u8 {
+fn var_name(id: pr.VarId) []const u8 {
     const names = comptime blk: {
         var arr: [256][]const u8 = undefined;
         for (0..256) |i| {
@@ -202,8 +202,8 @@ test "zxpr format" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const a = try b.paramTensor(.f32, &.{ 2, 3 });
-    const c = try b.paramTensor(.f32, &.{ 3, 2 });
+    const a = try b.param_tensor(.f32, &.{ 2, 3 });
+    const c = try b.param_tensor(.f32, &.{ 3, 2 });
     const d = try b.dot(a, c);
     const func = try b.finish(&.{d});
 
@@ -221,11 +221,11 @@ test "zxpr format" {
 }
 
 test "zxpr variable naming" {
-    try std.testing.expectEqualStrings("a", varName(0));
-    try std.testing.expectEqualStrings("b", varName(1));
-    try std.testing.expectEqualStrings("z", varName(25));
-    try std.testing.expectEqualStrings("aa", varName(26));
-    try std.testing.expectEqualStrings("ab", varName(27));
+    try std.testing.expectEqualStrings("a", var_name(0));
+    try std.testing.expectEqualStrings("b", var_name(1));
+    try std.testing.expectEqualStrings("z", var_name(25));
+    try std.testing.expectEqualStrings("aa", var_name(26));
+    try std.testing.expectEqualStrings("ab", var_name(27));
 }
 
 test "zxpr with transpose shows permutation" {
@@ -235,7 +235,7 @@ test "zxpr with transpose shows permutation" {
     var b = try pr.FunctionBuilder.init(&program, "t");
     defer b.deinit();
 
-    const x = try b.paramTensor(.f32, &.{ 2, 3 });
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.transpose(x, &.{ 1, 0 });
     const func = try b.finish(&.{y});
 

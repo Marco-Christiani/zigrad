@@ -27,7 +27,7 @@ pub fn OpFor(comptime prim: pr.Prim) type {
 }
 
 /// Comptime validation that all ops implement required interface
-fn validateOpInterface() void {
+fn validate_op_interface() void {
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         const Op = OpFor(prim);
 
@@ -35,21 +35,21 @@ fn validateOpInterface() void {
         if (!@hasDecl(Op, "validate")) {
             @compileError("Op " ++ @tagName(prim) ++ " missing validate()");
         }
-        if (!@hasDecl(Op, "inferOutput")) {
-            @compileError("Op " ++ @tagName(prim) ++ " missing inferOutput()");
+        if (!@hasDecl(Op, "infer_output")) {
+            @compileError("Op " ++ @tagName(prim) ++ " missing infer_output()");
         }
         if (!@hasDecl(Op, "lower")) {
             @compileError("Op " ++ @tagName(prim) ++ " missing lower()");
         }
 
-        // Optional: vjpForward/vjpBackward (AD support)
+        // Optional: vjp_forward/vjp_backward (AD support)
         // These are checked at runtime when AD is requested
     }
 }
 
 // Run comptime validation
 comptime {
-    validateOpInterface();
+    validate_op_interface();
 }
 
 // ============================================================================
@@ -68,11 +68,11 @@ pub fn validate(func: pr.Function, eqn: pr.Eqn) pr.ValidationError!void {
 }
 
 /// Infer output type for an equation
-pub fn inferOutput(builder: *pr.FunctionBuilder, prim: pr.Prim, inputs: []const pr.VarId, params: []const pr.Param) pr.BuildError!pr.Aval {
+pub fn infer_output(builder: *pr.FunctionBuilder, prim: pr.Prim, inputs: []const pr.VarId, params: []const pr.Param) pr.BuildError!pr.Aval {
     const ctx = types.InferContext{ .builder = builder, .inputs = inputs, .params = params };
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
-            return OpFor(p).inferOutput(ctx);
+            return OpFor(p).infer_output(ctx);
         }
     }
     unreachable;
@@ -89,33 +89,33 @@ pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
 }
 
 /// Check if an op supports VJP
-pub fn hasVjp(prim: pr.Prim) bool {
+pub fn has_vjp(prim: pr.Prim) bool {
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
             const Op = OpFor(p);
-            return @hasDecl(Op, "vjpForward") and @hasDecl(Op, "vjpBackward");
+            return @hasDecl(Op, "vjp_forward") and @hasDecl(Op, "vjp_backward");
         }
     }
     unreachable;
 }
 
 /// Check if an op has VJP forward (for primals computation)
-pub fn hasVjpForward(prim: pr.Prim) bool {
+pub fn has_vjp_forward(prim: pr.Prim) bool {
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
-            return @hasDecl(OpFor(p), "vjpForward");
+            return @hasDecl(OpFor(p), "vjp_forward");
         }
     }
     unreachable;
 }
 
 /// Execute VJP forward pass for an equation
-pub fn vjpForward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         if (eqn.prim == prim) {
             const Op = OpFor(prim);
-            if (@hasDecl(Op, "vjpForward")) {
-                return Op.vjpForward(ctx, eqn);
+            if (@hasDecl(Op, "vjp_forward")) {
+                return Op.vjp_forward(ctx, eqn);
             } else {
                 return error.UnsupportedEqn;
             }
@@ -125,12 +125,12 @@ pub fn vjpForward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
 }
 
 /// Execute VJP backward pass for an equation
-pub fn vjpBackward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         if (eqn.prim == prim) {
             const Op = OpFor(prim);
-            if (@hasDecl(Op, "vjpBackward")) {
-                return Op.vjpBackward(ctx, eqn);
+            if (@hasDecl(Op, "vjp_backward")) {
+                return Op.vjp_backward(ctx, eqn);
             } else {
                 // No backward = zero gradient (e.g., literal)
                 return;
@@ -165,26 +165,26 @@ test "all prims have op implementations" {
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         const Op = OpFor(prim);
         try std.testing.expect(@hasDecl(Op, "validate"));
-        try std.testing.expect(@hasDecl(Op, "inferOutput"));
+        try std.testing.expect(@hasDecl(Op, "infer_output"));
         try std.testing.expect(@hasDecl(Op, "lower"));
     }
 }
 
 test "vjp support detection" {
     // Ops with full VJP support
-    try std.testing.expect(hasVjp(.add));
-    try std.testing.expect(hasVjp(.subtract));
-    try std.testing.expect(hasVjp(.multiply));
-    try std.testing.expect(hasVjp(.dot));
-    try std.testing.expect(hasVjp(.reshape));
-    try std.testing.expect(hasVjp(.transpose));
+    try std.testing.expect(has_vjp(.add));
+    try std.testing.expect(has_vjp(.subtract));
+    try std.testing.expect(has_vjp(.multiply));
+    try std.testing.expect(has_vjp(.dot));
+    try std.testing.expect(has_vjp(.reshape));
+    try std.testing.expect(has_vjp(.transpose));
 
     // Ops with forward only (constants)
-    try std.testing.expect(hasVjpForward(.literal));
-    try std.testing.expect(!hasVjp(.literal));
+    try std.testing.expect(has_vjp_forward(.literal));
+    try std.testing.expect(!has_vjp(.literal));
 
     // Ops without VJP
-    try std.testing.expect(!hasVjp(.maximum));
-    try std.testing.expect(!hasVjp(.broadcast_in_dim));
-    try std.testing.expect(!hasVjp(.custom_call));
+    try std.testing.expect(!has_vjp(.maximum));
+    try std.testing.expect(!has_vjp(.broadcast_in_dim));
+    try std.testing.expect(!has_vjp(.custom_call));
 }

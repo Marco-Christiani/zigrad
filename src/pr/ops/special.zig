@@ -20,21 +20,21 @@ pub const custom_call = struct {
 
         if (outputs.len != 1) return error.InvalidEqnArity;
 
-        _ = pr.paramCallTargetName(params) orelse return error.InvalidParams;
-        _ = pr.paramHasSideEffect(params) orelse return error.InvalidParams;
-        _ = pr.paramOutAval(params) orelse return error.InvalidParams;
+        _ = pr.param_call_target_name(params) orelse return error.InvalidParams;
+        _ = pr.param_has_side_effect(params) orelse return error.InvalidParams;
+        _ = pr.param_out_aval(params) orelse return error.InvalidParams;
 
-        _ = try ctx.tensorOf(outputs[0]);
-        for (inputs) |in_id| _ = try ctx.tensorOf(in_id);
+        _ = try ctx.tensor_of(outputs[0]);
+        for (inputs) |in_id| _ = try ctx.tensor_of(in_id);
     }
 
-    pub fn inferOutput(ctx: types.InferContext) pr.BuildError!types.Aval {
-        const out_aval = pr.paramOutAval(ctx.params) orelse return error.InvalidParams;
-        _ = pr.paramCallTargetName(ctx.params) orelse return error.InvalidParams;
-        _ = pr.paramHasSideEffect(ctx.params) orelse return error.InvalidParams;
-        _ = out_aval.asTensor() orelse return error.CustomCallTypeMismatch;
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+        const out_aval = pr.param_out_aval(ctx.params) orelse return error.InvalidParams;
+        _ = pr.param_call_target_name(ctx.params) orelse return error.InvalidParams;
+        _ = pr.param_has_side_effect(ctx.params) orelse return error.InvalidParams;
+        _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
 
-        for (ctx.inputs) |in_id| _ = try ctx.tensorOf(in_id);
+        for (ctx.inputs) |in_id| _ = try ctx.tensor_of(in_id);
         return out_aval;
     }
 
@@ -45,24 +45,24 @@ pub const custom_call = struct {
 
         if (outputs.len != 1) return error.InvalidProgram;
 
-        const target = pr.paramCallTargetName(params) orelse return error.InvalidProgram;
-        const has_side_effect = pr.paramHasSideEffect(params) orelse return error.InvalidProgram;
+        const target = pr.param_call_target_name(params) orelse return error.InvalidProgram;
+        const has_side_effect = pr.param_has_side_effect(params) orelse return error.InvalidProgram;
 
         const out_id = outputs[0];
-        const out_tensor = try ctx.tensorOf(out_id);
-        const out_type = try ctx.tensorToMlirType(out_tensor);
+        const out_tensor = try ctx.tensor_of(out_id);
+        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
 
         // Build operand values and layouts
         const operand_values = try ctx.arena.alloc(mlir.Value, inputs.len);
         const operand_layouts = try ctx.arena.alloc([]const usize, inputs.len);
 
         for (inputs, 0..) |operand_id, i| {
-            operand_values[i] = ctx.getValue(operand_id) orelse return error.InvalidProgram;
-            const operand_tensor = try ctx.tensorOf(operand_id);
-            operand_layouts[i] = try defaultLayout(ctx.arena, operand_tensor.shape.rank());
+            operand_values[i] = ctx.get_value(operand_id) orelse return error.InvalidProgram;
+            const operand_tensor = try ctx.tensor_of(operand_id);
+            operand_layouts[i] = try default_layout(ctx.arena, operand_tensor.shape.rank());
         }
 
-        const result_layout = try defaultLayout(ctx.arena, out_tensor.shape.rank());
+        const result_layout = try default_layout(ctx.arena, out_tensor.shape.rank());
 
         // Need null-terminated string for call_target_name
         const target_z = try ctx.arena.allocSentinel(u8, target.len, 0);
@@ -77,19 +77,19 @@ pub const custom_call = struct {
             .api_version = .typed_ffi,
         }, &.{out_type}, ctx.loc);
 
-        ctx.block.appendOperation(op);
-        ctx.setValue(out_id, op.result(0));
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
     }
 
-    // No vjpForward/vjpBackward - custom_call AD not supported
+    // No vjp_forward/vjp_backward - custom_call AD not supported
     // (would require user-provided gradient function)
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
         const params = ctx.params();
-        if (pr.paramCallTargetName(params)) |target| {
+        if (pr.param_call_target_name(params)) |target| {
             try writer.print("target=\"{s}\"", .{target});
         }
-        if (pr.paramHasSideEffect(params)) |se| {
+        if (pr.param_has_side_effect(params)) |se| {
             if (se) try writer.writeAll(", side_effect=true");
         }
     }
@@ -99,7 +99,7 @@ pub const custom_call = struct {
 // Helpers
 // ============================================================================
 
-fn defaultLayout(arena: std.mem.Allocator, rank: usize) ![]const usize {
+fn default_layout(arena: std.mem.Allocator, rank: usize) ![]const usize {
     const layout = try arena.alloc(usize, rank);
     for (0..rank) |i| {
         layout[i] = rank - i - 1;

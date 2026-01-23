@@ -40,8 +40,8 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addIncludePath(b.path("src"));
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
-    linkMlirStablehloCapi(exe, sdk_lib);
-    addRuntimeBundle(b, exe, runtime_root_opt orelse sdk_runtime);
+    link_mlir_stablehlo_capi(exe, sdk_lib);
+    add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime);
 
     b.installArtifact(exe);
 
@@ -51,14 +51,14 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the v0 demo executable").dependOn(&run_cmd.step);
 
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
-    linkMlirStablehloCapi(lib_tests, sdk_lib);
-    addRuntimeBundle(b, lib_tests, runtime_root_opt orelse sdk_runtime);
+    link_mlir_stablehlo_capi(lib_tests, sdk_lib);
+    add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime);
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
     b.step("test", "Run unit tests").dependOn(&run_lib_tests.step);
 }
 
-fn linkMlirStablehloCapi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
+fn link_mlir_stablehlo_capi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
     exe.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
 
     // MLIR + StableHLO were built with libstdc++ ABI.
@@ -71,7 +71,7 @@ fn linkMlirStablehloCapi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) void
     exe.root_module.linkSystemLibrary("StablehloCAPI", .{});
 }
 
-fn addRuntimeBundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root: []const u8) void {
+fn add_runtime_bundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root: []const u8) void {
     exe.root_module.linkSystemLibrary("dl", .{});
 
     const rpaths = [_][]const u8{

@@ -19,9 +19,9 @@ pub const dot = struct {
 
         if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const lhs = try ctx.tensorOf(inputs[0]);
-        const rhs = try ctx.tensorOf(inputs[1]);
-        const out = try ctx.tensorOf(outputs[0]);
+        const lhs = try ctx.tensor_of(inputs[0]);
+        const rhs = try ctx.tensor_of(inputs[1]);
+        const out = try ctx.tensor_of(outputs[0]);
 
         if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotTypeMismatch;
         if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2 or out.shape.rank() != 2) return error.DotTypeMismatch;
@@ -29,11 +29,11 @@ pub const dot = struct {
         if (out.shape.dims[0] != lhs.shape.dims[0] or out.shape.dims[1] != rhs.shape.dims[1]) return error.DotTypeMismatch;
     }
 
-    pub fn inferOutput(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         if (ctx.inputs.len != 2) return error.InvalidEqnArity;
 
-        const lhs = try ctx.tensorOf(ctx.inputs[0]);
-        const rhs = try ctx.tensorOf(ctx.inputs[1]);
+        const lhs = try ctx.tensor_of(ctx.inputs[0]);
+        const rhs = try ctx.tensor_of(ctx.inputs[1]);
 
         if (lhs.dtype != rhs.dtype) return error.DotTypeMismatch;
         if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2) return error.DotTypeMismatch;
@@ -49,11 +49,11 @@ pub const dot = struct {
 
         if (inputs.len != 2 or outputs.len != 1) return error.InvalidProgram;
 
-        const lhs = ctx.getValue(inputs[0]) orelse return error.InvalidProgram;
-        const rhs = ctx.getValue(inputs[1]) orelse return error.InvalidProgram;
+        const lhs = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
+        const rhs = ctx.get_value(inputs[1]) orelse return error.InvalidProgram;
         const out_id = outputs[0];
-        const out_tensor = try ctx.tensorOf(out_id);
-        const out_type = try ctx.tensorToMlirType(out_tensor);
+        const out_tensor = try ctx.tensor_of(out_id);
+        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
 
         const op = stablehlo.dot_general(ctx.mlir_ctx, lhs, rhs, out_type, ctx.loc, .{
             .lhs_batching_dimensions = &.{},
@@ -62,31 +62,31 @@ pub const dot = struct {
             .rhs_contracting_dimensions = &.{0},
             .precision = .fast,
         });
-        ctx.block.appendOperation(op);
-        ctx.setValue(out_id, op.result(0));
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
     }
 
-    pub fn vjpForward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
 
         if (inputs.len != 2) return error.UnsupportedEqn;
 
-        const lhs = ctx.getPrimal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs = ctx.getPrimal(inputs[1]) orelse return error.UnsupportedEqn;
+        const lhs = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.dot(lhs, rhs);
-        ctx.setPrimal(outputs[0], out);
+        ctx.set_primal(outputs[0], out);
     }
 
-    pub fn vjpBackward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
 
         if (inputs.len != 2) return error.UnsupportedEqn;
 
-        const out_cot = ctx.getCot(outputs[0]) orelse return;
-        const lhs_primal = ctx.getPrimal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.getPrimal(inputs[1]) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(outputs[0]) orelse return;
+        const lhs_primal = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const rhs_primal = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
 
         // For C = A @ B:
         // dA = dC @ B^T
@@ -97,12 +97,12 @@ pub const dot = struct {
         const lhs_contrib = try ctx.builder.dot(out_cot, rhs_t);
         const rhs_contrib = try ctx.builder.dot(lhs_t, out_cot);
 
-        try ctx.addCot(inputs[0], lhs_contrib);
-        try ctx.addCot(inputs[1], rhs_contrib);
+        try ctx.add_cot(inputs[0], lhs_contrib);
+        try ctx.add_cot(inputs[1], rhs_contrib);
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const lhs = ctx.inputTensor(0) orelse return;
+        const lhs = ctx.input_tensor(0) orelse return;
         const contract_dim = lhs.shape.rank() - 1;
         try writer.print("contracting=([{d}], [0]), K={d}", .{
             contract_dim,

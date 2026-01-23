@@ -20,15 +20,15 @@ pub const literal = struct {
 
         if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const lit = pr.paramLiteral(params) orelse return error.InvalidParams;
-        const out = try ctx.tensorOf(outputs[0]);
+        const lit = pr.param_literal(params) orelse return error.InvalidParams;
+        const out = try ctx.tensor_of(outputs[0]);
 
         if (out.dtype != lit.dtype()) return error.LiteralTypeMismatch;
         if (out.shape.rank() != 0) return error.LiteralTypeMismatch;
     }
 
-    pub fn inferOutput(ctx: types.InferContext) pr.BuildError!types.Aval {
-        const lit = pr.paramLiteral(ctx.params) orelse return error.InvalidParams;
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+        const lit = pr.param_literal(ctx.params) orelse return error.InvalidParams;
         return .{ .tensor = .{ .dtype = lit.dtype(), .shape = .{ .dims = &.{} } } };
     }
 
@@ -40,33 +40,33 @@ pub const literal = struct {
         if (inputs.len != 0 or outputs.len != 1) return error.InvalidProgram;
 
         const out_id = outputs[0];
-        const out_tensor = try ctx.tensorOf(out_id);
+        const out_tensor = try ctx.tensor_of(out_id);
         if (out_tensor.shape.rank() != 0) return error.InvalidProgram;
 
-        const lit = pr.paramLiteral(params) orelse return error.InvalidProgram;
-        const elem_type = types.dtypeToDenseElementsType(out_tensor.dtype);
+        const lit = pr.param_literal(params) orelse return error.InvalidProgram;
+        const elem_type = types.dtype_to_dense_elements_type(out_tensor.dtype);
         const raw_bytes = switch (lit) {
             inline else => |v| std.mem.asBytes(&v),
         };
 
         const op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, raw_bytes, ctx.loc);
-        ctx.block.appendOperation(op);
-        ctx.setValue(out_id, op.result(0));
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
     }
 
-    pub fn vjpForward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
 
-        const lit = pr.paramLiteral(params) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.literalScalar(lit);
-        ctx.setPrimal(outputs[0], out);
+        const lit = pr.param_literal(params) orelse return error.UnsupportedEqn;
+        const out = try ctx.builder.literal_scalar(lit);
+        ctx.set_primal(outputs[0], out);
     }
 
-    // No vjpBackward needed - constants have zero gradient
+    // No vjp_backward needed - constants have zero gradient
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        if (pr.paramLiteral(ctx.params())) |lit| {
+        if (pr.param_literal(ctx.params())) |lit| {
             switch (lit) {
                 // currently exhaustive, but doing this explicitly if we add more later so we cant forget to
                 //  add the cases here (compiler should catch non-exhaustive)

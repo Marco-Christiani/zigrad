@@ -12,7 +12,7 @@ pub const DType = enum {
     u32,
     u64,
 
-    pub fn sizeInBytes(self: DType) usize {
+    pub fn size_in_bytes(self: DType) usize {
         return switch (self) {
             .f32, .i32, .u32 => 4,
             .f64, .i64, .u64 => 8,
@@ -34,7 +34,7 @@ pub const DType = enum {
 pub const Shape = struct {
     dims: []const usize,
 
-    pub fn numElements(self: Shape) usize {
+    pub fn num_elements(self: Shape) usize {
         var count: usize = 1;
         for (self.dims) |d| count *= d;
         return count;
@@ -72,7 +72,7 @@ pub const HostBuffer = struct {
     owns_dims: bool,
 
     pub fn init(allocator: std.mem.Allocator, shape: Shape, dtype: DType) !HostBuffer {
-        const num_bytes = shape.numElements() * dtype.sizeInBytes();
+        const num_bytes = shape.num_elements() * dtype.size_in_bytes();
         const data = try allocator.alignedAlloc(u8, .@"8", num_bytes);
 
         // Allocate and copy shape dims
@@ -87,20 +87,20 @@ pub const HostBuffer = struct {
         };
     }
 
-    pub fn fromSlice(allocator: std.mem.Allocator, data: anytype, shape: Shape, dtype: DType) !HostBuffer {
+    pub fn from_slice(allocator: std.mem.Allocator, data: anytype, shape: Shape, dtype: DType) !HostBuffer {
         const DataType = @TypeOf(data);
         const data_info = @typeInfo(DataType);
 
         if (data_info != .pointer) {
-            @compileError("fromSlice requires a pointer or slice type, got: " ++ @typeName(DataType));
+            @compileError("from_slice requires a pointer or slice type, got: " ++ @typeName(DataType));
         }
 
         // Accept both slices and pointers to arrays
         if (data_info.pointer.size != .slice and data_info.pointer.size != .one) {
-            @compileError("fromSlice requires a slice or pointer-to-array, got pointer size: " ++ @tagName(data_info.pointer.size));
+            @compileError("from_slice requires a slice or pointer-to-array, got pointer size: " ++ @tagName(data_info.pointer.size));
         }
 
-        const num_bytes = shape.numElements() * dtype.sizeInBytes();
+        const num_bytes = shape.num_elements() * dtype.size_in_bytes();
         const data_bytes = try allocator.alignedAlloc(u8, .@"8", num_bytes);
 
         // Copy data as bytes (works for both slices and pointer-to-array)
@@ -128,7 +128,7 @@ pub const HostBuffer = struct {
 
     /// Fill buffer with a scalar value
     pub fn fill(self: *HostBuffer, comptime T: type, value: T) void {
-        const count = self.shape.numElements();
+        const count = self.shape.num_elements();
         const data_slice: []T = @alignCast(std.mem.bytesAsSlice(T, self.data));
         for (data_slice[0..count]) |*elem| {
             elem.* = value;
@@ -136,7 +136,7 @@ pub const HostBuffer = struct {
     }
 
     /// View buffer as typed slice
-    pub fn asSlice(self: *HostBuffer, comptime T: type) []T {
+    pub fn as_slice(self: *HostBuffer, comptime T: type) []T {
         return @alignCast(std.mem.bytesAsSlice(T, self.data));
     }
 
@@ -147,41 +147,41 @@ pub const HostBuffer = struct {
 
         try writer.print("HostBuffer({s}, {s}): ", .{ self.dtype.name(), shape_str });
 
-        const max_print = @min(self.shape.numElements(), 16);
+        const max_print = @min(self.shape.num_elements(), 16);
 
         switch (self.dtype) {
             .f32 => {
-                const slice = self.asSlice(f32);
+                const slice = self.as_slice(f32);
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
                     try writer.print("{d:.2}", .{val});
                 }
-                if (max_print < self.shape.numElements()) {
+                if (max_print < self.shape.num_elements()) {
                     try writer.writeAll(", ...");
                 }
                 try writer.writeAll("]");
             },
             .f64 => {
-                const slice = self.asSlice(f64);
+                const slice = self.as_slice(f64);
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
                     try writer.print("{d:.2}", .{val});
                 }
-                if (max_print < self.shape.numElements()) {
+                if (max_print < self.shape.num_elements()) {
                     try writer.writeAll(", ...");
                 }
                 try writer.writeAll("]");
             },
             .i32 => {
-                const slice = self.asSlice(i32);
+                const slice = self.as_slice(i32);
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
                     try writer.print("{d}", .{val});
                 }
-                if (max_print < self.shape.numElements()) {
+                if (max_print < self.shape.num_elements()) {
                     try writer.writeAll(", ...");
                 }
                 try writer.writeAll("]");
@@ -199,23 +199,23 @@ test "HostBuffer basic operations" {
     var buf = try HostBuffer.init(allocator, .{ .dims = &[_]usize{ 2, 3 } }, .f32);
     defer buf.deinit();
 
-    try std.testing.expectEqual(@as(usize, 6), buf.shape.numElements());
+    try std.testing.expectEqual(@as(usize, 6), buf.shape.num_elements());
     try std.testing.expectEqual(@as(usize, 24), buf.data.len);
 
     buf.fill(f32, 42.0);
-    const slice = buf.asSlice(f32);
+    const slice = buf.as_slice(f32);
     try std.testing.expectEqual(@as(f32, 42.0), slice[0]);
     try std.testing.expectEqual(@as(f32, 42.0), slice[5]);
 }
 
-test "HostBuffer fromSlice" {
+test "HostBuffer from_slice" {
     const allocator = std.testing.allocator;
 
     const data = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
-    var buf = try HostBuffer.fromSlice(allocator, &data, .{ .dims = &[_]usize{4} }, .f32);
+    var buf = try HostBuffer.from_slice(allocator, &data, .{ .dims = &[_]usize{4} }, .f32);
     defer buf.deinit();
 
-    const slice = buf.asSlice(f32);
+    const slice = buf.as_slice(f32);
     try std.testing.expectEqual(@as(f32, 1.0), slice[0]);
     try std.testing.expectEqual(@as(f32, 4.0), slice[3]);
 }

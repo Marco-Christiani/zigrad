@@ -20,7 +20,7 @@ pub const Shape = struct {
 pub const Aval = union(enum) {
     tensor: Tensor,
 
-    pub fn asTensor(self: Aval) ?Tensor {
+    pub fn as_tensor(self: Aval) ?Tensor {
         return switch (self) {
             .tensor => |t| t,
         };
@@ -127,7 +127,7 @@ pub const Program = struct {
         return self.arena.allocator();
     }
 
-    pub fn addFunction(self: *Program, func: Function) error{OutOfMemory}!void {
+    pub fn add_function(self: *Program, func: Function) error{OutOfMemory}!void {
         const a = self.allocator();
         const new_items = try a.alloc(Function, self.functions.len + 1);
         @memcpy(new_items[0..self.functions.len], self.functions);
@@ -158,29 +158,29 @@ pub const ValidationError = error{
     DuplicateFunctionName,
 };
 
-fn expectVarInRange(func: Function, id: VarId) ValidationError!void {
+fn expect_var_in_range(func: Function, id: VarId) ValidationError!void {
     if (@as(usize, @intCast(id)) >= func.avals.len) return error.InvalidVarId;
 }
 
-fn expectTensor(func: Function, id: VarId) ValidationError!Tensor {
-    try expectVarInRange(func, id);
+fn expect_tensor(func: Function, id: VarId) ValidationError!Tensor {
+    try expect_var_in_range(func, id);
     const aval = func.avals[@intCast(id)];
-    return aval.asTensor() orelse error.UnsupportedAval;
+    return aval.as_tensor() orelse error.UnsupportedAval;
 }
 
-fn sameTensorType(a: Tensor, b: Tensor) bool {
+fn same_tensor_type(a: Tensor, b: Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.rank() != b.shape.rank()) return false;
     return std.mem.eql(usize, a.shape.dims, b.shape.dims);
 }
 
-fn numElements(dims: []const usize) usize {
+fn num_elements(dims: []const usize) usize {
     var n: usize = 1;
     for (dims) |d| n *= d;
     return n;
 }
 
-fn isPermutation(perm: []const i64, rank: usize) bool {
+fn is_permutation(perm: []const i64, rank: usize) bool {
     if (perm.len != rank) return false;
     if (rank == 0) return true;
 
@@ -198,7 +198,7 @@ fn isPermutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
-pub fn paramLiteral(params: []const Param) ?Literal {
+pub fn param_literal(params: []const Param) ?Literal {
     for (params) |p| {
         switch (p) {
             .literal => |v| return v,
@@ -208,7 +208,7 @@ pub fn paramLiteral(params: []const Param) ?Literal {
     return null;
 }
 
-pub fn paramOutShape(params: []const Param) ?[]const usize {
+pub fn param_out_shape(params: []const Param) ?[]const usize {
     for (params) |p| {
         switch (p) {
             .out_shape => |v| return v,
@@ -218,7 +218,7 @@ pub fn paramOutShape(params: []const Param) ?[]const usize {
     return null;
 }
 
-pub fn paramBroadcastDims(params: []const Param) ?[]const i64 {
+pub fn param_broadcast_dims(params: []const Param) ?[]const i64 {
     for (params) |p| {
         switch (p) {
             .broadcast_dimensions => |v| return v,
@@ -228,7 +228,7 @@ pub fn paramBroadcastDims(params: []const Param) ?[]const i64 {
     return null;
 }
 
-pub fn paramPermutation(params: []const Param) ?[]const i64 {
+pub fn param_permutation(params: []const Param) ?[]const i64 {
     for (params) |p| {
         switch (p) {
             .permutation => |v| return v,
@@ -238,7 +238,7 @@ pub fn paramPermutation(params: []const Param) ?[]const i64 {
     return null;
 }
 
-pub fn paramCallTargetName(params: []const Param) ?[]const u8 {
+pub fn param_call_target_name(params: []const Param) ?[]const u8 {
     for (params) |p| {
         switch (p) {
             .call_target_name => |v| return v,
@@ -248,7 +248,7 @@ pub fn paramCallTargetName(params: []const Param) ?[]const u8 {
     return null;
 }
 
-pub fn paramHasSideEffect(params: []const Param) ?bool {
+pub fn param_has_side_effect(params: []const Param) ?bool {
     for (params) |p| {
         switch (p) {
             .has_side_effect => |v| return v,
@@ -258,7 +258,7 @@ pub fn paramHasSideEffect(params: []const Param) ?bool {
     return null;
 }
 
-pub fn paramOutAval(params: []const Param) ?Aval {
+pub fn param_out_aval(params: []const Param) ?Aval {
     for (params) |p| {
         switch (p) {
             .out_aval => |v| return v,
@@ -268,7 +268,7 @@ pub fn paramOutAval(params: []const Param) ?Aval {
     return null;
 }
 
-pub fn paramOutline(params: []const Param) ?bool {
+pub fn param_outline(params: []const Param) ?bool {
     for (params) |p| {
         switch (p) {
             .outline => |v| return v,
@@ -278,7 +278,7 @@ pub fn paramOutline(params: []const Param) ?bool {
     return null;
 }
 
-pub fn paramKernelizeProvider(params: []const Param) ?[]const u8 {
+pub fn param_kernelize_provider(params: []const Param) ?[]const u8 {
     for (params) |p| {
         switch (p) {
             .kernelize_provider => |v| return v,
@@ -288,7 +288,7 @@ pub fn paramKernelizeProvider(params: []const Param) ?[]const u8 {
     return null;
 }
 
-fn validateBroadcastInDimOp(operand: Tensor, out: Tensor, broadcast_dimensions: []const i64) ValidationError!void {
+fn validate_broadcast_in_dim_op(operand: Tensor, out: Tensor, broadcast_dimensions: []const i64) ValidationError!void {
     if (operand.dtype != out.dtype) return error.BroadcastInDimTypeMismatch;
 
     if (broadcast_dimensions.len != operand.shape.rank()) return error.BroadcastInDimTypeMismatch;
@@ -311,59 +311,59 @@ fn validateBroadcastInDimOp(operand: Tensor, out: Tensor, broadcast_dimensions: 
     }
 }
 
-pub fn validateFunction(func: Function) ValidationError!void {
-    for (func.params) |p| try expectVarInRange(func, p);
-    for (func.returns) |r| try expectVarInRange(func, r);
+pub fn validate_function(func: Function) ValidationError!void {
+    for (func.params) |p| try expect_var_in_range(func, p);
+    for (func.returns) |r| try expect_var_in_range(func, r);
 
     for (func.eqns) |eqn| {
         const inputs = eqn.inputs.slice(VarId, func.varids_store);
         const outputs = eqn.outputs.slice(VarId, func.varids_store);
         const params = eqn.params.slice(Param, func.params_store);
 
-        for (inputs) |in_id| try expectVarInRange(func, in_id);
-        for (outputs) |out_id| try expectVarInRange(func, out_id);
+        for (inputs) |in_id| try expect_var_in_range(func, in_id);
+        for (outputs) |out_id| try expect_var_in_range(func, out_id);
 
         switch (eqn.prim) {
             .literal => {
                 if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
-                const lit = paramLiteral(params) orelse return error.InvalidParams;
-                const out = try expectTensor(func, outputs[0]);
+                const lit = param_literal(params) orelse return error.InvalidParams;
+                const out = try expect_tensor(func, outputs[0]);
                 if (out.dtype != lit.dtype()) return error.LiteralTypeMismatch;
                 if (out.shape.rank() != 0) return error.LiteralTypeMismatch;
             },
             .add => {
                 if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-                const lhs = try expectTensor(func, inputs[0]);
-                const rhs = try expectTensor(func, inputs[1]);
-                const out = try expectTensor(func, outputs[0]);
-                if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.AddTypeMismatch;
+                const lhs = try expect_tensor(func, inputs[0]);
+                const rhs = try expect_tensor(func, inputs[1]);
+                const out = try expect_tensor(func, outputs[0]);
+                if (!same_tensor_type(lhs, rhs) or !same_tensor_type(lhs, out)) return error.AddTypeMismatch;
             },
             .subtract => {
                 if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-                const lhs = try expectTensor(func, inputs[0]);
-                const rhs = try expectTensor(func, inputs[1]);
-                const out = try expectTensor(func, outputs[0]);
-                if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.SubtractTypeMismatch;
+                const lhs = try expect_tensor(func, inputs[0]);
+                const rhs = try expect_tensor(func, inputs[1]);
+                const out = try expect_tensor(func, outputs[0]);
+                if (!same_tensor_type(lhs, rhs) or !same_tensor_type(lhs, out)) return error.SubtractTypeMismatch;
             },
             .multiply => {
                 if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-                const lhs = try expectTensor(func, inputs[0]);
-                const rhs = try expectTensor(func, inputs[1]);
-                const out = try expectTensor(func, outputs[0]);
-                if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.MultiplyTypeMismatch;
+                const lhs = try expect_tensor(func, inputs[0]);
+                const rhs = try expect_tensor(func, inputs[1]);
+                const out = try expect_tensor(func, outputs[0]);
+                if (!same_tensor_type(lhs, rhs) or !same_tensor_type(lhs, out)) return error.MultiplyTypeMismatch;
             },
             .maximum => {
                 if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-                const lhs = try expectTensor(func, inputs[0]);
-                const rhs = try expectTensor(func, inputs[1]);
-                const out = try expectTensor(func, outputs[0]);
-                if (!sameTensorType(lhs, rhs) or !sameTensorType(lhs, out)) return error.MaximumTypeMismatch;
+                const lhs = try expect_tensor(func, inputs[0]);
+                const rhs = try expect_tensor(func, inputs[1]);
+                const out = try expect_tensor(func, outputs[0]);
+                if (!same_tensor_type(lhs, rhs) or !same_tensor_type(lhs, out)) return error.MaximumTypeMismatch;
             },
             .dot => {
                 if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-                const lhs = try expectTensor(func, inputs[0]);
-                const rhs = try expectTensor(func, inputs[1]);
-                const out = try expectTensor(func, outputs[0]);
+                const lhs = try expect_tensor(func, inputs[0]);
+                const rhs = try expect_tensor(func, inputs[1]);
+                const out = try expect_tensor(func, outputs[0]);
 
                 if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotTypeMismatch;
                 if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2 or out.shape.rank() != 2) return error.DotTypeMismatch;
@@ -372,29 +372,29 @@ pub fn validateFunction(func: Function) ValidationError!void {
             },
             .reshape => {
                 if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
-                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
-                const operand = try expectTensor(func, inputs[0]);
-                const out = try expectTensor(func, outputs[0]);
+                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const operand = try expect_tensor(func, inputs[0]);
+                const out = try expect_tensor(func, outputs[0]);
                 if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.ReshapeTypeMismatch;
                 if (operand.dtype != out.dtype) return error.ReshapeTypeMismatch;
-                if (numElements(operand.shape.dims) != numElements(out.shape.dims)) return error.ReshapeTypeMismatch;
+                if (num_elements(operand.shape.dims) != num_elements(out.shape.dims)) return error.ReshapeTypeMismatch;
             },
             .broadcast_in_dim => {
                 if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
-                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
-                const bd = paramBroadcastDims(params) orelse return error.InvalidParams;
-                const operand = try expectTensor(func, inputs[0]);
-                const out = try expectTensor(func, outputs[0]);
+                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const bd = param_broadcast_dims(params) orelse return error.InvalidParams;
+                const operand = try expect_tensor(func, inputs[0]);
+                const out = try expect_tensor(func, outputs[0]);
                 if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.BroadcastInDimTypeMismatch;
-                try validateBroadcastInDimOp(operand, out, bd);
+                try validate_broadcast_in_dim_op(operand, out, bd);
             },
             .transpose => {
                 if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
-                const perm = paramPermutation(params) orelse return error.InvalidParams;
-                const operand = try expectTensor(func, inputs[0]);
-                const out = try expectTensor(func, outputs[0]);
+                const perm = param_permutation(params) orelse return error.InvalidParams;
+                const operand = try expect_tensor(func, inputs[0]);
+                const out = try expect_tensor(func, outputs[0]);
                 if (operand.dtype != out.dtype) return error.TransposeTypeMismatch;
-                if (!isPermutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
+                if (!is_permutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
                 if (out.shape.rank() != operand.shape.rank()) return error.TransposeTypeMismatch;
                 for (perm, 0..) |p, out_axis| {
                     const in_axis: usize = @intCast(p);
@@ -403,17 +403,17 @@ pub fn validateFunction(func: Function) ValidationError!void {
             },
             .custom_call => {
                 if (outputs.len != 1) return error.InvalidEqnArity;
-                _ = paramCallTargetName(params) orelse return error.InvalidParams;
-                _ = paramHasSideEffect(params) orelse return error.InvalidParams;
-                _ = paramOutAval(params) orelse return error.InvalidParams;
-                _ = try expectTensor(func, outputs[0]);
-                for (inputs) |in_id| _ = try expectTensor(func, in_id);
+                _ = param_call_target_name(params) orelse return error.InvalidParams;
+                _ = param_has_side_effect(params) orelse return error.InvalidParams;
+                _ = param_out_aval(params) orelse return error.InvalidParams;
+                _ = try expect_tensor(func, outputs[0]);
+                for (inputs) |in_id| _ = try expect_tensor(func, in_id);
             },
         }
     }
 }
 
-pub fn validateProgram(program: *const Program) ValidationError!void {
+pub fn validate_program(program: *const Program) ValidationError!void {
     var i: usize = 0;
     while (i < program.functions.len) : (i += 1) {
         var j: usize = i + 1;
@@ -425,7 +425,7 @@ pub fn validateProgram(program: *const Program) ValidationError!void {
     }
 
     for (program.functions) |func| {
-        try validateFunction(func);
+        try validate_function(func);
     }
 }
 
@@ -466,31 +466,31 @@ pub const FunctionBuilder = struct {
         return self.program.allocator();
     }
 
-    fn varWithAval(self: *FunctionBuilder, aval: Aval) BuildError!VarId {
+    fn var_with_aval(self: *FunctionBuilder, aval: Aval) BuildError!VarId {
         const a = self.alloc();
         const id: VarId = @intCast(self.avals.items.len);
         try self.avals.append(a, aval);
         return id;
     }
 
-    fn tensorOf(self: *FunctionBuilder, id: VarId) ValidationError!Tensor {
+    fn tensor_of(self: *FunctionBuilder, id: VarId) ValidationError!Tensor {
         if (@as(usize, @intCast(id)) >= self.avals.items.len) return error.InvalidVarId;
         const aval = self.avals.items[@intCast(id)];
-        return aval.asTensor() orelse error.UnsupportedAval;
+        return aval.as_tensor() orelse error.UnsupportedAval;
     }
 
-    fn inferOutputAval(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!Aval {
+    fn infer_output_aval(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!Aval {
         const a = self.alloc();
         switch (prim) {
             .literal => {
-                const lit = paramLiteral(params) orelse return error.InvalidParams;
+                const lit = param_literal(params) orelse return error.InvalidParams;
                 return .{ .tensor = .{ .dtype = lit.dtype(), .shape = .{ .dims = &.{} } } };
             },
             .add, .subtract, .multiply, .maximum => {
                 if (inputs.len != 2) return error.InvalidEqnArity;
-                const lhs = try self.tensorOf(inputs[0]);
-                const rhs = try self.tensorOf(inputs[1]);
-                if (!sameTensorType(lhs, rhs)) return switch (prim) {
+                const lhs = try self.tensor_of(inputs[0]);
+                const rhs = try self.tensor_of(inputs[1]);
+                if (!same_tensor_type(lhs, rhs)) return switch (prim) {
                     .add => error.AddTypeMismatch,
                     .subtract => error.SubtractTypeMismatch,
                     .multiply => error.MultiplyTypeMismatch,
@@ -501,8 +501,8 @@ pub const FunctionBuilder = struct {
             },
             .dot => {
                 if (inputs.len != 2) return error.InvalidEqnArity;
-                const lhs = try self.tensorOf(inputs[0]);
-                const rhs = try self.tensorOf(inputs[1]);
+                const lhs = try self.tensor_of(inputs[0]);
+                const rhs = try self.tensor_of(inputs[1]);
 
                 if (lhs.dtype != rhs.dtype) return error.DotTypeMismatch;
                 if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2) return error.DotTypeMismatch;
@@ -513,36 +513,36 @@ pub const FunctionBuilder = struct {
             },
             .reshape => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
-                const operand = try self.tensorOf(inputs[0]);
-                if (numElements(operand.shape.dims) != numElements(out_shape)) return error.ReshapeTypeMismatch;
+                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const operand = try self.tensor_of(inputs[0]);
+                if (num_elements(operand.shape.dims) != num_elements(out_shape)) return error.ReshapeTypeMismatch;
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } } };
             },
             .broadcast_in_dim => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const out_shape = paramOutShape(params) orelse return error.InvalidParams;
-                const bd = paramBroadcastDims(params) orelse return error.InvalidParams;
-                const operand = try self.tensorOf(inputs[0]);
+                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const bd = param_broadcast_dims(params) orelse return error.InvalidParams;
+                const operand = try self.tensor_of(inputs[0]);
                 const out_tensor = Tensor{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } };
-                try validateBroadcastInDimOp(operand, out_tensor, bd);
+                try validate_broadcast_in_dim_op(operand, out_tensor, bd);
                 return .{ .tensor = out_tensor };
             },
             .transpose => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const perm = paramPermutation(params) orelse return error.InvalidParams;
-                const operand = try self.tensorOf(inputs[0]);
-                if (!isPermutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
+                const perm = param_permutation(params) orelse return error.InvalidParams;
+                const operand = try self.tensor_of(inputs[0]);
+                if (!is_permutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
 
                 const out_dims = try a.alloc(usize, operand.shape.rank());
                 for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
             },
             .custom_call => {
-                const out_aval = paramOutAval(params) orelse return error.InvalidParams;
-                _ = paramCallTargetName(params) orelse return error.InvalidParams;
-                _ = paramHasSideEffect(params) orelse return error.InvalidParams;
-                _ = out_aval.asTensor() orelse return error.CustomCallTypeMismatch;
-                for (inputs) |in_id| _ = try self.tensorOf(in_id);
+                const out_aval = param_out_aval(params) orelse return error.InvalidParams;
+                _ = param_call_target_name(params) orelse return error.InvalidParams;
+                _ = param_has_side_effect(params) orelse return error.InvalidParams;
+                _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
+                for (inputs) |in_id| _ = try self.tensor_of(in_id);
                 return out_aval;
             },
         }
@@ -551,8 +551,8 @@ pub const FunctionBuilder = struct {
     pub fn emit(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!VarId {
         const a = self.alloc();
 
-        const out_aval = try self.inferOutputAval(prim, inputs, params);
-        const out = try self.varWithAval(out_aval);
+        const out_aval = try self.infer_output_aval(prim, inputs, params);
+        const out = try self.var_with_aval(out_aval);
 
         const inputs_start: u32 = @intCast(self.varids_store.items.len);
         try self.varids_store.appendSlice(a, inputs);
@@ -576,15 +576,15 @@ pub const FunctionBuilder = struct {
         return out;
     }
 
-    pub fn paramTensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
+    pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
         const a = self.alloc();
         const dims_copy = try a.dupe(usize, dims);
-        const id = try self.varWithAval(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
+        const id = try self.var_with_aval(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
         try self.params.append(a, id);
         return id;
     }
 
-    pub fn literalScalar(self: *FunctionBuilder, value: Literal) BuildError!VarId {
+    pub fn literal_scalar(self: *FunctionBuilder, value: Literal) BuildError!VarId {
         return self.emit(.literal, &.{}, &.{.{ .literal = value }});
     }
 
@@ -614,7 +614,7 @@ pub const FunctionBuilder = struct {
         return self.emit(.reshape, &.{operand}, &.{.{ .out_shape = out_shape }});
     }
 
-    pub fn broadcastInDim(self: *FunctionBuilder, operand: VarId, out_dims: []const usize, broadcast_dimensions: []const i64) BuildError!VarId {
+    pub fn broadcast_in_dim(self: *FunctionBuilder, operand: VarId, out_dims: []const usize, broadcast_dimensions: []const i64) BuildError!VarId {
         const a = self.alloc();
         const out_shape = try a.dupe(usize, out_dims);
         const bd_copy = try a.dupe(i64, broadcast_dimensions);
@@ -630,12 +630,12 @@ pub const FunctionBuilder = struct {
         return self.emit(.transpose, &.{operand}, &.{.{ .permutation = perm_copy }});
     }
 
-    pub fn customCall(self: *FunctionBuilder, target: []const u8, operands: []const VarId, out_like: VarId) BuildError!VarId {
+    pub fn custom_call(self: *FunctionBuilder, target: []const u8, operands: []const VarId, out_like: VarId) BuildError!VarId {
         const a = self.alloc();
 
         const out_aval = self.avals.items[@intCast(out_like)];
-        _ = out_aval.asTensor() orelse return error.CustomCallTypeMismatch;
-        for (operands) |op| _ = try self.tensorOf(op);
+        _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
+        for (operands) |op| _ = try self.tensor_of(op);
 
         const target_copy = try a.dupe(u8, target);
         return self.emit(.custom_call, operands, &.{
@@ -656,7 +656,7 @@ pub const FunctionBuilder = struct {
             .varids_store = try self.varids_store.toOwnedSlice(a),
             .params_store = try self.params_store.toOwnedSlice(a),
         };
-        try validateFunction(func);
+        try validate_function(func);
         return func;
     }
 };
@@ -668,7 +668,7 @@ test "FunctionBuilder reshape validation" {
     var b = try FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const x = try b.paramTensor(.f32, &.{ 2, 3 });
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
     try std.testing.expectError(error.ReshapeTypeMismatch, b.reshape(x, &.{4}));
 }
 
@@ -679,10 +679,10 @@ test "FunctionBuilder broadcast_in_dim basic" {
     var b = try FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const x = try b.paramTensor(.f32, &.{3});
-    const y = try b.broadcastInDim(x, &.{ 2, 3 }, &.{1});
+    const x = try b.param_tensor(.f32, &.{3});
+    const y = try b.broadcast_in_dim(x, &.{ 2, 3 }, &.{1});
     const func = try b.finish(&.{y});
-    try validateFunction(func);
+    try validate_function(func);
 }
 
 test "FunctionBuilder transpose validation" {
@@ -692,10 +692,10 @@ test "FunctionBuilder transpose validation" {
     var b = try FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const x = try b.paramTensor(.f32, &.{ 2, 3, 4 });
+    const x = try b.param_tensor(.f32, &.{ 2, 3, 4 });
     const y = try b.transpose(x, &.{ 2, 0, 1 });
     const func = try b.finish(&.{y});
-    try validateFunction(func);
+    try validate_function(func);
 }
 
 test "FunctionBuilder literal scalar" {
@@ -705,7 +705,7 @@ test "FunctionBuilder literal scalar" {
     var b = try FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const one = try b.literalScalar(.{ .f32 = 1.0 });
+    const one = try b.literal_scalar(.{ .f32 = 1.0 });
     const func = try b.finish(&.{one});
-    try validateFunction(func);
+    try validate_function(func);
 }

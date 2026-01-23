@@ -21,10 +21,10 @@ pub const ValidateContext = struct {
         return self.eqn.params.slice(pr.Param, self.func.params_store);
     }
 
-    pub fn tensorOf(self: ValidateContext, id: pr.VarId) pr.ValidationError!pr.Tensor {
+    pub fn tensor_of(self: ValidateContext, id: pr.VarId) pr.ValidationError!pr.Tensor {
         if (@as(usize, @intCast(id)) >= self.func.avals.len) return error.InvalidVarId;
         const aval = self.func.avals[@intCast(id)];
-        return aval.asTensor() orelse error.UnsupportedAval;
+        return aval.as_tensor() orelse error.UnsupportedAval;
     }
 };
 
@@ -34,10 +34,10 @@ pub const InferContext = struct {
     inputs: []const pr.VarId,
     params: []const pr.Param,
 
-    pub fn tensorOf(self: InferContext, id: pr.VarId) pr.ValidationError!pr.Tensor {
+    pub fn tensor_of(self: InferContext, id: pr.VarId) pr.ValidationError!pr.Tensor {
         if (@as(usize, @intCast(id)) >= self.builder.avals.items.len) return error.InvalidVarId;
         const aval = self.builder.avals.items[@intCast(id)];
-        return aval.asTensor() orelse error.UnsupportedAval;
+        return aval.as_tensor() orelse error.UnsupportedAval;
     }
 
     pub fn alloc(self: InferContext) std.mem.Allocator {
@@ -66,22 +66,22 @@ pub const LowerContext = struct {
         return eqn.params.slice(pr.Param, self.func.params_store);
     }
 
-    pub fn getValue(self: LowerContext, id: pr.VarId) ?mlir.Value {
+    pub fn get_value(self: LowerContext, id: pr.VarId) ?mlir.Value {
         return self.value_map[@intCast(id)];
     }
 
-    pub fn setValue(self: LowerContext, id: pr.VarId, value: mlir.Value) void {
+    pub fn set_value(self: LowerContext, id: pr.VarId, value: mlir.Value) void {
         self.value_map[@intCast(id)] = value;
     }
 
-    pub fn tensorOf(self: LowerContext, id: pr.VarId) !pr.Tensor {
-        return self.func.avals[@intCast(id)].asTensor() orelse error.InvalidProgram;
+    pub fn tensor_of(self: LowerContext, id: pr.VarId) !pr.Tensor {
+        return self.func.avals[@intCast(id)].as_tensor() orelse error.InvalidProgram;
     }
 
-    pub fn tensorToMlirType(self: LowerContext, t: pr.Tensor) !mlir.Type {
+    pub fn tensor_to_mlir_type(self: LowerContext, t: pr.Tensor) !mlir.Type {
         const dims_i64 = try self.arena.alloc(i64, t.shape.dims.len);
         for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
-        return mlir.Type.tensor(dims_i64, dtypeToMlirType(self.mlir_ctx, t.dtype));
+        return mlir.Type.tensor(dims_i64, dtype_to_mlir_type(self.mlir_ctx, t.dtype));
     }
 };
 
@@ -105,19 +105,19 @@ pub const AdContext = struct {
         return eqn.params.slice(pr.Param, self.func.params_store);
     }
 
-    pub fn getPrimal(self: AdContext, id: pr.VarId) ?pr.VarId {
+    pub fn get_primal(self: AdContext, id: pr.VarId) ?pr.VarId {
         return self.primal_map[@intCast(id)];
     }
 
-    pub fn setPrimal(self: AdContext, id: pr.VarId, value: pr.VarId) void {
+    pub fn set_primal(self: AdContext, id: pr.VarId, value: pr.VarId) void {
         self.primal_map[@intCast(id)] = value;
     }
 
-    pub fn getCot(self: AdContext, id: pr.VarId) ?pr.VarId {
+    pub fn get_cot(self: AdContext, id: pr.VarId) ?pr.VarId {
         return self.cot_map[@intCast(id)];
     }
 
-    pub fn addCot(self: AdContext, var_id: pr.VarId, new_cot: pr.VarId) pr.BuildError!void {
+    pub fn add_cot(self: AdContext, var_id: pr.VarId, new_cot: pr.VarId) pr.BuildError!void {
         const idx: usize = @intCast(var_id);
         if (self.cot_map[idx]) |existing| {
             self.cot_map[idx] = try self.builder.add(existing, new_cot);
@@ -126,14 +126,14 @@ pub const AdContext = struct {
         }
     }
 
-    pub fn tensorOf(self: AdContext, id: pr.VarId) pr.Tensor {
-        return self.func.avals[@intCast(id)].asTensor().?;
+    pub fn tensor_of(self: AdContext, id: pr.VarId) pr.Tensor {
+        return self.func.avals[@intCast(id)].as_tensor().?;
     }
 };
 
 // Helper functions
 
-pub fn dtypeToMlirType(ctx: mlir.Context, dt: pr.DType) mlir.Type {
+pub fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
     return switch (dt) {
         .f32 => mlir.Type.float(ctx, .f32),
         .f64 => mlir.Type.float(ctx, .f64),
@@ -144,7 +144,7 @@ pub fn dtypeToMlirType(ctx: mlir.Context, dt: pr.DType) mlir.Type {
     };
 }
 
-pub fn dtypeToDenseElementsType(dt: pr.DType) mlir.DenseElementsAttributeTypes {
+pub fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     return switch (dt) {
         .f32 => .f32,
         .f64 => .f64,
@@ -155,13 +155,13 @@ pub fn dtypeToDenseElementsType(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     };
 }
 
-pub fn sameTensorType(a: pr.Tensor, b: pr.Tensor) bool {
+pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.rank() != b.shape.rank()) return false;
     return std.mem.eql(usize, a.shape.dims, b.shape.dims);
 }
 
-pub fn scalarLiteral(value_dtype: pr.DType, value: f64) pr.Literal {
+pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
     return switch (value_dtype) {
         .f32 => .{ .f32 = @floatCast(value) },
         .f64 => .{ .f64 = value },
@@ -189,16 +189,16 @@ pub const FormatContext = struct {
         return self.eqn.params.slice(pr.Param, self.func.params_store);
     }
 
-    pub fn inputTensor(self: FormatContext, idx: usize) ?pr.Tensor {
+    pub fn input_tensor(self: FormatContext, idx: usize) ?pr.Tensor {
         const ins = self.inputs();
         if (idx >= ins.len) return null;
-        return self.func.avals[@intCast(ins[idx])].asTensor();
+        return self.func.avals[@intCast(ins[idx])].as_tensor();
     }
 
-    pub fn outputTensor(self: FormatContext, idx: usize) ?pr.Tensor {
+    pub fn output_tensor(self: FormatContext, idx: usize) ?pr.Tensor {
         const outs = self.outputs();
         if (idx >= outs.len) return null;
-        return self.func.avals[@intCast(outs[idx])].asTensor();
+        return self.func.avals[@intCast(outs[idx])].as_tensor();
     }
 };
 

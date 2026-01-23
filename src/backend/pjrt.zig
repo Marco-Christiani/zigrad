@@ -52,8 +52,8 @@ pub const Backend = struct {
         const api_ptr = try allocator.create(pjrt_api.Api);
         errdefer allocator.destroy(api_ptr);
 
-        api_ptr.* = try plugin.loadPlugin(plugin_path);
-        errdefer plugin.unloadPlugin(api_ptr.*);
+        api_ptr.* = try plugin.load_plugin(plugin_path);
+        errdefer plugin.unload_plugin(api_ptr.*);
 
         var client = try pjrt_types.Client.create(api_ptr);
         errdefer client.deinit();
@@ -67,7 +67,7 @@ pub const Backend = struct {
 
     pub fn deinit(self: *Backend) void {
         self.client.deinit();
-        plugin.unloadPlugin(self.api.*);
+        plugin.unload_plugin(self.api.*);
         self.allocator.destroy(self.api);
     }
 
@@ -76,12 +76,12 @@ pub const Backend = struct {
     // ========================================================================
 
     /// Get all available devices.
-    pub fn getDevices(self: *Backend, allocator: std.mem.Allocator) ![]Device {
-        return self.client.getDevices(allocator);
+    pub fn get_devices(self: *Backend, allocator: std.mem.Allocator) ![]Device {
+        return self.client.get_devices(allocator);
     }
 
     /// Get the underlying client (for advanced use cases).
-    pub fn getClient(self: *Backend) *pjrt_types.Client {
+    pub fn get_client(self: *Backend) *pjrt_types.Client {
         return &self.client;
     }
 
@@ -100,14 +100,14 @@ pub const Backend = struct {
         program_format: ProgramFormat,
         options: CompileOptions,
     ) !LoadedExecutable {
-        const compile_opts_pb = try buildCompileOptionsProto(self.allocator, options);
+        const compile_opts_pb = try build_compile_options_proto(self.allocator, options);
         defer self.allocator.free(compile_opts_pb);
 
         return self.client.compile(device, program_format, mlir_bytes, compile_opts_pb);
     }
 
     /// Compile and serialize the resulting executable (for caching).
-    pub fn compileSerialized(
+    pub fn compile_serialized(
         self: *Backend,
         device: *const Device,
         mlir_bytes: []const u8,
@@ -120,12 +120,12 @@ pub const Backend = struct {
     }
 
     /// Load a previously serialized executable.
-    pub fn loadSerializedExecutable(
+    pub fn load_serialized_executable(
         self: *Backend,
         serialized_executable: []const u8,
         overridden_compile_options: ?[]const u8,
     ) !LoadedExecutable {
-        return self.client.deserializeAndLoad(serialized_executable, overridden_compile_options);
+        return self.client.deserialize_and_load(serialized_executable, overridden_compile_options);
     }
 
     // ========================================================================
@@ -133,14 +133,14 @@ pub const Backend = struct {
     // ========================================================================
 
     /// Create a buffer on device from host data.
-    pub fn bufferFromHost(
+    pub fn buffer_from_host(
         self: *Backend,
         device: *const Device,
         data: []const u8,
         dtype: BufferType,
         shape: []const i64,
     ) !Buffer {
-        return self.client.bufferFromHost(device, data, dtype, shape);
+        return self.client.buffer_from_host(device, data, dtype, shape);
     }
 
     // ========================================================================
@@ -153,7 +153,7 @@ pub const Backend = struct {
         client: *pjrt_types.Client = undefined,
     };
 
-    fn compilePassRun(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
+    fn compile_pass_run(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
         if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
 
         const cfg_ptr = userdata orelse return error.MissingContext;
@@ -161,7 +161,7 @@ pub const Backend = struct {
 
         const mlir = artifact.mlir;
 
-        const compile_opts_pb = buildCompileOptionsProto(ctx.allocator, cfg.options) catch return error.OutOfMemory;
+        const compile_opts_pb = build_compile_options_proto(ctx.allocator, cfg.options) catch return error.OutOfMemory;
         defer ctx.allocator.free(compile_opts_pb);
 
         const program_format: ProgramFormat = switch (mlir.encoding) {
@@ -177,13 +177,13 @@ pub const Backend = struct {
     /// Compile pass: MLIR artifact -> EA artifact.
     ///
     /// The caller owns `config` and must keep it alive while the pass is used.
-    pub fn compilePass(self: *Backend, config: *CompilePassConfig) pass.Pass {
+    pub fn compile_pass(self: *Backend, config: *CompilePassConfig) pass.Pass {
         config.client = &self.client;
         return .{
             .name = "pjrt_compile",
             .input_kind = .mlir,
             .output_kind = .ea,
-            .run = compilePassRun,
+            .run = compile_pass_run,
             .userdata = config,
         };
     }
@@ -193,7 +193,7 @@ pub const Backend = struct {
 // Helpers
 // ============================================================================
 
-fn writeVarint(writer: anytype, value: u64) !void {
+fn write_varint(writer: anytype, value: u64) !void {
     var v = value;
     while (true) {
         const byte: u8 = @intCast(v & 0x7F);
@@ -207,7 +207,7 @@ fn writeVarint(writer: anytype, value: u64) !void {
 }
 
 /// Build a minimal CompileOptionsProto for PJRT (protobuf wire format).
-pub fn buildCompileOptionsProto(allocator: std.mem.Allocator, options: CompileOptions) ![]u8 {
+pub fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOptions) ![]u8 {
     var build_opts = try std.ArrayList(u8).initCapacity(allocator, 16);
     defer build_opts.deinit(allocator);
     const b = build_opts.writer(allocator);
@@ -216,9 +216,9 @@ pub fn buildCompileOptionsProto(allocator: std.mem.Allocator, options: CompileOp
     //   int64 num_replicas = 4;
     //   int64 num_partitions = 5;
     try b.writeByte((4 << 3) | 0);
-    try writeVarint(b, options.num_replicas);
+    try write_varint(b, options.num_replicas);
     try b.writeByte((5 << 3) | 0);
-    try writeVarint(b, options.num_partitions);
+    try write_varint(b, options.num_partitions);
 
     var out = try std.ArrayList(u8).initCapacity(allocator, 32);
     errdefer out.deinit(allocator);
@@ -227,7 +227,7 @@ pub fn buildCompileOptionsProto(allocator: std.mem.Allocator, options: CompileOp
     // CompileOptionsProto:
     //   ExecutableBuildOptionsProto executable_build_options = 3;
     try w.writeByte((3 << 3) | 2);
-    try writeVarint(w, build_opts.items.len);
+    try write_varint(w, build_opts.items.len);
     try w.writeAll(build_opts.items);
 
     return out.toOwnedSlice(allocator);

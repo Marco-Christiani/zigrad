@@ -20,22 +20,22 @@ pub const reshape = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.paramOutShape(params) orelse return error.InvalidParams;
-        const operand = try ctx.tensorOf(inputs[0]);
-        const out = try ctx.tensorOf(outputs[0]);
+        const out_shape = pr.param_out_shape(params) orelse return error.InvalidParams;
+        const operand = try ctx.tensor_of(inputs[0]);
+        const out = try ctx.tensor_of(outputs[0]);
 
         if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.ReshapeTypeMismatch;
         if (operand.dtype != out.dtype) return error.ReshapeTypeMismatch;
-        if (numElements(operand.shape.dims) != numElements(out.shape.dims)) return error.ReshapeTypeMismatch;
+        if (num_elements(operand.shape.dims) != num_elements(out.shape.dims)) return error.ReshapeTypeMismatch;
     }
 
-    pub fn inferOutput(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.paramOutShape(ctx.params) orelse return error.InvalidParams;
-        const operand = try ctx.tensorOf(ctx.inputs[0]);
+        const out_shape = pr.param_out_shape(ctx.params) orelse return error.InvalidParams;
+        const operand = try ctx.tensor_of(ctx.inputs[0]);
 
-        if (numElements(operand.shape.dims) != numElements(out_shape)) return error.ReshapeTypeMismatch;
+        if (num_elements(operand.shape.dims) != num_elements(out_shape)) return error.ReshapeTypeMismatch;
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } } };
     }
 
@@ -45,48 +45,48 @@ pub const reshape = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
 
-        const operand = ctx.getValue(inputs[0]) orelse return error.InvalidProgram;
+        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
         const out_id = outputs[0];
-        const out_tensor = try ctx.tensorOf(out_id);
-        const out_type = try ctx.tensorToMlirType(out_tensor);
+        const out_tensor = try ctx.tensor_of(out_id);
+        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
 
         const op = stablehlo.reshape(ctx.mlir_ctx, operand, out_type, ctx.loc);
-        ctx.block.appendOperation(op);
-        ctx.setValue(out_id, op.result(0));
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
     }
 
-    pub fn vjpForward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
 
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.getPrimal(inputs[0]) orelse return error.UnsupportedEqn;
-        const out_tensor = ctx.tensorOf(outputs[0]);
+        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_tensor = ctx.tensor_of(outputs[0]);
         const out = try ctx.builder.reshape(operand, out_tensor.shape.dims);
-        ctx.setPrimal(outputs[0], out);
+        ctx.set_primal(outputs[0], out);
     }
 
-    pub fn vjpBackward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
 
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.getCot(outputs[0]) orelse return;
-        const operand_tensor = ctx.tensorOf(inputs[0]);
+        const out_cot = ctx.get_cot(outputs[0]) orelse return;
+        const operand_tensor = ctx.tensor_of(inputs[0]);
 
         // Gradient flows back through inverse reshape
         const contrib = try ctx.builder.reshape(out_cot, operand_tensor.shape.dims);
-        try ctx.addCot(inputs[0], contrib);
+        try ctx.add_cot(inputs[0], contrib);
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const src = ctx.inputTensor(0) orelse return;
-        try formatShape(writer, src.shape.dims);
+        const src = ctx.input_tensor(0) orelse return;
+        try format_shape(writer, src.shape.dims);
         try writer.writeAll(" -> ");
-        if (pr.paramOutShape(ctx.params())) |out_shape| {
-            try formatShape(writer, out_shape);
+        if (pr.param_out_shape(ctx.params())) |out_shape| {
+            try format_shape(writer, out_shape);
         }
     }
 };
@@ -105,12 +105,12 @@ pub const transpose = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const perm = pr.paramPermutation(params) orelse return error.InvalidParams;
-        const operand = try ctx.tensorOf(inputs[0]);
-        const out = try ctx.tensorOf(outputs[0]);
+        const perm = pr.param_permutation(params) orelse return error.InvalidParams;
+        const operand = try ctx.tensor_of(inputs[0]);
+        const out = try ctx.tensor_of(outputs[0]);
 
         if (operand.dtype != out.dtype) return error.TransposeTypeMismatch;
-        if (!isPermutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
+        if (!is_permutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
         if (out.shape.rank() != operand.shape.rank()) return error.TransposeTypeMismatch;
 
         for (perm, 0..) |p, out_axis| {
@@ -119,13 +119,13 @@ pub const transpose = struct {
         }
     }
 
-    pub fn inferOutput(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
 
-        const perm = pr.paramPermutation(ctx.params) orelse return error.InvalidParams;
-        const operand = try ctx.tensorOf(ctx.inputs[0]);
+        const perm = pr.param_permutation(ctx.params) orelse return error.InvalidParams;
+        const operand = try ctx.tensor_of(ctx.inputs[0]);
 
-        if (!isPermutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
+        if (!is_permutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
 
         const out_dims = try ctx.alloc().alloc(usize, operand.shape.rank());
         for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
@@ -139,39 +139,39 @@ pub const transpose = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
 
-        const perm = pr.paramPermutation(params) orelse return error.InvalidProgram;
-        const operand = ctx.getValue(inputs[0]) orelse return error.InvalidProgram;
+        const perm = pr.param_permutation(params) orelse return error.InvalidProgram;
+        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
         const out_id = outputs[0];
-        const out_tensor = try ctx.tensorOf(out_id);
-        const out_type = try ctx.tensorToMlirType(out_tensor);
+        const out_tensor = try ctx.tensor_of(out_id);
+        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
 
         const op = stablehlo.transpose(ctx.mlir_ctx, operand, out_type, ctx.loc, .{ .permutation = perm });
-        ctx.block.appendOperation(op);
-        ctx.setValue(out_id, op.result(0));
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
     }
 
-    pub fn vjpForward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
 
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.getPrimal(inputs[0]) orelse return error.UnsupportedEqn;
-        const perm = pr.paramPermutation(params) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const perm = pr.param_permutation(params) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.transpose(operand, perm);
-        ctx.setPrimal(outputs[0], out);
+        ctx.set_primal(outputs[0], out);
     }
 
-    pub fn vjpBackward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
 
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.getCot(outputs[0]) orelse return;
-        const perm = pr.paramPermutation(params) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(outputs[0]) orelse return;
+        const perm = pr.param_permutation(params) orelse return error.UnsupportedEqn;
 
         // Inverse permutation
         const inv = try ctx.allocator.alloc(i64, perm.len);
@@ -179,11 +179,11 @@ pub const transpose = struct {
         for (perm, 0..) |p, i| inv[@intCast(p)] = @intCast(i);
 
         const contrib = try ctx.builder.transpose(out_cot, inv);
-        try ctx.addCot(inputs[0], contrib);
+        try ctx.add_cot(inputs[0], contrib);
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        if (pr.paramPermutation(ctx.params())) |perm| {
+        if (pr.param_permutation(ctx.params())) |perm| {
             try writer.writeAll("perm=[");
             for (perm, 0..) |p, i| {
                 if (i > 0) try writer.writeAll(", ");
@@ -208,24 +208,24 @@ pub const broadcast_in_dim = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.paramOutShape(params) orelse return error.InvalidParams;
-        const bd = pr.paramBroadcastDims(params) orelse return error.InvalidParams;
-        const operand = try ctx.tensorOf(inputs[0]);
-        const out = try ctx.tensorOf(outputs[0]);
+        const out_shape = pr.param_out_shape(params) orelse return error.InvalidParams;
+        const bd = pr.param_broadcast_dims(params) orelse return error.InvalidParams;
+        const operand = try ctx.tensor_of(inputs[0]);
+        const out = try ctx.tensor_of(outputs[0]);
 
         if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.BroadcastInDimTypeMismatch;
-        try validateBroadcastInDimOp(operand, out, bd);
+        try validate_broadcast_in_dim_op(operand, out, bd);
     }
 
-    pub fn inferOutput(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.paramOutShape(ctx.params) orelse return error.InvalidParams;
-        const bd = pr.paramBroadcastDims(ctx.params) orelse return error.InvalidParams;
-        const operand = try ctx.tensorOf(ctx.inputs[0]);
+        const out_shape = pr.param_out_shape(ctx.params) orelse return error.InvalidParams;
+        const bd = pr.param_broadcast_dims(ctx.params) orelse return error.InvalidParams;
+        const operand = try ctx.tensor_of(ctx.inputs[0]);
         const out_tensor = types.Tensor{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } };
 
-        try validateBroadcastInDimOp(operand, out_tensor, bd);
+        try validate_broadcast_in_dim_op(operand, out_tensor, bd);
         return .{ .tensor = out_tensor };
     }
 
@@ -236,28 +236,28 @@ pub const broadcast_in_dim = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
 
-        const bd = pr.paramBroadcastDims(params) orelse return error.InvalidProgram;
-        const operand = ctx.getValue(inputs[0]) orelse return error.InvalidProgram;
+        const bd = pr.param_broadcast_dims(params) orelse return error.InvalidProgram;
+        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
         const out_id = outputs[0];
-        const out_tensor = try ctx.tensorOf(out_id);
-        const out_type = try ctx.tensorToMlirType(out_tensor);
+        const out_tensor = try ctx.tensor_of(out_id);
+        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
 
         const op = stablehlo.broadcast_in_dim(ctx.mlir_ctx, operand, bd, out_type, ctx.loc);
-        ctx.block.appendOperation(op);
-        ctx.setValue(out_id, op.result(0));
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
     }
 
-    // No vjpForward/vjpBackward - broadcast_in_dim AD not yet supported
+    // No vjp_forward/vjp_backward - broadcast_in_dim AD not yet supported
     // (requires reduce_sum to sum over broadcasted dimensions)
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const src = ctx.inputTensor(0) orelse return;
-        try formatShape(writer, src.shape.dims);
+        const src = ctx.input_tensor(0) orelse return;
+        try format_shape(writer, src.shape.dims);
         try writer.writeAll(" -> ");
-        if (pr.paramOutShape(ctx.params())) |out_shape| {
-            try formatShape(writer, out_shape);
+        if (pr.param_out_shape(ctx.params())) |out_shape| {
+            try format_shape(writer, out_shape);
         }
-        if (pr.paramBroadcastDims(ctx.params())) |bd| {
+        if (pr.param_broadcast_dims(ctx.params())) |bd| {
             try writer.writeAll(", dims=[");
             for (bd, 0..) |d, i| {
                 if (i > 0) try writer.writeAll(", ");
@@ -272,13 +272,13 @@ pub const broadcast_in_dim = struct {
 // Helpers
 // ============================================================================
 
-fn numElements(dims: []const usize) usize {
+fn num_elements(dims: []const usize) usize {
     var n: usize = 1;
     for (dims) |d| n *= d;
     return n;
 }
 
-fn isPermutation(perm: []const i64, rank: usize) bool {
+fn is_permutation(perm: []const i64, rank: usize) bool {
     if (perm.len != rank) return false;
     if (rank == 0) return true;
 
@@ -296,7 +296,7 @@ fn isPermutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
-fn formatShape(writer: *types.Writer, dims: []const usize) types.FormatError!void {
+fn format_shape(writer: *types.Writer, dims: []const usize) types.FormatError!void {
     try writer.writeByte('[');
     for (dims, 0..) |d, i| {
         if (i > 0) try writer.writeAll(", ");
@@ -305,7 +305,7 @@ fn formatShape(writer: *types.Writer, dims: []const usize) types.FormatError!voi
     try writer.writeByte(']');
 }
 
-fn validateBroadcastInDimOp(operand: types.Tensor, out: types.Tensor, broadcast_dimensions: []const i64) pr.ValidationError!void {
+fn validate_broadcast_in_dim_op(operand: types.Tensor, out: types.Tensor, broadcast_dimensions: []const i64) pr.ValidationError!void {
     if (operand.dtype != out.dtype) return error.BroadcastInDimTypeMismatch;
     if (broadcast_dimensions.len != operand.shape.rank()) return error.BroadcastInDimTypeMismatch;
     if (out.shape.rank() < operand.shape.rank()) return error.BroadcastInDimTypeMismatch;

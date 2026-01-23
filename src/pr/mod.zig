@@ -17,19 +17,19 @@ pub const Function = core.Function;
 pub const Program = core.Program;
 
 pub const ValidationError = core.ValidationError;
-pub const validateFunction = core.validateFunction;
-pub const validateProgram = core.validateProgram;
+pub const validate_function = core.validate_function;
+pub const validate_program = core.validate_program;
 
 pub const BuildError = core.BuildError;
 pub const FunctionBuilder = core.FunctionBuilder;
 
-pub const paramLiteral = core.paramLiteral;
-pub const paramOutShape = core.paramOutShape;
-pub const paramBroadcastDims = core.paramBroadcastDims;
-pub const paramPermutation = core.paramPermutation;
-pub const paramCallTargetName = core.paramCallTargetName;
-pub const paramHasSideEffect = core.paramHasSideEffect;
-pub const paramOutAval = core.paramOutAval;
+pub const param_literal = core.param_literal;
+pub const param_out_shape = core.param_out_shape;
+pub const param_broadcast_dims = core.param_broadcast_dims;
+pub const param_permutation = core.param_permutation;
+pub const param_call_target_name = core.param_call_target_name;
+pub const param_has_side_effect = core.param_has_side_effect;
+pub const param_out_aval = core.param_out_aval;
 
 pub const ad = @import("ad.zig");
 pub const emit = @import("emit.zig");

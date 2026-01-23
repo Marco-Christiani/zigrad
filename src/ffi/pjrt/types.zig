@@ -13,7 +13,7 @@ pub const Client = struct {
     pjrt_client: *c.PJRT_Client,
 
     pub fn create(api: *Api) !Client {
-        var args = api_mod.initArgs(c.PJRT_Client_Create_Args);
+        var args = api_mod.init_args(c.PJRT_Client_Create_Args);
         // args.create_options = null;
         // args.num_options = 0;
         // args.kv_get_callback = null;
@@ -50,13 +50,13 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        var args = api_mod.initArgs(c.PJRT_Client_Destroy_Args);
+        var args = api_mod.init_args(c.PJRT_Client_Destroy_Args);
         args.client = self.pjrt_client;
         self.api.call("PJRT_Client_Destroy", &args) catch {};
     }
 
-    pub fn getDevices(self: *Client, allocator: std.mem.Allocator) ![]Device {
-        var args = api_mod.initArgs(c.PJRT_Client_Devices_Args);
+    pub fn get_devices(self: *Client, allocator: std.mem.Allocator) ![]Device {
+        var args = api_mod.init_args(c.PJRT_Client_Devices_Args);
         args.client = self.pjrt_client;
         args.devices = null;
         args.num_devices = 0;
@@ -84,7 +84,7 @@ pub const Client = struct {
         _ = device; // TODO: use device for target-specific compilation options
 
         // Create PJRT_Program
-        var program = api_mod.initArgs(c.PJRT_Program);
+        var program = api_mod.init_args(c.PJRT_Program);
         program.code = @constCast(bytecode.ptr);
         program.code_size = bytecode.len;
 
@@ -119,7 +119,7 @@ pub const Client = struct {
             (5 << 3) | 0, 0x01, // tag 40, value 1
         };
 
-        var args = api_mod.initArgs(c.PJRT_Client_Compile_Args);
+        var args = api_mod.init_args(c.PJRT_Client_Compile_Args);
         args.client = self.pjrt_client;
         args.program = &program;
         args.compile_options = if (options) |opts| opts.ptr else &minimal_compile_opts;
@@ -135,12 +135,12 @@ pub const Client = struct {
         };
     }
 
-    pub fn deserializeAndLoad(
+    pub fn deserialize_and_load(
         self: *Client,
         serialized_executable: []const u8,
         overridden_compile_options: ?[]const u8,
     ) !LoadedExecutable {
-        var args = api_mod.initArgs(c.PJRT_Executable_DeserializeAndLoad_Args);
+        var args = api_mod.init_args(c.PJRT_Executable_DeserializeAndLoad_Args);
         args.client = self.pjrt_client;
         args.serialized_executable = @ptrCast(serialized_executable.ptr);
         args.serialized_executable_size = serialized_executable.len;
@@ -163,18 +163,18 @@ pub const Client = struct {
         };
     }
 
-    pub fn bufferFromHost(
+    pub fn buffer_from_host(
         self: *Client,
         device: *const Device,
         data: []const u8,
         dtype: BufferType,
         shape: []const i64,
     ) !Buffer {
-        var args = api_mod.initArgs(c.PJRT_Client_BufferFromHostBuffer_Args);
+        var args = api_mod.init_args(c.PJRT_Client_BufferFromHostBuffer_Args);
 
         args.client = self.pjrt_client;
         args.data = data.ptr;
-        args.type = dtype.toCEnum();
+        args.type = dtype.to_c_enum();
         args.dims = shape.ptr;
         args.num_dims = shape.len;
         args.byte_strides = null;
@@ -198,9 +198,9 @@ pub const Client = struct {
 pub const Device = struct {
     pjrt_device: *c.PJRT_Device,
 
-    pub fn getId(self: *const Device, api: *Api) !i32 {
+    pub fn get_id(self: *const Device, api: *Api) !i32 {
         // First get the device description
-        var desc_args = api_mod.initArgs(c.PJRT_Device_GetDescription_Args);
+        var desc_args = api_mod.init_args(c.PJRT_Device_GetDescription_Args);
         desc_args.device = self.pjrt_device;
         desc_args.device_description = null;
 
@@ -208,16 +208,16 @@ pub const Device = struct {
         const device_desc = desc_args.device_description orelse return error.PjrtReturnedNullDeviceDescription;
 
         // Then query the ID
-        var args = api_mod.initArgs(c.PJRT_DeviceDescription_Id_Args);
+        var args = api_mod.init_args(c.PJRT_DeviceDescription_Id_Args);
         args.device_description = device_desc;
 
         try api.call("PJRT_DeviceDescription_Id", &args);
         return args.id;
     }
 
-    pub fn getKind(self: *const Device, api: *Api) ![]const u8 {
+    pub fn get_kind(self: *const Device, api: *Api) ![]const u8 {
         // First get the device description
-        var desc_args = api_mod.initArgs(c.PJRT_Device_GetDescription_Args);
+        var desc_args = api_mod.init_args(c.PJRT_Device_GetDescription_Args);
         desc_args.device = self.pjrt_device;
         desc_args.device_description = null;
 
@@ -225,7 +225,7 @@ pub const Device = struct {
         const device_desc = desc_args.device_description orelse return error.PjrtReturnedNullDeviceDescription;
 
         // Then query the kind
-        var args = api_mod.initArgs(c.PJRT_DeviceDescription_Kind_Args);
+        var args = api_mod.init_args(c.PJRT_DeviceDescription_Kind_Args);
         args.device_description = device_desc;
 
         try api.call("PJRT_DeviceDescription_Kind", &args);
@@ -238,26 +238,26 @@ pub const LoadedExecutable = struct {
     pjrt_executable: *c.PJRT_LoadedExecutable,
 
     pub fn deinit(self: *LoadedExecutable) void {
-        var args = api_mod.initArgs(c.PJRT_LoadedExecutable_Destroy_Args);
+        var args = api_mod.init_args(c.PJRT_LoadedExecutable_Destroy_Args);
         args.executable = self.pjrt_executable;
         self.api.call("PJRT_LoadedExecutable_Destroy", &args) catch {};
     }
 
     pub fn serialize(self: *LoadedExecutable, allocator: std.mem.Allocator) ![]u8 {
         // Get the underlying PJRT_Executable to serialize
-        var get_exec_args = api_mod.initArgs(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
         try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
 
         const pjrt_executable = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
-            var destroy_args = api_mod.initArgs(c.PJRT_Executable_Destroy_Args);
+            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_executable;
             self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
-        var args = api_mod.initArgs(c.PJRT_Executable_Serialize_Args);
+        var args = api_mod.init_args(c.PJRT_Executable_Serialize_Args);
         args.executable = pjrt_executable;
 
         try self.api.call("PJRT_Executable_Serialize", &args);
@@ -283,19 +283,19 @@ pub const LoadedExecutable = struct {
         // Full implementation would handle multi-device
 
         // Get the underlying PJRT_Executable to query num_outputs
-        var get_exec_args = api_mod.initArgs(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
         try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
         const pjrt_executable = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
-            var destroy_args = api_mod.initArgs(c.PJRT_Executable_Destroy_Args);
+            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_executable;
             self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
         // Query number of outputs
-        var num_outputs_args = api_mod.initArgs(c.PJRT_Executable_NumOutputs_Args);
+        var num_outputs_args = api_mod.init_args(c.PJRT_Executable_NumOutputs_Args);
         num_outputs_args.executable = pjrt_executable;
         try self.api.call("PJRT_Executable_NumOutputs", &num_outputs_args);
         const num_outputs = num_outputs_args.num_outputs;
@@ -320,7 +320,7 @@ pub const LoadedExecutable = struct {
         var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
 
         // Create execute options
-        var execute_opts = api_mod.initArgs(c.PJRT_ExecuteOptions);
+        var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
         execute_opts.send_callbacks = null;
         execute_opts.recv_callbacks = null;
         execute_opts.num_send_ops = 0;
@@ -330,7 +330,7 @@ pub const LoadedExecutable = struct {
         execute_opts.num_non_donatable_input_indices = 0;
         execute_opts.context = null;
 
-        var args = api_mod.initArgs(c.PJRT_LoadedExecutable_Execute_Args);
+        var args = api_mod.init_args(c.PJRT_LoadedExecutable_Execute_Args);
         args.executable = self.pjrt_executable;
         args.options = &execute_opts;
         args.argument_lists = @ptrCast(&input_lists);
@@ -360,13 +360,13 @@ pub const Buffer = struct {
     pjrt_buffer: *c.PJRT_Buffer,
 
     pub fn deinit(self: *Buffer) void {
-        var args = api_mod.initArgs(c.PJRT_Buffer_Destroy_Args);
+        var args = api_mod.init_args(c.PJRT_Buffer_Destroy_Args);
         args.buffer = self.pjrt_buffer;
         self.api.call("PJRT_Buffer_Destroy", &args) catch {};
     }
 
-    pub fn getDimensions(self: *const Buffer, allocator: std.mem.Allocator) ![]usize {
-        var args = api_mod.initArgs(c.PJRT_Buffer_Dimensions_Args);
+    pub fn get_dimensions(self: *const Buffer, allocator: std.mem.Allocator) ![]usize {
+        var args = api_mod.init_args(c.PJRT_Buffer_Dimensions_Args);
         args.buffer = self.pjrt_buffer;
         args.dims = null;
         args.num_dims = 0;
@@ -385,8 +385,8 @@ pub const Buffer = struct {
         return dims;
     }
 
-    pub fn toHost(self: *Buffer, dst: []u8) !Event {
-        var args = api_mod.initArgs(c.PJRT_Buffer_ToHostBuffer_Args);
+    pub fn to_host(self: *Buffer, dst: []u8) !Event {
+        var args = api_mod.init_args(c.PJRT_Buffer_ToHostBuffer_Args);
 
         args.src = self.pjrt_buffer;
         args.host_layout = null;
@@ -403,8 +403,8 @@ pub const Buffer = struct {
         };
     }
 
-    pub fn readyEvent(self: *Buffer) !Event {
-        var args = api_mod.initArgs(c.PJRT_Buffer_ReadyEvent_Args);
+    pub fn ready_event(self: *Buffer) !Event {
+        var args = api_mod.init_args(c.PJRT_Buffer_ReadyEvent_Args);
 
         args.buffer = self.pjrt_buffer;
         args.event = null;
@@ -424,19 +424,19 @@ pub const Event = struct {
     pjrt_event: *c.PJRT_Event,
 
     pub fn deinit(self: *Event) void {
-        var args = api_mod.initArgs(c.PJRT_Event_Destroy_Args);
+        var args = api_mod.init_args(c.PJRT_Event_Destroy_Args);
         args.event = self.pjrt_event;
         self.api.call("PJRT_Event_Destroy", &args) catch {};
     }
 
     pub fn await_(self: *Event) !void {
-        var args = api_mod.initArgs(c.PJRT_Event_Await_Args);
+        var args = api_mod.init_args(c.PJRT_Event_Await_Args);
         args.event = self.pjrt_event;
         try self.api.call("PJRT_Event_Await", &args);
     }
 
-    pub fn isReady(self: *Event) !bool {
-        var args = api_mod.initArgs(c.PJRT_Event_IsReady_Args);
+    pub fn is_ready(self: *Event) !bool {
+        var args = api_mod.init_args(c.PJRT_Event_IsReady_Args);
         args.event = self.pjrt_event;
         try self.api.call("PJRT_Event_IsReady", &args);
         return args.is_ready;
@@ -450,7 +450,7 @@ pub const ProgramFormat = enum {
     mlir_bytecode,
     stablehlo_portable,
 
-    pub fn toCEnum(self: ProgramFormat) c.PJRT_Program_Format {
+    pub fn to_c_enum(self: ProgramFormat) c.PJRT_Program_Format {
         return switch (self) {
             .mlir_text => c.PJRT_Program_Format_MLIR,
             .mlir_bytecode => c.PJRT_Program_Format_MLIR_BYTECODE,
@@ -467,7 +467,7 @@ pub const BufferType = enum {
     u32,
     u64,
 
-    pub fn toCEnum(self: BufferType) c.PJRT_Buffer_Type {
+    pub fn to_c_enum(self: BufferType) c.PJRT_Buffer_Type {
         return switch (self) {
             .f32 => c.PJRT_Buffer_Type_F32,
             .f64 => c.PJRT_Buffer_Type_F64,
@@ -478,7 +478,7 @@ pub const BufferType = enum {
         };
     }
 
-    pub fn sizeInBytes(self: BufferType) usize {
+    pub fn size_in_bytes(self: BufferType) usize {
         return switch (self) {
             .f32, .i32, .u32 => 4,
             .f64, .i64, .u64 => 8,

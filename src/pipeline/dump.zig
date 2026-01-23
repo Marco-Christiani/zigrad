@@ -15,7 +15,7 @@ pub const DumpConfig = struct {
     entry_name: ?[]const u8 = null,
 };
 
-pub fn dumpPrPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
+pub fn dump_pr_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
     _ = ctx;
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
@@ -27,17 +27,17 @@ pub fn dumpPrPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*
         program: *const pr.Program,
         entry: ?[]const u8,
         fn run(self: @This(), out: *std.Io.Writer) !void {
-            try emitProgram(out, self.program, self.entry);
+            try emit_program(out, self.program, self.entry);
         }
     }{
         .program = program,
         .entry = cfg.entry_name,
     };
 
-    withWriter(cfg, task) catch return error.ValidationFailed;
+    with_writer(cfg, task) catch return error.ValidationFailed;
 }
 
-pub fn dumpMlirPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
+pub fn dump_mlir_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
     _ = ctx;
     if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
 
@@ -51,37 +51,37 @@ pub fn dumpMlirPass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: 
         bytes: []const u8,
         entry: ?[]const u8,
         fn run(self: @This(), out: *std.Io.Writer) !void {
-            try emitMlir(out, self.bytes, self.entry);
+            try emit_mlir(out, self.bytes, self.entry);
         }
     }{
         .bytes = mlir.bytes,
         .entry = cfg.entry_name,
     };
 
-    withWriter(cfg, task) catch return error.ValidationFailed;
+    with_writer(cfg, task) catch return error.ValidationFailed;
 }
 
-pub fn dumpPrPassWithConfig(config: *DumpConfig) pass.Pass {
+pub fn dump_pr_pass_with_config(config: *DumpConfig) pass.Pass {
     return .{
         .name = "dump_pr",
         .input_kind = .pr,
         .output_kind = .pr,
-        .run = dumpPrPass,
+        .run = dump_pr_pass,
         .userdata = config,
     };
 }
 
-pub fn dumpMlirPassWithConfig(config: *DumpConfig) pass.Pass {
+pub fn dump_mlir_pass_with_config(config: *DumpConfig) pass.Pass {
     return .{
         .name = "dump_mlir",
         .input_kind = .mlir,
         .output_kind = .mlir,
-        .run = dumpMlirPass,
+        .run = dump_mlir_pass,
         .userdata = config,
     };
 }
 
-fn emitProgram(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const u8) !void {
+fn emit_program(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const u8) !void {
     if (entry) |name| {
         try out.print("entry: {s}\n", .{name});
     }
@@ -92,7 +92,7 @@ fn emitProgram(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const 
     }
 }
 
-fn emitMlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
+fn emit_mlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
     if (entry) |name| {
         try out.print("entry: {s}\n", .{name});
     }
@@ -100,7 +100,7 @@ fn emitMlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
     if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') try out.writeAll("\n");
 }
 
-fn withWriter(config: *const DumpConfig, task: anytype) !void {
+fn with_writer(config: *const DumpConfig, task: anytype) !void {
     var buffer: [8192]u8 = undefined;
 
     if (config.target == .stdout) {

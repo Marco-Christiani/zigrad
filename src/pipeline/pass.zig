@@ -183,9 +183,9 @@ test "artifact kind tagging" {
 
     var b = try pr_mod.FunctionBuilder.init(&program, "test");
     defer b.deinit();
-    const x = try b.paramTensor(.f32, &.{ 2, 3 });
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const func = try b.finish(&.{x});
-    try program.addFunction(func);
+    try program.add_function(func);
 
     const artifact = Artifact{ .pr = &program };
     try testing.expectEqual(ArtifactKind.pr, artifact.kind());

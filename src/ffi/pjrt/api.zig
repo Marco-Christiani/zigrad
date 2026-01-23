@@ -10,7 +10,7 @@ const std = @import("std");
 const c_mod = @import("c.zig");
 const c = c_mod.c;
 
-pub fn pjrtStructSize(comptime T: type) usize {
+pub fn pjrt_struct_size(comptime T: type) usize {
     const maybe_struct_name: ?[]const u8 = comptime blk: {
         const needle = ".struct_";
         const type_name = @typeName(T);
@@ -59,11 +59,11 @@ pub const Api = struct {
         const pjrt_err = func_ptr(args);
 
         if (pjrt_err) |err| {
-            const pjrt_error = PjrtError.fromHandle(self, err);
-            const msg = pjrt_error.getMessage(std.heap.page_allocator) catch "Unable to get error message";
+            const pjrt_error = PjrtError.from_handle(self, err);
+            const msg = pjrt_error.get_message(std.heap.page_allocator) catch "Unable to get error message";
             defer if (msg.ptr != "Unable to get error message".ptr) std.heap.page_allocator.free(msg);
             std.debug.print("PJRT Error in {s}: {s}\n", .{ func_name, msg });
-            return try pjrt_error.toZigError();
+            return try pjrt_error.to_zig_error();
         }
     }
 
@@ -80,14 +80,14 @@ pub const Api = struct {
 /// to avoid pointer-kind coercion issues in the generic.
 ///
 /// Usage:
-///   var args = initArgs(c.PJRT_Client_Create_Args);
+///   var args = init_args(c.PJRT_Client_Create_Args);
 ///   args.client = &client_ptr;
 ///
-pub fn initArgs(comptime Args: type) Args {
+pub fn init_args(comptime Args: type) Args {
     var a: Args = std.mem.zeroes(Args);
 
     if (@hasField(Args, "struct_size")) {
-        a.struct_size = pjrtStructSize(Args);
+        a.struct_size = pjrt_struct_size(Args);
     }
     if (@hasField(Args, "extension_start")) {
         @field(a, "extension_start") = null;
@@ -128,12 +128,12 @@ pub const PjrtError = struct {
     api: *Api,
     pjrt_error: *c.PJRT_Error,
 
-    pub fn fromHandle(api: *Api, pjrt_error: *c.PJRT_Error) PjrtError {
+    pub fn from_handle(api: *Api, pjrt_error: *c.PJRT_Error) PjrtError {
         return .{ .api = api, .pjrt_error = pjrt_error };
     }
 
-    pub fn getMessage(self: PjrtError, allocator: std.mem.Allocator) ![]const u8 {
-        var args = initArgs(c.PJRT_Error_Message_Args);
+    pub fn get_message(self: PjrtError, allocator: std.mem.Allocator) ![]const u8 {
+        var args = init_args(c.PJRT_Error_Message_Args);
         args.@"error" = self.pjrt_error;
 
         const msg_fn = self.api.pjrt_api.PJRT_Error_Message orelse return error.FunctionNotAvailable;
@@ -143,8 +143,8 @@ pub const PjrtError = struct {
         return allocator.dupe(u8, msg);
     }
 
-    pub fn getCode(self: PjrtError) !i32 {
-        var args = initArgs(c.PJRT_Error_GetCode_Args);
+    pub fn get_code(self: PjrtError) !i32 {
+        var args = init_args(c.PJRT_Error_GetCode_Args);
         args.@"error" = self.pjrt_error;
 
         const code_fn = self.api.pjrt_api.PJRT_Error_GetCode orelse return error.FunctionNotAvailable;
@@ -153,8 +153,8 @@ pub const PjrtError = struct {
         return @intCast(args.code);
     }
 
-    pub fn toZigError(self: PjrtError) !void {
-        const code = self.getCode() catch return error.UnknownPjrtError;
+    pub fn to_zig_error(self: PjrtError) !void {
+        const code = self.get_code() catch return error.UnknownPjrtError;
         self.deinit();
 
         return switch (code) {
@@ -214,7 +214,7 @@ pub const PjrtError = struct {
     }
 
     pub fn deinit(self: PjrtError) void {
-        var args = initArgs(c.PJRT_Error_Destroy_Args);
+        var args = init_args(c.PJRT_Error_Destroy_Args);
         args.@"error" = self.pjrt_error;
         if (self.api.pjrt_api.PJRT_Error_Destroy) |destroy_fn| {
             _ = destroy_fn(&args);
@@ -222,14 +222,14 @@ pub const PjrtError = struct {
     }
 };
 
-test "initArgs sets struct_size" {
+test "init_args sets struct_size" {
     const TestStruct = struct {
         struct_size: usize,
         priv: ?*anyopaque,
         value: i32,
     };
 
-    var s = initArgs(TestStruct);
+    var s = init_args(TestStruct);
     s.value = 42;
     try std.testing.expectEqual(@sizeOf(TestStruct), s.struct_size);
     try std.testing.expectEqual(@as(i32, 42), s.value);
