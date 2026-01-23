@@ -7,8 +7,6 @@
 /// - PassContext: Shared state threaded through passes
 /// - Pass: Pass descriptor (metadata + run fn + config)
 /// - Pass: Pass descriptor (name + input/output kinds + run)
-///
-/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
 pub const pass = @import("pass.zig");
 
 // Re-export pass types

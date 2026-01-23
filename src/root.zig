@@ -14,11 +14,11 @@
 const std = @import("std");
 
 // Core modules
-pub const pr = @import("pr/mod.zig");
+pub const pr = @import("pr/root.zig");
 pub const frontend = @import("frontend/frontend.zig");
-pub const pipeline = @import("pipeline/mod.zig");
-pub const backend = @import("backend/mod.zig");
-pub const lower = @import("lower/mod.zig");
+pub const pipeline = @import("pipeline/root.zig");
+pub const backend = @import("backend/root.zig");
+pub const lower = @import("lower/root.zig");
 
 // Utility types
 pub const utils = struct {

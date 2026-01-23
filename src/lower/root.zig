@@ -4,8 +4,6 @@
 ///
 /// Currently provides:
 /// - stablehlo: PR -> StableHLO/MLIR lowering
-///
-/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
 pub const stablehlo = @import("stablehlo.zig");
 
 // Re-export pass functions
