@@ -9,6 +9,8 @@ pub fn main() !void {
     var arg_it = std.process.args();
     _ = arg_it.next(); // argv0
     var mode: ?[]const u8 = null;
+    var mode_args = std.ArrayList([]const u8).empty;
+    defer mode_args.deinit(gpa);
     var dump_pr_cfg: zg.pipeline.DumpConfig = .{};
     var dump_mlir_cfg: zg.pipeline.DumpConfig = .{};
     var have_dump_pr = false;
@@ -18,6 +20,14 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try print_usage();
             return;
+        }
+        if (mode != null) {
+            if (std.mem.startsWith(u8, arg, "-")) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            try mode_args.append(gpa, arg);
+            continue;
         }
         if (std.mem.eql(u8, arg, "--dump-pr")) {
             dump_pr_cfg = .{ .target = .stdout };
@@ -53,16 +63,15 @@ pub fn main() !void {
             try print_usage();
             return error.InvalidArguments;
         }
-        if (mode == null) {
-            mode = arg;
-        } else {
-            try print_usage();
-            return error.InvalidArguments;
-        }
+        mode = arg;
     }
 
     if (mode) |m| {
         if (std.mem.eql(u8, m, "print-pr")) {
+            if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
             return print_pr(gpa);
         }
     }
@@ -84,18 +93,29 @@ pub fn main() !void {
 
     if (mode) |m| {
         if (std.mem.eql(u8, m, "custom-call-neg")) {
-            const emit_text = have_dump_mlir;
-            return run_custom_call_negative(gpa, &backend, device, emit_text);
-        }
-        if (std.mem.eql(u8, m, "vjp-demo")) {
-            const emit_text = have_dump_mlir;
-            return run_vjp_demo(gpa, &backend, device, emit_text);
-        }
-        if (std.mem.eql(u8, m, "jit-cache-save")) {
-            const path = arg_it.next() orelse {
+            if (mode_args.items.len != 0) {
                 try print_usage();
                 return error.InvalidArguments;
-            };
+            }
+            return run_custom_call_negative(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
+        }
+        if (std.mem.eql(u8, m, "vjp-demo")) {
+            if (mode_args.items.len != 0) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return run_vjp_demo(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
+        }
+        if (std.mem.eql(u8, m, "jit-cache-save")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            const path: ?[]const u8 = if (mode_args.items.len == 1) mode_args.items[0] else null;
+            if (path == null) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
 
             var program = try zg.frontend.build_demo_program(gpa);
             defer program.deinit();
@@ -107,17 +127,22 @@ pub fn main() !void {
             const serialized = try backend.compile_serialized(device, mlir_bytes, .mlir_bytecode, .{});
             defer gpa.free(serialized);
 
-            try write_bytes_to_path(path, serialized);
-            std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, path });
+            try write_bytes_to_path(path.?, serialized);
+            std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, path.? });
             return;
         }
         if (std.mem.eql(u8, m, "jit-cache-run")) {
-            const path = arg_it.next() orelse {
+            if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
-            };
+            }
+            const path: ?[]const u8 = if (mode_args.items.len == 1) mode_args.items[0] else null;
+            if (path == null) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
 
-            const serialized = try read_bytes_from_path(gpa, path);
+            const serialized = try read_bytes_from_path(gpa, path.?);
             defer gpa.free(serialized);
 
             var exe = try backend.load_serialized_executable(serialized, null);
@@ -235,7 +260,7 @@ fn run_demo_executable(
     std.log.info("OK: demo output matches expected", .{});
 }
 
-fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, emit_text: bool) !void {
+fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -247,10 +272,11 @@ fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.P
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     var exe = compile_program(backend, allocator, &program, device, .{
-        .encoding = if (emit_text) .text else .bytecode,
+        .encoding = lower_encoding,
         .entry_name = "main",
-    }, null, null) catch |err| {
+    }, dump_pr, dump_mlir) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -260,7 +286,7 @@ fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.P
     return error.UnexpectedSuccess;
 }
 
-fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, emit_text: bool) !void {
+fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig) !void {
     var program = try zg.frontend.build_demo_program(allocator);
     defer program.deinit();
 
@@ -268,10 +294,11 @@ fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, 
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
     try program.add_function(vjp);
 
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     var exe = try compile_program(backend, allocator, &program, device, .{
-        .encoding = if (emit_text) .text else .bytecode,
+        .encoding = lower_encoding,
         .entry_name = "main_vjp",
-    }, null, null);
+    }, dump_pr, dump_mlir);
     defer exe.deinit();
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
@@ -454,21 +481,21 @@ fn print_usage() !void {
     const out = &stdout_writer.interface;
 
     try out.writeAll(
-        \\usage: zigrad [mode] [options]
+        \\usage: zigrad [global options] [mode [args]]
+        \\
+        \\global options (must appear before mode):
+        \\  -h, --help          show this help
+        \\  --dump-pr           print PR (zxpr) to stdout (default/custom-call-neg/vjp-demo)
+        \\  --dump-pr=PATH      write PR (zxpr) to PATH (default/custom-call-neg/vjp-demo)
+        \\  --dump-mlir         print MLIR (text) to stdout (default/custom-call-neg/vjp-demo)
+        \\  --dump-mlir=PATH    write MLIR (text) to PATH (default/custom-call-neg/vjp-demo)
         \\
         \\modes:
-        \\  print-pr
-        \\  custom-call-neg
-        \\  vjp-demo
-        \\  jit-cache-save <path>
-        \\  jit-cache-run <path>
-        \\
-        \\options:
-        \\  -h, --help          show this help
-        \\  --dump-pr           print PR (zxpr) to stdout
-        \\  --dump-pr=PATH      write PR (zxpr) to PATH
-        \\  --dump-mlir         print MLIR (text) to stdout
-        \\  --dump-mlir=PATH    write MLIR (text) to PATH
+        \\  print-pr                     prints the PR for the demo program
+        \\  custom-call-neg              expects missing custom call handler
+        \\  vjp-demo                     runs the reverse-mode demo
+        \\  jit-cache-save <path>        writes PJRT JIT cache artifact
+        \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\
     );
 

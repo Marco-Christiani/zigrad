@@ -323,14 +323,9 @@ fn choose_symbol_name(
     const func = program.functions[idx];
     if (entry_name == null or !std.mem.eql(u8, func.name, "main")) return func.name;
 
-    if (!is_symbol_name_used(program, entry_index, "main_pr")) {
-        log.warn("renaming non-entry function 'main' to 'main_pr' to avoid entry collision", .{});
-        return "main_pr";
-    }
-
-    var suffix: usize = 1;
+    var suffix: usize = 0;
     while (true) : (suffix += 1) {
-        const candidate = try std.fmt.allocPrint(arena, "main_pr_{d}", .{suffix});
+        const candidate = try std.fmt.allocPrint(arena, "main_non_entry_{d}", .{suffix});
         if (!is_symbol_name_used(program, entry_index, candidate)) {
             log.warn("renaming non-entry function 'main' to '{s}' to avoid entry collision", .{candidate});
             return candidate;
@@ -495,7 +490,7 @@ test "lowering renames non-entry main when entry_name differs" {
     defer testing.allocator.free(text);
 
     try testing.expect(std.mem.indexOf(u8, text, "func.func @main") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "func.func @main_pr") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "func.func @main_non_entry_0") != null);
 }
 
 test "lowering supports reshape/broadcast/transpose" {
