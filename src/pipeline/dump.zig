@@ -12,6 +12,10 @@ pub const DumpTarget = enum {
 pub const DumpConfig = struct {
     target: DumpTarget = .stdout,
     path: ?[]const u8 = null,
+
+    /// Optional label identifying which PR function was selected as entry.
+    /// Printed as "entry: <name>" header in dump output for user reference.
+    /// Does not affect the actual function names in the dumped content.
     entry_name: ?[]const u8 = null,
 };
 
@@ -122,4 +126,41 @@ fn with_writer(config: *const DumpConfig, task: anytype) !void {
     const out = &file_writer.interface;
     try task.run(out);
     try out.flush();
+}
+
+test "emit_program includes entry header and zxpr output" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{1});
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
+    defer writer_state.deinit();
+
+    try emit_program(&writer_state.writer, &program, "main");
+    const output = try writer_state.toOwnedSlice();
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "entry: main") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "zxpr main") != null);
+}
+
+test "emit_mlir appends newline" {
+    const testing = std.testing;
+
+    var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
+    defer writer_state.deinit();
+
+    try emit_mlir(&writer_state.writer, "module {}", null);
+    const output = try writer_state.toOwnedSlice();
+    defer testing.allocator.free(output);
+
+    try testing.expect(output.len > 0);
+    try testing.expectEqual(@as(u8, '\n'), output[output.len - 1]);
 }

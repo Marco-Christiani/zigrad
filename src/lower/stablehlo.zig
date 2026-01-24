@@ -14,6 +14,7 @@ const pr = @import("../pr/pr.zig");
 const ops = @import("../pr/ops/ops.zig");
 const mlir = @import("../ffi/mlir/mlir.zig");
 const pass = @import("../pipeline/pass.zig");
+const log = std.log.scoped(.lower_stablehlo);
 
 pub const LowerError = ops.types.LowerError;
 
@@ -26,6 +27,24 @@ pub const OutputFormat = enum {
 // Core Lowering Implementation
 // ============================================================================
 
+/// Lower a PR program to StableHLO MLIR bytecode or text.
+///
+/// Entry Function Selection and Naming:
+/// - `entry_name`: Selects which PR function is the compilation entry point.
+///   - If provided: That function is renamed to "@main" in MLIR.
+///   - If null: "main" (or the only function) is used as entry.
+/// - All PR functions are lowered into the MLIR module to preserve whole-program
+///   optimization opportunities unless explicit boundaries exist.
+/// - The entry function is always renamed to "@main" in the MLIR output. This is
+///   required by XLA/PJRT.
+/// - Non-entry functions retain their PR names, except when a non-entry function
+///   is already named "main" and a different entry is selected; that symbol is
+///   renamed to avoid collisions.
+///
+/// Example:
+///   Program with functions ["forward", "backward"]
+///   - entry_name = "backward" → MLIR contains only @main (was "backward")
+///   - entry_name = null → MLIR contains @main (was "forward") + @backward
 pub fn lower_program_to_mlir(
     allocator: std.mem.Allocator,
     program: *const pr.Program,
@@ -62,18 +81,10 @@ pub fn lower_program_to_mlir(
     defer module.deinit();
 
     const entry_index = try find_entry_function(program, entry_name);
-    const entry_func = program.functions[entry_index];
-    const entry_sym_name = entry_name orelse entry_func.name;
 
+    // XLA/PJRT requires the entry function to be named "main".
     for (program.functions, 0..) |func, idx| {
-        if (idx != entry_index and std.mem.eql(u8, func.name, entry_sym_name)) {
-            return error.InvalidProgram;
-        }
-    }
-
-    for (program.functions, 0..) |func, idx| {
-        const is_entry = idx == entry_index;
-        const sym_name = if (is_entry) entry_sym_name else func.name;
+        const sym_name = try choose_symbol_name(arena, program, idx, entry_index, entry_name);
         try lower_function_into_module(arena, ctx, module, func, sym_name);
     }
 
@@ -300,6 +311,41 @@ fn find_entry_function(program: *const pr.Program, entry_name: ?[]const u8) !usi
     return error.InvalidProgram;
 }
 
+fn choose_symbol_name(
+    arena: std.mem.Allocator,
+    program: *const pr.Program,
+    idx: usize,
+    entry_index: usize,
+    entry_name: ?[]const u8,
+) ![]const u8 {
+    if (idx == entry_index) return "main";
+
+    const func = program.functions[idx];
+    if (entry_name == null or !std.mem.eql(u8, func.name, "main")) return func.name;
+
+    if (!is_symbol_name_used(program, entry_index, "main_pr")) {
+        log.warn("renaming non-entry function 'main' to 'main_pr' to avoid entry collision", .{});
+        return "main_pr";
+    }
+
+    var suffix: usize = 1;
+    while (true) : (suffix += 1) {
+        const candidate = try std.fmt.allocPrint(arena, "main_pr_{d}", .{suffix});
+        if (!is_symbol_name_used(program, entry_index, candidate)) {
+            log.warn("renaming non-entry function 'main' to '{s}' to avoid entry collision", .{candidate});
+            return candidate;
+        }
+    }
+}
+
+fn is_symbol_name_used(program: *const pr.Program, entry_index: usize, name: []const u8) bool {
+    for (program.functions, 0..) |func, idx| {
+        if (idx == entry_index) continue;
+        if (std.mem.eql(u8, func.name, name)) return true;
+    }
+    return false;
+}
+
 fn tensor_to_mlir_type(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) !mlir.Type {
     const dims_i64 = try arena.alloc(i64, t.shape.dims.len);
     for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
@@ -313,6 +359,9 @@ fn tensor_to_mlir_type(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator
 /// Lower pass: PR artifact -> MLIR artifact.
 pub const LowerPassConfig = struct {
     encoding: pass.MlirEncoding = .bytecode,
+
+    /// Selects which PR function is the compilation entry point.
+    /// The selected function is always renamed to "@main" in MLIR output (XLA requirement).
     entry_name: ?[]const u8 = null,
 };
 
@@ -397,6 +446,56 @@ test "lowering produces verified bytecode" {
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
+}
+
+test "lowering keeps non-entry functions when entry_name is set" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var fwd_builder = try pr.FunctionBuilder.init(&program, "forward");
+    defer fwd_builder.deinit();
+    const fwd_x = try fwd_builder.param_tensor(.f32, &.{ 2 });
+    const fwd = try fwd_builder.finish(&.{fwd_x});
+    try program.add_function(fwd);
+
+    var bwd_builder = try pr.FunctionBuilder.init(&program, "backward");
+    defer bwd_builder.deinit();
+    const bwd_x = try bwd_builder.param_tensor(.f32, &.{ 2 });
+    const bwd = try bwd_builder.finish(&.{bwd_x});
+    try program.add_function(bwd);
+
+    const text = try lower_program_to_mlir(testing.allocator, &program, "backward", .mlir_text);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "func.func @main") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "func.func @forward") != null);
+}
+
+test "lowering renames non-entry main when entry_name differs" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var main_builder = try pr.FunctionBuilder.init(&program, "main");
+    defer main_builder.deinit();
+    const main_x = try main_builder.param_tensor(.f32, &.{ 2 });
+    const main_fn = try main_builder.finish(&.{main_x});
+    try program.add_function(main_fn);
+
+    var other_builder = try pr.FunctionBuilder.init(&program, "backward");
+    defer other_builder.deinit();
+    const other_x = try other_builder.param_tensor(.f32, &.{ 2 });
+    const other_fn = try other_builder.finish(&.{other_x});
+    try program.add_function(other_fn);
+
+    const text = try lower_program_to_mlir(testing.allocator, &program, "backward", .mlir_text);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "func.func @main") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "func.func @main_pr") != null);
 }
 
 test "lowering supports reshape/broadcast/transpose" {

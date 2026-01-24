@@ -5,7 +5,6 @@
 /// Key types:
 /// - Artifact: Tagged union representing IR at various stages (PR, MLIR, EA)
 /// - PassContext: Shared state threaded through passes
-/// - Pass: Pass descriptor (metadata + run fn + config)
 /// - Pass: Pass descriptor (name + input/output kinds + run)
 pub const pass = @import("pass.zig");
 
