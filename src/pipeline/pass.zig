@@ -225,3 +225,45 @@ test "pass chain validation rejects mismatch" {
     const pipeline = Pipeline{ .passes = &passes };
     try std.testing.expectError(error.ArtifactKindMismatch, pipeline.validate());
 }
+
+test "pipeline run transforms artifacts" {
+    const testing = std.testing;
+
+    var program = pr_mod.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr_mod.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{ 2 });
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    const to_mlir = struct {
+        fn run(a: *Artifact, ctx: *PassContext, _: ?*anyopaque) PassError!void {
+            const bytes = try ctx.allocator.dupe(u8, "mlir");
+            a.replace(ctx.allocator, .{ .mlir = .{ .bytes = bytes, .encoding = .text } });
+        }
+    }.run;
+
+    const to_serialized = struct {
+        fn run(a: *Artifact, ctx: *PassContext, _: ?*anyopaque) PassError!void {
+            const bytes = try ctx.allocator.dupe(u8, "ea");
+            a.replace(ctx.allocator, .{ .serialized_ea = bytes });
+        }
+    }.run;
+
+    const passes = [_]Pass{
+        .{ .name = "to_mlir", .input_kind = .pr, .output_kind = .mlir, .run = to_mlir },
+        .{ .name = "to_serialized", .input_kind = .mlir, .output_kind = .serialized_ea, .run = to_serialized },
+    };
+
+    var ctx = PassContext{ .allocator = testing.allocator };
+    const pipeline = Pipeline{ .passes = &passes };
+    var artifact = try pipeline.run(.{ .pr = &program }, &ctx);
+    defer artifact.deinit(testing.allocator);
+
+    switch (artifact) {
+        .serialized_ea => |bytes| try testing.expectEqualStrings("ea", bytes),
+        else => return error.ArtifactKindMismatch,
+    }
+}

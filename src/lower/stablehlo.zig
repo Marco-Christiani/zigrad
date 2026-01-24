@@ -14,7 +14,7 @@ const pr = @import("../pr/pr.zig");
 const ops = @import("../pr/ops/ops.zig");
 const mlir = @import("../ffi/mlir/mlir.zig");
 const pass = @import("../pipeline/pass.zig");
-const log = std.log.scoped(.lower_stablehlo);
+const log = std.log.scoped(.@"zg/lower_stablehlo");
 
 pub const LowerError = ops.types.LowerError;
 

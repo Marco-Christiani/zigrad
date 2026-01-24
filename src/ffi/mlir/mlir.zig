@@ -18,7 +18,7 @@ pub const c = @cImport({
     @cInclude("stablehlo/integrations/c/StablehloTypes.h");
 });
 
-const log = std.log.scoped(.mlir);
+const log = std.log.scoped(.@"zg/mlir");
 
 test {
     std.testing.refAllDeclsRecursive(@This());
