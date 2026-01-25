@@ -368,8 +368,8 @@ pub fn gather(
 }
 
 fn element_type_or_self(typ: mlir.Type) mlir.Type {
-    return if (typ.as(mlir.ShapedType)) |shaped| {
-        return shaped.elementType();
+    return if (typ.as(mlir.RankedTensorType)) |shaped| {
+        return shaped.get_element_type();
     } else typ;
 }
 
@@ -481,23 +481,23 @@ pub fn reduce(
         reduce_elem_types[i] = arg_type;
         reduce_elem_types[inputs.len + i] = arg_type;
     }
-    var block = mlir.Block.open(reduce_elem_types[0..block_n_args], locations) catch unreachable;
-    {
-        defer block.close();
+    var block = mlir.Block.init(reduce_elem_types[0..block_n_args], locations) catch unreachable;
 
-        var block_inputs: [MaxBlockArguments / 2]mlir.Value = undefined;
-        var block_accs: [MaxBlockArguments / 2]mlir.Value = undefined;
-        for (0..inputs.len) |i| {
-            block_inputs[i] = block.argument(i);
-            block_accs[i] = block.argument(inputs.len + i);
-        }
-        _ = blkfn(blkctx, ctx, block_inputs[0..inputs.len], block_accs[0..init_values.len]);
+    var block_inputs: [MaxBlockArguments / 2]mlir.Value = undefined;
+    var block_accs: [MaxBlockArguments / 2]mlir.Value = undefined;
+    for (0..inputs.len) |i| {
+        block_inputs[i] = block.argument(i);
+        block_accs[i] = block.argument(inputs.len + i);
     }
+    const reduce_op = blkfn(blkctx, ctx, block_inputs[0..inputs.len], block_accs[0..init_values.len]);
+    block.append_operation(reduce_op);
+    const ret = return_(ctx, reduce_op.result(0), mlir.Location.unknown(ctx));
+    block.append_operation(ret);
 
     return mlir.Operation.make(ctx, "stablehlo.reduce", .{
         .variadic_operands = &.{ inputs, init_values },
         .result_type_inference = true,
-        .block = block,
+        .blocks = &.{block},
         .attributes = &.{
             .{ "dimensions", .dense(ctx, .i64, dimensions) },
         },
@@ -534,7 +534,7 @@ pub fn sort(
     return mlir.Operation.make(ctx, "stablehlo.sort", .{
         .variadic_operands = &.{inputs},
         .result_type_inference = true,
-        .block = block,
+        .blocks = &.{block},
         .attributes = &.{
             .{ "dimension", .int(ctx, .i64, dimension) },
             .{ "is_stable", .boolean(ctx, is_stable) },

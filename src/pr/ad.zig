@@ -11,7 +11,7 @@ fn zero_like(bld: *pr.FunctionBuilder, tensor: pr.Tensor) pr.BuildError!pr.VarId
     return try bld.broadcast_in_dim(z, tensor.shape.dims, &.{});
 }
 
-pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
+fn vjp_impl(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8, include_value: bool) VjpError!pr.Function {
     try pr.validate_function(func);
 
     var primal_map = try allocator.alloc(?pr.VarId, func.avals.len);
@@ -64,19 +64,38 @@ pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
         try ops.vjp_backward(ad_ctx, eqn);
     }
 
-    // Collect gradients for input parameters
-    const returns = try allocator.alloc(pr.VarId, func.params.len);
+    const extra = if (include_value) func.returns.len else 0;
+    const returns = try allocator.alloc(pr.VarId, func.params.len + extra);
     defer allocator.free(returns);
-    for (func.params, 0..) |param_id, i| {
-        if (cot_map[@intCast(param_id)]) |cot| {
-            returns[i] = cot;
-        } else {
-            const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
-            returns[i] = try zero_like(&b, tensor);
+
+    var out_index: usize = 0;
+    if (include_value) {
+        for (func.returns) |ret_id| {
+            const primal = primal_map[@intCast(ret_id)] orelse return error.UnsupportedEqn;
+            returns[out_index] = primal;
+            out_index += 1;
         }
     }
 
+    for (func.params) |param_id| {
+        if (cot_map[@intCast(param_id)]) |cot| {
+            returns[out_index] = cot;
+        } else {
+            const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
+            returns[out_index] = try zero_like(&b, tensor);
+        }
+        out_index += 1;
+    }
+
     return b.finish(returns);
+}
+
+pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
+    return vjp_impl(allocator, program, func, name, false);
+}
+
+pub fn vjp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
+    return vjp_impl(allocator, program, func, name, true);
 }
 
 test "vjp produces gradients matching input shapes" {
@@ -110,4 +129,22 @@ test "vjp produces gradients matching input shapes" {
         try std.testing.expectEqual(p_t.dtype, g_t.dtype);
         try std.testing.expect(std.mem.eql(usize, p_t.shape.dims, g_t.shape.dims));
     }
+}
+
+test "vjp_with_value returns primals plus gradients" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{ 2, 2 });
+    const y = try b.multiply(x, x);
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const vjp_func = try vjp_with_value(std.testing.allocator, &program, func, "vjp_with_value");
+    try pr.validate_function(vjp_func);
+
+    try std.testing.expectEqual(@as(usize, func.returns.len + func.params.len), vjp_func.returns.len);
 }

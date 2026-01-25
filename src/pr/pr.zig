@@ -75,6 +75,8 @@ pub const Prim = enum {
     reshape,
     broadcast_in_dim,
     transpose,
+    reduce_sum,
+    call,
     custom_call,
 };
 
@@ -83,6 +85,8 @@ pub const Param = union(enum) {
     out_shape: []const usize,
     broadcast_dimensions: []const i64,
     permutation: []const i64,
+    reduce_axes: []const i64,
+    call_callee: []const u8,
     call_target_name: []const u8,
     has_side_effect: bool,
     out_aval: Aval,
@@ -154,6 +158,8 @@ pub const ValidationError = error{
     ReshapeTypeMismatch,
     BroadcastInDimTypeMismatch,
     TransposeTypeMismatch,
+    ReduceSumTypeMismatch,
+    CallTypeMismatch,
     CustomCallTypeMismatch,
     DuplicateFunctionName,
 };
@@ -198,6 +204,59 @@ fn is_permutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
+fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const usize, axes: []const i64) BuildError![]const usize {
+    const rank = in_dims.len;
+    const max_rank: usize = 64;
+    if (rank > max_rank) return error.ReduceSumTypeMismatch;
+
+    var reduce = [_]bool{false} ** max_rank;
+    for (axes) |axis| {
+        if (axis < 0) return error.ReduceSumTypeMismatch;
+        const idx: usize = @intCast(axis);
+        if (idx >= rank) return error.ReduceSumTypeMismatch;
+        if (reduce[idx]) return error.ReduceSumTypeMismatch;
+        reduce[idx] = true;
+    }
+
+    var out_count: usize = 0;
+    for (0..rank) |i| {
+        if (!reduce[i]) out_count += 1;
+    }
+    const out_dims = try allocator.alloc(usize, out_count);
+    var out_i: usize = 0;
+    for (0..rank) |i| {
+        if (reduce[i]) continue;
+        out_dims[out_i] = in_dims[i];
+        out_i += 1;
+    }
+    return out_dims;
+}
+
+fn reduce_sum_matches(in_dims: []const usize, out_dims: []const usize, axes: []const i64) bool {
+    const rank = in_dims.len;
+    const max_rank: usize = 64;
+    if (rank > max_rank) return false;
+
+    var reduce = [_]bool{false} ** max_rank;
+    for (axes) |axis| {
+        if (axis < 0) return false;
+        const idx: usize = @intCast(axis);
+        if (idx >= rank) return false;
+        if (reduce[idx]) return false;
+        reduce[idx] = true;
+    }
+
+    var out_i: usize = 0;
+    for (0..rank) |i| {
+        if (reduce[i]) continue;
+        if (out_i >= out_dims.len) return false;
+        if (in_dims[i] != out_dims[out_i]) return false;
+        out_i += 1;
+    }
+
+    return out_i == out_dims.len;
+}
+
 pub fn param_literal(params: []const Param) ?Literal {
     for (params) |p| {
         switch (p) {
@@ -238,6 +297,26 @@ pub fn param_permutation(params: []const Param) ?[]const i64 {
     return null;
 }
 
+pub fn param_reduce_axes(params: []const Param) ?[]const i64 {
+    for (params) |p| {
+        switch (p) {
+            .reduce_axes => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn param_call_callee(params: []const Param) ?[]const u8 {
+    for (params) |p| {
+        switch (p) {
+            .call_callee => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
 pub fn param_call_target_name(params: []const Param) ?[]const u8 {
     for (params) |p| {
         switch (p) {
@@ -246,6 +325,15 @@ pub fn param_call_target_name(params: []const Param) ?[]const u8 {
         }
     }
     return null;
+}
+
+fn same_tensor_signature(a: Tensor, b: Tensor) bool {
+    if (a.dtype != b.dtype) return false;
+    if (a.shape.dims.len != b.shape.dims.len) return false;
+    for (a.shape.dims, 0..) |d, i| {
+        if (d != b.shape.dims[i]) return false;
+    }
+    return true;
 }
 
 pub fn param_has_side_effect(params: []const Param) ?bool {
@@ -401,6 +489,18 @@ pub fn validate_function(func: Function) ValidationError!void {
                     if (out.shape.dims[out_axis] != operand.shape.dims[in_axis]) return error.TransposeTypeMismatch;
                 }
             },
+            .reduce_sum => {
+                if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
+                const axes = param_reduce_axes(params) orelse return error.InvalidParams;
+                const operand = try expect_tensor(func, inputs[0]);
+                const out = try expect_tensor(func, outputs[0]);
+                if (!reduce_sum_matches(operand.shape.dims, out.shape.dims, axes)) return error.ReduceSumTypeMismatch;
+            },
+            .call => {
+                _ = param_call_callee(params) orelse return error.InvalidParams;
+                for (inputs) |in_id| _ = try expect_tensor(func, in_id);
+                for (outputs) |out_id| _ = try expect_tensor(func, out_id);
+            },
             .custom_call => {
                 if (outputs.len != 1) return error.InvalidEqnArity;
                 _ = param_call_target_name(params) orelse return error.InvalidParams;
@@ -426,6 +526,41 @@ pub fn validate_program(program: *const Program) ValidationError!void {
 
     for (program.functions) |func| {
         try validate_function(func);
+    }
+
+    for (program.functions) |func| {
+        for (func.eqns) |eqn| {
+            if (eqn.prim != .call) continue;
+
+            const params = func.params_store[eqn.params.start..][0..eqn.params.len];
+            const callee_name = param_call_callee(params) orelse return error.InvalidParams;
+
+            var callee: ?Function = null;
+            for (program.functions) |candidate| {
+                if (std.mem.eql(u8, candidate.name, callee_name)) {
+                    callee = candidate;
+                    break;
+                }
+            }
+            const callee_func = callee orelse return error.CallTypeMismatch;
+
+            const inputs = func.varids_store[eqn.inputs.start..][0..eqn.inputs.len];
+            const outputs = func.varids_store[eqn.outputs.start..][0..eqn.outputs.len];
+
+            if (inputs.len != callee_func.params.len) return error.CallTypeMismatch;
+            if (outputs.len != callee_func.returns.len) return error.CallTypeMismatch;
+
+            for (inputs, 0..) |in_id, idx| {
+                const in_tensor = func.avals[@intCast(in_id)].as_tensor() orelse return error.CallTypeMismatch;
+                const callee_tensor = callee_func.avals[@intCast(callee_func.params[idx])].as_tensor() orelse return error.CallTypeMismatch;
+                if (!same_tensor_signature(in_tensor, callee_tensor)) return error.CallTypeMismatch;
+            }
+            for (outputs, 0..) |out_id, idx| {
+                const out_tensor = func.avals[@intCast(out_id)].as_tensor() orelse return error.CallTypeMismatch;
+                const callee_tensor = callee_func.avals[@intCast(callee_func.returns[idx])].as_tensor() orelse return error.CallTypeMismatch;
+                if (!same_tensor_signature(out_tensor, callee_tensor)) return error.CallTypeMismatch;
+            }
+        }
     }
 }
 
@@ -537,6 +672,17 @@ pub const FunctionBuilder = struct {
                 for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
             },
+            .reduce_sum => {
+                if (inputs.len != 1) return error.InvalidEqnArity;
+                const axes = param_reduce_axes(params) orelse return error.InvalidParams;
+                const operand = try self.tensor_of(inputs[0]);
+                const out_dims = try reduce_sum_output_dims(a, operand.shape.dims, axes);
+                return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
+            },
+            .call => {
+                _ = param_call_callee(params) orelse return error.InvalidParams;
+                return error.InvalidEqnArity;
+            },
             .custom_call => {
                 const out_aval = param_out_aval(params) orelse return error.InvalidParams;
                 _ = param_call_target_name(params) orelse return error.InvalidParams;
@@ -574,6 +720,29 @@ pub const FunctionBuilder = struct {
         });
 
         return out;
+    }
+
+    fn emit_with_outputs(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, outputs: []const VarId, params: []const Param) BuildError!void {
+        const a = self.alloc();
+
+        const inputs_start: u32 = @intCast(self.varids_store.items.len);
+        try self.varids_store.appendSlice(a, inputs);
+        const inputs_span: Span = .{ .start = inputs_start, .len = @intCast(inputs.len) };
+
+        const outputs_start: u32 = @intCast(self.varids_store.items.len);
+        try self.varids_store.appendSlice(a, outputs);
+        const outputs_span: Span = .{ .start = outputs_start, .len = @intCast(outputs.len) };
+
+        const params_start: u32 = @intCast(self.params_store.items.len);
+        try self.params_store.appendSlice(a, params);
+        const params_span: Span = .{ .start = params_start, .len = @intCast(params.len) };
+
+        try self.eqns.append(a, .{
+            .prim = prim,
+            .inputs = inputs_span,
+            .outputs = outputs_span,
+            .params = params_span,
+        });
     }
 
     pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
@@ -630,6 +799,12 @@ pub const FunctionBuilder = struct {
         return self.emit(.transpose, &.{operand}, &.{.{ .permutation = perm_copy }});
     }
 
+    pub fn reduce_sum(self: *FunctionBuilder, operand: VarId, axes: []const i64) BuildError!VarId {
+        const a = self.alloc();
+        const axes_copy = try a.dupe(i64, axes);
+        return self.emit(.reduce_sum, &.{operand}, &.{.{ .reduce_axes = axes_copy }});
+    }
+
     pub fn custom_call(self: *FunctionBuilder, target: []const u8, operands: []const VarId, out_like: VarId) BuildError!VarId {
         const a = self.alloc();
 
@@ -643,6 +818,35 @@ pub const FunctionBuilder = struct {
             .{ .has_side_effect = false },
             .{ .out_aval = out_aval },
         });
+    }
+
+    pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const VarId) BuildError![]VarId {
+        var callee_func: ?Function = null;
+        for (self.program.functions) |func| {
+            if (std.mem.eql(u8, func.name, callee)) {
+                callee_func = func;
+                break;
+            }
+        }
+        const callee_fn = callee_func orelse return error.InvalidParams;
+
+        if (inputs.len != callee_fn.params.len) return error.InvalidEqnArity;
+        for (inputs, 0..) |in_id, i| {
+            const in_tensor = try self.tensor_of(in_id);
+            const callee_tensor = callee_fn.avals[@intCast(callee_fn.params[i])].as_tensor() orelse return error.CallTypeMismatch;
+            if (!same_tensor_signature(in_tensor, callee_tensor)) return error.CallTypeMismatch;
+        }
+
+        const a = self.alloc();
+        const outputs = try a.alloc(VarId, callee_fn.returns.len);
+        for (callee_fn.returns, 0..) |ret_id, i| {
+            const aval = callee_fn.avals[@intCast(ret_id)];
+            outputs[i] = try self.var_with_aval(aval);
+        }
+
+        const callee_copy = try a.dupe(u8, callee);
+        try self.emit_with_outputs(.call, inputs, outputs, &.{.{ .call_callee = callee_copy }});
+        return outputs;
     }
 
     pub fn finish(self: *FunctionBuilder, returns: []const VarId) BuildError!Function {
@@ -694,6 +898,19 @@ test "FunctionBuilder transpose validation" {
 
     const x = try b.param_tensor(.f32, &.{ 2, 3, 4 });
     const y = try b.transpose(x, &.{ 2, 0, 1 });
+    const func = try b.finish(&.{y});
+    try validate_function(func);
+}
+
+test "FunctionBuilder reduce_sum basic" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
+    const y = try b.reduce_sum(x, &.{0});
     const func = try b.finish(&.{y});
     try validate_function(func);
 }

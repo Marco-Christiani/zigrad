@@ -22,6 +22,8 @@ pub fn OpFor(comptime prim: pr.Prim) type {
         .reshape => shape.reshape,
         .transpose => shape.transpose,
         .broadcast_in_dim => shape.broadcast_in_dim,
+        .reduce_sum => shape.reduce_sum,
+        .call => special.call,
         .custom_call => special.custom_call,
     };
 }
@@ -178,6 +180,8 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp(.dot));
     try std.testing.expect(has_vjp(.reshape));
     try std.testing.expect(has_vjp(.transpose));
+    try std.testing.expect(has_vjp(.broadcast_in_dim));
+    try std.testing.expect(has_vjp(.reduce_sum));
 
     // Ops with forward only (constants)
     try std.testing.expect(has_vjp_forward(.literal));
@@ -185,6 +189,6 @@ test "vjp support detection" {
 
     // Ops without VJP
     try std.testing.expect(!has_vjp(.maximum));
-    try std.testing.expect(!has_vjp(.broadcast_in_dim));
+    try std.testing.expect(!has_vjp(.call));
     try std.testing.expect(!has_vjp(.custom_call));
 }

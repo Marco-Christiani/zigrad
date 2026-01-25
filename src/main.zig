@@ -106,6 +106,26 @@ pub fn main() !void {
             }
             return run_vjp_demo(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
         }
+        if (std.mem.eql(u8, m, "train-demo")) {
+            if (mode_args.items.len > 1) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            const warmup_steps: usize = if (mode_args.items.len == 1)
+                std.fmt.parseInt(usize, mode_args.items[0], 10) catch {
+                    try print_usage();
+                    return error.InvalidArguments;
+                }
+            else
+                0;
+            return run_train_demo(
+                gpa,
+                plugin_path,
+                if (have_dump_pr) &dump_pr_cfg else null,
+                if (have_dump_mlir) &dump_mlir_cfg else null,
+                warmup_steps,
+            );
+        }
         if (std.mem.eql(u8, m, "jit-cache-save")) {
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
@@ -229,17 +249,21 @@ fn run_demo_executable(
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
     defer dev_c.deinit();
 
-    const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c });
     defer {
-        for (outputs) |*buf| buf.deinit();
-        allocator.free(outputs);
+        if (result.device_complete_event) |ev| {
+            var tmp = ev;
+            tmp.deinit();
+        }
+        for (result.outputs) |*buf| buf.deinit();
+        allocator.free(result.outputs);
     }
 
-    if (outputs.len != 1) return error.UnexpectedOutputs;
+    if (result.outputs.len != 1) return error.UnexpectedOutputs;
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try outputs[0].to_host(out_host.data);
+    var ev = try result.outputs[0].to_host(out_host.data);
     defer ev.deinit();
     try ev.await_();
 
@@ -346,13 +370,17 @@ fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, 
     var dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
     defer dev_ct.deinit();
 
-    const outputs = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
+    const result = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
     defer {
-        for (outputs) |*buf| buf.deinit();
-        allocator.free(outputs);
+        if (result.device_complete_event) |ev| {
+            var tmp = ev;
+            tmp.deinit();
+        }
+        for (result.outputs) |*buf| buf.deinit();
+        allocator.free(result.outputs);
     }
 
-    if (outputs.len != 3) return error.UnexpectedOutputs;
+    if (result.outputs.len != 3) return error.UnexpectedOutputs;
 
     var out_a = try zg.utils.HostBuffer.init(allocator, shape_a, .f32);
     defer out_a.deinit();
@@ -361,11 +389,11 @@ fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, 
     var out_c = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
-    var ev_a = try outputs[0].to_host(out_a.data);
+    var ev_a = try result.outputs[0].to_host(out_a.data);
     defer ev_a.deinit();
-    var ev_b = try outputs[1].to_host(out_b.data);
+    var ev_b = try result.outputs[1].to_host(out_b.data);
     defer ev_b.deinit();
-    var ev_c = try outputs[2].to_host(out_c.data);
+    var ev_c = try result.outputs[2].to_host(out_c.data);
     defer ev_c.deinit();
 
     try ev_a.await_();
@@ -395,6 +423,316 @@ fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, 
     try expect_all_close("dC", got_c, expected_c[0..], 1e-4);
 
     std.log.info("OK: vjp-demo gradients match expected", .{});
+}
+
+fn run_train_demo(
+    allocator: std.mem.Allocator,
+    plugin_path: []const u8,
+    dump_pr: ?*zg.pipeline.DumpConfig,
+    dump_mlir: ?*zg.pipeline.DumpConfig,
+    warmup_steps: usize,
+) !void {
+    const TensorSpec = zg.frontend.TensorSpec;
+
+    const ParamsSpec = struct {
+        w1: TensorSpec,
+        b1: TensorSpec,
+        w2: TensorSpec,
+        b2: TensorSpec,
+        w3: TensorSpec,
+        b3: TensorSpec,
+    };
+
+    const BatchSpec = struct {
+        x: TensorSpec,
+        y: TensorSpec,
+    };
+
+    const LossFn = struct {
+        fn call(params: anytype, batch: anytype) !zg.frontend.Tensor {
+            const bs: usize = 64;
+            const h1: usize = 128;
+            const h2: usize = 64;
+            const out: usize = 10;
+
+            const z1 = try batch.x.matmul(params.w1);
+            const b1b = try params.b1.broadcast_in_dim(&.{ bs, h1 }, &.{1});
+            const a1 = try z1.add(b1b);
+
+            const z2 = try a1.matmul(params.w2);
+            const b2b = try params.b2.broadcast_in_dim(&.{ bs, h2 }, &.{1});
+            const a2 = try z2.add(b2b);
+
+            const z3 = try a2.matmul(params.w3);
+            const b3b = try params.b3.broadcast_in_dim(&.{ bs, out }, &.{1});
+            const preds = try z3.add(b3b);
+            const diff = try preds.sub(batch.y);
+            const sq = try diff.mul(diff);
+            return try sq.reduce_sum(&.{ 0, 1 });
+        }
+    };
+
+
+    const bs: usize = 64;
+    const in_dim: usize = 784;
+    const h1: usize = 128;
+    const h2: usize = 64;
+    const out_dim: usize = 10;
+
+    const params_spec = ParamsSpec{
+            .w1 = .{ .dtype = .f32, .dims = &.{ in_dim, h1 } },
+            .b1 = .{ .dtype = .f32, .dims = &.{ h1 } },
+            .w2 = .{ .dtype = .f32, .dims = &.{ h1, h2 } },
+            .b2 = .{ .dtype = .f32, .dims = &.{ h2 } },
+            .w3 = .{ .dtype = .f32, .dims = &.{ h2, out_dim } },
+            .b3 = .{ .dtype = .f32, .dims = &.{ out_dim } },
+        };
+    const batch_spec = BatchSpec{
+            .x = .{ .dtype = .f32, .dims = &.{ bs, in_dim } },
+            .y = .{ .dtype = .f32, .dims = &.{ bs, out_dim } },
+        };
+    const inputs_spec = .{ params_spec, batch_spec };
+
+    var compile_cfg = zg.frontend.CompileConfig{
+        .entry_name = "train_step",
+        .plugin_path = plugin_path,
+        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
+        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+    };
+    if (compile_cfg.dump_mlir != null) {
+        compile_cfg.lower.encoding = .text;
+    }
+
+    var backend_handle = try zg.frontend.init_backend(allocator, compile_cfg.plugin_path);
+    defer backend_handle.deinit();
+
+    const devices = try backend_handle.get_devices(allocator);
+    defer allocator.free(devices);
+
+    if (compile_cfg.device_index >= devices.len) return error.InvalidDeviceIndex;
+    const device = &devices[compile_cfg.device_index];
+
+    var compiled = try zg.frontend.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, 6, 1e-2, compile_cfg);
+    defer compiled.deinit();
+
+    const true_w1 = try allocator.alloc(f32, in_dim * h1);
+    defer allocator.free(true_w1);
+    const true_b1 = try allocator.alloc(f32, h1);
+    defer allocator.free(true_b1);
+    const true_w2 = try allocator.alloc(f32, h1 * h2);
+    defer allocator.free(true_w2);
+    const true_b2 = try allocator.alloc(f32, h2);
+    defer allocator.free(true_b2);
+    const true_w3 = try allocator.alloc(f32, h2 * out_dim);
+    defer allocator.free(true_w3);
+    const true_b3 = try allocator.alloc(f32, out_dim);
+    defer allocator.free(true_b3);
+
+    fill_pattern(true_w1, 1e-6, 0.0);
+    fill_pattern(true_b1, 1e-6, 0.0);
+    fill_pattern(true_w2, 1e-6, 0.0);
+    fill_pattern(true_b2, 1e-6, 0.0);
+    fill_pattern(true_w3, 1e-6, 0.0);
+    fill_pattern(true_b3, 1e-6, 0.0);
+
+    const shape_w1 = zg.utils.Shape{ .dims = &.{ in_dim, h1 } };
+    const shape_b1 = zg.utils.Shape{ .dims = &.{ h1 } };
+    const shape_w2 = zg.utils.Shape{ .dims = &.{ h1, h2 } };
+    const shape_b2 = zg.utils.Shape{ .dims = &.{ h2 } };
+    const shape_w3 = zg.utils.Shape{ .dims = &.{ h2, out_dim } };
+    const shape_b3 = zg.utils.Shape{ .dims = &.{ out_dim } };
+    const shape_x = zg.utils.Shape{ .dims = &.{ bs, in_dim } };
+    const shape_y = zg.utils.Shape{ .dims = &.{ bs, out_dim } };
+
+    var host_w1 = try zg.utils.HostBuffer.init(allocator, shape_w1, .f32);
+    defer host_w1.deinit();
+    var host_b1 = try zg.utils.HostBuffer.init(allocator, shape_b1, .f32);
+    defer host_b1.deinit();
+    var host_w2 = try zg.utils.HostBuffer.init(allocator, shape_w2, .f32);
+    defer host_w2.deinit();
+    var host_b2 = try zg.utils.HostBuffer.init(allocator, shape_b2, .f32);
+    defer host_b2.deinit();
+    var host_w3 = try zg.utils.HostBuffer.init(allocator, shape_w3, .f32);
+    defer host_w3.deinit();
+    var host_b3 = try zg.utils.HostBuffer.init(allocator, shape_b3, .f32);
+    defer host_b3.deinit();
+    var host_x = try zg.utils.HostBuffer.init(allocator, shape_x, .f32);
+    defer host_x.deinit();
+    var host_y = try zg.utils.HostBuffer.init(allocator, shape_y, .f32);
+    defer host_y.deinit();
+
+    fill_pattern(host_w1.as_slice(f32), 1e-7, 0.0);
+    fill_pattern(host_b1.as_slice(f32), 1e-7, 0.0);
+    fill_pattern(host_w2.as_slice(f32), 1e-7, 0.0);
+    fill_pattern(host_b2.as_slice(f32), 1e-7, 0.0);
+    fill_pattern(host_w3.as_slice(f32), 1e-7, 0.0);
+    fill_pattern(host_b3.as_slice(f32), 1e-7, 0.0);
+    fill_inputs(host_x.as_slice(f32));
+
+    const scratch1 = try allocator.alloc(f32, bs * h1);
+    defer allocator.free(scratch1);
+    const scratch2 = try allocator.alloc(f32, bs * h2);
+    defer allocator.free(scratch2);
+
+    try fill_targets(
+        &host_y,
+        &host_x,
+        true_w1,
+        true_b1,
+        true_w2,
+        true_b2,
+        true_w3,
+        true_b3,
+        scratch1,
+        scratch2,
+        bs,
+        in_dim,
+        h1,
+        h2,
+        out_dim,
+    );
+
+    const steps: usize = 8;
+    var total_ns: u64 = 0;
+
+    var dev_w1 = try upload_host_buffer(allocator, &backend_handle, device, &host_w1);
+    defer dev_w1.deinit();
+    var dev_b1 = try upload_host_buffer(allocator, &backend_handle, device, &host_b1);
+    defer dev_b1.deinit();
+    var dev_w2 = try upload_host_buffer(allocator, &backend_handle, device, &host_w2);
+    defer dev_w2.deinit();
+    var dev_b2 = try upload_host_buffer(allocator, &backend_handle, device, &host_b2);
+    defer dev_b2.deinit();
+    var dev_w3 = try upload_host_buffer(allocator, &backend_handle, device, &host_w3);
+    defer dev_w3.deinit();
+    var dev_b3 = try upload_host_buffer(allocator, &backend_handle, device, &host_b3);
+    defer dev_b3.deinit();
+    var dev_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
+    defer dev_x.deinit();
+    var dev_y = try upload_host_buffer(allocator, &backend_handle, device, &host_y);
+    defer dev_y.deinit();
+
+    var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
+    defer loss_host.deinit();
+
+    const input_count = 8;
+    const output_count = 7;
+    var scratch = try zg.backend.pjrt.ExecuteScratch.init(allocator, input_count, output_count);
+    defer scratch.deinit(allocator);
+
+    var outputs: [output_count]zg.backend.pjrt.Buffer = undefined;
+
+    var warmup: usize = 0;
+    while (warmup < warmup_steps) : (warmup += 1) {
+        const wait_device_event = false;
+        const inputs = [_]zg.backend.pjrt.Buffer{ dev_w1, dev_b1, dev_w2, dev_b2, dev_w3, dev_b3, dev_x, dev_y };
+        var result = try compiled.execute_into(inputs[0..], outputs[0..], &scratch);
+
+        var loss_ev = try result.outputs[0].to_host(loss_host.data);
+        if (result.device_complete_event) |ev| {
+            var tmp = ev;
+            if (wait_device_event) {
+                try tmp.await_();
+            }
+            tmp.deinit();
+        }
+
+        try loss_ev.await_();
+        loss_ev.deinit();
+
+        result.outputs[0].deinit();
+        const new_w1 = result.outputs[1];
+        const new_b1 = result.outputs[2];
+        const new_w2 = result.outputs[3];
+        const new_b2 = result.outputs[4];
+        const new_w3 = result.outputs[5];
+        const new_b3 = result.outputs[6];
+
+        dev_w1.deinit();
+        dev_b1.deinit();
+        dev_w2.deinit();
+        dev_b2.deinit();
+        dev_w3.deinit();
+        dev_b3.deinit();
+        dev_w1 = new_w1;
+        dev_b1 = new_b1;
+        dev_w2 = new_w2;
+        dev_b2 = new_b2;
+        dev_w3 = new_w3;
+        dev_b3 = new_b3;
+    }
+
+    var step: usize = 0;
+    while (step < steps) : (step += 1) {
+        const wait_device_event = false;
+        var timer = try std.time.Timer.start();
+        const inputs = [_]zg.backend.pjrt.Buffer{ dev_w1, dev_b1, dev_w2, dev_b2, dev_w3, dev_b3, dev_x, dev_y };
+        var result = try compiled.execute_into(inputs[0..], outputs[0..], &scratch);
+        const exec_ns = timer.lap();
+
+        var loss_ev = try result.outputs[0].to_host(loss_host.data);
+        const to_host_ns = timer.lap();
+        var dev_wait_ns: u64 = 0;
+        if (result.device_complete_event) |ev| {
+            var tmp = ev;
+            if (wait_device_event) {
+                try tmp.await_();
+                dev_wait_ns = timer.lap();
+            } else {
+                timer.reset();
+            }
+            tmp.deinit();
+        } else {
+            timer.reset();
+        }
+
+        try loss_ev.await_();
+        loss_ev.deinit();
+        const loss_wait_ns = timer.lap();
+
+        result.outputs[0].deinit();
+        const new_w1 = result.outputs[1];
+        const new_b1 = result.outputs[2];
+        const new_w2 = result.outputs[3];
+        const new_b2 = result.outputs[4];
+        const new_w3 = result.outputs[5];
+        const new_b3 = result.outputs[6];
+
+        dev_w1.deinit();
+        dev_b1.deinit();
+        dev_w2.deinit();
+        dev_b2.deinit();
+        dev_w3.deinit();
+        dev_b3.deinit();
+        dev_w1 = new_w1;
+        dev_b1 = new_b1;
+        dev_w2 = new_w2;
+        dev_b2 = new_b2;
+        dev_w3 = new_w3;
+        dev_b3 = new_b3;
+
+        const loss = loss_host.as_slice(f32)[0];
+
+        const swap_ns = timer.lap();
+        const step_ns = exec_ns + to_host_ns + dev_wait_ns + loss_wait_ns + swap_ns;
+        total_ns += step_ns;
+        const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
+        const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
+        const to_host_ms = @as(f64, @floatFromInt(to_host_ns)) / std.time.ns_per_ms;
+        const dev_wait_ms = @as(f64, @floatFromInt(dev_wait_ns)) / std.time.ns_per_ms;
+        const loss_wait_ms = @as(f64, @floatFromInt(loss_wait_ns)) / std.time.ns_per_ms;
+        const swap_ms = @as(f64, @floatFromInt(swap_ns)) / std.time.ns_per_ms;
+        std.log.info("train-demo step {d}: loss={d:.6}", .{ step, loss });
+        std.log.info(
+            "train-demo step {d}: exec_ms={d:.3} to_host_ms={d:.3} dev_wait_ms={d:.3} loss_wait_ms={d:.3} swap_ms={d:.3}",
+            .{ step, exec_ms, to_host_ms, dev_wait_ms, loss_wait_ms, swap_ms },
+        );
+        std.log.info("train-demo step {d}: time_ms={d:.3}", .{ step, step_ms });
+    }
+
+    const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
+    std.log.info("train-demo avg_step_ms={d:.3}", .{avg_ms});
+    std.log.info("OK: train-demo executed", .{});
 }
 
 fn compile_program(
@@ -457,6 +795,110 @@ fn expect_all_close(label: []const u8, got: []const f32, expected: []const f32, 
     }
 }
 
+fn upload_host_buffer(
+    allocator: std.mem.Allocator,
+    backend: *zg.backend.PjrtBackend,
+    device: *const zg.backend.pjrt.Device,
+    buf: *zg.utils.HostBuffer,
+) !zg.backend.pjrt.Buffer {
+    const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
+    defer allocator.free(shape_i64);
+    for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
+    const dtype: zg.backend.pjrt.BufferType = switch (buf.dtype) {
+        .f32 => .f32,
+        .f64 => .f64,
+        .i32 => .i32,
+        .i64 => .i64,
+        .u32 => .u32,
+        .u64 => .u64,
+    };
+    return backend.buffer_from_host(device, buf.data, dtype, shape_i64);
+}
+
+fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
+    for (slice, 0..) |*v, i| {
+        const base = @as(f32, @floatFromInt(i % 1024));
+        v.* = offset + scale * base;
+    }
+}
+
+fn fill_inputs(x: []f32) void {
+    for (x, 0..) |*v, i| {
+        const base = @as(f32, @floatFromInt(i % 256));
+        v.* = base / 255.0;
+    }
+}
+
+fn fill_targets(
+    host_y: *zg.utils.HostBuffer,
+    host_x: *zg.utils.HostBuffer,
+    w1: []const f32,
+    b1: []const f32,
+    w2: []const f32,
+    b2: []const f32,
+    w3: []const f32,
+    b3: []const f32,
+    scratch1: []f32,
+    scratch2: []f32,
+    bs: usize,
+    in_dim: usize,
+    h1: usize,
+    h2: usize,
+    out_dim: usize,
+) !void {
+    if (host_y.dtype != .f32 or host_x.dtype != .f32) return error.UnsupportedDType;
+    if (host_x.shape.dims.len != 2 or host_y.shape.dims.len != 2) return error.ShapeMismatch;
+    if (host_x.shape.dims[0] != bs or host_x.shape.dims[1] != in_dim) return error.ShapeMismatch;
+    if (host_y.shape.dims[0] != bs or host_y.shape.dims[1] != out_dim) return error.ShapeMismatch;
+
+    if (w1.len != in_dim * h1 or b1.len != h1) return error.ShapeMismatch;
+    if (w2.len != h1 * h2 or b2.len != h2) return error.ShapeMismatch;
+    if (w3.len != h2 * out_dim or b3.len != out_dim) return error.ShapeMismatch;
+    if (scratch1.len != bs * h1 or scratch2.len != bs * h2) return error.ShapeMismatch;
+
+    const x = host_x.as_slice(f32);
+    const y = host_y.as_slice(f32);
+
+    var n: usize = 0;
+    while (n < bs) : (n += 1) {
+        var j: usize = 0;
+        while (j < h1) : (j += 1) {
+            var acc: f32 = b1[j];
+            var k: usize = 0;
+            while (k < in_dim) : (k += 1) {
+                acc += x[n * in_dim + k] * w1[k * h1 + j];
+            }
+            scratch1[n * h1 + j] = acc;
+        }
+    }
+
+    n = 0;
+    while (n < bs) : (n += 1) {
+        var j: usize = 0;
+        while (j < h2) : (j += 1) {
+            var acc: f32 = b2[j];
+            var k: usize = 0;
+            while (k < h1) : (k += 1) {
+                acc += scratch1[n * h1 + k] * w2[k * h2 + j];
+            }
+            scratch2[n * h2 + j] = acc;
+        }
+    }
+
+    n = 0;
+    while (n < bs) : (n += 1) {
+        var j: usize = 0;
+        while (j < out_dim) : (j += 1) {
+            var acc: f32 = b3[j];
+            var k: usize = 0;
+            while (k < h2) : (k += 1) {
+                acc += scratch2[n * h2 + k] * w3[k * out_dim + j];
+            }
+            y[n * out_dim + j] = acc;
+        }
+    }
+}
+
 fn print_pr(allocator: std.mem.Allocator) !void {
     var program = try zg.frontend.build_demo_program(allocator);
     defer program.deinit();
@@ -494,6 +936,7 @@ fn print_usage() !void {
         \\  print-pr                     prints the PR for the demo program
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
+        \\  train-demo [warmup]          runs the frontend training demo
         \\  jit-cache-save <path>        writes PJRT JIT cache artifact
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\

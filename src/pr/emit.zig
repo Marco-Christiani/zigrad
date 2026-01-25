@@ -115,6 +115,9 @@ fn emit_params(params: []const pr.Param, writer: anytype) !void {
                 }
                 try writer.writeAll("]");
             },
+            .call_callee => |name| {
+                try writer.print(" callee=\"{s}\"", .{name});
+            },
             .call_target_name => |name| {
                 try writer.print(" target=\"{s}\"", .{name});
             },

@@ -96,6 +96,74 @@ pub const custom_call = struct {
 };
 
 // ============================================================================
+// Call
+// ============================================================================
+
+pub const call = struct {
+    pub const arity = .{ .in = .variadic, .out = .variadic };
+
+    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
+        const inputs = ctx.inputs();
+        const outputs = ctx.outputs();
+        const params = ctx.params();
+
+        _ = pr.param_call_callee(params) orelse return error.InvalidParams;
+
+        for (inputs) |in_id| _ = try ctx.tensor_of(in_id);
+        for (outputs) |out_id| _ = try ctx.tensor_of(out_id);
+    }
+
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+        _ = pr.param_call_callee(ctx.params) orelse return error.InvalidParams;
+        return error.InvalidEqnArity;
+    }
+
+    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+
+        const callee = pr.param_call_callee(params) orelse return error.InvalidProgram;
+
+        const operand_values = try ctx.arena.alloc(mlir.Value, inputs.len);
+        for (inputs, 0..) |operand_id, i| {
+            operand_values[i] = ctx.get_value(operand_id) orelse return error.InvalidProgram;
+        }
+
+        const result_types = try ctx.arena.alloc(mlir.Type, outputs.len);
+        for (outputs, 0..) |out_id, i| {
+            const out_tensor = try ctx.tensor_of(out_id);
+            result_types[i] = try ctx.tensor_to_mlir_type(out_tensor);
+        }
+
+        const callee_z = try ctx.arena.allocSentinel(u8, callee.len, 0);
+        @memcpy(callee_z, callee);
+
+        const op = mlir.Operation.make(ctx.mlir_ctx, "func.call", .{
+            .results = result_types,
+            .operands = operand_values,
+            .attributes = &.{
+                .{ "callee", mlir.Attribute.symbol(ctx.mlir_ctx, callee_z) },
+            },
+            .verify = false,
+            .location = ctx.loc,
+        });
+
+        ctx.block.append_operation(op);
+        for (outputs, 0..) |out_id, i| {
+            ctx.set_value(out_id, op.result(i));
+        }
+    }
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        const params = ctx.params();
+        if (pr.param_call_callee(params)) |callee| {
+            try writer.print("callee=\"{s}\"", .{callee});
+        }
+    }
+};
+
+// ============================================================================
 // Helpers
 // ============================================================================
 

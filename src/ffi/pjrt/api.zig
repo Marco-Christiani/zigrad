@@ -26,13 +26,21 @@ pub fn pjrt_struct_size(comptime T: type) usize {
 pub const Api = struct {
     handle: *anyopaque,
     pjrt_api: *c.PJRT_Api,
+    trace_execute: bool,
 
     /// Load API from dlopen handle
     pub fn init(handle: *anyopaque, get_api_fn: *const fn () callconv(.c) ?*const c.PJRT_Api) !Api {
         const pjrt_api = get_api_fn() orelse return error.GetApiFailed;
+        const trace_execute = blk: {
+            const env = std.posix.getenv("ZG_PJRT_TRACE_EXECUTE") orelse break :blk false;
+            const val = std.mem.sliceTo(env, 0);
+            if (val.len == 0) break :blk false;
+            break :blk !std.mem.eql(u8, val, "0");
+        };
         return Api{
             .handle = handle,
             .pjrt_api = @constCast(pjrt_api),
+            .trace_execute = trace_execute,
         };
     }
 

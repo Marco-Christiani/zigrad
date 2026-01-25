@@ -129,10 +129,7 @@ pub const Client = struct {
         try self.api.call("PJRT_Client_Compile", &args);
 
         const executable_ptr = args.executable orelse return error.PjrtReturnedNullExecutable;
-        return LoadedExecutable{
-            .api = self.api,
-            .pjrt_executable = executable_ptr,
-        };
+        return LoadedExecutable.init(self.api, executable_ptr);
     }
 
     pub fn deserialize_and_load(
@@ -157,10 +154,7 @@ pub const Client = struct {
         try self.api.call("PJRT_Executable_DeserializeAndLoad", &args);
 
         const loaded_ptr = args.loaded_executable orelse return error.PjrtReturnedNullLoadedExecutable;
-        return LoadedExecutable{
-            .api = self.api,
-            .pjrt_executable = loaded_ptr,
-        };
+        return LoadedExecutable.init(self.api, loaded_ptr);
     }
 
     pub fn buffer_from_host(
@@ -236,6 +230,34 @@ pub const Device = struct {
 pub const LoadedExecutable = struct {
     api: *Api,
     pjrt_executable: *c.PJRT_LoadedExecutable,
+    num_outputs: usize,
+
+    fn query_num_outputs(api: *Api, pjrt_executable: *c.PJRT_LoadedExecutable) !usize {
+        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        get_exec_args.loaded_executable = pjrt_executable;
+        get_exec_args.executable = null;
+        try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
+        const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
+        defer {
+            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            destroy_args.executable = pjrt_exec;
+            api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+        }
+
+        var num_outputs_args = api_mod.init_args(c.PJRT_Executable_NumOutputs_Args);
+        num_outputs_args.executable = pjrt_exec;
+        try api.call("PJRT_Executable_NumOutputs", &num_outputs_args);
+        return num_outputs_args.num_outputs;
+    }
+
+    fn init(api: *Api, pjrt_executable: *c.PJRT_LoadedExecutable) !LoadedExecutable {
+        const num_outputs = try query_num_outputs(api, pjrt_executable);
+        return .{
+            .api = api,
+            .pjrt_executable = pjrt_executable,
+            .num_outputs = num_outputs,
+        };
+    }
 
     pub fn deinit(self: *LoadedExecutable) void {
         var args = api_mod.init_args(c.PJRT_LoadedExecutable_Destroy_Args);
@@ -274,33 +296,18 @@ pub const LoadedExecutable = struct {
         return allocator.dupe(u8, bytes);
     }
 
-    pub fn execute(
-        self: *LoadedExecutable,
-        allocator: std.mem.Allocator,
-        inputs: []const Buffer,
-    ) ![]Buffer {
-        // For simplicity, assume single-device execution
-        // Full implementation would handle multi-device
-
-        // Get the underlying PJRT_Executable to query num_outputs
-        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
-        get_exec_args.loaded_executable = self.pjrt_executable;
-        get_exec_args.executable = null;
-        try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
-        const pjrt_executable = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
-        defer {
-            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
-            destroy_args.executable = pjrt_executable;
-            self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+    pub fn execute(self: *LoadedExecutable, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
+        const trace = self.api.trace_execute;
+        var timer: std.time.Timer = undefined;
+        var prep_ns: u64 = 0;
+        var call_ns: u64 = 0;
+        var wrap_ns: u64 = 0;
+        if (trace) {
+            timer = try std.time.Timer.start();
         }
 
-        // Query number of outputs
-        var num_outputs_args = api_mod.init_args(c.PJRT_Executable_NumOutputs_Args);
-        num_outputs_args.executable = pjrt_executable;
-        try self.api.call("PJRT_Executable_NumOutputs", &num_outputs_args);
-        const num_outputs = num_outputs_args.num_outputs;
+        const num_outputs = self.num_outputs;
 
-        // Convert inputs to C array - single device execution
         const input_ptrs = try allocator.alloc(*c.PJRT_Buffer, inputs.len);
         defer allocator.free(input_ptrs);
         for (inputs, 0..) |buf, i| {
@@ -310,16 +317,13 @@ pub const LoadedExecutable = struct {
         const input_list: [*c]*c.PJRT_Buffer = input_ptrs.ptr;
         var input_lists = [_][*c]*c.PJRT_Buffer{input_list};
 
-        // Allocate output buffer pointer array (PJRT will fill these in)
         const output_ptrs = try allocator.alloc(?*c.PJRT_Buffer, num_outputs);
         defer allocator.free(output_ptrs);
-        // Initialize to null - PJRT will populate with actual buffer pointers
         @memset(output_ptrs, null);
 
         const output_list: [*c]*c.PJRT_Buffer = @ptrCast(output_ptrs.ptr);
         var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
 
-        // Create execute options
         var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
         execute_opts.send_callbacks = null;
         execute_opts.recv_callbacks = null;
@@ -330,6 +334,8 @@ pub const LoadedExecutable = struct {
         execute_opts.num_non_donatable_input_indices = 0;
         execute_opts.context = null;
 
+        var device_events = [_]?*c.PJRT_Event{null};
+
         var args = api_mod.init_args(c.PJRT_LoadedExecutable_Execute_Args);
         args.executable = self.pjrt_executable;
         args.options = &execute_opts;
@@ -337,12 +343,19 @@ pub const LoadedExecutable = struct {
         args.num_devices = 1;
         args.num_args = inputs.len;
         args.output_lists = @ptrCast(&output_lists);
-        args.device_complete_events = null;
+        args.device_complete_events = @ptrCast(&device_events);
         args.execute_device = null;
+
+        if (trace) {
+            prep_ns = timer.lap();
+        }
 
         try self.api.call("PJRT_LoadedExecutable_Execute", &args);
 
-        // Copy output buffers to our Buffer wrapper array
+        if (trace) {
+            call_ns = timer.lap();
+        }
+
         const outputs = try allocator.alloc(Buffer, num_outputs);
         for (outputs, 0..) |*buf, i| {
             buf.* = Buffer{
@@ -351,7 +364,101 @@ pub const LoadedExecutable = struct {
             };
         }
 
-        return outputs;
+        const event = if (device_events[0]) |ev| Event{ .api = self.api, .pjrt_event = ev } else null;
+        if (trace) {
+            wrap_ns = timer.lap();
+            const ns_per_ms = std.time.ns_per_ms;
+            const prep_ms = @as(f64, @floatFromInt(prep_ns)) / ns_per_ms;
+            const call_ms = @as(f64, @floatFromInt(call_ns)) / ns_per_ms;
+            const wrap_ms = @as(f64, @floatFromInt(wrap_ns)) / ns_per_ms;
+            std.log.info(
+                "pjrt execute: inputs={d} outputs={d} prep_ms={d:.3} call_ms={d:.3} wrap_ms={d:.3}",
+                .{ inputs.len, num_outputs, prep_ms, call_ms, wrap_ms },
+            );
+        }
+        return .{ .outputs = outputs, .device_complete_event = event };
+    }
+
+    pub fn execute_with_scratch(
+        self: *LoadedExecutable,
+        inputs: []const Buffer,
+        outputs: []Buffer,
+        scratch: *ExecuteScratch,
+    ) !?Event {
+        if (inputs.len != scratch.input_ptrs.len) return error.InputArityMismatch;
+        if (outputs.len != self.num_outputs) return error.OutputArityMismatch;
+        if (outputs.len != scratch.output_ptrs.len) return error.OutputArityMismatch;
+
+        const input_ptrs = scratch.input_ptrs;
+        for (inputs, 0..) |buf, i| {
+            input_ptrs[i] = buf.pjrt_buffer;
+        }
+
+        const input_list: [*c]*c.PJRT_Buffer = input_ptrs.ptr;
+        var input_lists = [_][*c]*c.PJRT_Buffer{input_list};
+
+        const output_ptrs = scratch.output_ptrs;
+        @memset(output_ptrs, null);
+        const output_list: [*c]*c.PJRT_Buffer = @ptrCast(output_ptrs.ptr);
+        var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
+
+        var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
+        execute_opts.send_callbacks = null;
+        execute_opts.recv_callbacks = null;
+        execute_opts.num_send_ops = 0;
+        execute_opts.num_recv_ops = 0;
+        execute_opts.launch_id = 0;
+        execute_opts.non_donatable_input_indices = null;
+        execute_opts.num_non_donatable_input_indices = 0;
+        execute_opts.context = null;
+
+        var device_events = [_]?*c.PJRT_Event{null};
+
+        var args = api_mod.init_args(c.PJRT_LoadedExecutable_Execute_Args);
+        args.executable = self.pjrt_executable;
+        args.options = &execute_opts;
+        args.argument_lists = @ptrCast(&input_lists);
+        args.num_devices = 1;
+        args.num_args = inputs.len;
+        args.output_lists = @ptrCast(&output_lists);
+        args.device_complete_events = @ptrCast(&device_events);
+        args.execute_device = null;
+
+        try self.api.call("PJRT_LoadedExecutable_Execute", &args);
+
+        for (outputs, 0..) |*buf, i| {
+            buf.* = Buffer{
+                .api = self.api,
+                .pjrt_buffer = output_ptrs[i] orelse return error.PjrtReturnedNullOutputBuffer,
+            };
+        }
+
+        return if (device_events[0]) |ev| Event{ .api = self.api, .pjrt_event = ev } else null;
+    }
+};
+
+pub const ExecuteResult = struct {
+    outputs: []Buffer,
+    device_complete_event: ?Event,
+};
+
+pub const ExecuteScratch = struct {
+    input_ptrs: []*c.PJRT_Buffer,
+    output_ptrs: []?*c.PJRT_Buffer,
+
+    pub fn init(allocator: std.mem.Allocator, input_count: usize, output_count: usize) !ExecuteScratch {
+        const input_ptrs = try allocator.alloc(*c.PJRT_Buffer, input_count);
+        const output_ptrs = try allocator.alloc(?*c.PJRT_Buffer, output_count);
+        @memset(output_ptrs, null);
+        return .{
+            .input_ptrs = input_ptrs,
+            .output_ptrs = output_ptrs,
+        };
+    }
+
+    pub fn deinit(self: *ExecuteScratch, allocator: std.mem.Allocator) void {
+        allocator.free(self.input_ptrs);
+        allocator.free(self.output_ptrs);
     }
 };
 

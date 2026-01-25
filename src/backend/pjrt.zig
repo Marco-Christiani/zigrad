@@ -27,6 +27,7 @@ pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;
 pub const Device = pjrt_types.Device;
 pub const Event = pjrt_types.Event;
+pub const ExecuteScratch = pjrt_types.ExecuteScratch;
 pub const BufferType = pjrt_types.BufferType;
 pub const ProgramFormat = pjrt_types.ProgramFormat;
 
