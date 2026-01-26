@@ -627,17 +627,30 @@ fn run_train_demo(
         .non_donatable_input_indices = &.{ 6, 7 },
     };
 
+    // Check once if we're on CPU for direct memory access optimization
+    const is_cpu = try dev_w1.is_on_cpu();
+
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
-        if (try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts)) |ev| {
-            var tmp = ev;
-            tmp.deinit();
-        }
+        const ev = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
 
         var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
-        var loss_ev = try loss_buf.to_host(loss_host.data);
-        try loss_ev.await_();
-        loss_ev.deinit();
+        if (is_cpu) {
+            // CPU: wait on device event (same as timed loop)
+            if (ev) |e| {
+                var tmp = e;
+                try tmp.await_();
+                tmp.deinit();
+            }
+        } else {
+            if (ev) |e| {
+                var tmp = e;
+                tmp.deinit();
+            }
+            var loss_ev = try loss_buf.to_host(loss_host.data);
+            try loss_ev.await_();
+            loss_ev.deinit();
+        }
         loss_buf.deinit();
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
@@ -651,19 +664,31 @@ fn run_train_demo(
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
         const event = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
-        const exec_ns = timer.lap();
+        const dispatch_ns = timer.lap();
 
         var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
-        var loss_ev = try loss_buf.to_host(loss_host.data);
-        if (event) |ev| {
-            var tmp = ev;
-            tmp.deinit();
-        }
 
-        // to_host event encompasses buffer-ready + transfer-complete
-        try loss_ev.await_();
-        loss_ev.deinit();
-        const loss_wait_ns = timer.lap();
+        const loss: f32 = if (is_cpu) blk: {
+            // CPU: wait for compute, then read directly from buffer memory
+            if (event) |ev| {
+                var tmp = ev;
+                try tmp.await_();
+                tmp.deinit();
+            }
+            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer());
+            break :blk ptr[0];
+        } else blk: {
+            // GPU: wait for compute via async copy to host
+            if (event) |ev| {
+                var tmp = ev;
+                tmp.deinit();
+            }
+            var loss_ev = try loss_buf.to_host(loss_host.data);
+            try loss_ev.await_();
+            loss_ev.deinit();
+            break :blk loss_host.as_slice(f32)[0];
+        };
+        const compute_ns = timer.lap();
 
         loss_buf.deinit();
 
@@ -673,17 +698,15 @@ fn run_train_demo(
             old.* = new;
         }
 
-        const loss = loss_host.as_slice(f32)[0];
-
-        const swap_ns = timer.lap();
-        const step_ns = exec_ns + loss_wait_ns + swap_ns;
+        const cleanup_ns = timer.lap();
+        const step_ns = dispatch_ns + compute_ns + cleanup_ns;
         total_ns += step_ns;
         const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
-        const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
-        const loss_wait_ms = @as(f64, @floatFromInt(loss_wait_ns)) / std.time.ns_per_ms;
-        const swap_ms = @as(f64, @floatFromInt(swap_ns)) / std.time.ns_per_ms;
-        std.log.info("train-demo step {d}: loss={d:.6} exec_ms={d:.3} wait_ms={d:.3} swap_ms={d:.3} total_ms={d:.3}", .{
-            step, loss, exec_ms, loss_wait_ms, swap_ms, step_ms,
+        const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
+        const compute_ms = @as(f64, @floatFromInt(compute_ns)) / std.time.ns_per_ms;
+        const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
+        std.log.info("train-demo step {d}: loss={d:.6} dispatch={d:.3}ms compute={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+            step, loss, dispatch_ms, compute_ms, cleanup_ms, step_ms,
         });
     }
 

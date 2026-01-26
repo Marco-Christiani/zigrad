@@ -501,6 +501,22 @@ pub const Buffer = struct {
             .pjrt_event = event_ptr,
         };
     }
+
+    pub fn is_on_cpu(self: *const Buffer) !bool {
+        var args = api_mod.init_args(c.PJRT_Buffer_IsOnCpu_Args);
+        args.buffer = self.pjrt_buffer;
+        args.is_on_cpu = false;
+        try self.api.call("PJRT_Buffer_IsOnCpu", &args);
+        return args.is_on_cpu;
+    }
+
+    pub fn unsafe_pointer(self: *const Buffer) !usize {
+        var args = api_mod.init_args(c.PJRT_Buffer_UnsafePointer_Args);
+        args.buffer = self.pjrt_buffer;
+        args.buffer_pointer = 0;
+        try self.api.call("PJRT_Buffer_UnsafePointer", &args);
+        return args.buffer_pointer;
+    }
 };
 
 /// Raw C pointer type for zero-copy buffer operations.
