@@ -25,9 +25,9 @@ const pass = @import("../pipeline/pass.zig");
 // Re-export common types for convenience
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;
+pub const RawBuffer = pjrt_types.RawBuffer;
 pub const Device = pjrt_types.Device;
 pub const Event = pjrt_types.Event;
-pub const ExecuteScratch = pjrt_types.ExecuteScratch;
 pub const BufferType = pjrt_types.BufferType;
 pub const ProgramFormat = pjrt_types.ProgramFormat;
 

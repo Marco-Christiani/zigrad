@@ -615,119 +615,76 @@ fn run_train_demo(
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
     defer loss_host.deinit();
 
-    const input_count = 8;
     const output_count = 7;
-    var scratch = try zg.backend.pjrt.ExecuteScratch.init(allocator, input_count, output_count);
-    defer scratch.deinit(allocator);
+    const api = dev_w1.api;
 
-    var outputs: [output_count]zg.backend.pjrt.Buffer = undefined;
+    var input_ptrs = [_]zg.backend.pjrt.RawBuffer{
+        dev_w1.pjrt_buffer, dev_b1.pjrt_buffer, dev_w2.pjrt_buffer, dev_b2.pjrt_buffer,
+        dev_w3.pjrt_buffer, dev_b3.pjrt_buffer, dev_x.pjrt_buffer,  dev_y.pjrt_buffer,
+    };
+    var output_ptrs: [output_count]zg.backend.pjrt.RawBuffer = undefined;
+    const exec_opts: zg.frontend.CompiledForward.ExecuteOptions = .{
+        .non_donatable_input_indices = &.{ 6, 7 },
+    };
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
-        const wait_device_event = false;
-        const inputs = [_]zg.backend.pjrt.Buffer{ dev_w1, dev_b1, dev_w2, dev_b2, dev_w3, dev_b3, dev_x, dev_y };
-        var result = try compiled.execute_into(inputs[0..], outputs[0..], &scratch);
-
-        var loss_ev = try result.outputs[0].to_host(loss_host.data);
-        if (result.device_complete_event) |ev| {
+        if (try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts)) |ev| {
             var tmp = ev;
-            if (wait_device_event) {
-                try tmp.await_();
-            }
             tmp.deinit();
         }
 
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        var loss_ev = try loss_buf.to_host(loss_host.data);
         try loss_ev.await_();
         loss_ev.deinit();
+        loss_buf.deinit();
 
-        result.outputs[0].deinit();
-        const new_w1 = result.outputs[1];
-        const new_b1 = result.outputs[2];
-        const new_w2 = result.outputs[3];
-        const new_b2 = result.outputs[4];
-        const new_w3 = result.outputs[5];
-        const new_b3 = result.outputs[6];
-
-        dev_w1.deinit();
-        dev_b1.deinit();
-        dev_w2.deinit();
-        dev_b2.deinit();
-        dev_w3.deinit();
-        dev_b3.deinit();
-        dev_w1 = new_w1;
-        dev_b1 = new_b1;
-        dev_w2 = new_w2;
-        dev_b2 = new_b2;
-        dev_w3 = new_w3;
-        dev_b3 = new_b3;
+        for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
+            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
+            buf.deinit();
+            old.* = new;
+        }
     }
 
     var step: usize = 0;
     while (step < steps) : (step += 1) {
-        const wait_device_event = false;
         var timer = try std.time.Timer.start();
-        const inputs = [_]zg.backend.pjrt.Buffer{ dev_w1, dev_b1, dev_w2, dev_b2, dev_w3, dev_b3, dev_x, dev_y };
-        var result = try compiled.execute_into(inputs[0..], outputs[0..], &scratch);
+        const event = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
         const exec_ns = timer.lap();
 
-        var loss_ev = try result.outputs[0].to_host(loss_host.data);
-        const to_host_ns = timer.lap();
-        var dev_wait_ns: u64 = 0;
-        if (result.device_complete_event) |ev| {
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        var loss_ev = try loss_buf.to_host(loss_host.data);
+        if (event) |ev| {
             var tmp = ev;
-            if (wait_device_event) {
-                try tmp.await_();
-                dev_wait_ns = timer.lap();
-            } else {
-                timer.reset();
-            }
             tmp.deinit();
-        } else {
-            timer.reset();
         }
 
+        // to_host event encompasses buffer-ready + transfer-complete
         try loss_ev.await_();
         loss_ev.deinit();
         const loss_wait_ns = timer.lap();
 
-        result.outputs[0].deinit();
-        const new_w1 = result.outputs[1];
-        const new_b1 = result.outputs[2];
-        const new_w2 = result.outputs[3];
-        const new_b2 = result.outputs[4];
-        const new_w3 = result.outputs[5];
-        const new_b3 = result.outputs[6];
+        loss_buf.deinit();
 
-        dev_w1.deinit();
-        dev_b1.deinit();
-        dev_w2.deinit();
-        dev_b2.deinit();
-        dev_w3.deinit();
-        dev_b3.deinit();
-        dev_w1 = new_w1;
-        dev_b1 = new_b1;
-        dev_w2 = new_w2;
-        dev_b2 = new_b2;
-        dev_w3 = new_w3;
-        dev_b3 = new_b3;
+        for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
+            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
+            buf.deinit();
+            old.* = new;
+        }
 
         const loss = loss_host.as_slice(f32)[0];
 
         const swap_ns = timer.lap();
-        const step_ns = exec_ns + to_host_ns + dev_wait_ns + loss_wait_ns + swap_ns;
+        const step_ns = exec_ns + loss_wait_ns + swap_ns;
         total_ns += step_ns;
         const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
         const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
-        const to_host_ms = @as(f64, @floatFromInt(to_host_ns)) / std.time.ns_per_ms;
-        const dev_wait_ms = @as(f64, @floatFromInt(dev_wait_ns)) / std.time.ns_per_ms;
         const loss_wait_ms = @as(f64, @floatFromInt(loss_wait_ns)) / std.time.ns_per_ms;
         const swap_ms = @as(f64, @floatFromInt(swap_ns)) / std.time.ns_per_ms;
-        std.log.info("train-demo step {d}: loss={d:.6}", .{ step, loss });
-        std.log.info(
-            "train-demo step {d}: exec_ms={d:.3} to_host_ms={d:.3} dev_wait_ms={d:.3} loss_wait_ms={d:.3} swap_ms={d:.3}",
-            .{ step, exec_ms, to_host_ms, dev_wait_ms, loss_wait_ms, swap_ms },
-        );
-        std.log.info("train-demo step {d}: time_ms={d:.3}", .{ step, step_ms });
+        std.log.info("train-demo step {d}: loss={d:.6} exec_ms={d:.3} wait_ms={d:.3} swap_ms={d:.3} total_ms={d:.3}", .{
+            step, loss, exec_ms, loss_wait_ms, swap_ms, step_ms,
+        });
     }
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));

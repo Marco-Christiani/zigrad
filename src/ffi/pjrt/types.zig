@@ -379,27 +379,26 @@ pub const LoadedExecutable = struct {
         return .{ .outputs = outputs, .device_complete_event = event };
     }
 
-    pub fn execute_with_scratch(
+    pub fn execute_into(
         self: *LoadedExecutable,
-        inputs: []const Buffer,
-        outputs: []Buffer,
-        scratch: *ExecuteScratch,
+        input_ptrs: []const *c.PJRT_Buffer,
+        output_ptrs: []*c.PJRT_Buffer,
     ) !?Event {
-        if (inputs.len != scratch.input_ptrs.len) return error.InputArityMismatch;
-        if (outputs.len != self.num_outputs) return error.OutputArityMismatch;
-        if (outputs.len != scratch.output_ptrs.len) return error.OutputArityMismatch;
+        return self.execute_into_opts(input_ptrs, output_ptrs, null);
+    }
 
-        const input_ptrs = scratch.input_ptrs;
-        for (inputs, 0..) |buf, i| {
-            input_ptrs[i] = buf.pjrt_buffer;
-        }
+    pub fn execute_into_opts(
+        self: *LoadedExecutable,
+        input_ptrs: []const *c.PJRT_Buffer,
+        output_ptrs: []*c.PJRT_Buffer,
+        non_donatable_input_indices: ?[]const i64,
+    ) !?Event {
+        if (output_ptrs.len != self.num_outputs) return error.OutputArityMismatch;
 
-        const input_list: [*c]*c.PJRT_Buffer = input_ptrs.ptr;
+        const input_list: [*c]*c.PJRT_Buffer = @constCast(input_ptrs.ptr);
         var input_lists = [_][*c]*c.PJRT_Buffer{input_list};
 
-        const output_ptrs = scratch.output_ptrs;
-        @memset(output_ptrs, null);
-        const output_list: [*c]*c.PJRT_Buffer = @ptrCast(output_ptrs.ptr);
+        const output_list: [*c]*c.PJRT_Buffer = output_ptrs.ptr;
         var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
 
         var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
@@ -408,8 +407,13 @@ pub const LoadedExecutable = struct {
         execute_opts.num_send_ops = 0;
         execute_opts.num_recv_ops = 0;
         execute_opts.launch_id = 0;
-        execute_opts.non_donatable_input_indices = null;
-        execute_opts.num_non_donatable_input_indices = 0;
+        if (non_donatable_input_indices) |indices| {
+            execute_opts.non_donatable_input_indices = indices.ptr;
+            execute_opts.num_non_donatable_input_indices = indices.len;
+        } else {
+            execute_opts.non_donatable_input_indices = null;
+            execute_opts.num_non_donatable_input_indices = 0;
+        }
         execute_opts.context = null;
 
         var device_events = [_]?*c.PJRT_Event{null};
@@ -419,19 +423,12 @@ pub const LoadedExecutable = struct {
         args.options = &execute_opts;
         args.argument_lists = @ptrCast(&input_lists);
         args.num_devices = 1;
-        args.num_args = inputs.len;
+        args.num_args = input_ptrs.len;
         args.output_lists = @ptrCast(&output_lists);
         args.device_complete_events = @ptrCast(&device_events);
         args.execute_device = null;
 
         try self.api.call("PJRT_LoadedExecutable_Execute", &args);
-
-        for (outputs, 0..) |*buf, i| {
-            buf.* = Buffer{
-                .api = self.api,
-                .pjrt_buffer = output_ptrs[i] orelse return error.PjrtReturnedNullOutputBuffer,
-            };
-        }
 
         return if (device_events[0]) |ev| Event{ .api = self.api, .pjrt_event = ev } else null;
     }
@@ -440,26 +437,6 @@ pub const LoadedExecutable = struct {
 pub const ExecuteResult = struct {
     outputs: []Buffer,
     device_complete_event: ?Event,
-};
-
-pub const ExecuteScratch = struct {
-    input_ptrs: []*c.PJRT_Buffer,
-    output_ptrs: []?*c.PJRT_Buffer,
-
-    pub fn init(allocator: std.mem.Allocator, input_count: usize, output_count: usize) !ExecuteScratch {
-        const input_ptrs = try allocator.alloc(*c.PJRT_Buffer, input_count);
-        const output_ptrs = try allocator.alloc(?*c.PJRT_Buffer, output_count);
-        @memset(output_ptrs, null);
-        return .{
-            .input_ptrs = input_ptrs,
-            .output_ptrs = output_ptrs,
-        };
-    }
-
-    pub fn deinit(self: *ExecuteScratch, allocator: std.mem.Allocator) void {
-        allocator.free(self.input_ptrs);
-        allocator.free(self.output_ptrs);
-    }
 };
 
 pub const Buffer = struct {
@@ -525,6 +502,10 @@ pub const Buffer = struct {
         };
     }
 };
+
+/// Raw C pointer type for zero-copy buffer operations.
+/// Use with execute_into for hot paths where Buffer wrapper overhead matters.
+pub const RawBuffer = *c.PJRT_Buffer;
 
 pub const Event = struct {
     api: *Api,

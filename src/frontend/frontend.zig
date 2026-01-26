@@ -220,19 +220,19 @@ pub const CompiledForward = struct {
         };
     }
 
+    pub const ExecuteOptions = struct {
+        non_donatable_input_indices: ?[]const i64 = null,
+    };
+
     pub fn execute_into(
         self: *CompiledForward,
-        inputs: []const backend.pjrt.Buffer,
-        outputs: []backend.pjrt.Buffer,
-        scratch: *backend.pjrt.ExecuteScratch,
-    ) !DeviceOutputsBorrowed {
-        if (inputs.len != self.input_specs.len) return error.InputArityMismatch;
-        if (outputs.len != self.output_specs.len) return error.OutputArityMismatch;
-        const event = try self.exe.execute_with_scratch(inputs, outputs, scratch);
-        return .{
-            .outputs = outputs,
-            .device_complete_event = event,
-        };
+        input_ptrs: []const backend.pjrt.RawBuffer,
+        output_ptrs: []backend.pjrt.RawBuffer,
+        options: ExecuteOptions,
+    ) !?backend.pjrt.Event {
+        if (input_ptrs.len != self.input_specs.len) return error.InputArityMismatch;
+        if (output_ptrs.len != self.output_specs.len) return error.OutputArityMismatch;
+        return self.exe.execute_into_opts(input_ptrs, output_ptrs, options.non_donatable_input_indices);
     }
 };
 
@@ -307,11 +307,6 @@ pub const DeviceOutputs = struct {
         }
         self.allocator.free(self.outputs);
     }
-};
-
-pub const DeviceOutputsBorrowed = struct {
-    outputs: []backend.pjrt.Buffer,
-    device_complete_event: ?backend.pjrt.Event,
 };
 
 pub const ValueAndGradDevice = struct {
