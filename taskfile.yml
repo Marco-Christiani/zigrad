@@ -19,11 +19,11 @@ vars:
   ZG_EXTERNAL_SDK_ROOT: '{{env "ZG_EXTERNAL_SDK_ROOT" | default "./result"}}'
 
 env:
-  ZG_EXTERNAL_SDK_ROOT: '{{.ZG_EXTERNAL_SDK_ROOT}}'
-  PJRT_CPU_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so'
-  PJRT_GPU_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so'
-  PJRT_PLUGIN_PATH: '{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so'
-  XLA_FLAGS: '--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia'
+  ZG_EXTERNAL_SDK_ROOT: "{{.ZG_EXTERNAL_SDK_ROOT}}"
+  PJRT_CPU_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
+  PJRT_GPU_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+  PJRT_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia"
 
 dotenv: [".env"]
 # env:
@@ -42,7 +42,7 @@ tasks:
       This task is a helper task to calulate the duration in seconds
       for the caller task
     vars:
-      end_time: '{{now | unixEpoch}}'
+      end_time: "{{now | unixEpoch}}"
     requires:
       vars: [start_time]
     cmds:
@@ -55,7 +55,7 @@ tasks:
       - direnv reload
       - task: task_timer
         vars:
-          start_time: '{{ now | unixEpoch }}'
+          start_time: "{{ now | unixEpoch }}"
 
   check-sdk:
     cmd:
@@ -107,7 +107,7 @@ tasks:
 
   build:
     deps: [check-env-bt]
-    cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT
+    cmd: zig build -Doptimize=ReleaseFast -Dsdk=$ZG_EXTERNAL_SDK_ROOT
 
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
@@ -124,7 +124,62 @@ tasks:
           echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
           exit 1
         fi
-        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" XLA_FLAGS="" ./zig-out/bin/zigrad {{.CLI_ARGS}}
+        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" ./zig-out/bin/zigrad {{.CLI_ARGS}}
+  run:cpu:dump-hlo:
+    deps: [build]
+    vars:
+      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/zigrad_hlo_cpu"}}'
+      CLI_ARGS: '{{.CLI_ARGS | default "train-demo 1"}}'
+    cmds:
+      - |
+        if [ -z "${PJRT_CPU_PLUGIN_PATH:-}" ]; then
+          echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
+          exit 1
+        fi
+        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" \
+          XLA_FLAGS="--xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
+          ./zig-out/bin/zigrad {{.CLI_ARGS}}
+  profile:cpu:
+    desc: "Collect perf profile for Zigrad CPU train demo"
+    deps: [build]
+    vars:
+      PERF_DATA: '{{.PERF_DATA | default "/tmp/zigrad_perf_cpu.data"}}'
+      PROFILE_ARGS: '{{.PROFILE_ARGS | default "train-demo 1"}}'
+      PERF_DELAY_MS: '{{.PERF_DELAY_MS | default "0"}}'
+    cmds:
+      - |
+        if [ -z "${PJRT_CPU_PLUGIN_PATH:-}" ]; then
+          echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
+          exit 1
+        fi
+        nix shell nixpkgs#perf -c bash -lc \
+          'env PJRT_PLUGIN_PATH="'"$PJRT_CPU_PLUGIN_PATH"'" perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- ./zig-out/bin/zigrad {{.PROFILE_ARGS}} > /tmp/zigrad_perf_cpu_stdout.log 2>/tmp/zigrad_perf_cpu_stderr.log'
+  profile:cpu:report:
+    desc: "Report perf profile for Zigrad CPU train demo"
+    vars:
+      PERF_DATA: '{{.PERF_DATA | default "/tmp/zigrad_perf_cpu.data"}}'
+    cmds:
+      - |
+        nix shell nixpkgs#perf -c bash -lc \
+          'perf report --stdio -n --percent-limit 1 -i {{.PERF_DATA}} | head -n 80'
+  profile:jax:cpu:
+    desc: "Collect perf profile for JAX CPU train demo"
+    vars:
+      PERF_DATA: '{{.PERF_DATA | default "/tmp/jax_perf_cpu.data"}}'
+      PERF_DELAY_MS: '{{.PERF_DELAY_MS | default "0"}}'
+      PROFILE_ARGS: '{{.PROFILE_ARGS | default "--warmup 10 --steps 2000"}}'
+    cmds:
+      - |
+        nix shell nixpkgs#perf -c bash -lc \
+          'JAX_PLATFORMS=cpu perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- /run/current-system/sw/bin/nix develop .#pyshell --command python scripts/jax_train_demo.py {{.PROFILE_ARGS}} > /tmp/jax_perf_cpu_stdout.log 2>/tmp/jax_perf_cpu_stderr.log'
+  profile:jax:cpu:report:
+    desc: "Report perf profile for JAX CPU train demo"
+    vars:
+      PERF_DATA: '{{.PERF_DATA | default "/tmp/jax_perf_cpu.data"}}'
+    cmds:
+      - |
+        nix shell nixpkgs#perf -c bash -lc \
+          'perf report --stdio -n --percent-limit 1 -i {{.PERF_DATA}} | head -n 80'
 
   run:gpu:
     deps: [build]
@@ -135,6 +190,20 @@ tasks:
           exit 1
         fi
         PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" ./zig-out/bin/zigrad {{.CLI_ARGS}}
+  run:gpu:dump-hlo:
+    deps: [build]
+    vars:
+      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/zigrad_hlo_gpu"}}'
+      CLI_ARGS: '{{.CLI_ARGS | default "train-demo 1"}}'
+    cmds:
+      - |
+        if [ -z "${PJRT_GPU_PLUGIN_PATH:-}" ]; then
+          echo "PJRT_GPU_PLUGIN_PATH is not set (run inside the devshell)."
+          exit 1
+        fi
+        PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" \
+          XLA_FLAGS="--xla_gpu_cuda_data_dir=$ZG_EXTERNAL_SDK_ROOT/runtime/nvidia --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
+          ./zig-out/bin/zigrad {{.CLI_ARGS}}
 
   custom-call:neg:
     cmd:
@@ -197,6 +266,26 @@ tasks:
     desc: Run a python command in the devshell (in lieu of uv on NixOS). E.g., `task python -- scripts/reference_experiments.py`
     cmds:
       - nix develop .#pyshell --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
+  jax:dump-hlo:gpu:
+    desc: Run the JAX train demo and dump HLO (GPU).
+    vars:
+      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/jax_hlo_gpu"}}'
+      CLI_ARGS: '{{.CLI_ARGS | default "--warmup=1"}}'
+    cmd:
+      task: python
+      vars:
+        CLI_ARGS: >-
+          -c "import os, runpy, sys; os.environ['XLA_FLAGS']='--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*'; sys.argv=['scripts/jax_train_demo.py'] + '{{.CLI_ARGS}}'.split(); runpy.run_path('scripts/jax_train_demo.py', run_name='__main__')"
+  jax:dump-hlo:cpu:
+    desc: Run the JAX train demo and dump HLO (CPU).
+    vars:
+      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/jax_hlo_cpu"}}'
+      CLI_ARGS: '{{.CLI_ARGS | default "--warmup=1"}}'
+    cmd:
+      task: python
+      vars:
+        CLI_ARGS: >-
+          -c "import os, runpy, sys; os.environ['JAX_PLATFORM_NAME']='cpu'; os.environ['XLA_FLAGS']='--xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*'; sys.argv=['scripts/jax_train_demo.py'] + '{{.CLI_ARGS}}'.split(); runpy.run_path('scripts/jax_train_demo.py', run_name='__main__')"
 
   # Nix ccache -----------------------------------------------------------------
   nix-ccache-setup:
@@ -260,7 +349,6 @@ tasks:
         echo "nix conf changed, restart daemon."
       fi
 
-
   # Nix bazel cache ------------------------------------------------------------
   nix-bazel-cache-setup:
     cmds:
@@ -269,7 +357,6 @@ tasks:
       - task: _nix-cache-setup
         vars:
           path: /nix/var/cache/bazel
-
 
   nix-bazel-cache:usage:
     cmd: sudo du -sh /nix/var/cache/bazel
