@@ -10,7 +10,7 @@
 /// - frontend: User-facing program construction
 /// - utils: Utility types (HostBuffer, etc.)
 ///
-/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
+/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
 // Core modules

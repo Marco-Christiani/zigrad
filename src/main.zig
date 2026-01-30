@@ -1,10 +1,15 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const main_aot = @import("main_aot.zig");
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+    // var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer _ = gpa_state.deinit();
+    // const gpa = gpa_state.allocator();
+    // var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    // defer arena.deinit();
+    // const gpa = arena.allocator();
+    const gpa = std.heap.smp_allocator;
 
     var arg_it = std.process.args();
     _ = arg_it.next(); // argv0
@@ -15,6 +20,7 @@ pub fn main() !void {
     var dump_mlir_cfg: zg.pipeline.DumpConfig = .{};
     var have_dump_pr = false;
     var have_dump_mlir = false;
+    var quiet = false;
 
     while (arg_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -59,6 +65,10 @@ pub fn main() !void {
             have_dump_mlir = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--")) {
             try print_usage();
             return error.InvalidArguments;
@@ -92,6 +102,13 @@ pub fn main() !void {
     const device = &devs[0];
 
     if (mode) |m| {
+        if (std.mem.eql(u8, m, "aot-demo")) {
+            if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return main_aot.run(gpa, &backend, device);
+        }
         if (std.mem.eql(u8, m, "custom-call-neg")) {
             if (mode_args.items.len != 0) {
                 try print_usage();
@@ -107,23 +124,34 @@ pub fn main() !void {
             return run_vjp_demo(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
         }
         if (std.mem.eql(u8, m, "train-demo")) {
-            if (mode_args.items.len > 1) {
+            if (mode_args.items.len > 2) {
                 try print_usage();
                 return error.InvalidArguments;
             }
-            const warmup_steps: usize = if (mode_args.items.len == 1)
+
+            const warmup_steps: usize = if (mode_args.items.len >= 1)
                 std.fmt.parseInt(usize, mode_args.items[0], 10) catch {
                     try print_usage();
                     return error.InvalidArguments;
                 }
             else
                 0;
+
+            const steps: usize = if (mode_args.items.len == 2)
+                std.fmt.parseInt(usize, mode_args.items[1], 10) catch {
+                    try print_usage();
+                    return error.InvalidArguments;
+                }
+            else
+                8;
             return run_train_demo(
                 gpa,
                 plugin_path,
                 if (have_dump_pr) &dump_pr_cfg else null,
                 if (have_dump_mlir) &dump_mlir_cfg else null,
                 warmup_steps,
+                steps,
+                quiet,
             );
         }
         if (std.mem.eql(u8, m, "jit-cache-save")) {
@@ -431,6 +459,8 @@ fn run_train_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     warmup_steps: usize,
+    steps: usize,
+    quiet: bool,
 ) !void {
     const TensorSpec = zg.frontend.TensorSpec;
 
@@ -472,7 +502,6 @@ fn run_train_demo(
         }
     };
 
-
     const bs: usize = 64;
     const in_dim: usize = 784;
     const h1: usize = 128;
@@ -480,17 +509,17 @@ fn run_train_demo(
     const out_dim: usize = 10;
 
     const params_spec = ParamsSpec{
-            .w1 = .{ .dtype = .f32, .dims = &.{ in_dim, h1 } },
-            .b1 = .{ .dtype = .f32, .dims = &.{ h1 } },
-            .w2 = .{ .dtype = .f32, .dims = &.{ h1, h2 } },
-            .b2 = .{ .dtype = .f32, .dims = &.{ h2 } },
-            .w3 = .{ .dtype = .f32, .dims = &.{ h2, out_dim } },
-            .b3 = .{ .dtype = .f32, .dims = &.{ out_dim } },
-        };
+        .w1 = .{ .dtype = .f32, .dims = &.{ in_dim, h1 } },
+        .b1 = .{ .dtype = .f32, .dims = &.{h1} },
+        .w2 = .{ .dtype = .f32, .dims = &.{ h1, h2 } },
+        .b2 = .{ .dtype = .f32, .dims = &.{h2} },
+        .w3 = .{ .dtype = .f32, .dims = &.{ h2, out_dim } },
+        .b3 = .{ .dtype = .f32, .dims = &.{out_dim} },
+    };
     const batch_spec = BatchSpec{
-            .x = .{ .dtype = .f32, .dims = &.{ bs, in_dim } },
-            .y = .{ .dtype = .f32, .dims = &.{ bs, out_dim } },
-        };
+        .x = .{ .dtype = .f32, .dims = &.{ bs, in_dim } },
+        .y = .{ .dtype = .f32, .dims = &.{ bs, out_dim } },
+    };
     const inputs_spec = .{ params_spec, batch_spec };
 
     var compile_cfg = zg.frontend.CompileConfig{
@@ -536,11 +565,11 @@ fn run_train_demo(
     fill_pattern(true_b3, 1e-6, 0.0);
 
     const shape_w1 = zg.utils.Shape{ .dims = &.{ in_dim, h1 } };
-    const shape_b1 = zg.utils.Shape{ .dims = &.{ h1 } };
+    const shape_b1 = zg.utils.Shape{ .dims = &.{h1} };
     const shape_w2 = zg.utils.Shape{ .dims = &.{ h1, h2 } };
-    const shape_b2 = zg.utils.Shape{ .dims = &.{ h2 } };
+    const shape_b2 = zg.utils.Shape{ .dims = &.{h2} };
     const shape_w3 = zg.utils.Shape{ .dims = &.{ h2, out_dim } };
-    const shape_b3 = zg.utils.Shape{ .dims = &.{ out_dim } };
+    const shape_b3 = zg.utils.Shape{ .dims = &.{out_dim} };
     const shape_x = zg.utils.Shape{ .dims = &.{ bs, in_dim } };
     const shape_y = zg.utils.Shape{ .dims = &.{ bs, out_dim } };
 
@@ -592,61 +621,56 @@ fn run_train_demo(
         out_dim,
     );
 
-    const steps: usize = 8;
     var total_ns: u64 = 0;
 
-    var dev_w1 = try upload_host_buffer(allocator, &backend_handle, device, &host_w1);
-    defer dev_w1.deinit();
-    var dev_b1 = try upload_host_buffer(allocator, &backend_handle, device, &host_b1);
-    defer dev_b1.deinit();
-    var dev_w2 = try upload_host_buffer(allocator, &backend_handle, device, &host_w2);
-    defer dev_w2.deinit();
-    var dev_b2 = try upload_host_buffer(allocator, &backend_handle, device, &host_b2);
-    defer dev_b2.deinit();
-    var dev_w3 = try upload_host_buffer(allocator, &backend_handle, device, &host_w3);
-    defer dev_w3.deinit();
-    var dev_b3 = try upload_host_buffer(allocator, &backend_handle, device, &host_b3);
-    defer dev_b3.deinit();
-    var dev_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
-    defer dev_x.deinit();
-    var dev_y = try upload_host_buffer(allocator, &backend_handle, device, &host_y);
-    defer dev_y.deinit();
+    // Note: buffer ownership transfers to `input_ptrs`; do not `defer deinit()` the
+    // temporary wrappers here, or we will double-destroy buffers after donation.
+    const tmp_w1 = try upload_host_buffer(allocator, &backend_handle, device, &host_w1);
+    const tmp_b1 = try upload_host_buffer(allocator, &backend_handle, device, &host_b1);
+    const tmp_w2 = try upload_host_buffer(allocator, &backend_handle, device, &host_w2);
+    const tmp_b2 = try upload_host_buffer(allocator, &backend_handle, device, &host_b2);
+    const tmp_w3 = try upload_host_buffer(allocator, &backend_handle, device, &host_w3);
+    const tmp_b3 = try upload_host_buffer(allocator, &backend_handle, device, &host_b3);
+    const tmp_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
+    const tmp_y = try upload_host_buffer(allocator, &backend_handle, device, &host_y);
 
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
     defer loss_host.deinit();
 
     const output_count = 7;
-    const api = dev_w1.api;
+    const api = tmp_w1.api;
 
     var input_ptrs = [_]zg.backend.pjrt.RawBuffer{
-        dev_w1.pjrt_buffer, dev_b1.pjrt_buffer, dev_w2.pjrt_buffer, dev_b2.pjrt_buffer,
-        dev_w3.pjrt_buffer, dev_b3.pjrt_buffer, dev_x.pjrt_buffer,  dev_y.pjrt_buffer,
+        tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer,
+        tmp_w3.pjrt_buffer, tmp_b3.pjrt_buffer, tmp_x.pjrt_buffer,  tmp_y.pjrt_buffer,
     };
     var output_ptrs: [output_count]zg.backend.pjrt.RawBuffer = undefined;
     const exec_opts: zg.frontend.CompiledForward.ExecuteOptions = .{
         .non_donatable_input_indices = &.{ 6, 7 },
     };
 
-    // Check once if we're on CPU for direct memory access optimization
-    const is_cpu = try dev_w1.is_on_cpu();
+    // Ensure remaining buffers are released even if we replace/donate them in-loop.
+    defer {
+        for (input_ptrs) |raw| {
+            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = raw };
+            buf.deinit();
+        }
+    }
+
+    // Check once if we're on CPU for direct memory access optimization.
+    const is_cpu = try (zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = input_ptrs[0] }).is_on_cpu();
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
         const ev = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
 
         var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
-        if (is_cpu) {
-            // CPU: wait on device event (same as timed loop)
-            if (ev) |e| {
-                var tmp = e;
-                try tmp.await_();
-                tmp.deinit();
-            }
-        } else {
-            if (ev) |e| {
-                var tmp = e;
-                tmp.deinit();
-            }
+        if (ev) |e| {
+            var tmp = e;
+            try tmp.await_();
+            tmp.deinit();
+        }
+        if (!is_cpu and !quiet) {
             var loss_ev = try loss_buf.to_host(loss_host.data);
             try loss_ev.await_();
             loss_ev.deinit();
@@ -654,64 +678,73 @@ fn run_train_demo(
         loss_buf.deinit();
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
+            if (new == old.*) continue;
             var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
-            buf.deinit();
             old.* = new;
+            buf.deinit();
         }
     }
 
     var step: usize = 0;
+    var reused_params: usize = 0;
+    var replaced_params: usize = 0;
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
         const event = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
         const dispatch_ns = timer.lap();
 
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        if (event) |ev| {
+            var tmp = ev;
+            try tmp.await_();
+            tmp.deinit();
+        }
+        const wait_ns = timer.lap();
 
-        const loss: f32 = if (is_cpu) blk: {
-            // CPU: wait for compute, then read directly from buffer memory
-            if (event) |ev| {
-                var tmp = ev;
-                try tmp.await_();
-                tmp.deinit();
-            }
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
             const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer());
             break :blk ptr[0];
         } else blk: {
-            // GPU: wait for compute via async copy to host
-            if (event) |ev| {
-                var tmp = ev;
-                tmp.deinit();
-            }
             var loss_ev = try loss_buf.to_host(loss_host.data);
             try loss_ev.await_();
             loss_ev.deinit();
             break :blk loss_host.as_slice(f32)[0];
         };
-        const compute_ns = timer.lap();
+        const loss_read_ns = timer.lap();
 
         loss_buf.deinit();
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
+            if (new == old.*) {
+                reused_params += 1;
+                continue;
+            }
+            replaced_params += 1;
             var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
-            buf.deinit();
             old.* = new;
+            buf.deinit();
         }
 
         const cleanup_ns = timer.lap();
-        const step_ns = dispatch_ns + compute_ns + cleanup_ns;
+        const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;
         total_ns += step_ns;
         const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
         const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-        const compute_ms = @as(f64, @floatFromInt(compute_ns)) / std.time.ns_per_ms;
+        const wait_ms = @as(f64, @floatFromInt(wait_ns)) / std.time.ns_per_ms;
+        const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
         const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
-        std.log.info("train-demo step {d}: loss={d:.6} dispatch={d:.3}ms compute={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-            step, loss, dispatch_ms, compute_ms, cleanup_ms, step_ms,
-        });
+        if (!quiet) {
+            std.log.info("train-demo step {d}: loss={d:.6} dispatch={d:.3}ms wait={d:.3}ms loss={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                step, loss.?, dispatch_ms, wait_ms, loss_ms, cleanup_ms, step_ms,
+            });
+        }
     }
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
     std.log.info("train-demo avg_step_ms={d:.3}", .{avg_ms});
+    if (!quiet) {
+        std.log.info("train-demo donation: reused_params={d} replaced_params={d}", .{ reused_params, replaced_params });
+    }
     std.log.info("OK: train-demo executed", .{});
 }
 
@@ -911,12 +944,14 @@ fn print_usage() !void {
         \\  --dump-pr=PATH      write PR (zxpr) to PATH (default/custom-call-neg/vjp-demo)
         \\  --dump-mlir         print MLIR (text) to stdout (default/custom-call-neg/vjp-demo)
         \\  --dump-mlir=PATH    write MLIR (text) to PATH (default/custom-call-neg/vjp-demo)
+        \\  --quiet             reduce output (train-demo)
         \\
         \\modes:
         \\  print-pr                     prints the PR for the demo program
+        \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
-        \\  train-demo [warmup]          runs the frontend training demo
+        \\  train-demo [warmup] [steps]  runs the frontend training demo
         \\  jit-cache-save <path>        writes PJRT JIT cache artifact
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\

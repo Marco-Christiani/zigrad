@@ -8,27 +8,54 @@ const Api = api_mod.Api;
 const c_mod = @import("c.zig");
 const c = c_mod.c;
 
+// Hand-crafted minimal CompileOptionsProto
+// Based on proto/xla/pjrt/proto/compile_options.proto
+// Protobuf wire format: (field_number << 3) | wire_type
+// Wire type 0 = varint, Wire type 2 = length-delimited
+//
+// CompileOptionsProto {
+//   ExecutableBuildOptionsProto executable_build_options = 3;
+// }
+// ExecutableBuildOptionsProto {
+//   int64 num_replicas = 4;     // field 4
+//   int64 num_partitions = 5;   // field 5
+// }
+const minimal_compile_opts = [_]u8{
+    // CompileOptionsProto.executable_build_options (field 3, message)
+    (3 << 3) | 2, 4, // tag 26, length 4
+
+    // ExecutableBuildOptionsProto.num_replicas (field 4, int64) = 1
+    (4 << 3) | 0, 0x01, // tag 32, value 1
+
+    // ExecutableBuildOptionsProto.num_partitions (field 5, int64) = 1
+    (5 << 3) | 0, 0x01, // tag 40, value 1
+};
+
+fn make_named_value_int64(name: []const u8, value: i64) c.PJRT_NamedValue {
+    var out: c.PJRT_NamedValue = std.mem.zeroes(c.PJRT_NamedValue);
+    out.struct_size = api_mod.pjrt_struct_size(c.PJRT_NamedValue);
+    out.extension_start = null;
+    out.name = name.ptr;
+    out.name_size = name.len;
+    out.type = c.PJRT_NamedValue_kInt64;
+    out.unnamed_0.int64_value = value;
+    out.value_size = 1;
+    return out;
+}
+
 pub const Client = struct {
     api: *Api,
     pjrt_client: *c.PJRT_Client,
 
     pub fn create(api: *Api) !Client {
-        var args = api_mod.init_args(c.PJRT_Client_Create_Args);
-        // args.create_options = null;
-        // args.num_options = 0;
-        // args.kv_get_callback = null;
-        // args.kv_get_user_arg = null;
-        // args.kv_put_callback = null;
-        // args.kv_put_user_arg = null;
-        // args.kv_try_get_callback = null;
-        // args.kv_try_get_user_arg = null;
-        // args.client = null;
-        //
-        // try api.call("PJRT_Client_Create", &args);
+        return create_with_options(api, null);
+    }
 
+    pub fn create_with_options(api: *Api, create_options: ?[]const c.PJRT_NamedValue) !Client {
+        var args = api_mod.init_args(c.PJRT_Client_Create_Args);
         const empty_opts: [0]c.PJRT_NamedValue = .{};
-        args.create_options = @ptrCast(&empty_opts);
-        args.num_options = 0;
+        args.create_options = if (create_options) |opts| opts.ptr else @ptrCast(&empty_opts);
+        args.num_options = if (create_options) |opts| opts.len else 0;
 
         // callbacks/user args: null
         args.kv_get_callback = null;
@@ -47,6 +74,12 @@ pub const Client = struct {
             .api = api,
             .pjrt_client = client_ptr,
         };
+    }
+
+    pub fn create_cpu_with_device_count(api: *Api, cpu_device_count: usize) !Client {
+        const option = make_named_value_int64("cpu_device_count", @intCast(cpu_device_count));
+        const options = [_]c.PJRT_NamedValue{option};
+        return create_with_options(api, options[0..]);
     }
 
     pub fn deinit(self: *Client) void {
@@ -96,29 +129,6 @@ pub const Client = struct {
         program.format = format_str.ptr;
         program.format_size = format_str.len;
 
-        // Hand-crafted minimal CompileOptionsProto
-        // Based on proto/xla/pjrt/proto/compile_options.proto
-        // Protobuf wire format: (field_number << 3) | wire_type
-        // Wire type 0 = varint, Wire type 2 = length-delimited
-        //
-        // CompileOptionsProto {
-        //   ExecutableBuildOptionsProto executable_build_options = 3;
-        // }
-        // ExecutableBuildOptionsProto {
-        //   int64 num_replicas = 4;     // field 4
-        //   int64 num_partitions = 5;   // field 5
-        // }
-        const minimal_compile_opts = [_]u8{
-            // CompileOptionsProto.executable_build_options (field 3, message)
-            (3 << 3) | 2, 4, // tag 26, length 4
-
-            // ExecutableBuildOptionsProto.num_replicas (field 4, int64) = 1
-            (4 << 3) | 0, 0x01, // tag 32, value 1
-
-            // ExecutableBuildOptionsProto.num_partitions (field 5, int64) = 1
-            (5 << 3) | 0, 0x01, // tag 40, value 1
-        };
-
         var args = api_mod.init_args(c.PJRT_Client_Compile_Args);
         args.client = self.pjrt_client;
         args.program = &program;
@@ -130,6 +140,58 @@ pub const Client = struct {
 
         const executable_ptr = args.executable orelse return error.PjrtReturnedNullExecutable;
         return LoadedExecutable.init(self.api, executable_ptr);
+    }
+
+    pub fn get_topology_description(self: *Client) !TopologyDescription {
+        var args = api_mod.init_args(c.PJRT_Client_TopologyDescription_Args);
+        args.client = self.pjrt_client;
+        args.topology = null;
+
+        try self.api.call("PJRT_Client_TopologyDescription", &args);
+
+        const topo_ptr = args.topology orelse return error.PjrtReturnedNullTopology;
+        return TopologyDescription{
+            .api = self.api,
+            .pjrt_topology = topo_ptr,
+            .owned = false,
+        };
+    }
+
+    pub fn compile_aot(
+        self: *Client,
+        topology: *const TopologyDescription,
+        format: ProgramFormat,
+        bytecode: []const u8,
+        options: ?[]const u8,
+    ) !Executable {
+        // Create PJRT_Program
+        var program = api_mod.init_args(c.PJRT_Program);
+        program.code = @constCast(bytecode.ptr);
+        program.code_size = bytecode.len;
+
+        const format_str = switch (format) {
+            .mlir_text => "mlir",
+            .mlir_bytecode => "mlir",
+            .stablehlo_portable => "mlir",
+        };
+        program.format = format_str.ptr;
+        program.format_size = format_str.len;
+
+        var args = api_mod.init_args(c.PJRT_Compile_Args);
+        args.topology = topology.pjrt_topology;
+        args.program = &program;
+        args.compile_options = if (options) |opts| opts.ptr else &minimal_compile_opts;
+        args.compile_options_size = if (options) |opts| opts.len else minimal_compile_opts.len;
+        args.client = self.pjrt_client;
+        args.executable = null;
+
+        try self.api.call("PJRT_Compile", &args);
+
+        const executable_ptr = args.executable orelse return error.PjrtReturnedNullExecutable;
+        return Executable{
+            .api = self.api,
+            .pjrt_executable = executable_ptr,
+        };
     }
 
     pub fn deserialize_and_load(
@@ -189,6 +251,19 @@ pub const Client = struct {
     }
 };
 
+pub const TopologyDescription = struct {
+    api: *Api,
+    pjrt_topology: *c.PJRT_TopologyDescription,
+    owned: bool,
+
+    pub fn deinit(self: *TopologyDescription) void {
+        if (!self.owned) return;
+        var args = api_mod.init_args(c.PJRT_TopologyDescription_Destroy_Args);
+        args.topology = self.pjrt_topology;
+        self.api.call("PJRT_TopologyDescription_Destroy", &args) catch {};
+    }
+};
+
 pub const Device = struct {
     pjrt_device: *c.PJRT_Device,
 
@@ -224,6 +299,35 @@ pub const Device = struct {
 
         try api.call("PJRT_DeviceDescription_Kind", &args);
         return std.mem.span(args.device_kind);
+    }
+};
+
+pub const Executable = struct {
+    api: *Api,
+    pjrt_executable: *c.PJRT_Executable,
+
+    pub fn deinit(self: *Executable) void {
+        var args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+        args.executable = self.pjrt_executable;
+        self.api.call("PJRT_Executable_Destroy", &args) catch {};
+    }
+
+    pub fn serialize(self: *Executable, allocator: std.mem.Allocator) ![]u8 {
+        var args = api_mod.init_args(c.PJRT_Executable_Serialize_Args);
+        args.executable = self.pjrt_executable;
+
+        try self.api.call("PJRT_Executable_Serialize", &args);
+
+        const serialized = args.serialized_executable orelse return error.PjrtReturnedNullSerializedExecutable;
+        const deleter = args.serialized_executable_deleter orelse return error.PjrtReturnedNullSerializedExecutableDeleter;
+        defer deleter(serialized);
+
+        if (args.serialized_bytes == null and args.serialized_bytes_size != 0) {
+            return error.PjrtReturnedNullSerializedBytes;
+        }
+
+        const bytes = args.serialized_bytes[0..args.serialized_bytes_size];
+        return allocator.dupe(u8, bytes);
     }
 };
 

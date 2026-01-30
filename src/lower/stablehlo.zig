@@ -7,7 +7,7 @@
 /// - lower_pass: Pass function for pipeline integration
 /// - lower_function_to_mlir: Direct lowering API
 ///
-/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
+/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");

@@ -11,7 +11,7 @@
 /// - Artifact kinds are runtime-validated at pass composition
 /// - PassContext is backend-agnostic; backend-specific config lives in Pass.userdata
 ///
-/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
+/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
 const pr_mod = @import("../pr/pr.zig");

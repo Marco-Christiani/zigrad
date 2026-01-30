@@ -14,7 +14,7 @@
 /// - Execution (EA + buffers -> outputs)
 /// - Buffer management (host <-> device transfers)
 ///
-/// See: .internal/2026-01-16-03_PASS_BASED_PIPELINE.md
+/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
 const plugin = @import("../ffi/pjrt/plugin.zig");
@@ -56,7 +56,12 @@ pub const Backend = struct {
         api_ptr.* = try plugin.load_plugin(plugin_path);
         errdefer plugin.unload_plugin(api_ptr.*);
 
-        var client = try pjrt_types.Client.create(api_ptr);
+        const is_cpu_plugin = std.mem.endsWith(u8, plugin_path, "pjrt_c_api_cpu_plugin.so");
+        var client = if (is_cpu_plugin) blk: {
+            const env_count = cpu_device_count_from_env();
+            if (env_count) |count| break :blk try pjrt_types.Client.create_cpu_with_device_count(api_ptr, count);
+            break :blk try pjrt_types.Client.create(api_ptr);
+        } else try pjrt_types.Client.create(api_ptr);
         errdefer client.deinit();
 
         return .{
@@ -189,6 +194,13 @@ pub const Backend = struct {
         };
     }
 };
+
+fn cpu_device_count_from_env() ?usize {
+    const env = std.posix.getenv("ZG_CPU_DEVICE_COUNT") orelse return null;
+    const text = std.mem.sliceTo(env, 0);
+    if (text.len == 0) return null;
+    return std.fmt.parseInt(usize, text, 10) catch null;
+}
 
 // ============================================================================
 // Helpers
