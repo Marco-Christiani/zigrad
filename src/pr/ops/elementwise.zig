@@ -206,6 +206,60 @@ pub const multiply = struct {
     pub const format = format_binary_elementwise;
 };
 
+// =========================================================================
+// Divide
+// =========================================================================
+
+pub const divide = struct {
+    pub const arity = .{ .in = 2, .out = 1 };
+
+    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
+        return validate_binary_elementwise(error.DivideTypeMismatch, ctx);
+    }
+
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+        return infer_binary_elementwise(error.DivideTypeMismatch, ctx);
+    }
+
+    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
+        return lower_binary_elementwise(stablehlo.divide, ctx, eqn);
+    }
+
+    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const lhs = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const out = try ctx.builder.divide(lhs, rhs);
+        ctx.set_primal(outputs[0], out);
+    }
+
+    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const out_cot = ctx.get_cot(outputs[0]) orelse return;
+        const lhs_primal = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const rhs_primal = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+
+        const rhs_sq = try ctx.builder.multiply(rhs_primal, rhs_primal);
+        const lhs_over_rhs_sq = try ctx.builder.divide(lhs_primal, rhs_sq);
+        const rhs_contrib = try ctx.builder.multiply(out_cot, lhs_over_rhs_sq);
+
+        const lhs_contrib = try ctx.builder.divide(out_cot, rhs_primal);
+        try ctx.add_cot(inputs[0], lhs_contrib);
+
+        const rhs_tensor = ctx.tensor_of(inputs[1]);
+        const neg = try negate_like(ctx.builder, rhs_tensor, rhs_contrib);
+        try ctx.add_cot(inputs[1], neg);
+    }
+
+    pub const format = format_binary_elementwise;
+};
+
 // ============================================================================
 // Maximum
 // ============================================================================

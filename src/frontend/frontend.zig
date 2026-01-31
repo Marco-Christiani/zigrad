@@ -42,12 +42,24 @@ pub const Tensor = struct {
         return self.builder.emit_binary(.multiply, self, rhs, self.options);
     }
 
+    pub fn div(self: Tensor, rhs: Tensor) !Tensor {
+        return self.builder.emit_binary(.divide, self, rhs, self.options);
+    }
+
     pub fn max(self: Tensor, rhs: Tensor) !Tensor {
         return self.builder.emit_binary(.maximum, self, rhs, self.options);
     }
 
+    pub fn gather_rows(self: Tensor, indices: Tensor) !Tensor {
+        return self.builder.emit_gather_rows(self, indices, self.options);
+    }
+
     pub fn matmul(self: Tensor, rhs: Tensor) !Tensor {
         return self.builder.emit_binary(.dot, self, rhs, self.options);
+    }
+
+    pub fn dot_general(self: Tensor, rhs: Tensor, params: pr.DotGeneralParams) !Tensor {
+        return self.builder.emit_dot_general(self, rhs, params, self.options);
     }
 
     pub fn reshape(self: Tensor, dims: []const usize) !Tensor {
@@ -72,9 +84,55 @@ pub const Tensor = struct {
         return self.builder.emit_unary(.transpose, self, &.{.{ .permutation = perm_copy }}, self.options);
     }
 
+    pub fn slice(self: Tensor, start_indices: []const i64, limit_indices: []const i64, strides: []const i64) !Tensor {
+        const allocator = self.builder.program.allocator();
+        const start_copy = try allocator.dupe(i64, start_indices);
+        const limit_copy = try allocator.dupe(i64, limit_indices);
+        const stride_copy = try allocator.dupe(i64, strides);
+        return self.builder.emit_unary(
+            .slice,
+            self,
+            &.{.{ .slice = .{ .start_indices = start_copy, .limit_indices = limit_copy, .strides = stride_copy } }},
+            self.options,
+        );
+    }
+
+    pub fn concatenate(self: Tensor, others: []const Tensor, axis: i64) !Tensor {
+        return self.builder.emit_concatenate(self, others, axis, self.options);
+    }
+
     pub fn reduce_sum(self: Tensor, axes: []const i64) !Tensor {
         const axes_copy = try self.builder.program.allocator().dupe(i64, axes);
         return self.builder.emit_unary(.reduce_sum, self, &.{.{ .reduce_axes = axes_copy }}, self.options);
+    }
+
+    pub fn reduce_max(self: Tensor, axes: []const i64) !Tensor {
+        const axes_copy = try self.builder.program.allocator().dupe(i64, axes);
+        return self.builder.emit_unary(.reduce_max, self, &.{.{ .reduce_axes = axes_copy }}, self.options);
+    }
+
+    pub fn exp(self: Tensor) !Tensor {
+        return self.builder.emit_unary(.exp, self, &.{}, self.options);
+    }
+
+    pub fn log(self: Tensor) !Tensor {
+        return self.builder.emit_unary(.log, self, &.{}, self.options);
+    }
+
+    pub fn rsqrt(self: Tensor) !Tensor {
+        return self.builder.emit_unary(.rsqrt, self, &.{}, self.options);
+    }
+
+    pub fn logistic(self: Tensor) !Tensor {
+        return self.builder.emit_unary(.logistic, self, &.{}, self.options);
+    }
+
+    pub fn compare(self: Tensor, rhs: Tensor, params: pr.CompareParams) !Tensor {
+        return self.builder.emit_compare(self, rhs, params, self.options);
+    }
+
+    pub fn select(self: Tensor, cond: Tensor, on_false: Tensor) !Tensor {
+        return self.builder.emit_select(cond, self, on_false, self.options);
     }
 
     pub fn relu(self: Tensor) !Tensor {
@@ -139,6 +197,77 @@ pub const Builder = struct {
         return self.tensor_from_id(id);
     }
 
+    fn emit_dot_general(self: *Builder, lhs: Tensor, rhs: Tensor, params: pr.DotGeneralParams, options: OpOptions) !Tensor {
+        try self.assert_same_builder(lhs, rhs);
+        const a = self.program.allocator();
+        const lhs_batch_dims = try a.dupe(i64, params.lhs_batch_dims);
+        const rhs_batch_dims = try a.dupe(i64, params.rhs_batch_dims);
+        const lhs_contracting_dims = try a.dupe(i64, params.lhs_contracting_dims);
+        const rhs_contracting_dims = try a.dupe(i64, params.rhs_contracting_dims);
+        const params_with_opts = try self.params_with_options(&.{.{ .dot_general = .{
+            .lhs_batch_dims = lhs_batch_dims,
+            .rhs_batch_dims = rhs_batch_dims,
+            .lhs_contracting_dims = lhs_contracting_dims,
+            .rhs_contracting_dims = rhs_contracting_dims,
+        } }}, options);
+        const id = try self.builder.emit(.dot_general, &.{ lhs.id, rhs.id }, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
+    fn emit_compare(self: *Builder, lhs: Tensor, rhs: Tensor, params: pr.CompareParams, options: OpOptions) !Tensor {
+        try self.assert_same_builder(lhs, rhs);
+        const params_with_opts = try self.params_with_options(&.{.{ .compare = params }}, options);
+        const id = try self.builder.emit(.compare, &.{ lhs.id, rhs.id }, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
+    fn emit_select(self: *Builder, cond: Tensor, on_true: Tensor, on_false: Tensor, options: OpOptions) !Tensor {
+        try self.assert_builder(cond);
+        try self.assert_same_builder(on_true, on_false);
+        const params_with_opts = try self.params_with_options(&.{}, options);
+        const id = try self.builder.emit(.select, &.{ cond.id, on_true.id, on_false.id }, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
+    fn emit_concatenate(self: *Builder, first: Tensor, others: []const Tensor, axis: i64, options: OpOptions) !Tensor {
+        const a = self.program.allocator();
+        const inputs = try a.alloc(pr.VarId, others.len + 1);
+        inputs[0] = first.id;
+        for (others, 0..) |t, i| {
+            try self.assert_same_builder(first, t);
+            inputs[i + 1] = t.id;
+        }
+        const params_with_opts = try self.params_with_options(&.{.{ .concat_axis = axis }}, options);
+        const id = try self.builder.emit(.concatenate, inputs, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
+    fn emit_gather_rows(self: *Builder, operand: Tensor, indices: Tensor, options: OpOptions) !Tensor {
+        try self.assert_same_builder(operand, indices);
+        if (operand.tensor.shape.rank() != 2) return error.InvalidGatherOperand;
+        if (indices.tensor.shape.rank() != 1) return error.InvalidGatherIndices;
+
+        const hidden: i64 = @intCast(operand.tensor.shape.dims[1]);
+        const a = self.program.allocator();
+
+        const slice_sizes = try a.dupe(i64, &.{ 1, hidden });
+        const offset_dims = try a.dupe(i64, &.{1});
+        const collapsed_slice_dims = try a.dupe(i64, &.{0});
+        const start_index_map = try a.dupe(i64, &.{0});
+
+        const params: pr.GatherParams = .{
+            .slice_sizes = slice_sizes,
+            .offset_dims = offset_dims,
+            .collapsed_slice_dims = collapsed_slice_dims,
+            .start_index_map = start_index_map,
+            .index_vector_dim = 1,
+        };
+
+        const params_with_opts = try self.params_with_options(&.{.{ .gather = params }}, options);
+        const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
     fn params_with_options(self: *Builder, params: []const pr.Param, options: OpOptions) ![]const pr.Param {
         // Fast path: no options = no allocation
         if (!options.outline and options.kernelize_provider == null) {
@@ -174,7 +303,6 @@ pub const Builder = struct {
     }
 };
 
-
 pub const CompileConfig = struct {
     entry_name: []const u8 = "main",
     plugin_path: ?[]const u8 = null,
@@ -184,7 +312,6 @@ pub const CompileConfig = struct {
     dump_mlir: ?dump.DumpConfig = null,
     compile: backend.pjrt.CompileOptions = .{},
 };
-
 
 pub const CompiledForward = struct {
     allocator: std.mem.Allocator,
@@ -644,6 +771,14 @@ fn build_inputs(builder: *Builder, spec: anytype) !SpecToTensorType(@TypeOf(spec
             }
             return out;
         },
+        .array => |info| {
+            var out: SpecToTensorType(T) = undefined;
+            var i: usize = 0;
+            while (i < info.len) : (i += 1) {
+                out[i] = try build_inputs(builder, spec[i]);
+            }
+            return out;
+        },
         else => {
             if (T != TensorSpec) {
                 @compileError("input spec must be TensorSpec or a struct/tuple of TensorSpec");
@@ -670,6 +805,12 @@ fn append_output(allocator: std.mem.Allocator, list: *std.ArrayList(Tensor), out
         .@"struct" => |info| {
             inline for (info.fields) |field| {
                 try append_output(allocator, list, @field(output, field.name));
+            }
+        },
+        .array => |info| {
+            var i: usize = 0;
+            while (i < info.len) : (i += 1) {
+                try append_output(allocator, list, output[i]);
             }
         },
         else => {
@@ -701,6 +842,10 @@ fn SpecToTensorType(comptime T: type) type {
                     .is_tuple = info.is_tuple,
                 },
             });
+        },
+        .array => |info| {
+            const elem_type = SpecToTensorType(info.child);
+            return @Type(.{ .array = .{ .len = info.len, .child = elem_type, .sentinel_ptr = null } });
         },
         else => {
             if (T == TensorSpec) return Tensor;
@@ -759,6 +904,12 @@ fn append_specs(allocator: std.mem.Allocator, list: *std.ArrayList(TensorSpec), 
                 try append_specs(allocator, list, @field(spec, field.name));
             }
         },
+        .array => |info| {
+            var i: usize = 0;
+            while (i < info.len) : (i += 1) {
+                try append_specs(allocator, list, spec[i]);
+            }
+        },
         else => {
             @compileError("input spec must be TensorSpec or a struct/tuple of TensorSpec");
         },
@@ -784,6 +935,7 @@ fn zero_literal(dtype: pr.DType) pr.Literal {
         .i64 => .{ .i64 = 0 },
         .u32 => .{ .u32 = 0 },
         .u64 => .{ .u64 = 0 },
+        .bool => .{ .bool = false },
     };
 }
 
@@ -805,7 +957,6 @@ fn emit_sgd_update(builder: *pr.FunctionBuilder, param: pr.VarId, grad: pr.VarId
     const scaled = try builder.multiply(grad, lr_broadcast);
     return try builder.subtract(param, scaled);
 }
-
 
 fn clone_tensor_specs(allocator: std.mem.Allocator, spec: anytype) ![]TensorSpec {
     const flat = try flatten_specs(allocator, spec);

@@ -6,6 +6,8 @@ const pr = @import("../pr.zig");
 pub const types = @import("types.zig");
 pub const constant = @import("constant.zig");
 pub const elementwise = @import("elementwise.zig");
+pub const unary = @import("unary.zig");
+pub const compare = @import("compare.zig");
 pub const contraction = @import("contraction.zig");
 pub const shape = @import("shape.zig");
 pub const special = @import("special.zig");
@@ -17,12 +19,26 @@ pub fn OpFor(comptime prim: pr.Prim) type {
         .add => elementwise.add,
         .subtract => elementwise.subtract,
         .multiply => elementwise.multiply,
+        .divide => elementwise.divide,
         .maximum => elementwise.maximum,
+        .exp => unary.exp,
+        .log => unary.log,
+        .rsqrt => unary.rsqrt,
+        .logistic => unary.logistic,
+        .compare => compare.compare,
+        .select => compare.select,
+        .convert => unary.convert,
+        .gather => shape.gather,
+        .scatter => shape.scatter,
         .dot => contraction.dot,
+        .dot_general => contraction.dot_general,
         .reshape => shape.reshape,
         .transpose => shape.transpose,
         .broadcast_in_dim => shape.broadcast_in_dim,
+        .slice => shape.slice,
+        .concatenate => shape.concatenate,
         .reduce_sum => shape.reduce_sum,
+        .reduce_max => shape.reduce_max,
         .call => special.call,
         .custom_call => special.custom_call,
     };
@@ -177,11 +193,22 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp(.add));
     try std.testing.expect(has_vjp(.subtract));
     try std.testing.expect(has_vjp(.multiply));
+    try std.testing.expect(has_vjp(.divide));
     try std.testing.expect(has_vjp(.dot));
     try std.testing.expect(has_vjp(.reshape));
     try std.testing.expect(has_vjp(.transpose));
     try std.testing.expect(has_vjp(.broadcast_in_dim));
     try std.testing.expect(has_vjp(.reduce_sum));
+    try std.testing.expect(has_vjp(.exp));
+    try std.testing.expect(has_vjp(.log));
+    try std.testing.expect(has_vjp(.rsqrt));
+    try std.testing.expect(has_vjp(.logistic));
+    try std.testing.expect(has_vjp(.gather));
+    try std.testing.expect(has_vjp(.select));
+    try std.testing.expect(has_vjp(.reduce_max));
+    try std.testing.expect(has_vjp(.dot_general));
+    try std.testing.expect(has_vjp(.slice));
+    try std.testing.expect(has_vjp(.concatenate));
 
     // Ops with forward only (constants)
     try std.testing.expect(has_vjp_forward(.literal));
@@ -189,6 +216,9 @@ test "vjp support detection" {
 
     // Ops without VJP
     try std.testing.expect(!has_vjp(.maximum));
+    try std.testing.expect(!has_vjp(.scatter));
+    try std.testing.expect(!has_vjp(.compare));
+    try std.testing.expect(!has_vjp(.convert));
     try std.testing.expect(!has_vjp(.call));
     try std.testing.expect(!has_vjp(.custom_call));
 }

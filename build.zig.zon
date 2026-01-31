@@ -31,7 +31,12 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{},
+    .dependencies = .{
+        .safetensors_zg = .{
+            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#15787b35b541a4493630ec383750242eef422b64",
+            .hash = "safetensors_zg-0.0.1-dRXUiGDtAAAS8GBHZT5IfFha7hG6KXCtVUuUxB-ob4Jc",
+        },
+    },
     .paths = .{
         "build.zig",
         "build-experimental.zig",

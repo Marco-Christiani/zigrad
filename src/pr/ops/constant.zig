@@ -71,6 +71,7 @@ pub const literal = struct {
                 // currently exhaustive, but doing this explicitly if we add more later so we cant forget to
                 //  add the cases here (compiler should catch non-exhaustive)
                 inline .f32, .f64, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
+                .bool => |v| try writer.print("{s}", .{if (v) "true" else "false"}),
             }
         }
     }

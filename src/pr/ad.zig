@@ -28,7 +28,6 @@ fn vjp_impl(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Functio
     // Create parameters for primals
     for (func.params) |param_id| {
         const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
-        if (tensor.dtype != .f32 and tensor.dtype != .f64) return error.UnsupportedDType;
 
         const new_param = try b.param_tensor(tensor.dtype, tensor.shape.dims);
         primal_map[@intCast(param_id)] = new_param;

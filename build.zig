@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
     const sdk_lib = b.fmt("{s}/lib", .{sdk_root});
     const sdk_runtime = b.fmt("{s}/runtime", .{sdk_root});
 
+    const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const zigrad_mod = b.addModule("zigrad", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -34,7 +35,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "zigrad", .module = zigrad_mod }},
+            .imports = &.{
+                .{ .name = "zigrad", .module = zigrad_mod },
+                .{ .name = "safetensors_zg", .module = safetensors_zg_dep.module("safetensors_zg") },
+            },
         }),
     });
 
@@ -112,4 +116,3 @@ fn add_runtime_bundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root:
     });
     exe.step.dependOn(&link_step.step);
 }
-

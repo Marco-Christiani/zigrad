@@ -141,6 +141,7 @@ pub fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
         .i64 => mlir.Type.int(ctx, .i64),
         .u32 => mlir.Type.int(ctx, .i32),
         .u64 => mlir.Type.int(ctx, .i64),
+        .bool => mlir.Type.int(ctx, .i1),
     };
 }
 
@@ -152,6 +153,7 @@ pub fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTyp
         .i64 => .i64,
         .u32 => .i32,
         .u64 => .i64,
+        .bool => .bool,
     };
 }
 
@@ -169,6 +171,7 @@ pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
         .i64 => .{ .i64 = @intFromFloat(value) },
         .u32 => .{ .u32 = @intFromFloat(value) },
         .u64 => .{ .u64 = @intFromFloat(value) },
+        .bool => .{ .bool = value != 0.0 },
     };
 }
 
