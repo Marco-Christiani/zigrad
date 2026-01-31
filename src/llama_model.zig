@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const ops = zg.pr.ops;
 
 pub const LlamaWeights = struct {
     w_emb: zg.frontend.Tensor,
@@ -92,7 +93,8 @@ fn self_attention(
     });
 
     const scale = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
-    const scale_t = try scores.builder.scalar_literal(.{ .f32 = scale });
+    const scale_lit = ops.types.scalar_literal(scores.tensor.dtype, scale);
+    const scale_t = try scores.builder.scalar_literal(scale_lit);
     const scale_b = try scale_t.broadcast_in_dim(scores.tensor.shape.dims, &.{});
     const scaled = try scores.mul(scale_b);
 
@@ -149,7 +151,8 @@ fn apply_causal_mask(scores: zg.frontend.Tensor, mask: zg.frontend.Tensor) !zg.f
     const cond = try mask.compare(zeros, .{ .direction = .GT, .compare_type = .SIGNED });
     const cond_b = try cond.broadcast_in_dim(scores.tensor.shape.dims, &.{ 1, 2 });
 
-    const neg = try scores.builder.scalar_literal(.{ .f32 = -1.0e9 });
+    const neg_lit = ops.types.scalar_literal(scores.tensor.dtype, -1.0e9);
+    const neg = try scores.builder.scalar_literal(neg_lit);
     const neg_b = try neg.broadcast_in_dim(scores.tensor.shape.dims, &.{});
     return scores.select(cond_b, neg_b);
 }
@@ -189,14 +192,16 @@ fn mlp(x: zg.frontend.Tensor, layer: LayerWeights) !zg.frontend.Tensor {
 pub fn rms_norm(x: zg.frontend.Tensor, weight: zg.frontend.Tensor, eps: f32) !zg.frontend.Tensor {
     const hidden = x.tensor.shape.dims[1];
     const hidden_f: f32 = @floatFromInt(hidden);
-    const mean_scale = try x.builder.scalar_literal(.{ .f32 = 1.0 / hidden_f });
+    const mean_scale_lit = ops.types.scalar_literal(x.tensor.dtype, 1.0 / hidden_f);
+    const mean_scale = try x.builder.scalar_literal(mean_scale_lit);
 
     const x_sq = try x.mul(x);
     const sum = try x_sq.reduce_sum(&.{1});
     const mean_scale_b = try mean_scale.broadcast_in_dim(&.{x.tensor.shape.dims[0]}, &.{});
     const mean = try sum.mul(mean_scale_b);
 
-    const eps_tensor = try x.builder.scalar_literal(.{ .f32 = eps });
+    const eps_lit = ops.types.scalar_literal(x.tensor.dtype, eps);
+    const eps_tensor = try x.builder.scalar_literal(eps_lit);
     const eps_b = try eps_tensor.broadcast_in_dim(&.{x.tensor.shape.dims[0]}, &.{});
     const denom = try mean.add(eps_b);
     const inv = try denom.rsqrt();

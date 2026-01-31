@@ -56,7 +56,7 @@ pub const compare = struct {
         if (!std.mem.eql(usize, lhs.shape.dims, out.shape.dims)) return error.CompareTypeMismatch;
 
         switch (lhs.dtype) {
-            .f32, .f64 => {
+            .bf16, .f32, .f64 => {
                 if (cparams.compare_type != .FLOAT and cparams.compare_type != .TOTALORDER) return error.CompareTypeMismatch;
             },
             .i32, .i64 => if (cparams.compare_type != .SIGNED) return error.CompareTypeMismatch,
@@ -73,7 +73,7 @@ pub const compare = struct {
         if (!types.same_tensor_type(lhs, rhs)) return error.CompareTypeMismatch;
 
         switch (lhs.dtype) {
-            .f32, .f64 => {
+            .bf16, .f32, .f64 => {
                 if (cparams.compare_type != .FLOAT and cparams.compare_type != .TOTALORDER) return error.CompareTypeMismatch;
             },
             .i32, .i64 => if (cparams.compare_type != .SIGNED) return error.CompareTypeMismatch,

@@ -668,6 +668,7 @@ pub const ProgramFormat = enum {
 };
 
 pub const BufferType = enum {
+    bf16,
     f32,
     f64,
     i32,
@@ -677,6 +678,7 @@ pub const BufferType = enum {
 
     pub fn to_c_enum(self: BufferType) c.PJRT_Buffer_Type {
         return switch (self) {
+            .bf16 => c.PJRT_Buffer_Type_BF16,
             .f32 => c.PJRT_Buffer_Type_F32,
             .f64 => c.PJRT_Buffer_Type_F64,
             .i32 => c.PJRT_Buffer_Type_S32,
@@ -688,6 +690,7 @@ pub const BufferType = enum {
 
     pub fn size_in_bytes(self: BufferType) usize {
         return switch (self) {
+            .bf16 => 2,
             .f32, .i32, .u32 => 4,
             .f64, .i64, .u64 => 8,
         };

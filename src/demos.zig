@@ -533,7 +533,6 @@ pub fn run_train_demo(
     std.log.info("OK: train-demo executed", .{});
 }
 
-
 pub fn compile_program(
     backend: *zg.backend.PjrtBackend,
     allocator: std.mem.Allocator,
@@ -620,6 +619,7 @@ fn upload_host_buffer(
     defer allocator.free(shape_i64);
     for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
     const dtype: zg.backend.pjrt.BufferType = switch (buf.dtype) {
+        .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
         .i32 => .i32,
@@ -643,7 +643,6 @@ fn fill_inputs(x: []f32) void {
         v.* = base / 255.0;
     }
 }
-
 
 fn fill_targets(
     host_y: *zg.utils.HostBuffer,

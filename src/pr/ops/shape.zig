@@ -1062,6 +1062,7 @@ fn broadcast_reduce_axes(
 
 fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
     return switch (dtype) {
+        .bf16 => std.mem.asBytes(&@as(u16, 0)),
         .f32 => std.mem.asBytes(&@as(f32, 0.0)),
         .f64 => std.mem.asBytes(&@as(f64, 0.0)),
         .i32 => std.mem.asBytes(&@as(i32, 0)),
@@ -1072,8 +1073,14 @@ fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
     };
 }
 
+fn f32_to_bf16_bits(val: f32) u16 {
+    const bits: u32 = @bitCast(val);
+    return @intCast(bits >> 16);
+}
+
 fn scalar_min_bytes(dtype: pr.DType) []const u8 {
     return switch (dtype) {
+        .bf16 => std.mem.asBytes(&f32_to_bf16_bits(-std.math.inf(f32))),
         .f32 => std.mem.asBytes(&@as(f32, -std.math.inf(f32))),
         .f64 => std.mem.asBytes(&@as(f64, -std.math.inf(f64))),
         .i32 => std.mem.asBytes(&std.math.minInt(i32)),
@@ -1248,7 +1255,7 @@ fn zeros_like(bld: *pr.FunctionBuilder, dtype: pr.DType, dims: []const usize) pr
 
 fn compare_type_for_dtype(dt: pr.DType) pr.CompareType {
     return switch (dt) {
-        .f32, .f64 => .FLOAT,
+        .bf16, .f32, .f64 => .FLOAT,
         .i32, .i64 => .SIGNED,
         .u32, .u64, .bool => .UNSIGNED,
     };

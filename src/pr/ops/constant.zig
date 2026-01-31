@@ -70,9 +70,15 @@ pub const literal = struct {
             switch (lit) {
                 // currently exhaustive, but doing this explicitly if we add more later so we cant forget to
                 //  add the cases here (compiler should catch non-exhaustive)
+                .bf16 => |v| try writer.print("{d}", .{bf16_to_f32(v)}),
                 inline .f32, .f64, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
                 .bool => |v| try writer.print("{s}", .{if (v) "true" else "false"}),
             }
         }
     }
 };
+
+fn bf16_to_f32(val: u16) f32 {
+    const bits: u32 = @as(u32, val) << 16;
+    return @bitCast(bits);
+}

@@ -2,6 +2,7 @@ const std = @import("std");
 const zg = @import("zigrad");
 const stz = @import("safetensors_zg");
 const llama_model = @import("llama_model.zig");
+const ops = zg.pr.ops;
 
 const num_layers: usize = 16;
 
@@ -15,6 +16,13 @@ pub fn run_llama_ft_demo(
     quiet: bool,
 ) !void {
     const TensorSpec = zg.frontend.TensorSpec;
+    const train_mode = blk: {
+        const env = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_TRAIN") catch null;
+        defer if (env) |v| allocator.free(v);
+        break :blk env != null and std.mem.eql(u8, env.?, "1");
+    };
+    const model_dtype: zg.pr.DType = if (train_mode) .f32 else .bf16;
+    const host_dtype: zg.utils.DType = if (train_mode) .f32 else .bf16;
 
     const LayerSpec = struct {
         input_norm: TensorSpec,
@@ -82,7 +90,8 @@ pub fn run_llama_ft_demo(
             const y_log = try batch.y.mul(log_softmax);
             const loss_per = try y_log.reduce_sum(&.{1});
 
-            const neg = try log_softmax.builder.scalar_literal(.{ .f32 = -1.0 });
+            const neg_lit = ops.types.scalar_literal(log_softmax.tensor.dtype, -1.0);
+            const neg = try log_softmax.builder.scalar_literal(neg_lit);
             const neg_b = try neg.broadcast_in_dim(&.{seq}, &.{});
             const neg_loss = try loss_per.mul(neg_b);
             return try neg_loss.reduce_sum(&.{0});
@@ -96,30 +105,30 @@ pub fn run_llama_ft_demo(
     var layers_spec: [num_layers]LayerSpec = undefined;
     inline for (0..num_layers) |i| {
         layers_spec[i] = .{
-            .input_norm = .{ .dtype = .f32, .dims = &.{hidden} },
-            .post_norm = .{ .dtype = .f32, .dims = &.{hidden} },
-            .q_proj = .{ .dtype = .f32, .dims = &.{ hidden, hidden } },
-            .k_proj = .{ .dtype = .f32, .dims = &.{ hidden, 512 } },
-            .v_proj = .{ .dtype = .f32, .dims = &.{ hidden, 512 } },
-            .o_proj = .{ .dtype = .f32, .dims = &.{ hidden, hidden } },
-            .gate_proj = .{ .dtype = .f32, .dims = &.{ hidden, 8192 } },
-            .up_proj = .{ .dtype = .f32, .dims = &.{ hidden, 8192 } },
-            .down_proj = .{ .dtype = .f32, .dims = &.{ 8192, hidden } },
+            .input_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
+            .post_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
+            .q_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, hidden } },
+            .k_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 512 } },
+            .v_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 512 } },
+            .o_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, hidden } },
+            .gate_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 8192 } },
+            .up_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 8192 } },
+            .down_proj = .{ .dtype = model_dtype, .dims = &.{ 8192, hidden } },
         };
     }
 
     const params_spec = ParamsSpec{
-        .w_emb = .{ .dtype = .f32, .dims = &.{ vocab, hidden } },
-        .w_out = .{ .dtype = .f32, .dims = &.{ hidden, vocab } },
-        .norm = .{ .dtype = .f32, .dims = &.{hidden} },
+        .w_emb = .{ .dtype = model_dtype, .dims = &.{ vocab, hidden } },
+        .w_out = .{ .dtype = model_dtype, .dims = &.{ hidden, vocab } },
+        .norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
         .layers = layers_spec,
     };
     const batch_spec = BatchSpec{
         .x = .{ .dtype = .i32, .dims = &.{seq} },
-        .y = .{ .dtype = .f32, .dims = &.{ seq, vocab } },
+        .y = .{ .dtype = model_dtype, .dims = &.{ seq, vocab } },
         .mask = .{ .dtype = .i32, .dims = &.{ seq, seq } },
-        .sin = .{ .dtype = .f32, .dims = &.{ seq, 32 } },
-        .cos = .{ .dtype = .f32, .dims = &.{ seq, 32 } },
+        .sin = .{ .dtype = model_dtype, .dims = &.{ seq, 32 } },
+        .cos = .{ .dtype = model_dtype, .dims = &.{ seq, 32 } },
     };
     const inputs_spec = .{ params_spec, batch_spec };
 
@@ -143,11 +152,6 @@ pub fn run_llama_ft_demo(
     const device = &devices[compile_cfg.device_index];
 
     const param_count = 3 + num_layers * 9;
-    const train_mode = blk: {
-        const env = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_TRAIN") catch null;
-        defer if (env) |v| allocator.free(v);
-        break :blk env != null and std.mem.eql(u8, env.?, "1");
-    };
 
     var compiled = if (train_mode)
         try zg.frontend.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, param_count, 1e-4, compile_cfg)
@@ -170,11 +174,11 @@ pub fn run_llama_ft_demo(
     const shape_mask = zg.utils.Shape{ .dims = &.{ seq, seq } };
     const shape_rot = zg.utils.Shape{ .dims = &.{ seq, 32 } };
 
-    var host_w_emb = try zg.utils.HostBuffer.init(allocator, shape_w_emb, .f32);
+    var host_w_emb = try zg.utils.HostBuffer.init(allocator, shape_w_emb, host_dtype);
     defer host_w_emb.deinit();
-    var host_w_out = try zg.utils.HostBuffer.init(allocator, shape_w_out, .f32);
+    var host_w_out = try zg.utils.HostBuffer.init(allocator, shape_w_out, host_dtype);
     defer host_w_out.deinit();
-    var host_norm = try zg.utils.HostBuffer.init(allocator, shape_norm, .f32);
+    var host_norm = try zg.utils.HostBuffer.init(allocator, shape_norm, host_dtype);
     defer host_norm.deinit();
     var host_layer_input_norm: [num_layers]zg.utils.HostBuffer = undefined;
     var host_layer_post_norm: [num_layers]zg.utils.HostBuffer = undefined;
@@ -188,15 +192,15 @@ pub fn run_llama_ft_demo(
 
     var i: usize = 0;
     while (i < num_layers) : (i += 1) {
-        host_layer_input_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, .f32);
-        host_layer_post_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, .f32);
-        host_q_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_q_proj, .f32);
-        host_k_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_kv_proj, .f32);
-        host_v_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_kv_proj, .f32);
-        host_o_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_o_proj, .f32);
-        host_gate_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_gate_proj, .f32);
-        host_up_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_up_proj, .f32);
-        host_down_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_down_proj, .f32);
+        host_layer_input_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, host_dtype);
+        host_layer_post_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, host_dtype);
+        host_q_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_q_proj, host_dtype);
+        host_k_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_kv_proj, host_dtype);
+        host_v_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_kv_proj, host_dtype);
+        host_o_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_o_proj, host_dtype);
+        host_gate_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_gate_proj, host_dtype);
+        host_up_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_up_proj, host_dtype);
+        host_down_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_down_proj, host_dtype);
     }
     defer {
         var j: usize = 0;
@@ -214,13 +218,13 @@ pub fn run_llama_ft_demo(
     }
     var host_x = try zg.utils.HostBuffer.init(allocator, shape_x, .i32);
     defer host_x.deinit();
-    var host_y = try zg.utils.HostBuffer.init(allocator, shape_y, .f32);
+    var host_y = try zg.utils.HostBuffer.init(allocator, shape_y, host_dtype);
     defer host_y.deinit();
     var host_mask = try zg.utils.HostBuffer.init(allocator, shape_mask, .i32);
     defer host_mask.deinit();
-    var host_sin = try zg.utils.HostBuffer.init(allocator, shape_rot, .f32);
+    var host_sin = try zg.utils.HostBuffer.init(allocator, shape_rot, host_dtype);
     defer host_sin.deinit();
-    var host_cos = try zg.utils.HostBuffer.init(allocator, shape_rot, .f32);
+    var host_cos = try zg.utils.HostBuffer.init(allocator, shape_rot, host_dtype);
     defer host_cos.deinit();
 
     const default_path = "./weights/llama-3.2-1b-instruct/model.safetensors";
@@ -230,9 +234,9 @@ pub fn run_llama_ft_demo(
     if (try load_llama_weights(
         allocator,
         weights_path,
-        host_w_emb.as_slice(f32),
-        host_w_out.as_slice(f32),
-        host_norm.as_slice(f32),
+        &host_w_emb,
+        &host_w_out,
+        &host_norm,
         host_layer_input_norm[0..],
         host_layer_post_norm[0..],
         host_q_proj[0..],
@@ -257,20 +261,38 @@ pub fn run_llama_ft_demo(
             std.log.info("llama-ft-demo: loaded weights from {s}", .{weights_path});
         }
     } else {
-        fill_pattern(host_w_emb.as_slice(f32), 1e-3, 0.0);
-        fill_pattern(host_w_out.as_slice(f32), 1e-3, 0.0);
-        fill_pattern(host_norm.as_slice(f32), 1e-3, 0.0);
-        var k: usize = 0;
-        while (k < num_layers) : (k += 1) {
-            fill_pattern(host_layer_input_norm[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_layer_post_norm[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_q_proj[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_k_proj[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_v_proj[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_o_proj[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_gate_proj[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_up_proj[k].as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_down_proj[k].as_slice(f32), 1e-3, 0.0);
+        if (host_dtype == .bf16) {
+            fill_pattern_bf16(host_w_emb.as_slice(u16), 1e-3, 0.0);
+            fill_pattern_bf16(host_w_out.as_slice(u16), 1e-3, 0.0);
+            fill_pattern_bf16(host_norm.as_slice(u16), 1e-3, 0.0);
+            var k: usize = 0;
+            while (k < num_layers) : (k += 1) {
+                fill_pattern_bf16(host_layer_input_norm[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_layer_post_norm[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_q_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_k_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_v_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_o_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_gate_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_up_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_down_proj[k].as_slice(u16), 1e-3, 0.0);
+            }
+        } else {
+            fill_pattern(host_w_emb.as_slice(f32), 1e-3, 0.0);
+            fill_pattern(host_w_out.as_slice(f32), 1e-3, 0.0);
+            fill_pattern(host_norm.as_slice(f32), 1e-3, 0.0);
+            var k: usize = 0;
+            while (k < num_layers) : (k += 1) {
+                fill_pattern(host_layer_input_norm[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_layer_post_norm[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_q_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_k_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_v_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_o_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_gate_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_up_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_down_proj[k].as_slice(f32), 1e-3, 0.0);
+            }
         }
         std.log.warn("llama-ft-demo: using synthetic weights (set ZG_LLAMA_SAFETENSORS_PATH)", .{});
     }
@@ -278,9 +300,17 @@ pub fn run_llama_ft_demo(
     const tokens = [_]usize{ 128000, 128009, 128001, 128008 };
     const targets = [_]usize{ 128009, 128001, 128008, 128001 };
     fill_i32_tokens(host_x.as_slice(i32), &tokens);
-    fill_one_hot_seq(host_y.as_slice(f32), &targets, vocab);
+    if (host_dtype == .bf16) {
+        fill_one_hot_seq_bf16(host_y.as_slice(u16), &targets, vocab);
+    } else {
+        fill_one_hot_seq(host_y.as_slice(f32), &targets, vocab);
+    }
     fill_causal_mask(host_mask.as_slice(i32), seq);
-    fill_rope_tables(host_sin.as_slice(f32), host_cos.as_slice(f32), seq, 64);
+    if (host_dtype == .bf16) {
+        fill_rope_tables_bf16(host_sin.as_slice(u16), host_cos.as_slice(u16), seq, 64);
+    } else {
+        fill_rope_tables(host_sin.as_slice(f32), host_cos.as_slice(f32), seq, 64);
+    }
 
     var total_ns: u64 = 0;
 
@@ -315,7 +345,8 @@ pub fn run_llama_ft_demo(
     const tmp_sin = try upload_host_buffer(allocator, &backend_handle, device, &host_sin);
     const tmp_cos = try upload_host_buffer(allocator, &backend_handle, device, &host_cos);
 
-    var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
+    const loss_dtype: zg.utils.DType = host_dtype;
+    var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
     defer loss_host.deinit();
 
     const output_count = if (train_mode) 1 + param_count else 1;
@@ -409,13 +440,20 @@ pub fn run_llama_ft_demo(
 
         var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
+            if (loss_dtype == .bf16) {
+                const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer());
+                break :blk bf16_to_f32(ptr[0]);
+            }
             const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer());
             break :blk ptr[0];
         } else blk: {
             var loss_ev = try loss_buf.to_host(loss_host.data);
             try loss_ev.await_();
             loss_ev.deinit();
-            break :blk loss_host.as_slice(f32)[0];
+            break :blk if (loss_dtype == .bf16)
+                bf16_to_f32(loss_host.as_slice(u16)[0])
+            else
+                loss_host.as_slice(f32)[0];
         };
         const loss_read_ns = timer.lap();
 
@@ -451,9 +489,9 @@ pub fn run_llama_ft_demo(
 fn load_llama_weights(
     allocator: std.mem.Allocator,
     path: []const u8,
-    w_emb: []f32,
-    w_out: []f32,
-    norm: []f32,
+    w_emb: *zg.utils.HostBuffer,
+    w_out: *zg.utils.HostBuffer,
+    norm: *zg.utils.HostBuffer,
     layer_input_norm: []zg.utils.HostBuffer,
     layer_post_norm: []zg.utils.HostBuffer,
     q_proj: []zg.utils.HostBuffer,
@@ -481,10 +519,18 @@ fn load_llama_weights(
     defer st_file.deinit();
 
     const emb_view = try st_file.get("model.embed_tokens.weight");
-    try copy_tensor_to_f32(emb_view, w_emb, shape_w_emb);
+    if (w_emb.dtype == .bf16) {
+        try copy_tensor_to_bf16(emb_view, w_emb.as_slice(u16), shape_w_emb);
+    } else {
+        try copy_tensor_to_f32(emb_view, w_emb.as_slice(f32), shape_w_emb);
+    }
 
     const norm_view = try st_file.get("model.norm.weight");
-    try copy_tensor_to_f32(norm_view, norm, shape_norm);
+    if (norm.dtype == .bf16) {
+        try copy_tensor_to_bf16(norm_view, norm.as_slice(u16), shape_norm);
+    } else {
+        try copy_tensor_to_f32(norm_view, norm.as_slice(f32), shape_norm);
+    }
 
     if (layer_input_norm.len != num_layers) return error.InvalidParams;
     if (layer_post_norm.len != num_layers) return error.InvalidParams;
@@ -513,32 +559,76 @@ fn load_llama_weights(
         defer allocator.free(down_name);
 
         const layer_in = try st_file.get(in_name);
-        try copy_tensor_to_f32(layer_in, layer_input_norm[i].as_slice(f32), shape_layer_norm);
+        if (layer_input_norm[i].dtype == .bf16) {
+            try copy_tensor_to_bf16(layer_in, layer_input_norm[i].as_slice(u16), shape_layer_norm);
+        } else {
+            try copy_tensor_to_f32(layer_in, layer_input_norm[i].as_slice(f32), shape_layer_norm);
+        }
         const layer_post = try st_file.get(post_name);
-        try copy_tensor_to_f32(layer_post, layer_post_norm[i].as_slice(f32), shape_layer_norm);
+        if (layer_post_norm[i].dtype == .bf16) {
+            try copy_tensor_to_bf16(layer_post, layer_post_norm[i].as_slice(u16), shape_layer_norm);
+        } else {
+            try copy_tensor_to_f32(layer_post, layer_post_norm[i].as_slice(f32), shape_layer_norm);
+        }
 
         const q_view = try st_file.get(q_name);
-        try copy_tensor_to_f32_transposed(q_view, q_proj[i].as_slice(f32), shape_q_proj);
+        if (q_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(q_view, q_proj[i].as_slice(u16), shape_q_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(q_view, q_proj[i].as_slice(f32), shape_q_proj);
+        }
         const k_view = try st_file.get(k_name);
-        try copy_tensor_to_f32_transposed(k_view, k_proj[i].as_slice(f32), shape_k_proj);
+        if (k_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(k_view, k_proj[i].as_slice(u16), shape_k_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(k_view, k_proj[i].as_slice(f32), shape_k_proj);
+        }
         const v_view = try st_file.get(v_name);
-        try copy_tensor_to_f32_transposed(v_view, v_proj[i].as_slice(f32), shape_k_proj);
+        if (v_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(v_view, v_proj[i].as_slice(u16), shape_k_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(v_view, v_proj[i].as_slice(f32), shape_k_proj);
+        }
         const o_view = try st_file.get(o_name);
-        try copy_tensor_to_f32_transposed(o_view, o_proj[i].as_slice(f32), shape_o_proj);
+        if (o_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(o_view, o_proj[i].as_slice(u16), shape_o_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(o_view, o_proj[i].as_slice(f32), shape_o_proj);
+        }
 
         const gate_view = try st_file.get(gate_name);
-        try copy_tensor_to_f32_transposed(gate_view, gate_proj[i].as_slice(f32), shape_gate_proj);
+        if (gate_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(gate_view, gate_proj[i].as_slice(u16), shape_gate_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(gate_view, gate_proj[i].as_slice(f32), shape_gate_proj);
+        }
         const up_view = try st_file.get(up_name);
-        try copy_tensor_to_f32_transposed(up_view, up_proj[i].as_slice(f32), shape_up_proj);
+        if (up_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(up_view, up_proj[i].as_slice(u16), shape_up_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(up_view, up_proj[i].as_slice(f32), shape_up_proj);
+        }
         const down_view = try st_file.get(down_name);
-        try copy_tensor_to_f32_transposed(down_view, down_proj[i].as_slice(f32), shape_down_proj);
+        if (down_proj[i].dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(down_view, down_proj[i].as_slice(u16), shape_down_proj);
+        } else {
+            try copy_tensor_to_f32_transposed(down_view, down_proj[i].as_slice(f32), shape_down_proj);
+        }
     }
 
     const lm_view = get_optional(&st_file, "lm_head.weight") catch |err| return err;
     if (lm_view) |view| {
-        try copy_tensor_to_f32_transposed(view, w_out, shape_w_out);
+        if (w_out.dtype == .bf16) {
+            try copy_tensor_to_bf16_transposed(view, w_out.as_slice(u16), shape_w_out);
+        } else {
+            try copy_tensor_to_f32_transposed(view, w_out.as_slice(f32), shape_w_out);
+        }
     } else {
-        try transpose_vocab_hidden(w_emb, w_out, shape_w_emb, shape_w_out);
+        if (w_out.dtype == .bf16) {
+            try transpose_vocab_hidden_bf16(w_emb.as_slice(u16), w_out.as_slice(u16), shape_w_emb, shape_w_out);
+        } else {
+            try transpose_vocab_hidden(w_emb.as_slice(f32), w_out.as_slice(f32), shape_w_emb, shape_w_out);
+        }
     }
 
     return true;
@@ -591,6 +681,30 @@ fn copy_tensor_to_f32(view: stz.TensorView, out: []f32, expected_shape: []const 
     }
 }
 
+fn copy_tensor_to_bf16(view: stz.TensorView, out: []u16, expected_shape: []const usize) !void {
+    if (!std.mem.eql(usize, view.info.shape, expected_shape)) return error.TensorShapeMismatch;
+
+    var count: usize = 1;
+    for (view.info.shape) |d| count *= d;
+    if (count != out.len) return error.TensorSizeMismatch;
+
+    switch (view.info.dtype) {
+        .bf16 => {
+            const data = std.mem.bytesAsSlice(u16, view.data);
+            if (data.len != out.len) return error.TensorSizeMismatch;
+            @memcpy(out, data);
+        },
+        .f32 => {
+            const data = std.mem.bytesAsSlice(f32, view.data);
+            if (data.len != out.len) return error.TensorSizeMismatch;
+            for (data, 0..) |v, i| {
+                out[i] = f32_to_bf16(v);
+            }
+        },
+        else => return error.TensorDtypeMismatch,
+    }
+}
+
 fn copy_tensor_to_f32_transposed(view: stz.TensorView, out: []f32, expected_shape: []const usize) !void {
     if (view.info.shape.len != 2 or expected_shape.len != 2) return error.TensorShapeMismatch;
     if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
@@ -603,7 +717,54 @@ fn copy_tensor_to_f32_transposed(view: stz.TensorView, out: []f32, expected_shap
     try transpose_vocab_hidden(tmp, out, view.info.shape, expected_shape);
 }
 
+fn copy_tensor_to_bf16_transposed(view: stz.TensorView, out: []u16, expected_shape: []const usize) !void {
+    if (view.info.shape.len != 2 or expected_shape.len != 2) return error.TensorShapeMismatch;
+    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
+        return error.TensorShapeMismatch;
+    }
+
+    switch (view.info.dtype) {
+        .bf16 => {
+            const data = std.mem.bytesAsSlice(u16, view.data);
+            if (data.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
+            try transpose_vocab_hidden_bf16(data, out, view.info.shape, expected_shape);
+        },
+        .f32 => {
+            const data = std.mem.bytesAsSlice(f32, view.data);
+            if (data.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
+
+            const vocab = view.info.shape[0];
+            const hidden = view.info.shape[1];
+            if (expected_shape[0] != hidden or expected_shape[1] != vocab) return error.TensorShapeMismatch;
+
+            var v: usize = 0;
+            while (v < vocab) : (v += 1) {
+                var h: usize = 0;
+                while (h < hidden) : (h += 1) {
+                    out[h * vocab + v] = f32_to_bf16(data[v * hidden + h]);
+                }
+            }
+        },
+        else => return error.TensorDtypeMismatch,
+    }
+}
+
 fn transpose_vocab_hidden(src: []const f32, dst: []f32, src_shape: []const usize, dst_shape: []const usize) !void {
+    if (src_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
+    const vocab = src_shape[0];
+    const hidden = src_shape[1];
+    if (dst_shape[0] != hidden or dst_shape[1] != vocab) return error.TensorShapeMismatch;
+
+    var v: usize = 0;
+    while (v < vocab) : (v += 1) {
+        var h: usize = 0;
+        while (h < hidden) : (h += 1) {
+            dst[h * vocab + v] = src[v * hidden + h];
+        }
+    }
+}
+
+fn transpose_vocab_hidden_bf16(src: []const u16, dst: []u16, src_shape: []const usize, dst_shape: []const usize) !void {
     if (src_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
     const vocab = src_shape[0];
     const hidden = src_shape[1];
@@ -623,6 +784,11 @@ fn bf16_to_f32(val: u16) f32 {
     return @bitCast(bits);
 }
 
+fn f32_to_bf16(val: f32) u16 {
+    const bits: u32 = @bitCast(val);
+    return @intCast(bits >> 16);
+}
+
 fn upload_host_buffer(
     allocator: std.mem.Allocator,
     backend: *zg.backend.PjrtBackend,
@@ -633,6 +799,7 @@ fn upload_host_buffer(
     defer allocator.free(shape_i64);
     for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
     const dtype: zg.backend.pjrt.BufferType = switch (buf.dtype) {
+        .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
         .i32 => .i32,
@@ -650,11 +817,27 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
     }
 }
 
+fn fill_pattern_bf16(slice: []u16, scale: f32, offset: f32) void {
+    for (slice, 0..) |*v, i| {
+        const base = @as(f32, @floatFromInt(i % 1024));
+        v.* = f32_to_bf16(offset + scale * base);
+    }
+}
+
 fn fill_one_hot_seq(out: []f32, indices: []const usize, vocab: usize) void {
     @memset(out, 0);
     for (indices, 0..) |idx, i| {
         const offset = i * vocab + (idx % vocab);
         if (offset < out.len) out[offset] = 1.0;
+    }
+}
+
+fn fill_one_hot_seq_bf16(out: []u16, indices: []const usize, vocab: usize) void {
+    @memset(out, 0);
+    const one = f32_to_bf16(1.0);
+    for (indices, 0..) |idx, i| {
+        const offset = i * vocab + (idx % vocab);
+        if (offset < out.len) out[offset] = one;
     }
 }
 
@@ -692,6 +875,24 @@ fn fill_rope_tables(out_sin: []f32, out_cos: []f32, seq: usize, head_dim: usize)
             const theta = @as(f32, @floatFromInt(i)) * inv;
             out_sin[i * half + j] = @sin(theta);
             out_cos[i * half + j] = @cos(theta);
+        }
+    }
+}
+
+fn fill_rope_tables_bf16(out_sin: []u16, out_cos: []u16, seq: usize, head_dim: usize) void {
+    const half = head_dim / 2;
+    if (out_sin.len != seq * half or out_cos.len != seq * half) return;
+
+    const base: f32 = 10000.0;
+    var i: usize = 0;
+    while (i < seq) : (i += 1) {
+        var j: usize = 0;
+        while (j < half) : (j += 1) {
+            const exp = @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(head_dim));
+            const inv = 1.0 / std.math.pow(f32, base, exp);
+            const theta = @as(f32, @floatFromInt(i)) * inv;
+            out_sin[i * half + j] = f32_to_bf16(@sin(theta));
+            out_cos[i * half + j] = f32_to_bf16(@cos(theta));
         }
     }
 }

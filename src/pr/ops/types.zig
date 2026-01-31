@@ -135,6 +135,7 @@ pub const AdContext = struct {
 
 pub fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
     return switch (dt) {
+        .bf16 => mlir.Type.float(ctx, .bf16),
         .f32 => mlir.Type.float(ctx, .f32),
         .f64 => mlir.Type.float(ctx, .f64),
         .i32 => mlir.Type.int(ctx, .i32),
@@ -147,6 +148,7 @@ pub fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
 
 pub fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     return switch (dt) {
+        .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
         .i32 => .i32,
@@ -157,6 +159,11 @@ pub fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTyp
     };
 }
 
+fn f32_to_bf16_bits(val: f32) u16 {
+    const bits: u32 = @bitCast(val);
+    return @intCast(bits >> 16);
+}
+
 pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.rank() != b.shape.rank()) return false;
@@ -165,6 +172,7 @@ pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
 
 pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
     return switch (value_dtype) {
+        .bf16 => .{ .bf16 = f32_to_bf16_bits(@floatCast(value)) },
         .f32 => .{ .f32 = @floatCast(value) },
         .f64 => .{ .f64 = value },
         .i32 => .{ .i32 = @intFromFloat(value) },

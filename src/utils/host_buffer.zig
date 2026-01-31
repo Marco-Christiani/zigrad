@@ -5,6 +5,7 @@
 const std = @import("std");
 
 pub const DType = enum {
+    bf16,
     f32,
     f64,
     i32,
@@ -14,6 +15,7 @@ pub const DType = enum {
 
     pub fn size_in_bytes(self: DType) usize {
         return switch (self) {
+            .bf16 => 2,
             .f32, .i32, .u32 => 4,
             .f64, .i64, .u64 => 8,
         };
@@ -21,6 +23,7 @@ pub const DType = enum {
 
     pub fn name(self: DType) []const u8 {
         return switch (self) {
+            .bf16 => "bf16",
             .f32 => "f32",
             .f64 => "f64",
             .i32 => "i32",
@@ -150,6 +153,18 @@ pub const HostBuffer = struct {
         const max_print = @min(self.shape.num_elements(), 16);
 
         switch (self.dtype) {
+            .bf16 => {
+                const slice = self.as_slice(u16);
+                try writer.writeAll("[");
+                for (slice[0..max_print], 0..) |val, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.print("{d:.2}", .{bf16_to_f32(val)});
+                }
+                if (max_print < self.shape.num_elements()) {
+                    try writer.writeAll(", ...");
+                }
+                try writer.writeAll("]");
+            },
             .f32 => {
                 const slice = self.as_slice(f32);
                 try writer.writeAll("[");
@@ -192,6 +207,11 @@ pub const HostBuffer = struct {
         try writer.writeAll("\n");
     }
 };
+
+fn bf16_to_f32(val: u16) f32 {
+    const bits: u32 = @as(u32, val) << 16;
+    return @bitCast(bits);
+}
 
 test "HostBuffer basic operations" {
     const allocator = std.testing.allocator;

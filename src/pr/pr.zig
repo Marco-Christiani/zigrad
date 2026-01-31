@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const DType = enum {
+    bf16,
     f32,
     f64,
     i32,
@@ -47,6 +48,7 @@ pub const Span = struct {
 };
 
 pub const Literal = union(enum) {
+    bf16: u16,
     f32: f32,
     f64: f64,
     i32: i32,
@@ -57,6 +59,7 @@ pub const Literal = union(enum) {
 
     pub fn dtype(self: Literal) DType {
         return switch (self) {
+            .bf16 => .bf16,
             .f32 => .f32,
             .f64 => .f64,
             .i32 => .i32,
@@ -920,7 +923,7 @@ pub fn validate_function(func: Function) ValidationError!void {
                 if (!std.mem.eql(usize, lhs.shape.dims, out.shape.dims)) return error.CompareTypeMismatch;
 
                 switch (lhs.dtype) {
-                    .f32, .f64 => {
+                    .bf16, .f32, .f64 => {
                         if (cparams.compare_type != .FLOAT and cparams.compare_type != .TOTALORDER) return error.CompareTypeMismatch;
                     },
                     .i32, .i64 => if (cparams.compare_type != .SIGNED) return error.CompareTypeMismatch,
@@ -1195,7 +1198,7 @@ pub const FunctionBuilder = struct {
                 if (!same_tensor_signature(lhs, rhs)) return error.CompareTypeMismatch;
 
                 switch (lhs.dtype) {
-                    .f32, .f64 => {
+                    .bf16, .f32, .f64 => {
                         if (cparams.compare_type != .FLOAT and cparams.compare_type != .TOTALORDER) return error.CompareTypeMismatch;
                     },
                     .i32, .i64 => if (cparams.compare_type != .SIGNED) return error.CompareTypeMismatch,

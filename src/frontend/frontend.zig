@@ -929,6 +929,7 @@ fn concat_device_buffers(
 
 fn zero_literal(dtype: pr.DType) pr.Literal {
     return switch (dtype) {
+        .bf16 => .{ .bf16 = 0 },
         .f32 => .{ .f32 = 0.0 },
         .f64 => .{ .f64 = 0.0 },
         .i32 => .{ .i32 = 0 },
