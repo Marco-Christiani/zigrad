@@ -36,7 +36,7 @@ fn vjp_impl(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Functio
     // Create parameters for cotangents of outputs
     for (func.returns) |ret_id| {
         const tensor = func.avals[@intCast(ret_id)].as_tensor() orelse return error.UnsupportedEqn;
-        if (tensor.dtype != .f32 and tensor.dtype != .f64) return error.UnsupportedDType;
+        if (tensor.dtype != .f32 and tensor.dtype != .f64 and tensor.dtype != .bf16) return error.UnsupportedDType;
 
         const new_cot = try b.param_tensor(tensor.dtype, tensor.shape.dims);
         cot_map[@intCast(ret_id)] = new_cot;

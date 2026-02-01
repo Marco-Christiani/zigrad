@@ -6,6 +6,74 @@ const ops = zg.pr.ops;
 
 const num_layers: usize = 16;
 
+pub const LlamaDemoConfig = struct {
+    train: bool,
+    dtype: zg.pr.DType,
+};
+
+const upcast_loss = false;
+
+fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
+    const seq: usize = 129;
+    const vocab: usize = 128256;
+
+    var layers: [num_layers]llama_model.LayerWeights = undefined;
+    inline for (0..num_layers) |idx| {
+        const p = params.layers[idx];
+        layers[idx] = .{
+            .input_norm = p.input_norm,
+            .post_norm = p.post_norm,
+            .q_proj = p.q_proj,
+            .k_proj = p.k_proj,
+            .v_proj = p.v_proj,
+            .o_proj = p.o_proj,
+            .gate_proj = p.gate_proj,
+            .up_proj = p.up_proj,
+            .down_proj = p.down_proj,
+        };
+    }
+    const logits = try llama_model.forward(batch.x, batch.mask, batch.attention_mask, batch.sin, batch.cos, .{
+        .w_emb = params.w_emb,
+        .w_out = params.w_out,
+        .norm = params.norm,
+        .layers = layers[0..],
+    }, 1e-5);
+    const logits_f = if (upcast_loss and logits.tensor.dtype == .bf16)
+        try logits.convert(.f32)
+    else
+        logits;
+    const attn_mask = if (batch.attention_mask.tensor.dtype == logits_f.tensor.dtype)
+        batch.attention_mask
+    else
+        try batch.attention_mask.convert(logits_f.tensor.dtype);
+
+    const max_logits = try logits_f.reduce_max(&.{1});
+    const max_b = try max_logits.broadcast_in_dim(&.{ seq, vocab }, &.{0});
+    const shifted = try logits_f.sub(max_b);
+    const exp_logits = try shifted.exp();
+    const sum_exp = try exp_logits.reduce_sum(&.{1});
+    const log_sum = try sum_exp.log();
+    const log_sum_b = try log_sum.broadcast_in_dim(&.{ seq, vocab }, &.{0});
+    const log_softmax = try shifted.sub(log_sum_b);
+
+    const row_ids_2d = try batch.row_ids.reshape(&.{ seq, 1 });
+    const tgt_ids_2d = try batch.target_ids.reshape(&.{ seq, 1 });
+    const gather_idx = try row_ids_2d.concatenate(&.{tgt_ids_2d}, 1);
+    const gathered = try log_softmax.gather_2d(gather_idx);
+
+    const zero_lit = ops.types.scalar_literal(log_softmax.tensor.dtype, 0.0);
+    const zero = try log_softmax.builder.scalar_literal(zero_lit);
+    const zero_b = try zero.broadcast_in_dim(&.{seq}, &.{});
+    const attn_zero = try attn_mask.compare(zero_b, .{ .direction = .GT, .compare_type = .FLOAT });
+    const masked = try gathered.select(attn_zero, zero_b);
+
+    const neg_lit = ops.types.scalar_literal(log_softmax.tensor.dtype, -1.0);
+    const neg = try log_softmax.builder.scalar_literal(neg_lit);
+    const neg_b = try neg.broadcast_in_dim(&.{seq}, &.{});
+    const neg_loss = try masked.mul(neg_b);
+    return try neg_loss.reduce_sum(&.{0});
+}
+
 pub fn run_llama_ft_demo(
     allocator: std.mem.Allocator,
     plugin_path: []const u8,
@@ -14,15 +82,12 @@ pub fn run_llama_ft_demo(
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
+    cfg: LlamaDemoConfig,
 ) !void {
     const TensorSpec = zg.frontend.TensorSpec;
-    const train_mode = blk: {
-        const env = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_TRAIN") catch null;
-        defer if (env) |v| allocator.free(v);
-        break :blk env != null and std.mem.eql(u8, env.?, "1");
-    };
-    const model_dtype: zg.pr.DType = if (train_mode) .f32 else .bf16;
-    const host_dtype: zg.utils.DType = if (train_mode) .f32 else .bf16;
+    const train_mode = cfg.train;
+    const model_dtype: zg.pr.DType = cfg.dtype;
+    const host_dtype: zg.utils.DType = host_dtype_for(model_dtype);
 
     const LayerSpec = struct {
         input_norm: TensorSpec,
@@ -45,60 +110,15 @@ pub fn run_llama_ft_demo(
 
     const BatchSpec = struct {
         x: TensorSpec,
-        y: TensorSpec,
+        target_ids: TensorSpec,
+        row_ids: TensorSpec,
+        attention_mask: TensorSpec,
         mask: TensorSpec,
         sin: TensorSpec,
         cos: TensorSpec,
     };
 
-    const LossFn = struct {
-        fn call(params: anytype, batch: anytype) !zg.frontend.Tensor {
-            const seq: usize = 4;
-            const vocab: usize = 128256;
-
-            var layers: [num_layers]llama_model.LayerWeights = undefined;
-            inline for (0..num_layers) |idx| {
-                const p = params.layers[idx];
-                layers[idx] = .{
-                    .input_norm = p.input_norm,
-                    .post_norm = p.post_norm,
-                    .q_proj = p.q_proj,
-                    .k_proj = p.k_proj,
-                    .v_proj = p.v_proj,
-                    .o_proj = p.o_proj,
-                    .gate_proj = p.gate_proj,
-                    .up_proj = p.up_proj,
-                    .down_proj = p.down_proj,
-                };
-            }
-            const logits = try llama_model.forward(batch.x, batch.mask, batch.sin, batch.cos, .{
-                .w_emb = params.w_emb,
-                .w_out = params.w_out,
-                .norm = params.norm,
-                .layers = layers[0..],
-            }, 1e-5);
-
-            const max_logits = try logits.reduce_max(&.{1});
-            const max_b = try max_logits.broadcast_in_dim(&.{ seq, vocab }, &.{0});
-            const shifted = try logits.sub(max_b);
-            const exp_logits = try shifted.exp();
-            const sum_exp = try exp_logits.reduce_sum(&.{1});
-            const log_sum = try sum_exp.log();
-            const log_sum_b = try log_sum.broadcast_in_dim(&.{ seq, vocab }, &.{0});
-            const log_softmax = try shifted.sub(log_sum_b);
-
-            const y_log = try batch.y.mul(log_softmax);
-            const loss_per = try y_log.reduce_sum(&.{1});
-
-            const neg_lit = ops.types.scalar_literal(log_softmax.tensor.dtype, -1.0);
-            const neg = try log_softmax.builder.scalar_literal(neg_lit);
-            const neg_b = try neg.broadcast_in_dim(&.{seq}, &.{});
-            const neg_loss = try loss_per.mul(neg_b);
-            return try neg_loss.reduce_sum(&.{0});
-        }
-    };
-
-    const seq: usize = 4;
+    const seq: usize = 129;
     const vocab: usize = 128256;
     const hidden: usize = 2048;
 
@@ -125,8 +145,10 @@ pub fn run_llama_ft_demo(
     };
     const batch_spec = BatchSpec{
         .x = .{ .dtype = .i32, .dims = &.{seq} },
-        .y = .{ .dtype = model_dtype, .dims = &.{ seq, vocab } },
-        .mask = .{ .dtype = .i32, .dims = &.{ seq, seq } },
+        .target_ids = .{ .dtype = .i32, .dims = &.{seq} },
+        .row_ids = .{ .dtype = .i32, .dims = &.{seq} },
+        .attention_mask = .{ .dtype = model_dtype, .dims = &.{seq} },
+        .mask = .{ .dtype = model_dtype, .dims = &.{ seq, seq } },
         .sin = .{ .dtype = model_dtype, .dims = &.{ seq, 32 } },
         .cos = .{ .dtype = model_dtype, .dims = &.{ seq, 32 } },
     };
@@ -135,8 +157,8 @@ pub fn run_llama_ft_demo(
     var compile_cfg = zg.frontend.CompileConfig{
         .entry_name = "llama_ft_step",
         .plugin_path = plugin_path,
-        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
-        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+        .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
+        .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
     };
     if (compile_cfg.dump_mlir != null) {
         compile_cfg.lower.encoding = .text;
@@ -154,9 +176,9 @@ pub fn run_llama_ft_demo(
     const param_count = 3 + num_layers * 9;
 
     var compiled = if (train_mode)
-        try zg.frontend.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, param_count, 1e-4, compile_cfg)
+        try zg.frontend.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, 1e-4, compile_cfg)
     else
-        try zg.frontend.compile_forward(allocator, &backend_handle, device, LossFn.call, inputs_spec, compile_cfg);
+        try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
     defer compiled.deinit();
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
@@ -170,8 +192,9 @@ pub fn run_llama_ft_demo(
     const shape_up_proj = zg.utils.Shape{ .dims = &.{ hidden, 8192 } };
     const shape_down_proj = zg.utils.Shape{ .dims = &.{ 8192, hidden } };
     const shape_x = zg.utils.Shape{ .dims = &.{seq} };
-    const shape_y = zg.utils.Shape{ .dims = &.{ seq, vocab } };
+    const shape_target = zg.utils.Shape{ .dims = &.{seq} };
     const shape_mask = zg.utils.Shape{ .dims = &.{ seq, seq } };
+    const shape_attn = zg.utils.Shape{ .dims = &.{seq} };
     const shape_rot = zg.utils.Shape{ .dims = &.{ seq, 32 } };
 
     var host_w_emb = try zg.utils.HostBuffer.init(allocator, shape_w_emb, host_dtype);
@@ -218,9 +241,13 @@ pub fn run_llama_ft_demo(
     }
     var host_x = try zg.utils.HostBuffer.init(allocator, shape_x, .i32);
     defer host_x.deinit();
-    var host_y = try zg.utils.HostBuffer.init(allocator, shape_y, host_dtype);
-    defer host_y.deinit();
-    var host_mask = try zg.utils.HostBuffer.init(allocator, shape_mask, .i32);
+    var host_target_ids = try zg.utils.HostBuffer.init(allocator, shape_target, .i32);
+    defer host_target_ids.deinit();
+    var host_row_ids = try zg.utils.HostBuffer.init(allocator, shape_target, .i32);
+    defer host_row_ids.deinit();
+    var host_attention_mask = try zg.utils.HostBuffer.init(allocator, shape_attn, host_dtype);
+    defer host_attention_mask.deinit();
+    var host_mask = try zg.utils.HostBuffer.init(allocator, shape_mask, host_dtype);
     defer host_mask.deinit();
     var host_sin = try zg.utils.HostBuffer.init(allocator, shape_rot, host_dtype);
     defer host_sin.deinit();
@@ -300,12 +327,15 @@ pub fn run_llama_ft_demo(
     const tokens = [_]usize{ 128000, 128009, 128001, 128008 };
     const targets = [_]usize{ 128009, 128001, 128008, 128001 };
     fill_i32_tokens(host_x.as_slice(i32), &tokens);
+    fill_i32_tokens(host_target_ids.as_slice(i32), &targets);
+    fill_row_ids(host_row_ids.as_slice(i32));
     if (host_dtype == .bf16) {
-        fill_one_hot_seq_bf16(host_y.as_slice(u16), &targets, vocab);
+        fill_attention_mask_bf16(host_attention_mask.as_slice(u16), tokens.len);
+        fill_causal_mask_bf16(host_mask.as_slice(u16), seq);
     } else {
-        fill_one_hot_seq(host_y.as_slice(f32), &targets, vocab);
+        fill_attention_mask(host_attention_mask.as_slice(f32), tokens.len);
+        fill_causal_mask(host_mask.as_slice(f32), seq);
     }
-    fill_causal_mask(host_mask.as_slice(i32), seq);
     if (host_dtype == .bf16) {
         fill_rope_tables_bf16(host_sin.as_slice(u16), host_cos.as_slice(u16), seq, 64);
     } else {
@@ -340,12 +370,14 @@ pub fn run_llama_ft_demo(
         tmp_down_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_down_proj[m]);
     }
     const tmp_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
-    const tmp_y = try upload_host_buffer(allocator, &backend_handle, device, &host_y);
+    const tmp_target_ids = try upload_host_buffer(allocator, &backend_handle, device, &host_target_ids);
+    const tmp_row_ids = try upload_host_buffer(allocator, &backend_handle, device, &host_row_ids);
+    const tmp_attention_mask = try upload_host_buffer(allocator, &backend_handle, device, &host_attention_mask);
     const tmp_mask = try upload_host_buffer(allocator, &backend_handle, device, &host_mask);
     const tmp_sin = try upload_host_buffer(allocator, &backend_handle, device, &host_sin);
     const tmp_cos = try upload_host_buffer(allocator, &backend_handle, device, &host_cos);
 
-    const loss_dtype: zg.utils.DType = host_dtype;
+    const loss_dtype: zg.utils.DType = if (upcast_loss) .f32 else host_dtype;
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
     defer loss_host.deinit();
 
@@ -370,7 +402,9 @@ pub fn run_llama_ft_demo(
         try input_ptrs.append(allocator, tmp_down_proj[p].pjrt_buffer);
     }
     try input_ptrs.append(allocator, tmp_x.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_y.pjrt_buffer);
+    try input_ptrs.append(allocator, tmp_target_ids.pjrt_buffer);
+    try input_ptrs.append(allocator, tmp_row_ids.pjrt_buffer);
+    try input_ptrs.append(allocator, tmp_attention_mask.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_mask.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_sin.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_cos.pjrt_buffer);
@@ -436,7 +470,7 @@ pub fn run_llama_ft_demo(
             try tmp.await_();
             tmp.deinit();
         }
-        const wait_ns = timer.lap();
+        const exec_ns = timer.lap();
 
         var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
@@ -468,15 +502,15 @@ pub fn run_llama_ft_demo(
             }
         }
 
-        const step_ns = dispatch_ns + wait_ns + loss_read_ns;
+        const step_ns = dispatch_ns + exec_ns + loss_read_ns;
         total_ns += step_ns;
         const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
         const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-        const wait_ms = @as(f64, @floatFromInt(wait_ns)) / std.time.ns_per_ms;
+        const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
         const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
         if (!quiet) {
-            std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms wait={d:.3}ms loss={d:.3}ms total={d:.3}ms", .{
-                step, loss.?, dispatch_ms, wait_ms, loss_ms, step_ms,
+            std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms total={d:.3}ms", .{
+                step, loss.?, dispatch_ms, exec_ms, loss_ms, step_ms,
             });
         }
     }
@@ -784,6 +818,19 @@ fn bf16_to_f32(val: u16) f32 {
     return @bitCast(bits);
 }
 
+fn host_dtype_for(dtype: zg.pr.DType) zg.utils.DType {
+    return switch (dtype) {
+        .bf16 => .bf16,
+        .f32 => .f32,
+        .f64 => .f64,
+        .i32 => .i32,
+        .i64 => .i64,
+        .u32 => .u32,
+        .u64 => .u64,
+        .bool => .i32,
+    };
+}
+
 fn f32_to_bf16(val: f32) u16 {
     const bits: u32 = @bitCast(val);
     return @intCast(bits >> 16);
@@ -824,38 +871,62 @@ fn fill_pattern_bf16(slice: []u16, scale: f32, offset: f32) void {
     }
 }
 
-fn fill_one_hot_seq(out: []f32, indices: []const usize, vocab: usize) void {
-    @memset(out, 0);
-    for (indices, 0..) |idx, i| {
-        const offset = i * vocab + (idx % vocab);
-        if (offset < out.len) out[offset] = 1.0;
-    }
-}
-
-fn fill_one_hot_seq_bf16(out: []u16, indices: []const usize, vocab: usize) void {
-    @memset(out, 0);
-    const one = f32_to_bf16(1.0);
-    for (indices, 0..) |idx, i| {
-        const offset = i * vocab + (idx % vocab);
-        if (offset < out.len) out[offset] = one;
-    }
-}
-
 fn fill_i32_tokens(out: []i32, tokens: []const usize) void {
-    if (out.len != tokens.len) return;
-    for (tokens, 0..) |t, i| {
+    @memset(out, 0);
+    const count = @min(out.len, tokens.len);
+    for (tokens[0..count], 0..) |t, i| {
         out[i] = @intCast(t);
     }
 }
 
-fn fill_causal_mask(out: []i32, seq: usize) void {
+fn fill_row_ids(out: []i32) void {
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        out[i] = @intCast(i);
+    }
+}
+
+fn fill_attention_mask(out: []f32, active_len: usize) void {
+    @memset(out, 0);
+    const count = @min(out.len, active_len);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        out[i] = 1.0;
+    }
+}
+
+fn fill_attention_mask_bf16(out: []u16, active_len: usize) void {
+    @memset(out, 0);
+    const one = f32_to_bf16(1.0);
+    const count = @min(out.len, active_len);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        out[i] = one;
+    }
+}
+
+fn fill_causal_mask(out: []f32, seq: usize) void {
     @memset(out, 0);
     var i: usize = 0;
     while (i < seq) : (i += 1) {
         var j: usize = 0;
         while (j < seq) : (j += 1) {
             if (j <= i) {
-                out[i * seq + j] = 1;
+                out[i * seq + j] = 1.0;
+            }
+        }
+    }
+}
+
+fn fill_causal_mask_bf16(out: []u16, seq: usize) void {
+    @memset(out, 0);
+    const one = f32_to_bf16(1.0);
+    var i: usize = 0;
+    while (i < seq) : (i += 1) {
+        var j: usize = 0;
+        while (j < seq) : (j += 1) {
+            if (j <= i) {
+                out[i * seq + j] = one;
             }
         }
     }

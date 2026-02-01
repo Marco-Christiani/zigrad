@@ -174,9 +174,30 @@ pub const convert = struct {
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        _ = ctx;
-        _ = eqn;
-        return error.UnsupportedEqn;
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+        const out_dtype = pr.param_out_dtype(params) orelse return error.UnsupportedEqn;
+
+        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const out = try ctx.builder.convert(operand, out_dtype);
+        ctx.set_primal(outputs[0], out);
+    }
+
+    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const out_cot = ctx.get_cot(outputs[0]) orelse return;
+        const in_tensor = ctx.tensor_of(inputs[0]);
+        const out_tensor = ctx.tensor_of(outputs[0]);
+        const cot = if (out_tensor.dtype == in_tensor.dtype)
+            out_cot
+        else
+            try ctx.builder.convert(out_cot, in_tensor.dtype);
+        try ctx.add_cot(inputs[0], cot);
     }
 };
 

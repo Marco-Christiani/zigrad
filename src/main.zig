@@ -31,10 +31,6 @@ pub fn main() !void {
             return;
         }
         if (mode != null) {
-            if (std.mem.startsWith(u8, arg, "-")) {
-                try print_usage();
-                return error.InvalidArguments;
-            }
             try mode_args.append(gpa, arg);
             continue;
         }
@@ -190,26 +186,50 @@ pub fn main() !void {
             );
         }
         if (std.mem.eql(u8, m, "llama-ft-demo")) {
-            if (mode_args.items.len > 2) {
-                try print_usage();
-                return error.InvalidArguments;
+            var warmup_steps: usize = 0;
+            var steps: usize = 4;
+            var pos_index: usize = 0;
+            var train_mode = false;
+            var model_dtype: ?zg.pr.DType = null;
+
+            for (mode_args.items) |arg| {
+                if (std.mem.eql(u8, arg, "--train")) {
+                    train_mode = true;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--dtype=")) {
+                    const dtype_str = arg["--dtype=".len..];
+                    if (std.mem.eql(u8, dtype_str, "bf16")) {
+                        model_dtype = .bf16;
+                    } else if (std.mem.eql(u8, dtype_str, "f32")) {
+                        model_dtype = .f32;
+                    } else {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }
+                    continue;
+                }
+
+                const value = std.fmt.parseInt(usize, arg, 10) catch {
+                    try print_usage();
+                    return error.InvalidArguments;
+                };
+                if (pos_index == 0) {
+                    warmup_steps = value;
+                } else if (pos_index == 1) {
+                    steps = value;
+                } else {
+                    try print_usage();
+                    return error.InvalidArguments;
+                }
+                pos_index += 1;
             }
 
-            const warmup_steps: usize = if (mode_args.items.len >= 1)
-                std.fmt.parseInt(usize, mode_args.items[0], 10) catch {
-                    try print_usage();
-                    return error.InvalidArguments;
-                }
-            else
-                0;
-
-            const steps: usize = if (mode_args.items.len == 2)
-                std.fmt.parseInt(usize, mode_args.items[1], 10) catch {
-                    try print_usage();
-                    return error.InvalidArguments;
-                }
-            else
-                4;
+            const dtype = model_dtype orelse .bf16;
+            const cfg = llama_demo.LlamaDemoConfig{
+                .train = train_mode,
+                .dtype = dtype,
+            };
 
             return llama_demo.run_llama_ft_demo(
                 gpa,
@@ -219,6 +239,7 @@ pub fn main() !void {
                 warmup_steps,
                 steps,
                 quiet,
+                cfg,
             );
         }
         if (std.mem.eql(u8, m, "jit-cache-save")) {
@@ -306,7 +327,7 @@ fn print_usage() !void {
         \\  vjp-demo                     runs the reverse-mode demo
         \\  train-demo [warmup] [steps]  runs the frontend training demo
         \\  llm-ft-demo [warmup] [steps] runs a tiny LLM fine-tune demo
-        \\  llama-ft-demo [warmup] [steps] runs a tiny Llama fine-tune demo
+        \\  llama-ft-demo [warmup] [steps] [--train] [--dtype=bf16|f32] runs a tiny Llama fine-tune demo
         \\  jit-cache-save <path>        writes PJRT JIT cache artifact
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\

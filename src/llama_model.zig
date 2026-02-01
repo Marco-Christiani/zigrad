@@ -24,14 +24,17 @@ pub const LayerWeights = struct {
 pub fn forward(
     tokens: zg.frontend.Tensor,
     mask: zg.frontend.Tensor,
+    attention_mask: zg.frontend.Tensor,
     sin: zg.frontend.Tensor,
     cos: zg.frontend.Tensor,
     weights: LlamaWeights,
     eps: f32,
 ) !zg.frontend.Tensor {
+    const mask_b = try attention_mask.broadcast_in_dim(mask.tensor.shape.dims, &.{1});
+    const combined_mask = try mask.mul(mask_b);
     var x = try weights.w_emb.gather_rows(tokens);
     for (weights.layers) |layer| {
-        x = try layer_forward(x, mask, sin, cos, layer, eps);
+        x = try layer_forward(x, combined_mask, sin, cos, layer, eps);
     }
     const final_norm = try rms_norm(x, weights.norm, eps);
     return final_norm.matmul(weights.w_out);
@@ -146,9 +149,10 @@ fn apply_rope(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.frontend.T
 }
 
 fn apply_causal_mask(scores: zg.frontend.Tensor, mask: zg.frontend.Tensor) !zg.frontend.Tensor {
-    const zero = try mask.builder.scalar_literal(.{ .i32 = 0 });
+    const zero_lit = ops.types.scalar_literal(mask.tensor.dtype, 0.0);
+    const zero = try mask.builder.scalar_literal(zero_lit);
     const zeros = try zero.broadcast_in_dim(mask.tensor.shape.dims, &.{});
-    const cond = try mask.compare(zeros, .{ .direction = .GT, .compare_type = .SIGNED });
+    const cond = try mask.compare(zeros, .{ .direction = .GT, .compare_type = .FLOAT });
     const cond_b = try cond.broadcast_in_dim(scores.tensor.shape.dims, &.{ 1, 2 });
 
     const neg_lit = ops.types.scalar_literal(scores.tensor.dtype, -1.0e9);

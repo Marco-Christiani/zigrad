@@ -54,6 +54,10 @@ pub const Tensor = struct {
         return self.builder.emit_gather_rows(self, indices, self.options);
     }
 
+    pub fn gather_2d(self: Tensor, indices: Tensor) !Tensor {
+        return self.builder.emit_gather_2d(self, indices, self.options);
+    }
+
     pub fn matmul(self: Tensor, rhs: Tensor) !Tensor {
         return self.builder.emit_binary(.dot, self, rhs, self.options);
     }
@@ -125,6 +129,10 @@ pub const Tensor = struct {
 
     pub fn logistic(self: Tensor) !Tensor {
         return self.builder.emit_unary(.logistic, self, &.{}, self.options);
+    }
+
+    pub fn convert(self: Tensor, out_dtype: pr.DType) !Tensor {
+        return self.builder.emit_convert(self, out_dtype, self.options);
     }
 
     pub fn compare(self: Tensor, rhs: Tensor, params: pr.CompareParams) !Tensor {
@@ -242,6 +250,13 @@ pub const Builder = struct {
         return self.tensor_from_id(id);
     }
 
+    fn emit_convert(self: *Builder, operand: Tensor, out_dtype: pr.DType, options: OpOptions) !Tensor {
+        try self.assert_builder(operand);
+        const params_with_opts = try self.params_with_options(&.{.{ .out_dtype = out_dtype }}, options);
+        const id = try self.builder.emit(.convert, &.{operand.id}, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
     fn emit_gather_rows(self: *Builder, operand: Tensor, indices: Tensor, options: OpOptions) !Tensor {
         try self.assert_same_builder(operand, indices);
         if (operand.tensor.shape.rank() != 2) return error.InvalidGatherOperand;
@@ -254,6 +269,31 @@ pub const Builder = struct {
         const offset_dims = try a.dupe(i64, &.{1});
         const collapsed_slice_dims = try a.dupe(i64, &.{0});
         const start_index_map = try a.dupe(i64, &.{0});
+
+        const params: pr.GatherParams = .{
+            .slice_sizes = slice_sizes,
+            .offset_dims = offset_dims,
+            .collapsed_slice_dims = collapsed_slice_dims,
+            .start_index_map = start_index_map,
+            .index_vector_dim = 1,
+        };
+
+        const params_with_opts = try self.params_with_options(&.{.{ .gather = params }}, options);
+        const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
+    fn emit_gather_2d(self: *Builder, operand: Tensor, indices: Tensor, options: OpOptions) !Tensor {
+        try self.assert_same_builder(operand, indices);
+        if (operand.tensor.shape.rank() != 2) return error.InvalidGatherOperand;
+        if (indices.tensor.shape.rank() != 2) return error.InvalidGatherIndices;
+        if (indices.tensor.shape.dims[1] != 2) return error.InvalidGatherIndices;
+
+        const a = self.program.allocator();
+        const slice_sizes = try a.dupe(i64, &.{ 1, 1 });
+        const offset_dims = try a.dupe(i64, &.{});
+        const collapsed_slice_dims = try a.dupe(i64, &.{ 0, 1 });
+        const start_index_map = try a.dupe(i64, &.{ 0, 1 });
 
         const params: pr.GatherParams = .{
             .slice_sizes = slice_sizes,

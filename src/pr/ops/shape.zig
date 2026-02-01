@@ -1263,14 +1263,27 @@ fn compare_type_for_dtype(dt: pr.DType) pr.CompareType {
 
 fn scatter_params_for_gather(params: pr.GatherParams) pr.BuildError!pr.ScatterParams {
     if (params.slice_sizes.len == 0) return error.GatherTypeMismatch;
-    if (params.start_index_map.len != 1) return error.GatherTypeMismatch;
     if (params.index_vector_dim < 0) return error.GatherTypeMismatch;
 
-    return .{
-        .update_window_dims = &.{1},
-        .inserted_window_dims = &.{0},
-        .scatter_dims_to_operand_dims = &.{0},
-        .index_vector_dim = params.index_vector_dim,
-        .reduction = .add,
-    };
+    if (params.start_index_map.len == 1) {
+        return .{
+            .update_window_dims = &.{1},
+            .inserted_window_dims = &.{0},
+            .scatter_dims_to_operand_dims = &.{0},
+            .index_vector_dim = params.index_vector_dim,
+            .reduction = .add,
+        };
+    }
+
+    if (params.start_index_map.len == 2 and params.slice_sizes.len == 2 and params.collapsed_slice_dims.len == 2 and params.offset_dims.len == 0) {
+        return .{
+            .update_window_dims = &.{},
+            .inserted_window_dims = &.{ 0, 1 },
+            .scatter_dims_to_operand_dims = &.{ 0, 1 },
+            .index_vector_dim = params.index_vector_dim,
+            .reduction = .add,
+        };
+    }
+
+    return error.GatherTypeMismatch;
 }
