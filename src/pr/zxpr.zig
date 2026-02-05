@@ -165,20 +165,32 @@ pub const Emitter = struct {
 /// Generate readable variable name from ID: 0->a, 1->b, ..., 26->aa, etc.
 fn var_name(id: pr.VarId) []const u8 {
     const names = comptime blk: {
-        var arr: [256][]const u8 = undefined;
-        for (0..256) |i| {
-            if (i < 26) {
+        @setEvalBranchQuota(20000);
+        const single = 26;
+        const double = 26 * 26;
+        const triple = 26 * 26 * 26;
+        const total = single + double + triple;
+        var arr: [total][]const u8 = undefined;
+        for (0..total) |i| {
+            if (i < single) {
                 arr[i] = &[_]u8{'a' + @as(u8, @intCast(i))};
-            } else {
-                const first = 'a' + @as(u8, @intCast((i - 26) / 26));
-                const second = 'a' + @as(u8, @intCast((i - 26) % 26));
+            } else if (i < single + double) {
+                const idx = i - single;
+                const first = 'a' + @as(u8, @intCast(idx / 26));
+                const second = 'a' + @as(u8, @intCast(idx % 26));
                 arr[i] = &[_]u8{ first, second };
+            } else {
+                const idx = i - single - double;
+                const first = 'a' + @as(u8, @intCast(idx / (26 * 26)));
+                const second = 'a' + @as(u8, @intCast((idx / 26) % 26));
+                const third = 'a' + @as(u8, @intCast(idx % 26));
+                arr[i] = &[_]u8{ first, second, third };
             }
         }
         break :blk arr;
     };
-    if (id < 256) return names[id];
-    return "??"; // Fallback for very large programs
+    if (id < names.len) return names[id];
+    return "???"; // Fallback for very large programs
 }
 
 // ============================================================================
@@ -226,6 +238,8 @@ test "zxpr variable naming" {
     try std.testing.expectEqualStrings("z", var_name(25));
     try std.testing.expectEqualStrings("aa", var_name(26));
     try std.testing.expectEqualStrings("ab", var_name(27));
+    try std.testing.expectEqualStrings("zz", var_name(701));
+    try std.testing.expectEqualStrings("aaa", var_name(702));
 }
 
 test "zxpr with transpose shows permutation" {
