@@ -2,6 +2,8 @@
 
 version: "3"
 
+silent: true
+
 vars:
   RED: "\\033[31m"
   GREEN: "\\033[32m"
@@ -17,13 +19,15 @@ vars:
     --no-times
     --filter=':- .rsync-filter'
   ZG_EXTERNAL_SDK_ROOT: '{{env "ZG_EXTERNAL_SDK_ROOT" | default "./result"}}'
+  XLA_FLAGS_EXTRA: '{{env "ZG_XLA_FLAGS_EXTRA" | default ""}}'
 
 env:
   ZG_EXTERNAL_SDK_ROOT: "{{.ZG_EXTERNAL_SDK_ROOT}}"
   PJRT_CPU_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
   PJRT_GPU_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
   PJRT_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia"
+  # Perf default: enable the fusion block-level rewriter so XLA can emit Triton softmax fusions.
+  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true {{.XLA_FLAGS_EXTRA}}"
 
 dotenv: [".env"]
 # env:
@@ -202,7 +206,7 @@ tasks:
           exit 1
         fi
         PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" \
-          XLA_FLAGS="--xla_gpu_cuda_data_dir=$ZG_EXTERNAL_SDK_ROOT/runtime/nvidia --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
+          XLA_FLAGS="--xla_gpu_cuda_data_dir=$ZG_EXTERNAL_SDK_ROOT/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
           ./zig-out/bin/zigrad {{.CLI_ARGS}}
 
   custom-call:neg:
