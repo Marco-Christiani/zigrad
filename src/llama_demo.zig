@@ -9,12 +9,19 @@ const num_layers: usize = 16;
 pub const LlamaDemoConfig = struct {
     train: bool,
     dtype: zg.pr.DType,
+    seq: usize,
+    batch: usize = 1,
+    canonicalize: llama_model.CanonicalizeConfig = .{},
 };
 
 const upcast_loss = false;
 
+var g_fwd_cfg: llama_model.ForwardConfig = .{};
+
 fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
-    const seq: usize = 129;
+    const batch_size: usize = batch.x.tensor.shape.dims[0];
+    const seq: usize = batch.x.tensor.shape.dims[1];
+    const n: usize = batch_size * seq;
     const vocab: usize = 128256;
 
     var layers: [num_layers]llama_model.LayerWeights = undefined;
@@ -23,9 +30,7 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
         layers[idx] = .{
             .input_norm = p.input_norm,
             .post_norm = p.post_norm,
-            .q_proj = p.q_proj,
-            .k_proj = p.k_proj,
-            .v_proj = p.v_proj,
+            .qkv_proj = p.qkv_proj,
             .o_proj = p.o_proj,
             .gate_proj = p.gate_proj,
             .up_proj = p.up_proj,
@@ -37,41 +42,61 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
         .w_out = params.w_out,
         .norm = params.norm,
         .layers = layers[0..],
-    }, 1e-5);
-    const logits_f = if (upcast_loss and logits.tensor.dtype == .bf16)
-        try logits.convert(.f32)
-    else
-        logits;
-    const attn_mask = if (batch.attention_mask.tensor.dtype == logits_f.tensor.dtype)
+    }, g_fwd_cfg, 1e-5);
+    const logits_f0 = if (upcast_loss and logits.tensor.dtype == .bf16) try logits.convert(.f32) else logits;
+    var dims_n_vocab: [2]usize = .{ n, vocab };
+    const logits_f = try logits_f0.reshape(dims_n_vocab[0..]);
+
+    const attn_mask0 = if (batch.attention_mask.tensor.dtype == logits_f.tensor.dtype)
         batch.attention_mask
     else
         try batch.attention_mask.convert(logits_f.tensor.dtype);
+    var dims_n: [1]usize = .{n};
+    const attn_mask = try attn_mask0.reshape(dims_n[0..]);
+
+    var dims_n_1: [2]usize = .{ n, 1 };
+    const row_ids_2d = try batch.row_ids.reshape(dims_n_1[0..]);
+    const tgt_ids_2d = try batch.target_ids.reshape(dims_n_1[0..]);
+    const gather_idx = try row_ids_2d.concatenate(&.{tgt_ids_2d}, 1);
+    const target_logits = try logits_f.gather_2d(gather_idx);
 
     const max_logits = try logits_f.reduce_max(&.{1});
-    const max_b = try max_logits.broadcast_in_dim(&.{ seq, vocab }, &.{0});
+    const max_b = try max_logits.broadcast_in_dim(dims_n_vocab[0..], &.{0});
     const shifted = try logits_f.sub(max_b);
-    const exp_logits = try shifted.exp();
-    const sum_exp = try exp_logits.reduce_sum(&.{1});
+
+    // Match JAX-style logsumexp lowering: subtract in f32, exp in bf16 (when model dtype is bf16),
+    // then accumulate reductions in f32.
+    const shifted_f32 = if (shifted.tensor.dtype == .f32) shifted else try shifted.convert(.f32);
+    const exp_in = if (logits.tensor.dtype == .bf16) try shifted_f32.convert(.bf16) else shifted_f32;
+    const exp_logits = try exp_in.exp();
+    const exp_logits_f32 = if (exp_logits.tensor.dtype == .f32) exp_logits else try exp_logits.convert(.f32);
+    const sum_exp = try exp_logits_f32.reduce_sum(&.{1});
     const log_sum = try sum_exp.log();
-    const log_sum_b = try log_sum.broadcast_in_dim(&.{ seq, vocab }, &.{0});
-    const log_softmax = try shifted.sub(log_sum_b);
+    const max_f = if (max_logits.tensor.dtype == log_sum.tensor.dtype)
+        max_logits
+    else
+        try max_logits.convert(log_sum.tensor.dtype);
+    const logsumexp = try log_sum.add(max_f);
 
-    const row_ids_2d = try batch.row_ids.reshape(&.{ seq, 1 });
-    const tgt_ids_2d = try batch.target_ids.reshape(&.{ seq, 1 });
-    const gather_idx = try row_ids_2d.concatenate(&.{tgt_ids_2d}, 1);
-    const gathered = try log_softmax.gather_2d(gather_idx);
+    const target_f = if (target_logits.tensor.dtype == logsumexp.tensor.dtype)
+        target_logits
+    else
+        try target_logits.convert(logsumexp.tensor.dtype);
+    const loss_per = try logsumexp.sub(target_f);
+    const loss_per_out = if (loss_per.tensor.dtype == logits_f.tensor.dtype)
+        loss_per
+    else
+        try loss_per.convert(logits_f.tensor.dtype);
 
-    const zero_lit = ops.types.scalar_literal(log_softmax.tensor.dtype, 0.0);
-    const zero = try log_softmax.builder.scalar_literal(zero_lit);
-    const zero_b = try zero.broadcast_in_dim(&.{seq}, &.{});
+    const zero_lit = ops.types.scalar_literal(logits_f.tensor.dtype, 0.0);
+    const zero = try logits_f.builder.scalar_literal(zero_lit);
+    const zero_b = try zero.broadcast_in_dim(dims_n[0..], &.{});
     const attn_zero = try attn_mask.compare(zero_b, .{ .direction = .GT, .compare_type = .FLOAT });
-    const masked = try gathered.select(attn_zero, zero_b);
-
-    const neg_lit = ops.types.scalar_literal(log_softmax.tensor.dtype, -1.0);
-    const neg = try log_softmax.builder.scalar_literal(neg_lit);
-    const neg_b = try neg.broadcast_in_dim(&.{seq}, &.{});
-    const neg_loss = try masked.mul(neg_b);
-    return try neg_loss.reduce_sum(&.{0});
+    const masked = try loss_per_out.select(attn_zero, zero_b);
+    const masked_f = if (masked.tensor.dtype == .f32) masked else try masked.convert(.f32);
+    const loss_sum = try masked_f.reduce_sum(&.{0});
+    if (loss_sum.tensor.dtype == logits_f.tensor.dtype) return loss_sum;
+    return loss_sum.convert(logits_f.tensor.dtype);
 }
 
 pub fn run_llama_ft_demo(
@@ -88,13 +113,12 @@ pub fn run_llama_ft_demo(
     const train_mode = cfg.train;
     const model_dtype: zg.pr.DType = cfg.dtype;
     const host_dtype: zg.utils.DType = host_dtype_for(model_dtype);
+    const batch_size: usize = cfg.batch;
 
     const LayerSpec = struct {
         input_norm: TensorSpec,
         post_norm: TensorSpec,
-        q_proj: TensorSpec,
-        k_proj: TensorSpec,
-        v_proj: TensorSpec,
+        qkv_proj: TensorSpec,
         o_proj: TensorSpec,
         gate_proj: TensorSpec,
         up_proj: TensorSpec,
@@ -118,18 +142,17 @@ pub fn run_llama_ft_demo(
         cos: TensorSpec,
     };
 
-    const seq: usize = 129;
+    const seq: usize = cfg.seq;
     const vocab: usize = 128256;
     const hidden: usize = 2048;
+    const qkv_out: usize = hidden + 512 + 512;
 
     var layers_spec: [num_layers]LayerSpec = undefined;
     inline for (0..num_layers) |i| {
         layers_spec[i] = .{
             .input_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
             .post_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
-            .q_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, hidden } },
-            .k_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 512 } },
-            .v_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 512 } },
+            .qkv_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, qkv_out } },
             .o_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, hidden } },
             .gate_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 8192 } },
             .up_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 8192 } },
@@ -143,14 +166,17 @@ pub fn run_llama_ft_demo(
         .norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
         .layers = layers_spec,
     };
+    var dims_seq_seq: [2]usize = .{ seq, seq };
+    var dims_seq_32: [2]usize = .{ seq, 32 };
+    var dims_b_s: [2]usize = .{ batch_size, seq };
     const batch_spec = BatchSpec{
-        .x = .{ .dtype = .i32, .dims = &.{seq} },
-        .target_ids = .{ .dtype = .i32, .dims = &.{seq} },
-        .row_ids = .{ .dtype = .i32, .dims = &.{seq} },
-        .attention_mask = .{ .dtype = model_dtype, .dims = &.{seq} },
-        .mask = .{ .dtype = model_dtype, .dims = &.{ seq, seq } },
-        .sin = .{ .dtype = model_dtype, .dims = &.{ seq, 32 } },
-        .cos = .{ .dtype = model_dtype, .dims = &.{ seq, 32 } },
+        .x = .{ .dtype = .i32, .dims = dims_b_s[0..] },
+        .target_ids = .{ .dtype = .i32, .dims = dims_b_s[0..] },
+        .row_ids = .{ .dtype = .i32, .dims = dims_b_s[0..] },
+        .attention_mask = .{ .dtype = model_dtype, .dims = dims_b_s[0..] },
+        .mask = .{ .dtype = model_dtype, .dims = dims_seq_seq[0..] },
+        .sin = .{ .dtype = model_dtype, .dims = dims_seq_32[0..] },
+        .cos = .{ .dtype = model_dtype, .dims = dims_seq_32[0..] },
     };
     const inputs_spec = .{ params_spec, batch_spec };
 
@@ -173,7 +199,9 @@ pub fn run_llama_ft_demo(
     if (compile_cfg.device_index >= devices.len) return error.InvalidDeviceIndex;
     const device = &devices[compile_cfg.device_index];
 
-    const param_count = 3 + num_layers * 9;
+    const param_count = 3 + num_layers * 7;
+
+    g_fwd_cfg = .{ .canonicalize = cfg.canonicalize };
 
     var compiled = if (train_mode)
         try zg.frontend.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, 1e-4, compile_cfg)
@@ -181,21 +209,26 @@ pub fn run_llama_ft_demo(
         try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
     defer compiled.deinit();
 
+    if (!quiet) {
+        log_compiled_memory_stats(&compiled.exe);
+    }
+
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
     const shape_w_out = zg.utils.Shape{ .dims = &.{ hidden, vocab } };
     const shape_norm = zg.utils.Shape{ .dims = &.{hidden} };
     const shape_layer_norm = zg.utils.Shape{ .dims = &.{hidden} };
     const shape_q_proj = zg.utils.Shape{ .dims = &.{ hidden, hidden } };
     const shape_kv_proj = zg.utils.Shape{ .dims = &.{ hidden, 512 } };
+    const shape_qkv_proj = zg.utils.Shape{ .dims = &.{ hidden, qkv_out } };
     const shape_o_proj = zg.utils.Shape{ .dims = &.{ hidden, hidden } };
     const shape_gate_proj = zg.utils.Shape{ .dims = &.{ hidden, 8192 } };
     const shape_up_proj = zg.utils.Shape{ .dims = &.{ hidden, 8192 } };
     const shape_down_proj = zg.utils.Shape{ .dims = &.{ 8192, hidden } };
-    const shape_x = zg.utils.Shape{ .dims = &.{seq} };
-    const shape_target = zg.utils.Shape{ .dims = &.{seq} };
-    const shape_mask = zg.utils.Shape{ .dims = &.{ seq, seq } };
-    const shape_attn = zg.utils.Shape{ .dims = &.{seq} };
-    const shape_rot = zg.utils.Shape{ .dims = &.{ seq, 32 } };
+    const shape_x = zg.utils.Shape{ .dims = dims_b_s[0..] };
+    const shape_target = zg.utils.Shape{ .dims = dims_b_s[0..] };
+    const shape_mask = zg.utils.Shape{ .dims = dims_seq_seq[0..] };
+    const shape_attn = zg.utils.Shape{ .dims = dims_b_s[0..] };
+    const shape_rot = zg.utils.Shape{ .dims = dims_seq_32[0..] };
 
     var host_w_emb = try zg.utils.HostBuffer.init(allocator, shape_w_emb, host_dtype);
     defer host_w_emb.deinit();
@@ -205,9 +238,7 @@ pub fn run_llama_ft_demo(
     defer host_norm.deinit();
     var host_layer_input_norm: [num_layers]zg.utils.HostBuffer = undefined;
     var host_layer_post_norm: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_q_proj: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_k_proj: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_v_proj: [num_layers]zg.utils.HostBuffer = undefined;
+    var host_qkv_proj: [num_layers]zg.utils.HostBuffer = undefined;
     var host_o_proj: [num_layers]zg.utils.HostBuffer = undefined;
     var host_gate_proj: [num_layers]zg.utils.HostBuffer = undefined;
     var host_up_proj: [num_layers]zg.utils.HostBuffer = undefined;
@@ -217,9 +248,7 @@ pub fn run_llama_ft_demo(
     while (i < num_layers) : (i += 1) {
         host_layer_input_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, host_dtype);
         host_layer_post_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, host_dtype);
-        host_q_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_q_proj, host_dtype);
-        host_k_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_kv_proj, host_dtype);
-        host_v_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_kv_proj, host_dtype);
+        host_qkv_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_qkv_proj, host_dtype);
         host_o_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_o_proj, host_dtype);
         host_gate_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_gate_proj, host_dtype);
         host_up_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_up_proj, host_dtype);
@@ -230,9 +259,7 @@ pub fn run_llama_ft_demo(
         while (j < num_layers) : (j += 1) {
             host_layer_input_norm[j].deinit();
             host_layer_post_norm[j].deinit();
-            host_q_proj[j].deinit();
-            host_k_proj[j].deinit();
-            host_v_proj[j].deinit();
+            host_qkv_proj[j].deinit();
             host_o_proj[j].deinit();
             host_gate_proj[j].deinit();
             host_up_proj[j].deinit();
@@ -266,9 +293,7 @@ pub fn run_llama_ft_demo(
         &host_norm,
         host_layer_input_norm[0..],
         host_layer_post_norm[0..],
-        host_q_proj[0..],
-        host_k_proj[0..],
-        host_v_proj[0..],
+        host_qkv_proj[0..],
         host_o_proj[0..],
         host_gate_proj[0..],
         host_up_proj[0..],
@@ -277,6 +302,7 @@ pub fn run_llama_ft_demo(
         shape_w_out.dims,
         shape_norm.dims,
         shape_layer_norm.dims,
+        shape_qkv_proj.dims,
         shape_q_proj.dims,
         shape_kv_proj.dims,
         shape_o_proj.dims,
@@ -296,9 +322,7 @@ pub fn run_llama_ft_demo(
             while (k < num_layers) : (k += 1) {
                 fill_pattern_bf16(host_layer_input_norm[k].as_slice(u16), 1e-3, 0.0);
                 fill_pattern_bf16(host_layer_post_norm[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_q_proj[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_k_proj[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_v_proj[k].as_slice(u16), 1e-3, 0.0);
+                fill_pattern_bf16(host_qkv_proj[k].as_slice(u16), 1e-3, 0.0);
                 fill_pattern_bf16(host_o_proj[k].as_slice(u16), 1e-3, 0.0);
                 fill_pattern_bf16(host_gate_proj[k].as_slice(u16), 1e-3, 0.0);
                 fill_pattern_bf16(host_up_proj[k].as_slice(u16), 1e-3, 0.0);
@@ -312,9 +336,7 @@ pub fn run_llama_ft_demo(
             while (k < num_layers) : (k += 1) {
                 fill_pattern(host_layer_input_norm[k].as_slice(f32), 1e-3, 0.0);
                 fill_pattern(host_layer_post_norm[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_q_proj[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_k_proj[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_v_proj[k].as_slice(f32), 1e-3, 0.0);
+                fill_pattern(host_qkv_proj[k].as_slice(f32), 1e-3, 0.0);
                 fill_pattern(host_o_proj[k].as_slice(f32), 1e-3, 0.0);
                 fill_pattern(host_gate_proj[k].as_slice(f32), 1e-3, 0.0);
                 fill_pattern(host_up_proj[k].as_slice(f32), 1e-3, 0.0);
@@ -326,14 +348,14 @@ pub fn run_llama_ft_demo(
 
     const tokens = [_]usize{ 128000, 128009, 128001, 128008 };
     const targets = [_]usize{ 128009, 128001, 128008, 128001 };
-    fill_i32_tokens(host_x.as_slice(i32), &tokens);
-    fill_i32_tokens(host_target_ids.as_slice(i32), &targets);
+    fill_i32_tokens_batched(host_x.as_slice(i32), batch_size, seq, &tokens);
+    fill_i32_tokens_batched(host_target_ids.as_slice(i32), batch_size, seq, &targets);
     fill_row_ids(host_row_ids.as_slice(i32));
     if (host_dtype == .bf16) {
-        fill_attention_mask_bf16(host_attention_mask.as_slice(u16), tokens.len);
+        fill_attention_mask_bf16_batched(host_attention_mask.as_slice(u16), batch_size, seq, tokens.len);
         fill_causal_mask_bf16(host_mask.as_slice(u16), seq);
     } else {
-        fill_attention_mask(host_attention_mask.as_slice(f32), tokens.len);
+        fill_attention_mask_batched(host_attention_mask.as_slice(f32), batch_size, seq, tokens.len);
         fill_causal_mask(host_mask.as_slice(f32), seq);
     }
     if (host_dtype == .bf16) {
@@ -349,9 +371,7 @@ pub fn run_llama_ft_demo(
     const tmp_norm = try upload_host_buffer(allocator, &backend_handle, device, &host_norm);
     var tmp_layer_input_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_layer_post_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_q_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_k_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_v_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
+    var tmp_qkv_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_o_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_gate_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_up_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
@@ -361,9 +381,7 @@ pub fn run_llama_ft_demo(
     while (m < num_layers) : (m += 1) {
         tmp_layer_input_norm[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_layer_input_norm[m]);
         tmp_layer_post_norm[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_layer_post_norm[m]);
-        tmp_q_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_q_proj[m]);
-        tmp_k_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_k_proj[m]);
-        tmp_v_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_v_proj[m]);
+        tmp_qkv_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_qkv_proj[m]);
         tmp_o_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_o_proj[m]);
         tmp_gate_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_gate_proj[m]);
         tmp_up_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_up_proj[m]);
@@ -393,9 +411,7 @@ pub fn run_llama_ft_demo(
     while (p < num_layers) : (p += 1) {
         try input_ptrs.append(allocator, tmp_layer_input_norm[p].pjrt_buffer);
         try input_ptrs.append(allocator, tmp_layer_post_norm[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_q_proj[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_k_proj[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_v_proj[p].pjrt_buffer);
+        try input_ptrs.append(allocator, tmp_qkv_proj[p].pjrt_buffer);
         try input_ptrs.append(allocator, tmp_o_proj[p].pjrt_buffer);
         try input_ptrs.append(allocator, tmp_gate_proj[p].pjrt_buffer);
         try input_ptrs.append(allocator, tmp_up_proj[p].pjrt_buffer);
@@ -409,15 +425,20 @@ pub fn run_llama_ft_demo(
     try input_ptrs.append(allocator, tmp_sin.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_cos.pjrt_buffer);
 
-    var output_ptrs = try allocator.alloc(zg.backend.pjrt.RawBuffer, output_count);
+    var output_ptrs = try allocator.alloc(?zg.backend.pjrt.RawBuffer, output_count);
     defer allocator.free(output_ptrs);
+    @memset(output_ptrs, null);
 
+    // Disallow donation for all non-parameter inputs (batch + precomputed RoPE tables).
+    // Keep parameters donatable so XLA can alias outputs to inputs when profitable.
     const non_donatable = &.{
-        @as(i64, @intCast(param_count)),
-        @as(i64, @intCast(param_count + 1)),
-        @as(i64, @intCast(param_count + 2)),
-        @as(i64, @intCast(param_count + 3)),
-        @as(i64, @intCast(param_count + 4)),
+        @as(i64, @intCast(param_count + 0)), // x
+        @as(i64, @intCast(param_count + 1)), // target_ids
+        @as(i64, @intCast(param_count + 2)), // row_ids
+        @as(i64, @intCast(param_count + 3)), // attention_mask
+        @as(i64, @intCast(param_count + 4)), // mask
+        @as(i64, @intCast(param_count + 5)), // sin
+        @as(i64, @intCast(param_count + 6)), // cos
     };
     const exec_opts: zg.frontend.CompiledForward.ExecuteOptions = .{
         .non_donatable_input_indices = if (train_mode) non_donatable else null,
@@ -434,9 +455,11 @@ pub fn run_llama_ft_demo(
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
+        @memset(output_ptrs, null);
         const ev = try compiled.execute_into(input_ptrs.items, output_ptrs, exec_opts);
 
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw };
         if (ev) |e| {
             var tmp = e;
             try tmp.await_();
@@ -448,12 +471,14 @@ pub fn run_llama_ft_demo(
             loss_ev.deinit();
         }
         loss_buf.deinit();
+        output_ptrs[0] = null;
 
         if (train_mode) {
-            for (input_ptrs.items[0..param_count], output_ptrs[1..]) |*old, new| {
-                if (new == old.*) continue;
+            for (input_ptrs.items[0..param_count], output_ptrs[1 .. 1 + param_count]) |*old, new| {
+                const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
+                if (new_raw == old.*) continue;
                 var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
-                old.* = new;
+                old.* = new_raw;
                 buf.deinit();
             }
         }
@@ -462,6 +487,7 @@ pub fn run_llama_ft_demo(
     var step: usize = 0;
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
+        @memset(output_ptrs, null);
         const event = try compiled.execute_into(input_ptrs.items, output_ptrs, exec_opts);
         const dispatch_ns = timer.lap();
 
@@ -472,7 +498,8 @@ pub fn run_llama_ft_demo(
         }
         const exec_ns = timer.lap();
 
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw2 };
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
             if (loss_dtype == .bf16) {
                 const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer());
@@ -492,31 +519,39 @@ pub fn run_llama_ft_demo(
         const loss_read_ns = timer.lap();
 
         loss_buf.deinit();
+        output_ptrs[0] = null;
 
         if (train_mode) {
-            for (input_ptrs.items[0..param_count], output_ptrs[1..]) |*old, new| {
-                if (new == old.*) continue;
+            for (input_ptrs.items[0..param_count], output_ptrs[1 .. 1 + param_count]) |*old, new| {
+                const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
+                if (new_raw == old.*) continue;
                 var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
-                old.* = new;
+                old.* = new_raw;
                 buf.deinit();
             }
         }
 
-        const step_ns = dispatch_ns + exec_ns + loss_read_ns;
+        const cleanup_ns = timer.lap();
+
+        const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
         total_ns += step_ns;
         const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
         const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
         const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
         const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
+        const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
         if (!quiet) {
-            std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms total={d:.3}ms", .{
-                step, loss.?, dispatch_ms, exec_ms, loss_ms, step_ms,
+            std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                step, loss.?, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
             });
         }
     }
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
-    std.log.info("llama-ft-demo avg_step_ms={d:.3}", .{avg_ms});
+    if (!quiet) {
+        log_device_memory_stats(device, backend_handle.api);
+    }
+    std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ avg_ms, warmup_steps, steps, seq });
     std.log.info("OK: llama-ft-demo executed", .{});
 }
 
@@ -528,9 +563,7 @@ fn load_llama_weights(
     norm: *zg.utils.HostBuffer,
     layer_input_norm: []zg.utils.HostBuffer,
     layer_post_norm: []zg.utils.HostBuffer,
-    q_proj: []zg.utils.HostBuffer,
-    k_proj: []zg.utils.HostBuffer,
-    v_proj: []zg.utils.HostBuffer,
+    qkv_proj: []zg.utils.HostBuffer,
     o_proj: []zg.utils.HostBuffer,
     gate_proj: []zg.utils.HostBuffer,
     up_proj: []zg.utils.HostBuffer,
@@ -539,6 +572,7 @@ fn load_llama_weights(
     shape_w_out: []const usize,
     shape_norm: []const usize,
     shape_layer_norm: []const usize,
+    shape_qkv_proj: []const usize,
     shape_q_proj: []const usize,
     shape_k_proj: []const usize,
     shape_o_proj: []const usize,
@@ -606,22 +640,18 @@ fn load_llama_weights(
         }
 
         const q_view = try st_file.get(q_name);
-        if (q_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(q_view, q_proj[i].as_slice(u16), shape_q_proj);
-        } else {
-            try copy_tensor_to_f32_transposed(q_view, q_proj[i].as_slice(f32), shape_q_proj);
-        }
         const k_view = try st_file.get(k_name);
-        if (k_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(k_view, k_proj[i].as_slice(u16), shape_k_proj);
-        } else {
-            try copy_tensor_to_f32_transposed(k_view, k_proj[i].as_slice(f32), shape_k_proj);
-        }
         const v_view = try st_file.get(v_name);
-        if (v_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(v_view, v_proj[i].as_slice(u16), shape_k_proj);
+        if (qkv_proj[i].dtype == .bf16) {
+            const dst = qkv_proj[i].as_slice(u16);
+            try copy_tensor_to_bf16_transposed_into_cols(q_view, dst, shape_qkv_proj, 0, shape_q_proj);
+            try copy_tensor_to_bf16_transposed_into_cols(k_view, dst, shape_qkv_proj, 2048, shape_k_proj);
+            try copy_tensor_to_bf16_transposed_into_cols(v_view, dst, shape_qkv_proj, 2560, shape_k_proj);
         } else {
-            try copy_tensor_to_f32_transposed(v_view, v_proj[i].as_slice(f32), shape_k_proj);
+            const dst = qkv_proj[i].as_slice(f32);
+            try copy_tensor_to_f32_transposed_into_cols(q_view, dst, shape_qkv_proj, 0, shape_q_proj);
+            try copy_tensor_to_f32_transposed_into_cols(k_view, dst, shape_qkv_proj, 2048, shape_k_proj);
+            try copy_tensor_to_f32_transposed_into_cols(v_view, dst, shape_qkv_proj, 2560, shape_k_proj);
         }
         const o_view = try st_file.get(o_name);
         if (o_proj[i].dtype == .bf16) {
@@ -783,6 +813,100 @@ fn copy_tensor_to_bf16_transposed(view: stz.TensorView, out: []u16, expected_sha
     }
 }
 
+fn copy_tensor_to_bf16_transposed_into_cols(
+    view: stz.TensorView,
+    dst: []u16,
+    dst_shape: []const usize,
+    col_offset: usize,
+    expected_shape: []const usize,
+) !void {
+    if (view.info.shape.len != 2 or expected_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
+    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
+        return error.TensorShapeMismatch;
+    }
+    const in_dim = expected_shape[0];
+    const out_dim = expected_shape[1];
+    if (dst_shape[0] != in_dim) return error.TensorShapeMismatch;
+    if (col_offset + out_dim > dst_shape[1]) return error.TensorShapeMismatch;
+    if (dst.len != dst_shape[0] * dst_shape[1]) return error.TensorSizeMismatch;
+
+    const dst_stride = dst_shape[1];
+    switch (view.info.dtype) {
+        .bf16 => {
+            const src = std.mem.bytesAsSlice(u16, view.data);
+            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
+
+            var o: usize = 0;
+            while (o < out_dim) : (o += 1) {
+                var i: usize = 0;
+                while (i < in_dim) : (i += 1) {
+                    dst[i * dst_stride + (col_offset + o)] = src[o * in_dim + i];
+                }
+            }
+        },
+        .f32 => {
+            const src = std.mem.bytesAsSlice(f32, view.data);
+            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
+
+            var o: usize = 0;
+            while (o < out_dim) : (o += 1) {
+                var i: usize = 0;
+                while (i < in_dim) : (i += 1) {
+                    dst[i * dst_stride + (col_offset + o)] = f32_to_bf16(src[o * in_dim + i]);
+                }
+            }
+        },
+        else => return error.TensorDtypeMismatch,
+    }
+}
+
+fn copy_tensor_to_f32_transposed_into_cols(
+    view: stz.TensorView,
+    dst: []f32,
+    dst_shape: []const usize,
+    col_offset: usize,
+    expected_shape: []const usize,
+) !void {
+    if (view.info.shape.len != 2 or expected_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
+    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
+        return error.TensorShapeMismatch;
+    }
+    const in_dim = expected_shape[0];
+    const out_dim = expected_shape[1];
+    if (dst_shape[0] != in_dim) return error.TensorShapeMismatch;
+    if (col_offset + out_dim > dst_shape[1]) return error.TensorShapeMismatch;
+    if (dst.len != dst_shape[0] * dst_shape[1]) return error.TensorSizeMismatch;
+
+    const dst_stride = dst_shape[1];
+    switch (view.info.dtype) {
+        .f32 => {
+            const src = std.mem.bytesAsSlice(f32, view.data);
+            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
+
+            var o: usize = 0;
+            while (o < out_dim) : (o += 1) {
+                var i: usize = 0;
+                while (i < in_dim) : (i += 1) {
+                    dst[i * dst_stride + (col_offset + o)] = src[o * in_dim + i];
+                }
+            }
+        },
+        .bf16 => {
+            const src = std.mem.bytesAsSlice(u16, view.data);
+            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
+
+            var o: usize = 0;
+            while (o < out_dim) : (o += 1) {
+                var i: usize = 0;
+                while (i < in_dim) : (i += 1) {
+                    dst[i * dst_stride + (col_offset + o)] = bf16_to_f32(src[o * in_dim + i]);
+                }
+            }
+        },
+        else => return error.TensorDtypeMismatch,
+    }
+}
+
 fn transpose_vocab_hidden(src: []const f32, dst: []f32, src_shape: []const usize, dst_shape: []const usize) !void {
     if (src_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
     const vocab = src_shape[0];
@@ -816,6 +940,52 @@ fn transpose_vocab_hidden_bf16(src: []const u16, dst: []u16, src_shape: []const 
 fn bf16_to_f32(val: u16) f32 {
     const bits: u32 = @as(u32, val) << 16;
     return @bitCast(bits);
+}
+
+fn bytes_to_mb(value: i64) f64 {
+    return @as(f64, @floatFromInt(value)) / (1024.0 * 1024.0);
+}
+
+fn log_compiled_memory_stats(exe: *zg.backend.pjrt.LoadedExecutable) void {
+    const stats = exe.get_compiled_memory_stats() catch |err| switch (err) {
+        error.Unimplemented, error.FunctionNotAvailable => return,
+        else => {
+            std.log.warn("llama-ft-demo: compiled memory stats unavailable ({s})", .{@errorName(err)});
+            return;
+        },
+    };
+
+    std.log.info(
+        "llama-ft-demo compiled memory: peak={d:.1}MB temp={d:.1}MB args={d:.1}MB outputs={d:.1}MB",
+        .{
+            bytes_to_mb(stats.peak_memory_in_bytes),
+            bytes_to_mb(stats.temp_size_in_bytes),
+            bytes_to_mb(stats.argument_size_in_bytes),
+            bytes_to_mb(stats.output_size_in_bytes),
+        },
+    );
+}
+
+fn log_device_memory_stats(device: *const zg.backend.pjrt.Device, api: *zg.backend.pjrt.Api) void {
+    const stats = device.get_memory_stats(api) catch |err| switch (err) {
+        error.Unimplemented, error.FunctionNotAvailable => return,
+        else => {
+            std.log.warn("llama-ft-demo: device memory stats unavailable ({s})", .{@errorName(err)});
+            return;
+        },
+    };
+
+    const peak = stats.peak_bytes_in_use orelse stats.bytes_in_use;
+    const pool_peak = stats.peak_pool_bytes orelse stats.pool_bytes orelse 0;
+    std.log.info(
+        "llama-ft-demo device memory: in_use={d:.1}MB peak={d:.1}MB pool={d:.1}MB pool_peak={d:.1}MB",
+        .{
+            bytes_to_mb(stats.bytes_in_use),
+            bytes_to_mb(peak),
+            bytes_to_mb(stats.pool_bytes orelse 0),
+            bytes_to_mb(pool_peak),
+        },
+    );
 }
 
 fn host_dtype_for(dtype: zg.pr.DType) zg.utils.DType {
@@ -879,6 +1049,21 @@ fn fill_i32_tokens(out: []i32, tokens: []const usize) void {
     }
 }
 
+fn fill_i32_tokens_batched(out: []i32, batch: usize, seq: usize, tokens: []const usize) void {
+    @memset(out, 0);
+    if (batch == 0 or seq == 0) return;
+    if (out.len != batch * seq) return;
+
+    var b: usize = 0;
+    while (b < batch) : (b += 1) {
+        const row = out[b * seq .. (b + 1) * seq];
+        const count = @min(row.len, tokens.len);
+        for (tokens[0..count], 0..) |t, i| {
+            row[i] = @intCast(t);
+        }
+    }
+}
+
 fn fill_row_ids(out: []i32) void {
     var i: usize = 0;
     while (i < out.len) : (i += 1) {
@@ -895,6 +1080,21 @@ fn fill_attention_mask(out: []f32, active_len: usize) void {
     }
 }
 
+fn fill_attention_mask_batched(out: []f32, batch: usize, seq: usize, active_len: usize) void {
+    @memset(out, 0);
+    if (batch == 0 or seq == 0) return;
+    if (out.len != batch * seq) return;
+
+    const count = @min(seq, active_len);
+    var b: usize = 0;
+    while (b < batch) : (b += 1) {
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            out[b * seq + i] = 1.0;
+        }
+    }
+}
+
 fn fill_attention_mask_bf16(out: []u16, active_len: usize) void {
     @memset(out, 0);
     const one = f32_to_bf16(1.0);
@@ -902,6 +1102,22 @@ fn fill_attention_mask_bf16(out: []u16, active_len: usize) void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         out[i] = one;
+    }
+}
+
+fn fill_attention_mask_bf16_batched(out: []u16, batch: usize, seq: usize, active_len: usize) void {
+    @memset(out, 0);
+    if (batch == 0 or seq == 0) return;
+    if (out.len != batch * seq) return;
+
+    const one = f32_to_bf16(1.0);
+    const count = @min(seq, active_len);
+    var b: usize = 0;
+    while (b < batch) : (b += 1) {
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            out[b * seq + i] = one;
+        }
     }
 }
 

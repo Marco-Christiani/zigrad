@@ -194,18 +194,65 @@ pub const dot_general = struct {
         const lhs_primal = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const rhs_primal = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
 
-        const lhs_contrib = try ctx.builder.dot_general(out_cot, rhs_primal, .{
-            .lhs_batch_dims = &.{0},
-            .rhs_batch_dims = &.{0},
-            .lhs_contracting_dims = &.{2},
-            .rhs_contracting_dims = &.{2},
-        });
-        const rhs_contrib = try ctx.builder.dot_general(lhs_primal, out_cot, .{
-            .lhs_batch_dims = &.{0},
-            .rhs_batch_dims = &.{0},
-            .lhs_contracting_dims = &.{1},
-            .rhs_contracting_dims = &.{1},
-        });
+        const lhs_contrib, const rhs_contrib = blk: {
+            // Case A: batched attention matmul.
+            if (dg_params.lhs_batch_dims.len == 1 and dg_params.lhs_batch_dims[0] == 0 and
+                dg_params.rhs_batch_dims.len == 1 and dg_params.rhs_batch_dims[0] == 0 and
+                dg_params.lhs_contracting_dims.len == 1 and dg_params.lhs_contracting_dims[0] == 2 and
+                dg_params.rhs_contracting_dims.len == 1 and dg_params.rhs_contracting_dims[0] == 1)
+            {
+                const lhs_c = try ctx.builder.dot_general(out_cot, rhs_primal, .{
+                    .lhs_batch_dims = &.{0},
+                    .rhs_batch_dims = &.{0},
+                    .lhs_contracting_dims = &.{2},
+                    .rhs_contracting_dims = &.{2},
+                });
+                const rhs_c = try ctx.builder.dot_general(lhs_primal, out_cot, .{
+                    .lhs_batch_dims = &.{0},
+                    .rhs_batch_dims = &.{0},
+                    .lhs_contracting_dims = &.{1},
+                    .rhs_contracting_dims = &.{1},
+                });
+                break :blk .{ lhs_c, rhs_c };
+            }
+
+            // Case B: (B,M,K) x (K,N) -> (B,M,N) with no explicit batching dims.
+            // dL/dlhs = (dL/dout) x rhs^T  (contract N)
+            // dL/drhs = lhs^T x (dL/dout)  (contract B and M)
+            if (dg_params.lhs_batch_dims.len == 0 and dg_params.rhs_batch_dims.len == 0 and
+                dg_params.lhs_contracting_dims.len == 1 and dg_params.lhs_contracting_dims[0] == 2 and
+                dg_params.rhs_contracting_dims.len == 1 and dg_params.rhs_contracting_dims[0] == 0)
+            {
+                const lhs_t = ctx.tensor_of(inputs[0]);
+                const rhs_t = ctx.tensor_of(inputs[1]);
+                const out_t = ctx.tensor_of(outputs[0]);
+
+                if (lhs_t.shape.rank() != 3 or rhs_t.shape.rank() != 2 or out_t.shape.rank() != 3) {
+                    return error.UnsupportedEqn;
+                }
+
+                const b = out_t.shape.dims[0];
+                const m = out_t.shape.dims[1];
+                const n = out_t.shape.dims[2];
+                const k = rhs_t.shape.dims[0];
+                const bm = b * m;
+
+                // Flatten (B,M,*) -> (B*M,*) and use 2D dot/transpose.
+                const out2 = try ctx.builder.reshape(out_cot, &.{ bm, n });
+
+                const rhs_t2 = try ctx.builder.transpose(rhs_primal, &.{ 1, 0 }); // (N,K)
+                const lhs_flat = try ctx.builder.dot(out2, rhs_t2); // (B*M,K)
+                const lhs_c = try ctx.builder.reshape(lhs_flat, &.{ b, m, k });
+
+                const lhs2 = try ctx.builder.reshape(lhs_primal, &.{ bm, k });
+                const lhs2_t = try ctx.builder.transpose(lhs2, &.{ 1, 0 }); // (K,B*M)
+                const rhs_c = try ctx.builder.dot(lhs2_t, out2); // (K,N)
+
+                break :blk .{ lhs_c, rhs_c };
+            }
+
+            return error.UnsupportedEqn;
+        };
 
         try ctx.add_cot(inputs[0], lhs_contrib);
         try ctx.add_cot(inputs[1], rhs_contrib);
@@ -213,12 +260,25 @@ pub const dot_general = struct {
 };
 
 fn dot_general_vjp_supported(params: pr.DotGeneralParams) bool {
-    return params.lhs_batch_dims.len == 1 and
+    // Case A: batched matmul used by attention.
+    if (params.lhs_batch_dims.len == 1 and
         params.rhs_batch_dims.len == 1 and
         params.lhs_batch_dims[0] == 0 and
         params.rhs_batch_dims[0] == 0 and
         params.lhs_contracting_dims.len == 1 and
         params.rhs_contracting_dims.len == 1 and
         params.lhs_contracting_dims[0] == 2 and
-        params.rhs_contracting_dims[0] == 1;
+        params.rhs_contracting_dims[0] == 1)
+    {
+        return true;
+    }
+
+    // Case B: explicit batch dim on LHS with 2D RHS (B,M,K) x (K,N) -> (B,M,N).
+    // (lhs_batch_dims/rhs_batch_dims empty, contracting dims are (2) and (0)).
+    return params.lhs_batch_dims.len == 0 and
+        params.rhs_batch_dims.len == 0 and
+        params.lhs_contracting_dims.len == 1 and
+        params.rhs_contracting_dims.len == 1 and
+        params.lhs_contracting_dims[0] == 2 and
+        params.rhs_contracting_dims[0] == 0;
 }

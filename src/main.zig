@@ -4,6 +4,7 @@ const demos = @import("demos.zig");
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const main_aot = @import("main_aot.zig");
+const llama_model = @import("llama_model.zig");
 
 pub fn main() !void {
     // var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
@@ -186,15 +187,34 @@ pub fn main() !void {
             );
         }
         if (std.mem.eql(u8, m, "llama-ft-demo")) {
-            var warmup_steps: usize = 0;
+            var warmup_steps: usize = 1;
             var steps: usize = 4;
+            var seq: usize = 4;
+            var batch: usize = 1;
             var pos_index: usize = 0;
             var train_mode = false;
             var model_dtype: ?zg.pr.DType = null;
+            var canonicalize: llama_model.CanonicalizeConfig = .{};
 
             for (mode_args.items) |arg| {
                 if (std.mem.eql(u8, arg, "--train")) {
                     train_mode = true;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--seq=")) {
+                    const seq_str = arg["--seq=".len..];
+                    seq = std.fmt.parseInt(usize, seq_str, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--batch=")) {
+                    const batch_str = arg["--batch=".len..];
+                    batch = std.fmt.parseInt(usize, batch_str, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
                     continue;
                 }
                 if (std.mem.startsWith(u8, arg, "--dtype=")) {
@@ -207,6 +227,24 @@ pub fn main() !void {
                         try print_usage();
                         return error.InvalidArguments;
                     }
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--canonical-shapes")) {
+                    canonicalize.qkv_batch1 = true;
+                    canonicalize.o_proj_batch1 = true;
+                    canonicalize.mlp_batch1 = true;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--canonical-qkv")) {
+                    canonicalize.qkv_batch1 = true;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--canonical-o")) {
+                    canonicalize.o_proj_batch1 = true;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--canonical-mlp")) {
+                    canonicalize.mlp_batch1 = true;
                     continue;
                 }
 
@@ -229,6 +267,9 @@ pub fn main() !void {
             const cfg = llama_demo.LlamaDemoConfig{
                 .train = train_mode,
                 .dtype = dtype,
+                .seq = seq,
+                .batch = batch,
+                .canonicalize = canonicalize,
             };
 
             return llama_demo.run_llama_ft_demo(
@@ -327,7 +368,7 @@ fn print_usage() !void {
         \\  vjp-demo                     runs the reverse-mode demo
         \\  train-demo [warmup] [steps]  runs the frontend training demo
         \\  llm-ft-demo [warmup] [steps] runs a tiny LLM fine-tune demo
-        \\  llama-ft-demo [warmup] [steps] [--train] [--dtype=bf16|f32] runs a tiny Llama fine-tune demo
+        \\  llama-ft-demo [warmup] [steps] [--train] [--dtype=bf16|f32] [--seq=N] [--batch=N] [--canonical-shapes] [--canonical-qkv] [--canonical-o] [--canonical-mlp] runs a tiny Llama fine-tune demo
         \\  jit-cache-save <path>        writes PJRT JIT cache artifact
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\

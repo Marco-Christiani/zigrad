@@ -429,7 +429,8 @@ pub fn run_train_demo(
         tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer,
         tmp_w3.pjrt_buffer, tmp_b3.pjrt_buffer, tmp_x.pjrt_buffer,  tmp_y.pjrt_buffer,
     };
-    var output_ptrs: [output_count]zg.backend.pjrt.RawBuffer = undefined;
+    var output_ptrs: [output_count]?zg.backend.pjrt.RawBuffer = undefined;
+    @memset(output_ptrs[0..], null);
     const exec_opts: zg.frontend.CompiledForward.ExecuteOptions = .{
         .non_donatable_input_indices = &.{ 6, 7 },
     };
@@ -447,9 +448,11 @@ pub fn run_train_demo(
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
+        @memset(output_ptrs[0..], null);
         const ev = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
 
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw };
         if (ev) |e| {
             var tmp = e;
             try tmp.await_();
@@ -461,20 +464,21 @@ pub fn run_train_demo(
             loss_ev.deinit();
         }
         loss_buf.deinit();
+        output_ptrs[0] = null;
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
-            if (new == old.*) continue;
+            const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
+            if (new_raw == old.*) continue;
             var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
-            old.* = new;
+            old.* = new_raw;
             buf.deinit();
         }
     }
 
     var step: usize = 0;
-    var reused_params: usize = 0;
-    var replaced_params: usize = 0;
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
+        @memset(output_ptrs[0..], null);
         const event = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
         const dispatch_ns = timer.lap();
 
@@ -485,7 +489,8 @@ pub fn run_train_demo(
         }
         const wait_ns = timer.lap();
 
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = output_ptrs[0] };
+        const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw2 };
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
             const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer());
             break :blk ptr[0];
@@ -498,15 +503,13 @@ pub fn run_train_demo(
         const loss_read_ns = timer.lap();
 
         loss_buf.deinit();
+        output_ptrs[0] = null;
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
-            if (new == old.*) {
-                reused_params += 1;
-                continue;
-            }
-            replaced_params += 1;
+            const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
+            if (new_raw == old.*) continue;
             var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
-            old.* = new;
+            old.* = new_raw;
             buf.deinit();
         }
 
@@ -527,9 +530,6 @@ pub fn run_train_demo(
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
     std.log.info("train-demo avg_step_ms={d:.3}", .{avg_ms});
-    if (!quiet) {
-        std.log.info("train-demo donation: reused_params={d} replaced_params={d}", .{ reused_params, replaced_params });
-    }
     std.log.info("OK: train-demo executed", .{});
 }
 

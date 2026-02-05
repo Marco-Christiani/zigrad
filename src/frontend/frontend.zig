@@ -394,7 +394,7 @@ pub const CompiledForward = struct {
     pub fn execute_into(
         self: *CompiledForward,
         input_ptrs: []const backend.pjrt.RawBuffer,
-        output_ptrs: []backend.pjrt.RawBuffer,
+        output_ptrs: []?backend.pjrt.RawBuffer,
         options: ExecuteOptions,
     ) !?backend.pjrt.Event {
         if (input_ptrs.len != self.input_specs.len) return error.InputArityMismatch;

@@ -267,6 +267,20 @@ pub const TopologyDescription = struct {
 pub const Device = struct {
     pjrt_device: *c.PJRT_Device,
 
+    pub const MemoryStats = struct {
+        bytes_in_use: i64,
+        peak_bytes_in_use: ?i64,
+        num_allocs: ?i64,
+        largest_alloc_size: ?i64,
+        bytes_limit: ?i64,
+        bytes_reserved: ?i64,
+        peak_bytes_reserved: ?i64,
+        bytes_reservable_limit: ?i64,
+        largest_free_block_bytes: ?i64,
+        pool_bytes: ?i64,
+        peak_pool_bytes: ?i64,
+    };
+
     pub fn get_id(self: *const Device, api: *Api) !i32 {
         // First get the device description
         var desc_args = api_mod.init_args(c.PJRT_Device_GetDescription_Args);
@@ -299,6 +313,27 @@ pub const Device = struct {
 
         try api.call("PJRT_DeviceDescription_Kind", &args);
         return std.mem.span(args.device_kind);
+    }
+
+    pub fn get_memory_stats(self: *const Device, api: *Api) !MemoryStats {
+        var args = api_mod.init_args(c.PJRT_Device_MemoryStats_Args);
+        args.device = self.pjrt_device;
+
+        try api.call("PJRT_Device_MemoryStats", &args);
+
+        return .{
+            .bytes_in_use = args.bytes_in_use,
+            .peak_bytes_in_use = if (args.peak_bytes_in_use_is_set) args.peak_bytes_in_use else null,
+            .num_allocs = if (args.num_allocs_is_set) args.num_allocs else null,
+            .largest_alloc_size = if (args.largest_alloc_size_is_set) args.largest_alloc_size else null,
+            .bytes_limit = if (args.bytes_limit_is_set) args.bytes_limit else null,
+            .bytes_reserved = if (args.bytes_reserved_is_set) args.bytes_reserved else null,
+            .peak_bytes_reserved = if (args.peak_bytes_reserved_is_set) args.peak_bytes_reserved else null,
+            .bytes_reservable_limit = if (args.bytes_reservable_limit_is_set) args.bytes_reservable_limit else null,
+            .largest_free_block_bytes = if (args.largest_free_block_bytes_is_set) args.largest_free_block_bytes else null,
+            .pool_bytes = if (args.pool_bytes_is_set) args.pool_bytes else null,
+            .peak_pool_bytes = if (args.peak_pool_bytes_is_set) args.peak_pool_bytes else null,
+        };
     }
 };
 
@@ -335,6 +370,20 @@ pub const LoadedExecutable = struct {
     api: *Api,
     pjrt_executable: *c.PJRT_LoadedExecutable,
     num_outputs: usize,
+
+    pub const CompiledMemoryStats = struct {
+        generated_code_size_in_bytes: i64,
+        argument_size_in_bytes: i64,
+        output_size_in_bytes: i64,
+        alias_size_in_bytes: i64,
+        temp_size_in_bytes: i64,
+        host_generated_code_size_in_bytes: i64,
+        host_argument_size_in_bytes: i64,
+        host_output_size_in_bytes: i64,
+        host_alias_size_in_bytes: i64,
+        host_temp_size_in_bytes: i64,
+        peak_memory_in_bytes: i64,
+    };
 
     fn query_num_outputs(api: *Api, pjrt_executable: *c.PJRT_LoadedExecutable) !usize {
         var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
@@ -398,6 +447,38 @@ pub const LoadedExecutable = struct {
 
         const bytes = args.serialized_bytes[0..args.serialized_bytes_size];
         return allocator.dupe(u8, bytes);
+    }
+
+    pub fn get_compiled_memory_stats(self: *LoadedExecutable) !CompiledMemoryStats {
+        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        get_exec_args.loaded_executable = self.pjrt_executable;
+        get_exec_args.executable = null;
+        try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
+
+        const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
+        defer {
+            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            destroy_args.executable = pjrt_exec;
+            self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+        }
+
+        var args = api_mod.init_args(c.PJRT_Executable_GetCompiledMemoryStats_Args);
+        args.executable = pjrt_exec;
+        try self.api.call("PJRT_Executable_GetCompiledMemoryStats", &args);
+
+        return .{
+            .generated_code_size_in_bytes = args.generated_code_size_in_bytes,
+            .argument_size_in_bytes = args.argument_size_in_bytes,
+            .output_size_in_bytes = args.output_size_in_bytes,
+            .alias_size_in_bytes = args.alias_size_in_bytes,
+            .temp_size_in_bytes = args.temp_size_in_bytes,
+            .host_generated_code_size_in_bytes = args.host_generated_code_size_in_bytes,
+            .host_argument_size_in_bytes = args.host_argument_size_in_bytes,
+            .host_output_size_in_bytes = args.host_output_size_in_bytes,
+            .host_alias_size_in_bytes = args.host_alias_size_in_bytes,
+            .host_temp_size_in_bytes = args.host_temp_size_in_bytes,
+            .peak_memory_in_bytes = args.peak_memory_in_bytes,
+        };
     }
 
     pub fn execute(self: *LoadedExecutable, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
@@ -486,7 +567,7 @@ pub const LoadedExecutable = struct {
     pub fn execute_into(
         self: *LoadedExecutable,
         input_ptrs: []const *c.PJRT_Buffer,
-        output_ptrs: []*c.PJRT_Buffer,
+        output_ptrs: []?*c.PJRT_Buffer,
     ) !?Event {
         return self.execute_into_opts(input_ptrs, output_ptrs, null);
     }
@@ -494,7 +575,7 @@ pub const LoadedExecutable = struct {
     pub fn execute_into_opts(
         self: *LoadedExecutable,
         input_ptrs: []const *c.PJRT_Buffer,
-        output_ptrs: []*c.PJRT_Buffer,
+        output_ptrs: []?*c.PJRT_Buffer,
         non_donatable_input_indices: ?[]const i64,
     ) !?Event {
         if (output_ptrs.len != self.num_outputs) return error.OutputArityMismatch;
@@ -502,8 +583,8 @@ pub const LoadedExecutable = struct {
         const input_list: [*c]*c.PJRT_Buffer = @constCast(input_ptrs.ptr);
         var input_lists = [_][*c]*c.PJRT_Buffer{input_list};
 
-        const output_list: [*c]*c.PJRT_Buffer = output_ptrs.ptr;
-        var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
+        const output_list: [*c]?*c.PJRT_Buffer = output_ptrs.ptr;
+        var output_lists = [_][*c]?*c.PJRT_Buffer{output_list};
 
         var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
         execute_opts.send_callbacks = null;

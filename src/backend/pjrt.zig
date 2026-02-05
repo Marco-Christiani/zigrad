@@ -30,6 +30,7 @@ pub const Device = pjrt_types.Device;
 pub const Event = pjrt_types.Event;
 pub const BufferType = pjrt_types.BufferType;
 pub const ProgramFormat = pjrt_types.ProgramFormat;
+pub const Api = pjrt_api.Api;
 
 /// Compile options for the PJRT backend.
 pub const CompileOptions = struct {
