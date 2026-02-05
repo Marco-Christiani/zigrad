@@ -195,6 +195,7 @@ pub fn main() !void {
             var train_mode = false;
             var model_dtype: ?zg.pr.DType = null;
             var canonicalize: llama_model.CanonicalizeConfig = .{};
+            var execute_only = false;
 
             for (mode_args.items) |arg| {
                 if (std.mem.eql(u8, arg, "--train")) {
@@ -247,6 +248,10 @@ pub fn main() !void {
                     canonicalize.mlp_batch1 = true;
                     continue;
                 }
+                if (std.mem.eql(u8, arg, "--execute-only")) {
+                    execute_only = true;
+                    continue;
+                }
 
                 const value = std.fmt.parseInt(usize, arg, 10) catch {
                     try print_usage();
@@ -270,6 +275,7 @@ pub fn main() !void {
                 .seq = seq,
                 .batch = batch,
                 .canonicalize = canonicalize,
+                .execute_only = execute_only,
             };
 
             return llama_demo.run_llama_ft_demo(
@@ -368,7 +374,7 @@ fn print_usage() !void {
         \\  vjp-demo                     runs the reverse-mode demo
         \\  train-demo [warmup] [steps]  runs the frontend training demo
         \\  llm-ft-demo [warmup] [steps] runs a tiny LLM fine-tune demo
-        \\  llama-ft-demo [warmup] [steps] [--train] [--dtype=bf16|f32] [--seq=N] [--batch=N] [--canonical-shapes] [--canonical-qkv] [--canonical-o] [--canonical-mlp] runs a tiny Llama fine-tune demo
+        \\  llama-ft-demo [warmup] [steps] [--train] [--dtype=bf16|f32] [--seq=N] [--batch=N] [--canonical-shapes] [--canonical-qkv] [--canonical-o] [--canonical-mlp] [--execute-only] runs a tiny Llama fine-tune demo
         \\  jit-cache-save <path>        writes PJRT JIT cache artifact
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\

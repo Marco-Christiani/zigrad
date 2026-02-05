@@ -1,8 +1,8 @@
-const std = @import("std");
 const zg = @import("zigrad");
 const stz = @import("safetensors_zg");
 const llama_model = @import("llama_model.zig");
 const ops = zg.pr.ops;
+const std = @import("std");
 
 const num_layers: usize = 16;
 
@@ -12,6 +12,7 @@ pub const LlamaDemoConfig = struct {
     seq: usize,
     batch: usize = 1,
     canonicalize: llama_model.CanonicalizeConfig = .{},
+    execute_only: bool = false,
 };
 
 const upcast_loss = false;
@@ -114,6 +115,7 @@ pub fn run_llama_ft_demo(
     const model_dtype: zg.pr.DType = cfg.dtype;
     const host_dtype: zg.utils.DType = host_dtype_for(model_dtype);
     const batch_size: usize = cfg.batch;
+    const execute_only = cfg.execute_only;
 
     const LayerSpec = struct {
         input_norm: TensorSpec,
@@ -465,7 +467,7 @@ pub fn run_llama_ft_demo(
             try tmp.await_();
             tmp.deinit();
         }
-        if (!is_cpu and !quiet) {
+        if (!execute_only and !is_cpu and !quiet) {
             var loss_ev = try loss_buf.to_host(loss_host.data);
             try loss_ev.await_();
             loss_ev.deinit();
@@ -484,6 +486,11 @@ pub fn run_llama_ft_demo(
         }
     }
 
+    const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
+    var nvtx_range = NvtxRange.init() catch null;
+    defer if (nvtx_range) |*range| range.deinit();
+    if (nvtx_range) |*range| range.push(nvtx_label) catch {};
+
     var step: usize = 0;
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
@@ -500,7 +507,7 @@ pub fn run_llama_ft_demo(
 
         const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
         var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw2 };
-        const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
+        const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
             if (loss_dtype == .bf16) {
                 const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer());
                 break :blk bf16_to_f32(ptr[0]);
@@ -541,11 +548,19 @@ pub fn run_llama_ft_demo(
         const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
         const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
         if (!quiet) {
-            std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                step, loss.?, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-            });
+            if (loss) |loss_value| {
+                std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                    step, loss_value, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
+                });
+            } else {
+                std.log.info("llama-ft-demo step {d}: dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                    step, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
+                });
+            }
         }
     }
+
+    if (nvtx_range) |*range| range.pop() catch {};
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
     if (!quiet) {
@@ -553,6 +568,68 @@ pub fn run_llama_ft_demo(
     }
     std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ avg_ms, warmup_steps, steps, seq });
     std.log.info("OK: llama-ft-demo executed", .{});
+}
+
+const NvtxRange = struct {
+    lib: std.DynLib,
+    push_fn: *const fn ([*:0]const u8) callconv(.c) c_int,
+    pop_fn: *const fn () callconv(.c) c_int,
+
+    pub fn init() !NvtxRange {
+        if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZG_EXTERNAL_SDK_ROOT")) |sdk| {
+            defer std.heap.page_allocator.free(sdk);
+            var buf1: [1024]u8 = undefined;
+            var buf2: [1024]u8 = undefined;
+            const p1 = std.fmt.bufPrintZ(&buf1, "{s}/runtime/nvidia/nvtx/lib/libnvToolsExt.so", .{sdk}) catch null;
+            if (p1) |p| {
+                if (open_nvtx(p)) |range| return range;
+            }
+            const p2 = std.fmt.bufPrintZ(&buf2, "{s}/runtime/nvidia/nvtx/lib/libnvToolsExt.so.1", .{sdk}) catch null;
+            if (p2) |p| {
+                if (open_nvtx(p)) |range| return range;
+            }
+        } else |_| {}
+
+        const names = [_][]const u8{
+            "libnvToolsExt.so",
+            "libnvToolsExt.so.1",
+            "libnvToolsExt.so.1.0",
+        };
+        var i: usize = 0;
+        while (i < names.len) : (i += 1) {
+            if (open_nvtx(names[i])) |range| return range;
+        }
+        return error.FileNotFound;
+    }
+
+    pub fn deinit(self: *NvtxRange) void {
+        self.lib.close();
+    }
+
+    pub fn push(self: *NvtxRange, label: [:0]const u8) !void {
+        _ = self.push_fn(label);
+    }
+
+    pub fn pop(self: *NvtxRange) !void {
+        _ = self.pop_fn();
+    }
+};
+
+fn open_nvtx(path: []const u8) ?NvtxRange {
+    if (std.DynLib.open(path)) |lib0| {
+        var lib = lib0;
+        const push_fn = lib.lookup(*const fn ([*:0]const u8) callconv(.c) c_int, "nvtxRangePushA") orelse {
+            lib.close();
+            return null;
+        };
+        const pop_fn = lib.lookup(*const fn () callconv(.c) c_int, "nvtxRangePop") orelse {
+            lib.close();
+            return null;
+        };
+        return .{ .lib = lib, .push_fn = push_fn, .pop_fn = pop_fn };
+    } else |_| {
+        return null;
+    }
 }
 
 fn load_llama_weights(
