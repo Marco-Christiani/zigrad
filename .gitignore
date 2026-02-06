@@ -42,3 +42,4 @@ result-*
 artifacts/
 
 !nix/**/*ccache*
+/weights/
