@@ -11,20 +11,14 @@ pub const LlamaDemoConfig = struct {
     dtype: zg.pr.DType,
     seq: usize,
     batch: usize = 1,
-    canonicalize: llama_model.CanonicalizeConfig = .{},
     execute_only: bool = false,
 };
 
 const upcast_loss = false;
 
-var g_fwd_cfg: llama_model.ForwardConfig = .{};
-
 fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
     const batch_size: usize = batch.x.tensor.shape.dims[0];
     const seq: usize = batch.x.tensor.shape.dims[1];
-    const n: usize = batch_size * seq;
-    const vocab: usize = 128256;
-
     var layers: [num_layers]llama_model.LayerWeights = undefined;
     inline for (0..num_layers) |idx| {
         const p = params.layers[idx];
@@ -43,26 +37,38 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
         .w_out = params.w_out,
         .norm = params.norm,
         .layers = layers[0..],
-    }, g_fwd_cfg, 1e-5);
+    }, 1e-5);
     const logits_f0 = if (upcast_loss and logits.tensor.dtype == .bf16) try logits.convert(.f32) else logits;
-    var dims_n_vocab: [2]usize = .{ n, vocab };
-    const logits_f = try logits_f0.reshape(dims_n_vocab[0..]);
-
+    const logits_f = logits_f0;
+    const b = logits_f.builder;
     const attn_mask0 = if (batch.attention_mask.tensor.dtype == logits_f.tensor.dtype)
         batch.attention_mask
     else
         try batch.attention_mask.convert(logits_f.tensor.dtype);
-    var dims_n: [1]usize = .{n};
-    const attn_mask = try attn_mask0.reshape(dims_n[0..]);
+    const attn_mask = attn_mask0;
 
-    var dims_n_1: [2]usize = .{ n, 1 };
-    const row_ids_2d = try batch.row_ids.reshape(dims_n_1[0..]);
-    const tgt_ids_2d = try batch.target_ids.reshape(dims_n_1[0..]);
-    const gather_idx = try row_ids_2d.concatenate(&.{tgt_ids_2d}, 1);
-    const target_logits = try logits_f.gather_2d(gather_idx);
+    // Gather one vocab entry per (batch, seq) row without flattening.
+    const row_b = try b.iota(.i32, &.{ batch_size, seq }, 0);
+    const row_s = try b.iota(.i32, &.{ batch_size, seq }, 1);
+    const tgt_ids = if (batch.target_ids.tensor.dtype == .i32)
+        batch.target_ids
+    else
+        try batch.target_ids.convert(.i32);
+    const row_b3 = try row_b.reshape(&.{ batch_size, seq, 1 });
+    const row_s3 = try row_s.reshape(&.{ batch_size, seq, 1 });
+    const tgt_ids3 = try tgt_ids.reshape(&.{ batch_size, seq, 1 });
+    const gather_idx = try row_b3.concatenate(&.{ row_s3, tgt_ids3 }, 2);
+    const gather_params: zg.pr.GatherParams = .{
+        .slice_sizes = &.{ 1, 1, 1 },
+        .offset_dims = &.{},
+        .collapsed_slice_dims = &.{ 0, 1, 2 },
+        .start_index_map = &.{ 0, 1, 2 },
+        .index_vector_dim = 2,
+    };
+    const target_logits_2d = try logits_f.gather(gather_idx, gather_params);
 
-    const max_logits = try logits_f.reduce_max(&.{1});
-    const max_b = try max_logits.broadcast_in_dim(dims_n_vocab[0..], &.{0});
+    const max_logits = try logits_f.reduce_max(&.{2});
+    const max_b = try max_logits.broadcast_in_dim(logits_f.tensor.shape.dims, &.{ 0, 1 });
     const shifted = try logits_f.sub(max_b);
 
     // Match JAX-style logsumexp lowering: subtract in f32, exp in bf16 (when model dtype is bf16),
@@ -71,7 +77,7 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
     const exp_in = if (logits.tensor.dtype == .bf16) try shifted_f32.convert(.bf16) else shifted_f32;
     const exp_logits = try exp_in.exp();
     const exp_logits_f32 = if (exp_logits.tensor.dtype == .f32) exp_logits else try exp_logits.convert(.f32);
-    const sum_exp = try exp_logits_f32.reduce_sum(&.{1});
+    const sum_exp = try exp_logits_f32.reduce_sum(&.{2});
     const log_sum = try sum_exp.log();
     const max_f = if (max_logits.tensor.dtype == log_sum.tensor.dtype)
         max_logits
@@ -79,10 +85,10 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
         try max_logits.convert(log_sum.tensor.dtype);
     const logsumexp = try log_sum.add(max_f);
 
-    const target_f = if (target_logits.tensor.dtype == logsumexp.tensor.dtype)
-        target_logits
+    const target_f = if (target_logits_2d.tensor.dtype == logsumexp.tensor.dtype)
+        target_logits_2d
     else
-        try target_logits.convert(logsumexp.tensor.dtype);
+        try target_logits_2d.convert(logsumexp.tensor.dtype);
     const loss_per = try logsumexp.sub(target_f);
     const loss_per_out = if (loss_per.tensor.dtype == logits_f.tensor.dtype)
         loss_per
@@ -91,11 +97,11 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
 
     const zero_lit = ops.types.scalar_literal(logits_f.tensor.dtype, 0.0);
     const zero = try logits_f.builder.scalar_literal(zero_lit);
-    const zero_b = try zero.broadcast_in_dim(dims_n[0..], &.{});
+    const zero_b = try zero.broadcast_in_dim(&.{ batch_size, seq }, &.{});
     const attn_zero = try attn_mask.compare(zero_b, .{ .direction = .GT, .compare_type = .FLOAT });
     const masked = try loss_per_out.select(attn_zero, zero_b);
     const masked_f = if (masked.tensor.dtype == .f32) masked else try masked.convert(.f32);
-    const loss_sum = try masked_f.reduce_sum(&.{0});
+    const loss_sum = try masked_f.reduce_sum(&.{ 0, 1 });
     if (loss_sum.tensor.dtype == logits_f.tensor.dtype) return loss_sum;
     return loss_sum.convert(logits_f.tensor.dtype);
 }
@@ -137,7 +143,6 @@ pub fn run_llama_ft_demo(
     const BatchSpec = struct {
         x: TensorSpec,
         target_ids: TensorSpec,
-        row_ids: TensorSpec,
         attention_mask: TensorSpec,
         mask: TensorSpec,
         sin: TensorSpec,
@@ -174,7 +179,6 @@ pub fn run_llama_ft_demo(
     const batch_spec = BatchSpec{
         .x = .{ .dtype = .i32, .dims = dims_b_s[0..] },
         .target_ids = .{ .dtype = .i32, .dims = dims_b_s[0..] },
-        .row_ids = .{ .dtype = .i32, .dims = dims_b_s[0..] },
         .attention_mask = .{ .dtype = model_dtype, .dims = dims_b_s[0..] },
         .mask = .{ .dtype = model_dtype, .dims = dims_seq_seq[0..] },
         .sin = .{ .dtype = model_dtype, .dims = dims_seq_32[0..] },
@@ -202,8 +206,6 @@ pub fn run_llama_ft_demo(
     const device = &devices[compile_cfg.device_index];
 
     const param_count = 3 + num_layers * 7;
-
-    g_fwd_cfg = .{ .canonicalize = cfg.canonicalize };
 
     var compiled = if (train_mode)
         try zg.frontend.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, 1e-4, compile_cfg)
@@ -272,8 +274,6 @@ pub fn run_llama_ft_demo(
     defer host_x.deinit();
     var host_target_ids = try zg.utils.HostBuffer.init(allocator, shape_target, .i32);
     defer host_target_ids.deinit();
-    var host_row_ids = try zg.utils.HostBuffer.init(allocator, shape_target, .i32);
-    defer host_row_ids.deinit();
     var host_attention_mask = try zg.utils.HostBuffer.init(allocator, shape_attn, host_dtype);
     defer host_attention_mask.deinit();
     var host_mask = try zg.utils.HostBuffer.init(allocator, shape_mask, host_dtype);
@@ -352,7 +352,6 @@ pub fn run_llama_ft_demo(
     const targets = [_]usize{ 128009, 128001, 128008, 128001 };
     fill_i32_tokens_batched(host_x.as_slice(i32), batch_size, seq, &tokens);
     fill_i32_tokens_batched(host_target_ids.as_slice(i32), batch_size, seq, &targets);
-    fill_row_ids(host_row_ids.as_slice(i32));
     if (host_dtype == .bf16) {
         fill_attention_mask_bf16_batched(host_attention_mask.as_slice(u16), batch_size, seq, tokens.len);
         fill_causal_mask_bf16(host_mask.as_slice(u16), seq);
@@ -391,7 +390,6 @@ pub fn run_llama_ft_demo(
     }
     const tmp_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
     const tmp_target_ids = try upload_host_buffer(allocator, &backend_handle, device, &host_target_ids);
-    const tmp_row_ids = try upload_host_buffer(allocator, &backend_handle, device, &host_row_ids);
     const tmp_attention_mask = try upload_host_buffer(allocator, &backend_handle, device, &host_attention_mask);
     const tmp_mask = try upload_host_buffer(allocator, &backend_handle, device, &host_mask);
     const tmp_sin = try upload_host_buffer(allocator, &backend_handle, device, &host_sin);
@@ -421,7 +419,6 @@ pub fn run_llama_ft_demo(
     }
     try input_ptrs.append(allocator, tmp_x.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_target_ids.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_row_ids.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_attention_mask.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_mask.pjrt_buffer);
     try input_ptrs.append(allocator, tmp_sin.pjrt_buffer);
@@ -436,7 +433,6 @@ pub fn run_llama_ft_demo(
     const non_donatable = &.{
         @as(i64, @intCast(param_count + 0)), // x
         @as(i64, @intCast(param_count + 1)), // target_ids
-        @as(i64, @intCast(param_count + 2)), // row_ids
         @as(i64, @intCast(param_count + 3)), // attention_mask
         @as(i64, @intCast(param_count + 4)), // mask
         @as(i64, @intCast(param_count + 5)), // sin
@@ -1138,13 +1134,6 @@ fn fill_i32_tokens_batched(out: []i32, batch: usize, seq: usize, tokens: []const
         for (tokens[0..count], 0..) |t, i| {
             row[i] = @intCast(t);
         }
-    }
-}
-
-fn fill_row_ids(out: []i32) void {
-    var i: usize = 0;
-    while (i < out.len) : (i += 1) {
-        out[i] = @intCast(i);
     }
 }
 

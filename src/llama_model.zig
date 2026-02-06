@@ -19,19 +19,6 @@ pub const LayerWeights = struct {
     down_proj: zg.frontend.Tensor,
 };
 
-pub const CanonicalizeConfig = struct {
-    /// Use an explicit batch dimension of 1 for attention QKV projection.
-    qkv_batch1: bool = false,
-    /// Use an explicit batch dimension of 1 for attention output projection.
-    o_proj_batch1: bool = false,
-    /// Use an explicit batch dimension of 1 for MLP GEMMs.
-    mlp_batch1: bool = false,
-};
-
-pub const ForwardConfig = struct {
-    canonicalize: CanonicalizeConfig = .{},
-};
-
 pub fn forward(
     tokens: zg.frontend.Tensor,
     mask: zg.frontend.Tensor,
@@ -39,7 +26,6 @@ pub fn forward(
     sin: zg.frontend.Tensor,
     cos: zg.frontend.Tensor,
     weights: LlamaWeights,
-    cfg: ForwardConfig,
     eps: f32,
 ) !zg.frontend.Tensor {
     std.debug.assert(tokens.tensor.shape.dims.len == 2);
@@ -60,20 +46,33 @@ pub fn forward(
     const zero_attn_b = try zero_attn.broadcast_in_dim(attention_mask.tensor.shape.dims, &.{});
     const attn_pred = try attention_mask.compare(zero_attn_b, .{ .direction = .GT, .compare_type = .FLOAT });
 
-    const n: usize = batch_size * seq;
-    var dims_n: [1]usize = .{n};
-    const flat_tokens = try tokens.reshape(dims_n[0..]);
-    const flat = try weights.w_emb.gather_rows(flat_tokens);
-    const x0 = try flat.reshape(&.{ batch_size, seq, hidden });
+    // Gather embeddings without flattening tokens.
+    const token_ids = if (tokens.tensor.dtype == .i32 or tokens.tensor.dtype == .i64)
+        tokens
+    else
+        try tokens.convert(.i32);
+    const token_ids3 = try token_ids.reshape(&.{ batch_size, seq, 1 });
+    const gather_params: zg.pr.GatherParams = .{
+        .slice_sizes = &.{ 1, hidden },
+        .offset_dims = &.{2},
+        .collapsed_slice_dims = &.{0},
+        .start_index_map = &.{0},
+        .index_vector_dim = 2,
+    };
+    const x0 = try weights.w_emb.gather(token_ids3, gather_params);
 
     var x = x0;
     for (weights.layers) |layer| {
-        x = try layer_forward(x, causal_pred, attn_pred, sin, cos, layer, &cfg, eps);
+        x = try layer_forward(x, causal_pred, attn_pred, sin, cos, layer, eps);
     }
     const final_norm = try rms_norm(x, weights.norm, eps);
-    const flat_norm = try final_norm.reshape(&.{ n, hidden });
-    const logits2 = try flat_norm.matmul(weights.w_out);
-    return logits2.reshape(&.{ batch_size, seq, 128256 });
+    const logits2 = try final_norm.dot_general(weights.w_out, .{
+        .lhs_batch_dims = &.{},
+        .rhs_batch_dims = &.{},
+        .lhs_contracting_dims = &.{2},
+        .rhs_contracting_dims = &.{0},
+    });
+    return logits2;
 }
 
 fn layer_forward(
@@ -83,15 +82,14 @@ fn layer_forward(
     sin: zg.frontend.Tensor,
     cos: zg.frontend.Tensor,
     layer: LayerWeights,
-    cfg: *const ForwardConfig,
     eps: f32,
 ) !zg.frontend.Tensor {
     const x_norm = try rms_norm(x_in, layer.input_norm, eps);
-    const attn_out = try self_attention(x_norm, causal_pred, attn_pred, sin, cos, layer, cfg);
+    const attn_out = try self_attention(x_norm, causal_pred, attn_pred, sin, cos, layer);
     const x1 = try x_in.add(attn_out);
 
     const post_norm = try rms_norm(x1, layer.post_norm, eps);
-    const mlp_out = try mlp(post_norm, layer, cfg);
+    const mlp_out = try mlp(post_norm, layer);
     return x1.add(mlp_out);
 }
 
@@ -102,7 +100,6 @@ fn self_attention(
     sin: zg.frontend.Tensor,
     cos: zg.frontend.Tensor,
     layer: LayerWeights,
-    cfg: *const ForwardConfig,
 ) !zg.frontend.Tensor {
     const n_heads: usize = 32;
     const n_kv: usize = 8;
@@ -111,34 +108,34 @@ fn self_attention(
     std.debug.assert(x.tensor.shape.dims.len == 3);
     const batch_size: usize = x.tensor.shape.dims[0];
     const seq: usize = x.tensor.shape.dims[1];
-    const n: usize = batch_size * seq;
+    const x_dot = if (x.tensor.dtype == layer.qkv_proj.tensor.dtype)
+        x
+    else
+        try x.convert(layer.qkv_proj.tensor.dtype);
+    var lhs_contract: [1]i64 = .{2};
+    var rhs_contract: [1]i64 = .{0};
+    const qkv = try x_dot.dot_general(layer.qkv_proj, .{
+        .lhs_batch_dims = &.{},
+        .rhs_batch_dims = &.{},
+        .lhs_contracting_dims = lhs_contract[0..],
+        .rhs_contracting_dims = rhs_contract[0..],
+    });
+    // QKV layout is [Q heads | K heads | V heads].
+    const total_heads = n_heads + (2 * n_kv);
+    const qkv4 = try qkv.reshape(&.{ batch_size, seq, total_heads, head_dim });
+    const b_i64: i64 = @intCast(batch_size);
+    const s_i64: i64 = @intCast(seq);
+    const heads_i64: i64 = @intCast(n_heads);
+    const kv_i64: i64 = @intCast(n_kv);
+    const total_i64: i64 = @intCast(total_heads);
+    const head_dim_i64: i64 = @intCast(head_dim);
+    const q4 = try qkv4.slice(&.{ 0, 0, 0, 0 }, &.{ b_i64, s_i64, heads_i64, head_dim_i64 }, &.{ 1, 1, 1, 1 });
+    const k4 = try qkv4.slice(&.{ 0, 0, heads_i64, 0 }, &.{ b_i64, s_i64, heads_i64 + kv_i64, head_dim_i64 }, &.{ 1, 1, 1, 1 });
+    const v4 = try qkv4.slice(&.{ 0, 0, heads_i64 + kv_i64, 0 }, &.{ b_i64, s_i64, total_i64, head_dim_i64 }, &.{ 1, 1, 1, 1 });
 
-    const qkv = if (cfg.canonicalize.qkv_batch1) blk: {
-        const x2 = try x.reshape(&.{ n, hidden });
-        const qkv2 = try matmul_batch1(x2, layer.qkv_proj);
-        break :blk try qkv2.reshape(&.{ batch_size, seq, hidden * 3 });
-    } else blk: {
-        const x_dot = if (x.tensor.dtype == layer.qkv_proj.tensor.dtype)
-            x
-        else
-            try x.convert(layer.qkv_proj.tensor.dtype);
-        var lhs_contract: [1]i64 = .{2};
-        var rhs_contract: [1]i64 = .{0};
-        break :blk try x_dot.dot_general(layer.qkv_proj, .{
-            .lhs_batch_dims = &.{},
-            .rhs_batch_dims = &.{},
-            .lhs_contracting_dims = lhs_contract[0..],
-            .rhs_contracting_dims = rhs_contract[0..],
-        });
-    };
-    const qkv_n: i64 = @intCast(layer.qkv_proj.tensor.shape.dims[1]);
-    const q2 = try qkv.slice(&.{ 0, 0, 0 }, &.{ @intCast(batch_size), @intCast(seq), 2048 }, &.{ 1, 1, 1 });
-    const k2 = try qkv.slice(&.{ 0, 0, 2048 }, &.{ @intCast(batch_size), @intCast(seq), 2560 }, &.{ 1, 1, 1 });
-    const v2 = try qkv.slice(&.{ 0, 0, 2560 }, &.{ @intCast(batch_size), @intCast(seq), qkv_n }, &.{ 1, 1, 1 });
-
-    const q = try q2.reshape(&.{ batch_size, seq, n_heads, head_dim });
-    const k = try k2.reshape(&.{ batch_size, seq, n_kv, head_dim });
-    const v = try v2.reshape(&.{ batch_size, seq, n_kv, head_dim });
+    const q = try q4.reshape(&.{ batch_size, seq, n_heads, head_dim });
+    const k = try k4.reshape(&.{ batch_size, seq, n_kv, head_dim });
+    const v = try v4.reshape(&.{ batch_size, seq, n_kv, head_dim });
 
     const q_rot = try apply_rope_bshd(q, sin, cos);
     const k_rot = try apply_rope_bshd(k, sin, cos);
@@ -179,58 +176,21 @@ fn self_attention(
     });
 
     const out_bshd = try out_bhsd.transpose(&.{ 0, 2, 1, 3 });
-    const out = try out_bshd.reshape(&.{ batch_size, seq, hidden });
-    if (cfg.canonicalize.o_proj_batch1) {
-        const out2 = try out.reshape(&.{ n, hidden });
-        const proj2 = try matmul_batch1(out2, layer.o_proj);
-        return proj2.reshape(&.{ batch_size, seq, hidden });
-    }
 
-    const out_dot = if (out.tensor.dtype == layer.o_proj.tensor.dtype)
-        out
+    // Keep [B,S,H,D] and contract over [H,D] to avoid flattening.
+    const out_dot = if (out_bshd.tensor.dtype == layer.o_proj.tensor.dtype)
+        out_bshd
     else
-        try out.convert(layer.o_proj.tensor.dtype);
-    var out_contract: [1]i64 = .{2};
-    var w_contract: [1]i64 = .{0};
-    return out_dot.dot_general(layer.o_proj, .{
+        try out_bshd.convert(layer.o_proj.tensor.dtype);
+    const o_proj_3d = try layer.o_proj.reshape(&.{ n_heads, head_dim, hidden });
+    var out_contract: [2]i64 = .{ 2, 3 };
+    var w_contract: [2]i64 = .{ 0, 1 };
+    return out_dot.dot_general(o_proj_3d, .{
         .lhs_batch_dims = &.{},
         .rhs_batch_dims = &.{},
         .lhs_contracting_dims = out_contract[0..],
         .rhs_contracting_dims = w_contract[0..],
     });
-}
-
-fn apply_rope(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.frontend.Tensor) !zg.frontend.Tensor {
-    const seq = x.tensor.shape.dims[0];
-    const heads = x.tensor.shape.dims[1];
-    const head_dim = x.tensor.shape.dims[2];
-    const half = head_dim / 2;
-
-    const x4 = try x.reshape(&.{ seq, heads, half, 2 });
-    const seq_i: i64 = @intCast(seq);
-    const heads_i: i64 = @intCast(heads);
-    const half_i: i64 = @intCast(half);
-    const even = try x4.slice(&.{ 0, 0, 0, 0 }, &.{ seq_i, heads_i, half_i, 1 }, &.{ 1, 1, 1, 1 });
-    const odd = try x4.slice(&.{ 0, 0, 0, 1 }, &.{ seq_i, heads_i, half_i, 2 }, &.{ 1, 1, 1, 1 });
-
-    const even_3 = try even.reshape(&.{ seq, heads, half });
-    const odd_3 = try odd.reshape(&.{ seq, heads, half });
-
-    const sin_b = try sin.broadcast_in_dim(&.{ seq, heads, half }, &.{ 0, 2 });
-    const cos_b = try cos.broadcast_in_dim(&.{ seq, heads, half }, &.{ 0, 2 });
-
-    const even_cos = try even_3.mul(cos_b);
-    const odd_sin = try odd_3.mul(sin_b);
-    const out_even = try even_cos.sub(odd_sin);
-
-    const even_sin = try even_3.mul(sin_b);
-    const odd_cos = try odd_3.mul(cos_b);
-    const out_odd = try even_sin.add(odd_cos);
-
-    const out_even4 = try out_even.reshape(&.{ seq, heads, half, 1 });
-    const out_odd4 = try out_odd.reshape(&.{ seq, heads, half, 1 });
-    const interleaved = try out_even4.concatenate(&.{out_odd4}, 3);
-    return interleaved.reshape(&.{ seq, heads, head_dim });
 }
 
 fn apply_rope_bshd(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.frontend.Tensor) !zg.frontend.Tensor {
@@ -252,23 +212,29 @@ fn apply_rope_bshd(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.front
     const s_i64: i64 = @intCast(seq);
     const h_i64: i64 = @intCast(heads);
     const half_i64: i64 = @intCast(half);
-    const hd_i64: i64 = @intCast(head_dim);
 
-    const x1 = try x.slice(&.{ 0, 0, 0, 0 }, &.{ b_i64, s_i64, h_i64, half_i64 }, &.{ 1, 1, 1, 1 });
-    const x2 = try x.slice(&.{ 0, 0, 0, half_i64 }, &.{ b_i64, s_i64, h_i64, hd_i64 }, &.{ 1, 1, 1, 1 });
+    const x5 = try x.reshape(&.{ batch_size, seq, heads, half, 2 });
+    const x_even = try x5.slice(&.{ 0, 0, 0, 0, 0 }, &.{ b_i64, s_i64, h_i64, half_i64, 1 }, &.{ 1, 1, 1, 1, 1 });
+    const x_odd = try x5.slice(&.{ 0, 0, 0, 0, 1 }, &.{ b_i64, s_i64, h_i64, half_i64, 2 }, &.{ 1, 1, 1, 1, 1 });
+
+    const x_even3 = try x_even.reshape(&.{ batch_size, seq, heads, half });
+    const x_odd3 = try x_odd.reshape(&.{ batch_size, seq, heads, half });
 
     const sin_b = try sin.broadcast_in_dim(&.{ batch_size, seq, heads, half }, &.{ 1, 3 });
     const cos_b = try cos.broadcast_in_dim(&.{ batch_size, seq, heads, half }, &.{ 1, 3 });
 
-    const a = try x1.mul(cos_b);
-    const b = try x2.mul(sin_b);
-    const y1 = try a.sub(b);
+    const a = try x_even3.mul(cos_b);
+    const b = try x_odd3.mul(sin_b);
+    const y_even = try a.sub(b);
 
-    const c = try x1.mul(sin_b);
-    const d = try x2.mul(cos_b);
-    const y2 = try c.add(d);
+    const c = try x_even3.mul(sin_b);
+    const d = try x_odd3.mul(cos_b);
+    const y_odd = try c.add(d);
 
-    return y1.concatenate(&.{y2}, 3);
+    const y_even5 = try y_even.reshape(&.{ batch_size, seq, heads, half, 1 });
+    const y_odd5 = try y_odd.reshape(&.{ batch_size, seq, heads, half, 1 });
+    const out = try y_even5.concatenate(&.{y_odd5}, 4);
+    return out.reshape(&.{ batch_size, seq, heads, head_dim });
 }
 
 fn apply_attention_masks(scores: zg.frontend.Tensor, causal_pred: zg.frontend.Tensor, attn_pred: zg.frontend.Tensor) !zg.frontend.Tensor {
@@ -338,18 +304,8 @@ fn softmax_last_dim_accum_f32(x: zg.frontend.Tensor) !zg.frontend.Tensor {
     return y_f32.convert(.bf16);
 }
 
-fn mlp(x: zg.frontend.Tensor, layer: LayerWeights, cfg: *const ForwardConfig) !zg.frontend.Tensor {
+fn mlp(x: zg.frontend.Tensor, layer: LayerWeights) !zg.frontend.Tensor {
     if (x.tensor.shape.dims.len == 3) {
-        const b = x.tensor.shape.dims[0];
-        const s = x.tensor.shape.dims[1];
-        const h = x.tensor.shape.dims[2];
-        if (cfg.canonicalize.mlp_batch1) {
-            const n = b * s;
-            const x2 = try x.reshape(&.{ n, h });
-            const y2 = try mlp(x2, layer, cfg);
-            return y2.reshape(&.{ b, s, h });
-        }
-
         var lhs_contract: [1]i64 = .{2};
         var rhs_contract: [1]i64 = .{0};
         const x_dot = if (x.tensor.dtype == layer.gate_proj.tensor.dtype)
@@ -383,41 +339,11 @@ fn mlp(x: zg.frontend.Tensor, layer: LayerWeights, cfg: *const ForwardConfig) !z
     }
 
     std.debug.assert(x.tensor.shape.dims.len == 2);
-    const gate = if (cfg.canonicalize.mlp_batch1) try matmul_batch1(x, layer.gate_proj) else try x.matmul(layer.gate_proj);
-    const up = if (cfg.canonicalize.mlp_batch1) try matmul_batch1(x, layer.up_proj) else try x.matmul(layer.up_proj);
+    const gate = try x.matmul(layer.gate_proj);
+    const up = try x.matmul(layer.up_proj);
     const act = try silu_like(gate);
     const fused = try act.mul(up);
-    return if (cfg.canonicalize.mlp_batch1)
-        matmul_batch1(fused, layer.down_proj)
-    else
-        fused.matmul(layer.down_proj);
-}
-
-fn matmul_batch1(x: zg.frontend.Tensor, w: zg.frontend.Tensor) !zg.frontend.Tensor {
-    std.debug.assert(x.tensor.shape.dims.len == 2);
-    std.debug.assert(w.tensor.shape.dims.len == 2);
-    std.debug.assert(x.tensor.shape.dims[1] == w.tensor.shape.dims[0]);
-
-    const seq: usize = x.tensor.shape.dims[0];
-    const k: usize = x.tensor.shape.dims[1];
-    const n: usize = w.tensor.shape.dims[1];
-
-    // Express (M,K)x(K,N)->(M,N) as a batched dot_general with batch=1.
-    // This matches the dot_general VJP pattern we already support (batch dims on both operands).
-    const x3 = try x.reshape(&.{ 1, seq, k });
-    const w3 = try w.reshape(&.{ 1, k, n });
-
-    var batch: [1]i64 = .{0};
-    var lhs_contract: [1]i64 = .{2};
-    var rhs_contract: [1]i64 = .{1};
-    const y3 = try x3.dot_general(w3, .{
-        .lhs_batch_dims = batch[0..],
-        .rhs_batch_dims = batch[0..],
-        .lhs_contracting_dims = lhs_contract[0..],
-        .rhs_contracting_dims = rhs_contract[0..],
-    });
-    const y2 = try y3.reshape(&.{ seq, n });
-    return y2;
+    return fused.matmul(layer.down_proj);
 }
 
 fn silu_like(x: zg.frontend.Tensor) !zg.frontend.Tensor {

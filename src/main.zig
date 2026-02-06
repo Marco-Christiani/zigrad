@@ -223,7 +223,6 @@ pub fn main() !void {
             var pos_index: usize = 0;
             var train_mode = false;
             var model_dtype: ?zg.pr.DType = null;
-            var canonicalize: llama_model.CanonicalizeConfig = .{};
             var execute_only = false;
 
             for (mode_args.items) |arg| {
@@ -259,24 +258,6 @@ pub fn main() !void {
                     }
                     continue;
                 }
-                if (std.mem.eql(u8, arg, "--canonical-shapes")) {
-                    canonicalize.qkv_batch1 = true;
-                    canonicalize.o_proj_batch1 = true;
-                    canonicalize.mlp_batch1 = true;
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--canonical-qkv")) {
-                    canonicalize.qkv_batch1 = true;
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--canonical-o")) {
-                    canonicalize.o_proj_batch1 = true;
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--canonical-mlp")) {
-                    canonicalize.mlp_batch1 = true;
-                    continue;
-                }
                 if (std.mem.eql(u8, arg, "--execute-only")) {
                     execute_only = true;
                     continue;
@@ -303,7 +284,6 @@ pub fn main() !void {
                 .dtype = dtype,
                 .seq = seq,
                 .batch = batch,
-                .canonicalize = canonicalize,
                 .execute_only = execute_only,
             };
 
