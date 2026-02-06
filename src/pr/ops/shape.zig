@@ -92,6 +92,101 @@ pub const reshape = struct {
 };
 
 // ============================================================================
+// Iota
+// ============================================================================
+
+pub const iota = struct {
+    pub const arity = .{ .in = 0, .out = 1 };
+
+    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
+        const inputs = ctx.inputs();
+        const outputs = ctx.outputs();
+        const params = ctx.params();
+
+        if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
+
+        const out_shape = pr.param_out_shape(params) orelse return error.InvalidParams;
+        const out_dtype = pr.param_out_dtype(params) orelse return error.InvalidParams;
+        const iota_dim = pr.param_iota_dimension(params) orelse return error.InvalidParams;
+        const out = try ctx.tensor_of(outputs[0]);
+
+        if (!std.mem.eql(usize, out.shape.dims, out_shape)) {
+            log.err(
+                "iota out dims mismatch: out={any} param_out={any}",
+                .{ out.shape.dims, out_shape },
+            );
+            return error.IotaTypeMismatch;
+        }
+        if (out.dtype != out_dtype) {
+            log.err(
+                "iota dtype mismatch: out={s} param_out={s}",
+                .{ @tagName(out.dtype), @tagName(out_dtype) },
+            );
+            return error.IotaTypeMismatch;
+        }
+        if (out_dtype != .i32 and out_dtype != .i64) {
+            log.err(
+                "iota dtype must be integer: dtype={s}",
+                .{@tagName(out_dtype)},
+            );
+            return error.IotaTypeMismatch;
+        }
+        if (iota_dim < 0 or @as(usize, @intCast(iota_dim)) >= out.shape.rank()) {
+            log.err(
+                "iota dimension out of range: dim={d} rank={d}",
+                .{ iota_dim, out.shape.rank() },
+            );
+            return error.IotaTypeMismatch;
+        }
+    }
+
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+        if (ctx.inputs.len != 0) return error.InvalidEqnArity;
+        const out_shape = pr.param_out_shape(ctx.params) orelse return error.InvalidParams;
+        const out_dtype = pr.param_out_dtype(ctx.params) orelse return error.InvalidParams;
+        const iota_dim = pr.param_iota_dimension(ctx.params) orelse return error.InvalidParams;
+        if (out_dtype != .i32 and out_dtype != .i64) return error.IotaTypeMismatch;
+        if (iota_dim < 0 or @as(usize, @intCast(iota_dim)) >= out_shape.len) return error.IotaTypeMismatch;
+        return .{ .tensor = .{ .dtype = out_dtype, .shape = .{ .dims = out_shape } } };
+    }
+
+    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+
+        if (inputs.len != 0 or outputs.len != 1) return error.InvalidProgram;
+
+        const iota_dim = pr.param_iota_dimension(params) orelse return error.InvalidProgram;
+        const out_id = outputs[0];
+        const out_tensor = try ctx.tensor_of(out_id);
+        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
+
+        const op = stablehlo.iota(ctx.mlir_ctx, iota_dim, out_type, ctx.loc);
+        ctx.block.append_operation(op);
+        ctx.set_value(out_id, op.result(0));
+    }
+
+    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+
+        const iota_dim = pr.param_iota_dimension(params) orelse return error.UnsupportedEqn;
+        const out_tensor = ctx.tensor_of(outputs[0]);
+        const out = try ctx.builder.iota(out_tensor.dtype, out_tensor.shape.dims, iota_dim);
+        ctx.set_primal(outputs[0], out);
+    }
+
+    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
+        const out_shape = pr.param_out_shape(ctx.params()) orelse return;
+        const out_dtype = pr.param_out_dtype(ctx.params()) orelse return;
+        const iota_dim = pr.param_iota_dimension(ctx.params()) orelse return;
+        try writer.print("dim={d} dtype={s} shape=", .{ iota_dim, @tagName(out_dtype) });
+        try format_shape(writer, out_shape);
+    }
+};
+
+// ============================================================================
 // Transpose
 // ============================================================================
 

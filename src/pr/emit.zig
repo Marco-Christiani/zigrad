@@ -115,6 +115,9 @@ fn emit_params(params: []const pr.Param, writer: anytype) !void {
                 }
                 try writer.writeAll("]");
             },
+            .iota_dimension => |dim| {
+                try writer.print(" iota_dim={d}", .{dim});
+            },
             .out_dtype => |dt| {
                 try writer.print(" dtype={s}", .{@tagName(dt)});
             },

@@ -33,6 +33,7 @@ pub fn OpFor(comptime prim: pr.Prim) type {
         .dot => contraction.dot,
         .dot_general => contraction.dot_general,
         .reshape => shape.reshape,
+        .iota => shape.iota,
         .transpose => shape.transpose,
         .broadcast_in_dim => shape.broadcast_in_dim,
         .slice => shape.slice,

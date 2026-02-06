@@ -90,6 +90,7 @@ pub const Prim = enum {
     dot,
     dot_general,
     reshape,
+    iota,
     broadcast_in_dim,
     transpose,
     slice,
@@ -107,6 +108,7 @@ pub const Param = union(enum) {
     permutation: []const i64,
     reduce_axes: []const i64,
     out_dtype: DType,
+    iota_dimension: i64,
     compare: CompareParams,
     gather: GatherParams,
     scatter: ScatterParams,
@@ -259,6 +261,7 @@ pub const ValidationError = error{
     ReduceMaxTypeMismatch,
     CallTypeMismatch,
     CustomCallTypeMismatch,
+    IotaTypeMismatch,
     DuplicateFunctionName,
 };
 
@@ -661,6 +664,16 @@ pub fn param_permutation(params: []const Param) ?[]const i64 {
     return null;
 }
 
+pub fn param_iota_dimension(params: []const Param) ?i64 {
+    for (params) |p| {
+        switch (p) {
+            .iota_dimension => |v| return v,
+            else => {},
+        }
+    }
+    return null;
+}
+
 pub fn param_reduce_axes(params: []const Param) ?[]const i64 {
     for (params) |p| {
         switch (p) {
@@ -997,6 +1010,17 @@ pub fn validate_function(func: Function) ValidationError!void {
                 if (operand.dtype != out.dtype) return error.ReshapeTypeMismatch;
                 if (num_elements(operand.shape.dims) != num_elements(out.shape.dims)) return error.ReshapeTypeMismatch;
             },
+            .iota => {
+                if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
+                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const out_dtype = param_out_dtype(params) orelse return error.InvalidParams;
+                const iota_dim = param_iota_dimension(params) orelse return error.InvalidParams;
+                const out = try expect_tensor(func, outputs[0]);
+                if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.IotaTypeMismatch;
+                if (out.dtype != out_dtype) return error.IotaTypeMismatch;
+                if (out_dtype != .i32 and out_dtype != .i64) return error.IotaTypeMismatch;
+                if (iota_dim < 0 or @as(usize, @intCast(iota_dim)) >= out.shape.rank()) return error.IotaTypeMismatch;
+            },
             .broadcast_in_dim => {
                 if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
                 const out_shape = param_out_shape(params) orelse return error.InvalidParams;
@@ -1251,6 +1275,16 @@ pub const FunctionBuilder = struct {
                 const operand = try self.tensor_of(inputs[0]);
                 if (num_elements(operand.shape.dims) != num_elements(out_shape)) return error.ReshapeTypeMismatch;
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } } };
+            },
+            .iota => {
+                if (inputs.len != 0) return error.InvalidEqnArity;
+                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const out_dtype = param_out_dtype(params) orelse return error.InvalidParams;
+                const iota_dim = param_iota_dimension(params) orelse return error.InvalidParams;
+                if (out_dtype != .i32 and out_dtype != .i64) return error.IotaTypeMismatch;
+                if (iota_dim < 0) return error.IotaTypeMismatch;
+                if (@as(usize, @intCast(iota_dim)) >= out_shape.len) return error.IotaTypeMismatch;
+                return .{ .tensor = .{ .dtype = out_dtype, .shape = .{ .dims = out_shape } } };
             },
             .broadcast_in_dim => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
@@ -1531,6 +1565,16 @@ pub const FunctionBuilder = struct {
 
     pub fn dot(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
         return self.emit(.dot, &.{ lhs, rhs }, &.{});
+    }
+
+    pub fn iota(self: *FunctionBuilder, out_dtype: DType, out_dims: []const usize, iota_dim: i64) BuildError!VarId {
+        const a = self.alloc();
+        const out_shape = try a.dupe(usize, out_dims);
+        return self.emit(.iota, &.{}, &.{
+            .{ .out_shape = out_shape },
+            .{ .out_dtype = out_dtype },
+            .{ .iota_dimension = iota_dim },
+        });
     }
 
     pub fn reshape(self: *FunctionBuilder, operand: VarId, out_dims: []const usize) BuildError!VarId {

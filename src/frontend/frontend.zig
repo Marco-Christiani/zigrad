@@ -183,6 +183,11 @@ pub const Builder = struct {
         return self.tensor_from_id(id);
     }
 
+    pub fn iota(self: *Builder, out_dtype: pr.DType, out_dims: []const usize, iota_dim: i64) !Tensor {
+        const id = try self.builder.iota(out_dtype, out_dims, iota_dim);
+        return self.tensor_from_id(id);
+    }
+
     pub fn finish(self: *Builder, returns: []const Tensor) !pr.Function {
         const ids = try self.program.allocator().alloc(pr.VarId, returns.len);
         for (returns, 0..) |t, i| ids[i] = t.id;
