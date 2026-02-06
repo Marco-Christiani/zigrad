@@ -10,6 +10,7 @@ pub const Span = core.Span;
 pub const Literal = core.Literal;
 pub const Prim = core.Prim;
 pub const Param = core.Param;
+pub const GatherParams = core.GatherParams;
 
 pub const Eqn = core.Eqn;
 

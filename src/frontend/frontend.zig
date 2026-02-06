@@ -54,6 +54,10 @@ pub const Tensor = struct {
         return self.builder.emit_gather_rows(self, indices, self.options);
     }
 
+    pub fn gather(self: Tensor, indices: Tensor, params: pr.GatherParams) !Tensor {
+        return self.builder.emit_gather(self, indices, params, self.options);
+    }
+
     pub fn gather_2d(self: Tensor, indices: Tensor) !Tensor {
         return self.builder.emit_gather_2d(self, indices, self.options);
     }
@@ -284,6 +288,28 @@ pub const Builder = struct {
         };
 
         const params_with_opts = try self.params_with_options(&.{.{ .gather = params }}, options);
+        const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, params_with_opts);
+        return self.tensor_from_id(id);
+    }
+
+    fn emit_gather(self: *Builder, operand: Tensor, indices: Tensor, params: pr.GatherParams, options: OpOptions) !Tensor {
+        try self.assert_same_builder(operand, indices);
+        const a = self.program.allocator();
+
+        const slice_sizes = try a.dupe(i64, params.slice_sizes);
+        const offset_dims = try a.dupe(i64, params.offset_dims);
+        const collapsed_slice_dims = try a.dupe(i64, params.collapsed_slice_dims);
+        const start_index_map = try a.dupe(i64, params.start_index_map);
+
+        const gparams: pr.GatherParams = .{
+            .slice_sizes = slice_sizes,
+            .offset_dims = offset_dims,
+            .collapsed_slice_dims = collapsed_slice_dims,
+            .start_index_map = start_index_map,
+            .index_vector_dim = params.index_vector_dim,
+        };
+
+        const params_with_opts = try self.params_with_options(&.{.{ .gather = gparams }}, options);
         const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, params_with_opts);
         return self.tensor_from_id(id);
     }

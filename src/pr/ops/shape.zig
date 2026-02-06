@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const mlir = @import("../../ffi/mlir/mlir.zig");
 const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
+const log = std.log.scoped(.@"zg/shape");
 
 // ============================================================================
 // Reshape
@@ -24,9 +25,27 @@ pub const reshape = struct {
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
 
-        if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.ReshapeTypeMismatch;
-        if (operand.dtype != out.dtype) return error.ReshapeTypeMismatch;
-        if (num_elements(operand.shape.dims) != num_elements(out.shape.dims)) return error.ReshapeTypeMismatch;
+        if (!std.mem.eql(usize, out.shape.dims, out_shape)) {
+            log.err(
+                "reshape out dims mismatch: operand={any} out={any} param_out={any}",
+                .{ operand.shape.dims, out.shape.dims, out_shape },
+            );
+            return error.ReshapeTypeMismatch;
+        }
+        if (operand.dtype != out.dtype) {
+            log.err(
+                "reshape dtype mismatch: operand={s} out={s}",
+                .{ @tagName(operand.dtype), @tagName(out.dtype) },
+            );
+            return error.ReshapeTypeMismatch;
+        }
+        if (num_elements(operand.shape.dims) != num_elements(out.shape.dims)) {
+            log.err(
+                "reshape element count mismatch: operand={any} out={any}",
+                .{ operand.shape.dims, out.shape.dims },
+            );
+            return error.ReshapeTypeMismatch;
+        }
     }
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
@@ -727,10 +746,42 @@ pub const gather = struct {
         const indices = try ctx.tensor_of(inputs[1]);
         const out = try ctx.tensor_of(outputs[0]);
 
-        if (out.dtype != operand.dtype) return error.GatherTypeMismatch;
-        if (indices.dtype != .i32 and indices.dtype != .i64) return error.GatherTypeMismatch;
-        const expected = gather_output_dims_local(operand.shape.dims, indices.shape.dims, gparams) orelse return error.GatherTypeMismatch;
-        if (!std.mem.eql(usize, out.shape.dims, expected)) return error.GatherTypeMismatch;
+        if (out.dtype != operand.dtype) {
+            log.err(
+                "gather dtype mismatch: operand={s} out={s}",
+                .{ @tagName(operand.dtype), @tagName(out.dtype) },
+            );
+            return error.GatherTypeMismatch;
+        }
+        if (indices.dtype != .i32 and indices.dtype != .i64) {
+            log.err(
+                "gather indices dtype mismatch: indices={s}",
+                .{@tagName(indices.dtype)},
+            );
+            return error.GatherTypeMismatch;
+        }
+        const expected = gather_output_dims_local(operand.shape.dims, indices.shape.dims, gparams) orelse {
+            log.err(
+                "gather output shape invalid: operand={any} indices={any} params(slice={any}, offset={any}, collapsed={any}, map={any}, index_vec_dim={d})",
+                .{
+                    operand.shape.dims,
+                    indices.shape.dims,
+                    gparams.slice_sizes,
+                    gparams.offset_dims,
+                    gparams.collapsed_slice_dims,
+                    gparams.start_index_map,
+                    gparams.index_vector_dim,
+                },
+            );
+            return error.GatherTypeMismatch;
+        };
+        if (!std.mem.eql(usize, out.shape.dims, expected)) {
+            log.err(
+                "gather out dims mismatch: operand={any} indices={any} out={any} expected={any}",
+                .{ operand.shape.dims, indices.shape.dims, out.shape.dims, expected },
+            );
+            return error.GatherTypeMismatch;
+        }
     }
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
