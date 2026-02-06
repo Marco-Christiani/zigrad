@@ -115,6 +115,9 @@ fn emit_params(params: []const pr.Param, writer: anytype) !void {
                 }
                 try writer.writeAll("]");
             },
+            .out_dtype => |dt| {
+                try writer.print(" dtype={s}", .{@tagName(dt)});
+            },
             .call_callee => |name| {
                 try writer.print(" callee=\"{s}\"", .{name});
             },

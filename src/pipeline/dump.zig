@@ -91,8 +91,7 @@ fn emit_program(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const
     }
     for (program.functions, 0..) |func, i| {
         if (i > 0) try out.writeAll("\n");
-        var emitter = zxpr.Emitter.init(out, func);
-        try emitter.emit();
+        try zxpr.emit(func, out, .plain, .{});
     }
 }
 
