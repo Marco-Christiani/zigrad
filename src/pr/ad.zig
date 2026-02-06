@@ -147,3 +147,85 @@ test "vjp_with_value returns primals plus gradients" {
 
     try std.testing.expectEqual(@as(usize, func.returns.len + func.params.len), vjp_func.returns.len);
 }
+
+test "dot_general vjp supports 2 batch dims" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const lhs = try b.param_tensor(.f32, &.{ 2, 3, 4, 5 }); // [B,H,M,K]
+    const rhs = try b.param_tensor(.f32, &.{ 2, 3, 5, 6 }); // [B,H,K,N]
+    const out = try b.dot_general(lhs, rhs, .{
+        .lhs_batch_dims = &.{ 0, 1 },
+        .rhs_batch_dims = &.{ 0, 1 },
+        .lhs_contracting_dims = &.{3},
+        .rhs_contracting_dims = &.{2},
+    });
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    try pr.validate_function(vjp_func);
+
+    try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
+    try std.testing.expectEqual(@as(usize, func.params.len), vjp_func.returns.len);
+
+    for (func.params, 0..) |param_id, i| {
+        const p_t = func.avals[@intCast(param_id)].as_tensor().?;
+        const g_id = vjp_func.returns[i];
+        const g_t = vjp_func.avals[@intCast(g_id)].as_tensor().?;
+        try std.testing.expectEqual(p_t.dtype, g_t.dtype);
+        try std.testing.expect(std.mem.eql(usize, p_t.shape.dims, g_t.shape.dims));
+    }
+}
+
+test "dot_general vjp supports non-prefix batch dims" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    // lhs/rhs: [B,S,H,D]
+    const lhs = try b.param_tensor(.f32, &.{ 2, 4, 3, 5 });
+    const rhs = try b.param_tensor(.f32, &.{ 2, 4, 3, 5 });
+    const out = try b.dot_general(lhs, rhs, .{
+        .lhs_batch_dims = &.{ 0, 2 },
+        .rhs_batch_dims = &.{ 0, 2 },
+        .lhs_contracting_dims = &.{3},
+        .rhs_contracting_dims = &.{3},
+    });
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    try pr.validate_function(vjp_func);
+}
+
+test "dot_general vjp supports differing batch dim positions" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    // lhs: [B,H,S,S], rhs: [B,S,H,D] -> out: [B,H,S,D]
+    const lhs = try b.param_tensor(.f32, &.{ 2, 3, 4, 4 });
+    const rhs = try b.param_tensor(.f32, &.{ 2, 4, 3, 5 });
+    const out = try b.dot_general(lhs, rhs, .{
+        .lhs_batch_dims = &.{ 0, 1 },
+        .rhs_batch_dims = &.{ 0, 2 },
+        .lhs_contracting_dims = &.{3},
+        .rhs_contracting_dims = &.{1},
+    });
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    try pr.validate_function(vjp_func);
+}

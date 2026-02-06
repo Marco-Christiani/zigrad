@@ -113,15 +113,28 @@ fn self_attention(
     const seq: usize = x.tensor.shape.dims[1];
     const n: usize = batch_size * seq;
 
-    const x2 = try x.reshape(&.{ n, hidden });
-    const qkv2 = if (cfg.canonicalize.qkv_batch1)
-        try matmul_batch1(x2, layer.qkv_proj)
-    else
-        try x2.matmul(layer.qkv_proj);
-    const n_i64: i64 = @intCast(n);
-    const q2 = try qkv2.slice(&.{ 0, 0 }, &.{ n_i64, 2048 }, &.{ 1, 1 });
-    const k2 = try qkv2.slice(&.{ 0, 2048 }, &.{ n_i64, 2560 }, &.{ 1, 1 });
-    const v2 = try qkv2.slice(&.{ 0, 2560 }, &.{ n_i64, 3072 }, &.{ 1, 1 });
+    const qkv = if (cfg.canonicalize.qkv_batch1) blk: {
+        const x2 = try x.reshape(&.{ n, hidden });
+        const qkv2 = try matmul_batch1(x2, layer.qkv_proj);
+        break :blk try qkv2.reshape(&.{ batch_size, seq, hidden * 3 });
+    } else blk: {
+        const x_dot = if (x.tensor.dtype == layer.qkv_proj.tensor.dtype)
+            x
+        else
+            try x.convert(layer.qkv_proj.tensor.dtype);
+        var lhs_contract: [1]i64 = .{2};
+        var rhs_contract: [1]i64 = .{0};
+        break :blk try x_dot.dot_general(layer.qkv_proj, .{
+            .lhs_batch_dims = &.{},
+            .rhs_batch_dims = &.{},
+            .lhs_contracting_dims = lhs_contract[0..],
+            .rhs_contracting_dims = rhs_contract[0..],
+        });
+    };
+    const qkv_n: i64 = @intCast(layer.qkv_proj.tensor.shape.dims[1]);
+    const q2 = try qkv.slice(&.{ 0, 0, 0 }, &.{ @intCast(batch_size), @intCast(seq), 2048 }, &.{ 1, 1, 1 });
+    const k2 = try qkv.slice(&.{ 0, 0, 2048 }, &.{ @intCast(batch_size), @intCast(seq), 2560 }, &.{ 1, 1, 1 });
+    const v2 = try qkv.slice(&.{ 0, 0, 2560 }, &.{ @intCast(batch_size), @intCast(seq), qkv_n }, &.{ 1, 1, 1 });
 
     const q = try q2.reshape(&.{ batch_size, seq, n_heads, head_dim });
     const k = try k2.reshape(&.{ batch_size, seq, n_kv, head_dim });
@@ -133,22 +146,13 @@ fn self_attention(
     const k_rep = try repeat_kv_bshd(k_rot, n_heads / n_kv);
     const v_rep = try repeat_kv_bshd(v, n_heads / n_kv);
 
-    // Collapse (batch, head) into a single batch dimension so the attention
-    // dot_general matches our existing VJP support.
-    const bh = batch_size * n_heads;
-    const q_bhsd = try q_rot.transpose(&.{ 0, 2, 1, 3 });
-    const k_bhds = try k_rep.transpose(&.{ 0, 2, 3, 1 });
-    const v_bhsd = try v_rep.transpose(&.{ 0, 2, 1, 3 });
-
-    const q_t = try q_bhsd.reshape(&.{ bh, seq, head_dim });
-    const k_t = try k_bhds.reshape(&.{ bh, head_dim, seq });
-    const v_t = try v_bhsd.reshape(&.{ bh, seq, head_dim });
-
-    const scores = try q_t.dot_general(k_t, .{
-        .lhs_batch_dims = &.{0},
-        .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{2},
-        .rhs_contracting_dims = &.{1},
+    // scores: [B,H,S,S]
+    // q_rot: [B,S,H,D], k_rep: [B,S,H,D]
+    const scores = try q_rot.dot_general(k_rep, .{
+        .lhs_batch_dims = &.{ 0, 2 },
+        .rhs_batch_dims = &.{ 0, 2 },
+        .lhs_contracting_dims = &.{3},
+        .rhs_contracting_dims = &.{3},
     });
 
     const scores_f32 = if (scores.tensor.dtype == .bf16) try scores.convert(.f32) else scores;
@@ -159,31 +163,41 @@ fn self_attention(
     const scale_b = try scale_t.broadcast_in_dim(scores_f32.tensor.shape.dims, &.{});
     const scaled = try scores_f32.mul(scale_b);
 
-    // Broadcast attention mask [B,S] -> [B,H,S] -> [B*H,S] so it can mask key dim.
-    const attn_bhs = try attn_pred.broadcast_in_dim(&.{ batch_size, n_heads, seq }, &.{ 0, 2 });
-    const attn_bh = try attn_bhs.reshape(&.{ bh, seq });
-    const masked = try apply_attention_masks(scaled, causal_pred, attn_bh);
+    const masked = try apply_attention_masks(scaled, causal_pred, attn_pred);
 
     // Keep softmax math in f32 (JAX default) even when model dtype is bf16.
     const attn_f32 = try softmax_last_dim_accum_f32(masked);
-    const attn = if (attn_f32.tensor.dtype == v_t.tensor.dtype) attn_f32 else try attn_f32.convert(v_t.tensor.dtype);
+    const attn = if (attn_f32.tensor.dtype == v_rep.tensor.dtype) attn_f32 else try attn_f32.convert(v_rep.tensor.dtype);
 
-    const out_bhsd = try attn.dot_general(v_t, .{
-        .lhs_batch_dims = &.{0},
-        .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{2},
+    // out_bhsd: [B,H,S,D]
+    // attn: [B,H,S,S], v_rep: [B,S,H,D]
+    const out_bhsd = try attn.dot_general(v_rep, .{
+        .lhs_batch_dims = &.{ 0, 1 },
+        .rhs_batch_dims = &.{ 0, 2 },
+        .lhs_contracting_dims = &.{3},
         .rhs_contracting_dims = &.{1},
     });
 
-    const out4 = try out_bhsd.reshape(&.{ batch_size, n_heads, seq, head_dim });
-    const out_bshd = try out4.transpose(&.{ 0, 2, 1, 3 });
+    const out_bshd = try out_bhsd.transpose(&.{ 0, 2, 1, 3 });
     const out = try out_bshd.reshape(&.{ batch_size, seq, hidden });
-    const out2 = try out.reshape(&.{ n, hidden });
-    const proj2 = if (cfg.canonicalize.o_proj_batch1)
-        try matmul_batch1(out2, layer.o_proj)
+    if (cfg.canonicalize.o_proj_batch1) {
+        const out2 = try out.reshape(&.{ n, hidden });
+        const proj2 = try matmul_batch1(out2, layer.o_proj);
+        return proj2.reshape(&.{ batch_size, seq, hidden });
+    }
+
+    const out_dot = if (out.tensor.dtype == layer.o_proj.tensor.dtype)
+        out
     else
-        try out2.matmul(layer.o_proj);
-    return proj2.reshape(&.{ batch_size, seq, hidden });
+        try out.convert(layer.o_proj.tensor.dtype);
+    var out_contract: [1]i64 = .{2};
+    var w_contract: [1]i64 = .{0};
+    return out_dot.dot_general(layer.o_proj, .{
+        .lhs_batch_dims = &.{},
+        .rhs_batch_dims = &.{},
+        .lhs_contracting_dims = out_contract[0..],
+        .rhs_contracting_dims = w_contract[0..],
+    });
 }
 
 fn apply_rope(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.frontend.Tensor) !zg.frontend.Tensor {
@@ -329,10 +343,43 @@ fn mlp(x: zg.frontend.Tensor, layer: LayerWeights, cfg: *const ForwardConfig) !z
         const b = x.tensor.shape.dims[0];
         const s = x.tensor.shape.dims[1];
         const h = x.tensor.shape.dims[2];
-        const n = b * s;
-        const x2 = try x.reshape(&.{ n, h });
-        const y2 = try mlp(x2, layer, cfg);
-        return y2.reshape(&.{ b, s, h });
+        if (cfg.canonicalize.mlp_batch1) {
+            const n = b * s;
+            const x2 = try x.reshape(&.{ n, h });
+            const y2 = try mlp(x2, layer, cfg);
+            return y2.reshape(&.{ b, s, h });
+        }
+
+        var lhs_contract: [1]i64 = .{2};
+        var rhs_contract: [1]i64 = .{0};
+        const x_dot = if (x.tensor.dtype == layer.gate_proj.tensor.dtype)
+            x
+        else
+            try x.convert(layer.gate_proj.tensor.dtype);
+        const gate = try x_dot.dot_general(layer.gate_proj, .{
+            .lhs_batch_dims = &.{},
+            .rhs_batch_dims = &.{},
+            .lhs_contracting_dims = lhs_contract[0..],
+            .rhs_contracting_dims = rhs_contract[0..],
+        });
+        const up = try x_dot.dot_general(layer.up_proj, .{
+            .lhs_batch_dims = &.{},
+            .rhs_batch_dims = &.{},
+            .lhs_contracting_dims = lhs_contract[0..],
+            .rhs_contracting_dims = rhs_contract[0..],
+        });
+        const act = try silu_like(gate);
+        const fused = try act.mul(up);
+        const fused_dot = if (fused.tensor.dtype == layer.down_proj.tensor.dtype)
+            fused
+        else
+            try fused.convert(layer.down_proj.tensor.dtype);
+        return fused_dot.dot_general(layer.down_proj, .{
+            .lhs_batch_dims = &.{},
+            .rhs_batch_dims = &.{},
+            .lhs_contracting_dims = lhs_contract[0..],
+            .rhs_contracting_dims = rhs_contract[0..],
+        });
     }
 
     std.debug.assert(x.tensor.shape.dims.len == 2);
@@ -404,13 +451,31 @@ fn silu_like(x: zg.frontend.Tensor) !zg.frontend.Tensor {
 
 pub fn rms_norm(x: zg.frontend.Tensor, weight: zg.frontend.Tensor, eps: f32) !zg.frontend.Tensor {
     if (x.tensor.shape.dims.len == 3) {
-        const b = x.tensor.shape.dims[0];
-        const s = x.tensor.shape.dims[1];
         const h = x.tensor.shape.dims[2];
-        const n = b * s;
-        const x2 = try x.reshape(&.{ n, h });
-        const y2 = try rms_norm(x2, weight, eps);
-        return y2.reshape(&.{ b, s, h });
+        const orig_dtype = x.tensor.dtype;
+        const x_f32 = if (orig_dtype == .f32) x else try x.convert(.f32);
+        const w_f32 = if (weight.tensor.dtype == .f32) weight else try weight.convert(.f32);
+
+        const hidden_f: f32 = @floatFromInt(h);
+        const mean_scale_lit = ops.types.scalar_literal(.f32, 1.0 / hidden_f);
+        const mean_scale = try x_f32.builder.scalar_literal(mean_scale_lit);
+
+        const x_sq = try x_f32.mul(x_f32);
+        const sum = try x_sq.reduce_sum(&.{2});
+        const mean_scale_b = try mean_scale.broadcast_in_dim(&.{ x_f32.tensor.shape.dims[0], x_f32.tensor.shape.dims[1] }, &.{});
+        const mean = try sum.mul(mean_scale_b);
+
+        const eps_lit = ops.types.scalar_literal(.f32, eps);
+        const eps_tensor = try x_f32.builder.scalar_literal(eps_lit);
+        const eps_b = try eps_tensor.broadcast_in_dim(&.{ x_f32.tensor.shape.dims[0], x_f32.tensor.shape.dims[1] }, &.{});
+        const denom = try mean.add(eps_b);
+        const inv = try denom.rsqrt();
+        const inv_b = try inv.broadcast_in_dim(x_f32.tensor.shape.dims, &.{ 0, 1 });
+        const normed = try x_f32.mul(inv_b);
+
+        const w_b = try w_f32.broadcast_in_dim(x_f32.tensor.shape.dims, &.{2});
+        const y_f32 = try normed.mul(w_b);
+        return if (orig_dtype == .f32) y_f32 else y_f32.convert(orig_dtype);
     }
 
     std.debug.assert(x.tensor.shape.dims.len == 2);

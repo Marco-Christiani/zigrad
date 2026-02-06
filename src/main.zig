@@ -84,6 +84,13 @@ pub fn main() !void {
             }
             return demos.print_pr(gpa);
         }
+        if (std.mem.eql(u8, m, "tvm-zxpr")) {
+            if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.print_tvm_kernelize_pr(gpa);
+        }
     }
 
     const plugin_path = std.process.getEnvVarOwned(gpa, "PJRT_PLUGIN_PATH") catch |err| {
@@ -369,6 +376,7 @@ fn print_usage() !void {
         \\
         \\modes:
         \\  print-pr                     prints the PR for the demo program
+        \\  tvm-zxpr                     prints a kernelized TVM region in zxpr
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
