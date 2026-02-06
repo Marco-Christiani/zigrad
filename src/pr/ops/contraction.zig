@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const mlir = @import("../../ffi/mlir/mlir.zig");
 const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
+const log = std.log.scoped(.@"zg/contraction");
 
 // ============================================================================
 // Dot (Matrix Multiply)
@@ -131,7 +132,21 @@ pub const dot_general = struct {
         const out = try ctx.tensor_of(outputs[0]);
         if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotGeneralTypeMismatch;
 
-        if (!pr.dot_general_matches(lhs, rhs, out.shape.dims, dg_params)) return error.DotGeneralTypeMismatch;
+        if (!pr.dot_general_matches(lhs, rhs, out.shape.dims, dg_params)) {
+            log.err(
+                "dot_general shape mismatch: lhs={any} rhs={any} out={any} batch(lhs={any}, rhs={any}) contract(lhs={any}, rhs={any})",
+                .{
+                    lhs.shape.dims,
+                    rhs.shape.dims,
+                    out.shape.dims,
+                    dg_params.lhs_batch_dims,
+                    dg_params.rhs_batch_dims,
+                    dg_params.lhs_contracting_dims,
+                    dg_params.rhs_contracting_dims,
+                },
+            );
+            return error.DotGeneralTypeMismatch;
+        }
     }
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
@@ -203,7 +218,11 @@ pub const dot_general = struct {
             //   rhs: [B..., K, N]
             //   out: [B..., M, N]
             // Output batch dims order follows lhs_batch_dims order.
-            if (try try_batched_matmul_vjp(ctx, inputs[0], inputs[1], out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
+            if (try maybe_batched_matmul_vjp(ctx, inputs[0], inputs[1], out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
+                break :blk .{ pair.lhs, pair.rhs };
+            }
+
+            if (try maybe_general_dot_vjp(ctx, inputs[0], inputs[1], out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
                 break :blk .{ pair.lhs, pair.rhs };
             }
 
@@ -274,7 +293,98 @@ pub const dot_general = struct {
 
 const BatchedMatmulVjpPair = struct { lhs: pr.VarId, rhs: pr.VarId };
 
-fn try_batched_matmul_vjp(
+/// VJP for dot_general with multiple contracting dims.
+///
+/// We canonicalize layouts into [batch..., other..., contract...] order, compute
+/// gradients in that canonical order, then transpose back to the original
+/// operand dim order.
+fn maybe_general_dot_vjp(
+    ctx: types.AdContext,
+    lhs_id: pr.VarId,
+    rhs_id: pr.VarId,
+    out_cot: pr.VarId,
+    lhs_primal: pr.VarId,
+    rhs_primal: pr.VarId,
+    params: pr.DotGeneralParams,
+) types.AdError!?BatchedMatmulVjpPair {
+    // General dot_general VJP for multiple contracting dims.
+    // For out = dot_general(lhs, rhs):
+    // d_lhs = dot_general(d_out, rhs, contract over rhs_other dims)
+    // d_rhs = dot_general(lhs, d_out, contract over lhs_other dims)
+    // where other are non-batch, non-contract dims.
+    if (params.lhs_contracting_dims.len != params.rhs_contracting_dims.len) return null;
+    if (params.lhs_contracting_dims.len == 0) return null;
+    if (params.lhs_batch_dims.len != params.rhs_batch_dims.len) return null;
+
+    const lhs_t = ctx.tensor_of(lhs_id);
+    const rhs_t = ctx.tensor_of(rhs_id);
+    const out_t = ctx.tensor_of(out_cot);
+
+    const lhs_rank = lhs_t.shape.rank();
+    const rhs_rank = rhs_t.shape.rank();
+    const batch_len: usize = params.lhs_batch_dims.len;
+
+    const lhs_other = try collect_other_dims(ctx.allocator, lhs_rank, params.lhs_batch_dims, params.lhs_contracting_dims);
+    defer ctx.allocator.free(lhs_other);
+    const rhs_other = try collect_other_dims(ctx.allocator, rhs_rank, params.rhs_batch_dims, params.rhs_contracting_dims);
+    defer ctx.allocator.free(rhs_other);
+
+    const expected_out_rank = batch_len + lhs_other.len + rhs_other.len;
+    if (out_t.shape.rank() != expected_out_rank) return error.UnsupportedEqn;
+
+    // out_cot batch dims are always prefix [0..batch_len).
+    const out_batch = try build_range(ctx.allocator, 0, batch_len);
+    defer ctx.allocator.free(out_batch);
+
+    // In out = [batch..., lhs_other..., rhs_other...], rhs_other dims start
+    // after batch + lhs_other.
+    const rhs_contract_from_out = try build_range(ctx.allocator, batch_len + lhs_other.len, rhs_other.len);
+    defer ctx.allocator.free(rhs_contract_from_out);
+
+    // d_lhs in canonical layout: [batch..., lhs_other..., lhs_contract...]
+    const d_lhs_canon = try ctx.builder.dot_general(out_cot, rhs_primal, .{
+        .lhs_batch_dims = out_batch,
+        .rhs_batch_dims = params.rhs_batch_dims,
+        .lhs_contracting_dims = rhs_contract_from_out,
+        .rhs_contracting_dims = rhs_other,
+    });
+
+    const d_lhs = try transpose_to_match_multi(
+        ctx,
+        d_lhs_canon,
+        lhs_rank,
+        params.lhs_batch_dims,
+        lhs_other,
+        params.lhs_contracting_dims,
+    );
+
+    // d_rhs in canonical layout: [batch..., rhs_other..., rhs_contract...]
+    const lhs_contract = lhs_other;
+    const out_contract = try build_range(ctx.allocator, batch_len, lhs_other.len);
+    defer ctx.allocator.free(out_contract);
+
+    const d_rhs_canon = try ctx.builder.dot_general(lhs_primal, out_cot, .{
+        .lhs_batch_dims = params.lhs_batch_dims,
+        .rhs_batch_dims = out_batch,
+        .lhs_contracting_dims = lhs_contract,
+        .rhs_contracting_dims = out_contract,
+    });
+
+    const d_rhs = try transpose_to_match_multi(
+        ctx,
+        d_rhs_canon,
+        rhs_rank,
+        params.rhs_batch_dims,
+        rhs_other,
+        params.rhs_contracting_dims,
+    );
+
+    return .{ .lhs = d_lhs, .rhs = d_rhs };
+}
+
+/// VJP for batched matmul-like dot_general with one contracting dim.
+/// Supports arbitrary batch dim positions (paired by index).
+fn maybe_batched_matmul_vjp(
     ctx: types.AdContext,
     lhs_id: pr.VarId,
     rhs_id: pr.VarId,
@@ -337,6 +447,7 @@ fn try_batched_matmul_vjp(
     return .{ .lhs = d_lhs, .rhs = d_rhs };
 }
 
+/// Find the single dim that is neither batch nor contracting.
 fn find_single_other_dim(rank: usize, batch_dims: []const i64, contracting_dim: i64) ?i64 {
     var found: ?i64 = null;
     var d: usize = 0;
@@ -350,6 +461,31 @@ fn find_single_other_dim(rank: usize, batch_dims: []const i64, contracting_dim: 
     return found;
 }
 
+/// Collect dims that are neither batch nor contracting, in ascending order.
+fn collect_other_dims(
+    allocator: std.mem.Allocator,
+    rank: usize,
+    batch_dims: []const i64,
+    contracting_dims: []const i64,
+) ![]i64 {
+    var list = try std.ArrayList(i64).initCapacity(allocator, rank);
+    var d: usize = 0;
+    while (d < rank) : (d += 1) {
+        const dim_i64: i64 = @intCast(d);
+        if (index_of_i64(batch_dims, dim_i64) != null) continue;
+        if (index_of_i64(contracting_dims, dim_i64) != null) continue;
+        list.appendAssumeCapacity(dim_i64);
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+/// Return the range [start, start+1, ..., start+len-1].
+fn build_range(allocator: std.mem.Allocator, start: usize, len: usize) ![]i64 {
+    const out = try allocator.alloc(i64, len);
+    for (0..len) |i| out[i] = @intCast(start + i);
+    return out;
+}
+
 fn index_of_i64(list: []const i64, needle: i64) ?usize {
     for (list, 0..) |v, i| {
         if (v == needle) return i;
@@ -357,6 +493,7 @@ fn index_of_i64(list: []const i64, needle: i64) ?usize {
     return null;
 }
 
+/// Transpose a canonical [batch..., a, b] layout back to original dim order.
 fn transpose_to_match(
     b: *pr.FunctionBuilder,
     canon: pr.VarId,
@@ -384,6 +521,42 @@ fn transpose_to_match(
 
     if (is_identity) return canon;
     return try b.transpose(canon, perm_buf[0..rank]);
+}
+
+/// Transpose a canonical layout [batch..., other..., contract...] back to the
+/// original operand dim order.
+fn transpose_to_match_multi(
+    ctx: types.AdContext,
+    canon: pr.VarId,
+    rank: usize,
+    batch_dims: []const i64,
+    other_dims: []const i64,
+    contract_dims: []const i64,
+) types.AdError!pr.VarId {
+    // Canonical layout is: [batch..., other..., contract...]. Compute a permutation
+    // that maps canonical dims back to the original operand dim order.
+    if (rank == 0) return canon;
+
+    const perm = try ctx.allocator.alloc(i64, rank);
+    defer ctx.allocator.free(perm);
+
+    var is_identity = true;
+    var d: usize = 0;
+    while (d < rank) : (d += 1) {
+        const dim_i64: i64 = @intCast(d);
+        const src: i64 = if (index_of_i64(batch_dims, dim_i64)) |bi| blk: {
+            break :blk @intCast(bi);
+        } else if (index_of_i64(other_dims, dim_i64)) |oi| blk: {
+            break :blk @intCast(batch_dims.len + oi);
+        } else if (index_of_i64(contract_dims, dim_i64)) |ci| blk: {
+            break :blk @intCast(batch_dims.len + other_dims.len + ci);
+        } else return error.UnsupportedEqn;
+        perm[d] = src;
+        if (src != dim_i64) is_identity = false;
+    }
+
+    if (is_identity) return canon;
+    return try ctx.builder.transpose(canon, perm);
 }
 
 fn write_dims(writer: *types.Writer, dims: []const i64) types.FormatError!void {

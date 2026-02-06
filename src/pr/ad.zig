@@ -229,3 +229,27 @@ test "dot_general vjp supports differing batch dim positions" {
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
     try pr.validate_function(vjp_func);
 }
+
+test "dot_general vjp supports multi-contract dims" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    // lhs/rhs: [B,S,H,D], contract over H and D -> out [B,S]
+    const lhs = try b.param_tensor(.f32, &.{ 2, 3, 4, 5 });
+    const rhs = try b.param_tensor(.f32, &.{ 2, 3, 4, 5 });
+    const out = try b.dot_general(lhs, rhs, .{
+        .lhs_batch_dims = &.{ 0, 1 },
+        .rhs_batch_dims = &.{ 0, 1 },
+        .lhs_contracting_dims = &.{ 2, 3 },
+        .rhs_contracting_dims = &.{ 2, 3 },
+    });
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    try pr.validate_function(vjp_func);
+}
