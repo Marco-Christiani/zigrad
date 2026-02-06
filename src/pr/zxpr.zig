@@ -65,10 +65,33 @@ pub const Emitter = struct {
         if (self.func.eqns.len > 0) {
             try w.writeAll(ind);
             try w.print("; body ({d} ops)\n", .{self.func.eqns.len});
+            var current_kernel: ?[]const u8 = null;
             for (self.func.eqns) |eqn| {
+                const params = eqn.params.slice(pr.Param, self.func.params_store);
+                const provider = pr.param_kernelize_provider(params);
+                if (provider) |name| {
+                    if (current_kernel == null or !std.mem.eql(u8, current_kernel.?, name)) {
+                        if (current_kernel) |prev| {
+                            try w.writeAll(ind);
+                            try w.print("; end kernelize[{s}]\n", .{prev});
+                        }
+                        try w.writeAll(ind);
+                        try w.print("; kernelize[{s}]\n", .{name});
+                        current_kernel = name;
+                    }
+                } else if (current_kernel) |prev| {
+                    try w.writeAll(ind);
+                    try w.print("; end kernelize[{s}]\n", .{prev});
+                    current_kernel = null;
+                }
+
                 try w.writeAll(ind);
                 try self.emit_let(eqn);
                 try w.writeAll("\n");
+            }
+            if (current_kernel) |prev| {
+                try w.writeAll(ind);
+                try w.print("; end kernelize[{s}]\n", .{prev});
             }
         }
 
@@ -259,4 +282,30 @@ test "zxpr with transpose shows permutation" {
 
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "transpose[perm=[1, 0]]") != null);
+}
+
+test "zxpr kernelize region annotations" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "k");
+    defer b.deinit();
+
+    const a = try b.param_tensor(.f32, &.{ 2, 2 });
+    const c = try b.param_tensor(.f32, &.{ 2, 2 });
+    const kparams = &.{pr.Param{ .kernelize_provider = "tvm" }};
+
+    const add1 = try b.emit(.add, &.{ a, c }, kparams);
+    const add2 = try b.emit(.add, &.{ add1, c }, kparams);
+    const out = try b.add(add2, c);
+    const func = try b.finish(&.{out});
+
+    var buf: [512]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w);
+
+    const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "; kernelize[tvm]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "; end kernelize[tvm]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "kernelize=\"tvm\"") != null);
 }

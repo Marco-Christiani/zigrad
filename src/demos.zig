@@ -598,6 +598,38 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
     try zg.pr.zxpr.emit(vjp_func, stdout);
 }
 
+pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator) !void {
+    var program = zg.pr.Program.init(allocator);
+    defer program.deinit();
+
+    var b = try zg.frontend.Builder.init(&program, "main");
+    defer b.deinit();
+
+    const a = try b.param(.{ .dtype = .f32, .dims = &.{ 2, 3 } });
+    const b_t = try b.param(.{ .dtype = .f32, .dims = &.{ 3, 2 } });
+    const c = try b.param(.{ .dtype = .f32, .dims = &.{ 2, 2 } });
+    const d = try b.param(.{ .dtype = .f32, .dims = &.{ 2, 2 } });
+
+    const pre = try c.add(d);
+
+    const tvm_opts: zg.frontend.OpOptions = .{ .kernelize_provider = "tvm" };
+    const dot = try a.annotate(tvm_opts).matmul(b_t);
+    const sum = try dot.annotate(tvm_opts).add(pre);
+    const mul = try sum.annotate(tvm_opts).mul(c);
+    const out = try mul.add(d);
+    _ = try b.finish(&.{out});
+
+    const func = program.functions[0];
+
+    var stdout_buffer: [8192]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
+
+    try stdout.writeAll("=== Kernelize(TVM subgraph) ===\n");
+    try zg.pr.zxpr.emit(func, stdout);
+}
+
 fn expect_all_close(label: []const u8, got: []const f32, expected: []const f32, tol: f32) !void {
     if (got.len != expected.len) return error.LengthMismatch;
     for (got, 0..) |v, i| {
