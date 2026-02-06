@@ -12,18 +12,55 @@
 ///!
 ///! zxpr main {
 ///!   ; params (2)
-///!   a: f32[2,3]
-///!   b: f32[3,2]
+///!   a: 2x3<f32>
+///!   b: 3x2<f32>
 ///!   ; body (1 ops)
-///!   let c: f32[2,2] = dot[contracting=([1], [0]), K=3](a, b)  ; vjp
-///!   ;
+///!   let
+///!     c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp
 ///!   in c
 ///! }
 const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
+const zxpr_style = @import("zxpr_style.zig");
 
 const Writer = std.Io.Writer;
+
+pub const Symbols = zxpr_style.Symbols;
+pub const FormatConfig = zxpr_style.Config;
+pub const FormatMode = zxpr_style.ConfigMode;
+pub const FormatOpts = zxpr_style.ConfigOpts;
+pub const format_config = zxpr_style.config;
+pub const ShapeFormat = zxpr_style.ShapeFormat;
+pub const Palette = zxpr_style.Palette;
+
+const max_region_tags = 4;
+const max_region_stack = 8;
+
+const RegionTag = struct {
+    key: []const u8,
+    value: ?[]const u8,
+};
+
+const RegionSpec = struct {
+    tags: [max_region_tags]RegionTag = undefined,
+    len: usize = 0,
+};
+
+const RegionStackSpec = struct {
+    items: [max_region_stack]RegionSpec = undefined,
+    len: usize = 0,
+};
+
+const Region = struct {
+    name_buf: [24]u8,
+    name_len: usize,
+    spec: RegionSpec,
+};
+
+fn region_name(region: *const Region) []const u8 {
+    return region.name_buf[0..region.name_len];
+}
 
 // ============================================================================
 // Emitter
@@ -35,12 +72,14 @@ pub const Emitter = struct {
     writer: *Writer,
     func: pr.Function,
     indent: []const u8,
+    styler: zxpr_style.Styler,
 
-    pub fn init(writer: *Writer, func: pr.Function) Self {
+    pub fn init(writer: *Writer, func: pr.Function, cfg: FormatConfig) Self {
         return .{
             .writer = writer,
             .func = func,
             .indent = "  ",
+            .styler = zxpr_style.Styler.init(writer, cfg),
         };
     }
 
@@ -48,12 +87,16 @@ pub const Emitter = struct {
         const w = self.writer;
         const ind = self.indent;
 
-        try w.print("zxpr {s} {{\n", .{self.func.name});
+        try self.styler.write_keyword("zxpr");
+        try w.writeAll(" ");
+        try self.styler.write_var_name(self.func.name);
+        try w.writeAll(" {\n");
 
         // Parameters section
         if (self.func.params.len > 0) {
             try w.writeAll(ind);
-            try w.print("; params ({d})\n", .{self.func.params.len});
+            try self.styler.write_section("; params");
+            try w.print(" ({d})\n", .{self.func.params.len});
             for (self.func.params) |param_id| {
                 try w.writeAll(ind);
                 try self.emit_var_with_type(param_id);
@@ -64,43 +107,54 @@ pub const Emitter = struct {
         // Body section
         if (self.func.eqns.len > 0) {
             try w.writeAll(ind);
-            try w.print("; body ({d} ops)\n", .{self.func.eqns.len});
-            var current_kernel: ?[]const u8 = null;
+            try self.styler.write_section("; body");
+            try w.print(" ({d} ops)\n", .{self.func.eqns.len});
+            try w.writeAll(ind);
+            try self.styler.write_keyword("let");
+            try w.writeAll("\n");
+            var region_stack: [8]Region = undefined;
+            var region_len: usize = 0;
+            var region_counter: usize = 0;
             for (self.func.eqns) |eqn| {
-                const params = eqn.params.slice(pr.Param, self.func.params_store);
-                const provider = pr.param_kernelize_provider(params);
-                if (provider) |name| {
-                    if (current_kernel == null or !std.mem.eql(u8, current_kernel.?, name)) {
-                        if (current_kernel) |prev| {
-                            try w.writeAll(ind);
-                            try w.print("; end kernelize[{s}]\n", .{prev});
-                        }
-                        try w.writeAll(ind);
-                        try w.print("; kernelize[{s}]\n", .{name});
-                        current_kernel = name;
-                    }
-                } else if (current_kernel) |prev| {
-                    try w.writeAll(ind);
-                    try w.print("; end kernelize[{s}]\n", .{prev});
-                    current_kernel = null;
+                const desired = self.region_stack_for_eqn(eqn);
+                const common = common_region_prefix(region_stack[0..region_len], desired);
+
+                var i: usize = region_len;
+                while (i > common) : (i -= 1) {
+                    try self.close_region(region_stack[0 .. i - 1], region_stack[i - 1]);
+                }
+                region_len = common;
+
+                i = common;
+                while (i < desired.len) : (i += 1) {
+                    region_len = try self.open_region(
+                        region_stack[0..region_len],
+                        &region_stack,
+                        region_len,
+                        &region_counter,
+                        desired.items[i],
+                    );
                 }
 
-                try w.writeAll(ind);
-                try self.emit_let(eqn);
+                try self.emit_binding_prefix(region_stack[0..region_len]);
+                try self.emit_binding(eqn);
                 try w.writeAll("\n");
             }
-            if (current_kernel) |prev| {
-                try w.writeAll(ind);
-                try w.print("; end kernelize[{s}]\n", .{prev});
+            var i: usize = region_len;
+            while (i > 0) : (i -= 1) {
+                try self.close_region(region_stack[0 .. i - 1], region_stack[i - 1]);
             }
         }
 
         // Return section
         if (self.func.returns.len > 0) {
+            if (self.func.eqns.len == 0) {
+                try w.writeAll(ind);
+                try w.writeAll(";\n");
+            }
             try w.writeAll(ind);
-            try w.writeAll(";\n");
-            try w.writeAll(ind);
-            try w.writeAll("in ");
+            try self.styler.write_keyword("in");
+            try w.writeAll(" ");
             for (self.func.returns, 0..) |ret_id, i| {
                 if (i > 0) try w.writeAll(", ");
                 try self.emit_var_name(ret_id);
@@ -116,7 +170,7 @@ pub const Emitter = struct {
     // ====================================================================
 
     fn emit_var_name(self: *Self, id: pr.VarId) !void {
-        try self.writer.print("{s}", .{var_name(id)});
+        try self.styler.write_var_name(var_name(id));
     }
 
     fn emit_var_with_type(self: *Self, id: pr.VarId) !void {
@@ -128,22 +182,29 @@ pub const Emitter = struct {
     fn emit_type(self: *Self, aval: pr.Aval) !void {
         switch (aval) {
             .tensor => |t| {
-                try self.writer.print("{s}[", .{@tagName(t.dtype)});
-                for (t.shape.dims, 0..) |d, i| {
-                    if (i > 0) try self.writer.writeAll(",");
-                    try self.writer.print("{d}", .{d});
+                switch (self.styler.cfg.shape_format) {
+                    .dtype_suffix => {
+                        if (t.shape.dims.len > 0) {
+                            for (t.shape.dims, 0..) |d, i| {
+                                if (i > 0) try self.writer.writeAll("x");
+                                try self.writer.print("{d}", .{d});
+                            }
+                            try self.writer.writeAll("<");
+                            try self.styler.write_type_name(@tagName(t.dtype));
+                            try self.writer.writeAll(">");
+                        } else {
+                            try self.styler.write_type_name(@tagName(t.dtype));
+                        }
+                    },
                 }
-                try self.writer.writeAll("]");
             },
         }
     }
 
-    fn emit_let(self: *Self, eqn: pr.Eqn) !void {
+    fn emit_binding(self: *Self, eqn: pr.Eqn) !void {
         const outputs = eqn.outputs.slice(pr.VarId, self.func.varids_store);
         const inputs = eqn.inputs.slice(pr.VarId, self.func.varids_store);
         const params = eqn.params.slice(pr.Param, self.func.params_store);
-
-        try self.writer.writeAll("let ");
 
         // Output binding(s)
         for (outputs, 0..) |out_id, i| {
@@ -152,19 +213,18 @@ pub const Emitter = struct {
         }
 
         try self.writer.writeAll(" = ");
-        try self.writer.print("{s}[", .{@tagName(eqn.prim)});
-
-        // Op-specific attributes via dispatch
-        try ops.format(self.writer, self.func, eqn);
-
-        if (pr.param_kernelize_provider(params)) |provider| {
-            try self.writer.print(", kernelize=\"{s}\"", .{provider});
+        try self.styler.write_op_name(@tagName(eqn.prim));
+        if (is_dtype_only_attr(eqn.prim) and !self.styler.cfg.include_dtype_attrs) {
+            try self.writer.writeAll("(");
+        } else {
+            try self.writer.writeAll("[");
+            if (is_dtype_only_attr(eqn.prim)) {
+                _ = try self.emit_dtype_attr(eqn.prim, inputs, params);
+            } else {
+                try ops.format(self.writer, self.func, eqn);
+            }
+            try self.writer.writeAll("](");
         }
-        if (pr.param_outline(params) orelse false) {
-            try self.writer.writeAll(", outline=true");
-        }
-
-        try self.writer.writeAll("](");
 
         // Inputs as function args
         for (inputs, 0..) |in_id, i| {
@@ -176,10 +236,158 @@ pub const Emitter = struct {
 
         // VJP annotation
         if (ops.has_vjp(eqn.prim)) {
-            try self.writer.writeAll("  ; vjp");
+            try self.styler.write_comment("  ; vjp");
         }
     }
+
+    fn emit_binding_prefix(self: *Self, regions: []const Region) !void {
+        try self.writer.writeAll(self.indent);
+        try self.writer.writeAll(self.indent);
+        try self.emit_gutters(regions.len);
+    }
+
+    fn emit_region_start(self: *Self, regions: []const Region, region: Region) !void {
+        try self.writer.writeAll(self.indent);
+        try self.writer.writeAll(self.indent);
+        try self.emit_gutters(regions.len);
+        try self.styler.write_region(self.styler.cfg.symbols.region_start);
+        try self.styler.write_region(" ");
+        try self.styler.write_region(region_name(&region));
+        try self.styler.write_region("[");
+        for (region.spec.tags[0..region.spec.len], 0..) |tag, i| {
+            if (i > 0) try self.styler.write_region(", ");
+            try self.styler.write_region(tag.key);
+            if (tag.value) |value| {
+                try self.styler.write_region("=");
+                try self.styler.write_region(value);
+            }
+        }
+        try self.styler.write_region("]\n");
+    }
+
+    fn emit_region_end(self: *Self, regions: []const Region, region: Region) !void {
+        try self.writer.writeAll(self.indent);
+        try self.writer.writeAll(self.indent);
+        try self.emit_gutters(regions.len);
+        try self.styler.write_region(self.styler.cfg.symbols.region_end);
+        try self.styler.write_region(" ");
+        try self.styler.write_region(region_name(&region));
+        try self.styler.write_region("\n");
+    }
+
+    fn emit_gutters(self: *Self, count: usize) !void {
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            try self.styler.write_region(self.styler.cfg.symbols.region_gutter);
+            try self.writer.writeAll(" ");
+        }
+    }
+
+    fn region_stack_for_eqn(self: *Self, eqn: pr.Eqn) RegionStackSpec {
+        const params = eqn.params.slice(pr.Param, self.func.params_store);
+        return region_stack_from_params(params);
+    }
+
+    fn open_region(
+        self: *Self,
+        active: []const Region,
+        stack: *[8]Region,
+        len: usize,
+        counter: *usize,
+        spec: RegionSpec,
+    ) !usize {
+        var region = Region{ .name_buf = undefined, .name_len = 0, .spec = spec };
+        const name_slice = std.fmt.bufPrint(&region.name_buf, "region{d}", .{counter.*}) catch "region?";
+        region.name_len = name_slice.len;
+        try self.emit_region_start(active, region);
+        stack[len] = region;
+        counter.* += 1;
+        return len + 1;
+    }
+
+    fn close_region(self: *Self, active: []const Region, region: Region) !void {
+        try self.emit_region_end(active, region);
+    }
+
+    fn emit_dtype_attr(self: *Self, prim: pr.Prim, inputs: []const pr.VarId, params: []const pr.Param) !?bool {
+        const use_dtype = switch (prim) {
+            .add, .subtract, .multiply, .divide, .maximum => true,
+            .exp, .log, .rsqrt, .logistic, .convert => true,
+            else => false,
+        };
+        if (!use_dtype) return null;
+        if (inputs.len == 0) return false;
+        const dtype = if (prim == .convert) blk: {
+            const out_dtype = pr.param_out_dtype(params) orelse return false;
+            break :blk out_dtype;
+        } else blk: {
+            const tensor = self.func.avals[@intCast(inputs[0])].as_tensor() orelse return false;
+            break :blk tensor.dtype;
+        };
+        try self.writer.writeAll("dtype=");
+        try self.styler.write_type_name(@tagName(dtype));
+        return true;
+    }
 };
+
+fn is_dtype_only_attr(prim: pr.Prim) bool {
+    return switch (prim) {
+        .add, .subtract, .multiply, .divide, .maximum => true,
+        .exp, .log, .rsqrt, .logistic, .convert => true,
+        else => false,
+    };
+}
+
+fn region_stack_from_params(params: []const pr.Param) RegionStackSpec {
+    var stack: RegionStackSpec = .{};
+    if (pr.param_kernelize_provider(params)) |provider| {
+        stack.items[stack.len] = region_spec_kernelize(provider);
+        stack.len += 1;
+    }
+    if (pr.param_outline(params) orelse false) {
+        stack.items[stack.len] = region_spec_outline();
+        stack.len += 1;
+    }
+    return stack;
+}
+
+fn region_spec_kernelize(provider: []const u8) RegionSpec {
+    var spec: RegionSpec = .{};
+    spec.tags[0] = .{ .key = "kernelize", .value = provider };
+    spec.len = 1;
+    return spec;
+}
+
+fn region_spec_outline() RegionSpec {
+    var spec: RegionSpec = .{};
+    spec.tags[0] = .{ .key = "outline", .value = null };
+    spec.len = 1;
+    return spec;
+}
+
+fn region_spec_equal(a: RegionSpec, b: RegionSpec) bool {
+    if (a.len != b.len) return false;
+    for (a.tags[0..a.len], 0..) |tag, i| {
+        const other = b.tags[i];
+        if (!std.mem.eql(u8, tag.key, other.key)) return false;
+        if (tag.value) |value| {
+            const other_value = other.value orelse return false;
+            if (!std.mem.eql(u8, value, other_value)) return false;
+        } else {
+            if (other.value != null) return false;
+        }
+    }
+    return true;
+}
+
+fn common_region_prefix(current: []const Region, desired: RegionStackSpec) usize {
+    const max_len = if (current.len < desired.len) current.len else desired.len;
+    var i: usize = 0;
+    while (i < max_len) : (i += 1) {
+        if (!region_spec_equal(current[i].spec, desired.items[i])) break;
+    }
+    return i;
+}
 
 // ============================================================================
 // Helpers
@@ -220,9 +428,10 @@ fn var_name(id: pr.VarId) []const u8 {
 // Public API
 // ============================================================================
 
-/// Emit ZXPR representation of a function
-pub fn emit(func: pr.Function, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func);
+/// Emit ZXPR representation of a function.
+pub fn emit(func: pr.Function, writer: *Writer, mode: FormatMode, opts: FormatOpts) !void {
+    const cfg = format_config(mode, opts);
+    var emitter = Emitter.init(writer, func, cfg);
     try emitter.emit();
 }
 
@@ -244,12 +453,13 @@ test "zxpr format" {
 
     var buf: [512]u8 = undefined;
     var w: Writer = .fixed(&buf);
-    try emit(func, &w);
+    try emit(func, &w, .plain, .{});
 
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "zxpr main {") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "; params (2)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "a: f32[2,3]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "a: 2x3<f32>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "let\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "dot[contracting=([1], [0])") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "; vjp") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "in c") != null);
@@ -278,7 +488,7 @@ test "zxpr with transpose shows permutation" {
 
     var buf: [256]u8 = undefined;
     var w: Writer = .fixed(&buf);
-    try emit(func, &w);
+    try emit(func, &w, .plain, .{});
 
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "transpose[perm=[1, 0]]") != null);
@@ -302,10 +512,9 @@ test "zxpr kernelize region annotations" {
 
     var buf: [512]u8 = undefined;
     var w: Writer = .fixed(&buf);
-    try emit(func, &w);
+    try emit(func, &w, .plain, .{});
 
     const result = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, result, "; kernelize[tvm]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "; end kernelize[tvm]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "kernelize=\"tvm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "> region0[kernelize=tvm]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "< region0") != null);
 }

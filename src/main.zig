@@ -85,11 +85,33 @@ pub fn main() !void {
             return demos.print_pr(gpa);
         }
         if (std.mem.eql(u8, m, "tvm-zxpr")) {
-            if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
+            if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
             }
-            return demos.print_tvm_kernelize_pr(gpa);
+            var sweep_palettes = false;
+            var palette: ?zg.pr.zxpr.Palette = null;
+            for (mode_args.items) |arg| {
+                if (std.mem.eql(u8, arg, "--sweep-palettes")) {
+                    sweep_palettes = true;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--palette=")) {
+                    const value = arg["--palette=".len..];
+                    palette = parse_zxpr_palette(value) orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            if (sweep_palettes and palette != null) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.print_tvm_kernelize_pr(gpa, sweep_palettes, palette);
         }
     }
 
@@ -376,7 +398,7 @@ fn print_usage() !void {
         \\
         \\modes:
         \\  print-pr                     prints the PR for the demo program
-        \\  tvm-zxpr                     prints a kernelized TVM region in zxpr
+        \\  tvm-zxpr [--sweep-palettes] [--palette=<name>]  prints a kernelized TVM region in zxpr
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
@@ -389,4 +411,15 @@ fn print_usage() !void {
     );
 
     try out.flush();
+}
+
+fn parse_zxpr_palette(value: []const u8) ?zg.pr.zxpr.Palette {
+    if (std.mem.eql(u8, value, "default")) return .default;
+    if (std.mem.eql(u8, value, "alt_orange")) return .alt;
+    if (std.mem.eql(u8, value, "nord")) return .nord;
+    if (std.mem.eql(u8, value, "gruvbox_material")) return .gruvbox_material;
+    if (std.mem.eql(u8, value, "flat_dark")) return .flat_dark;
+    if (std.mem.eql(u8, value, "catppuccin")) return .catppuccin;
+    if (std.mem.eql(u8, value, "tokyonight")) return .tokyonight;
+    return null;
 }
