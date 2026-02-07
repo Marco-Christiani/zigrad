@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const tvm_runtime = @import("tvm_runtime.zig");
 
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
@@ -596,6 +597,14 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
     try zg.pr.zxpr.emit(fwd, stdout, .auto_stdout, .{});
     try stdout.writeAll("\n=== VJP ===\n");
     try zg.pr.zxpr.emit(vjp_func, stdout, .auto_stdout, .{});
+}
+
+pub fn print_tvm_runtime_globals(allocator: std.mem.Allocator) !void {
+    return tvm_runtime.print_global_functions(allocator);
+}
+
+pub fn run_tvm_vec_add(allocator: std.mem.Allocator, module_path: []const u8, n: usize) !void {
+    return tvm_runtime.run_vec_add(allocator, module_path, n);
 }
 
 pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.Palette) !void {

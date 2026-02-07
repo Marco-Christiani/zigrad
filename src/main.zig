@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const demos = @import("demos.zig");
+const tvm_runtime = @import("tvm_runtime.zig");
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const main_aot = @import("main_aot.zig");
@@ -112,6 +113,74 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             return demos.print_tvm_kernelize_pr(gpa, sweep_palettes, palette);
+        }
+        if (std.mem.eql(u8, m, "tvm-runtime")) {
+            if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.print_tvm_runtime_globals(gpa);
+        }
+        if (std.mem.eql(u8, m, "tvm-build")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            var n: usize = 1024;
+            var target_kind: tvm_runtime.TargetKind = .cpu;
+            for (mode_args.items) |arg| {
+                if (std.mem.startsWith(u8, arg, "--n=")) {
+                    const value = arg["--n=".len..];
+                    n = std.fmt.parseInt(usize, value, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--cuda") or std.mem.eql(u8, arg, "--gpu")) {
+                    target_kind = .cuda;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--cpu")) {
+                    target_kind = .cpu;
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return tvm_runtime.build_and_run_vec_add(gpa, n, target_kind);
+        }
+        if (std.mem.eql(u8, m, "tvm-vec-add")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            var module_path: []const u8 = "artifacts/tvm/vec_add_cpu.so";
+            var n: usize = 1024;
+            var saw_path = false;
+            for (mode_args.items) |arg| {
+                if (std.mem.startsWith(u8, arg, "--n=")) {
+                    const value = arg["--n=".len..];
+                    n = std.fmt.parseInt(usize, value, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--module=")) {
+                    module_path = arg["--module=".len..];
+                    saw_path = true;
+                    continue;
+                }
+                if (!saw_path) {
+                    module_path = arg;
+                    saw_path = true;
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.run_tvm_vec_add(gpa, module_path, n);
         }
     }
 
@@ -379,6 +448,9 @@ fn print_usage() !void {
         \\modes:
         \\  print-pr                     prints the PR for the demo program
         \\  tvm-zxpr [--sweep-palettes] [--palette=<name>]  prints a kernelized TVM region in zxpr
+        \\  tvm-runtime                  lists global TVM runtime functions (requires -Dtvm)
+        \\  tvm-build [--n=N] [--cuda]   builds+runs vec_add in-memory via TVM TE (requires -Dtvm)
+        \\  tvm-vec-add [--module=PATH] [--n=N]  runs a TVM vec_add module (default artifacts/tvm/vec_add_cpu.so)
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
