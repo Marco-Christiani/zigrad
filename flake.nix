@@ -2,16 +2,43 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     nix-gl-host.url = "github:numtide/nix-gl-host";
+    xla-local = {
+      # Local checkout for instrumentation; avoid git-clean filtering.
+      url = "path:/home/marco/Github/zigrad-a/reference/xla";
+      flake = false;
+    };
     # this fork isnt exactly as correct but i hope its faster bc the mainline one is really slow like 20-30s startup
     #   i should fork and fix one of them or write my own idk but if this works and is faster then im happy.
     #   that being said, this seems like it may be bringing in gigs of deps (ironically, given the stated motivations)
     #   although i would need to actually check this to be confident in that idea.
     # nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
+
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+    };
+
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+    };
   };
   outputs = {
     self,
     nixpkgs,
     nix-gl-host,
+    xla-local,
+    pyproject-nix,
+    uv2nix,
+    pyproject-build-systems,
   }: let
     systems = [
       "x86_64-linux"
@@ -54,9 +81,30 @@
 
       nixglhost = nix-gl-host.packages.${system}.default;
 
-      # note to self: keep builds from accidentally capturing ./build, downloaded junk, etc.
-      src = pkgs.lib.cleanSource self;
-      # shimSrc = pkgs.lib.cleanSource (self + "/shim");
+      # src = pkgs.lib.cleanSource self;
+      allowPrefixes = [
+        "/src/"
+        "/build.zig"
+        "/build.zig.zon"
+        "/nix/"
+        "/tools/"
+        # "/shim/"
+        # "/README.md"
+        # "/LICENSE"
+      ];
+
+      src = pkgs.lib.cleanSourceWith {
+        src = self;
+        filter = path: type: let
+          p = toString path;
+          # relative to repo root
+          rel = pkgs.lib.removePrefix (toString self) p;
+        in
+          # keep directories so traversal can continue but only keep files that match allow-list
+          if type == "directory"
+          then true
+          else pkgs.lib.any (prefix: pkgs.lib.hasPrefix prefix rel) allowPrefixes;
+      };
 
       inherit
         (import ./nix/targets.nix {
@@ -87,6 +135,12 @@
         devel = true;
       };
 
+      # LLVM 22 built from XLA-pinned sources. Shared by SDK and TVM to ensure
+      # they use the same LLVM version (same pass registry, no ABI conflicts).
+      llvm = pkgs.callPackage ./nix/llvm.nix {
+        inherit lockFile;
+      };
+
       # Convenience aggregate.
       #   others are individually targetable mostly for development reasons
       zigradExternalSdk = pkgs.symlinkJoin {
@@ -94,6 +148,7 @@
         paths = [
           xlaPjrtPluginsCuda
           xlaMlirStablehloCapiSdk
+          tvm
           # zigradMlirShim
         ];
       };
@@ -105,6 +160,8 @@
         paths = [
           xlaPjrtPluginsCudaDevel
           xlaMlirStablehloCapiDevel
+          # tvm
+          tvmDevel
           # zigradMlirShimDevel
         ];
       };
@@ -127,6 +184,7 @@
       # Bazel-built PJRT C API plugins from XLA
       xlaPjrtPlugins = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
+        xlaSrcOverride = xla-local;
         devel = false;
         cudaSupport = false;
         cudaPackages = null;
@@ -135,6 +193,7 @@
 
       xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
+        xlaSrcOverride = xla-local;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         devel = false;
         cudaSupport = true;
@@ -150,6 +209,7 @@
       # TODO: Can flip cudaSupport=true once we plumb CUDA env/toolchain.
       xlaPjrtPluginsDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
+        xlaSrcOverride = xla-local;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
 
@@ -164,6 +224,7 @@
       # Dev: ccache + devel + CUDA.
       xlaPjrtPluginsCudaDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
+        xlaSrcOverride = xla-local;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
@@ -176,13 +237,97 @@
         persistentBazelOutputBase = true;
       };
       # ------------------------------------------------------------------
+      # Simple buildBazelPackage-based PJRT C API plugins (experimental)
+      xlaPjrtPluginsBazel = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
+        inherit lockFile;
+        xlaSrcOverride = xla-local;
+        cudaSupport = false;
+      };
+
+      xlaPjrtPluginsBazelCuda = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
+        inherit lockFile;
+        xlaSrcOverride = xla-local;
+        inherit (cudaCfg) cudaArchitectures cudaVersion;
+        cudaSupport = true;
+        copyNcclNvshmem = true;
+        copyCudaTools = true;
+        copyLibdevice = true;
+        depsHash = "sha256-Pjjy96jds1Ti883btDXKgrOUXVg15uGSBOXy2rR+vwg=";
+      };
+
+      # TVM with LLVM 22 (built from XLA-pinned sources).
+      # Uses shared LLVM to match SDK, avoiding pass registry conflicts.
+      tvm = pkgs.callPackage ./nix/tvm.nix {
+        inherit
+          cudaPackages
+          gccHost
+          llvm
+          ;
+        inherit (cudaCfg) cudaArchitectures;
+        cudaSupport = true;
+        devel = false;
+      };
+
+      tvmDevel = pkgs.callPackage ./nix/tvm.nix {
+        inherit
+          cudaPackages
+          gccHost
+          llvm
+          ;
+        inherit (cudaCfg) cudaArchitectures;
+        cudaSupport = true;
+        devel = true;
+      };
+
+      tvmCpu = pkgs.callPackage ./nix/tvm.nix {
+        inherit
+          cudaPackages
+          gccHost
+          llvm
+          ;
+        inherit (cudaCfg) cudaArchitectures;
+        cudaSupport = false;
+      };
+
+      # ------------------------------------------------------------------
       baseDevShellPkgs = with pkgs; [
         zig
         zls
         go-task
         binutils
         patchelf
+        git
       ];
+
+      pyShellPkgs0 = pkgs.python312.withPackages (ps: [
+        ps.ruff
+        ps.jax
+        (
+          if builtins.hasAttr "jax-cuda13-plugin" ps
+          then ps."jax-cuda13-plugin"
+          else ps."jax-cuda12-plugin"
+        )
+        ps.pyelftools
+        ps.transformers
+        ps.flax
+        # ps.torchWithCuda
+        # ps.torch
+        ps.torch-bin
+        ps.polars
+        ps.plotly
+      ]);
+
+      pyShellPkgs = pkgs.callPackage ./nix/pydev.nix {
+        inherit
+          system
+          pyproject-nix
+          uv2nix
+          pyproject-build-systems
+          cudaPackages
+          ;
+        py = pkgs.python312;
+        py-pkgs = pkgs.python312Packages;
+      };
 
       pythonJaxCudaOverride = pkgs.python312.override {
         packageOverrides = self: super: {
@@ -197,13 +342,19 @@
       #   relaxed hermeticity requirements as needed for productivity.
       devShells = {
         default = pkgs.mkShellNoCC {
-          packages = baseDevShellPkgs ++ [zigradExternalSdkDevel];
-          ZG_EXTERNAL_SDK_ROOT = sdkRootDevel;
-          # PJRT_PLUGIN_PATH = "${sdkRootDevel}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
-          PJRT_CPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
-          PJRT_GPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
-
+          packages = pyShellPkgs.out.packages ++ baseDevShellPkgs ++ [zigradExternalSdkDevel];
+          env =
+            pyShellPkgs.out.env
+            // {
+              ZG_EXTERNAL_SDK_ROOT = sdkRootDevel;
+              # PJRT_PLUGIN_PATH = "${sdkRootDevel}/runtime/jax_plugins/xla_cuda13/xla_cuda_plugin.so";
+              PJRT_CPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
+              PJRT_GPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
+              PYTHONPATH = "${sdkRootDevel}/python";
+            };
           shellHook = ''
+            export REPO_ROOT=$(git rev-parse --show-toplevel)
+
             [[ -f "$PJRT_CPU_PLUGIN_PATH" ]]
             cpu_plugin_exists=$?
 
@@ -211,13 +362,15 @@
             gpu_plugin_exists=$?
 
             if (( cpu_plugin_exists != 0 )); then
-              printf "%b[WARNING]%b PJRT_CPU_PLUGIN_PATH=%s does not exist. Leaving the env variable set but you may need to materialize this.\n" \
-                "${colors.yellow}" "${colors.reset}" "$PJRT_CPU_PLUGIN_PATH"
+              # printf "%b[WARNING]%b PJRT_CPU_PLUGIN_PATH=%s does not exist. Leaving the env variable set but you may need to materialize this.\n" \
+              #   "${colors.yellow}" "${colors.reset}" "$PJRT_CPU_PLUGIN_PATH"
+              true
             fi
 
             if (( gpu_plugin_exists != 0 )); then
-              printf "%b[WARNING]%b PJRT_GPU_PLUGIN_PATH=%s does not exist. Leaving the env variable set but you may need to materialize this.\n" \
-                "${colors.yellow}" "${colors.reset}" "$PJRT_GPU_PLUGIN_PATH"
+              # printf "%b[WARNING]%b PJRT_GPU_PLUGIN_PATH=%s does not exist. Leaving the env variable set but you may need to materialize this.\n" \
+              #   "${colors.yellow}" "${colors.reset}" "$PJRT_GPU_PLUGIN_PATH"
+              true
             fi
 
             # Selection logic:
@@ -226,8 +379,9 @@
             # - Otherwise fall back to CPU (warnings already emitted)
             if (( gpu_plugin_exists == 0 )); then
               if (( cpu_plugin_exists == 0 )); then
-                printf "%b[INFO]%b Both CPU and GPU plugins exist. Selecting GPU plugin as the preferred option.\n" \
-                  "${colors.yellow}" "${colors.reset}"
+                # printf "%b[INFO]%b Both CPU and GPU plugins exist. Selecting GPU plugin as the preferred option.\n" \
+                #   "${colors.yellow}" "${colors.reset}"
+                true
               fi
               PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH"
             else
@@ -235,8 +389,8 @@
             fi
             export PJRT_PLUGIN_PATH
 
-            printf "Plugin path: PJRT_PLUGIN_PATH=%s\n" "$PJRT_PLUGIN_PATH"
-            printf "SDK path: ZG_EXTERNAL_SDK_ROOT=%s\n" "$ZG_EXTERNAL_SDK_ROOT"
+            # printf "Plugin path: PJRT_PLUGIN_PATH=%s\n" "$PJRT_PLUGIN_PATH"
+            # printf "SDK path: ZG_EXTERNAL_SDK_ROOT=%s\n" "$ZG_EXTERNAL_SDK_ROOT"
           '';
         };
 
@@ -256,14 +410,8 @@
           '';
         };
 
-        pyshell = pkgs.mkShell {
-          packages = [
-            (pkgs.python312.withPackages (ps: [
-              ps.jax
-              ps.jax-cuda12-plugin
-              ps.pyelftools
-            ]))
-          ];
+        pyshell = pkgs.mkShellNoCC {
+          packages = [pyShellPkgs0];
         };
 
         # more complicated way to enable cuda via overlays, this may be better, though.
@@ -275,6 +423,40 @@
               ps.jax
             ]))
           ];
+        };
+
+        profiling = pkgs.mkShellNoCC {
+          packages =
+            pyShellPkgs.out.packages
+            ++ baseDevShellPkgs
+            ++ [
+              zigradExternalSdkDevel
+              cudaPackages.nsight_systems # nix-du: ~1.1 / manual diffing: ~2.3GiB / nix-tree: NAR Size: 8.11 KiB | Closure Size: 15.39 MiB | Added Size: 93.75 KiB
+              cudaPackages.nsight_compute # nix-du: ~1.3 / manual diffing: 2.5GiB / NAR Size: 4.93 KiB | Closure Size: 15.24 MiB | Added Size: 16.35 KiB
+            ];
+          env =
+            pyShellPkgs.out.env
+            // {
+              ZG_EXTERNAL_SDK_ROOT = sdkRootDevel;
+              PJRT_CPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
+              PJRT_GPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
+            };
+          shellHook = ''
+            export REPO_ROOT=$(git rev-parse --show-toplevel)
+
+            [[ -f "$PJRT_CPU_PLUGIN_PATH" ]]
+            cpu_plugin_exists=$?
+
+            [[ -f "$PJRT_GPU_PLUGIN_PATH" ]]
+            gpu_plugin_exists=$?
+
+            if (( gpu_plugin_exists == 0 )); then
+              PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH"
+            else
+              PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH"
+            fi
+            export PJRT_PLUGIN_PATH
+          '';
         };
       };
 
@@ -307,11 +489,22 @@
         # Comptile-time SDK - Dev target: ccache + devel
         xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
 
+        tvm = tvm;
+        tvm-cpu = tvmCpu;
+        tvm-devel = tvmDevel;
+
+        # LLVM 22 built from XLA-pinned sources
+        llvm = llvm;
+
         gen-clangd = targets.editor.clangd;
         gen-nvim = targets.editor.nvim;
         # TODO: hermetic zig build/run targets
         # m1 = targets.m1.build;
         m4 = targets.zigrad-m4.build;
+
+        # new version with buildBazelPackage
+        xla-pjrt-plugins-bazel = xlaPjrtPluginsBazel;
+        xla-pjrt-plugins-bazel-cuda = xlaPjrtPluginsBazelCuda;
       };
 
       apps = {

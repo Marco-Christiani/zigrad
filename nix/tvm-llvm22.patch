@@ -1,0 +1,38 @@
+--- a/src/target/llvm/llvm_instance.cc
++++ b/src/target/llvm/llvm_instance.cc
+@@ -316,7 +316,10 @@
+   // In clang, these are fed from LangOpts which describe language specific features
+   // TODO(AndrewZhaoLuo): figure out how these relate to fast math flags
+   target_options_.AllowFPOpFusion = llvm::FPOpFusion::Fast;
++#if TVM_LLVM_VERSION < 220
++  // UnsafeFPMath removed in LLVM 22 - controlled by NoInfsFPMath + NoNaNsFPMath
+   target_options_.UnsafeFPMath = false;
++#endif
+   target_options_.NoInfsFPMath = false;
+   target_options_.NoNaNsFPMath = true;
+   target_options_.FloatABIType = float_abi;
+@@ -414,7 +417,11 @@
+   std::string error;
+   // create LLVM instance
+   // required mimimum: llvm::InitializeAllTargets()
++#if TVM_LLVM_VERSION < 220
+   const llvm::Target* llvm_instance = llvm::TargetRegistry::lookupTarget(triple, error);
++#else
++  const llvm::Target* llvm_instance = llvm::TargetRegistry::lookupTarget(llvm::Triple(triple), error);
++#endif
+   if (!allow_missing && !llvm_instance) {
+     ICHECK(llvm_instance) << "LLVM instance error: `" << error << "`";
+   }
+@@ -432,7 +439,11 @@
+ #else
+     const llvm::CodeGenOptLevel& opt_level = llvm::CodeGenOptLevel(0)) {
+ #endif
+   llvm::TargetMachine* tm = llvm_instance->createTargetMachine(
++#if TVM_LLVM_VERSION < 220
+       triple, cpu, features, target_options, reloc_model, code_model, opt_level);
++#else
++      llvm::Triple(triple), cpu, features, target_options, reloc_model, code_model, opt_level);
++#endif
+   ICHECK(tm != nullptr);
+
+   return std::unique_ptr<llvm::TargetMachine>(tm);

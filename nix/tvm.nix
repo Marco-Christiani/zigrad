@@ -5,7 +5,11 @@
   cmake,
   ninja,
   python3,
-  llvmPackages,
+  patch,
+  # Standard nixpkgs LLVM (used when llvm is null)
+  llvmPackages ? null,
+  # LLVM 22 built from XLA-pinned sources (preferred - ensures ABI compat with SDK)
+  llvm ? null,
   pkg-config,
   git,
   patchelf,
@@ -32,10 +36,14 @@
   cudaEnabled = cudaSupport && cudaPackages != null;
   cudaArchStr = lib.concatStringsSep ";" cudaArchitectures;
 
-  # Use llvm-config with --link-static to statically link LLVM into libtvm.so.
-  # Combined with HIDE_PRIVATE_SYMBOLS, this isolates LLVM symbols so they
-  # don't conflict with the SDK's LLVM 22 at runtime.
-  llvmConfigStatic = "${llvmPackages.llvm.dev}/bin/llvm-config --link-static";
+  # When llvm is provided, use shared LLVM to match the SDK's LLVM 22.
+  # When using nixpkgs llvmPackages, use static linking to isolate symbols.
+  useCustomLlvm = llvm != null;
+  llvmDev = if useCustomLlvm then llvm else llvmPackages.llvm.dev;
+  llvmLib = if useCustomLlvm then llvm else llvmPackages.llvm.lib;
+  llvmConfigCmd = if useCustomLlvm
+    then "${llvm}/bin/llvm-config"  # Shared linking
+    else "${llvmPackages.llvm.dev}/bin/llvm-config --link-static";  # Static isolation
 
   src =
     if tvmSrcOverride != null
@@ -50,6 +58,7 @@
       };
 in
   assert lib.assertMsg (!cudaSupport || cudaPackages != null) "tvm: cudaSupport=true requires cudaPackages";
+  assert lib.assertMsg (llvm != null || llvmPackages != null) "tvm: requires either llvm or llvmPackages";
     stdenv.mkDerivation {
       pname = "tvm";
       version = tvmRev;
@@ -63,12 +72,19 @@ in
       # and cstdint is a C++ STL header not available in NVRTC).
       # For simple kernels, these aren't needed - only cuda_fp16.h etc for special types.
       # Patch: Only include these headers when need_include_path() returns true.
-      postPatch = lib.optionalString cudaEnabled ''
-        substituteInPlace src/target/source/codegen_cuda.cc \
-          --replace-fail 'decl_stream << "#include <cuda.h>\n";' \
-                         'if (need_include_path()) { decl_stream << "#include <cuda.h>\\n"; }' \
-          --replace-fail 'decl_stream << "#include <cstdint>\n";' \
-                         'if (need_include_path()) { decl_stream << "#include <cstdint>\\n"; }'
+      postPatch = ''
+        ${lib.optionalString cudaEnabled ''
+          substituteInPlace src/target/source/codegen_cuda.cc \
+            --replace-fail 'decl_stream << "#include <cuda.h>\n";' \
+                           'if (need_include_path()) { decl_stream << "#include <cuda.h>\\n"; }' \
+            --replace-fail 'decl_stream << "#include <cstdint>\n";' \
+                           'if (need_include_path()) { decl_stream << "#include <cstdint>\\n"; }'
+        ''}
+
+        ${lib.optionalString useCustomLlvm ''
+          # Apply LLVM 22 API compatibility patch
+          patch -p1 < ${./tvm-llvm22.patch}
+        ''}
       '';
 
     nativeBuildInputs = [
@@ -78,8 +94,10 @@ in
       pkg-config
       git
       patchelf
+      patch
+      llvmDev
+    ] ++ lib.optionals (!useCustomLlvm) [
       llvmPackages.llvm
-      llvmPackages.llvm.dev
     ] ++ lib.optionals cudaEnabled [
       autoAddDriverRunpath  # automatically patches rpath to include /run/opengl-driver for libcuda.so
     ];
@@ -105,7 +123,7 @@ in
         cat >> build/config.cmake <<EOF
         set(CMAKE_BUILD_TYPE RelWithDebInfo)
         set(CMAKE_CXX_STANDARD 17)
-        set(USE_LLVM "${llvmConfigStatic}")
+        set(USE_LLVM "${llvmConfigCmd}")
         set(HIDE_PRIVATE_SYMBOLS ON)
         set(USE_CUDA ${boolToCmake cudaEnabled})
         set(USE_METAL OFF)
@@ -188,11 +206,15 @@ in
         cp -r 3rdparty/dmlc-core/include/dmlc/. $out/include/dmlc/
       fi
 
-      # With static LLVM linking, we don't need LLVM in the rpath.
-      # The LLVM symbols are embedded in libtvm.so with hidden visibility.
-      # But we still need LLVM's runtime deps (zlib, ncurses, libxml2) in rpath.
-      # Note: libcuda.so.1 is provided by the driver and resolved via autoAddDriverRunpath or LD_LIBRARY_PATH.
-      rpath="\$ORIGIN:${lib.makeLibraryPath ([stdenv.cc.cc.lib zlib ncurses libxml2] ++ lib.optionals cudaEnabled [cudaPackages.cudatoolkit])}"
+      # Build rpath for TVM libs.
+      # - When using custom LLVM (shared), include it in rpath so libtvm.so finds libLLVM.so.
+      # - Always include LLVM's runtime deps (zlib, ncurses, libxml2).
+      # - Note: libcuda.so.1 is provided by the driver and resolved via autoAddDriverRunpath or LD_LIBRARY_PATH.
+      rpath="\$ORIGIN:${lib.makeLibraryPath (
+        [stdenv.cc.cc.lib zlib ncurses libxml2]
+        ++ lib.optionals useCustomLlvm [llvm]
+        ++ lib.optionals cudaEnabled [cudaPackages.cudatoolkit]
+      )}"
       for f in $out/lib/*.so*; do
         [ -e "$f" ] || continue
         patchelf --set-rpath "$rpath" "$f"
