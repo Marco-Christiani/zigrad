@@ -702,15 +702,14 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     };
 
     // --- Step 10: Create target with host ---
-    // For CPU: use 'c' target to avoid LLVM JIT conflicts with SDK's LLVM 22.
-    // For CUDA: device is 'cuda', host is 'c' (generates C source compiled with gcc).
-    // The 'c' target avoids LLVM entirely, using external C compiler instead.
-    const host_str = try cstr_alloc(allocator, "c");
+    // For CPU: use 'llvm' target for JIT compilation (now works with LLVM 21).
+    // For CUDA: device is 'cuda', host is 'llvm'.
+    const host_str = try cstr_alloc(allocator, "llvm");
     defer allocator.free(host_str);
 
     // Device target depends on target_kind
     const device_str = switch (target_kind) {
-        .cpu => try cstr_alloc(allocator, "c"),
+        .cpu => try cstr_alloc(allocator, "llvm"),
         .cuda => try cstr_alloc(allocator, "cuda"),
     };
     defer allocator.free(device_str);
@@ -905,13 +904,13 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     var built_mod: c.TVMFFIAny = undefined;
 
     if (target_kind == .cpu) {
-        // CPU: use 'c' target to avoid LLVM JIT conflicts
+        // CPU: use LLVM JIT (now works with LLVM 21 matching SDK's LLVM 22)
         var args = [_]c.TVMFFIAny{ lowered_mod, target };
-        ffi_call_global(allocator, "target.build.c", &args, &built_mod) catch |err| {
-            log.err("target.build.c failed: {s}", .{@errorName(err)});
+        ffi_call_global(allocator, "target.build.llvm", &args, &built_mod) catch |err| {
+            log.err("target.build.llvm failed: {s}", .{@errorName(err)});
             return err;
         };
-        log.info("Built CPU module (C target): type_index={d}", .{built_mod.type_index});
+        log.info("Built CPU module (LLVM JIT): type_index={d}", .{built_mod.type_index});
     } else {
         // CUDA: need to filter and build host (llvm) and device (cuda) separately
         // After SplitHostDevice, functions are annotated with:
@@ -1126,185 +1125,18 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    // --- Step 13: Debug module info and export if needed ---
-    // The 'c' target creates a CSourceModule with C source code that needs compilation.
-    // Check module kind and supported formats.
+    // --- Step 13: Debug module info ---
+    // LLVM JIT produces an LLVMModule that's directly executable via ORC JIT.
     {
         var kind: c.TVMFFIAny = undefined;
         var args = [_]c.TVMFFIAny{built_mod};
-        ffi_call_global(allocator, "ffi.ModuleGetKind", &args, &kind) catch |err| {
-            log.warn("ffi.ModuleGetKind failed: {s}", .{@errorName(err)});
-        };
+        ffi_call_global(allocator, "ffi.ModuleGetKind", &args, &kind) catch {};
         if (kind.type_index != c.kTVMFFINone) {
             if (any_to_string(allocator, &kind)) |kind_str| {
                 defer allocator.free(kind_str);
                 log.info("Module kind: {s}", .{kind_str});
-            } else |_| {
-                log.info("Module kind: (could not convert to string)", .{});
-            }
-        }
-
-        var formats: c.TVMFFIAny = undefined;
-        ffi_call_global(allocator, "ffi.ModuleGetWriteFormats", &args, &formats) catch |err| {
-            log.warn("ffi.ModuleGetWriteFormats failed: {s}", .{@errorName(err)});
-        };
-        if (formats.type_index != c.kTVMFFINone) {
-            if (any_to_string(allocator, &formats)) |fmt_str| {
-                defer allocator.free(fmt_str);
-                log.info("Write formats: {s}", .{fmt_str});
             } else |_| {}
         }
-
-        // Check the source code in the module (format is required, use "c" for C source)
-        var source: c.TVMFFIAny = undefined;
-        const fmt_c_buf = try cstr_alloc(allocator, "c");
-        defer allocator.free(fmt_c_buf);
-        var src_args = [_]c.TVMFFIAny{ built_mod, any_raw_str(cstr_ptr(fmt_c_buf)) };
-        ffi_call_global(allocator, "ffi.ModuleInspectSource", &src_args, &source) catch |err| {
-            log.warn("ffi.ModuleInspectSource failed: {s}", .{@errorName(err)});
-        };
-        if (source.type_index != c.kTVMFFINone) {
-            if (any_to_string(allocator, &source)) |src_str| {
-                defer allocator.free(src_str);
-                // Print first 500 chars of source
-                const len = @min(src_str.len, 500);
-                log.info("Module source preview:\n{s}...", .{src_str[0..len]});
-            } else |_| {}
-        }
-    }
-
-    // For 'c' target, we need to export to .c and compile with an external compiler.
-    // Both CPU and CUDA use 'c' target for host code, so always export and compile.
-    {
-        const c_path = "/tmp/tvm_module.c";
-        const so_path = "/tmp/tvm_module.so";
-        const c_path_buf = try cstr_alloc(allocator, c_path);
-        defer allocator.free(c_path_buf);
-        const format_c = try cstr_alloc(allocator, "c");
-        defer allocator.free(format_c);
-
-        // Export C source
-        {
-            var result: c.TVMFFIAny = undefined;
-            var args = [_]c.TVMFFIAny{
-                built_mod,
-                any_raw_str(cstr_ptr(c_path_buf)),
-                any_raw_str(cstr_ptr(format_c)),
-            };
-            ffi_call_global(allocator, "ffi.ModuleWriteToFile", &args, &result) catch |err| {
-                log.err("ffi.ModuleWriteToFile(.c) failed: {s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        log.info("Exported C source to {s}", .{c_path});
-
-        // Compile with gcc
-        // We need TVM runtime includes from the TVM library path
-        const lib_path = try findTvmLibPath(allocator);
-        defer if (lib_path) |p| allocator.free(p);
-
-        var tvm_include_dir: []const u8 = "";
-        var tvm_lib_dir: []const u8 = "";
-        if (lib_path) |p| {
-            // Extract directories: /nix/.../lib/libtvm.so -> include and lib dirs
-            if (std.mem.lastIndexOf(u8, p, "/lib/")) |idx| {
-                tvm_include_dir = try std.fmt.allocPrint(allocator, "{s}/include", .{p[0..idx]});
-                tvm_lib_dir = try std.fmt.allocPrint(allocator, "{s}/lib", .{p[0..idx]});
-            }
-        }
-        defer if (tvm_include_dir.len > 0) allocator.free(tvm_include_dir);
-        defer if (tvm_lib_dir.len > 0) allocator.free(tvm_lib_dir);
-
-        // Compile C source to .so using zig cc (Zig's built-in C compiler)
-        // Link against TVM runtime for symbols like TVMBackendGetFuncFromEnv
-        var argv_buf: [24][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "zig";
-        argc += 1;
-        argv_buf[argc] = "cc";
-        argc += 1;
-        argv_buf[argc] = "-shared";
-        argc += 1;
-        argv_buf[argc] = "-fPIC";
-        argc += 1;
-        argv_buf[argc] = "-O2";
-        argc += 1;
-        argv_buf[argc] = "-o";
-        argc += 1;
-        argv_buf[argc] = so_path;
-        argc += 1;
-        argv_buf[argc] = c_path;
-        argc += 1;
-        if (tvm_include_dir.len > 0) {
-            argv_buf[argc] = "-I";
-            argc += 1;
-            argv_buf[argc] = tvm_include_dir;
-            argc += 1;
-        }
-        // Note: Don't link against libtvm_runtime here - symbols are already available
-        // from the TVM libraries loaded in the main process. Linking again would cause
-        // duplicate global function registration errors.
-        // The .so will resolve TVM symbols at load time from the already-loaded libraries.
-
-        // Debug: print compile command (join argv)
-        if (false) { // disabled - too verbose
-            var cmd_buf: [1024]u8 = undefined;
-            var cmd_len: usize = 0;
-            for (argv_buf[0..argc]) |arg| {
-                if (cmd_len + arg.len + 1 < cmd_buf.len) {
-                    @memcpy(cmd_buf[cmd_len..][0..arg.len], arg);
-                    cmd_len += arg.len;
-                    cmd_buf[cmd_len] = ' ';
-                    cmd_len += 1;
-                }
-            }
-            log.debug("Compiling: {s}", .{cmd_buf[0..cmd_len]});
-        }
-        const compile_result = std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = argv_buf[0..argc],
-        }) catch |err| {
-            log.err("cc compilation failed: {s}", .{@errorName(err)});
-            return err;
-        };
-        defer allocator.free(compile_result.stdout);
-        defer allocator.free(compile_result.stderr);
-
-        switch (compile_result.term) {
-            .Exited => |code| {
-                if (code != 0) {
-                    log.err("cc failed with exit code {d}: {s}", .{ code, compile_result.stderr });
-                    return error.TvmRuntimeError;
-                }
-            },
-            else => {
-                log.err("cc terminated abnormally", .{});
-                return error.TvmRuntimeError;
-            },
-        }
-        log.info("Compiled {s} to {s}", .{ c_path, so_path });
-
-        // Load the compiled .so
-        const so_path_buf = try cstr_alloc(allocator, so_path);
-        defer allocator.free(so_path_buf);
-
-        var loaded_mod: c.TVMFFIAny = undefined;
-        {
-            var args = [_]c.TVMFFIAny{
-                any_raw_str(cstr_ptr(so_path_buf)),
-            };
-            ffi_call_global(allocator, "ffi.ModuleLoadFromFile", &args, &loaded_mod) catch |err| {
-                log.err("ffi.ModuleLoadFromFile(.so) failed: {s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        log.info("Loaded compiled module: type_index={d}", .{loaded_mod.type_index});
-
-        // Replace built_mod with loaded_mod
-        if (built_mod.unnamed_1.v_obj) |obj| {
-            _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
-        }
-        built_mod = loaded_mod;
     }
 
     // --- Step 14: Get the compiled function ---

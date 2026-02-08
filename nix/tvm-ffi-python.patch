@@ -1,0 +1,15 @@
+diff --git a/3rdparty/tvm-ffi/CMakeLists.txt b/3rdparty/tvm-ffi/CMakeLists.txt
+index 1234567..abcdefg 100644
+--- a/3rdparty/tvm-ffi/CMakeLists.txt
++++ b/3rdparty/tvm-ffi/CMakeLists.txt
+@@ -170,10 +170,6 @@ endif ()
+ # The following code section only is triggered when the project is the root and will be skipped when
+ # the project is a subproject.
+ # ----------------------------------------------------------------------------
+-if (NOT ${PROJECT_NAME} STREQUAL ${CMAKE_PROJECT_NAME})
+-  return()
+-endif ()
+-
+ option(TVM_FFI_ATTACH_DEBUG_SYMBOLS "Attach debug symbols even in release mode" OFF)
+ option(TVM_FFI_BUILD_TESTS "Adding test targets." OFF)
+

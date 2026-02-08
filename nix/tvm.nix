@@ -85,12 +85,19 @@ in
           # Apply LLVM 22 API compatibility patch
           patch -p1 < ${./tvm-llvm22.patch}
         ''}
+
+        ${lib.optionalString devel ''
+          # Enable Python module build in tvm-ffi subproject
+          # By default, tvm-ffi skips Python module when used as a subdirectory
+          patch -p1 < ${./tvm-ffi-python.patch}
+        ''}
       '';
 
     nativeBuildInputs = [
       cmake
       ninja
       python3
+      python3.pkgs.cython  # Required to build tvm_ffi Cython extension (core.pyx)
       pkg-config
       git
       patchelf
@@ -132,6 +139,7 @@ in
         set(USE_CUBLAS ${boolToCmake enableCublas})
         set(USE_CUDNN ${boolToCmake enableCudnn})
         set(USE_CUTLASS ${boolToCmake enableCutlass})
+        ${lib.optionalString devel "set(TVM_FFI_BUILD_PYTHON_MODULE ON)"}
         EOF
 
         ${lib.optionalString cudaEnabled ''
@@ -174,6 +182,18 @@ in
           cp -v "$f" $out/lib/
         fi
       done
+
+      # Copy tvm_ffi_testing.so if it exists (needed by Python Cython extension)
+      echo "Searching for libtvm_ffi_testing.so..."
+      find build -name "libtvm_ffi_testing.so*" -type f
+      testing_lib="$(find build -name "libtvm_ffi_testing.so" -type f | head -n1 || true)"
+      if [ -n "$testing_lib" ] && [ -f "$testing_lib" ]; then
+        echo "Found testing library at: $testing_lib"
+        cp -v "$testing_lib" $out/lib/
+      else
+        echo "WARNING: libtvm_ffi_testing.so not found in build directory"
+        echo "This may cause Python imports to fail if core.abi3.so depends on it"
+      fi
 
       # v0.22+: TVM runtime depends on a separate libtvm_ffi.so.
       # It may live under build/3rdparty/tvm-ffi/, so copy it explicitly.
@@ -231,6 +251,26 @@ in
         # Copy tvm_ffi from 3rdparty
         if [ -d 3rdparty/tvm-ffi/python/tvm_ffi ]; then
           cp -r 3rdparty/tvm-ffi/python/tvm_ffi $out/python/
+        fi
+
+        # Copy compiled Cython extension (core*.so) to tvm_ffi/
+        # This is built by TVM_FFI_BUILD_PYTHON_MODULE and is required for Python imports
+        echo "Searching for Cython core extension..."
+        find build -name "core*.so" -type f
+        core_so="$(find build -name "core*.so" -type f | head -n1 || true)"
+        if [ -n "$core_so" ] && [ -f "$core_so" ]; then
+          cp -v "$core_so" $out/python/tvm_ffi/
+
+          # Patch RPATH to find libtvm_ffi.so in $out/lib (two directories up)
+          # The Cython module is at $out/python/tvm_ffi/core.abi3.so
+          # libtvm_ffi.so is at $out/lib/libtvm_ffi.so
+          # So we need $ORIGIN/../../lib
+          patchelf --set-rpath "\$ORIGIN/../../lib:$rpath" "$out/python/tvm_ffi/$(basename "$core_so")"
+
+          echo "Installed Cython core extension: $core_so"
+        else
+          echo "WARNING: Cython core extension not found - Python imports will fail"
+          echo "Expected location: build/3rdparty/tvm-ffi/core.abi3.so"
         fi
 
         # Make bindings writable for any post-install modifications
