@@ -39,6 +39,14 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
 
+    // Add CUDA include path if available (needed for nvrtc.h in tvm builds)
+    if (tvm_enabled) {
+        if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
+            const cuda_include = b.fmt("{s}/include", .{cuda_home});
+            zigrad_mod.addIncludePath(.{ .cwd_relative = cuda_include });
+        }
+    }
+
     const exe = b.addExecutable(.{
         .name = "zigrad",
         .root_module = b.createModule(.{
@@ -101,6 +109,17 @@ fn link_tvm_runtime(exe: *std.Build.Step.Compile, tvm_lib: []const u8) void {
     exe.root_module.linkSystemLibrary("tvm_runtime", .{});
     // Full compiler library — registers TE, TIR, codegen packed functions.
     exe.root_module.linkSystemLibrary("tvm", .{});
+
+    // NVRTC for runtime CUDA compilation callback
+    if (exe.rootModuleTarget().os.tag == .linux) {
+        exe.root_module.linkSystemLibrary("nvrtc", .{});
+
+        // Add CUDA include path for nvrtc.h if CUDA_HOME is set
+        if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
+            const cuda_include = std.fmt.allocPrint(exe.step.owner.allocator, "{s}/include", .{cuda_home}) catch @panic("OOM");
+            exe.root_module.addIncludePath(.{ .cwd_relative = cuda_include });
+        }
+    }
 }
 
 fn sdk_has_tvm(b: *std.Build, sdk_root: []const u8) bool {

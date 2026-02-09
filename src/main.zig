@@ -242,7 +242,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var work_dir: []const u8 = "artifacts/tvm_cache";
+            var work_dir: []const u8 = "artifacts/tvm_cache/cpu";  // NOTE: what about cuda/ subdir? also what about cuda support?
 
             for (mode_args.items) |arg| {
                 if (std.mem.startsWith(u8, arg, "--shape=")) {
@@ -288,7 +288,7 @@ pub fn main() !void {
                 try print_usage();
                 return error.InvalidArguments;
             }
-            var module_path: []const u8 = "artifacts/tvm/vec_add_cpu.so";
+            var module_path: []const u8 = "artifacts/tvm/vec_add_cpu.so"; // NOTE: what about cuda support?
             var n: usize = 1024;
             var saw_path = false;
             for (mode_args.items) |arg| {
