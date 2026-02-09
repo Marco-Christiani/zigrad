@@ -36,11 +36,11 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1766070988,
-        "narHash": "sha256-G/WVghka6c4bAzMhTwT2vjLccg/awmHkdKSd2JrycLc=",
+        "lastModified": 1770562336,
+        "narHash": "sha256-ub1gpAONMFsT/GU2hV6ZWJjur8rJ6kKxdm9IlCT0j84=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "c6245e83d836d0433170a16eb185cefe0572f8b8",
+        "rev": "d6c71932130818840fc8fe9509cf50be8c64634f",
         "type": "github"
       },
       "original": {
@@ -116,11 +116,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1769957392,
-        "narHash": "sha256-6PkqwwYf5K2CHi2V+faI/9pqjfz/HxUkI/MVid6hlOY=",
+        "lastModified": 1770605395,
+        "narHash": "sha256-jXydlwsCseO9F0YKPBMpPTWTS4JM7QDVIXaHvjfI1hg=",
         "owner": "pyproject-nix",
         "repo": "uv2nix",
-        "rev": "d18bc50ae1c3d4be9c41c2d94ea765524400af75",
+        "rev": "661dadc1e3ff53142e1554172ab60c667de2c1d5",
         "type": "github"
       },
       "original": {
@@ -132,8 +132,8 @@
     "xla-local": {
       "flake": false,
       "locked": {
-        "lastModified": 1770252297,
-        "narHash": "sha256-wPjtvRqgtfuYWtT8zp9JLDfb2aM5KCagKAQxkT69XaY=",
+        "lastModified": 1770429984,
+        "narHash": "sha256-zDQAEYScASBdtrd7Hiwl9SXZ6ptbUI23W/S50jJccfA=",
         "path": "/home/marco/Github/zigrad-a/reference/xla",
         "type": "path"
       },

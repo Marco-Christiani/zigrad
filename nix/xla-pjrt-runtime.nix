@@ -798,10 +798,11 @@ in
           } > "$out/logs/bazel-solib-scan.txt"
         fi
 
-        # Ensure NVIDIA libs find the bundled sys libs
+        # Ensure NVIDIA libs find the bundled sys libs and sibling libs in same directory
+        # E.g., sibling ($ORIGIN) needed for libnvrtc -> libnvrtc-builtins internal dlopen
         for so in "$out/runtime/nvidia/"*/lib/*.so*; do
           [ -f "$so" ] || continue
-          patchelf --set-rpath '$ORIGIN/../../../sys/lib' "$so" || true
+          patchelf --set-rpath '$ORIGIN:$ORIGIN/../../../sys/lib' "$so" || true
         done
 
         if ! find "$out/runtime/nvidia" -type f -name "*.so*" -print -quit | grep -q .; then

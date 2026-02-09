@@ -252,7 +252,7 @@
         copyNcclNvshmem = true;
         copyCudaTools = true;
         copyLibdevice = true;
-        depsHash = "sha256-Pjjy96jds1Ti883btDXKgrOUXVg15uGSBOXy2rR+vwg=";
+        depsHash = "sha256-G9ioY7aTQNaVlsBGRM/NuVbo7e/pjVNWX8epAPYAFYk=";
       };
 
       # TVM with LLVM 22 (built from XLA-pinned sources).
@@ -292,11 +292,13 @@
       # ------------------------------------------------------------------
       baseDevShellPkgs = with pkgs; [
         zig
-        zls
+        # zls
         go-task
         binutils
         patchelf
         git
+        gccHost
+        clang
       ];
 
       pyShellPkgs0 = pkgs.python312.withPackages (ps: [
@@ -351,6 +353,10 @@
               PJRT_CPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
               PJRT_GPU_PLUGIN_PATH = "${sdkRootDevel}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
               PYTHONPATH = "${sdkRootDevel}/python";
+              CUDA_HOME = "${cudaPackages.cudatoolkit}";
+              # NVRTC include paths for nix-compatible CUDA compilation
+              NIX_GLIBC_INCLUDE = "${pkgs.stdenv.cc.libc.dev}/include";
+              NIX_GCC_INCLUDE = "${pkgs.stdenv.cc.cc}/lib/gcc/${pkgs.stdenv.hostPlatform.config}/${pkgs.lib.getVersion pkgs.stdenv.cc.cc}/include";
             };
           shellHook = ''
             export REPO_ROOT=$(git rev-parse --show-toplevel)
@@ -389,8 +395,6 @@
             fi
             export PJRT_PLUGIN_PATH
 
-            # printf "Plugin path: PJRT_PLUGIN_PATH=%s\n" "$PJRT_PLUGIN_PATH"
-            # printf "SDK path: ZG_EXTERNAL_SDK_ROOT=%s\n" "$ZG_EXTERNAL_SDK_ROOT"
           '';
         };
 

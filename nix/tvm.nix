@@ -67,20 +67,7 @@ in
       strictDeps = true;
       dontStrip = true;
 
-      # Fix: TVM v0.22 unconditionally adds #include <cuda.h> and #include <cstdint> to generated
-      # CUDA code, but NVRTC can't compile code that includes these headers (cuda.h includes stdlib.h,
-      # and cstdint is a C++ STL header not available in NVRTC).
-      # For simple kernels, these aren't needed - only cuda_fp16.h etc for special types.
-      # Patch: Only include these headers when need_include_path() returns true.
       postPatch = ''
-        ${lib.optionalString cudaEnabled ''
-          substituteInPlace src/target/source/codegen_cuda.cc \
-            --replace-fail 'decl_stream << "#include <cuda.h>\n";' \
-                           'if (need_include_path()) { decl_stream << "#include <cuda.h>\\n"; }' \
-            --replace-fail 'decl_stream << "#include <cstdint>\n";' \
-                           'if (need_include_path()) { decl_stream << "#include <cstdint>\\n"; }'
-        ''}
-
         ${lib.optionalString useCustomLlvm ''
           # Apply LLVM 22 API compatibility patch
           patch -p1 < ${./tvm-llvm22.patch}
@@ -102,15 +89,15 @@ in
       git
       patchelf
       patch
-      llvmDev
-    ] ++ lib.optionals (!useCustomLlvm) [
-      llvmPackages.llvm
+      llvmDev  # Provides llvm-config (either custom LLVM or llvmPackages.llvm.dev)
     ] ++ lib.optionals cudaEnabled [
       autoAddDriverRunpath  # automatically patches rpath to include /run/opengl-driver for libcuda.so
     ];
 
       buildInputs = [
-        # Required for static LLVM linking - these are LLVM's dependencies
+        # LLVM runtime library (either custom LLVM or llvmPackages.llvm.lib)
+        llvmLib
+        # LLVM's dependencies (required for linking)
         zlib
         ncurses   # provides libtinfo
         libxml2
@@ -177,6 +164,8 @@ in
 
       mkdir -p $out/lib $out/include
 
+      # No custom headers needed - NVRTC uses CUDA's bundled libcxx
+
       for f in build/libtvm* build/libtvm_runtime*; do
         if [ -e "$f" ]; then
           cp -v "$f" $out/lib/
@@ -227,12 +216,11 @@ in
       fi
 
       # Build rpath for TVM libs.
-      # - When using custom LLVM (shared), include it in rpath so libtvm.so finds libLLVM.so.
+      # - Include LLVM library in rpath so libtvm.so finds libLLVM.so.
       # - Always include LLVM's runtime deps (zlib, ncurses, libxml2).
       # - Note: libcuda.so.1 is provided by the driver and resolved via autoAddDriverRunpath or LD_LIBRARY_PATH.
       rpath="\$ORIGIN:${lib.makeLibraryPath (
-        [stdenv.cc.cc.lib zlib ncurses libxml2]
-        ++ lib.optionals useCustomLlvm [llvm]
+        [stdenv.cc.cc.lib zlib ncurses libxml2 llvmLib]
         ++ lib.optionals cudaEnabled [cudaPackages.cudatoolkit]
       )}"
       for f in $out/lib/*.so*; do

@@ -9,11 +9,13 @@
   cudaArchitectures = ["86"];
 
   # prefer explicit host compiler for nvcc to avoid it discovering something else.
-  gccHostAttr = "gcc13";
+  gccHostAttr = "gcc14";
 
   # NOTE: pick the CUDA toolchain once. change here, not in random shells.
+  # cudaPackagesAttr = "cudaPackages_13";
   cudaPackagesAttr = "cudaPackages_12";
 
   # Match the hermetic CUDA version in tensorflow.bazelrc (pjrt_cuda12).
-  cudaVersion = "12.9.1";
+  # cudaVersion = "13.0.0";
+  cudaVersion = "12.8";
 }
