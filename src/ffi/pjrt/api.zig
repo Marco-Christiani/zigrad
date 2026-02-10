@@ -5,7 +5,7 @@
 /// - Struct-size-safe initialization
 /// - Error handling and conversion
 ///
-/// This module does NOT manage PJRT objects—see types.zig for that.
+/// This module does NOT manage PJRT objects--see types.zig for that.
 const std = @import("std");
 const c_mod = @import("c.zig");
 const c = c_mod.c;

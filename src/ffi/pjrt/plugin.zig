@@ -173,8 +173,10 @@ pub const PreloadError = error{
 /// Contract:
 /// - Requires: libcuda.so.1 (stable soname)
 /// - Optional: libnvidia-ml.so.1 (NVML)
-/// This assumes your build/install/runtime has arranged for the dynamic loader
-/// to find these (e.g. Docker GPU injection, or on NixOS: /run/opengl-driver/lib
+///
+/// ## Notes
+/// This assumes build/install/runtime has arranged for the dynamic loader to
+/// find these (e.g. Docker GPU injection, or on NixOS: /run/opengl-driver/lib
 /// in RUNPATH).
 pub fn preload_host_nvidia(verbose: bool) PreloadError!HostNvidiaHandles {
     // RTLD_GLOBAL is often important for driver-side symbol visibility when
@@ -182,7 +184,7 @@ pub fn preload_host_nvidia(verbose: bool) PreloadError!HostNvidiaHandles {
     const flags_driver: c_int = c.RTLD_NOW | c.RTLD_GLOBAL;
 
     const cuda_h = maybe_dlopen("CUDA driver", "libcuda.so.1", flags_driver, verbose) orelse {
-        // No absolute-path fallback here: if this fails, it’s an environment/packaging issue.
+        // no absolute-path fallback here: if this fails it is an environment/packaging issue.
         if (!verbose) {
             std.debug.print("dlopen FAIL CUDA driver (libcuda.so.1) -> {s}\n", .{dl_err_msg()});
         }

@@ -1,7 +1,7 @@
 /// PJRT Type Wrappers
 ///
 /// Higher-level Zig wrappers around PJRT C types with explicit lifetimes.
-/// These types are thin wrappers—no logic beyond calling through to api.zig.
+/// These types are thin wrappers--no logic beyond calling through to api.zig.
 const std = @import("std");
 const api_mod = @import("api.zig");
 const Api = api_mod.Api;

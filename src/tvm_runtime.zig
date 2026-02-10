@@ -927,7 +927,7 @@ fn lower_and_build_module(
     // CUDA-specific passes that must run before SplitHostDevice.
     // Ordering follows TVM's default_tir_pipeline (see tvm/driver/build_module.py).
     // ThreadSync inserts __syncthreads() barriers inferred from shared memory access patterns.
-    // AnnotateDeviceRegions wraps thread_extent regions with kTarget attributes — required
+    // AnnotateDeviceRegions wraps thread_extent regions with kTarget attributes - required
     // for SplitHostDevice to detect device code and extract it into a separate kernel.
     if (target_kind == .cuda) {
         apply_pass_with_args(allocator, "tir.transform.ThreadSync", &[_]c.TVMFFIAny{any_raw_str("shared")}, &lowered_mod, log) catch {};
@@ -1405,7 +1405,7 @@ fn zig_run_callback(
         var call_res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         ffi_call(ctx.allocator, func, &call_args, &call_res) catch |err| {
             const tvm_err = get_last_error_message(ctx.allocator) catch "?";
-            log.err("warmup call failed: {s} — {s}", .{ @errorName(err), tvm_err });
+            log.err("warmup call failed: {s} - {s}", .{ @errorName(err), tvm_err });
             const err_future = create_runner_error_future(ctx.allocator, "warmup failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
@@ -2167,7 +2167,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
         /// Returns null on success, or a static error description on failure.
         ///
         /// TVM's SafeCall checks `result->type_index < kTVMFFIStaticObjectBegin`
-        /// before executing — the output must be pre-initialized to a POD/None value,
+        /// before executing - the output must be pre-initialized to a POD/None value,
         /// otherwise uninitialized stack memory can trigger a spurious CHECK failure.
         fn ffi_call_global_noerr(name: []const u8, args: []c.TVMFFIAny, out: *c.TVMFFIAny) ?[]const u8 {
             out.* = any_none();

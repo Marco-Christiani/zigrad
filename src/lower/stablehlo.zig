@@ -43,8 +43,8 @@ pub const OutputFormat = enum {
 ///
 /// Example:
 ///   Program with functions ["forward", "backward"]
-///   - entry_name = "backward" → MLIR contains only @main (was "backward")
-///   - entry_name = null → MLIR contains @main (was "forward") + @backward
+///   - entry_name = "backward" -> MLIR contains only @main (was "backward")
+///   - entry_name = null -> MLIR contains @main (was "forward") + @backward
 pub fn lower_program_to_mlir(
     allocator: std.mem.Allocator,
     program: *const pr.Program,
