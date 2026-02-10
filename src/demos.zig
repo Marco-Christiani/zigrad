@@ -603,10 +603,6 @@ pub fn print_tvm_runtime_globals(allocator: std.mem.Allocator) !void {
     return tvm_runtime.print_global_functions(allocator);
 }
 
-pub fn run_tvm_vec_add(allocator: std.mem.Allocator, module_path: []const u8, n: usize) !void {
-    return tvm_runtime.run_vec_add(allocator, module_path, n);
-}
-
 pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.Palette) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();

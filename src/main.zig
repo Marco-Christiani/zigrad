@@ -121,35 +121,6 @@ pub fn main() !void {
             }
             return demos.print_tvm_runtime_globals(gpa);
         }
-        if (std.mem.eql(u8, m, "tvm-build")) {
-            if (have_dump_pr or have_dump_mlir) {
-                try print_usage();
-                return error.InvalidArguments;
-            }
-            var n: usize = 1024;
-            var target_kind: tvm_runtime.TargetKind = .cpu;
-            for (mode_args.items) |arg| {
-                if (std.mem.startsWith(u8, arg, "--n=")) {
-                    const value = arg["--n=".len..];
-                    n = std.fmt.parseInt(usize, value, 10) catch {
-                        try print_usage();
-                        return error.InvalidArguments;
-                    };
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--cuda") or std.mem.eql(u8, arg, "--gpu")) {
-                    target_kind = .cuda;
-                    continue;
-                }
-                if (std.mem.eql(u8, arg, "--cpu")) {
-                    target_kind = .cpu;
-                    continue;
-                }
-                try print_usage();
-                return error.InvalidArguments;
-            }
-            return tvm_runtime.build_and_run_vec_add(gpa, n, target_kind);
-        }
         if (std.mem.eql(u8, m, "tvm-tune")) {
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
@@ -282,38 +253,6 @@ pub fn main() !void {
             return tvm_runtime.run_tuned_matmul(gpa, shape.M, shape.N, shape.K, .{
                 .work_dir = work_dir,
             });
-        }
-        if (std.mem.eql(u8, m, "tvm-vec-add")) {
-            if (have_dump_pr or have_dump_mlir) {
-                try print_usage();
-                return error.InvalidArguments;
-            }
-            var module_path: []const u8 = "artifacts/tvm/vec_add_cpu.so"; // NOTE: what about cuda support?
-            var n: usize = 1024;
-            var saw_path = false;
-            for (mode_args.items) |arg| {
-                if (std.mem.startsWith(u8, arg, "--n=")) {
-                    const value = arg["--n=".len..];
-                    n = std.fmt.parseInt(usize, value, 10) catch {
-                        try print_usage();
-                        return error.InvalidArguments;
-                    };
-                    continue;
-                }
-                if (std.mem.startsWith(u8, arg, "--module=")) {
-                    module_path = arg["--module=".len..];
-                    saw_path = true;
-                    continue;
-                }
-                if (!saw_path) {
-                    module_path = arg;
-                    saw_path = true;
-                    continue;
-                }
-                try print_usage();
-                return error.InvalidArguments;
-            }
-            return demos.run_tvm_vec_add(gpa, module_path, n);
         }
     }
 
@@ -582,7 +521,6 @@ fn print_usage() !void {
         \\  print-pr                     prints the PR for the demo program
         \\  tvm-zxpr [--sweep-palettes] [--palette=<name>]  prints a kernelized TVM region in zxpr
         \\  tvm-runtime                  lists global TVM runtime functions (requires -Dtvm)
-        \\  tvm-build [--n=N] [--cuda]   builds+runs vec_add in-memory via TVM TE (requires -Dtvm)
         \\  tvm-tune [options]           runs TVM MetaSchedule autotuning on matmul (requires -Dtvm)
         \\      --shape=MxNxK            matmul dimensions (default: 128x128x128)
         \\      --trials=N               max tuning trials (default: 64)
@@ -593,7 +531,6 @@ fn print_usage() !void {
         \\  tvm-run [options]            runs best tuned matmul from previous tuning (requires -Dtvm)
         \\      --shape=MxNxK            matmul dimensions (must match tuned shape)
         \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache)
-        \\  tvm-vec-add [--module=PATH] [--n=N]  runs a TVM vec_add module (default artifacts/tvm/vec_add_cpu.so)
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
