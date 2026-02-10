@@ -184,7 +184,6 @@
       # Bazel-built PJRT C API plugins from XLA
       xlaPjrtPlugins = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
-        xlaSrcOverride = xla-local;
         devel = false;
         cudaSupport = false;
         cudaPackages = null;
@@ -193,7 +192,6 @@
 
       xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
-        xlaSrcOverride = xla-local;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         devel = false;
         cudaSupport = true;
@@ -209,7 +207,6 @@
       # TODO: Can flip cudaSupport=true once we plumb CUDA env/toolchain.
       xlaPjrtPluginsDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
-        xlaSrcOverride = xla-local;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
 
@@ -224,7 +221,6 @@
       # Dev: ccache + devel + CUDA.
       xlaPjrtPluginsCudaDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
         inherit lockFile;
-        xlaSrcOverride = xla-local;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
@@ -240,13 +236,11 @@
       # Simple buildBazelPackage-based PJRT C API plugins (experimental)
       xlaPjrtPluginsBazel = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
         inherit lockFile;
-        xlaSrcOverride = xla-local;
         cudaSupport = false;
       };
 
       xlaPjrtPluginsBazelCuda = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
         inherit lockFile;
-        xlaSrcOverride = xla-local;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         cudaSupport = true;
         copyNcclNvshmem = true;
