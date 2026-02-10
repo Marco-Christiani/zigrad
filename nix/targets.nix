@@ -5,7 +5,6 @@
   zig,
   cudaPackages,
   gccHost,
-  nixglhost,
   src,
   cudaArchitectures,
   zigradExternalSdk,
@@ -19,63 +18,6 @@
 in {
   # group targets explicitly, can extend this
   targets = {
-    example-cuda = rec {
-      # hermetic build target: no host driver needed
-      build = pkgs.stdenvNoCC.mkDerivation {
-        pname = "example-cuda";
-        version = "0.1";
-        inherit src;
-
-        nativeBuildInputs = [
-          pkgs.cmake
-          pkgs.gnumake
-          cudaPackages.cudatoolkit
-          gccHost
-        ];
-
-        configurePhase = ''
-          cmake -B build -S . \
-            -DCMAKE_C_COMPILER=${gccHost}/bin/gcc \
-            -DCMAKE_CXX_COMPILER=${gccHost}/bin/g++ \
-            -DCMAKE_CUDA_COMPILER=${cudaPackages.cudatoolkit}/bin/nvcc \
-            -DCMAKE_CUDA_HOST_COMPILER=${gccHost}/bin/g++ \
-            -DCMAKE_CUDA_ARCHITECTURES=${cudaArchStr} \
-            -DCMAKE_BUILD_TYPE=Release
-        '';
-
-        buildPhase = ''
-          cmake --build build -j
-        '';
-
-        installPhase = ''
-          mkdir -p $out/bin
-          # keep output names stable for tooling
-          cp build/programs/example-cuda $out/bin/example-cuda
-        '';
-      };
-
-      # NOTE: we might want to be more clear and expose the raw executable target and the wrapped target separately for clarity.
-      #   Since this is unused now, nbd, but in the future that may be preferrable to reduce hidden behavior and improve debuggability.
-      #   Also, not sure which is more appropriate for creating a distributable artifact.
-      #
-      # run target: explicitly impure (host driver stack) via nixglhost wrapper
-      run = pkgs.writeShellScriptBin "example-cuda" ''
-        if [ "''${NIX_ENFORCE_NO_NATIVE:-0}" = "1" ]; then
-          printf "${colors.yellow}WARNING:${colors.reset} NIX_ENFORCE_NO_NATIVE=1 (no native CPU tuning).\n"
-        fi
-
-        # if i understand correctly, we should prefer wrapping the binary rather than global LD_LIBRARY_PATH injection.
-        # nix-gl-host docs call -p a footgun, wrapping is recommended.
-        exec ${nixglhost}/bin/nixglhost ${build}/bin/example-cuda "$@"
-      '';
-    };
-
-    # thinking that zig+cuda projects can add a parallel group. e.g.,
-    # zig = {
-    #   build = pkgs.stdenvNoCC.mkDerivation { ... zig build ... };
-    #   run = pkgs.writeShellScriptBin "zig-app" '' exec ${nixglhost}/bin/nixglhost ${build}/bin/zig-app "$@" '';
-    # };
-
     zigrad-m4 = rec {
       build = pkgs.stdenvNoCC.mkDerivation {
         pname = "zigrad-m4";

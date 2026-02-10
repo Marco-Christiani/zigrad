@@ -1,17 +1,6 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nix-gl-host.url = "github:numtide/nix-gl-host";
-    xla-local = {
-      # Local checkout for instrumentation; avoid git-clean filtering.
-      url = "path:/home/marco/Github/zigrad-a/reference/xla";
-      flake = false;
-    };
-    # this fork isnt exactly as correct but i hope its faster bc the mainline one is really slow like 20-30s startup
-    #   i should fork and fix one of them or write my own idk but if this works and is faster then im happy.
-    #   that being said, this seems like it may be bringing in gigs of deps (ironically, given the stated motivations)
-    #   although i would need to actually check this to be confident in that idea.
-    # nix-gl-host.url = "github:arilotter/nix-gl-host-rs";
 
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
@@ -34,8 +23,6 @@
   outputs = {
     self,
     nixpkgs,
-    nix-gl-host,
-    xla-local,
     pyproject-nix,
     uv2nix,
     pyproject-build-systems,
@@ -79,8 +66,6 @@
       cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
       gccHost = pkgs.${cudaCfg.gccHostAttr};
 
-      nixglhost = nix-gl-host.packages.${system}.default;
-
       # src = pkgs.lib.cleanSource self;
       allowPrefixes = [
         "/src/"
@@ -112,7 +97,6 @@
             pkgs
             cudaPackages
             gccHost
-            nixglhost
             src
             ;
           inherit (cudaCfg) cudaArchitectures;
