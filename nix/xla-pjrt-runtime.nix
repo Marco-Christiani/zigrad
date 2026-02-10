@@ -32,10 +32,12 @@
   # toolchain closure into the build environment.
   useCudaStdenv ? true,
   lockFile,
+  xlaSrcOverride ? null,
   devel ? false,
   # Dev-speed knobs (keep false for hermetic builds)
   persistentBazelOutputBase ? false,
   bazelLogEvents ? false,
+  extraCpuFlags ? false,
 }: let
   # -----------------------------------------------------------------------------
   # XLA PJRT runtime bundle
@@ -63,18 +65,27 @@
   #   or under Bazel output_base (queried via `bazel info output_base`).
   # -----------------------------------------------------------------------------
   lock = builtins.fromJSON (builtins.readFile lockFile);
-  xla = lock.pins.xla;
+  inherit (lock.pins) xla;
 
   xlaTar = fetchurl {
     url = xla.tarball_url;
     hash = xla.hash_sri;
   };
 
-  xlaSrc = runCommand "xla-src-${builtins.substring 0 12 xla.commit}" {} ''
-    set -euo pipefail
-    mkdir -p "$out"
-    tar -xzf ${xlaTar} -C "$out" --strip-components=1
-  '';
+  xlaSrc =
+    if xlaSrcOverride != null
+    then
+      builtins.path {
+        path = xlaSrcOverride;
+        name = "xla-src-local";
+        filter = path: type: true;
+      }
+    else
+      runCommand "xla-src-${builtins.substring 0 12 xla.commit}" {} ''
+        set -euo pipefail
+        mkdir -p "$out"
+        tar -xzf ${xlaTar} -C "$out" --strip-components=1
+      '';
 
   cudaPackagesRequired = cudaSupport && (copyCudaFromNix || useCudaStdenv);
 
@@ -93,23 +104,22 @@
     then cudaPackagesChecked.backendStdenv
     else stdenv;
 
-  cudaRuntimeNames =
-    lib.optionals cudaSupport (
-      [
-        "cudnn"
-        "cublas"
-        "cufft"
-        "cusparse"
-        "cudart"
-        "cupti"
-        "nvrtc"
-        "nvjitlink"
-      ]
-      ++ lib.optionals copyNcclNvshmem [
-        "nccl"
-        "nvshmem"
-      ]
-    );
+  cudaRuntimeNames = lib.optionals cudaSupport (
+    [
+      "cudnn"
+      "cublas"
+      "cufft"
+      "cusparse"
+      "cudart"
+      "cupti"
+      "nvrtc"
+      "nvjitlink"
+    ]
+    ++ lib.optionals copyNcclNvshmem [
+      "nccl"
+      "nvshmem"
+    ]
+  );
 
   cudaRuntimeLibs =
     lib.optionals (cudaSupport && copyCudaFromNix)
@@ -204,6 +214,18 @@
       "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
     ];
 
+  cpuFlags = lib.optionalString extraCpuFlags ''
+    build --config=mkl_threadpool
+    build --define=tensorflow_mkldnn_contraction_kernel=1
+    build --copt=-march=native
+    build --copt=-mtune=native
+    build --copt=-mavx2
+    build --copt=-mfma
+    build --host_copt=-march=native
+    build --host_copt=-mtune=native
+    build --host_copt=-mavx2
+    build --host_copt=-mfma'';
+
   # see jaxlib
   xlaBazelrc =
     ''
@@ -217,6 +239,7 @@
         "build --disk_cache=/nix/var/cache/bazel/xla-${builtins.substring 0 12 xla.commit}/disk-cache"}
       build --repo_env PYTHON_BIN_PATH="${python3}/bin/python"
       build --python_path="${python3}/bin/python"
+      ${cpuFlags}
 
       # Make Bazel action environment see ccache variables too (even though the wrapper sets them).
       build --action_env CCACHE_DIR="/nix/var/cache/ccache"
@@ -233,7 +256,7 @@
       # build --sandbox_writable_path=/tmp
 
       common --host_linkopt=-Wl,--dynamic-linker=${stdenv.cc.bintools.dynamicLinker}
-      common --host_linkopt=-Wl,-rpath,${lib.makeLibraryPath [ stdenv.cc.cc stdenv.cc.libc zlib ncurses ]}
+      common --host_linkopt=-Wl,-rpath,${lib.makeLibraryPath [stdenv.cc.cc stdenv.cc.libc zlib ncurses]}
       common --verbose_failures
       common --sandbox_debug
     ''
@@ -257,6 +280,7 @@ in
     pname = "xla-pjrt-plugins";
     version =
       "xla-${builtins.substring 0 12 xla.commit}"
+      + lib.optionalString (xlaSrcOverride != null) "-local"
       + lib.optionalString devel "-devel"
       + lib.optionalString cudaSupport "-cuda";
 
@@ -286,6 +310,30 @@ in
       substituteInPlace third_party/py/python_init_toolchains.bzl \
         --replace '            python_version_kind = HERMETIC_PYTHON_VERSION_KIND,' ""
       sed -i '/remotable = True,/d' third_party/py/python_configure.bzl
+      # Ensure CPU PJRT plugin links PJRT compiler registration for AOT.
+      python3 - <<'PY'
+      from pathlib import Path
+
+      path = Path("xla/pjrt/c/BUILD")
+      text = path.read_text()
+      if "xla/pjrt/cpu:cpu_pjrt_compiler" in text:
+          raise SystemExit(0)
+
+      name_anchor = 'name = "pjrt_c_api_cpu_plugin.so"'
+      name_idx = text.find(name_anchor)
+      if name_idx < 0:
+          raise SystemExit("failed to patch xla/pjrt/c/BUILD: plugin target not found")
+
+      deps_anchor = "deps = ["
+      deps_idx = text.find(deps_anchor, name_idx)
+      if deps_idx < 0:
+          raise SystemExit("failed to patch xla/pjrt/c/BUILD: deps block not found")
+
+      insert_pos = deps_idx + len(deps_anchor)
+      insert_text = '\n        "//xla/pjrt/cpu:cpu_pjrt_compiler",'
+      updated = text[:insert_pos] + insert_text + text[insert_pos:]
+      path.write_text(updated)
+      PY
       mkdir -p third_party/local_config_cuda_stub
       cat > third_party/local_config_cuda_stub/BUILD.bazel <<'EOF'
       config_setting(
@@ -321,223 +369,223 @@ in
     '';
 
     buildPhase = ''
-      # -----------------------------------------------------------------------------
-      # Build strategy (NixOS + Bazel hermetic toolchains)
-      #
-      # Problem:
-      #   Bazel downloads some prebuilt, dynamically-linked Linux executables (LLVM
-      #   toolchain, hermetic Python, etc). On NixOS these fail at runtime because
-      #   their ELF interpreter is /lib64/ld-linux-x86-64.so.2 (stub-ld on NixOS).
-      #
-      # Approach:
-      #   1) Use a deterministic Bazel output_base inside the build directory.
-      #   2) Prime externals with `bazel build --nobuild` to populate output_base.
-      #   3) Patch:
-      #        - scripts: patch shebangs for wrapper dirs
-      #        - ELFs: rewrite stub interpreter -> real glibc loader + add minimal RPATH
-      #      This preserves Bazel's pinned deps and patches; we only make executables runnable.
-      #   4) Run the real `bazel build` using the same output_base.
-      # -----------------------------------------------------------------------------
+        # -----------------------------------------------------------------------------
+        # Build strategy (NixOS + Bazel hermetic toolchains)
+        #
+        # Problem:
+        #   Bazel downloads some prebuilt, dynamically-linked Linux executables (LLVM
+        #   toolchain, hermetic Python, etc). On NixOS these fail at runtime because
+        #   their ELF interpreter is /lib64/ld-linux-x86-64.so.2 (stub-ld on NixOS).
+        #
+        # Approach:
+        #   1) Use a deterministic Bazel output_base inside the build directory.
+        #   2) Prime externals with `bazel build --nobuild` to populate output_base.
+        #   3) Patch:
+        #        - scripts: patch shebangs for wrapper dirs
+        #        - ELFs: rewrite stub interpreter -> real glibc loader + add minimal RPATH
+        #      This preserves Bazel's pinned deps and patches; we only make executables runnable.
+        #   4) Run the real `bazel build` using the same output_base.
+        # -----------------------------------------------------------------------------
 
-      runHook preBuild
+        runHook preBuild
 
-      python3 ${./parse_bazelrc.py} --output ./bazel-config.json
+        python3 ${./parse_bazelrc.py} --output ./bazel-config.json
 
-      echo "[bazelrc] wrote ./bazel-config.json"
-      echo "[bazelrc] parsed $(python3 - <<'PY'
-    import json
-    data = json.load(open("./bazel-config.json", "r", encoding="utf-8"))
-    src = data.get("source") or "unknown"
-    count = len(data.get("available_configs", []))
-    print(f"source={src} configs={count}")
-    PY
-      )"
-      echo "[bazelrc] cuda (resolved): $(python3 - <<'PY'
-    import json
-    data = json.load(open("./bazel-config.json", "r", encoding="utf-8"))
-    for key in ("cuda", "pjrt_cuda12", "pjrt_cuda13"):
-        env = data.get("repo_env_resolved", {}).get(key, {})
-        cuda = env.get("HERMETIC_CUDA_VERSION", "n/a")
-        cudnn = env.get("HERMETIC_CUDNN_VERSION", "n/a")
-        nvsh = env.get("HERMETIC_NVSHMEM_VERSION", "n/a")
-        print(f"{key}={cuda} (cudnn={cudnn}, nvshmem={nvsh})")
-    PY
-      )"
+        echo "[bazelrc] wrote ./bazel-config.json"
+        echo "[bazelrc] parsed $(python3 - <<'PY'
+      import json
+      data = json.load(open("./bazel-config.json", "r", encoding="utf-8"))
+      src = data.get("source") or "unknown"
+      count = len(data.get("available_configs", []))
+      print(f"source={src} configs={count}")
+      PY
+        )"
+        echo "[bazelrc] cuda (resolved): $(python3 - <<'PY'
+      import json
+      data = json.load(open("./bazel-config.json", "r", encoding="utf-8"))
+      for key in ("cuda", "pjrt_cuda12", "pjrt_cuda13"):
+          env = data.get("repo_env_resolved", {}).get(key, {})
+          cuda = env.get("HERMETIC_CUDA_VERSION", "n/a")
+          cudnn = env.get("HERMETIC_CUDNN_VERSION", "n/a")
+          nvsh = env.get("HERMETIC_NVSHMEM_VERSION", "n/a")
+          print(f"{key}={cuda} (cudnn={cudnn}, nvshmem={nvsh})")
+      PY
+        )"
 
-      # Always deterministic output_base for this derivation.
-      OUTPUT_BASE="$PWD/.bazel-output-base"
-      output_base_arg=( "--output_base=$OUTPUT_BASE" )
+        # Always deterministic output_base for this derivation.
+        OUTPUT_BASE="$PWD/.bazel-output-base"
+        output_base_arg=( "--output_base=$OUTPUT_BASE" )
 
-      # Keep Bazel rc usage hermetic for this build.
-      # bazel_rc_args=( --nosystem_rc --nohome_rc )
-      bazel_rc_args=( --nohome_rc )
+        # Keep Bazel rc usage hermetic for this build.
+        # bazel_rc_args=( --nosystem_rc --nohome_rc )
+        bazel_rc_args=( --nohome_rc )
 
-      # Record the output_base for installPhase (copy_find fallback) and debugging.
-      bazel "''${bazel_rc_args[@]}" "''${output_base_arg[@]}" info output_base | tee ./bazel-output-base-path
+        # Record the output_base for installPhase (copy_find fallback) and debugging.
+        bazel "''${bazel_rc_args[@]}" "''${output_base_arg[@]}" info output_base | tee ./bazel-output-base-path
 
-      ${lib.optionalString devel ''
+        ${lib.optionalString devel ''
         bazel "''${bazel_rc_args[@]}" "''${output_base_arg[@]}" info output_base
         bazel "''${bazel_rc_args[@]}" "''${output_base_arg[@]}" info repository_cache
       ''}
 
-      # 1) Prime: populate external repos + runfiles without compiling targets.
-      bazel \
-        --batch \
-        "''${bazel_rc_args[@]}" \
-        "''${output_base_arg[@]}" \
-        build \
-        --nobuild \
-        -c opt \
-        ${lib.concatStringsSep " " bazelTargets}
+        # 1) Prime: populate external repos + runfiles without compiling targets.
+        bazel \
+          --batch \
+          "''${bazel_rc_args[@]}" \
+          "''${output_base_arg[@]}" \
+          build \
+          --nobuild \
+          -c opt \
+          ${lib.concatStringsSep " " bazelTargets}
 
-      # Minimal RPATH fallback for prebuilt tools.
-      # Prefer bundled libs first, then a small Nix fallback for common deps.
-      tool_rpath="\$ORIGIN/../lib:\$ORIGIN/../lib64:${lib.makeLibraryPath [ stdenv.cc.cc zlib ncurses ]}"
+        # Minimal RPATH fallback for prebuilt tools.
+        # Prefer bundled libs first, then a small Nix fallback for common deps.
+        tool_rpath="\$ORIGIN/../lib:\$ORIGIN/../lib64:${lib.makeLibraryPath [stdenv.cc.cc zlib ncurses]}"
 
-      patch_elf_one() {
-        local p="$1"
-        [ -e "$p" ] || return 0
+        patch_elf_one() {
+          local p="$1"
+          [ -e "$p" ] || return 0
 
-        # Follow symlinks so we patch the actual ELF.
-        local real="$p"
-        if [ -L "$p" ] && command -v readlink >/dev/null 2>&1; then
-          real="$(readlink -f "$p" 2>/dev/null || echo "$p")"
+          # Follow symlinks so we patch the actual ELF.
+          local real="$p"
+          if [ -L "$p" ] && command -v readlink >/dev/null 2>&1; then
+            real="$(readlink -f "$p" 2>/dev/null || echo "$p")"
+          fi
+          [ -f "$real" ] || return 0
+
+          chmod u+w "$real" 2>/dev/null || true
+
+          # Only touch ELF files whose interpreter is the NixOS stub loader.
+          if file -L "$p" 2>/dev/null | grep -q 'ELF '; then
+            local interp=""
+            interp="$(patchelf --print-interpreter "$real" 2>/dev/null || true)"
+            case "$interp" in
+              /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-x86-64.so.2)
+                echo "[elf-fix] patch $p (real=$real)"
+                patchelf --set-interpreter "${stdenv.cc.bintools.dynamicLinker}" "$real" || true
+                patchelf --set-rpath "$tool_rpath" "$real" || true
+                ;;
+            esac
+          fi
+        }
+
+        patch_elf_tree() {
+          local root="$1"
+          [ -d "$root" ] || return 0
+          chmod -R u+w "$root" 2>/dev/null || true
+
+          # Keep scan bounded so it scales:
+          # - bin/*, tools/*, and runfiles/*/bin/* are the typical "executed tools" locations.
+          find -L "$root" \
+            \( -path '*/bin/*' -o -path '*/tools/*' -o -path '*/.runfiles/*/bin/*' -o -path '*/python_*/*/bin/*' \) \
+            \( -type f -o -type l \) \
+            -print0 2>/dev/null |
+          while IFS= read -r -d $'\0' f; do
+            patch_elf_one "$f"
+          done
+        }
+
+        patch_wrappers_shebangs() {
+          local root="$1"
+          [ -d "$root" ] || return 0
+
+          # Patch wrapper script shebangs (common source of ENOENT on NixOS sandboxes).
+          find -L "$root" -type d -name wrappers -print0 2>/dev/null |
+          while IFS= read -r -d $'\0' d; do
+            chmod -R u+w "$d" 2>/dev/null || true
+            echo "[shebangs] patchShebangs $d"
+            patchShebangs "$d" || true
+          done
+        }
+
+        # 2) Apply fixes:
+        #   - scripts in rules_ml_toolchain wrappers
+        #   - prebuilt ELF tools under external + execroot (covers hermetic python in runfiles)
+        patch_wrappers_shebangs "$OUTPUT_BASE/external/rules_ml_toolchain"
+        patch_elf_tree "$OUTPUT_BASE/external"
+        patch_elf_tree "$OUTPUT_BASE/execroot"
+
+        # 3) Extra hardening: ensure the LLVM clang entrypoint is actually patched.
+        tc="$OUTPUT_BASE/external/llvm18_linux_x86_64"
+        if [ -d "$tc/bin" ]; then
+          chmod -R u+w "$tc" 2>/dev/null || true
+          for b in clang clang-18 clang++ clang++-18 ld.lld ld.lld-18 llvm-ar llvm-strip; do
+            patch_elf_one "$tc/bin/$b"
+          done
+
+          clang_real="$(readlink -f "$tc/bin/clang" 2>/dev/null || echo "$tc/bin/clang")"
+          echo "[toolchain] clang real=$clang_real interp=$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)"
+          if [ "$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)" != "${stdenv.cc.bintools.dynamicLinker}" ]; then
+            echo "ERROR: clang still has stub interpreter after patch pass" >&2
+            ls -la "$tc/bin" >&2 || true
+            exit 1
+          fi
+        else
+          echo "ERROR: expected llvm toolchain missing at $tc/bin" >&2
+          find "$OUTPUT_BASE/external" -maxdepth 2 -type d -name 'llvm*' -print >&2 || true
+          exit 1
         fi
-        [ -f "$real" ] || return 0
 
-        chmod u+w "$real" 2>/dev/null || true
-
-        # Only touch ELF files whose interpreter is the NixOS stub loader.
-        if file -L "$p" 2>/dev/null | grep -q 'ELF '; then
-          local interp=""
-          interp="$(patchelf --print-interpreter "$real" 2>/dev/null || true)"
-          case "$interp" in
-            /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-x86-64.so.2)
-              echo "[elf-fix] patch $p (real=$real)"
-              patchelf --set-interpreter "${stdenv.cc.bintools.dynamicLinker}" "$real" || true
-              patchelf --set-rpath "$tool_rpath" "$real" || true
-              ;;
-          esac
-        fi
-      }
-
-      patch_elf_tree() {
-        local root="$1"
-        [ -d "$root" ] || return 0
-        chmod -R u+w "$root" 2>/dev/null || true
-
-        # Keep scan bounded so it scales:
-        # - bin/*, tools/*, and runfiles/*/bin/* are the typical "executed tools" locations.
-        find -L "$root" \
-          \( -path '*/bin/*' -o -path '*/tools/*' -o -path '*/.runfiles/*/bin/*' -o -path '*/python_*/*/bin/*' \) \
-          \( -type f -o -type l \) \
-          -print0 2>/dev/null |
-        while IFS= read -r -d $'\0' f; do
-          patch_elf_one "$f"
-        done
-      }
-
-      patch_wrappers_shebangs() {
-        local root="$1"
-        [ -d "$root" ] || return 0
-
-        # Patch wrapper script shebangs (common source of ENOENT on NixOS sandboxes).
-        find -L "$root" -type d -name wrappers -print0 2>/dev/null |
-        while IFS= read -r -d $'\0' d; do
-          chmod -R u+w "$d" 2>/dev/null || true
-          echo "[shebangs] patchShebangs $d"
-          patchShebangs "$d" || true
-        done
-      }
-
-      # 2) Apply fixes:
-      #   - scripts in rules_ml_toolchain wrappers
-      #   - prebuilt ELF tools under external + execroot (covers hermetic python in runfiles)
-      patch_wrappers_shebangs "$OUTPUT_BASE/external/rules_ml_toolchain"
-      patch_elf_tree "$OUTPUT_BASE/external"
-      patch_elf_tree "$OUTPUT_BASE/execroot"
-
-      # 3) Extra hardening: ensure the LLVM clang entrypoint is actually patched.
-      tc="$OUTPUT_BASE/external/llvm18_linux_x86_64"
-      if [ -d "$tc/bin" ]; then
+        # --- hard patch + assert: llvm toolchain (clang / clang-18 etc.) ----------------
+        tc="$OUTPUT_BASE/external/llvm18_linux_x86_64"
+        [ -d "$tc/bin" ] || { echo "ERROR: missing $tc/bin" >&2; exit 1; }
         chmod -R u+w "$tc" 2>/dev/null || true
+
+        tool_rpath="\$ORIGIN/../lib:\$ORIGIN/../lib64:${lib.makeLibraryPath [stdenv.cc.cc zlib ncurses]}"
+
+        patch_elf_one() {
+          local p="$1"
+          [ -e "$p" ] || return 0
+
+          local real="$p"
+          if [ -L "$p" ] && command -v readlink >/dev/null 2>&1; then
+            real="$(readlink -f "$p" 2>/dev/null || echo "$p")"
+          fi
+          [ -f "$real" ] || return 0
+
+          chmod u+w "$real" 2>/dev/null || true
+
+          # Treat symlinks as their targets
+          if file -L "$p" 2>/dev/null | grep -q 'ELF '; then
+            local interp
+            interp="$(patchelf --print-interpreter "$real" 2>/dev/null || true)"
+            case "$interp" in
+              /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-x86-64.so.2)
+                patchelf --set-interpreter "${stdenv.cc.bintools.dynamicLinker}" "$real"
+                patchelf --set-rpath "$tool_rpath" "$real" || true
+                ;;
+            esac
+          fi
+        }
+
+        # Patch both entrypoint symlinks and common versioned targets.
         for b in clang clang-18 clang++ clang++-18 ld.lld ld.lld-18 llvm-ar llvm-strip; do
           patch_elf_one "$tc/bin/$b"
         done
 
         clang_real="$(readlink -f "$tc/bin/clang" 2>/dev/null || echo "$tc/bin/clang")"
-        echo "[toolchain] clang real=$clang_real interp=$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)"
+        echo "[toolchain] clang real=$clang_real"
+        echo "[toolchain] clang interp=$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)"
+        echo "[toolchain] clang rpath=$(patchelf --print-rpath "$clang_real" 2>/dev/null || true)"
+
         if [ "$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)" != "${stdenv.cc.bintools.dynamicLinker}" ]; then
-          echo "ERROR: clang still has stub interpreter after patch pass" >&2
+          echo "ERROR: clang still has stub interpreter after patch" >&2
           ls -la "$tc/bin" >&2 || true
           exit 1
         fi
-      else
-        echo "ERROR: expected llvm toolchain missing at $tc/bin" >&2
-        find "$OUTPUT_BASE/external" -maxdepth 2 -type d -name 'llvm*' -print >&2 || true
-        exit 1
-      fi
+        # -------------------------------------------------------------------------------
 
-      # --- hard patch + assert: llvm toolchain (clang / clang-18 etc.) ----------------
-      tc="$OUTPUT_BASE/external/llvm18_linux_x86_64"
-      [ -d "$tc/bin" ] || { echo "ERROR: missing $tc/bin" >&2; exit 1; }
-      chmod -R u+w "$tc" 2>/dev/null || true
+        # 4) Real build (must use the same output_base as priming + patching).
+        bazel \
+          --batch \
+          "''${bazel_rc_args[@]}" \
+          "''${output_base_arg[@]}" \
+          build \
+          --nofetch \
+          -c opt \
+          ${lib.concatStringsSep " " bazelTargets}
 
-      tool_rpath="\$ORIGIN/../lib:\$ORIGIN/../lib64:${lib.makeLibraryPath [ stdenv.cc.cc zlib ncurses ]}"
-
-      patch_elf_one() {
-        local p="$1"
-        [ -e "$p" ] || return 0
-
-        local real="$p"
-        if [ -L "$p" ] && command -v readlink >/dev/null 2>&1; then
-          real="$(readlink -f "$p" 2>/dev/null || echo "$p")"
-        fi
-        [ -f "$real" ] || return 0
-
-        chmod u+w "$real" 2>/dev/null || true
-
-        # Treat symlinks as their targets
-        if file -L "$p" 2>/dev/null | grep -q 'ELF '; then
-          local interp
-          interp="$(patchelf --print-interpreter "$real" 2>/dev/null || true)"
-          case "$interp" in
-            /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-x86-64.so.2)
-              patchelf --set-interpreter "${stdenv.cc.bintools.dynamicLinker}" "$real"
-              patchelf --set-rpath "$tool_rpath" "$real" || true
-              ;;
-          esac
-        fi
-      }
-
-      # Patch both entrypoint symlinks and common versioned targets.
-      for b in clang clang-18 clang++ clang++-18 ld.lld ld.lld-18 llvm-ar llvm-strip; do
-        patch_elf_one "$tc/bin/$b"
-      done
-
-      clang_real="$(readlink -f "$tc/bin/clang" 2>/dev/null || echo "$tc/bin/clang")"
-      echo "[toolchain] clang real=$clang_real"
-      echo "[toolchain] clang interp=$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)"
-      echo "[toolchain] clang rpath=$(patchelf --print-rpath "$clang_real" 2>/dev/null || true)"
-
-      if [ "$(patchelf --print-interpreter "$clang_real" 2>/dev/null || true)" != "${stdenv.cc.bintools.dynamicLinker}" ]; then
-        echo "ERROR: clang still has stub interpreter after patch" >&2
-        ls -la "$tc/bin" >&2 || true
-        exit 1
-      fi
-      # -------------------------------------------------------------------------------
-
-      # 4) Real build (must use the same output_base as priming + patching).
-      bazel \
-        --batch \
-        "''${bazel_rc_args[@]}" \
-        "''${output_base_arg[@]}" \
-        build \
-        --nofetch \
-        -c opt \
-        ${lib.concatStringsSep " " bazelTargets}
-
-      runHook postBuild
+        runHook postBuild
     '';
 
     installPhase = ''
