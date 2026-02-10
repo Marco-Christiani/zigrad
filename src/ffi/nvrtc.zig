@@ -25,10 +25,10 @@ pub const nvrtcProgram = Impl.nvrtcProgram;
 pub const nvrtcResult = Impl.nvrtcResult;
 pub const NVRTC_SUCCESS = Impl.NVRTC_SUCCESS;
 
-pub const nvrtcCreateProgram = if (tvm_enabled) Impl.nvrtcCreateProgram else undefined; // NOTE: audit use of undefined
-pub const nvrtcDestroyProgram = if (tvm_enabled) Impl.nvrtcDestroyProgram else undefined; // NOTE: audit use of undefined
-pub const nvrtcCompileProgram = if (tvm_enabled) Impl.nvrtcCompileProgram else undefined; // NOTE: audit use of undefined
-pub const nvrtcGetPTXSize = if (tvm_enabled) Impl.nvrtcGetPTXSize else undefined; // NOTE: audit use of undefined
-pub const nvrtcGetPTX = if (tvm_enabled) Impl.nvrtcGetPTX else undefined; // NOTE: audit use of undefined
-pub const nvrtcGetProgramLogSize = if (tvm_enabled) Impl.nvrtcGetProgramLogSize else undefined; // NOTE: audit use of undefined
-pub const nvrtcGetProgramLog = if (tvm_enabled) Impl.nvrtcGetProgramLog else undefined; // NOTE: audit use of undefined
+pub const nvrtcCreateProgram = if (tvm_enabled) Impl.nvrtcCreateProgram else @compileError("TVM not enabled");
+pub const nvrtcDestroyProgram = if (tvm_enabled) Impl.nvrtcDestroyProgram else @compileError("TVM not enabled");
+pub const nvrtcCompileProgram = if (tvm_enabled) Impl.nvrtcCompileProgram else @compileError("TVM not enabled");
+pub const nvrtcGetPTXSize = if (tvm_enabled) Impl.nvrtcGetPTXSize else @compileError("TVM not enabled");
+pub const nvrtcGetPTX = if (tvm_enabled) Impl.nvrtcGetPTX else @compileError("TVM not enabled");
+pub const nvrtcGetProgramLogSize = if (tvm_enabled) Impl.nvrtcGetProgramLogSize else @compileError("TVM not enabled");
+pub const nvrtcGetProgramLog = if (tvm_enabled) Impl.nvrtcGetProgramLog else @compileError("TVM not enabled");

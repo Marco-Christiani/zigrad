@@ -18,11 +18,11 @@ pub fn register(allocator: std.mem.Allocator) !void {
     _ = allocator;
 
     // create a tvm function that wraps our callback
-    var func: c.TVMFFIObjectHandle = undefined; // NOTE: audit use of undefined
+    var func: c.TVMFFIObjectHandle = std.mem.zeroes(c.TVMFFIObjectHandle);
 
     // cast to the c fn pointer type tvm expects
     // TVMFFISafeCallType signature: int (*)(void*, const TVMFFIAny*, int32_t, TVMFFIAny*)
-    const callback_fn: *const fn (?*anyopaque, [*c]const c.TVMFFIAny, i32, [*c]c.TVMFFIAny) callconv(.c) c_int = &nvrtcCompileCallback;
+    const callback_fn: *const fn (?*anyopaque, [*c]const c.TVMFFIAny, i32, [*c]c.TVMFFIAny) callconv(.c) c_int = &nvrtc_compile_callback;
 
     const ret = c.TVMFFIFunctionCreate(
         null, // no closure context needed (self)
@@ -61,19 +61,21 @@ pub fn register(allocator: std.mem.Allocator) !void {
 
 /// Callback function called by TVM when compiling CUDA code.
 ///
-/// Arguments: [code: string, target: Target] // NOTE: this doesnt match the zig fn signature is it referring to something else?
-/// Returns: string (compiled PTX) NOTE: this returns a c_int not a string
-fn nvrtcCompileCallback(
+/// TVM passes two arguments via the generic FFI convention:
+///   args[0] = CUDA source code (string), args[1] = Target object.
+/// On success, writes the compiled PTX string into ret[0] and returns 0.
+/// On failure, returns -1.
+fn nvrtc_compile_callback(
     handle: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
     ret: [*c]c.TVMFFIAny,
 ) callconv(.c) c_int {
     _ = handle;
-    log.info("nvrtcCompileCallback CALLED with {d} args", .{num_args});
+    log.info("nvrtc_compile_callback called with {d} args", .{num_args});
 
     if (num_args != 2) {
-        log.err("nvrtcCompileCallback: expected 2 args, got {d}", .{num_args});
+        log.err("nvrtc_compile_callback: expected 2 args, got {d}", .{num_args});
         return -1;
     }
 
@@ -84,7 +86,7 @@ fn nvrtcCompileCallback(
     // get cuda source code
     const code_ptr = code_arg.unnamed_1.v_c_str;
     if (code_ptr == null) {
-        log.err("nvrtcCompileCallback: code string is null", .{});
+        log.err("nvrtc_compile_callback: code string is null", .{});
         return -1;
     }
     const original_code = std.mem.span(code_ptr.?);
@@ -126,7 +128,7 @@ fn nvrtcCompileCallback(
     log.debug("Filtered code preview ({d} bytes total):\n{s}...", .{ patched_code.len, patched_code[0..patched_preview_len] });
 
     // compile
-    const ptx = compileWithNvrtc(allocator, patched_code, arch) catch |err| {
+    const ptx = compile_with_nvrtc(allocator, patched_code, arch) catch |err| {
         log.err("NVRTC compilation failed: {s}", .{@errorName(err)});
         return -1;
     };
@@ -135,7 +137,7 @@ fn nvrtcCompileCallback(
     // NOTE: using kTVMFFIRawStr would return a borrowed pointer that tvm doesnt own, which can
     //  cause heap corruption when tvm tries to manage the memory.
     var ptx_bytes: c.TVMFFIByteArray = .{ .data = ptx.ptr, .size = ptx.len };
-    var str_obj: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var str_obj: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     if (c.TVMFFIStringFromByteArray(&ptx_bytes, &str_obj) != 0) {
         log.err("Failed to create TVM string from PTX", .{});
         return -1;
@@ -145,7 +147,8 @@ fn nvrtcCompileCallback(
 }
 
 /// Compile CUDA source code to PTX using NVRTC injecting the right include paths.
-fn compileWithNvrtc(
+/// Caller owns the returned string.
+fn compile_with_nvrtc(
     allocator: std.mem.Allocator,
     code: []const u8,
     arch: []const u8,
@@ -175,7 +178,8 @@ fn compileWithNvrtc(
     );
     try options.append(allocator, cuda_include_path);
 
-    // glibc C headers - get from NIX_GLIBC_INCLUDE or use a common path NOTE: missing common path suggested by comment?
+    // glibc C headers from NIX_GLIBC_INCLUDE.
+    // TODO: add a fallback path (e.g. /usr/include) for non-Nix environments.
     if (std.posix.getenv("NIX_GLIBC_INCLUDE")) |glibc_include| {
         const glibc_path = try std.fmt.allocPrint(
             allocator,
@@ -185,7 +189,8 @@ fn compileWithNvrtc(
         try options.append(allocator, glibc_path);
     }
 
-    // GCC builtin headers - get from NIX_GCC_INCLUDE or use a common path NOTE: missing common path suggested by comment?
+    // GCC builtin headers from NIX_GCC_INCLUDE.
+    // TODO: add a fallback path for non-Nix environments.
     if (std.posix.getenv("NIX_GCC_INCLUDE")) |gcc_include| {
         const gcc_path = try std.fmt.allocPrint(
             allocator,
@@ -198,9 +203,9 @@ fn compileWithNvrtc(
     // arch and defines
     const arch_flag = try std.fmt.allocPrint(allocator, "--gpu-architecture={s}", .{arch});
     try options.append(allocator, arch_flag);
-    try options.append(allocator, "--std=c++17"); // NOTE: can we assume this?
-    try options.append(allocator, "-D__x86_64__"); // NOTE: can we assume this?
-    try options.append(allocator, "-default-device");  // required for jit mode NOTE: still needed? documentation required
+    try options.append(allocator, "--std=c++17"); // TVM-generated CUDA uses C++17 features
+    try options.append(allocator, "-D__x86_64__"); // TODO: derive from target arch instead of hardcoding
+    try options.append(allocator, "-default-device"); // NVRTC JIT requires this to emit device code
 
     // convert to c strings
     const c_options = try allocator.alloc([*c]const u8, options.items.len);
@@ -214,7 +219,7 @@ fn compileWithNvrtc(
     }
 
     // create nvrtc program
-    var prog: nvrtc.nvrtcProgram = undefined; // NOTE: audit use of undefined
+    var prog: nvrtc.nvrtcProgram = std.mem.zeroes(nvrtc.nvrtcProgram);
     const code_z = try allocator.dupeZ(u8, code);
     const create_result = nvrtc.nvrtcCreateProgram(
         &prog,
@@ -268,5 +273,7 @@ fn compileWithNvrtc(
     }
 
     log.info("NVRTC compilation successful ({d} bytes PTX)", .{ptx_size});
-    return ptx[0 .. ptx_size - 1]; // remove null terminator NOTE: do we need to dereference to move to stack mem? wont arena free this?
+    // Slice off the null terminator. The caller copies this into a TVM String
+    // object before the arena is freed, so the borrowed slice is safe here.
+    return ptx[0 .. ptx_size - 1];
 }

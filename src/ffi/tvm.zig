@@ -46,17 +46,17 @@ pub const DLTensor = if (tvm_enabled) Impl.DLTensor else Impl.DLTensor;
 pub const DLManagedTensor = if (tvm_enabled) Impl.DLManagedTensor else Impl.DLManagedTensor;
 
 // Functions
-pub const TVMFFIObjectDecRef = if (tvm_enabled) Impl.TVMFFIObjectDecRef else undefined;  // NOTE: audit use of undefined
-pub const TVMFFIObjectIncRef = if (tvm_enabled) Impl.TVMFFIObjectIncRef else undefined;  // NOTE: audit use of undefined
-pub const TVMFFIFunctionCreate = if (tvm_enabled) Impl.TVMFFIFunctionCreate else undefined; // NOTE: audit use of undefined
-pub const TVMFFIFunctionCall = if (tvm_enabled) Impl.TVMFFIFunctionCall else undefined; // NOTE: audit use of undefined
-pub const TVMFFIFunctionGetGlobal = if (tvm_enabled) Impl.TVMFFIFunctionGetGlobal else undefined; // NOTE: audit use of undefined
-pub const TVMFFIFunctionSetGlobal = if (tvm_enabled) Impl.TVMFFIFunctionSetGlobal else undefined; // NOTE: audit use of undefined
-pub const TVMFFIGetLastError = if (tvm_enabled) Impl.TVMFFIGetLastError else undefined; // NOTE: audit use of undefined
-pub const TVMFFIErrorMoveFromRaised = if (tvm_enabled) Impl.TVMFFIErrorMoveFromRaised else undefined; // NOTE: audit use of undefined
-pub const TVMFFIGetTypeInfo = if (tvm_enabled) Impl.TVMFFIGetTypeInfo else undefined; // NOTE: audit use of undefined
-pub const TVMFFIStringFromByteArray = if (tvm_enabled) Impl.TVMFFIStringFromByteArray else undefined; // NOTE: audit use of undefined
-pub const TVMFFITensorFromDLPack = if (tvm_enabled) Impl.TVMFFITensorFromDLPack else undefined; // NOTE: audit use of undefined
+pub const TVMFFIObjectDecRef = if (tvm_enabled) Impl.TVMFFIObjectDecRef else @compileError("TVM not enabled");
+pub const TVMFFIObjectIncRef = if (tvm_enabled) Impl.TVMFFIObjectIncRef else @compileError("TVM not enabled");
+pub const TVMFFIFunctionCreate = if (tvm_enabled) Impl.TVMFFIFunctionCreate else @compileError("TVM not enabled");
+pub const TVMFFIFunctionCall = if (tvm_enabled) Impl.TVMFFIFunctionCall else @compileError("TVM not enabled");
+pub const TVMFFIFunctionGetGlobal = if (tvm_enabled) Impl.TVMFFIFunctionGetGlobal else @compileError("TVM not enabled");
+pub const TVMFFIFunctionSetGlobal = if (tvm_enabled) Impl.TVMFFIFunctionSetGlobal else @compileError("TVM not enabled");
+pub const TVMFFIGetLastError = if (tvm_enabled) Impl.TVMFFIGetLastError else @compileError("TVM not enabled");
+pub const TVMFFIErrorMoveFromRaised = if (tvm_enabled) Impl.TVMFFIErrorMoveFromRaised else @compileError("TVM not enabled");
+pub const TVMFFIGetTypeInfo = if (tvm_enabled) Impl.TVMFFIGetTypeInfo else @compileError("TVM not enabled");
+pub const TVMFFIStringFromByteArray = if (tvm_enabled) Impl.TVMFFIStringFromByteArray else @compileError("TVM not enabled");
+pub const TVMFFITensorFromDLPack = if (tvm_enabled) Impl.TVMFFITensorFromDLPack else @compileError("TVM not enabled");
 
 // Constants
 pub const kTVMFFINone = if (tvm_enabled) Impl.kTVMFFINone else 0;

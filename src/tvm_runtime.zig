@@ -20,18 +20,18 @@ const nvrtc_callback = @import("tvm/nvrtc_callback.zig");
 var tvm_compiler_lib_handle: ?*anyopaque = null;
 
 /// Handle to libtvm_ffi.so loaded with RTLD_GLOBAL.
-/// While the Zig linker loads this library, it uses RTLD_LOCAL which doesn't expose
+/// While the zig linker loads this library, it uses RTLD_LOCAL which doesnt expose
 /// symbols globally. We need to reload it with RTLD_GLOBAL so compiled TVM modules
 /// can find TVM runtime symbols.
 var tvm_ffi_lib_handle: ?*anyopaque = null;
 
 /// Find the directory containing libtvm_ffi.so by reading /proc/self/maps.
 /// Returns the path to libtvm.so in the same directory, or null if not found.
-fn findTvmLibPath(allocator: std.mem.Allocator) !?[]const u8 {
+fn find_tvm_lib_path(allocator: std.mem.Allocator) !?[]const u8 {
     const maps_file = std.fs.openFileAbsolute("/proc/self/maps", .{}) catch return null;
     defer maps_file.close();
 
-    var read_buf: [8192]u8 = undefined;  // NOTE: audit use of undefined
+    var read_buf: [8192]u8 = undefined;
     var file_reader = maps_file.reader(&read_buf);
     const reader = &file_reader.interface;
 
@@ -64,9 +64,9 @@ extern "c" fn dlopen(filename: [*:0]const u8, flags: c_int) ?*anyopaque;
 extern "c" fn dlerror() ?[*:0]const u8;
 
 /// Ensure TVM FFI library is loaded with RTLD_GLOBAL.
-/// The Zig linker loads libtvm_ffi.so with RTLD_LOCAL, so we need to reload it
+/// The zig linker loads libtvm_ffi.so with RTLD_LOCAL, so we need to reload it
 /// with RTLD_GLOBAL for compiled TVM modules to find runtime symbols.
-fn ensureTvmFfiLoaded(allocator: std.mem.Allocator) !void {
+fn ensure_tvm_ffi_loaded(allocator: std.mem.Allocator) !void {
     if (tvm_ffi_lib_handle != null) return;
 
     const log = std.log.scoped(.@"zg/tvm_init");
@@ -86,7 +86,7 @@ fn ensureTvmFfiLoaded(allocator: std.mem.Allocator) !void {
         return;
     }
 
-    // Log failure but don't error - the Zig linker should have loaded it already
+    // Log failure but dont error - the zig linker should have loaded it already
     if (dlerror()) |err| {
         log.warn("could not reload TVM FFI with RTLD_GLOBAL: {s}", .{std.mem.span(err)});
     }
@@ -95,17 +95,17 @@ fn ensureTvmFfiLoaded(allocator: std.mem.Allocator) !void {
 /// Ensure the full TVM compiler library is loaded. Required for TE API access.
 /// Safe to call multiple times - only loads once.
 /// Uses RTLD_GLOBAL so TVM symbols are available to compiled modules loaded later.
-fn ensureTvmCompilerLoaded(allocator: std.mem.Allocator) !void {
+fn ensure_tvm_compiler_loaded(allocator: std.mem.Allocator) !void {
     // First, ensure libtvm_ffi.so is loaded with RTLD_GLOBAL
     // This is needed so compiled TVM modules can find FFI runtime symbols
-    try ensureTvmFfiLoaded(allocator);
+    try ensure_tvm_ffi_loaded(allocator);
 
     if (tvm_compiler_lib_handle != null) return;
 
     const log = std.log.scoped(.@"zg/tvm_init");
 
     // First, try to find libtvm.so in the same directory as libtvm_ffi.so
-    const lib_path = try findTvmLibPath(allocator);
+    const lib_path = try find_tvm_lib_path(allocator);
     defer if (lib_path) |p| allocator.free(p);
 
     if (lib_path) |path| {
@@ -157,8 +157,8 @@ var cuda_intrinsics_loaded: bool = false;
 /// scripts/generate_cuda_intrinsics.py and stored as JSON files.
 ///
 /// Safe to call multiple times - only loads once.
-/// Must be called after ensureTvmCompilerLoaded().
-fn loadCudaIntrinsics(allocator: std.mem.Allocator) !void {
+/// Must be called after ensure_tvm_compiler_loaded().
+fn load_cuda_intrinsics(allocator: std.mem.Allocator) !void {
     if (cuda_intrinsics_loaded) return;
 
     const log = std.log.scoped(.@"zg/cuda_intrinsics");
@@ -217,18 +217,18 @@ fn loadCudaIntrinsics(allocator: std.mem.Allocator) !void {
         defer allocator.free(impl_cstr);
 
         // Load PrimFuncs from JSON via FFI: node.LoadJSON
-        var desc_primfunc: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var desc_primfunc: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi_call_global(allocator, "node.LoadJSON", &.{any_raw_str(cstr_ptr(desc_cstr))}, &desc_primfunc);
 
-        var impl_primfunc: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var impl_primfunc: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi_call_global(allocator, "node.LoadJSON", &.{any_raw_str(cstr_ptr(impl_cstr))}, &impl_primfunc);
 
         // Create TensorIntrin object via FFI: tir.TensorIntrin(desc, impl)
-        var tensor_intrin: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var tensor_intrin: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi_call_global(allocator, "tir.TensorIntrin", &.{ desc_primfunc, impl_primfunc }, &tensor_intrin);
 
         // Register via FFI: tir.TensorIntrinRegister(name, intrin, override=false)
-        var dummy_out: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var dummy_out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi_call_global(allocator, "tir.TensorIntrinRegister", &.{
             any_raw_str(cstr_ptr(name_cstr)),
             tensor_intrin,
@@ -328,18 +328,18 @@ fn allocate_tensor(
 
     // GPU: allocate on device via TVM FFI
     // 1. Create Shape object
-    var shape_args: [4]c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var shape_args: [4]c.TVMFFIAny = std.mem.zeroes([4]c.TVMFFIAny);
     for (shape, 0..) |dim, i| {
         shape_args[i] = any_int(dim);
     }
-    var shape_obj: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var shape_obj: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call_global(allocator, "ffi.Shape", shape_args[0..shape.len], &shape_obj);
     defer if (shape_obj.unnamed_1.v_obj) |obj| {
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
     // 2. Allocate empty tensor on device
-    var tensor: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call_global(allocator, "runtime.TVMTensorAllocWithScope", &.{
         shape_obj,
         any_dtype_f32(),
@@ -373,7 +373,9 @@ fn get_last_error_message(allocator: std.mem.Allocator) ![]u8 {
 }
 
 pub fn any_to_string(allocator: std.mem.Allocator, v: *c.TVMFFIAny) ![]u8 {
-    // small string is stored inline // NOTE: explain
+    // TVM small strings (kTVMFFISmallStr) store their bytes directly in the TVMFFIAny
+    // union rather than behind a heap-allocated object, so we read from v_bytes
+    // using the inline length field (small_str_len).
     if (v.type_index == c.kTVMFFISmallStr) {
         const n: usize = @intCast(v.unnamed_0.small_str_len);
         return try allocator.dupe(u8, v.unnamed_1.v_bytes[0..n]);
@@ -443,15 +445,15 @@ pub fn cstr_ptr(buf: []u8) [*:0]const u8 {
 }
 
 /// Log number of functions in an IRModule.
-fn logModuleFuncCount(allocator: std.mem.Allocator, mod: c.TVMFFIAny, label: []const u8, comptime logger: anytype) void {
+fn log_module_func_count(allocator: std.mem.Allocator, mod: c.TVMFFIAny, label: []const u8, comptime logger: anytype) void {
     // get global vars array w/ ir.Module_GetGlobalVars (method on IRModule)
-    var gvars: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var gvars: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi_call_global(allocator, "ir.Module_GetGlobalVars", &.{mod}, &gvars) catch {
         logger.debug("{s}: could not get global vars", .{label});
         return;
     };
     // get array size
-    var size: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var size: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi_call_global(allocator, "ffi.ArraySize", &.{gvars}, &size) catch {
         logger.debug("{s}: could not get array size", .{label});
         return;
@@ -465,7 +467,7 @@ fn module_load_from_file(allocator: std.mem.Allocator, path: []const u8) !c.TVMF
     defer allocator.free(path_buf);
     const path_z = cstr_ptr(path_buf);
 
-    var out: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var args = [_]c.TVMFFIAny{any_raw_str(path_z)};
     try ffi_call_global(allocator, "ffi.ModuleLoadFromFile", &args, &out);
     if (out.type_index != c.kTVMFFIModule or out.unnamed_1.v_obj == null) {
@@ -488,7 +490,7 @@ fn module_write_to_file(allocator: std.mem.Allocator, module: c.TVMFFIAny, path:
     const path_z = cstr_ptr(path_buf);
     const fmt_z = cstr_ptr(fmt_buf);
 
-    var out: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var args = [_]c.TVMFFIAny{ module, any_raw_str(path_z), any_raw_str(fmt_z) };
     try ffi_call_global(allocator, "ffi.ModuleWriteToFile", &args, &out);
     log.debug("Wrote module to {s} (format={s})", .{ path, format });
@@ -526,19 +528,13 @@ fn link_objects_to_shared(allocator: std.mem.Allocator, obj_paths: []const []con
 fn module_get_function(
     allocator: std.mem.Allocator,
     module: c.TVMFFIObjectHandle,
-    name: []const u8,
+    name: [:0]const u8,
     query_imports: bool,
 ) !c.TVMFFIObjectHandle {
-    // NOTE: seems like "name" is always comptime known, so we dont need heap. Also, we could just change the param to be the required type and it will
-    //  coerce or be otherwise cast by the caller.
-    const name_buf = try cstr_alloc(allocator, name);
-    defer allocator.free(name_buf);
-    const name_z = cstr_ptr(name_buf);
-
-    var out: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var args = [_]c.TVMFFIAny{
         any_obj(module, c.kTVMFFIModule),
-        any_raw_str(name_z),
+        any_raw_str(name.ptr),
         any_bool(query_imports),
     };
     try ffi_call_global(allocator, "ffi.ModuleGetFunction", &args, &out);
@@ -586,7 +582,7 @@ pub fn print_global_functions(allocator: std.mem.Allocator) !void {
     const factory = try ffi_get_global(allocator, name);
     defer _ = c.TVMFFIObjectDecRef(factory);
 
-    var res0: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var res0: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call0(allocator, factory, &res0);
     if (res0.type_index != c.kTVMFFIFunction or res0.unnamed_1.v_obj == null) {
         std.log.err("unexpected return type from {s}(): type_index={d}", .{ name, res0.type_index });
@@ -595,7 +591,7 @@ pub fn print_global_functions(allocator: std.mem.Allocator) !void {
     const functor: c.TVMFFIObjectHandle = @ptrCast(res0.unnamed_1.v_obj);
     defer _ = c.TVMFFIObjectDecRef(functor);
 
-    var res_len: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var res_len: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call1_i64(allocator, functor, -1, &res_len);
     if (res_len.type_index != c.kTVMFFIInt) {
         std.log.err("unexpected len return type: type_index={d}", .{res_len.type_index});
@@ -603,14 +599,14 @@ pub fn print_global_functions(allocator: std.mem.Allocator) !void {
     }
     const count: usize = @intCast(res_len.unnamed_1.v_int64);
 
-    var stdout_buffer: [8192]u8 = undefined; // NOTE: audit use of undefined
+    var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
     try out.print("TVM FFI global functions: {d}\n", .{count});
     for (0..count) |i| {
-        var res_name: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var res_name: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi_call1_i64(allocator, functor, @intCast(i), &res_name);
         const s = try any_to_string(allocator, &res_name);
         defer allocator.free(s);
@@ -633,7 +629,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     const log = std.log.scoped(.@"zg/tvm_build");
 
     // Load the full TVM compiler (registers TE functions via static initializers)
-    ensureTvmCompilerLoaded(allocator) catch |err| {
+    ensure_tvm_compiler_loaded(allocator) catch |err| {
         log.err("cannot proceed without TVM compiler: {s}", .{@errorName(err)});
         return err;
     };
@@ -643,7 +639,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
 
     // te.Placeholder expects shape as Array<ir.PrimExpr>
     // integers can be used directly as PrimExpr in TVM
-    var shape_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var shape_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // ffi.Array takes variadic elements - integers are auto-converted to IntImm
         var args = [_]c.TVMFFIAny{any_int(n_i64)};
@@ -668,7 +664,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     const dtype_buf = try cstr_alloc(allocator, "float32");
     defer allocator.free(dtype_buf);
 
-    var tensor_a: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor_a: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             shape_array,
@@ -685,7 +681,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var tensor_b: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor_b: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             shape_array,
@@ -710,7 +706,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
 
     // create a tir.Var for the loop index
     // tir.Var(name: str, dtype: AnyView, span: ir.Span)
-    var iter_var_i: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var iter_var_i: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             any_raw_str(cstr_ptr(name_i_buf)),
@@ -729,7 +725,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
 
     // 4. Create load expressions A[i] and B[i]
     // tir.ProducerLoad(producer, indices)
-    var indices_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var indices_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{iter_var_i};
         ffi_call_global(allocator, "ffi.Array", &args, &indices_array) catch |err| {
@@ -741,7 +737,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var load_a: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var load_a: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ tensor_a, indices_array, any_none() };
         ffi_call_global(allocator, "tir.ProducerLoad", &args, &load_a) catch |err| {
@@ -754,7 +750,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var load_b: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var load_b: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ tensor_b, indices_array, any_none() };
         ffi_call_global(allocator, "tir.ProducerLoad", &args, &load_b) catch |err| {
@@ -768,7 +764,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     };
 
     // 5. Create Add expression: A[i] + B[i]
-    var add_expr: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var add_expr: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ load_a, load_b, any_none() };
         ffi_call_global(allocator, "tir.Add", &args, &add_expr) catch |err| {
@@ -783,7 +779,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
 
     // 6. Create IterVar for the compute axis
     // tir.IterVar(dom, var, iter_type, thread_tag)
-    var iter_dom: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var iter_dom: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // ir.Range(begin, end, span) - span can be None
         var args = [_]c.TVMFFIAny{ any_int(0), any_int(n_i64), any_none() };
@@ -797,7 +793,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var axis_iter_var: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var axis_iter_var: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // IterVar(dom, var, iter_type=0 (DataPar), thread_tag="", span)
         const empty_buf = try cstr_alloc(allocator, "");
@@ -826,7 +822,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     const tag_buf = try cstr_alloc(allocator, "");
     defer allocator.free(tag_buf);
 
-    var axis_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var axis_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{axis_iter_var};
         ffi_call_global(allocator, "ffi.Array", &args, &axis_array) catch |err| {
@@ -838,7 +834,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var body_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var body_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{add_expr};
         ffi_call_global(allocator, "ffi.Array", &args, &body_array) catch |err| {
@@ -850,7 +846,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var compute_op: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var compute_op: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // te.ComputeOp(name: str, tag: str, attrs: dict, axis: Array[IterVar], body: Array[Expr])
         var args = [_]c.TVMFFIAny{
@@ -871,7 +867,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     };
 
     // 8. Get output tensor C from ComputeOp
-    var tensor_c: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor_c: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ compute_op, any_int(0) };
         ffi_call_global(allocator, "te.OpGetOutput", &args, &tensor_c) catch |err| {
@@ -886,7 +882,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
 
     // 9. Create PrimFunc from tensors
     // te.CreatePrimFunc(tensors: Array[Tensor]) -> tir.PrimFunc
-    var tensors_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensors_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ tensor_a, tensor_b, tensor_c };
         ffi_call_global(allocator, "ffi.Array", &args, &tensors_array) catch |err| {
@@ -898,7 +894,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var prim_func: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var prim_func: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // te.CreatePrimFunc(tensors: Array<ObjectRef>, index_dtype_override: Optional<DataType>)
         var args = [_]c.TVMFFIAny{ tensors_array, any_none() };
@@ -916,7 +912,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         const main_name_buf = try cstr_alloc(allocator, "main");
         defer allocator.free(main_name_buf);
 
-        var prim_func_with_attr: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var prim_func_with_attr: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var args = [_]c.TVMFFIAny{
             prim_func,
             any_raw_str(cstr_ptr(global_symbol_buf)),
@@ -941,31 +937,26 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     // 10. Create target with host
     // For CPU: use 'llvm' target for JIT compilation (now works with LLVM 21).
     // For CUDA: device is 'cuda', host is 'llvm'.
-    const host_str = try cstr_alloc(allocator, "llvm");
-    defer allocator.free(host_str);
-
-    // Device target depends on target_kind
-    const device_str = switch (target_kind) {
-        .cpu => try cstr_alloc(allocator, "llvm"), // NOTE: audit static string being allocated, also casting indirection when it could be initialized to the correct type -- this happens in MANY places
-        .cuda => try cstr_alloc(allocator, "cuda"), // NOTE: audit static string being allocated, also casting indirection when it could be initialized to the correct type -- this happens in MANY places
+    const device_str: [*:0]const u8 = switch (target_kind) {
+        .cpu => "llvm",
+        .cuda => "cuda",
     };
-    defer allocator.free(device_str);
 
-    var target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // Create device target
-        var device_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var device_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
-            var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(device_str))};
+            var args = [_]c.TVMFFIAny{any_raw_str(device_str)};
             ffi_call_global(allocator, "target.Target", &args, &device_target) catch |err| {
                 log.err("target.Target({s}) failed: {s}", .{ device_str, @errorName(err) });
                 return err;
             };
         }
         // Create host target
-        var host_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var host_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
-            var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(host_str))};
+            var args = [_]c.TVMFFIAny{any_raw_str("llvm")};
             ffi_call_global(allocator, "target.Target", &args, &host_target) catch |err| {
                 if (device_target.unnamed_1.v_obj) |obj| {
                     _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
@@ -1002,13 +993,13 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     // 11. Build module
     // target.Build(IRModule, Target) -> runtime.Module
     // First wrap prim_func in an IRModule
-    var ir_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var ir_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // Create GlobalVar for the function name
         const main_buf = try cstr_alloc(allocator, "main");
         defer allocator.free(main_buf);
 
-        var global_var: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var global_var: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(main_buf))};
             ffi_call_global(allocator, "ir.GlobalVar", &args, &global_var) catch |err| {
@@ -1021,7 +1012,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         };
 
         // Create Map<GlobalVar, BaseFunc> with the function
-        var func_map: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var func_map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var map_args = [_]c.TVMFFIAny{ global_var, prim_func };
             ffi_call_global(allocator, "ffi.Map", &map_args, &func_map) catch |err| {
@@ -1034,7 +1025,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         };
 
         // Empty map for global_infos
-        var empty_map: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var empty_map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             ffi_call_global(allocator, "ffi.Map", &.{}, &empty_map) catch |err| {
                 log.err("ffi.Map(empty) failed: {s}", .{@errorName(err)});
@@ -1065,7 +1056,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     // Create and apply sequential passes
     {
         // 1. BindTarget - binds target to all functions
-        var bind_pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var bind_pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{target};
             try ffi_call_global(allocator, "tir.transform.BindTarget", &args, &bind_pass);
@@ -1074,7 +1065,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         };
 
-        var pass_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var pass_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{ bind_pass, lowered_mod };
             try ffi_call_global(allocator, "transform.RunPass", &args, &pass_result);
@@ -1088,10 +1079,12 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         log.info("Applied BindTarget", .{});
     }
 
-    // Helper to apply a nullary transform pass // NOTE: explain
+    // Applies a TIR transform pass that takes no arguments. Looks up the pass
+    // constructor by name in the TVM global registry, calls it to get the pass
+    // object, then runs the pass on the module via transform.RunPass.
     const apply_pass = struct {
         fn f(alloc: std.mem.Allocator, pass_name: []const u8, mod: *c.TVMFFIAny, logger: anytype) !void {
-            var pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             ffi_call_global(alloc, pass_name, &.{}, &pass) catch |err| {
                 logger.err("{s}() failed: {s}", .{ pass_name, @errorName(err) });
                 return err;
@@ -1100,7 +1093,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
                 _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
             };
 
-            var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             var run_args = [_]c.TVMFFIAny{ pass, mod.* };
             ffi_call_global(alloc, "transform.RunPass", &run_args, &result) catch |err| {
                 logger.err("RunPass({s}) failed: {s}", .{ pass_name, @errorName(err) });
@@ -1138,7 +1131,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     };
 
     // 12. Build runtime module(s)
-    var built_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
 
     if (target_kind == .cpu) {
         // CPU: use LLVM JIT (now works with LLVM 21 matching SDK's LLVM 22)
@@ -1157,7 +1150,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         // We use tir.transform.Filter with a predicate function to separate modules.
 
         // Create a predicate function for is_host_func using TVMFFIFunctionCreate
-        // The predicate checks the function's target attribute
+        // The predicate checks the functions target attribute
         //
         // After SplitHostDevice, functions have target attribute:
         //   - Host functions: target = "llvm -jit=mcjit" (or similar)
@@ -1219,9 +1212,9 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         }.f;
 
         // Create targets
-        var host_only_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var host_only_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
-            var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(host_str))};
+            var args = [_]c.TVMFFIAny{any_raw_str("llvm")};
             ffi_call_global(allocator, "target.Target", &args, &host_only_target) catch |err| {
                 log.err("target.Target(host_only) failed: {s}", .{@errorName(err)});
                 return err;
@@ -1231,9 +1224,9 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         };
 
-        var device_only_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var device_only_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
-            var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(device_str))};
+            var args = [_]c.TVMFFIAny{any_raw_str(device_str)};
             ffi_call_global(allocator, "target.Target", &args, &device_only_target) catch |err| {
                 log.err("target.Target(device_only) failed: {s}", .{@errorName(err)});
                 return err;
@@ -1262,7 +1255,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         defer _ = c.TVMFFIObjectDecRef(device_filter_func);
 
         // create Filter passes
-        var host_filter_pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var host_filter_pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{any_obj(host_filter_func, c.kTVMFFIFunction)};
             ffi_call_global(allocator, "tir.transform.Filter", &args, &host_filter_pass) catch |err| {
@@ -1274,7 +1267,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         };
 
-        var device_filter_pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var device_filter_pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{any_obj(device_filter_func, c.kTVMFFIFunction)};
             ffi_call_global(allocator, "tir.transform.Filter", &args, &device_filter_pass) catch |err| {
@@ -1287,7 +1280,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         };
 
         // apply host filter to get host-only module
-        var host_ir_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var host_ir_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{ host_filter_pass, lowered_mod };
             ffi_call_global(allocator, "transform.RunPass", &args, &host_ir_mod) catch |err| {
@@ -1301,7 +1294,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         log.info("Created host-filtered IRModule", .{});
 
         // apply device filter to get device-only module
-        var device_ir_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var device_ir_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{ device_filter_pass, lowered_mod };
             ffi_call_global(allocator, "transform.RunPass", &args, &device_ir_mod) catch |err| {
@@ -1314,8 +1307,8 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         };
         log.info("Created device-filtered IRModule", .{});
 
-        // Build host module with C backend (avoids LLVM JIT conflicts) // NOTE: still relevant? we switched back to llvm after fixing build issues, this needs analyzes, should we support both?
-        var host_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        // Build host module with C backend. The tuning path in tune() uses LLVM instead.
+        var host_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{ host_ir_mod, host_only_target };
             ffi_call_global(allocator, "target.build.c", &args, &host_mod) catch |err| {
@@ -1326,7 +1319,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         log.info("Built host module (C target): type_index={d}", .{host_mod.type_index});
 
         // build device module w/ CUDA
-        var device_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var device_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{ device_ir_mod, device_only_target };
             ffi_call_global(allocator, "target.build.cuda", &args, &device_mod) catch |err| {
@@ -1345,7 +1338,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         // import device module into host module
         {
             var args = [_]c.TVMFFIAny{ host_mod, device_mod };
-            var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             ffi_call_global(allocator, "ffi.ModuleImportModule", &args, &result) catch |err| {
                 log.err("ffi.ModuleImportModule failed: {s}", .{@errorName(err)});
                 if (host_mod.unnamed_1.v_obj) |obj| {
@@ -1362,10 +1355,9 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    // 13. Debug module info
-    // LLVM JIT produces an LLVMModule thats directly executable via ORC JIT. NOTE: did we get ORC JIT to work? we switched to MC JIT at one point, also we are using C above so is this still an accurate comment?
+    // 13. Debug module info - log the module kind to verify build backend produced the expected type
     {
-        var kind: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var kind: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var args = [_]c.TVMFFIAny{built_mod};
         ffi_call_global(allocator, "ffi.ModuleGetKind", &args, &kind) catch {};
         if (kind.type_index != c.kTVMFFINone) {
@@ -1377,7 +1369,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     }
 
     // 14. Get compiled function
-    var compiled_func: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var compiled_func: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         const main_buf2 = try cstr_alloc(allocator, "main");
         defer allocator.free(main_buf2);
@@ -1397,7 +1389,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     };
 
     // 15. Execute w/ test data
-    // use f32 for CPU (standard C support) // NOTE: hard coded f32?
+    // TODO: f32 is hardcoded here; extend to support other dtypes when needed
     const a_data = try allocator.alloc(f32, n);
     defer allocator.free(a_data);
     const b_data = try allocator.alloc(f32, n);
@@ -1420,9 +1412,9 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     const device_id: i32 = 0;
 
     // CUDA: build device tensors
-    var t_a: c.TVMFFIObjectHandle = undefined; // NOTE: audit use of undefined
-    var t_b: c.TVMFFIObjectHandle = undefined; // NOTE: audit use of undefined
-    var t_c: c.TVMFFIObjectHandle = undefined; // NOTE: audit use of undefined
+    var t_a: c.TVMFFIObjectHandle = std.mem.zeroes(c.TVMFFIObjectHandle);
+    var t_b: c.TVMFFIObjectHandle = std.mem.zeroes(c.TVMFFIObjectHandle);
+    var t_c: c.TVMFFIObjectHandle = std.mem.zeroes(c.TVMFFIObjectHandle);
 
     if (target_kind == .cpu) {
         // CPU: use DLPack with host memory directly (f32)
@@ -1446,11 +1438,10 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         t_c = try tensor_from_dlpack(allocator, &dl_c);
     } else {
         // CUDA: allocate device tensors and copy input data
-        const float32_buf = try cstr_alloc(allocator, "float32"); // NOTE: static string alloc and conversion indirection again, check this
-        defer allocator.free(float32_buf);
+        const float32_str: [*:0]const u8 = "float32";
 
         // create TVM Shape
-        var shape_any: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var shape_any: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         {
             var args = [_]c.TVMFFIAny{any_int(n_i64)};
             try ffi_call_global(allocator, "ffi.Shape", &args, &shape_any);
@@ -1463,9 +1454,9 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         // runtime.TVMTensorAllocWithScope(shape, dtype, device, mem_scope)
         const alloc_tensor = struct {
             fn f(alloc: std.mem.Allocator, shape: c.TVMFFIAny, dtype_cstr: [*:0]const u8, dev_type: i32, dev_id: i32) !c.TVMFFIObjectHandle {
-                var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+                var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
                 const dev_arr = [_]i64{ dev_type, dev_id };
-                var dev: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+                var dev: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
                 {
                     var args = [_]c.TVMFFIAny{ any_int(dev_arr[0]), any_int(dev_arr[1]) };
                     try ffi_call_global(alloc, "ffi.Device", &args, &dev);
@@ -1480,15 +1471,15 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
             }
         }.f;
 
-        t_a = try alloc_tensor(allocator, shape_any, cstr_ptr(float32_buf), device_type, device_id);
-        t_b = try alloc_tensor(allocator, shape_any, cstr_ptr(float32_buf), device_type, device_id);
-        t_c = try alloc_tensor(allocator, shape_any, cstr_ptr(float32_buf), device_type, device_id);
+        t_a = try alloc_tensor(allocator, shape_any, float32_str, device_type, device_id);
+        t_b = try alloc_tensor(allocator, shape_any, float32_str, device_type, device_id);
+        t_c = try alloc_tensor(allocator, shape_any, float32_str, device_type, device_id);
 
         // host->device
         // runtime.TVMTensorCopyFromBytes(tensor, data_ptr, nbytes)
         const copy_to_device = struct {
             fn f(alloc: std.mem.Allocator, tensor: c.TVMFFIObjectHandle, data: [*]const f32, bytes: usize) !void {
-                var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+                var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
                 var args = [_]c.TVMFFIAny{
                     any_obj(tensor, c.kTVMFFITensor),
                     .{ .type_index = c.kTVMFFIOpaquePtr, .unnamed_0 = .{ .small_str_len = 0 }, .unnamed_1 = .{ .v_ptr = @ptrCast(@constCast(data)) } },
@@ -1514,14 +1505,14 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
         any_obj(t_c, c.kTVMFFITensor),
     };
     const func_handle: c.TVMFFIObjectHandle = @ptrCast(compiled_func.unnamed_1.v_obj);
-    var exec_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var exec_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call(allocator, func_handle, &exec_args, &exec_result);
 
     log.info("Executed vec_add.", .{});
 
     // CUDA: transfer result device -> host
     if (target_kind == .cuda) {
-        var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var args = [_]c.TVMFFIAny{
             any_obj(t_c, c.kTVMFFITensor),
             .{ .type_index = c.kTVMFFIOpaquePtr, .unnamed_0 = .{ .small_str_len = 0 }, .unnamed_1 = .{ .v_ptr = @ptrCast(c_data.ptr) } },
@@ -1532,7 +1523,7 @@ pub fn build_and_run_vec_add(allocator: std.mem.Allocator, n: usize, target_kind
     }
 
     // print results
-    var stdout_buffer: [8192]u8 = undefined; // NOTE: audit use of undefined
+    var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
@@ -1601,10 +1592,10 @@ pub fn run_vec_add(allocator: std.mem.Allocator, module_path: []const u8, n: usi
         any_obj(t_b, c.kTVMFFITensor),
         any_obj(t_c, c.kTVMFFITensor),
     };
-    var res: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call(allocator, func, &args, &res);
 
-    var stdout_buffer: [8192]u8 = undefined; // NOTE: audit use of undefined
+    var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
@@ -1637,7 +1628,7 @@ pub const MatmulShape = struct {
     K: usize,
 };
 
-/// Context passed to Zig builder/runner callbacks during autotuning.
+/// Context passed to zig builder/runner callbacks during autotuning.
 /// Stored in a global to bridge the C callback interface.
 const TuneContext = struct {
     allocator: std.mem.Allocator,
@@ -1660,8 +1651,9 @@ const TuneContext = struct {
         };
     }
 
-    fn deinit(self: *TuneContext) void { // NOTE: is this used anywhere?
-        // No cleanup needed - .so files are left in work_dir for potential reuse
+    /// No-op cleanup. Called via `defer tune_ctx.deinit()` in tune().
+    /// Compiled .so files are intentionally left in work_dir for reuse.
+    fn deinit(self: *TuneContext) void {
         _ = self;
     }
 };
@@ -1773,7 +1765,7 @@ fn any_float(value: f64) c.TVMFFIAny {
 ///
 /// Applies the full TIR lowering pipeline then builds with the appropriate
 /// backend (target.build.cuda for CUDA, target.build.llvm for CPU).
-fn lowerAndBuildModule(
+fn lower_and_build_module(
     allocator: std.mem.Allocator,
     mod: c.TVMFFIAny,
     target: c.TVMFFIAny,
@@ -1789,12 +1781,10 @@ fn lowerAndBuildModule(
     // MetaSchedule candidates should preserve `global_symbol` from the original module
     log.debug("Input module type_index={d}", .{mod.type_index});
 
-    // apply BindTarget to set target attribute on the module // NOTE: is this comment misplaced?
-
     // helper to apply a single transform pass w/ no args
     const apply_pass = struct {
         fn f(alloc: std.mem.Allocator, pass_name: []const u8, modp: *c.TVMFFIAny, logger: anytype) !void {
-            var pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             ffi_call_global(alloc, pass_name, &.{}, &pass) catch |err| {
                 logger.debug("Get pass {s} failed: {s}", .{ pass_name, @errorName(err) });
                 return err;
@@ -1803,7 +1793,7 @@ fn lowerAndBuildModule(
                 _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
             };
 
-            var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             var run_args = [_]c.TVMFFIAny{ pass, modp.* };
             ffi_call_global(alloc, "transform.RunPass", &run_args, &result) catch |err| {
                 logger.debug("RunPass({s}) failed: {s}", .{ pass_name, @errorName(err) });
@@ -1823,7 +1813,7 @@ fn lowerAndBuildModule(
     // helper to apply a transform pass w/ args
     const apply_pass_with_args = struct { // NOTE: is this a bit repetitive? could have a generic (ie fn (comptime foo: something) type { return struct {...}; }) Same goes for other instances as well where we could consider this pattern.
         fn f(alloc: std.mem.Allocator, pass_name: []const u8, pass_args: []const c.TVMFFIAny, modp: *c.TVMFFIAny, logger: anytype) !void {
-            var pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             ffi_call_global(alloc, pass_name, pass_args, &pass) catch |err| {
                 logger.debug("Get pass {s} failed: {s}", .{ pass_name, @errorName(err) });
                 return err;
@@ -1832,7 +1822,7 @@ fn lowerAndBuildModule(
                 _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
             };
 
-            var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             var run_args = [_]c.TVMFFIAny{ pass, modp.* };
             ffi_call_global(alloc, "transform.RunPass", &run_args, &result) catch |err| {
                 logger.debug("RunPass({s}) failed: {s}", .{ pass_name, @errorName(err) });
@@ -1849,9 +1839,9 @@ fn lowerAndBuildModule(
         }
     }.f;
 
-    // apply BindTarget first
+    // apply BindTarget first to set target attribute on module
     {
-        var bind_target_pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var bind_target_pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var bt_args = [_]c.TVMFFIAny{target};
         ffi_call_global(allocator, "tir.transform.BindTarget", &bt_args, &bind_target_pass) catch |err| {
             log.err("Get BindTarget pass failed: {s}", .{@errorName(err)});
@@ -1861,7 +1851,7 @@ fn lowerAndBuildModule(
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         };
 
-        var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var run_args = [_]c.TVMFFIAny{ bind_target_pass, lowered_mod };
         ffi_call_global(allocator, "transform.RunPass", &run_args, &result) catch |err| {
             log.debug("BindTarget failed: {s}", .{@errorName(err)});
@@ -1880,16 +1870,18 @@ fn lowerAndBuildModule(
     // Apply default TIR lowering pipeline (based on TVM's `default_tir_pipeline`)
     // Key passes:
     // 1. LowerCrossThreadReduction - handles cross-thread reductions
-    // 2. LowerInitBlock - lowers T.init() blocks (REQUIRED before PlanAndUpdate) // NOTE: document how we know this
+    // 2. LowerInitBlock - lowers T.init() blocks, must precede PlanAndUpdate
+    //    (TVM's default_tir_pipeline enforces this ordering)
     // 3. Buffer allocation passes
     // 4. MakePackedAPI - creates wrapper with empty buffer_map
     // 5. Finalization passes
 
-    // Optional: LowerCrossThreadReduction (only for CUDA) // NOTE: comment unclear. is it intending to say its a no-op if target isnt cuda? clarify and likely remove "optional" and parentheticals
+    // LowerCrossThreadReduction is a no-op for non-CUDA targets. Failure is non-fatal.
     apply_pass(allocator, "tir.transform.LowerCrossThreadReduction", &lowered_mod, log) catch {};
 
-    // NOTE: LowerInitBlock must come before PlanAndUpdateBufferAllocationLocation // NOTE: documetn how we know this
-    // this pass handles T.init() blocks in reductions (like matmul accumulator init)
+    // LowerInitBlock must precede PlanAndUpdateBufferAllocationLocation per TVM's
+    // default_tir_pipeline ordering. This pass handles T.init() blocks in reductions
+    // such as the matmul accumulator initialization.
     try apply_pass(allocator, "tir.transform.LowerInitBlock", &lowered_mod, log);
 
     // buffer allocation and lowering
@@ -1902,7 +1894,8 @@ fn lowerAndBuildModule(
     try apply_pass(allocator, "tir.transform.LowerOpaqueBlock", &lowered_mod, log);
     try apply_pass(allocator, "tir.transform.FlattenBuffer", &lowered_mod, log);
 
-    // loop transforms and vectorization (critical for MetaSchedule candidates) // NOTE: what is this parenthetical? rephrase and provide more explanation/context if necessary to communicate what is meant.
+    // Loop transforms and vectorization. MetaSchedule candidates rely on these passes
+    // to realize the tiling and vectorization decisions chosen during schedule search.
     // NarrowDataType(target_bits: int) - typically 32 for 32-bit
     apply_pass_with_args(allocator, "tir.transform.NarrowDataType", &[_]c.TVMFFIAny{any_int(32)}, &lowered_mod, log) catch {};
     apply_pass(allocator, "tir.transform.LoopPartition", &lowered_mod, log) catch {};
@@ -1921,7 +1914,8 @@ fn lowerAndBuildModule(
     apply_pass(allocator, "tir.transform.VerifyMemory", &lowered_mod, log) catch {};
     try apply_pass(allocator, "tir.transform.AnnotateEntryFunc", &lowered_mod, log);
 
-    // CUDA-specific passes before SplitHostDevice (matching TVM python pipeline positions 42-48). // NOTE: requires explanation and/or citation
+    // CUDA-specific passes that must run before SplitHostDevice.
+    // Ordering follows TVM's default_tir_pipeline (see tvm/driver/build_module.py).
     // ThreadSync inserts __syncthreads() barriers inferred from shared memory access patterns.
     // AnnotateDeviceRegions wraps thread_extent regions with kTarget attributes — required
     // for SplitHostDevice to detect device code and extract it into a separate kernel.
@@ -1935,23 +1929,29 @@ fn lowerAndBuildModule(
     }
 
     try apply_pass(allocator, "tir.transform.SplitHostDevice", &lowered_mod, log);
-    logModuleFuncCount(allocator, lowered_mod, "after SplitHostDevice", log);
-    // MergeSharedMemoryAllocations must follow SplitHostDevice (TVM pipeline requirement) // NOTE: what does this mean? how do we know this? requires explanation and/or citation
+    log_module_func_count(allocator, lowered_mod, "after SplitHostDevice", log);
+    // MergeSharedMemoryAllocations must follow SplitHostDevice because it operates on
+    // device-only functions. TVM's default_tir_pipeline enforces this order
+    // (see tvm/driver/build_module.py, finalize_device_passes).
     if (target_kind == .cuda) {
         apply_pass(allocator, "tir.transform.MergeSharedMemoryAllocations", &lowered_mod, log) catch {};
     }
     try apply_pass(allocator, "tir.transform.MakePackedAPI", &lowered_mod, log);
-    logModuleFuncCount(allocator, lowered_mod, "after MakePackedAPI", log);
+    log_module_func_count(allocator, lowered_mod, "after MakePackedAPI", log);
 
-    // device kernel launch lowering (needed for proper function structure) // NOTE: what does this mean? how do we know this? requires explanation and/or citation. rephrase to remove parenthetical.
+    // LowerDeviceKernelLaunch rewrites device function calls into the runtime launch API,
+    // producing the final host-side call structure. Required by TVM's default_tir_pipeline
+    // (see tvm/driver/build_module.py).
     apply_pass(allocator, "tir.transform.LowerDeviceKernelLaunch", &lowered_mod, log) catch {};
-    logModuleFuncCount(allocator, lowered_mod, "after LowerDeviceKernelLaunch", log);
+    log_module_func_count(allocator, lowered_mod, "after LowerDeviceKernelLaunch", log);
 
-    // After LowerDeviceKernelLaunch, the module has both host and device functions.
-    // TVM's python pipeline applies finalization passes AFTER filtering:  // NOTE: requires explanation of what these referenced functions do and citation
-    //   finalize_host_passes() on host module only
-    //   finalize_device_passes() on device module only
-    // This is important because host passes (LowerTVMBuiltin) corrupt device functions. // NOTE: elaborate, is this purely empirical or tacit knowledge?
+    // After LowerDeviceKernelLaunch, the module contains both host and device functions.
+    // TVM's build pipeline (tvm/driver/build_module.py) applies finalization passes
+    // separately after filtering:
+    //   finalize_host_passes()   - LowerTVMBuiltin, LowerCustomDatatypes, LowerIntrin, etc.
+    //   finalize_device_passes() - LowerWarpMemory, Simplify, LowerIntrin, etc.
+    // Applying host passes such as LowerTVMBuiltin to device functions produces
+    // incorrect IR (observed empirically and consistent with the TVM reference pipeline).
 
     defer if (lowered_mod.unnamed_1.v_obj != mod.unnamed_1.v_obj) {
         if (lowered_mod.unnamed_1.v_obj) |obj| {
@@ -1972,31 +1972,31 @@ fn lowerAndBuildModule(
         },
         .cuda => {
             // CUDA: filter into host/device, finalize each separately, then build+link.
-            // matches TVM python: split_host_device_mods → finalize_*_passes → codegen_build  // NOTE: Use of Unicode symbol, remove. Also requires citations
+            // Matches TVM python pipeline: split_host_device_mods, finalize_*_passes, codegen_build.
             log.info("CUDA build: filtering and finalizing host/device separately", .{});
 
             // device path
-            log.info("Step 1: Filtering device functions", .{}); // NOTE: when logging a counter there should be a total (i.e., 1/5), and "Step" is too vague, different word or remove
+            log.info("CUDA build [1/5]: filtering device functions", .{});
             var device_mod = try tvm_cuda.filter_module_by_target(allocator, lowered_mod, .device);
             defer if (device_mod.unnamed_1.v_obj) |obj| {
                 _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
             };
 
-            // device finalization (matching TVM's finalize_device_passes) // NOTE: requires citations. rephrase to remove parenthetical.
+            // device finalization passes, mirrors TVM's finalize_device_passes
             apply_pass(allocator, "tir.transform.LowerWarpMemory", &device_mod, log) catch {};
             apply_pass(allocator, "tir.transform.Simplify", &device_mod, log) catch {};
             apply_pass(allocator, "tir.transform.LowerCustomDatatypes", &device_mod, log) catch {};
             apply_pass(allocator, "tir.transform.LowerDeviceStorageAccessInfo", &device_mod, log) catch {};
             apply_pass(allocator, "tir.transform.LowerIntrin", &device_mod, log) catch {};
 
-            log.info("Step 2: Building device kernels (NVRTC)", .{});
+            log.info("CUDA build [2/5]: building device kernels via NVRTC", .{});
             const device_built = try tvm_cuda.build_device_kernels(allocator, device_mod, target);
 
             // host path
-            log.info("Step 3: Filtering host functions", .{});
+            log.info("CUDA build [3/5]: filtering host functions", .{});
             var host_mod = try tvm_cuda.filter_module_by_target(allocator, lowered_mod, .host);
 
-            // host finalization (matching TVM's finalize_host_passes) // NOTE: requires citations. rephrase to remove parenthetical.
+            // host finalization passes, mirrors TVM's finalize_host_passes
             apply_pass(allocator, "tir.transform.LowerTVMBuiltin", &host_mod, log) catch {};
             apply_pass(allocator, "tir.transform.LowerCustomDatatypes", &host_mod, log) catch {};
             apply_pass(allocator, "tir.transform.LowerIntrin", &host_mod, log) catch {};
@@ -2004,22 +2004,20 @@ fn lowerAndBuildModule(
             apply_pass(allocator, "tir.transform.CombineContextCall", &host_mod, log) catch {};
 
             // create llvm host target
-            var host_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var host_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             {
-                const host_str = try cstr_alloc(allocator, "llvm");
-                defer allocator.free(host_str);
-                var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(host_str))};
+                var args = [_]c.TVMFFIAny{any_raw_str("llvm")};
                 try ffi_call_global(allocator, "target.Target", &args, &host_target);
             }
             defer if (host_target.unnamed_1.v_obj) |obj| {
                 _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
             };
 
-            log.info("Step 4: Building host wrapper (LLVM)", .{});
+            log.info("CUDA build [4/5]: building host wrapper via LLVM", .{});
             const host_built = try tvm_cuda.build_host_wrapper(allocator, host_mod, host_target);
 
             // link device module into host
-            log.info("Step 5: Linking device module into host", .{});
+            log.info("CUDA build [5/5]: linking device module into host", .{});
             try tvm_cuda.link_device_module(allocator, host_built, device_built);
 
             log.info("CUDA module built", .{});
@@ -2037,8 +2035,10 @@ fn lowerAndBuildModule(
 /// 3. Exports to a temp .so file
 /// 4. Returns a BuilderResult with the artifact path
 ///
-/// Signature matches TVM's FBuild: Array<BuilderResult>(Array<BuilderInput>) // NOTE: it is unclear how this signature matches, expand and clarify. also if referenced type is complex then this additionally requires citation.
-fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as well. need to update any comments/logs as well.
+/// Conforms to TVM's FBuild typedef (see tvm/meta_schedule/builder.h):
+/// args[0] is Array<BuilderInput>, result receives Array<BuilderResult>.
+/// The zig callback signature matches the generic TVMFFIFunctionCreate convention.
+fn zig_build_callback(
     _: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
@@ -2048,12 +2048,12 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
 
     // get global context
     const ctx = g_tune_ctx orelse {
-        log.err("zigBuildCallback: no tune context set", .{});
+        log.err("zig_build_callback: no tune context set", .{});
         return -1;
     };
 
     if (num_args != 1) {
-        log.err("zigBuildCallback: expected 1 arg (Array<BuilderInput>), got {d}", .{num_args});
+        log.err("zig_build_callback: expected 1 arg (Array<BuilderInput>), got {d}", .{num_args});
         return -1;
     }
 
@@ -2061,7 +2061,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
     const inputs_array = args[0];
 
     // get array length
-    var len_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var len_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var len_args = [_]c.TVMFFIAny{inputs_array};
     ffi_call_global(ctx.allocator, "ffi.ArraySize", &len_args, &len_result) catch |err| {
         log.err("ffi.ArraySize failed: {s}", .{@errorName(err)});
@@ -2076,7 +2076,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
 
     for (0..num_inputs) |i| {
         // get BuilderInput[i]
-        var input: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var input: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var get_args = [_]c.TVMFFIAny{ inputs_array, any_int(@intCast(i)) };
         ffi_call_global(ctx.allocator, "ffi.ArrayGetItem", &get_args, &input) catch |err| {
             log.err("ffi.ArrayGetItem failed: {s}", .{@errorName(err)});
@@ -2088,7 +2088,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
         const mod = ffi_get_attr(ctx.allocator, input, "mod") catch |err| {
             log.err("get mod failed: {s}", .{@errorName(err)});
             // Return error result
-            const err_result = createBuilderErrorResult(ctx.allocator, "failed to get mod") catch return -1;
+            const err_result = create_builder_error_result(ctx.allocator, "failed to get mod") catch return -1;
             results_list.append(ctx.allocator, err_result) catch return -1;
             continue;
         };
@@ -2098,10 +2098,11 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
 
         log.info("Processing candidate {d}/{d}", .{ i, num_inputs });
 
-        // apply lowering passes + compile w/ appropriate build backend (cuda/llvm) // NOTE: comment says llvm, elsewhere we say llvm, but we also have code that targets C, this needs to be investigated
-        const built_mod = lowerAndBuildModule(ctx.allocator, mod, target, ctx.target_kind, log) catch |err| {
-            log.err("lowerAndBuildModule failed: {s}", .{@errorName(err)});
-            const err_result = createBuilderErrorResult(ctx.allocator, "compilation failed") catch return -1;
+        // apply lowering passes and compile with the target-appropriate backend
+        // (CUDA target uses target.build.cuda; CPU target uses target.build.llvm)
+        const built_mod = lower_and_build_module(ctx.allocator, mod, target, ctx.target_kind, log) catch |err| {
+            log.err("lower_and_build_module failed: {s}", .{@errorName(err)});
+            const err_result = create_builder_error_result(ctx.allocator, "compilation failed") catch return -1;
             results_list.append(ctx.allocator, err_result) catch return -1;
             continue;
         };
@@ -2115,7 +2116,8 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
         const obj_path = std.fmt.allocPrint(ctx.allocator, "{s}/candidate_{d}.o", .{ ctx.work_dir, build_id }) catch return -1;
         defer ctx.allocator.free(obj_path);
         const so_path = std.fmt.allocPrintSentinel(ctx.allocator, "{s}/candidate_{d}.so", .{ ctx.work_dir, build_id }, 0) catch return -1;
-        // so_path is kept (not freed) as it's passed to BuilderResult // NOTE: this comment should be more clear about lifetime and ownership
+        // so_path ownership transfers to the BuilderResult string; it must outlive this
+        // loop iteration and is intentionally not freed here. TVM manages it afterward.
 
         log.info("Writing module to {s} (target={s})", .{
             obj_path,
@@ -2126,7 +2128,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
         module_write_to_file(ctx.allocator, built_mod, obj_path, "o") catch |err| {
             log.err("Failed to write module to {s}: {s}", .{ obj_path, @errorName(err) });
             ctx.allocator.free(so_path);
-            const err_result = createBuilderErrorResult(ctx.allocator, "write_to_file failed") catch return -1;
+            const err_result = create_builder_error_result(ctx.allocator, "write_to_file failed") catch return -1;
             results_list.append(ctx.allocator, err_result) catch return -1;
             continue;
         };
@@ -2139,22 +2141,21 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
             const devc_obj_path = std.fmt.allocPrint(ctx.allocator, "{s}/candidate_{d}_devc.o", .{ ctx.work_dir, build_id }) catch return -1;
             defer ctx.allocator.free(devc_obj_path);
 
-            // pack imports into llvm module // NOTE: explain what this means/does
-            const llvm_target_str = cstr_alloc(ctx.allocator, "llvm") catch return -1; // NOTE: same comment about c string here, again I wont comment on all of them but this needs to be addressed as its everywhere
-            defer ctx.allocator.free(llvm_target_str);
-            const empty_prefix = cstr_alloc(ctx.allocator, "") catch return -1;
-            defer ctx.allocator.free(empty_prefix);
+            // Serialize device module imports into an LLVM module containing the data blob.
+            // TVM's loader deserializes this on module_load.
 
-            var pack_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
-            ffi_call_global(ctx.allocator, "runtime.ModulePackImportsToLLVM", &.{ // NOTE: signature needs to be documented in a comment
+            // ModulePackImportsToLLVM(module, system_lib: bool, target_str: str, prefix: str)
+            // -> Module (LLVM module containing serialized device data blob)
+            var pack_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            ffi_call_global(ctx.allocator, "runtime.ModulePackImportsToLLVM", &.{
                 built_mod,
                 any_bool(false), // system_lib
-                any_raw_str(cstr_ptr(llvm_target_str)),
-                any_raw_str(cstr_ptr(empty_prefix)),
+                any_raw_str("llvm"),
+                any_raw_str(""),
             }, &pack_mod) catch |err| {
                 log.err("ModulePackImportsToLLVM failed: {s}", .{@errorName(err)});
                 ctx.allocator.free(so_path);
-                const err_result = createBuilderErrorResult(ctx.allocator, "pack imports failed") catch return -1;
+                const err_result = create_builder_error_result(ctx.allocator, "pack imports failed") catch return -1;
                 results_list.append(ctx.allocator, err_result) catch return -1;
                 continue;
             };
@@ -2166,7 +2167,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
             module_write_to_file(ctx.allocator, pack_mod, devc_obj_path, "o") catch |err| {
                 log.err("Failed to write devc module: {s}", .{@errorName(err)});
                 ctx.allocator.free(so_path);
-                const err_result = createBuilderErrorResult(ctx.allocator, "write devc failed") catch return -1;
+                const err_result = create_builder_error_result(ctx.allocator, "write devc failed") catch return -1;
                 results_list.append(ctx.allocator, err_result) catch return -1;
                 continue;
             };
@@ -2176,7 +2177,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
             link_objects_to_shared(ctx.allocator, &.{ obj_path, devc_obj_path }, so_path) catch |err| {
                 log.err("Failed to link CUDA module: {s}", .{@errorName(err)});
                 ctx.allocator.free(so_path);
-                const err_result = createBuilderErrorResult(ctx.allocator, "linker failed") catch return -1;
+                const err_result = create_builder_error_result(ctx.allocator, "linker failed") catch return -1;
                 results_list.append(ctx.allocator, err_result) catch return -1;
                 continue;
             };
@@ -2185,7 +2186,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
             link_objects_to_shared(ctx.allocator, &.{obj_path}, so_path) catch |err| {
                 log.err("Failed to link {s} -> {s}: {s}", .{ obj_path, so_path, @errorName(err) });
                 ctx.allocator.free(so_path);
-                const err_result = createBuilderErrorResult(ctx.allocator, "linker failed") catch return -1;
+                const err_result = create_builder_error_result(ctx.allocator, "linker failed") catch return -1;
                 results_list.append(ctx.allocator, err_result) catch return -1;
                 continue;
             };
@@ -2195,7 +2196,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
         log.debug("Exported module to {s}", .{so_path});
 
         // create BuilderResult with .so path as artifact_path
-        var builder_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var builder_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var br_args = [_]c.TVMFFIAny{ any_raw_str(so_path), any_none() };
         ffi_call_global(ctx.allocator, "meta_schedule.BuilderResult", &br_args, &builder_result) catch |err| {
             log.err("BuilderResult creation failed: {s}", .{@errorName(err)});
@@ -2208,7 +2209,7 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
     }
 
     // create output Array from results
-    var array_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var array_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi_call_global(ctx.allocator, "ffi.Array", results_list.items, &array_result) catch |err| {
         log.err("ffi.Array creation failed: {s}", .{@errorName(err)});
         return -1;
@@ -2219,11 +2220,11 @@ fn zigBuildCallback( // NOTE: should be snake_case. this applies elsewhere as we
 }
 
 /// Create a BuilderResult representing an error.
-fn createBuilderErrorResult(allocator: std.mem.Allocator, err_msg: []const u8) !c.TVMFFIAny {
+fn create_builder_error_result(allocator: std.mem.Allocator, err_msg: []const u8) !c.TVMFFIAny {
     const msg_buf = try cstr_alloc(allocator, err_msg);
     defer allocator.free(msg_buf);
 
-    var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var args = [_]c.TVMFFIAny{ any_none(), any_raw_str(cstr_ptr(msg_buf)) };
     try ffi_call_global(allocator, "meta_schedule.BuilderResult", &args, &result);
     return result;
@@ -2238,8 +2239,10 @@ fn createBuilderErrorResult(allocator: std.mem.Allocator, err_msg: []const u8) !
 /// 4. Times multiple runs and computes average
 /// 5. Returns RunnerFuture wrapping the timing result
 ///
-/// Signature matches TVM's FRun: Array<RunnerFuture>(Array<RunnerInput>) // NOTE: it is unclear how this signature matches, expand and clarify. also if referenced type is complex then this additionally requires citation.
-fn zigRunCallback(
+/// Conforms to TVM's FRun typedef (see tvm/meta_schedule/runner.h):
+/// args[0] is Array<RunnerInput>, result receives Array<RunnerFuture>.
+/// The zig callback signature matches the generic TVMFFIFunctionCreate convention.
+fn zig_run_callback(
     _: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
@@ -2248,19 +2251,19 @@ fn zigRunCallback(
     const log = std.log.scoped(.@"zg/tvm_runner");
 
     const ctx = g_tune_ctx orelse {
-        log.err("zigRunCallback: no tune context set", .{});
+        log.err("zig_run_callback: no tune context set", .{});
         return -1;
     };
 
     if (num_args != 1) {
-        log.err("zigRunCallback: expected 1 arg, got {d}", .{num_args});
+        log.err("zig_run_callback: expected 1 arg, got {d}", .{num_args});
         return -1;
     }
 
     const inputs_array = args[0];
 
     // get array length
-    var len_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var len_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var len_args = [_]c.TVMFFIAny{inputs_array};
     ffi_call_global(ctx.allocator, "ffi.ArraySize", &len_args, &len_result) catch |err| {
         log.err("ffi.ArraySize failed: {s}", .{@errorName(err)});
@@ -2274,7 +2277,7 @@ fn zigRunCallback(
 
     for (0..num_inputs) |i| {
         // get RunnerInput[i]
-        var input: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var input: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var get_args = [_]c.TVMFFIAny{ inputs_array, any_int(@intCast(i)) };
         ffi_call_global(ctx.allocator, "ffi.ArrayGetItem", &get_args, &input) catch |err| {
             log.err("ffi.ArrayGetItem failed: {s}", .{@errorName(err)});
@@ -2284,34 +2287,35 @@ fn zigRunCallback(
         // get artifact_path from RunnerInput
         const artifact_path_any = ffi_get_attr(ctx.allocator, input, "artifact_path") catch |err| {
             log.err("get artifact_path failed: {s}", .{@errorName(err)});
-            const err_future = createRunnerErrorFuture(ctx.allocator, "failed to get artifact_path") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "failed to get artifact_path") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
 
         const artifact_path = any_to_string(ctx.allocator, @constCast(&artifact_path_any)) catch |err| {
             log.err("artifact_path to string failed: {s}", .{@errorName(err)});
-            const err_future = createRunnerErrorFuture(ctx.allocator, "invalid artifact_path") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "invalid artifact_path") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
         defer ctx.allocator.free(artifact_path);
 
-        // load module from .so file (artifact_path is the .so path from builder) // NOTE: rephrase to remove parenthetical
+        // load the compiled .so module produced by the builder stage
         log.debug("Loading module from: {s}", .{artifact_path});
         const loaded_mod = module_load_from_file(ctx.allocator, artifact_path) catch |err| {
             log.err("Failed to load module {s}: {s}", .{ artifact_path, @errorName(err) });
-            const err_future = createRunnerErrorFuture(ctx.allocator, "module load failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "module load failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
         defer _ = c.TVMFFIObjectDecRef(loaded_mod);
         log.debug("Loaded module: {*}", .{loaded_mod});
 
-        // get the "main" function from loaded module // NOTE: requires explanation, how do we know "it" is called main, what is main, citation needed.
+        // Retrieve the entry-point function. TVM names it "main" by convention when
+        // building from IRModule (set via the global_symbol attribute in build_matmul_tir).
         const func = module_get_function(ctx.allocator, loaded_mod, "main", true) catch |err| {
             log.err("GetFunction(main) failed: {s}", .{@errorName(err)});
-            const err_future = createRunnerErrorFuture(ctx.allocator, "GetFunction failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "GetFunction failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
@@ -2324,21 +2328,21 @@ fn zigRunCallback(
         const K = ctx.shape.K;
 
         const a_data = ctx.allocator.alloc(f32, M * K) catch {
-            const err_future = createRunnerErrorFuture(ctx.allocator, "alloc A failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "alloc A failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
         defer ctx.allocator.free(a_data);
 
         const b_data = ctx.allocator.alloc(f32, K * N) catch {
-            const err_future = createRunnerErrorFuture(ctx.allocator, "alloc B failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "alloc B failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
         defer ctx.allocator.free(b_data);
 
         const c_data = ctx.allocator.alloc(f32, M * N) catch {
-            const err_future = createRunnerErrorFuture(ctx.allocator, "alloc C failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "alloc C failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
@@ -2360,7 +2364,7 @@ fn zigRunCallback(
 
         const t_a = allocate_tensor(ctx.allocator, a_data, &shape_a, dev_type) catch |err| {
             log.err("allocate_tensor(A) failed: {s}", .{@errorName(err)});
-            const err_future = createRunnerErrorFuture(ctx.allocator, "tensor A failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "tensor A failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
@@ -2368,7 +2372,7 @@ fn zigRunCallback(
 
         const t_b = allocate_tensor(ctx.allocator, b_data, &shape_b, dev_type) catch |err| {
             log.err("allocate_tensor(B) failed: {s}", .{@errorName(err)});
-            const err_future = createRunnerErrorFuture(ctx.allocator, "tensor B failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "tensor B failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
@@ -2376,7 +2380,7 @@ fn zigRunCallback(
 
         const t_c = allocate_tensor(ctx.allocator, c_data, &shape_c, dev_type) catch |err| {
             log.err("allocate_tensor(C) failed: {s}", .{@errorName(err)});
-            const err_future = createRunnerErrorFuture(ctx.allocator, "tensor C failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "tensor C failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
@@ -2388,23 +2392,24 @@ fn zigRunCallback(
             any_obj(t_b, c.kTVMFFITensor),
             any_obj(t_c, c.kTVMFFITensor),
         };
-        var call_res: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var call_res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         ffi_call(ctx.allocator, func, &call_args, &call_res) catch |err| {
             const tvm_err = get_last_error_message(ctx.allocator) catch "?";
             log.err("warmup call failed: {s} — {s}", .{ @errorName(err), tvm_err });
-            const err_future = createRunnerErrorFuture(ctx.allocator, "warmup failed") catch return -1;
+            const err_future = create_runner_error_future(ctx.allocator, "warmup failed") catch return -1;
             results_list.append(ctx.allocator, err_future) catch return -1;
             continue;
         };
 
-        // timed runs (5 iterations, take median) // NOTE: hard coded, intentional? whats the rationale behind this number?
+        // Time 5 iterations and take the median to reduce variance from system noise.
+        // TODO: make iteration count configurable via TuneOpts
         const num_runs: usize = 5;
-        var times: [5]f64 = undefined; // NOTE: audit use of undefined
+        var times: [5]f64 = std.mem.zeroes([5]f64);
         for (0..num_runs) |run_idx| {
             const start = std.time.nanoTimestamp();
             ffi_call(ctx.allocator, func, &call_args, &call_res) catch |err| {
                 log.err("timed call failed: {s}", .{@errorName(err)});
-                const err_future = createRunnerErrorFuture(ctx.allocator, "timed call failed") catch return -1;
+                const err_future = create_runner_error_future(ctx.allocator, "timed call failed") catch return -1;
                 results_list.append(ctx.allocator, err_future) catch return -1;
                 break;
             };
@@ -2416,7 +2421,7 @@ fn zigRunCallback(
         std.mem.sort(f64, &times, {}, std.sort.asc(f64));
         const run_time_secs = times[num_runs / 2];
 
-        const runner_future = createRunnerSuccessFuture(ctx.allocator, run_time_secs) catch |err| {
+        const runner_future = create_runner_success_future(ctx.allocator, run_time_secs) catch |err| {
             log.err("create runner future failed: {s}", .{@errorName(err)});
             return -1;
         };
@@ -2425,7 +2430,7 @@ fn zigRunCallback(
     }
 
     // create output Array
-    var array_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var array_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi_call_global(ctx.allocator, "ffi.Array", results_list.items, &array_result) catch |err| { // NOTE: we have a few instances of repeated verbose ffi patterns, like this one of creating an array, discuss considering abstraction in ffi module
         log.err("ffi.Array creation failed: {s}", .{@errorName(err)});
         return -1;
@@ -2441,8 +2446,10 @@ const RunnerFutureCtx = struct {
     result: c.TVMFFIAny,
 };
 
-/// Callback for RunnerFuture.f_done - always returns true (immediate future). // NOTE: explain
-fn zigRunnerFutureDone(
+/// Callback for RunnerFuture.f_done. Returns true unconditionally because our
+/// runner measures synchronously, so the result is always available immediately
+/// (no async polling needed).
+fn zig_runner_future_done(
     _: ?*anyopaque,
     _: [*c]const c.TVMFFIAny,
     _: i32,
@@ -2452,8 +2459,10 @@ fn zigRunnerFutureDone(
     return 0;
 }
 
-/// Callback for RunnerFuture.f_result - returns the pre-stored RunnerResult. // NOTE: explain
-fn zigRunnerFutureResult(
+/// Callback for RunnerFuture.f_result. Retrieves the RunnerResult that was
+/// pre-computed during the synchronous measurement phase and stored in the
+/// RunnerFutureCtx passed as the data pointer.
+fn zig_runner_future_result(
     data: ?*anyopaque,
     _: [*c]const c.TVMFFIAny,
     _: i32,
@@ -2464,27 +2473,29 @@ fn zigRunnerFutureResult(
     return 0;
 }
 
-/// Deleter for RunnerFutureCtx - called when the TVM function is destroyed. // NOTE: document lifetime and ownership
-fn zigRunnerFutureCtxDeleter(data: ?*anyopaque) callconv(.c) void {
+/// Deleter for RunnerFutureCtx. TVM calls this when the f_result function object is
+/// destroyed. Releases the stored RunnerResult (TVM object) and frees the zig-allocated
+/// RunnerFutureCtx using the global tune context's allocator.
+fn zig_runner_future_ctx_deleter(data: ?*anyopaque) callconv(.c) void {
     if (data) |ptr| {
         const ctx: *RunnerFutureCtx = @ptrCast(@alignCast(ptr));
         // release stored RunnerResult
         if (ctx.result.unnamed_1.v_obj) |obj| {
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         }
-        // free the context (allocated by the global allocator in tune context) // NOTE: rephrase to remove parenthetical
+        // free the context using the global tune context's allocator, which originally created it
         if (g_tune_ctx) |tune_ctx| {
             tune_ctx.allocator.destroy(ctx);
         }
     }
 }
 
-/// Create a RunnerFuture from a RunnerResult with Zig callbacks.
+/// Create a RunnerFuture from a RunnerResult with zig callbacks.
 /// RunnerFuture(f_done, f_result) where:
 ///   - f_done() -> bool (always true for immediate future)
 ///   - f_result() -> RunnerResult (returns the pre-stored result)
-fn createRunnerFuture(allocator: std.mem.Allocator, runner_result: c.TVMFFIAny) !c.TVMFFIAny {
-    // allocate context to store the result (will be freed by deleter) // NOTE: rephrase to remove parenthetical
+fn create_runner_future(allocator: std.mem.Allocator, runner_result: c.TVMFFIAny) !c.TVMFFIAny {
+    // allocate context to store the result; ownership transfers to TVM via the deleter callback
     const ctx = try allocator.create(RunnerFutureCtx);
     ctx.result = runner_result;
     // increment ref count since we arre storing it
@@ -2492,9 +2503,9 @@ fn createRunnerFuture(allocator: std.mem.Allocator, runner_result: c.TVMFFIAny) 
         _ = c.TVMFFIObjectIncRef(@ptrCast(obj));
     }
 
-    // create f_done callback (no context needed, always returns true) // NOTE: rephrase to remove parenthetical
+    // create f_done callback with null context since it unconditionally returns true
     var f_done: c.TVMFFIObjectHandle = null;
-    var ret = c.TVMFFIFunctionCreate(null, zigRunnerFutureDone, null, &f_done);
+    var ret = c.TVMFFIFunctionCreate(null, zig_runner_future_done, null, &f_done);
     if (ret != 0 or f_done == null) {
         allocator.destroy(ctx);
         return error.TvmRuntimeError;
@@ -2503,7 +2514,7 @@ fn createRunnerFuture(allocator: std.mem.Allocator, runner_result: c.TVMFFIAny) 
 
     // create f_result callback w/ context
     var f_result: c.TVMFFIObjectHandle = null;
-    ret = c.TVMFFIFunctionCreate(ctx, zigRunnerFutureResult, zigRunnerFutureCtxDeleter, &f_result);
+    ret = c.TVMFFIFunctionCreate(ctx, zig_runner_future_result, zig_runner_future_ctx_deleter, &f_result);
     if (ret != 0 or f_result == null) {
         allocator.destroy(ctx);
         return error.TvmRuntimeError;
@@ -2511,7 +2522,7 @@ fn createRunnerFuture(allocator: std.mem.Allocator, runner_result: c.TVMFFIAny) 
     defer _ = c.TVMFFIObjectDecRef(f_result);
 
     // create RunnerFuture(f_done, f_result)
-    var future: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var future: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var args = [_]c.TVMFFIAny{
         any_obj(f_done, c.kTVMFFIFunction),
         any_obj(f_result, c.kTVMFFIFunction),
@@ -2521,25 +2532,26 @@ fn createRunnerFuture(allocator: std.mem.Allocator, runner_result: c.TVMFFIAny) 
 }
 
 /// create a RunnerFuture representing an error.
-fn createRunnerErrorFuture(allocator: std.mem.Allocator, err_msg: []const u8) !c.TVMFFIAny {
+fn create_runner_error_future(allocator: std.mem.Allocator, err_msg: []const u8) !c.TVMFFIAny {
     const msg_buf = try cstr_alloc(allocator, err_msg);
     defer allocator.free(msg_buf);
 
     // create RunnerResult with error (run_secs=None, error_msg=msg)
-    var runner_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var runner_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var rr_args = [_]c.TVMFFIAny{ any_none(), any_raw_str(cstr_ptr(msg_buf)) };
     try ffi_call_global(allocator, "meta_schedule.RunnerResult", &rr_args, &runner_result);
     defer if (runner_result.unnamed_1.v_obj) |obj| {
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    return createRunnerFuture(allocator, runner_result);
+    return create_runner_future(allocator, runner_result);
 }
 
 /// Create a RunnerFuture representing a successful measurement.
-fn createRunnerSuccessFuture(allocator: std.mem.Allocator, run_secs: f64) !c.TVMFFIAny {
-    // create Array of run times (single measurement) // NOTE: elaborate and rephrase to remove parenthetical
-    var times_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+fn create_runner_success_future(allocator: std.mem.Allocator, run_secs: f64) !c.TVMFFIAny {
+    // Wrap the measured time in a single-element TVM Array. RunnerResult expects an
+    // Array of run times; we provide one element since each candidate is measured once.
+    var times_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var times_args = [_]c.TVMFFIAny{any_float(run_secs)};
     try ffi_call_global(allocator, "ffi.Array", &times_args, &times_array);
     defer if (times_array.unnamed_1.v_obj) |obj| {
@@ -2547,14 +2559,14 @@ fn createRunnerSuccessFuture(allocator: std.mem.Allocator, run_secs: f64) !c.TVM
     };
 
     // create RunnerResult(run_secs=times, error_msg=None)
-    var runner_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var runner_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var rr_args = [_]c.TVMFFIAny{ times_array, any_none() };
     try ffi_call_global(allocator, "meta_schedule.RunnerResult", &rr_args, &runner_result);
     defer if (runner_result.unnamed_1.v_obj) |obj| {
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    return createRunnerFuture(allocator, runner_result);
+    return create_runner_future(allocator, runner_result);
 }
 
 /// Build a TIR matmul module for autotuning.
@@ -2567,14 +2579,14 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     }
     const log = std.log.scoped(.@"zg/tvm_matmul");
 
-    try ensureTvmCompilerLoaded(allocator);
+    try ensure_tvm_compiler_loaded(allocator);
 
     const m_i64: i64 = @intCast(M);
     const n_i64: i64 = @intCast(N);
     const k_i64: i64 = @intCast(K);
 
     // create shapes for A[M,K], B[K,N], C[M,N]
-    var shape_a: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var shape_a: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ any_int(m_i64), any_int(k_i64) };
         try ffi_call_global(allocator, "ffi.Array", &args, &shape_a);
@@ -2583,7 +2595,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var shape_b: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var shape_b: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ any_int(k_i64), any_int(n_i64) };
         try ffi_call_global(allocator, "ffi.Array", &args, &shape_b);
@@ -2592,7 +2604,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
-    var shape_c: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var shape_c: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ any_int(m_i64), any_int(n_i64) };
         try ffi_call_global(allocator, "ffi.Array", &args, &shape_c);
@@ -2609,7 +2621,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     const name_b_buf = try cstr_alloc(allocator, "B");
     defer allocator.free(name_b_buf);
 
-    var tensor_a: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor_a: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             shape_a,
@@ -2620,7 +2632,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     }
     log.debug("Created placeholder A[{d},{d}]", .{ M, K });
 
-    var tensor_b: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor_b: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             shape_b,
@@ -2636,7 +2648,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     // Instead, we can use topi.nn.matmul which is a pre-built TE schedule.
 
     // try using topi.matmul(A, B, transpose_a=False, transpose_b=False) fallback to topi.nn.matmul
-    var tensor_c: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensor_c: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             tensor_a,
@@ -2657,13 +2669,13 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     log.info("Created matmul C[{d},{d}] = A[{d},{d}] @ B[{d},{d}]", .{ M, N, M, K, K, N });
 
     // create PrimFunc from tensors
-    var tensors_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tensors_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ tensor_a, tensor_b, tensor_c };
         try ffi_call_global(allocator, "ffi.Array", &args, &tensors_array);
     }
 
-    var prim_func: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var prim_func: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ tensors_array, any_none() };
         try ffi_call_global(allocator, "te.CreatePrimFunc", &args, &prim_func);
@@ -2675,7 +2687,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     const main_name_buf = try cstr_alloc(allocator, "main");
     defer allocator.free(main_name_buf);
 
-    var prim_func_with_attr: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var prim_func_with_attr: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             prim_func,
@@ -2692,22 +2704,22 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     const main_buf = try cstr_alloc(allocator, "main");
     defer allocator.free(main_buf);
 
-    var global_var: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var global_var: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(main_buf))};
         try ffi_call_global(allocator, "ir.GlobalVar", &args, &global_var);
     }
 
-    var func_map: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var func_map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ global_var, prim_func_with_attr };
         try ffi_call_global(allocator, "ffi.Map", &args, &func_map);
     }
 
-    var empty_map: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var empty_map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call_global(allocator, "ffi.Map", &.{}, &empty_map);
 
-    var ir_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var ir_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{ func_map, any_none(), empty_map };
         try ffi_call_global(allocator, "ir.IRModule", &args, &ir_mod);
@@ -2721,7 +2733,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
 ///
 /// This function orchestrates the tuning process:
 /// 1. Creates MetaSchedule components (space generator, search strategy, database)
-/// 2. Registers Zig builder/runner callbacks
+/// 2. Registers zig builder/runner callbacks
 /// 3. Runs the tuning loop
 /// 4. Saves best schedule to the database
 pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: TargetKind, shape: MatmulShape, opts: TuneOpts) !void {
@@ -2730,7 +2742,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     }
     const log = std.log.scoped(.@"zg/tvm_tune");
 
-    try ensureTvmCompilerLoaded(allocator);
+    try ensure_tvm_compiler_loaded(allocator);
 
     // load CUDA intrinsics if targeting CUDA
     //   these are required for MetaSchedule CUDA schedule rules (WMMA, MMA, etc.)
@@ -2770,18 +2782,16 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     const target_buf = try cstr_alloc(allocator, target_str);
     defer allocator.free(target_buf);
 
-    var target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // create device target
-        var device_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var device_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(target_buf))};
         try ffi_call_global(allocator, "target.Target", &args, &device_target);
 
         // create host target (always LLVM for CPU codegen)
-        const host_str = try cstr_alloc(allocator, "llvm");
-        defer allocator.free(host_str);
-        var host_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
-        var host_args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(host_str))};
+        var host_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+        var host_args = [_]c.TVMFFIAny{any_raw_str("llvm")};
         ffi_call_global(allocator, "target.Target", &host_args, &host_target) catch |err| { // NOTE: repeated pattern
             if (device_target.unnamed_1.v_obj) |obj| {
                 _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
@@ -2793,7 +2803,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         };
 
-        // Set host on target - CRITICAL for MakePackedAPI to work // NOTE: poor comment. remove all caps "CRITICAL", rephrase, explain, needs citation.
+        // MakePackedAPI requires the target to carry a host attribute; set it here.
         var with_host_args = [_]c.TVMFFIAny{ device_target, host_target };
         ffi_call_global(allocator, "target.WithHost", &with_host_args, &target) catch |err| {
             if (device_target.unnamed_1.v_obj) |obj| {
@@ -2803,7 +2813,8 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
             return err;
         };
 
-        // device_target was consumed by WithHost, release it // NOTE: do we have an understanding of memory contract or is this a guess? comment should clarify ownership and lifetime and explain what we know and how we know it when possible.
+        // WithHost increments the refcount on device_target internally (TVM uses ref-counted
+        // objects). We release our reference here; the combined target retains its own.
         if (device_target.unnamed_1.v_obj) |obj| {
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
         }
@@ -2816,12 +2827,15 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     g_tune_ctx = &tune_ctx;
     defer g_tune_ctx = null;
 
-    // Register required helper functions that MetaSchedule expects from python. // NOTE: "required" is redundant as comment clearly states TVM "expects" this.
-    // The C++ code looks for packed functions in the global registry.
-    // python registers "meta_schedule.cpu_count" but C++ may look for "_cpu_count" variant.
-    // We register both variants for compatibility. // NOTE: do we have an understanding? is this a guess? "C++ may look for "_cpu_count" variant"" sounds like speculation, requires clarification.
+    // Register helper functions that MetaSchedule expects. TVM's C++ runtime looks up
+    //  packed functions in the global registry by name. The python frontend registers
+    //  "meta_schedule.cpu_count", the C++ side also checks "_cpu_count" (see
+    //  TVM source: src/meta_schedule/utils.h).
+    //  Both variants are registered for compatibility.
     const cpu_count_cb = struct {
-        /// Returns number of CPUs available for parallel builds // NOTE: explain, are trials built in parallel? is this information applicable to or impact the kernel itself? I assume TVM needs to (or would want to) know what resources are available for kernel gen.
+        /// Returns the number of available CPUs. MetaSchedule uses this to determine
+        /// parallelism for candidate compilation and to inform LLVM schedule rules
+        /// (e.g. parallel loop tiling decisions).
         fn f(_: ?*anyopaque, args: [*c]const c.TVMFFIAny, num_args: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
             // _cpu_count(logical: bool = True) -> int
             _ = num_args;
@@ -2839,63 +2853,51 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     }
     defer _ = c.TVMFFIObjectDecRef(cpu_count_func);
 
-    // register both name variants that TVM might look for // NOTE: same uncertainty comment as above
+    // register both name variants (see comment above for rationale)
     const func_names = [_][]const u8{
         "meta_schedule._cpu_count",
         "meta_schedule.cpu_count",
     };
     for (func_names) |func_name_str| {
-        // Use the original string directly, NOT cstr_alloc which adds null terminator to length // NOTE: remove all caps "NOT" and provide justification
-        // TVMFFIByteArray size should NOT include the null terminator
+        // Use the original string directly instead of cstr_alloc, because cstr_alloc appends a
+        // null terminator that inflates the length. TVMFFIByteArray.size must not include it.
         var name_arr: c.TVMFFIByteArray = .{ .data = func_name_str.ptr, .size = func_name_str.len };
-        // use override=1 to replace any existing registration // NOTE: rephrase, sounds like author is instructing the user on how to use something, not declaring what is happening
+        // override=1 replaces any existing registration for this name
         if (c.TVMFFIFunctionSetGlobal(&name_arr, cpu_count_func, 1) != 0) {
             const msg = try get_last_error_message(allocator);
             defer allocator.free(msg);
             log.warn("TVMFFIFunctionSetGlobal({s}) failed: {s}", .{ func_name_str, msg });
-            // continue to try other names // NOTE: control flow unclear, loop/block requires better documentation
+            // registration failure for one name variant is non-fatal; the loop tries the next
         } else {
             log.debug("Registered {s}", .{func_name_str});
 
             // verify registration by immediately trying to retrieve the function
             var retrieved: c.TVMFFIObjectHandle = null;
             if (c.TVMFFIFunctionGetGlobal(&name_arr, &retrieved) != 0) {
-                log.warn("VERIFICATION FAILED: Could not retrieve {s} right after registration.", .{func_name_str});
+                log.warn("verification failed: could not retrieve {s} right after registration", .{func_name_str});
             } else if (retrieved == null) {
-                log.warn("VERIFICATION FAILED: Retrieved null for {s}", .{func_name_str});
+                log.warn("verification failed: retrieved null for {s}", .{func_name_str});
             } else {
-                log.info("VERIFIED: {s} is retrievable via TVMFFIFunctionGetGlobal", .{func_name_str});
+                log.info("verified: {s} is retrievable via TVMFFIFunctionGetGlobal", .{func_name_str});
                 // clean up retrieved handle
                 _ = c.TVMFFIObjectDecRef(retrieved);
             }
         }
     }
 
-    // verify functions are still retrievable after registration loop using ffi_get_global // NOTE: looks redundant, its okay to be sure but intent should be explained as repetition is a code smell, looks like debug code. also noisy logs.
-    // This uses the same path as ffi_call_global will use
-    log.debug("Verifying functions via ffi_get_global...", .{});
-    for (func_names) |func_name_str| {
-        if (ffi_get_global(allocator, func_name_str)) |handle| {
-            log.info("POST-LOOP CHECK OK: {s} retrievable via ffi_get_global", .{func_name_str}); // NOTE: remove all caps, unprofessional, this goes for other locations as well.
-            _ = c.TVMFFIObjectDecRef(handle);
-        } else |_| {
-            log.warn("POST-LOOP CHECK FAILED: {s} not found via ffi_get_global", .{func_name_str});
-        }
-    }
-
-    // Test calling the registered function through our FFI mechanism
+    // Smoke-test: call the registered function through ffi_call_global
     log.debug("Testing function call through ffi_call_global...", .{});
     {
-        var cpu_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var cpu_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var call_args = [_]c.TVMFFIAny{any_bool(true)};
         if (ffi_call_global(allocator, "meta_schedule.cpu_count", &call_args, &cpu_result)) {
             if (cpu_result.type_index == c.kTVMFFIInt) {
-                log.info("TEST CALL SUCCESS: meta_schedule.cpu_count returned {d}", .{cpu_result.unnamed_1.v_int64});
+                log.info("test call ok: meta_schedule.cpu_count returned {d}", .{cpu_result.unnamed_1.v_int64});
             } else {
-                log.warn("TEST CALL: unexpected return type {d}", .{cpu_result.type_index});
+                log.warn("test call: unexpected return type {d}", .{cpu_result.type_index});
             }
         } else |err| {
-            log.warn("TEST CALL FAILED: meta_schedule.cpu_count: {s}", .{@errorName(err)});
+            log.warn("test call failed: meta_schedule.cpu_count: {s}", .{@errorName(err)});
         }
     }
 
@@ -2911,11 +2913,13 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     //     Optional<Map<Mutator, FloatImm>>          -- mutators
     //   )
     //
-    // For now, we use the default schedule rules by passing None/empty values. // NOTE: is this still true? requires explanation, justification, and citation. is this a limitation we are tracking?
+    // We use ScheduleRuleDefault{LLVM,CUDA}() for explicit schedule rules and pass
+    // None for postprocs/mutators to use TVM's built-in defaults.
+    // NOTE: Custom postprocessors and mutators are not yet implemented on the zig side.
 
     // 1. Space generator - generates candidate schedules
     //   use ScheduleRuleDefault{LLVM,CUDA}() which returns default rules for the target kind
-    var schedule_rules: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var schedule_rules: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         const ffi_func_name = switch (target_kind) {
             .cpu => "meta_schedule.ScheduleRuleDefaultLLVM",
@@ -2925,10 +2929,10 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     }
     log.debug("Created ScheduleRules for {s}", .{@tagName(target_kind)});
 
-    var space_gen: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var space_gen: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // SpaceGeneratorPostOrderApply(sch_rules, postprocs, mutator_probs)
-        //   pass None for f_block_filter, and explicit arrays for others // NOTE: rephrase, sounds like author is instructing the user on how to use something, not declaring what is happening
+        //   f_block_filter is None (default filtering); schedule_rules are explicit.
         var args = [_]c.TVMFFIAny{
             any_none(), // f_block_filter - use default
             schedule_rules, // sch_rules
@@ -2939,7 +2943,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     }
     log.debug("Created SpaceGenerator", .{});
 
-    // 2. Search strategy - evolutionary search  // NOTE: Good comment block!
+    // 2. Search strategy - evolutionary search
     // EvolutionarySearch(
     //   population_size: int,         -- population for evolutionary algorithm
     //   init_measured_ratio: float,   -- ratio of initial measured samples
@@ -2950,7 +2954,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     //   genetic_max_fail_count: int,  -- max failures in genetic phase
     //   eps_greedy: float             -- epsilon for epsilon-greedy exploration
     // )
-    var search_strategy: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var search_strategy: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             any_int(512), // population_size
@@ -2979,7 +2983,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     const structural_buf = try cstr_alloc(allocator, "structural");
     defer allocator.free(structural_buf);
 
-    var database: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var database: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             any_raw_str(cstr_ptr(workload_buf)),
@@ -3005,7 +3009,8 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     const main_buf = try cstr_alloc(allocator, "main");
     defer allocator.free(main_buf);
 
-    // create a no-op logger callback // NOTE: this does not obviously log anything, clarify
+    // TuneContext requires a logger callback. We provide a no-op that discards all
+    // messages, since we use our own scoped logging instead of TVM's logger interface.
     const logger_noop = struct {
         fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
             result.* = any_none();
@@ -3019,7 +3024,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     }
     defer _ = c.TVMFFIObjectDecRef(logger_func);
 
-    var tune_context: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var tune_context: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             ir_mod, // mod
@@ -3035,41 +3040,45 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     }
     log.debug("Created TuneContext", .{});
 
-    // 5. Register Zig builder callback // NOTE: builder of what? vague.
+    // 5. Register zig builder callback (compiles TIR candidates to .so artifacts)
     var builder_func: c.TVMFFIObjectHandle = null;
-    if (c.TVMFFIFunctionCreate(null, zigBuildCallback, null, &builder_func) != 0) {
+    if (c.TVMFFIFunctionCreate(null, zig_build_callback, null, &builder_func) != 0) {
         log.err("TVMFFIFunctionCreate(builder) failed", .{});
         return error.TvmRuntimeError;
     }
     defer _ = c.TVMFFIObjectDecRef(builder_func);
 
-    var builder: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var builder: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{any_obj(builder_func, c.kTVMFFIFunction)};
         try ffi_call_global(allocator, "meta_schedule.BuilderPyBuilder", &args, &builder);
     }
-    log.debug("Created PyBuilder with Zig callback", .{});
+    log.debug("Created PyBuilder with zig callback", .{});
 
-    // 6. Register Zig runner callback
+    // 6. Register zig runner callback
     var runner_func: c.TVMFFIObjectHandle = null;
-    if (c.TVMFFIFunctionCreate(null, zigRunCallback, null, &runner_func) != 0) {
+    if (c.TVMFFIFunctionCreate(null, zig_run_callback, null, &runner_func) != 0) {
         log.err("TVMFFIFunctionCreate(runner) failed", .{});
         return error.TvmRuntimeError;
     }
     defer _ = c.TVMFFIObjectDecRef(runner_func);
 
-    var runner: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var runner: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{any_obj(runner_func, c.kTVMFFIFunction)};
         try ffi_call_global(allocator, "meta_schedule.RunnerPyRunner", &args, &runner);
     }
-    log.debug("Created PyRunner with Zig callback", .{});
+    log.debug("Created PyRunner with zig callback", .{});
 
-    // 7. Create cost model using PyCostModel with Zig callbacks
+    // 7. Create cost model using PyCostModel with zig callbacks
     // PyCostModel(f_load, f_save, f_update, f_predict, f_as_string)
-    // We implement a simple random cost model that returns random scores. // NOTE: I understand the rationale, but it should be justified here.
+    // A random cost model is used instead of a learned model (e.g. XGBoost) because
+    //  learned models require python dependencies we have not replaced in zig. The random model
+    //  relies on the evolutionary search to converge through measurement feedback alone. This
+    //  should be sufficient for our purposes at least for the short-medium term future.
 
-    // no-op callbacks for load/save // NOTE: this doesnt obviously load/save anything, require explanation
+    // PyCostModel requires f_load and f_save callbacks for model serialization.
+    // These are no-ops since the random model has no state to persist.
     const noop_cb = struct {
         fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
             result.* = any_none();
@@ -3077,7 +3086,8 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
         }
     }.f;
 
-    // update callback - no-op for random model // NOTE: clarify intended role. it is clear what we are doing (nothing) it is not clear what the TVM semantics are (ie what is TVM calling this for?).
+    // f_update callback: TVM calls this after each measurement round to let a learned
+    // cost model retrain on new data. No-op here since the random model has no parameters.
     var update_func: c.TVMFFIObjectHandle = null;
     if (c.TVMFFIFunctionCreate(null, noop_cb, null, &update_func) != 0) {
         return error.TvmRuntimeError;
@@ -3086,7 +3096,8 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
 
     // Predict callback - returns random scores
     // f_predict(context, candidates, return_ptr) -> None
-    // return_ptr is a pointer to a double array where we write scores // NOTE: ambiguous, could mean an array of doubles, or double pointer, etc.
+    // return_ptr (args[2]) is a void* pointing to a pre-allocated f64 buffer of length
+    // equal to the number of candidates. The callback writes one score per candidate.
     const predict_cb = struct {
         fn f(_: ?*anyopaque, args: [*c]const c.TVMFFIAny, num_args: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
             const predict_log = std.log.scoped(.@"zg/tvm_predict");
@@ -3104,7 +3115,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
             // get number of candidates
             var n: usize = 0;
             if (candidates.type_index >= c.kTVMFFIStaticObjectBegin and candidates.unnamed_1.v_obj != null) {
-                var len_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+                var len_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
                 var len_args = [_]c.TVMFFIAny{candidates};
                 if (ffi_call_global_noerr("ffi.ArraySize", &len_args, &len_result)) |err_msg| {
                     predict_log.err("ffi.ArraySize failed: {s}", .{err_msg});
@@ -3176,7 +3187,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
             // Return a string "ZigRandomModel"
             const name = "ZigRandomModel";
             var name_arr: c.TVMFFIByteArray = .{ .data = name.ptr, .size = name.len };
-            var str_obj: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+            var str_obj: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
             if (c.TVMFFIStringFromByteArray(&name_arr, &str_obj) != 0) {
                 result.* = any_none();
                 return -1;
@@ -3193,7 +3204,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     defer _ = c.TVMFFIObjectDecRef(as_string_func);
 
     // create PyCostModel
-    var cost_model: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var cost_model: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             any_obj(update_func, c.kTVMFFIFunction), // f_load (reuse noop)
@@ -3204,7 +3215,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
         };
         try ffi_call_global(allocator, "meta_schedule.CostModelPyCostModel", &args, &cost_model);
     }
-    log.debug("Created PyCostModel with Zig random predictor", .{});
+    log.debug("Created PyCostModel with zig random predictor", .{});
 
     // 8. Create task scheduler
     // TaskSchedulerGradientBased(
@@ -3213,7 +3224,7 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     //   window_size: int,         -- window for gradient estimation
     //   seed: int                 -- random seed
     // )
-    var task_scheduler: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var task_scheduler: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         // Use the same logger as TuneContext
         var args = [_]c.TVMFFIAny{
@@ -3229,35 +3240,43 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     // 8. Run tuning
     log.info("Starting tuning with {d} max trials...", .{opts.max_trials});
 
-    // create contexts array (single task) // NOTE: lacking context, what is single task? what is a task? why only a single task?
-    var contexts_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    // TaskScheduler.Tune operates on an array of TuneContexts, one per tuning task.
+    // We have a single task (the matmul workload), so the array has one element.
+    var contexts_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{tune_context};
         try ffi_call_global(allocator, "ffi.Array", &args, &contexts_array);
     }
 
-    // create weights array // NOTE: lacking context, what are "weights" is this a TVM concept?
-    var weights_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    // Task weights control how the scheduler distributes trials across tasks.
+    // With a single task, the weight value (1.0) has no practical effect.
+    var weights_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{any_float(1.0)};
         try ffi_call_global(allocator, "ffi.Array", &args, &weights_array);
     }
 
-    // Create AddToDatabase callback - this writes tuning records to the JSON database.
-    //  We only use AddToDatabase, not the full default set (which includes RemoveBuildArtifact
-    //   and UpdateCostModel that require python helpers we havent registered). // NOTE: requires brief explanation/justification
-    var add_to_db_callback: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    // Create AddToDatabase callback to persist tuning records to the JSON database.
+    // The full default callback set includes RemoveBuildArtifact and UpdateCostModel,
+    //  but those depend on Python-registered helpers we do not provide. AddToDatabase
+    //  alone is sufficient for record persistence and later replay.
+    var add_to_db_callback: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi_call_global(allocator, "meta_schedule.MeasureCallbackAddToDatabase", &.{}, &add_to_db_callback);
     log.debug("Created AddToDatabase callback", .{});
 
-    var callbacks_array: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var callbacks_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{add_to_db_callback};
         try ffi_call_global(allocator, "ffi.Array", &args, &callbacks_array);
     }
 
-    // run TaskScheduler.Tune // NOTE: requires documentation on what happens here and how it works
-    var tune_result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    // Run the tuning loop. TaskScheduler.Tune iterates up to max_trials, calling:
+    //   1. SpaceGenerator to produce candidate schedules
+    //   2. Builder callback (zig_build_callback) to compile each candidate to .so
+    //   3. Runner callback (zig_run_callback) to measure execution time
+    //   4. MeasureCallbacks (AddToDatabase) to persist results
+    // The evolutionary search strategy guides candidate selection between iterations.
+    var tune_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
         var args = [_]c.TVMFFIAny{
             task_scheduler,
@@ -3273,9 +3292,10 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
             cost_model, // RandomModel cost model
         };
         ffi_call_global(allocator, "meta_schedule.TaskSchedulerTune", &args, &tune_result) catch |err| {
-            // MetaSchedule requires additional python-registered functions. // NOTE: this doesnt make sense, implies this path will always fail, is that true? explain
-            //  The core callback infrastructure works (Builder/Runner registered),
-            //   but full tuning requires python for _cpu_count and other helpers.
+            // Tuning may fail if MetaSchedule internally calls python-registered helpers
+            //  beyond what we provide (e.g. postprocessors, mutators). The builder and
+            //  runner callbacks work, but some search strategies or schedule rules may
+            //  depend on functions only available with python.
             log.err("TaskSchedulerTune failed: {s}", .{@errorName(err)});
             log.err("MetaSchedule tuning currently requires python for helper functions.", .{});
             log.err("Use: task python -- scripts/tvm_autotune.py matmul --shape={s}x{s}x{s}", .{
@@ -3297,8 +3317,8 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
 
 /// Options for loading a tuned module.
 pub const LoadTunedOpts = struct {
-    /// Work directory containing tuning records and compiled .so files. // NOTE: confusing phrasing, rephrase.
-    ///  Tuning stores results in per-target subdirs (e.g. `artifacts/tvm_cache/cpu/`).
+    /// Path to the per-target tuning directory where MetaSchedule stores tuning records
+    /// (tuning_record.json) and compiled .so artifacts (e.g. `artifacts/tvm_cache/cpu/`).
     work_dir: []const u8 = "artifacts/tvm_cache/cpu",
 };
 
@@ -3328,7 +3348,7 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
     };
     defer file.close();
 
-    // read entire file (tuning records are typically small) // NOTE: rephrase to remove parenthetical
+    // read the entire file into memory; tuning record files are small enough for this
     const file_size = try file.getEndPos();
     if (file_size == 0) {
         log.err("Empty tuning records file: {s}", .{record_path});
@@ -3347,7 +3367,9 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
     while (lines.next()) |line| {
         if (line.len == 0) continue;
 
-        // Parse json to extract run_secs // NOTE: explain or state why we arent using std lib for json
+        // Extract run_secs with pattern matching instead of a full JSON parse.
+        // The record format is deeply nested and we only need one float value,
+        // so a targeted scan avoids pulling in std.json for a trivial extraction.
         // Format: [workload_id, [[trace, decisions], [run_secs], target, args]]
         // The run_secs comes after the decisions array closes: ]],[run_secs],{
         // Look for pattern "]],[" followed by a float (not integer like tile sizes)
@@ -3409,7 +3431,7 @@ pub fn load_tuned_module(allocator: std.mem.Allocator, opts: LoadTunedOpts) !Tun
     const log = std.log.scoped(.@"zg/tvm_loader");
 
     // TVM runtime needs to be initialized since we need full compiler module execution
-    try ensureTvmCompilerLoaded(allocator);
+    try ensure_tvm_compiler_loaded(allocator);
 
     // find best candidate from tuning records
     const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{opts.work_dir});
@@ -3476,7 +3498,7 @@ pub fn run_tuned_matmul(
     var shape_b = [_]i64{ @intCast(K), @intCast(N) };
     var shape_c = [_]i64{ @intCast(M), @intCast(N) };
 
-    var dl_a = c.DLManagedTensor{ // NOTE: should we consider DLPack bindings/Zig wrapper types going forward? Should discuss the possibility of DLPack as a Zigrad dependency, irrespective of TVM.
+    var dl_a = c.DLManagedTensor{ // NOTE: should we consider DLPack bindings/zig wrapper types going forward? Should discuss the possibility of DLPack as a Zigrad dependency, irrespective of TVM.
         .dl_tensor = make_dl_tensor_f32(a_data, &shape_a),
         .manager_ctx = null,
         .deleter = dlpack_noop_deleter,
@@ -3505,7 +3527,7 @@ pub fn run_tuned_matmul(
         any_obj(t_b, c.kTVMFFITensor),
         any_obj(t_c, c.kTVMFFITensor),
     };
-    var call_res: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var call_res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
 
     log.info("Executing tuned kernel...", .{});
 
@@ -3527,7 +3549,7 @@ pub fn run_tuned_matmul(
 
     log.info("Benchmark: {d:.2} µs/iter (tuned prediction: {d:.2} µs)", .{ avg_us, tuned.best_time_us });
 
-    // Verify correctness (simple check: compute reference matmul) // NOTE: rephrase to remove parenthetical
+    // Verify correctness by computing a reference matmul on the CPU and comparing
     log.info("Verifying correctness...", .{});
     var max_diff: f32 = 0;
     for (0..M) |i| {

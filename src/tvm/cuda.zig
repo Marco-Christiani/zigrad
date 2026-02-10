@@ -9,7 +9,9 @@ const ffi = @import("../tvm_runtime.zig"); // For FFI helpers. FIXME: ffi should
 
 const log = std.log.scoped(.@"zg/tvm_cuda");
 
-/// Track whether CUDA intrinsics have been loaded. // NOTE: should we think about how to make this global safe? threadlocal? atomic? mutex?
+/// Track whether CUDA intrinsics have been loaded.
+/// NOTE: this global is not thread-safe, consider using an atomic or mutex if load_intrinsics
+///  may be called from multiple threads.
 var intrinsics_loaded: bool = false;
 
 /// Load and register CUDA tensor intrinsics from pre-serialized JSON files.
@@ -75,18 +77,18 @@ pub fn load_intrinsics(allocator: std.mem.Allocator) !void {
         defer allocator.free(impl_cstr);
 
         // load PrimFuncs from json
-        var desc_primfunc: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var desc_primfunc: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi.ffi_call_global(allocator, "node.LoadJSON", &.{ffi.any_raw_str(ffi.cstr_ptr(desc_cstr))}, &desc_primfunc);
 
-        var impl_primfunc: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var impl_primfunc: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi.ffi_call_global(allocator, "node.LoadJSON", &.{ffi.any_raw_str(ffi.cstr_ptr(impl_cstr))}, &impl_primfunc);
 
         // create TensorIntrin object
-        var tensor_intrin: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var tensor_intrin: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi.ffi_call_global(allocator, "tir.TensorIntrin", &.{ desc_primfunc, impl_primfunc }, &tensor_intrin);
 
         // register intrinsic
-        var dummy_out: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+        var dummy_out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         try ffi.ffi_call_global(allocator, "tir.TensorIntrinRegister", &.{
             ffi.any_raw_str(ffi.cstr_ptr(name_cstr)),
             tensor_intrin,
@@ -122,10 +124,10 @@ pub fn filter_module_by_target(
     const want_host: bool = (kind == .host);
 
     // create a tvm function that wraps our filter predicate
-    var filter_func: c.TVMFFIObjectHandle = undefined; // NOTE: audit use of undefined
+    var filter_func: c.TVMFFIObjectHandle = std.mem.zeroes(c.TVMFFIObjectHandle);
 
     const callback_fn: *const fn (?*anyopaque, [*c]const c.TVMFFIAny, i32, [*c]c.TVMFFIAny) callconv(.c) c_int =
-        if (want_host) &filterHostCallback else &filterDeviceCallback;
+        if (want_host) &filter_host_callback else &filter_device_callback;
 
     const ret = c.TVMFFIFunctionCreate(
         null,
@@ -147,14 +149,14 @@ pub fn filter_module_by_target(
     _ = c.TVMFFIObjectIncRef(filter_func);
 
     // use tir.transform.Filter(callback) to create a pass
-    var filter_pass: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var filter_pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi.ffi_call_global(allocator, "tir.transform.Filter", &.{filter_func_any}, &filter_pass);
     defer if (filter_pass.unnamed_1.v_obj) |obj| {
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
 
     // apply pass: filtered_mod = filter_pass(module)
-    var filtered_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var filtered_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi.ffi_call_global(allocator, "transform.RunPass", &.{ filter_pass, module }, &filtered_mod);
 
     log.debug("Filtered module for {s} (inline FFI), type_index={d}", .{ @tagName(kind), filtered_mod.type_index });
@@ -162,23 +164,23 @@ pub fn filter_module_by_target(
 }
 
 /// Filter callback: keep host functions (calling_conv == 1).
-fn filterHostCallback(
+fn filter_host_callback(
     handle: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
     ret: [*c]c.TVMFFIAny,
 ) callconv(.c) c_int {
-    return filterByCallingConv(handle, args, num_args, ret, true);
+    return filter_by_calling_conv(handle, args, num_args, ret, true);
 }
 
 /// Filter callback: keep device functions (calling_conv != 1).
-fn filterDeviceCallback(
+fn filter_device_callback(
     handle: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
     ret: [*c]c.TVMFFIAny,
 ) callconv(.c) c_int {
-    return filterByCallingConv(handle, args, num_args, ret, false);
+    return filter_by_calling_conv(handle, args, num_args, ret, false);
 }
 
 /// Shared filter logic: check calling_conv attribute of a PrimFunc.
@@ -189,7 +191,7 @@ fn filterDeviceCallback(
 /// 3. `ffi.MapCount(map, "calling_conv")` -> existence check
 /// 4. `ffi.MapGetItem(map, "calling_conv")` -> IntImm value
 /// 5. Extract int via reflection field getter (IntImm stores value as object)
-fn filterByCallingConv(
+fn filter_by_calling_conv(
     handle: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
@@ -213,12 +215,12 @@ fn filterByCallingConv(
     var calling_conv: i64 = 0; // default = kDefault (device)
 
     // 1. Get attrs from the PrimFunc
-    var dict_attrs: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var dict_attrs: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi.ffi_call_global(alloc, "ir.BaseFunc_Attrs", &.{func_any}, &dict_attrs) catch {
         ret.* = ffi.any_bool(!want_host);
         return 0;
     };
-    defer decRefAny(dict_attrs);
+    defer dec_ref_any(dict_attrs);
 
     // if attrs is None then no attributes set
     if (dict_attrs.type_index == c.kTVMFFINone) {
@@ -227,26 +229,26 @@ fn filterByCallingConv(
     }
 
     // 2. Get the underlying Map from DictAttrs
-    var map: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi.ffi_call_global(alloc, "ir.DictAttrsGetDict", &.{dict_attrs}, &map) catch {
         ret.* = ffi.any_bool(!want_host);
         return 0;
     };
-    defer decRefAny(map);
+    defer dec_ref_any(map);
 
     // 3. Create a TVM String key for "calling_conv"
     // NB: must be a proper tvm string (not raw c str) so Map key comparison works
     const key_lit = "calling_conv";
     var key_bytes: c.TVMFFIByteArray = .{ .data = key_lit.ptr, .size = key_lit.len };
-    var key_any: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var key_any: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     if (c.TVMFFIStringFromByteArray(&key_bytes, &key_any) != 0) {
         ret.* = ffi.any_bool(!want_host);
         return 0;
     }
-    defer decRefAny(key_any);
+    defer dec_ref_any(key_any);
 
     // 4. Check if "calling_conv" exists in the Map
-    var count: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var count: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi.ffi_call_global(alloc, "ffi.MapCount", &.{ map, key_any }, &count) catch {
         ret.* = ffi.any_bool(!want_host);
         return 0;
@@ -258,16 +260,16 @@ fn filterByCallingConv(
     }
 
     // 5. Get the calling_conv value from the Map
-    var conv_val: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var conv_val: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     ffi.ffi_call_global(alloc, "ffi.MapGetItem", &.{ map, key_any }, &conv_val) catch {
         ret.* = ffi.any_bool(!want_host);
         return 0;
     };
-    defer decRefAny(conv_val);
+    defer dec_ref_any(conv_val);
 
     // 6. Extract integer value
     // NB: needs to handle both raw int and IntImm objects
-    if (getIntFromAny(conv_val)) |val| {
+    if (get_int_from_any(conv_val)) |val| {
         calling_conv = val;
     }
 
@@ -283,7 +285,7 @@ fn filterByCallingConv(
 /// Handles both raw kTVMFFIInt values and IntImm TVM objects.
 /// For IntImm, uses TVM's reflection system (TVMFFIGetTypeInfo) to access
 /// the "value" field via the registered field getter.
-fn getIntFromAny(any: c.TVMFFIAny) ?i64 {
+fn get_int_from_any(any: c.TVMFFIAny) ?i64 {
     // fast path: already a raw int
     if (any.type_index == c.kTVMFFIInt) return any.unnamed_1.v_int64;
 
@@ -303,7 +305,7 @@ fn getIntFromAny(any: c.TVMFFIAny) ?i64 {
                 const getter_fn = field.getter orelse return null;
                 const addr: usize = @intFromPtr(obj_ptr) + @as(usize, @intCast(field.offset));
                 const field_addr: *anyopaque = @ptrFromInt(addr);
-                var result: c.TVMFFIAny = undefined;  // NOTE: audit use of undefined
+                var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
                 if (getter_fn(field_addr, &result) == 0 and result.type_index == c.kTVMFFIInt) {
                     return result.unnamed_1.v_int64;
                 }
@@ -315,7 +317,7 @@ fn getIntFromAny(any: c.TVMFFIAny) ?i64 {
 }
 
 /// Release a TVM object reference if the TVMFFIAny holds one.
-fn decRefAny(any: c.TVMFFIAny) void {
+fn dec_ref_any(any: c.TVMFFIAny) void {
     if (any.type_index >= c.kTVMFFIStaticObjectBegin) {
         if (any.unnamed_1.v_obj) |obj| {
             _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
@@ -333,7 +335,7 @@ pub fn build_device_kernels(
     target: c.TVMFFIAny,
 ) !c.TVMFFIAny {
     log.debug("build_device_kernels: entering (device_mod type_index={d})", .{device_mod.type_index});
-    var built_mod: c.TVMFFIAny = undefined;  // NOTE: audit use of undefined
+    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var build_args = [_]c.TVMFFIAny{ device_mod, target };
     log.debug("build_device_kernels: calling target.build.cuda", .{});
     try ffi.ffi_call_global(allocator, "target.build.cuda", &build_args, &built_mod);
@@ -350,7 +352,7 @@ pub fn build_host_wrapper(
     host_mod: c.TVMFFIAny,
     target: c.TVMFFIAny,
 ) !c.TVMFFIAny {
-    var built_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var build_args = [_]c.TVMFFIAny{ host_mod, target };
     try ffi.ffi_call_global(allocator, "target.build.llvm", &build_args, &built_mod);
     return built_mod;
@@ -367,7 +369,7 @@ pub fn link_device_module(
     device_built: c.TVMFFIAny,
 ) !void {
     var args = [_]c.TVMFFIAny{ host_built, device_built };
-    var result: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     try ffi.ffi_call_global(allocator, "ffi.ModuleImportModule", &args, &result);
     log.debug("Linked device module into host module", .{});
 }

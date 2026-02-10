@@ -21,7 +21,7 @@ pub fn build_cpu_module(
     lowered_mod: c.TVMFFIAny,
     target: c.TVMFFIAny,
 ) !c.TVMFFIAny {
-    var built_mod: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     var build_args = [_]c.TVMFFIAny{ lowered_mod, target };
     try ffi.ffi_call_global(allocator, "target.build.llvm", &build_args, &built_mod);
     log.debug("Built CPU module: type_index={d}", .{built_mod.type_index});
@@ -48,11 +48,9 @@ pub fn build_cuda_module(
     log.info("Starting CUDA module build (host/device split)", .{});
 
     // Create separate host (LLVM) and device (CUDA) targets
-    var host_target: c.TVMFFIAny = undefined; // NOTE: audit use of undefined
+    var host_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
     {
-        const host_str = try ffi.cstr_alloc(allocator, "llvm"); // NOTE: why heap? if TVM isnt freeing it, should this be stack? also, cstr_ptr just casts to a null terminated string, we can just initialize it as one instead.
-        defer allocator.free(host_str);
-        var args = [_]c.TVMFFIAny{ffi.any_raw_str(ffi.cstr_ptr(host_str))};
+        var args = [_]c.TVMFFIAny{ffi.any_raw_str("llvm")};
         try ffi.ffi_call_global(allocator, "target.Target", &args, &host_target);
     }
     defer if (host_target.unnamed_1.v_obj) |obj| {
@@ -60,7 +58,7 @@ pub fn build_cuda_module(
     };
 
     // 1. Filter to device functions (calling_conv != 1)
-    log.info("Step 1: Filtering device functions", .{});
+    log.info("CUDA build [1/5]: filtering device functions", .{});
     const device_mod = cuda.filter_module_by_target(allocator, lowered_mod, .device) catch |err| {
         log.err("Failed to filter device functions: {s}", .{@errorName(err)});
         return err;
@@ -68,18 +66,18 @@ pub fn build_cuda_module(
     defer if (device_mod.unnamed_1.v_obj) |obj| {
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
-    log.info("Step 1 done: device_mod.type_index={d}", .{device_mod.type_index});
+    log.info("CUDA build [1/5] done: device_mod type_index={d}", .{device_mod.type_index});
 
     // 2. Build device kernels with CUDA target
-    log.info("Step 2: Building device kernels (NVRTC)", .{});
+    log.info("CUDA build [2/5]: building device kernels via NVRTC", .{});
     const device_built = cuda.build_device_kernels(allocator, device_mod, target) catch |err| {
         log.err("Failed to build device kernels: {s}", .{@errorName(err)});
         return err;
     };
-    log.info("Step 2 done: device_built.type_index={d}", .{device_built.type_index});
+    log.info("CUDA build [2/5] done: device_built type_index={d}", .{device_built.type_index});
 
     // 3. Filter to host functions (calling_conv == 1)
-    log.info("Step 3: Filtering host functions", .{});
+    log.info("CUDA build [3/5]: filtering host functions", .{});
     const host_mod = cuda.filter_module_by_target(allocator, lowered_mod, .host) catch |err| {
         log.err("Failed to filter host functions: {s}", .{@errorName(err)});
         return err;
@@ -87,18 +85,19 @@ pub fn build_cuda_module(
     defer if (host_mod.unnamed_1.v_obj) |obj| {
         _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
     };
-    log.info("Step 3 done: host_mod.type_index={d}", .{host_mod.type_index});
+    log.info("CUDA build [3/5] done: host_mod type_index={d}", .{host_mod.type_index});
 
     // 4. Build host wrapper with LLVM target
-    log.info("Step 4: Building host wrapper (LLVM)", .{});
-    const host_built = cuda.build_host_wrapper(allocator, host_mod, host_target) catch |err| {  // NOTE: should document lifetime in fn docstring
+    log.info("CUDA build [4/5]: building host wrapper via LLVM", .{});
+    // TODO: document return value lifetime in build_host_wrapper docstring
+    const host_built = cuda.build_host_wrapper(allocator, host_mod, host_target) catch |err| {
         log.err("Failed to build host wrapper: {s}", .{@errorName(err)});
         return err;
     };
-    log.info("Step 4 done: host_built.type_index={d}", .{host_built.type_index});
+    log.info("CUDA build [4/5] done: host_built type_index={d}", .{host_built.type_index});
 
     // 5. Link device module into host
-    log.info("Step 5: Linking device module into host", .{});
+    log.info("CUDA build [5/5]: linking device module into host", .{});
     cuda.link_device_module(allocator, host_built, device_built) catch |err| {
         log.err("Failed to link device module: {s}", .{@errorName(err)});
         return err;
