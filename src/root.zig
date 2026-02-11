@@ -20,6 +20,22 @@ pub const pipeline = @import("pipeline/root.zig");
 pub const backend = @import("backend/root.zig");
 pub const lower = @import("lower/root.zig");
 
+// Runtime
+pub const tvm_runtime = @import("tvm_runtime.zig");
+
+// Kernels
+pub const kernels = struct {
+    pub const gemm = @import("kernels/gemm.zig");
+};
+
+// Benchmark infrastructure
+pub const benchmark = struct {
+    pub const Harness = @import("benchmark/harness.zig").Harness;
+    pub const BenchmarkConfig = @import("benchmark/config.zig").BenchmarkConfig;
+    pub const Shape = @import("benchmark/config.zig").Shape;
+    pub const Implementation = @import("benchmark/config.zig").Implementation;
+};
+
 // Utility types
 pub const utils = struct {
     pub const HostBuffer = @import("utils/host_buffer.zig").HostBuffer;

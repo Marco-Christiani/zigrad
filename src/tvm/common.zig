@@ -60,8 +60,9 @@ pub const TuneContext = struct {
         };
     }
 
-    pub fn deinit(self: *TuneContext) void { // NOTE: is this used anywhere?
+    /// No-op cleanup. Called via `defer tune_ctx.deinit()` in tune().
+    /// Compiled .so files are intentionally left in work_dir for reuse.
+    pub fn deinit(self: *TuneContext) void {
         _ = self;
-        // .so files are left in work_dir for potential reuse
     }
 };

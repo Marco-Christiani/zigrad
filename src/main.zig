@@ -1,7 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const demos = @import("demos.zig");
-const tvm_runtime = @import("tvm_runtime.zig");
+const tvm_runtime = zg.tvm_runtime;
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const main_aot = @import("main_aot.zig");
@@ -131,6 +131,8 @@ pub fn main() !void {
             var work_dir: []const u8 = "artifacts/tvm_cache";
             var max_trials: u32 = 64;
             var trials_per_iter: u32 = 16;
+            var use_polly: bool = false;
+            var llvm_bin_path: []const u8 = "result-llvm/bin";
 
             for (mode_args.items) |arg| {
                 if (std.mem.startsWith(u8, arg, "--shape=")) {
@@ -188,6 +190,14 @@ pub fn main() !void {
                     target_kind = .cpu;
                     continue;
                 }
+                if (std.mem.eql(u8, arg, "--polly")) {
+                    use_polly = true;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--llvm-bin=")) {
+                    llvm_bin_path = arg["--llvm-bin=".len..];
+                    continue;
+                }
                 try print_usage();
                 return error.InvalidArguments;
             }
@@ -205,6 +215,8 @@ pub fn main() !void {
                 .work_dir = work_dir,
                 .max_trials = max_trials,
                 .trials_per_iter = trials_per_iter,
+                .use_polly = use_polly,
+                .llvm_bin_path = llvm_bin_path,
             });
         }
         if (std.mem.eql(u8, m, "tvm-run")) {
@@ -213,7 +225,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var work_dir: []const u8 = "artifacts/tvm_cache/cpu";  // NOTE: what about cuda/ subdir? also what about cuda support?
+            var work_dir: []const u8 = "artifacts/tvm_cache/cpu"; // NOTE: what about cuda/ subdir? also what about cuda support?
 
             for (mode_args.items) |arg| {
                 if (std.mem.startsWith(u8, arg, "--shape=")) {
@@ -253,6 +265,13 @@ pub fn main() !void {
             return tvm_runtime.run_tuned_matmul(gpa, shape.M, shape.N, shape.K, .{
                 .work_dir = work_dir,
             });
+        }
+        if (std.mem.eql(u8, m, "benchmark")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return run_benchmark_mode(gpa, mode_args.items);
         }
     }
 
@@ -528,6 +547,8 @@ fn print_usage() !void {
         \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache)
         \\      --cuda/--gpu             tune for CUDA target
         \\      --cpu                    tune for CPU target (default)
+        \\      --polly                  apply Polly optimization to LLVM IR
+        \\      --llvm-bin=PATH          path to LLVM bin dir with opt/llc (default: result-llvm/bin)
         \\  tvm-run [options]            runs best tuned matmul from previous tuning (requires -Dtvm)
         \\      --shape=MxNxK            matmul dimensions (must match tuned shape)
         \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache)
@@ -539,10 +560,102 @@ fn print_usage() !void {
         \\  llama-ft-demo [warmup] [steps] [--train] [--dtype=bf16|f32] [--seq=N] [--batch=N] [--canonical-shapes] [--canonical-qkv] [--canonical-o] [--canonical-mlp] [--execute-only] runs a tiny Llama fine-tune demo
         \\  jit-cache-save <path>        writes PJRT JIT cache artifact
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
+        \\  benchmark [options]          runs matmul performance benchmarks
+        \\      --shapes=MxNxK[,...]     comma-separated list of shapes (default: 128x128x128)
+        \\      --impls=impl1[,...]      implementations to test: zig_naive, tvm_cpu, xla_cpu,
+        \\                               or "all" (default: zig_naive)
+        \\      --warmup=N               warmup iterations (default: 10)
+        \\      --iters=N                benchmark iterations (default: 100)
+        \\      --tvm-cache-dir=PATH     TVM module cache directory (default: artifacts/tvm_cache)
         \\
     );
 
     try out.flush();
+}
+
+fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
+    var shapes = try std.ArrayList(zg.benchmark.Shape).initCapacity(gpa, 4);
+    defer shapes.deinit(gpa);
+    var impls = try std.ArrayList(zg.benchmark.Implementation).initCapacity(gpa, 6);
+    defer impls.deinit(gpa);
+    var warmup_iters: usize = 10;
+    var bench_iters: usize = 100;
+    var tvm_cache_dir: []const u8 = "artifacts/tvm_cache";
+
+    // Parse arguments
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "--shapes=")) {
+            const value = arg["--shapes=".len..];
+            var shape_iter = std.mem.splitScalar(u8, value, ',');
+            while (shape_iter.next()) |shape_str| {
+                const shape = try parse_shape(shape_str);
+                try shapes.append(gpa, shape);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--impls=")) {
+            const value = arg["--impls=".len..];
+            if (std.mem.eql(u8, value, "all")) {
+                // Only Zig naive baseline for now (TVM/XLA will be added in Phase 3-4)
+                try impls.append(gpa, .zig_naive);
+            } else {
+                var impl_iter = std.mem.splitScalar(u8, value, ',');
+                while (impl_iter.next()) |impl_str| {
+                    const impl = parse_impl(impl_str) orelse return error.InvalidImplementation;
+                    try impls.append(gpa, impl);
+                }
+            }
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            const value = arg["--warmup=".len..];
+            warmup_iters = try std.fmt.parseInt(usize, value, 10);
+        } else if (std.mem.startsWith(u8, arg, "--iters=")) {
+            const value = arg["--iters=".len..];
+            bench_iters = try std.fmt.parseInt(usize, value, 10);
+        } else if (std.mem.startsWith(u8, arg, "--tvm-cache-dir=")) {
+            tvm_cache_dir = arg["--tvm-cache-dir=".len..];
+        } else {
+            std.log.err("unknown benchmark argument: {s}", .{arg});
+            return error.InvalidArguments;
+        }
+    }
+
+    // Defaults
+    if (shapes.items.len == 0) {
+        try shapes.append(gpa, .{ .m = 128, .n = 128, .k = 128 });
+    }
+    if (impls.items.len == 0) {
+        try impls.append(gpa, .zig_naive);
+    }
+
+    // Run benchmark
+    const cfg = zg.benchmark.BenchmarkConfig{
+        .shapes = shapes.items,
+        .implementations = impls.items,
+        .warmup_iters = warmup_iters,
+        .bench_iters = bench_iters,
+    };
+
+    var harness = try zg.benchmark.Harness.init(gpa, cfg, tvm_cache_dir);
+    defer harness.deinit();
+
+    try harness.run();
+    try harness.print_results();
+}
+
+fn parse_shape(s: []const u8) !zg.benchmark.Shape {
+    var parts = std.mem.splitScalar(u8, s, 'x');
+    const m = std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10) catch return error.InvalidShape;
+    const n = std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10) catch return error.InvalidShape;
+    const k = std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10) catch return error.InvalidShape;
+    return .{ .m = m, .n = n, .k = k };
+}
+
+fn parse_impl(s: []const u8) ?zg.benchmark.Implementation {
+    if (std.mem.eql(u8, s, "blas")) return .blas;
+    if (std.mem.eql(u8, s, "zig_naive")) return .zig_naive;
+    if (std.mem.eql(u8, s, "tvm_cpu")) return .tvm_cpu;
+    if (std.mem.eql(u8, s, "tvm_gpu")) return .tvm_gpu;
+    if (std.mem.eql(u8, s, "xla_cpu")) return .xla_cpu;
+    if (std.mem.eql(u8, s, "xla_gpu")) return .xla_gpu;
+    return null;
 }
 
 fn parse_zxpr_palette(value: []const u8) ?zg.pr.zxpr.Palette {

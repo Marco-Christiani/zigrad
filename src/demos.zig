@@ -1,6 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const tvm_runtime = @import("tvm_runtime.zig");
+const tvm_runtime = zg.tvm_runtime;
 
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))

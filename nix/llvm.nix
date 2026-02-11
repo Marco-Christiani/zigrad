@@ -100,7 +100,7 @@ in
     cmakeFlags = [
       "-DCMAKE_BUILD_TYPE=Release"
       "-DBUILD_SHARED_LIBS=ON"
-      "-DLLVM_ENABLE_PROJECTS=mlir"
+      "-DLLVM_ENABLE_PROJECTS=mlir;clang;polly"
       # Include NVPTX for TVM CUDA code generation
       "-DLLVM_TARGETS_TO_BUILD=host;NVPTX"
       "-DLLVM_INCLUDE_TESTS=OFF"

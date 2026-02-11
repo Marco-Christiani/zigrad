@@ -1,6 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const c = @import("ffi/tvm.zig");
+pub const c = @import("ffi/tvm.zig");
 
 // TVM subsystem modules
 const tvm_common = @import("tvm/common.zig");
@@ -310,7 +310,7 @@ fn any_ptr(ptr: *anyopaque) c.TVMFFIAny {
 /// then copies from host via `runtime.TVMTensorCopyFromBytes`.
 ///
 /// Returns a TVM Tensor object handle (caller must DecRef).
-fn allocate_tensor(
+pub fn allocate_tensor(
     allocator: std.mem.Allocator,
     data: []f32,
     shape: []i64,
@@ -359,6 +359,24 @@ fn allocate_tensor(
     return @ptrCast(tensor.unnamed_1.v_obj);
 }
 
+/// Copy data from a TVM tensor (CPU or GPU) back to host memory.
+///
+/// For GPU tensors, this triggers a device-to-host copy.
+/// For CPU tensors, this is a host-to-host memcpy.
+pub fn copy_tensor_to_host(
+    allocator: std.mem.Allocator,
+    tensor: c.TVMFFIObjectHandle,
+    dest: []f32,
+) !void {
+    const nbytes = dest.len * @sizeOf(f32);
+    var copy_out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    try ffi_call_global(allocator, "runtime.TVMTensorCopyToBytes", &.{
+        any_obj(tensor, c.kTVMFFITensor),
+        any_ptr(@ptrCast(dest.ptr)),
+        any_int(@intCast(nbytes)),
+    }, &copy_out);
+}
+
 fn get_last_error_message(allocator: std.mem.Allocator) ![]u8 {
     var err_obj: c.TVMFFIObjectHandle = null;
     c.TVMFFIErrorMoveFromRaised(&err_obj);
@@ -393,7 +411,7 @@ pub fn any_to_string(allocator: std.mem.Allocator, v: *c.TVMFFIAny) ![]u8 {
     return error.UnexpectedTvmType;
 }
 
-fn ffi_call(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const c.TVMFFIAny, out: *c.TVMFFIAny) !void {
+pub fn ffi_call(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const c.TVMFFIAny, out: *c.TVMFFIAny) !void {
     out.* = any_none();
     const arg_ptr = if (args.len == 0) null else @constCast(args.ptr);
     if (c.TVMFFIFunctionCall(func, arg_ptr, @intCast(args.len), out) != 0) {
@@ -496,6 +514,93 @@ fn module_write_to_file(allocator: std.mem.Allocator, module: c.TVMFFIAny, path:
     log.debug("Wrote module to {s} (format={s})", .{ path, format });
 }
 
+/// Apply Polly optimization to TVM module and compile to object file.
+///
+/// Pipeline: Module → LLVM IR (.ll) → opt -polly → optimized IR → llc → object (.o)
+fn apply_polly_and_compile(
+    allocator: std.mem.Allocator,
+    module: c.TVMFFIAny,
+    obj_path: []const u8,
+    llvm_bin_path: []const u8,
+) !void {
+    const log = std.log.scoped(.@"zg/tvm_polly");
+
+    // 1. Export module to LLVM IR
+    const ll_path = try std.fmt.allocPrint(allocator, "{s}.ll", .{obj_path});
+    defer allocator.free(ll_path);
+    errdefer std.fs.cwd().deleteFile(ll_path) catch {}; // Clean up on error
+    try module_write_to_file(allocator, module, ll_path, "ll");
+    log.info("Exported LLVM IR: {s}", .{ll_path});
+
+    // 2. Apply Polly optimization
+    const opt_ll_path = try std.fmt.allocPrint(allocator, "{s}.opt.ll", .{obj_path});
+    defer allocator.free(opt_ll_path);
+    errdefer std.fs.cwd().deleteFile(opt_ll_path) catch {}; // Clean up on error
+
+    const opt_path = try std.fmt.allocPrint(allocator, "{s}/opt", .{llvm_bin_path});
+    defer allocator.free(opt_path);
+
+    // NOTE: Polly can hang on complex candidates (exponential worst-case complexity)
+    // Users can Ctrl+C to skip slow trials. Future: add proper timeout with threads
+    var opt_child = std.process.Child.init(&.{
+        opt_path,
+        "-polly",
+        "-polly-process-unprofitable",
+        "-polly-vectorizer=stripmine",
+        "-O3",
+        ll_path,
+        "-o",
+        opt_ll_path,
+    }, allocator);
+
+    const opt_term = try opt_child.spawnAndWait();
+    switch (opt_term) {
+        .Exited => |code| {
+            if (code != 0) {
+                log.err("opt -polly failed with code {d}", .{code});
+                return error.PollyOptFailed;
+            }
+        },
+        else => {
+            log.err("opt -polly terminated abnormally", .{});
+            return error.PollyOptFailed;
+        },
+    }
+    log.info("Applied Polly optimization", .{});
+
+    // 3. Compile optimized IR to object file with PIC (required for shared libs)
+    const llc_path = try std.fmt.allocPrint(allocator, "{s}/llc", .{llvm_bin_path});
+    defer allocator.free(llc_path);
+
+    var llc_child = std.process.Child.init(&.{
+        llc_path,
+        opt_ll_path,
+        "-o",
+        obj_path,
+        "-filetype=obj",
+        "-relocation-model=pic",
+    }, allocator);
+
+    const llc_term = try llc_child.spawnAndWait();
+    switch (llc_term) {
+        .Exited => |code| {
+            if (code != 0) {
+                log.err("llc failed with code {d}", .{code});
+                return error.LlcCompileFailed;
+            }
+        },
+        else => {
+            log.err("llc terminated abnormally", .{});
+            return error.LlcCompileFailed;
+        },
+    }
+    log.info("Compiled to object: {s}", .{obj_path});
+
+    // Clean up intermediate files
+    std.fs.cwd().deleteFile(ll_path) catch {};
+    std.fs.cwd().deleteFile(opt_ll_path) catch {};
+}
+
 /// Link one or more object files into a shared library using the system linker with `zig cc`.
 fn link_objects_to_shared(allocator: std.mem.Allocator, obj_paths: []const []const u8, so_path: []const u8) !void {
     const log = std.log.scoped(.@"zg/tvm_linker");
@@ -545,7 +650,7 @@ fn module_get_function(
     return @ptrCast(out.unnamed_1.v_obj);
 }
 
-fn make_dl_tensor_f32(data: []f32, shape: []i64) c.DLTensor {
+pub fn make_dl_tensor_f32(data: []f32, shape: []i64) c.DLTensor {
     return .{
         .data = @ptrCast(data.ptr),
         .device = .{ .device_type = c.kDLCPU, .device_id = 0 },
@@ -557,11 +662,11 @@ fn make_dl_tensor_f32(data: []f32, shape: []i64) c.DLTensor {
     };
 }
 
-fn dlpack_noop_deleter(tensor: ?*c.DLManagedTensor) callconv(.c) void {
+pub fn dlpack_noop_deleter(tensor: ?*c.DLManagedTensor) callconv(.c) void {
     _ = tensor;
 }
 
-fn tensor_from_dlpack(allocator: std.mem.Allocator, managed: *c.DLManagedTensor) !c.TVMFFIObjectHandle {
+pub fn tensor_from_dlpack(allocator: std.mem.Allocator, managed: *c.DLManagedTensor) !c.TVMFFIObjectHandle {
     var out: c.TVMFFIObjectHandle = null;
     if (c.TVMFFITensorFromDLPack(managed, 0, 0, &out) != 0 or out == null) {
         const msg = try get_last_error_message(allocator);
@@ -629,6 +734,10 @@ pub const TuneOpts = struct {
     max_trials: u32 = 64,
     /// Number of trials per iteration (batch size for parallel builds).
     trials_per_iter: u32 = 16,
+    /// Apply Polly (polyhedral optimizer) to LLVM IR before compilation.
+    use_polly: bool = false,
+    /// Path to LLVM bin directory containing opt and llc (for Polly).
+    llvm_bin_path: []const u8 = "result-llvm/bin",
 };
 
 /// Matmul shape for tuning.
@@ -649,8 +758,20 @@ const TuneContext = struct {
     shape: MatmulShape,
     /// Counter for generating unique build IDs (used for .so filenames).
     build_counter: u32 = 0,
+    /// Apply Polly optimization to LLVM IR.
+    use_polly: bool = false,
+    /// Path to LLVM bin directory (for opt/llc).
+    llvm_bin_path: []const u8 = "result-llvm/bin",
 
-    fn init(allocator: std.mem.Allocator, target: c.TVMFFIAny, target_kind: TargetKind, work_dir: []const u8, shape: MatmulShape) TuneContext {
+    fn init(
+        allocator: std.mem.Allocator,
+        target: c.TVMFFIAny,
+        target_kind: TargetKind,
+        work_dir: []const u8,
+        shape: MatmulShape,
+        use_polly: bool,
+        llvm_bin_path: []const u8,
+    ) TuneContext {
         return .{
             .allocator = allocator,
             .target = target,
@@ -658,6 +779,8 @@ const TuneContext = struct {
             .work_dir = work_dir,
             .shape = shape,
             .build_counter = 0,
+            .use_polly = use_polly,
+            .llvm_bin_path = llvm_bin_path,
         };
     }
 
@@ -1134,15 +1257,28 @@ fn zig_build_callback(
             if (ctx.target_kind == .cuda) "cuda" else "cpu",
         });
 
-        // write host module to object file
-        module_write_to_file(ctx.allocator, built_mod, obj_path, "o") catch |err| {
-            log.err("Failed to write module to {s}: {s}", .{ obj_path, @errorName(err) });
-            ctx.allocator.free(so_path);
-            const err_result = create_builder_error_result(ctx.allocator, "write_to_file failed") catch return -1;
-            results_list.append(ctx.allocator, err_result) catch return -1;
-            continue;
-        };
-        log.info("Write host .o succeeded", .{});
+        // write host module to object file (with optional Polly optimization)
+        if (ctx.use_polly) {
+            apply_polly_and_compile(ctx.allocator, built_mod, obj_path, ctx.llvm_bin_path) catch |err| {
+                log.err("Failed to apply Polly and compile to {s}: {s}", .{ obj_path, @errorName(err) });
+                // Clean up partial artifacts so they don't get loaded as "best" candidate
+                std.fs.cwd().deleteFile(obj_path) catch {};
+                ctx.allocator.free(so_path);
+                const err_result = create_builder_error_result(ctx.allocator, "polly compilation failed") catch return -1;
+                results_list.append(ctx.allocator, err_result) catch return -1;
+                continue;
+            };
+            log.info("Polly-optimized .o written", .{});
+        } else {
+            module_write_to_file(ctx.allocator, built_mod, obj_path, "o") catch |err| {
+                log.err("Failed to write module to {s}: {s}", .{ obj_path, @errorName(err) });
+                ctx.allocator.free(so_path);
+                const err_result = create_builder_error_result(ctx.allocator, "write_to_file failed") catch return -1;
+                results_list.append(ctx.allocator, err_result) catch return -1;
+                continue;
+            };
+            log.info("Write host .o succeeded", .{});
+        }
 
         // For CUDA: pack imported device modules into a separate .o, then link both.
         //  ModulePackImportsToLLVM serializes the CUDA/PTX device module into an LLVM
@@ -1832,7 +1968,15 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
     log.info("Created target with host: {s}", .{target_str});
 
     // set up global tune context for callbacks
-    var tune_ctx = TuneContext.init(allocator, target, target_kind, work_dir, shape);
+    var tune_ctx = TuneContext.init(
+        allocator,
+        target,
+        target_kind,
+        work_dir,
+        shape,
+        opts.use_polly,
+        opts.llvm_bin_path,
+    );
     defer tune_ctx.deinit();
     g_tune_ctx = &tune_ctx;
     defer g_tune_ctx = null;
@@ -2412,7 +2556,20 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
         }
 
         if (run_secs) |t| {
-            log.debug("Record {d}: {d:.2} µs", .{ line_num, t * 1e6 });
+            // Verify the compiled module exists before considering this candidate
+            const dir = record_path[0 .. record_path.len - "/tuning_record.json".len];
+            const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ dir, line_num });
+            defer allocator.free(so_path);
+
+            // Skip if .so doesn't exist (trial crashed during compilation)
+            std.fs.cwd().access(so_path, .{}) catch {
+                log.debug("Skipping candidate {d}: {s} not found (likely crashed)", .{ line_num, so_path });
+                line_num += 1;
+                continue;
+            };
+
+            // Valid candidate - consider for best time
+            log.debug("Candidate {d}: {d:.2} µs", .{ line_num, t * 1e6 });
             if (t < best_time) {
                 best_time = t;
                 best_idx = line_num;

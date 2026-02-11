@@ -419,3 +419,18 @@ tasks:
     cmds:
       - |
         {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}}  {{.REMOTE}}:/ ./
+
+  bench-grid:
+    cmds:
+      - | # GPU
+        shape0=1024x1024x1024
+        time ./zig-out/bin/zigrad tvm-tune --shape=$shape0 --cuda --work-dir=artifacts/tvm_cache/cuda/$shape0 2>&1 | grep -v warning
+        shape1=32768x1024x1024
+        time ./zig-out/bin/zigrad tvm-tune --shape=$shape1 --cuda --work-dir=artifacts/tvm_cache/cuda/$shape1 2>&1 | grep -v warning
+        ./zig-out/bin/zigrad benchmark --shapes=$shape0,$shape1 --impls=tvm_gpu,xla_gpu
+      - | # CPU
+        shape0=1024x1024x1024
+        time ./zig-out/bin/zigrad tvm-tune --shape=$shape0 --work-dir=artifacts/tvm_cache/cpu/$shape0 2>&1 | grep -v warning
+        shape1=32768x1024x1024
+        time ./zig-out/bin/zigrad tvm-tune --shape=$shape1 --work-dir=artifacts/tvm_cache/cpu/$shape1 2>&1 | grep -v warning
+        ./zig-out/bin/zigrad benchmark --shapes=$shape0,$shape1 --impls=tvm_cpu,xla_cpu

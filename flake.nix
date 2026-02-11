@@ -146,6 +146,7 @@
           xlaMlirStablehloCapiDevel
           # tvm
           tvmDevel
+          pkgs.mkl
           # zigradMlirShimDevel
         ];
       };

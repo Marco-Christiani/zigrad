@@ -38,6 +38,7 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addOptions("build_options", build_options);
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
+    zigrad_mod.linkSystemLibrary("mkl_rt", .{});
 
     // Add CUDA include path if available (needed for nvrtc.h in tvm builds)
     if (tvm_enabled) {
