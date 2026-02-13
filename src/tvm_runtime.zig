@@ -6,6 +6,7 @@ pub const c = @import("ffi/tvm.zig");
 const tvm_common = @import("tvm/common.zig");
 const tvm_cuda = @import("tvm/cuda.zig");
 const tvm_builder = @import("tvm/builder.zig");
+const tvm_correctness = @import("tvm/correctness.zig");
 const nvrtc_callback = @import("tvm/nvrtc_callback.zig");
 
 /// Handle to the dynamically loaded libtvm.so (full compiler with TE/codegen).
@@ -95,7 +96,7 @@ fn ensure_tvm_ffi_loaded(allocator: std.mem.Allocator) !void {
 /// Ensure the full TVM compiler library is loaded. Required for TE API access.
 /// Safe to call multiple times - only loads once.
 /// Uses RTLD_GLOBAL so TVM symbols are available to compiled modules loaded later.
-fn ensure_tvm_compiler_loaded(allocator: std.mem.Allocator) !void {
+pub fn ensure_tvm_compiler_loaded(allocator: std.mem.Allocator) !void {
     // First, ensure libtvm_ffi.so is loaded with RTLD_GLOBAL
     // This is needed so compiled TVM modules can find FFI runtime symbols
     try ensure_tvm_ffi_loaded(allocator);
@@ -305,28 +306,19 @@ fn any_ptr(ptr: *anyopaque) c.TVMFFIAny {
 
 /// Allocate a TVM tensor on the specified device, filled with the provided f32 data.
 ///
-/// For CPU (device_type = kDLCPU): uses DLPack zero-copy wrapping.
-/// For GPU (device_type = kDLCUDA): allocates via `runtime.TVMTensorAllocWithScope`,
-/// then copies from host via `runtime.TVMTensorCopyFromBytes`.
+/// Allocates via TVM FFI (`runtime.TVMTensorAllocWithScope`), then copies host data via
+/// `runtime.TVMTensorCopyFromBytes`. Works for both CPU and GPU devices.
 ///
 /// Returns a TVM Tensor object handle (caller must DecRef).
+///
+/// `shape` must remain valid until DecRef (TVM stores the pointer internally).
 pub fn allocate_tensor(
     allocator: std.mem.Allocator,
     data: []f32,
     shape: []i64,
     device_type: i32,
 ) !c.TVMFFIObjectHandle {
-    if (device_type == c.kDLCPU) {
-        // CPU: zero-copy DLPack path
-        var dl = c.DLManagedTensor{
-            .dl_tensor = make_dl_tensor_f32(data, shape),
-            .manager_ctx = null,
-            .deleter = dlpack_noop_deleter,
-        };
-        return tensor_from_dlpack(allocator, &dl);
-    }
-
-    // GPU: allocate on device via TVM FFI
+    // Allocate via TVM FFI for both CPU and GPU (avoids DLPack stack pointer issues)
     // 1. Create Shape object
     var shape_args: [4]c.TVMFFIAny = std.mem.zeroes([4]c.TVMFFIAny);
     for (shape, 0..) |dim, i| {
@@ -422,18 +414,18 @@ pub fn ffi_call(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: 
     }
 }
 
-fn ffi_call0(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, out: *c.TVMFFIAny) !void {
+pub fn ffi_call0(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, out: *c.TVMFFIAny) !void {
     try ffi_call(allocator, func, &.{}, out);
 }
 
-fn ffi_call1_i64(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, x: i64, out: *c.TVMFFIAny) !void {
+pub fn ffi_call1_i64(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, x: i64, out: *c.TVMFFIAny) !void {
     const arg = any_int(x);
     const args = [_]c.TVMFFIAny{arg};
     try ffi_call(allocator, func, args[0..], out);
 }
 
 // NOTE: allocator is only used for getting error msg, could just use a buffer or an fba. does passing an allocator obscure ownership here? could be viable to keep the allocator but document lifetime, or have user pass buffer? same comment goes for other locations with the same pattern.
-fn ffi_get_global(allocator: std.mem.Allocator, name: []const u8) !c.TVMFFIObjectHandle {
+pub fn ffi_get_global(allocator: std.mem.Allocator, name: []const u8) !c.TVMFFIObjectHandle {
     var name_arr: c.TVMFFIByteArray = .{ .data = name.ptr, .size = name.len };
     var out: c.TVMFFIObjectHandle = null;
     if (c.TVMFFIFunctionGetGlobal(&name_arr, &out) != 0 or out == null) {
@@ -741,34 +733,42 @@ pub const TuneOpts = struct {
 };
 
 /// Matmul shape for tuning.
-pub const MatmulShape = struct {
-    M: usize,
-    N: usize,
-    K: usize,
-};
-
 /// Context passed to zig builder/runner callbacks during autotuning.
 /// Stored in a global to bridge the C callback interface.
+/// Context passed to builder/runner callbacks during MetaSchedule autotuning.
+///
+/// Stored in a global (`g_tune_ctx`) to bridge TVM's C callback interface.
 const TuneContext = struct {
     allocator: std.mem.Allocator,
     target: c.TVMFFIAny,
     target_kind: TargetKind,
     work_dir: []const u8,
-    /// Matmul dimensions for tensor allocation in runner.
-    shape: MatmulShape,
+    /// Tensor shapes for runner to allocate: tensor_shapes[i] is shape of function arg i.
+    /// Each inner slice must remain valid for the tuning duration (caller's responsibility).
+    tensor_shapes: []const []const i64,
     /// Counter for generating unique build IDs (used for .so filenames).
     build_counter: u32 = 0,
     /// Apply Polly optimization to LLVM IR.
     use_polly: bool = false,
     /// Path to LLVM bin directory (for opt/llc).
     llvm_bin_path: []const u8 = "result-llvm/bin",
+    /// Timestamp when tuning started (nanoseconds). Used for ETA calculation.
+    tune_start_ns: i128 = 0,
+    /// Number of trials completed so far. Used for ETA calculation.
+    trials_completed: u32 = 0,
+    /// Total trials requested. Used for ETA calculation.
+    total_trials: u32 = 0,
+    /// Timestamp of last progress update (nanoseconds). Used for rolling ETA.
+    last_progress_ns: i128 = 0,
+    /// Trials completed at last progress update. Used for rolling ETA.
+    last_progress_trials: u32 = 0,
 
     fn init(
         allocator: std.mem.Allocator,
         target: c.TVMFFIAny,
         target_kind: TargetKind,
         work_dir: []const u8,
-        shape: MatmulShape,
+        tensor_shapes: []const []const i64,
         use_polly: bool,
         llvm_bin_path: []const u8,
     ) TuneContext {
@@ -777,7 +777,7 @@ const TuneContext = struct {
             .target = target,
             .target_kind = target_kind,
             .work_dir = work_dir,
-            .shape = shape,
+            .tensor_shapes = tensor_shapes,
             .build_counter = 0,
             .use_polly = use_polly,
             .llvm_bin_path = llvm_bin_path,
@@ -1421,7 +1421,7 @@ fn zig_run_callback(
     var results_list = std.ArrayList(c.TVMFFIAny).empty;
     defer results_list.deinit(ctx.allocator);
 
-    for (0..num_inputs) |i| {
+    candidate_loop: for (0..num_inputs) |i| {
         // get RunnerInput[i]
         var input: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
         var get_args = [_]c.TVMFFIAny{ inputs_array, any_int(@intCast(i)) };
@@ -1468,78 +1468,94 @@ fn zig_run_callback(
         defer _ = c.TVMFFIObjectDecRef(func);
         log.debug("Got main function: {*}", .{func});
 
-        // allocate test tensors for matmul: A[M,K], B[K,N], C[M,N]
-        const M = ctx.shape.M;
-        const N = ctx.shape.N;
-        const K = ctx.shape.K;
+        // buffers for all tensors
+        var data_buffers = std.ArrayList([]f32).empty;
+        defer {
+            for (data_buffers.items) |buf| ctx.allocator.free(buf);
+            data_buffers.deinit(ctx.allocator);
+        }
 
-        const a_data = ctx.allocator.alloc(f32, M * K) catch {
-            const err_future = create_runner_error_future(ctx.allocator, "alloc A failed") catch return -1;
-            results_list.append(ctx.allocator, err_future) catch return -1;
-            continue;
-        };
-        defer ctx.allocator.free(a_data);
+        for (ctx.tensor_shapes) |shape| {
+            var size: usize = 1;
+            for (shape) |dim| size *= @intCast(dim);
 
-        const b_data = ctx.allocator.alloc(f32, K * N) catch {
-            const err_future = create_runner_error_future(ctx.allocator, "alloc B failed") catch return -1;
-            results_list.append(ctx.allocator, err_future) catch return -1;
-            continue;
-        };
-        defer ctx.allocator.free(b_data);
+            const buf = ctx.allocator.alloc(f32, size) catch {
+                const err_future = create_runner_error_future(ctx.allocator, "alloc data failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
+            data_buffers.append(ctx.allocator, buf) catch {
+                ctx.allocator.free(buf);
+                const err_future = create_runner_error_future(ctx.allocator, "append data failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
 
-        const c_data = ctx.allocator.alloc(f32, M * N) catch {
-            const err_future = create_runner_error_future(ctx.allocator, "alloc C failed") catch return -1;
-            results_list.append(ctx.allocator, err_future) catch return -1;
-            continue;
-        };
-        defer ctx.allocator.free(c_data);
-
-        // initialize w/ some simple data
-        for (a_data, 0..) |*v, idx| v.* = @as(f32, @floatFromInt(idx % 10)) * 0.1;
-        for (b_data, 0..) |*v, idx| v.* = @as(f32, @floatFromInt(idx % 10)) * 0.1;
-        @memset(c_data, 0);
+            // initialize with simple data
+            for (buf, 0..) |*v, idx| v.* = @as(f32, @floatFromInt(idx % 10)) * 0.1;
+        }
 
         // allocate tensors on target device
-        const dev_type: i32 = switch (ctx.target_kind) { // NOTE: we switch on `target_kind` quite a few times, discuss considering methods
+        const dev_type: i32 = switch (ctx.target_kind) {
             .cpu => c.kDLCPU,
             .cuda => c.kDLCUDA,
         };
-        var shape_a = [_]i64{ @intCast(M), @intCast(K) };
-        var shape_b = [_]i64{ @intCast(K), @intCast(N) };
-        var shape_c = [_]i64{ @intCast(M), @intCast(N) };
 
-        const t_a = allocate_tensor(ctx.allocator, a_data, &shape_a, dev_type) catch |err| {
-            log.err("allocate_tensor(A) failed: {s}", .{@errorName(err)});
-            const err_future = create_runner_error_future(ctx.allocator, "tensor A failed") catch return -1;
-            results_list.append(ctx.allocator, err_future) catch return -1;
-            continue;
-        };
-        defer _ = c.TVMFFIObjectDecRef(t_a);
+        // shapes alive for tensor lifetime (allocate_tensor stores shape pointer)
+        var shape_copies = std.ArrayList([]i64).empty;
+        defer {
+            for (shape_copies.items) |sc| ctx.allocator.free(sc);
+            shape_copies.deinit(ctx.allocator);
+        }
 
-        const t_b = allocate_tensor(ctx.allocator, b_data, &shape_b, dev_type) catch |err| {
-            log.err("allocate_tensor(B) failed: {s}", .{@errorName(err)});
-            const err_future = create_runner_error_future(ctx.allocator, "tensor B failed") catch return -1;
-            results_list.append(ctx.allocator, err_future) catch return -1;
-            continue;
-        };
-        defer _ = c.TVMFFIObjectDecRef(t_b);
+        var tensors = std.ArrayList(c.TVMFFIObjectHandle).empty;
+        defer {
+            for (tensors.items) |t| _ = c.TVMFFIObjectDecRef(t);
+            tensors.deinit(ctx.allocator);
+        }
 
-        const t_c = allocate_tensor(ctx.allocator, c_data, &shape_c, dev_type) catch |err| {
-            log.err("allocate_tensor(C) failed: {s}", .{@errorName(err)});
-            const err_future = create_runner_error_future(ctx.allocator, "tensor C failed") catch return -1;
-            results_list.append(ctx.allocator, err_future) catch return -1;
-            continue;
-        };
-        defer _ = c.TVMFFIObjectDecRef(t_c);
+        for (ctx.tensor_shapes, 0..) |shape, idx| {
+            const shape_copy = ctx.allocator.dupe(i64, shape) catch {
+                const err_future = create_runner_error_future(ctx.allocator, "dupe shape failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
+            shape_copies.append(ctx.allocator, shape_copy) catch {
+                ctx.allocator.free(shape_copy);
+                const err_future = create_runner_error_future(ctx.allocator, "append shape failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
+
+            const t = allocate_tensor(ctx.allocator, data_buffers.items[idx], shape_copy, dev_type) catch |err| {
+                log.err("allocate_tensor({d}) failed: {s}", .{ idx, @errorName(err) });
+                const err_future = create_runner_error_future(ctx.allocator, "tensor failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
+            tensors.append(ctx.allocator, t) catch {
+                _ = c.TVMFFIObjectDecRef(t);
+                const err_future = create_runner_error_future(ctx.allocator, "append tensor failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
+        }
+
+        // Build call args
+        var call_args = std.ArrayList(c.TVMFFIAny).empty;
+        defer call_args.deinit(ctx.allocator);
+
+        for (tensors.items) |t| {
+            call_args.append(ctx.allocator, any_obj(t, c.kTVMFFITensor)) catch {
+                const err_future = create_runner_error_future(ctx.allocator, "build args failed") catch return -1;
+                results_list.append(ctx.allocator, err_future) catch return -1;
+                continue :candidate_loop;
+            };
+        }
 
         // Warmup run
-        var call_args = [_]c.TVMFFIAny{
-            any_obj(t_a, c.kTVMFFITensor),
-            any_obj(t_b, c.kTVMFFITensor),
-            any_obj(t_c, c.kTVMFFITensor),
-        };
         var call_res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-        ffi_call(ctx.allocator, func, &call_args, &call_res) catch |err| {
+        ffi_call(ctx.allocator, func, call_args.items, &call_res) catch |err| {
             const tvm_err = get_last_error_message(ctx.allocator) catch "?";
             log.err("warmup call failed: {s} - {s}", .{ @errorName(err), tvm_err });
             const err_future = create_runner_error_future(ctx.allocator, "warmup failed") catch return -1;
@@ -1553,7 +1569,7 @@ fn zig_run_callback(
         var times: [5]f64 = std.mem.zeroes([5]f64);
         for (0..num_runs) |run_idx| {
             const start = std.time.nanoTimestamp();
-            ffi_call(ctx.allocator, func, &call_args, &call_res) catch |err| {
+            ffi_call(ctx.allocator, func, call_args.items, &call_res) catch |err| {
                 log.err("timed call failed: {s}", .{@errorName(err)});
                 const err_future = create_runner_error_future(ctx.allocator, "timed call failed") catch return -1;
                 results_list.append(ctx.allocator, err_future) catch return -1;
@@ -1573,6 +1589,35 @@ fn zig_run_callback(
         };
         results_list.append(ctx.allocator, runner_future) catch return -1;
         log.debug("Measured candidate {d}: {d:.6}s", .{ i, run_time_secs });
+    }
+
+    // Update progress with blended ETA (rolling window + cumulative)
+    ctx.trials_completed += @intCast(num_inputs);
+    {
+        const now = std.time.nanoTimestamp();
+        const elapsed_ns: u64 = @intCast(now - ctx.tune_start_ns);
+        const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
+        const remaining = ctx.total_trials -| ctx.trials_completed;
+        const remaining_f = @as(f64, @floatFromInt(remaining));
+        const cumulative_rate = elapsed_s / @as(f64, @floatFromInt(ctx.trials_completed));
+
+        // Blend recent rate (70%) with cumulative rate (30%) for more responsive ETA
+        const batch_elapsed_ns: u64 = @intCast(now - ctx.last_progress_ns);
+        const batch_trials = ctx.trials_completed - ctx.last_progress_trials;
+        const eta_s = if (batch_trials > 0) blk: {
+            const recent_rate = @as(f64, @floatFromInt(batch_elapsed_ns)) / 1e9 / @as(f64, @floatFromInt(batch_trials));
+            const blended_rate = 0.7 * recent_rate + 0.3 * cumulative_rate;
+            break :blk blended_rate * remaining_f;
+        } else cumulative_rate * remaining_f;
+
+        const eta_min: u64 = @intFromFloat(eta_s / 60.0);
+        const eta_sec: u64 = @intFromFloat(eta_s - @as(f64, @floatFromInt(eta_min)) * 60.0);
+        log.info("Progress: {d}/{d} trials, {d:.1}s/trial, ETA: {d}m {d}s", .{
+            ctx.trials_completed, ctx.total_trials, cumulative_rate, eta_min, eta_sec,
+        });
+
+        ctx.last_progress_ns = now;
+        ctx.last_progress_trials = ctx.trials_completed;
     }
 
     // create output Array
@@ -1875,14 +1920,292 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, M: usize, N: usize, K: usi
     return ir_mod;
 }
 
+/// Attention sub-kernel variant for split tuning.
+///
+/// Splitting attention into 3 independent kernels allows MetaSchedule to tune each one
+/// effectively: standalone matmul has ~9 decision variables where 256 trials works well,
+/// vs. the monolithic fused kernel's 14-16 decision variables. Additionally, `topi.matmul`
+/// generates specialized compute tagged "matmul" with `layout_free_placeholders`, while
+/// `topi.einsum` generates generic "einsum"-tagged compute with no scheduling hints.
+pub const AttentionKernel = enum {
+    /// matmul(Q[S,D], K[S,D], transpose_b=true) * scale -> scores[S,S]
+    qk_scaled,
+    /// softmax(scores[S,S], axis=-1) -> weights[S,S]
+    softmax,
+    /// matmul(weights[S,S], V[S,D]) -> output[S,D]
+    sv,
+
+    pub fn name(self: AttentionKernel) []const u8 {
+        return switch (self) {
+            .qk_scaled => "qk_scaled",
+            .softmax => "softmax",
+            .sv => "sv",
+        };
+    }
+
+    /// Format the per-kernel subdirectory name: qk_{S}x{D}, softmax_{S}, sv_{S}x{D}.
+    pub fn subdir(self: AttentionKernel, allocator: std.mem.Allocator, seq: usize, head_dim: usize) ![]const u8 {
+        return switch (self) {
+            .qk_scaled => try std.fmt.allocPrint(allocator, "qk_{d}x{d}", .{ seq, head_dim }),
+            .softmax => try std.fmt.allocPrint(allocator, "softmax_{d}", .{seq}),
+            .sv => try std.fmt.allocPrint(allocator, "sv_{d}x{d}", .{ seq, head_dim }),
+        };
+    }
+};
+
+/// Build a single attention sub-kernel as a TIR IRModule.
+///
+/// All kernels operate on 2D tensors (no batch dimension). The batch dimension is handled
+/// at runtime by looping over batch slices.
+///
+/// 1. `qk_scaled`: `topi.matmul(Q[S,D], K[S,D], transpose_b=true) * scale` -> `scores[S,S]`.
+///    Uses `topi.matmul` (specialized compute, tag="matmul") + `topi.multiply` for scale.
+///
+/// 2. `softmax`: `topi.nn.softmax(scores[S,S], axis=-1)` -> `weights[S,S]`.
+///    4-stage decomposition: max, exp, sum, normalize.
+///
+/// 3. `sv`: `topi.matmul(weights[S,S], V[S,D])` -> `output[S,D]`.
+///    Uses `topi.matmul` (specialized compute, tag="matmul").
+pub fn build_attention_kernel_tir(
+    allocator: std.mem.Allocator,
+    kernel: AttentionKernel,
+    seq: usize,
+    head_dim: usize,
+) !c.TVMFFIAny {
+    if (!build_options.enable_tvm) {
+        return error.TvmDisabled;
+    }
+    const log = std.log.scoped(.@"zg/tvm_attention");
+
+    try ensure_tvm_compiler_loaded(allocator);
+
+    const seq_i64: i64 = @intCast(seq);
+    const head_dim_i64: i64 = @intCast(head_dim);
+
+    const dtype_buf = try cstr_alloc(allocator, "float32");
+    defer allocator.free(dtype_buf);
+
+    switch (kernel) {
+        .qk_scaled => {
+            // Q[S,D], K[S,D] -> scores[S,S]
+            var shape_sd: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ any_int(seq_i64), any_int(head_dim_i64) };
+                try ffi_call_global(allocator, "ffi.Array", &args, &shape_sd);
+            }
+            defer if (shape_sd.unnamed_1.v_obj) |obj| {
+                _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
+            };
+
+            const name_q_buf = try cstr_alloc(allocator, "Q");
+            defer allocator.free(name_q_buf);
+            const name_k_buf = try cstr_alloc(allocator, "K");
+            defer allocator.free(name_k_buf);
+
+            var tensor_q: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ shape_sd, any_raw_str(cstr_ptr(dtype_buf)), any_raw_str(cstr_ptr(name_q_buf)) };
+                try ffi_call_global(allocator, "te.Placeholder", &args, &tensor_q);
+            }
+
+            var tensor_k: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ shape_sd, any_raw_str(cstr_ptr(dtype_buf)), any_raw_str(cstr_ptr(name_k_buf)) };
+                try ffi_call_global(allocator, "te.Placeholder", &args, &tensor_k);
+            }
+
+            // matmul(Q, K, transpose_a=false, transpose_b=true) -> [S,S]
+            var matmul_result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ tensor_q, tensor_k, any_bool(false), any_bool(true) };
+                ffi_call_global(allocator, "topi.matmul", &args, &matmul_result) catch |err| {
+                    log.err("topi.matmul(Q, K^T) failed: {s}", .{@errorName(err)});
+                    return err;
+                };
+            }
+
+            // Scale by 1/sqrt(head_dim)
+            const scale_val: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+            var scaled: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ matmul_result, any_float(scale_val) };
+                ffi_call_global(allocator, "topi.multiply", &args, &scaled) catch |err| {
+                    log.err("topi.multiply(scores, scale) failed: {s}", .{@errorName(err)});
+                    return err;
+                };
+            }
+            log.info("Built qk_scaled kernel: Q[{d},{d}] @ K^T * {d:.4} -> [{d},{d}]", .{ seq, head_dim, scale_val, seq, seq });
+
+            // Pack into IRModule: inputs=[Q, K], output=scaled
+            var tensors_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ tensor_q, tensor_k, scaled };
+                try ffi_call_global(allocator, "ffi.Array", &args, &tensors_array);
+            }
+            return try wrap_te_as_irmodule(allocator, tensors_array);
+        },
+        .softmax => {
+            // scores[S,S] -> weights[S,S]
+            var shape_ss: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ any_int(seq_i64), any_int(seq_i64) };
+                try ffi_call_global(allocator, "ffi.Array", &args, &shape_ss);
+            }
+            defer if (shape_ss.unnamed_1.v_obj) |obj| {
+                _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
+            };
+
+            const name_scores_buf = try cstr_alloc(allocator, "scores");
+            defer allocator.free(name_scores_buf);
+
+            var tensor_scores: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ shape_ss, any_raw_str(cstr_ptr(dtype_buf)), any_raw_str(cstr_ptr(name_scores_buf)) };
+                try ffi_call_global(allocator, "te.Placeholder", &args, &tensor_scores);
+            }
+
+            var weights: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                const axis: i64 = -1;
+                var args = [_]c.TVMFFIAny{ tensor_scores, any_int(axis) };
+                ffi_call_global(allocator, "topi.nn.softmax", &args, &weights) catch |err| {
+                    log.err("topi.nn.softmax failed: {s}", .{@errorName(err)});
+                    return err;
+                };
+            }
+            log.info("Built softmax kernel: scores[{d},{d}] -> weights[{d},{d}]", .{ seq, seq, seq, seq });
+
+            // Pack into IRModule: input=scores, output=weights
+            var tensors_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ tensor_scores, weights };
+                try ffi_call_global(allocator, "ffi.Array", &args, &tensors_array);
+            }
+            return try wrap_te_as_irmodule(allocator, tensors_array);
+        },
+        .sv => {
+            // weights[S,S], V[S,D] -> output[S,D]
+            var shape_ss: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ any_int(seq_i64), any_int(seq_i64) };
+                try ffi_call_global(allocator, "ffi.Array", &args, &shape_ss);
+            }
+            defer if (shape_ss.unnamed_1.v_obj) |obj| {
+                _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
+            };
+
+            var shape_sd: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ any_int(seq_i64), any_int(head_dim_i64) };
+                try ffi_call_global(allocator, "ffi.Array", &args, &shape_sd);
+            }
+            defer if (shape_sd.unnamed_1.v_obj) |obj| {
+                _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
+            };
+
+            const name_w_buf = try cstr_alloc(allocator, "weights");
+            defer allocator.free(name_w_buf);
+            const name_v_buf = try cstr_alloc(allocator, "V");
+            defer allocator.free(name_v_buf);
+
+            var tensor_w: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ shape_ss, any_raw_str(cstr_ptr(dtype_buf)), any_raw_str(cstr_ptr(name_w_buf)) };
+                try ffi_call_global(allocator, "te.Placeholder", &args, &tensor_w);
+            }
+
+            var tensor_v: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ shape_sd, any_raw_str(cstr_ptr(dtype_buf)), any_raw_str(cstr_ptr(name_v_buf)) };
+                try ffi_call_global(allocator, "te.Placeholder", &args, &tensor_v);
+            }
+
+            // matmul(weights, V, transpose_a=false, transpose_b=false) -> [S,D]
+            var output: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ tensor_w, tensor_v, any_bool(false), any_bool(false) };
+                ffi_call_global(allocator, "topi.matmul", &args, &output) catch |err| {
+                    log.err("topi.matmul(weights, V) failed: {s}", .{@errorName(err)});
+                    return err;
+                };
+            }
+            log.info("Built sv kernel: weights[{d},{d}] @ V[{d},{d}] -> [{d},{d}]", .{ seq, seq, seq, head_dim, seq, head_dim });
+
+            // Pack into IRModule: inputs=[weights, V], output=output
+            var tensors_array: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            {
+                var args = [_]c.TVMFFIAny{ tensor_w, tensor_v, output };
+                try ffi_call_global(allocator, "ffi.Array", &args, &tensors_array);
+            }
+            return try wrap_te_as_irmodule(allocator, tensors_array);
+        },
+    }
+}
+
+/// Create PrimFunc from TE tensors, add global_symbol="main", wrap in IRModule.
+fn wrap_te_as_irmodule(allocator: std.mem.Allocator, tensors_array: c.TVMFFIAny) !c.TVMFFIAny {
+    var prim_func: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    {
+        var args = [_]c.TVMFFIAny{ tensors_array, any_none() };
+        try ffi_call_global(allocator, "te.CreatePrimFunc", &args, &prim_func);
+    }
+
+    const global_symbol_buf = try cstr_alloc(allocator, "global_symbol");
+    defer allocator.free(global_symbol_buf);
+    const main_name_buf = try cstr_alloc(allocator, "main");
+    defer allocator.free(main_name_buf);
+
+    var prim_func_with_attr: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    {
+        var args = [_]c.TVMFFIAny{
+            prim_func,
+            any_raw_str(cstr_ptr(global_symbol_buf)),
+            any_raw_str(cstr_ptr(main_name_buf)),
+        };
+        try ffi_call_global(allocator, "ir.BaseFuncWithAttr", &args, &prim_func_with_attr);
+    }
+    if (prim_func.unnamed_1.v_obj) |obj| {
+        _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
+    }
+
+    const main_buf = try cstr_alloc(allocator, "main");
+    defer allocator.free(main_buf);
+
+    var global_var: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    {
+        var args = [_]c.TVMFFIAny{any_raw_str(cstr_ptr(main_buf))};
+        try ffi_call_global(allocator, "ir.GlobalVar", &args, &global_var);
+    }
+
+    var func_map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    {
+        var args = [_]c.TVMFFIAny{ global_var, prim_func_with_attr };
+        try ffi_call_global(allocator, "ffi.Map", &args, &func_map);
+    }
+
+    var empty_map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    try ffi_call_global(allocator, "ffi.Map", &.{}, &empty_map);
+
+    var ir_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+    {
+        var args = [_]c.TVMFFIAny{ func_map, any_none(), empty_map };
+        try ffi_call_global(allocator, "ir.IRModule", &args, &ir_mod);
+    }
+
+    return ir_mod;
+}
+
 /// Run TVM MetaSchedule autotuning on a TIR module.
 ///
-/// This function orchestrates the tuning process:
+/// Orchestrates the tuning process:
 /// 1. Creates MetaSchedule components (space generator, search strategy, database)
 /// 2. Registers zig builder/runner callbacks
 /// 3. Runs the tuning loop
 /// 4. Saves best schedule to the database
-pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: TargetKind, shape: MatmulShape, opts: TuneOpts) !void {
+///
+/// `tensor_shapes` specifies the shape of each function argument for runtime allocation in the
+/// runner. Must remain valid for the duration of this call (e.g., heap-allocated by caller).
+pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: TargetKind, tensor_shapes: []const []const i64, opts: TuneOpts) !void {
     if (!build_options.enable_tvm) {
         return error.TvmDisabled;
     }
@@ -1973,13 +2296,19 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
         target,
         target_kind,
         work_dir,
-        shape,
+        tensor_shapes,
         opts.use_polly,
         opts.llvm_bin_path,
     );
     defer tune_ctx.deinit();
     g_tune_ctx = &tune_ctx;
     defer g_tune_ctx = null;
+
+    tune_ctx.total_trials = opts.max_trials;
+    const start_ns = std.time.nanoTimestamp();
+    tune_ctx.tune_start_ns = start_ns;
+    tune_ctx.last_progress_ns = start_ns;
+    tune_ctx.last_progress_trials = 0;
 
     // Register helper functions that MetaSchedule expects. TVM's C++ runtime looks up
     //  packed functions in the global registry by name. The python frontend registers
@@ -2471,9 +2800,12 @@ pub fn tune(allocator: std.mem.Allocator, ir_mod: c.TVMFFIAny, target_kind: Targ
 
 /// Options for loading a tuned module.
 pub const LoadTunedOpts = struct {
-    /// Path to the per-target tuning directory where MetaSchedule stores tuning records
-    /// (tuning_record.json) and compiled .so artifacts (e.g. `artifacts/tvm_cache/cpu/`).
-    work_dir: []const u8 = "artifacts/tvm_cache/cpu",
+    /// Base directory for attention tuning artifacts (e.g. `artifacts/tvm_cache_attn`).
+    /// Subdirectories are derived from kernel type, shape, and target:
+    /// `{work_dir}/qk_{S}x{D}/cpu/`, `{work_dir}/softmax_{S}/cpu/`, etc.
+    work_dir: []const u8 = "artifacts/tvm_cache_attn",
+    /// Target to load tuned modules for. Determines the per-target subdirectory.
+    target_kind: TargetKind = .cpu,
 };
 
 /// Result of loading a tuned module.
@@ -2491,9 +2823,16 @@ pub const TunedModule = struct {
     }
 };
 
-/// Parse tuning_record.json and find the best candidate index.
-/// Returns (best_index, best_time_seconds) or error if no records found.
-fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !struct { usize, f64 } {
+/// A candidate from tuning records: index into tuning_record.json and measured runtime.
+const RankedCandidate = struct {
+    idx: usize,
+    time_secs: f64,
+};
+
+/// Parse tuning_record.json and return candidates ranked by speed (fastest first).
+///
+/// Only includes candidates whose .so file exists on disk.
+fn find_ranked_candidates(allocator: std.mem.Allocator, record_path: []const u8) ![]RankedCandidate {
     const log = std.log.scoped(.@"zg/tvm_loader");
 
     const file = std.fs.cwd().openFile(record_path, .{}) catch |err| {
@@ -2512,9 +2851,11 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
     defer allocator.free(contents);
     const bytes_read = try file.readAll(contents);
 
-    var best_idx: usize = 0;
-    var best_time: f64 = std.math.inf(f64);
+    var candidates = std.ArrayList(RankedCandidate).empty;
+    defer candidates.deinit(allocator);
     var line_num: usize = 0;
+
+    const dir = record_path[0 .. record_path.len - "/tuning_record.json".len];
 
     // split by newlines
     var lines = std.mem.splitScalar(u8, contents[0..bytes_read], '\n');
@@ -2522,28 +2863,21 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
         if (line.len == 0) continue;
 
         // Extract run_secs with pattern matching instead of a full JSON parse.
-        // The record format is deeply nested and we only need one float value,
-        // so a targeted scan avoids pulling in std.json for a trivial extraction.
         // Format: [workload_id, [[trace, decisions], [run_secs], target, args]]
-        // The run_secs comes after the decisions array closes: ]],[run_secs],{
-        // Look for pattern "]],[" followed by a float (not integer like tile sizes)
+        // Look for pattern "]],[" followed by a float
         var run_secs: ?f64 = null;
         var i: usize = 0;
         while (i + 10 < line.len) : (i += 1) {
-            // Look for pattern "]],[" (double close bracket) followed by a digit
             if (i + 4 < line.len and
                 line[i] == ']' and line[i + 1] == ']' and
                 line[i + 2] == ',' and line[i + 3] == '[')
             {
                 const start = i + 4;
-                // Check if next char is a digit (floats start with digit, e.g., 1.14e-05)
                 if (start < line.len and std.ascii.isDigit(line[start])) {
-                    // Find end of number (until ])
                     var end = start;
                     while (end < line.len and line[end] != ']') : (end += 1) {}
                     if (end > start) {
                         const num_str = line[start..end];
-                        // Only accept if it looks like a float (contains 'e' or '.')
                         if (std.mem.indexOfScalar(u8, num_str, 'e') != null or
                             std.mem.indexOfScalar(u8, num_str, '.') != null)
                         {
@@ -2556,24 +2890,16 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
         }
 
         if (run_secs) |t| {
-            // Verify the compiled module exists before considering this candidate
-            const dir = record_path[0 .. record_path.len - "/tuning_record.json".len];
             const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ dir, line_num });
             defer allocator.free(so_path);
 
-            // Skip if .so doesn't exist (trial crashed during compilation)
             std.fs.cwd().access(so_path, .{}) catch {
                 log.debug("Skipping candidate {d}: {s} not found (likely crashed)", .{ line_num, so_path });
                 line_num += 1;
                 continue;
             };
 
-            // Valid candidate - consider for best time
-            log.debug("Candidate {d}: {d:.2} µs", .{ line_num, t * 1e6 });
-            if (t < best_time) {
-                best_time = t;
-                best_idx = line_num;
-            }
+            try candidates.append(allocator, .{ .idx = line_num, .time_secs = t });
         } else {
             log.warn("Could not parse run_secs from record {d}", .{line_num});
         }
@@ -2581,13 +2907,47 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
         line_num += 1;
     }
 
-    if (line_num == 0) {
-        log.err("No tuning records found in {s}", .{record_path});
+    if (candidates.items.len == 0) {
+        log.err("No valid tuning records found in {s}", .{record_path});
         return error.NoTuningRecords;
     }
 
-    log.info("Best candidate: {d} ({d:.2} µs)", .{ best_idx, best_time * 1e6 });
-    return .{ best_idx, best_time };
+    // Sort by time ascending (fastest first)
+    const items = try candidates.toOwnedSlice(allocator);
+    std.mem.sort(RankedCandidate, items, {}, struct {
+        fn lessThan(_: void, a: RankedCandidate, b: RankedCandidate) bool {
+            return a.time_secs < b.time_secs;
+        }
+    }.lessThan);
+
+    log.info("Found {d} candidates, fastest: {d} ({d:.2} µs)", .{
+        items.len, items[0].idx, items[0].time_secs * 1e6,
+    });
+
+    return items;
+}
+
+/// Load a specific candidate module by index.
+fn load_candidate_module(allocator: std.mem.Allocator, work_dir: []const u8, candidate_idx: usize) !TunedModule {
+    const log = std.log.scoped(.@"zg/tvm_loader");
+
+    const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ work_dir, candidate_idx });
+    defer allocator.free(so_path);
+
+    log.info("Loading tuned module: {s}", .{so_path});
+
+    const module_handle = try module_load_from_file(allocator, so_path);
+    errdefer _ = c.TVMFFIObjectDecRef(module_handle);
+
+    const main_func = try module_get_function(allocator, module_handle, "main", true);
+
+    return TunedModule{
+        .module_handle = module_handle,
+        .main_func = main_func,
+        .best_candidate = candidate_idx,
+        .best_time_us = 0, // caller fills this in
+        .allocator = allocator,
+    };
 }
 
 /// Load the best tuned module from a previous tuning run.
@@ -2597,36 +2957,20 @@ fn find_best_candidate(allocator: std.mem.Allocator, record_path: []const u8) !s
 pub fn load_tuned_module(allocator: std.mem.Allocator, opts: LoadTunedOpts) !TunedModule {
     const log = std.log.scoped(.@"zg/tvm_loader");
 
-    // TVM runtime needs to be initialized since we need full compiler module execution
     try ensure_tvm_compiler_loaded(allocator);
 
-    // find best candidate from tuning records
     const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{opts.work_dir});
     defer allocator.free(record_path);
 
-    const best_idx, const best_time = try find_best_candidate(allocator, record_path);
+    const candidates = try find_ranked_candidates(allocator, record_path);
+    defer allocator.free(candidates);
 
-    // load the corresponding .so file
-    const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ opts.work_dir, best_idx });
-    defer allocator.free(so_path);
-
-    log.info("Loading tuned module: {s}", .{so_path});
-
-    const module_handle = try module_load_from_file(allocator, so_path);
-    errdefer _ = c.TVMFFIObjectDecRef(module_handle);
-
-    // get main function
-    const main_func = try module_get_function(allocator, module_handle, "main", true);
+    const best = candidates[0];
+    var tuned = try load_candidate_module(allocator, opts.work_dir, best.idx);
+    tuned.best_time_us = best.time_secs * 1e6;
 
     log.info("Loaded tuned module successfully", .{});
-
-    return TunedModule{
-        .module_handle = module_handle,
-        .main_func = main_func,
-        .best_candidate = best_idx,
-        .best_time_us = best_time * 1e6,
-        .allocator = allocator,
-    };
+    return tuned;
 }
 
 /// Run a tuned matmul with random test data and verify correctness.
@@ -2741,4 +3085,470 @@ pub fn run_tuned_matmul(
     const flops = 2.0 * @as(f64, @floatFromInt(M * N * K)); // 2 ops per multiply-add
     const gflops = flops / (avg_us * 1000.0);
     log.info("Performance: {d:.2} GFLOP/s", .{gflops});
+}
+
+/// Run MKL baseline attention and report timing (for comparison with TVM).
+pub fn run_cpu_attention(
+    allocator: std.mem.Allocator,
+    batch: usize,
+    seq: usize,
+    head_dim: usize,
+) !void {
+    const log = std.log.scoped(.@"zg/tvm_run");
+
+    log.info("Running MKL baseline attention: Q,K,V[{d},{d},{d}]", .{ batch, seq, head_dim });
+
+    // Allocate test data
+    const qkv_size = batch * seq * head_dim;
+    const q_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(q_data);
+    const k_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(k_data);
+    const v_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(v_data);
+
+    // Allocate output and scratch buffers (reused across iterations)
+    const scores = try allocator.alloc(f32, batch * seq * seq);
+    defer allocator.free(scores);
+    const output = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(output);
+
+    // Initialize with random data (same seed as TVM for fair comparison)
+    var prng = std.Random.DefaultPrng.init(42);
+    const rand = prng.random();
+    for (q_data) |*v| v.* = rand.float(f32);
+    for (k_data) |*v| v.* = rand.float(f32);
+    for (v_data) |*v| v.* = rand.float(f32);
+
+    log.info("Executing MKL kernel...", .{});
+
+    const warmup_iters = 10;
+    const bench_iters = 100;
+
+    // Warmup (using batched GEMM)
+    for (0..warmup_iters) |_| {
+        tvm_correctness.compute_attention_mkl(batch, seq, head_dim, q_data, k_data, v_data, scores, output);
+    }
+
+    // Benchmark (using batched GEMM)
+    const start = std.time.nanoTimestamp();
+    for (0..bench_iters) |_| {
+        tvm_correctness.compute_attention_mkl(batch, seq, head_dim, q_data, k_data, v_data, scores, output);
+    }
+    const end = std.time.nanoTimestamp();
+    const elapsed_ns: u64 = @intCast(end - start);
+    const avg_us = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(bench_iters)) / 1000.0;
+
+    log.info("MKL Baseline: {d:.2} µs/iter", .{avg_us});
+
+    log.info("Verifying MKL correctness...", .{});
+    const max_error = try tvm_correctness.verify_attention(
+        allocator,
+        batch,
+        seq,
+        head_dim,
+        q_data,
+        k_data,
+        v_data,
+        output,
+    );
+
+    if (max_error < 1e-4) {
+        log.info("✓ MKL Verification passed (max error: {e:.2})", .{max_error});
+    } else {
+        log.err("✗  MKL Verification failed (max error: {e:.2})", .{max_error});
+        return error.VerificationFailed;
+    }
+    const flops = 2.0 * @as(f64, @floatFromInt(batch * seq * seq * head_dim)) + // Q@K^T
+        2.0 * @as(f64, @floatFromInt(batch * seq * seq * head_dim)); // scores@V
+    const gflops = flops / (avg_us * 1000.0);
+    log.info("MKL Performance: {d:.2} GFLOP/s", .{gflops});
+}
+
+/// Run a tuned attention module with random test data and verify correctness.
+///
+/// Iterates through candidates ranked by speed and picks the fastest one that
+/// passes correctness verification. MetaSchedule can produce miscompiled
+/// schedules (especially for complex fused ops like attention), so we verify
+/// each candidate before benchmarking.
+/// Run 3-kernel split attention pipeline using separately tuned modules.
+///
+/// Loads qk_scaled, softmax, and sv kernels from per-kernel subdirectories,
+/// verifies each independently, then runs the full pipeline with per-batch looping
+/// over 2D DLPack views. End-to-end result is verified against reference implementation.
+pub fn run_tuned_attention(
+    allocator: std.mem.Allocator,
+    batch: usize,
+    seq: usize,
+    head_dim: usize,
+    opts: LoadTunedOpts,
+) !void {
+    const log = std.log.scoped(.@"zg/tvm_run");
+
+    log.info("Running split attention: Q,K,V[{d},{d},{d}]", .{ batch, seq, head_dim });
+
+    try ensure_tvm_compiler_loaded(allocator);
+
+    // Load verified kernel for each sub-kernel
+    const kernels = [_]AttentionKernel{ .qk_scaled, .softmax, .sv };
+    var modules: [3]TunedModule = undefined;
+    var modules_loaded: usize = 0;
+    defer for (modules[0..modules_loaded]) |*m| m.deinit();
+
+    const target_suffix: []const u8 = switch (opts.target_kind) {
+        .cpu => "cpu",
+        .cuda => "cuda",
+    };
+
+    for (kernels, 0..) |kernel, i| {
+        const kernel_subdir = try kernel.subdir(allocator, seq, head_dim);
+        defer allocator.free(kernel_subdir);
+        const kernel_dir = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ opts.work_dir, kernel_subdir, target_suffix });
+        defer allocator.free(kernel_dir);
+
+        modules[i] = try load_verified_kernel(allocator, kernel_dir, kernel, seq, head_dim);
+        modules_loaded += 1;
+        log.info("Loaded verified {s} kernel (candidate {d})", .{ kernel.name(), modules[i].best_candidate });
+    }
+
+    // Allocate test data
+    const qkv_size = batch * seq * head_dim;
+    const scores_size = batch * seq * seq;
+    const q_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(q_data);
+    const k_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(k_data);
+    const v_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(v_data);
+    const scores_data = try allocator.alloc(f32, scores_size);
+    defer allocator.free(scores_data);
+    const weights_data = try allocator.alloc(f32, scores_size);
+    defer allocator.free(weights_data);
+    const output_data = try allocator.alloc(f32, qkv_size);
+    defer allocator.free(output_data);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const rand = prng.random();
+    for (q_data) |*v| v.* = rand.float(f32);
+    for (k_data) |*v| v.* = rand.float(f32);
+    for (v_data) |*v| v.* = rand.float(f32);
+
+    // 2D shapes for per-batch DLPack views
+    var shape_sd = [_]i64{ @intCast(seq), @intCast(head_dim) };
+    var shape_ss = [_]i64{ @intCast(seq), @intCast(seq) };
+
+    // Run single pass to verify end-to-end correctness
+    @memset(output_data, 0);
+    @memset(scores_data, 0);
+    @memset(weights_data, 0);
+    try run_attention_pipeline(allocator, &modules, batch, seq, head_dim, q_data, k_data, v_data, scores_data, weights_data, output_data, &shape_sd, &shape_ss);
+
+    const max_error = tvm_correctness.verify_attention(
+        allocator, batch, seq, head_dim, q_data, k_data, v_data, output_data,
+    ) catch |err| {
+        log.err("End-to-end verification failed: {s}", .{@errorName(err)});
+        return err;
+    };
+    if (max_error < 1e-3) {
+        log.info("End-to-end verification passed (max error: {e:.2})", .{max_error});
+    } else {
+        log.err("End-to-end verification failed (max error: {e:.2})", .{max_error});
+        return error.VerificationFailed;
+    }
+
+    // Warmup + benchmark
+    const warmup_iters = 10;
+    const bench_iters = 100;
+
+    for (0..warmup_iters) |_| {
+        try run_attention_pipeline(allocator, &modules, batch, seq, head_dim, q_data, k_data, v_data, scores_data, weights_data, output_data, &shape_sd, &shape_ss);
+    }
+
+    const start = std.time.nanoTimestamp();
+    for (0..bench_iters) |_| {
+        try run_attention_pipeline(allocator, &modules, batch, seq, head_dim, q_data, k_data, v_data, scores_data, weights_data, output_data, &shape_sd, &shape_ss);
+    }
+    const end = std.time.nanoTimestamp();
+    const elapsed_ns: u64 = @intCast(end - start);
+    const avg_us = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(bench_iters)) / 1000.0;
+
+    log.info("Benchmark: {d:.2} us/iter ({d} iters)", .{ avg_us, bench_iters });
+
+    // 2 matmuls: Q@K^T [B,S,S,D] and scores@V [B,S,D,S], each 2*B*S*S*D FLOPs
+    const matmul_flops = 2.0 * 2.0 * @as(f64, @floatFromInt(batch * seq * seq * head_dim));
+    const gflops = matmul_flops / (avg_us * 1000.0);
+    log.info("TVM Performance: ~{d:.2} GFLOP/s", .{gflops});
+}
+
+/// Execute the 3-kernel attention pipeline once over all batches.
+/// Uses zero-copy 2D DLPack views into batch slices.
+fn run_attention_pipeline(
+    allocator: std.mem.Allocator,
+    modules: *const [3]TunedModule,
+    batch: usize,
+    seq: usize,
+    head_dim: usize,
+    q_data: []f32,
+    k_data: []f32,
+    v_data: []f32,
+    scores_data: []f32,
+    weights_data: []f32,
+    output_data: []f32,
+    shape_sd: *[2]i64,
+    shape_ss: *[2]i64,
+) !void {
+    for (0..batch) |b| {
+        const sd_off = b * seq * head_dim;
+        const ss_off = b * seq * seq;
+
+        // qk_scaled: Q[S,D], K[S,D] -> scores[S,S]
+        var dl_q = c.DLManagedTensor{
+            .dl_tensor = make_dl_tensor_f32(q_data[sd_off..][0 .. seq * head_dim], shape_sd),
+            .manager_ctx = null, .deleter = dlpack_noop_deleter,
+        };
+        var dl_k = c.DLManagedTensor{
+            .dl_tensor = make_dl_tensor_f32(k_data[sd_off..][0 .. seq * head_dim], shape_sd),
+            .manager_ctx = null, .deleter = dlpack_noop_deleter,
+        };
+        var dl_scores = c.DLManagedTensor{
+            .dl_tensor = make_dl_tensor_f32(scores_data[ss_off..][0 .. seq * seq], shape_ss),
+            .manager_ctx = null, .deleter = dlpack_noop_deleter,
+        };
+        const t_q = try tensor_from_dlpack(allocator, &dl_q);
+        defer _ = c.TVMFFIObjectDecRef(t_q);
+        const t_k = try tensor_from_dlpack(allocator, &dl_k);
+        defer _ = c.TVMFFIObjectDecRef(t_k);
+        const t_scores = try tensor_from_dlpack(allocator, &dl_scores);
+        defer _ = c.TVMFFIObjectDecRef(t_scores);
+
+        var qk_args = [_]c.TVMFFIAny{
+            any_obj(t_q, c.kTVMFFITensor),
+            any_obj(t_k, c.kTVMFFITensor),
+            any_obj(t_scores, c.kTVMFFITensor),
+        };
+        var call_res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+        try ffi_call(allocator, modules[0].main_func, &qk_args, &call_res);
+
+        // softmax: scores[S,S] -> weights[S,S]
+        var dl_weights = c.DLManagedTensor{
+            .dl_tensor = make_dl_tensor_f32(weights_data[ss_off..][0 .. seq * seq], shape_ss),
+            .manager_ctx = null, .deleter = dlpack_noop_deleter,
+        };
+        const t_weights = try tensor_from_dlpack(allocator, &dl_weights);
+        defer _ = c.TVMFFIObjectDecRef(t_weights);
+
+        var sm_args = [_]c.TVMFFIAny{
+            any_obj(t_scores, c.kTVMFFITensor),
+            any_obj(t_weights, c.kTVMFFITensor),
+        };
+        try ffi_call(allocator, modules[1].main_func, &sm_args, &call_res);
+
+        // sv: weights[S,S], V[S,D] -> output[S,D]
+        var dl_v = c.DLManagedTensor{
+            .dl_tensor = make_dl_tensor_f32(v_data[sd_off..][0 .. seq * head_dim], shape_sd),
+            .manager_ctx = null, .deleter = dlpack_noop_deleter,
+        };
+        var dl_out = c.DLManagedTensor{
+            .dl_tensor = make_dl_tensor_f32(output_data[sd_off..][0 .. seq * head_dim], shape_sd),
+            .manager_ctx = null, .deleter = dlpack_noop_deleter,
+        };
+        const t_v = try tensor_from_dlpack(allocator, &dl_v);
+        defer _ = c.TVMFFIObjectDecRef(t_v);
+        const t_out = try tensor_from_dlpack(allocator, &dl_out);
+        defer _ = c.TVMFFIObjectDecRef(t_out);
+
+        var sv_args = [_]c.TVMFFIAny{
+            any_obj(t_weights, c.kTVMFFITensor),
+            any_obj(t_v, c.kTVMFFITensor),
+            any_obj(t_out, c.kTVMFFITensor),
+        };
+        try ffi_call(allocator, modules[2].main_func, &sv_args, &call_res);
+    }
+}
+
+/// Load and verify a single attention sub-kernel from its tuning directory.
+/// Tries candidates in order until one passes per-kernel verification.
+fn load_verified_kernel(
+    allocator: std.mem.Allocator,
+    kernel_dir: []const u8,
+    kernel: AttentionKernel,
+    seq: usize,
+    head_dim: usize,
+) !TunedModule {
+    const log = std.log.scoped(.@"zg/tvm_run");
+
+    const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{kernel_dir});
+    defer allocator.free(record_path);
+
+    const candidates = try find_ranked_candidates(allocator, record_path);
+    defer allocator.free(candidates);
+
+    const max_try = @min(candidates.len, 10);
+    var n_rejected: usize = 0;
+
+    for (candidates[0..max_try]) |cand| {
+        var tuned = load_candidate_module(allocator, kernel_dir, cand.idx) catch |err| {
+            log.warn("[{s}] Failed to load candidate {d}: {s}", .{ kernel.name(), cand.idx, @errorName(err) });
+            continue;
+        };
+        errdefer tuned.deinit();
+
+        const ok = verify_single_kernel(allocator, kernel, tuned.main_func, seq, head_dim) catch |err| {
+            log.warn("[{s}] Candidate {d} verification error: {s}", .{ kernel.name(), cand.idx, @errorName(err) });
+            tuned.deinit();
+            continue;
+        };
+
+        if (ok) {
+            tuned.best_time_us = cand.time_secs * 1e6;
+            log.info("[{s}] Candidate {d} verified ({d:.2} us)", .{ kernel.name(), cand.idx, tuned.best_time_us });
+            return tuned;
+        } else {
+            n_rejected += 1;
+            log.warn("[{s}] Candidate {d} rejected (miscompile)", .{ kernel.name(), cand.idx });
+            tuned.deinit();
+        }
+    }
+
+    if (n_rejected > 0) log.warn("[{s}] Rejected {d} miscompiled candidates", .{ kernel.name(), n_rejected });
+    log.err("[{s}] No candidates passed verification (tried {d})", .{ kernel.name(), max_try });
+    return error.VerificationFailed;
+}
+
+/// Verify a single kernel candidate against a reference implementation.
+fn verify_single_kernel(
+    allocator: std.mem.Allocator,
+    kernel: AttentionKernel,
+    main_func: c.TVMFFIObjectHandle,
+    seq: usize,
+    head_dim: usize,
+) !bool {
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+    var shape_sd = [_]i64{ @intCast(seq), @intCast(head_dim) };
+    var shape_ss = [_]i64{ @intCast(seq), @intCast(seq) };
+
+    switch (kernel) {
+        .qk_scaled => {
+            // Reference: C[i,j] = sum_d(Q[i,d] * K[j,d]) * scale
+            const q = try allocator.alloc(f32, seq * head_dim);
+            defer allocator.free(q);
+            const k = try allocator.alloc(f32, seq * head_dim);
+            defer allocator.free(k);
+            const out = try allocator.alloc(f32, seq * seq);
+            defer allocator.free(out);
+
+            var prng = std.Random.DefaultPrng.init(123);
+            const rand = prng.random();
+            for (q) |*v| v.* = rand.float(f32);
+            for (k) |*v| v.* = rand.float(f32);
+            @memset(out, 0);
+
+            // Run kernel
+            var dl_q = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(q, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_k = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(k, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_out = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            const t_q = try tensor_from_dlpack(allocator, &dl_q);
+            defer _ = c.TVMFFIObjectDecRef(t_q);
+            const t_k = try tensor_from_dlpack(allocator, &dl_k);
+            defer _ = c.TVMFFIObjectDecRef(t_k);
+            const t_out = try tensor_from_dlpack(allocator, &dl_out);
+            defer _ = c.TVMFFIObjectDecRef(t_out);
+
+            var args = [_]c.TVMFFIAny{ any_obj(t_q, c.kTVMFFITensor), any_obj(t_k, c.kTVMFFITensor), any_obj(t_out, c.kTVMFFITensor) };
+            var res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            try ffi_call(allocator, main_func, &args, &res);
+
+            // Compare
+            var max_err: f32 = 0;
+            for (0..seq) |i| {
+                for (0..seq) |j| {
+                    var sum: f32 = 0;
+                    for (0..head_dim) |d| sum += q[i * head_dim + d] * k[j * head_dim + d];
+                    const expected = sum * scale;
+                    const diff = @abs(out[i * seq + j] - expected);
+                    if (diff > max_err) max_err = diff;
+                }
+            }
+            return max_err < 1e-3;
+        },
+        .softmax => {
+            // Reference: row-wise softmax
+            const input = try allocator.alloc(f32, seq * seq);
+            defer allocator.free(input);
+            const out = try allocator.alloc(f32, seq * seq);
+            defer allocator.free(out);
+
+            var prng = std.Random.DefaultPrng.init(456);
+            const rand = prng.random();
+            for (input) |*v| v.* = rand.float(f32) * 2.0 - 1.0;
+            @memset(out, 0);
+
+            var dl_in = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(input, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_out = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            const t_in = try tensor_from_dlpack(allocator, &dl_in);
+            defer _ = c.TVMFFIObjectDecRef(t_in);
+            const t_out = try tensor_from_dlpack(allocator, &dl_out);
+            defer _ = c.TVMFFIObjectDecRef(t_out);
+
+            var args = [_]c.TVMFFIAny{ any_obj(t_in, c.kTVMFFITensor), any_obj(t_out, c.kTVMFFITensor) };
+            var res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            try ffi_call(allocator, main_func, &args, &res);
+
+            // Compare row-wise softmax
+            var max_err: f32 = 0;
+            for (0..seq) |i| {
+                const row = input[i * seq ..][0..seq];
+                var row_max: f32 = row[0];
+                for (row[1..]) |v| if (v > row_max) { row_max = v; };
+                var sum: f32 = 0;
+                for (row) |v| sum += @exp(v - row_max);
+                for (0..seq) |j| {
+                    const expected = @exp(row[j] - row_max) / sum;
+                    const diff = @abs(out[i * seq + j] - expected);
+                    if (diff > max_err) max_err = diff;
+                }
+            }
+            return max_err < 1e-4;
+        },
+        .sv => {
+            // Reference: C = A @ B (standard matmul)
+            const w = try allocator.alloc(f32, seq * seq);
+            defer allocator.free(w);
+            const v = try allocator.alloc(f32, seq * head_dim);
+            defer allocator.free(v);
+            const out = try allocator.alloc(f32, seq * head_dim);
+            defer allocator.free(out);
+
+            var prng = std.Random.DefaultPrng.init(789);
+            const rand = prng.random();
+            for (w) |*val| val.* = rand.float(f32);
+            for (v) |*val| val.* = rand.float(f32);
+            @memset(out, 0);
+
+            var dl_w = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(w, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_v = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(v, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_out = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            const t_w = try tensor_from_dlpack(allocator, &dl_w);
+            defer _ = c.TVMFFIObjectDecRef(t_w);
+            const t_v = try tensor_from_dlpack(allocator, &dl_v);
+            defer _ = c.TVMFFIObjectDecRef(t_v);
+            const t_out = try tensor_from_dlpack(allocator, &dl_out);
+            defer _ = c.TVMFFIObjectDecRef(t_out);
+
+            var args = [_]c.TVMFFIAny{ any_obj(t_w, c.kTVMFFITensor), any_obj(t_v, c.kTVMFFITensor), any_obj(t_out, c.kTVMFFITensor) };
+            var res: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
+            try ffi_call(allocator, main_func, &args, &res);
+
+            var max_err: f32 = 0;
+            for (0..seq) |i| {
+                for (0..head_dim) |j| {
+                    var sum: f32 = 0;
+                    for (0..seq) |kk| sum += w[i * seq + kk] * v[kk * head_dim + j];
+                    const diff = @abs(out[i * head_dim + j] - sum);
+                    if (diff > max_err) max_err = diff;
+                }
+            }
+            return max_err < 1e-3;
+        },
+    }
 }

@@ -599,8 +599,72 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
     try zg.pr.zxpr.emit(vjp_func, stdout, .auto_stdout, .{});
 }
 
-pub fn print_tvm_runtime_globals(allocator: std.mem.Allocator) !void {
-    return tvm_runtime.print_global_functions(allocator);
+/// Enumerate TVM FFI global functions.
+/// Writes available operations to stdout
+/// Note: Requires TVM runtime to be already loaded (will happen on first FFI call).
+pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
+    // Load TVM compiler to register te.* and topi.* functions
+    try tvm_runtime.ensure_tvm_compiler_loaded(allocator);
+
+    // get function enumeration functor
+    const factory = try tvm_runtime.ffi_get_global(allocator, "ffi.FunctionListGlobalNamesFunctor");
+    defer _ = tvm_runtime.c.TVMFFIObjectDecRef(factory);
+
+    var res0: tvm_runtime.c.TVMFFIAny = std.mem.zeroes(tvm_runtime.c.TVMFFIAny);
+    try tvm_runtime.ffi_call0(allocator, factory, &res0);
+    if (res0.type_index != tvm_runtime.c.kTVMFFIFunction or res0.unnamed_1.v_obj == null) {
+        return error.UnexpectedTvmType;
+    }
+    const functor: tvm_runtime.c.TVMFFIObjectHandle = @ptrCast(res0.unnamed_1.v_obj);
+    defer _ = tvm_runtime.c.TVMFFIObjectDecRef(functor);
+
+    // get count
+    var res_len: tvm_runtime.c.TVMFFIAny = std.mem.zeroes(tvm_runtime.c.TVMFFIAny);
+    try tvm_runtime.ffi_call1_i64(allocator, functor, -1, &res_len);
+    if (res_len.type_index != tvm_runtime.c.kTVMFFIInt) return error.UnexpectedTvmType;
+    const count: usize = @intCast(res_len.unnamed_1.v_int64);
+
+    // collect and sort all function names
+    var names = try std.ArrayList([]const u8).initCapacity(allocator, count);
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    for (0..count) |i| {
+        var res: tvm_runtime.c.TVMFFIAny = std.mem.zeroes(tvm_runtime.c.TVMFFIAny);
+        tvm_runtime.ffi_call1_i64(allocator, functor, @intCast(i), &res) catch continue;
+        const s = tvm_runtime.any_to_string(allocator, &res) catch continue;
+        try names.append(allocator, s);
+    }
+
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    // print with category headers
+    var stdout_buf: [16384]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const out = &stdout_writer.interface;
+    defer out.flush() catch {};
+
+    try out.print("# TVM FFI Global Functions (total: {d})\n#\n", .{names.items.len});
+
+    var current_prefix: []const u8 = "";
+    var category_count: usize = 0;
+    for (names.items) |name| {
+        const prefix = if (std.mem.indexOf(u8, name, ".")) |idx| name[0..idx] else "root";
+
+        if (!std.mem.eql(u8, prefix, current_prefix)) {
+            if (category_count > 0) try out.writeAll("\n");
+            try out.print("## {s}\n", .{prefix});
+            current_prefix = prefix;
+            category_count += 1;
+        }
+        try out.print("  {s}\n", .{name});
+    }
 }
 
 pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.Palette) !void {
@@ -758,5 +822,86 @@ fn fill_targets(
             }
             y[n * out_dim + j] = acc;
         }
+    }
+}
+
+/// Annotated attention pattern demo.
+///
+/// Builds simplified attention compute: Q @ K^T -> scale -> softmax -> @ V
+/// with region annotations to visualize what would be lowered.
+pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.Palette) !void {
+    var program = zg.pr.Program.init(allocator);
+    defer program.deinit();
+
+    var b = try zg.frontend.Builder.init(&program, "attention");
+    defer b.deinit();
+
+    // simplified attention: [B, S, D] shapes
+    // Q, K, V: [batch=2, seq=4, head_dim=64]
+    const batch: i64 = 2;
+    const seq: i64 = 4;
+    const head_dim: i64 = 64;
+
+    const q = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
+    const k = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
+    const v = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
+
+    // region annotation
+    const tvm_opts: zg.frontend.OpOptions = .{ .kernelize_provider = "tvm" };
+
+    // attention scores: Q @ K^T  ->  [B, S, S]
+    // using dot_general for batched matmul with transpose
+    const scores = try q.annotate(tvm_opts).dot_general(k, .{
+        .lhs_batch_dims = &.{0},       // batch dim
+        .rhs_batch_dims = &.{0},
+        .lhs_contracting_dims = &.{2}, // contract on head_dim
+        .rhs_contracting_dims = &.{2}, // K^T: transpose by contracting on last dim
+    });
+
+    // scale scores
+    const scale_val = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+    const scale = try b.scalar_literal(zg.pr.ops.types.scalar_literal(.f32, scale_val));
+    const scale_broadcast = try scale.annotate(tvm_opts).broadcast_in_dim(scores.tensor.shape.dims, &.{});
+    const scaled = try scores.annotate(tvm_opts).mul(scale_broadcast);
+
+    // softmax over last dim [S]
+    const rank = scaled.tensor.shape.dims.len;
+    const axis: i64 = @intCast(rank - 1);
+    const max_val = try scaled.annotate(tvm_opts).reduce_max(&.{axis});
+
+    // broadcast max back to full shape for stability
+    const max_broadcast = try max_val.annotate(tvm_opts).broadcast_in_dim(scaled.tensor.shape.dims, &.{ 0, 1 });
+    const shifted = try scaled.annotate(tvm_opts).sub(max_broadcast);
+    const exp_vals = try shifted.annotate(tvm_opts).exp();
+    const sum_exp = try exp_vals.annotate(tvm_opts).reduce_sum(&.{axis});
+    const sum_broadcast = try sum_exp.annotate(tvm_opts).broadcast_in_dim(exp_vals.tensor.shape.dims, &.{ 0, 1 });
+    const attn_weights = try exp_vals.annotate(tvm_opts).div(sum_broadcast);
+
+    // output: attn_weights @ V  ->  [B, S, D]
+    const out = try attn_weights.annotate(tvm_opts).dot_general(v, .{
+        .lhs_batch_dims = &.{0},
+        .rhs_batch_dims = &.{0},
+        .lhs_contracting_dims = &.{2}, // contract on S dimension
+        .rhs_contracting_dims = &.{1},
+    });
+
+    _ = try b.finish(&.{out});
+
+    const func = program.functions[0];
+
+    var stdout_buffer: [16384]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch @panic("Flush failed");
+
+    if (sweep_palettes) {
+        const palettes = [_]zg.pr.zxpr.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
+        for (palettes) |pal| {
+            try stdout.print("\n==== Palette: {s} ====\n", .{@tagName(pal)});
+            try zg.pr.zxpr.emit(func, stdout, .auto_stdout, .{ .palette = pal });
+        }
+    } else {
+        const pal = palette orelse .default;
+        try zg.pr.zxpr.emit(func, stdout, .auto_stdout, .{ .palette = pal });
     }
 }

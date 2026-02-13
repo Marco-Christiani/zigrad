@@ -114,12 +114,19 @@ pub fn main() !void {
             }
             return demos.print_tvm_kernelize_pr(gpa, sweep_palettes, palette);
         }
-        if (std.mem.eql(u8, m, "tvm-runtime")) {
+        if (std.mem.eql(u8, m, "tvm-attention-zxpr")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.print_tvm_attention_pr(gpa, false, null);
+        }
+        if (std.mem.eql(u8, m, "tvm-dump-symbols")) {
             if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
             }
-            return demos.print_tvm_runtime_globals(gpa);
+            return demos.dump_tvm_ffi_symbols(gpa);
         }
         if (std.mem.eql(u8, m, "tvm-tune")) {
             if (have_dump_pr or have_dump_mlir) {
@@ -137,7 +144,7 @@ pub fn main() !void {
             for (mode_args.items) |arg| {
                 if (std.mem.startsWith(u8, arg, "--shape=")) {
                     const value = arg["--shape=".len..];
-                    // Parse MxNxK format
+                    // parse MxNxK format
                     var parts = std.mem.splitScalar(u8, value, 'x');
                     shape.M = std.fmt.parseInt(usize, parts.next() orelse {
                         try print_usage();
@@ -202,16 +209,25 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
 
-            // Build matmul TIR module
+            // build matmul TIR module
+            // Note: ir_mod ownership transfers to tune()
             const ir_mod = try tvm_runtime.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
-            // Note: ir_mod ownership transfers to tune(), which handles cleanup
 
-            // Run autotuning
-            return tvm_runtime.tune(gpa, ir_mod, target_kind, .{
-                .M = shape.M,
-                .N = shape.N,
-                .K = shape.K,
-            }, .{
+            // A[M,K], B[K,N], C[M,N]
+            const M_i64: i64 = @intCast(shape.M);
+            const N_i64: i64 = @intCast(shape.N);
+            const K_i64: i64 = @intCast(shape.K);
+            const shape_a = try gpa.dupe(i64, &[_]i64{ M_i64, K_i64 });
+            defer gpa.free(shape_a);
+            const shape_b = try gpa.dupe(i64, &[_]i64{ K_i64, N_i64 });
+            defer gpa.free(shape_b);
+            const shape_c = try gpa.dupe(i64, &[_]i64{ M_i64, N_i64 });
+            defer gpa.free(shape_c);
+            const tensor_shapes = try gpa.dupe([]const i64, &[_][]const i64{ shape_a, shape_b, shape_c });
+            defer gpa.free(tensor_shapes);
+
+            // run autotuning
+            return tvm_runtime.tune(gpa, ir_mod, target_kind, tensor_shapes, .{
                 .work_dir = work_dir,
                 .max_trials = max_trials,
                 .trials_per_iter = trials_per_iter,
@@ -225,7 +241,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var work_dir: []const u8 = "artifacts/tvm_cache/cpu"; // NOTE: what about cuda/ subdir? also what about cuda support?
+            var work_dir: []const u8 = "artifacts/tvm_cache/cpu"; // NOTE: shouldnt be doing it this way, but also need to implement properly later anyways
 
             for (mode_args.items) |arg| {
                 if (std.mem.startsWith(u8, arg, "--shape=")) {
@@ -265,6 +281,225 @@ pub fn main() !void {
             return tvm_runtime.run_tuned_matmul(gpa, shape.M, shape.N, shape.K, .{
                 .work_dir = work_dir,
             });
+        }
+        if (std.mem.eql(u8, m, "tvm-run-attention")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            var shape: struct { batch: usize = 2, seq: usize = 4, head_dim: usize = 64 } = .{};
+            var work_dir: []const u8 = "artifacts/tvm_cache_attn/cpu";
+
+            for (mode_args.items) |arg| {
+                if (std.mem.startsWith(u8, arg, "--shape=")) {
+                    const value = arg["--shape=".len..];
+                    var parts = std.mem.splitScalar(u8, value, 'x');
+                    shape.batch = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.seq = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.head_dim = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--work-dir=")) {
+                    work_dir = arg["--work-dir=".len..];
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+
+            return tvm_runtime.run_tuned_attention(gpa, shape.batch, shape.seq, shape.head_dim, .{
+                .work_dir = work_dir,
+            });
+        }
+        if (std.mem.eql(u8, m, "tvm-run-attention-cpu")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            var shape: struct { batch: usize = 2, seq: usize = 4, head_dim: usize = 64 } = .{};
+            var work_dir: []const u8 = "artifacts/tvm_cache_attn";
+
+            for (mode_args.items) |arg| {
+                if (std.mem.startsWith(u8, arg, "--shape=")) {
+                    const value = arg["--shape=".len..];
+                    var parts = std.mem.splitScalar(u8, value, 'x');
+                    shape.batch = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.seq = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.head_dim = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--work-dir=")) {
+                    work_dir = arg["--work-dir=".len..];
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+
+            // Run MKL baseline
+            try tvm_runtime.run_cpu_attention(gpa, shape.batch, shape.seq, shape.head_dim);
+
+            // Also run TVM if tuned module exists
+            tvm_runtime.run_tuned_attention(gpa, shape.batch, shape.seq, shape.head_dim, .{
+                .work_dir = work_dir,
+            }) catch |err| {
+                if (err == error.NoTuningRecords) {
+                    std.log.info("No TVM tuned module found — run tuning first:", .{});
+                    std.log.info("  tvm-tune-attention --shape={d}x{d}x{d}", .{ shape.batch, shape.seq, shape.head_dim });
+                } else {
+                    return err;
+                }
+            };
+
+            return;
+        }
+        if (std.mem.eql(u8, m, "tvm-tune-attention")) {
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            var shape: struct { batch: usize = 2, seq: usize = 4, head_dim: usize = 64 } = .{};
+            var target_kind: tvm_runtime.TargetKind = .cpu;
+            var work_dir: []const u8 = "artifacts/tvm_cache_attn";
+            var max_trials: u32 = 64;
+            var trials_per_iter: u32 = 16;
+
+            for (mode_args.items) |arg| {
+                if (std.mem.startsWith(u8, arg, "--shape=")) {
+                    const value = arg["--shape=".len..];
+                    // parse BxSxD format
+                    var parts = std.mem.splitScalar(u8, value, 'x');
+                    shape.batch = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.seq = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.head_dim = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--trials=")) {
+                    const value = arg["--trials=".len..];
+                    max_trials = std.fmt.parseInt(u32, value, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--trials-per-iter=")) {
+                    const value = arg["--trials-per-iter=".len..];
+                    trials_per_iter = std.fmt.parseInt(u32, value, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--work-dir=")) {
+                    work_dir = arg["--work-dir=".len..];
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--cuda") or std.mem.eql(u8, arg, "--gpu")) {
+                    target_kind = .cuda;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--cpu")) {
+                    target_kind = .cpu;
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+
+            // tune 3 split attention kernels sequentially
+            const S_i64: i64 = @intCast(shape.seq);
+            const D_i64: i64 = @intCast(shape.head_dim);
+            const kernels = [_]tvm_runtime.AttentionKernel{ .qk_scaled, .softmax, .sv };
+
+            for (kernels) |kernel| {
+                std.log.info("=== Tuning {s} kernel (seq={d}, head_dim={d}) ===", .{
+                    kernel.name(), shape.seq, shape.head_dim,
+                });
+
+                const ir_mod = try tvm_runtime.build_attention_kernel_tir(gpa, kernel, shape.seq, shape.head_dim);
+
+                const kernel_subdir = try kernel.subdir(gpa, shape.seq, shape.head_dim);
+                defer gpa.free(kernel_subdir);
+                const kernel_work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, kernel_subdir });
+                defer gpa.free(kernel_work_dir);
+
+                // per-kernel tensor shapes (no batch dim)
+                const shape_sd = try gpa.dupe(i64, &[_]i64{ S_i64, D_i64 });
+                defer gpa.free(shape_sd);
+                const shape_ss = try gpa.dupe(i64, &[_]i64{ S_i64, S_i64 });
+                defer gpa.free(shape_ss);
+
+                const tensor_shapes: []const []const i64 = switch (kernel) {
+                    // Q[S,D], K[S,D], output[S,S]
+                    .qk_scaled => try gpa.dupe([]const i64, &[_][]const i64{ shape_sd, shape_sd, shape_ss }),
+                    // scores[S,S], output[S,S]
+                    .softmax => try gpa.dupe([]const i64, &[_][]const i64{ shape_ss, shape_ss }),
+                    // weights[S,S], V[S,D], output[S,D]
+                    .sv => try gpa.dupe([]const i64, &[_][]const i64{ shape_ss, shape_sd, shape_sd }),
+                };
+                defer gpa.free(tensor_shapes);
+
+                try tvm_runtime.tune(gpa, ir_mod, target_kind, tensor_shapes, .{
+                    .work_dir = kernel_work_dir,
+                    .max_trials = max_trials,
+                    .trials_per_iter = trials_per_iter,
+                });
+            }
+            return;
         }
         if (std.mem.eql(u8, m, "benchmark")) {
             if (have_dump_pr or have_dump_mlir) {
@@ -539,7 +774,8 @@ fn print_usage() !void {
         \\modes:
         \\  print-pr                     prints the PR for the demo program
         \\  tvm-zxpr [--sweep-palettes] [--palette=<name>]  prints a kernelized TVM region in zxpr
-        \\  tvm-runtime                  lists global TVM runtime functions (requires -Dtvm)
+        \\  tvm-attention-zxpr [--sweep-palettes] [--palette=<name>]  prints attention pattern with TVM annotation
+        \\  tvm-dump-symbols             enumerates all available TVM FFI functions (requires -Dtvm)
         \\  tvm-tune [options]           runs TVM MetaSchedule autotuning on matmul (requires -Dtvm)
         \\      --shape=MxNxK            matmul dimensions (default: 128x128x128)
         \\      --trials=N               max tuning trials (default: 64)
@@ -552,6 +788,19 @@ fn print_usage() !void {
         \\  tvm-run [options]            runs best tuned matmul from previous tuning (requires -Dtvm)
         \\      --shape=MxNxK            matmul dimensions (must match tuned shape)
         \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache)
+        \\  tvm-run-attention [options]  runs best tuned attention with correctness check (requires -Dtvm)
+        \\      --shape=BxSxD            attention dimensions (batch×seq×head_dim, default: 2x4x64)
+        \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache_attn/cpu)
+        \\  tvm-run-attention-cpu [options]  runs MKL baseline + TVM comparison (requires -Dtvm)
+        \\      --shape=BxSxD            attention dimensions (batch×seq×head_dim, default: 2x4x64)
+        \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache_attn/cpu)
+        \\  tvm-tune-attention [options] runs TVM MetaSchedule autotuning on attention (requires -Dtvm)
+        \\      --shape=BxSxD            attention dimensions (batch×seq×head_dim, default: 2x4x64)
+        \\      --trials=N               max tuning trials (default: 64)
+        \\      --trials-per-iter=N      batch size per iteration (default: 16)
+        \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache_attn)
+        \\      --cuda/--gpu             tune for CUDA target
+        \\      --cpu                    tune for CPU target (default)
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
@@ -562,8 +811,7 @@ fn print_usage() !void {
         \\  jit-cache-run <path>         loads and runs PJRT JIT cache artifact
         \\  benchmark [options]          runs matmul performance benchmarks
         \\      --shapes=MxNxK[,...]     comma-separated list of shapes (default: 128x128x128)
-        \\      --impls=impl1[,...]      implementations to test: zig_naive, tvm_cpu, xla_cpu,
-        \\                               or "all" (default: zig_naive)
+        \\      --impls=impl1[,...]      implementations to test: zig_naive, tvm_cpu, xla_cpu, etc (default: zig_naive)
         \\      --warmup=N               warmup iterations (default: 10)
         \\      --iters=N                benchmark iterations (default: 100)
         \\      --tvm-cache-dir=PATH     TVM module cache directory (default: artifacts/tvm_cache)
@@ -582,7 +830,6 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
     var bench_iters: usize = 100;
     var tvm_cache_dir: []const u8 = "artifacts/tvm_cache";
 
-    // Parse arguments
     for (args) |arg| {
         if (std.mem.startsWith(u8, arg, "--shapes=")) {
             const value = arg["--shapes=".len..];
@@ -593,15 +840,10 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
             }
         } else if (std.mem.startsWith(u8, arg, "--impls=")) {
             const value = arg["--impls=".len..];
-            if (std.mem.eql(u8, value, "all")) {
-                // Only Zig naive baseline for now (TVM/XLA will be added in Phase 3-4)
-                try impls.append(gpa, .zig_naive);
-            } else {
-                var impl_iter = std.mem.splitScalar(u8, value, ',');
-                while (impl_iter.next()) |impl_str| {
-                    const impl = parse_impl(impl_str) orelse return error.InvalidImplementation;
-                    try impls.append(gpa, impl);
-                }
+            var impl_iter = std.mem.splitScalar(u8, value, ',');
+            while (impl_iter.next()) |impl_str| {
+                const impl = parse_impl(impl_str) orelse return error.InvalidImplementation;
+                try impls.append(gpa, impl);
             }
         } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
             const value = arg["--warmup=".len..];
@@ -617,12 +859,12 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    // Defaults
+    // defaults
     if (shapes.items.len == 0) {
         try shapes.append(gpa, .{ .m = 128, .n = 128, .k = 128 });
     }
     if (impls.items.len == 0) {
-        try impls.append(gpa, .zig_naive);
+        return error.InvalidArguments;
     }
 
     // Run benchmark
