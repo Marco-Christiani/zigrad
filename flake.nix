@@ -280,24 +280,6 @@
         clang
       ];
 
-      pyShellPkgs0 = pkgs.python312.withPackages (ps: [
-        ps.ruff
-        ps.jax
-        (
-          if builtins.hasAttr "jax-cuda13-plugin" ps
-          then ps."jax-cuda13-plugin"
-          else ps."jax-cuda12-plugin"
-        )
-        ps.pyelftools
-        ps.transformers
-        ps.flax
-        # ps.torchWithCuda
-        # ps.torch
-        ps.torch-bin
-        ps.polars
-        ps.plotly
-      ]);
-
       pyShellPkgs = pkgs.callPackage ./nix/pydev.nix {
         inherit
           system
@@ -373,7 +355,8 @@
               PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH"
             fi
             export PJRT_PLUGIN_PATH
-
+            # zig is not happy about -fmacro-prefix-map
+            unset NIX_CFLAGS_COMPILE
           '';
         };
 
@@ -391,21 +374,6 @@
             fi
             printf "SDK path: ZG_EXTERNAL_SDK_ROOT=$ZG_EXTERNAL_SDK_ROOT"
           '';
-        };
-
-        pyshell = pkgs.mkShellNoCC {
-          packages = [pyShellPkgs0];
-        };
-
-        # more complicated way to enable cuda via overlays, this may be better, though.
-        # unless we find cuda issues with the simpler devshell, not using this
-        # this expensive to build, especially the tests take forever
-        pyshell2 = pkgs.mkShell {
-          packages = [
-            (pythonJaxCudaOverride.withPackages (ps: [
-              ps.jax
-            ]))
-          ];
         };
 
         profiling = pkgs.mkShellNoCC {
