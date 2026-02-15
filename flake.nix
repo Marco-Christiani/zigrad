@@ -173,6 +173,8 @@
         cudaSupport = false;
         cudaPackages = null;
         persistentBazelOutputBase = false;
+        cpuMathLibrary = "onednn";
+        cpuNativeTuning = true;
       };
 
       xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
@@ -186,6 +188,8 @@
         cudaPackages = null;
         useCudaStdenv = false;
         persistentBazelOutputBase = false;
+        cpuMathLibrary = "onednn";
+        cpuNativeTuning = true;
       };
 
       # Dev: ccache + devel.
@@ -201,6 +205,8 @@
 
         # Bazel incremental cache outside store
         persistentBazelOutputBase = true;
+        cpuMathLibrary = "onednn";
+        cpuNativeTuning = true;
       };
 
       # Dev: ccache + devel + CUDA.
@@ -216,12 +222,16 @@
         cudaPackages = null;
         useCudaStdenv = false;
         persistentBazelOutputBase = true;
+        cpuMathLibrary = "onednn";
+        cpuNativeTuning = true;
       };
       # ------------------------------------------------------------------
       # Simple buildBazelPackage-based PJRT C API plugins (experimental)
       xlaPjrtPluginsBazel = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
         inherit lockFile;
         cudaSupport = false;
+        cpuMathLibrary = "onednn";
+        cpuNativeTuning = true;
       };
 
       xlaPjrtPluginsBazelCuda = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
@@ -231,7 +241,9 @@
         copyNcclNvshmem = true;
         copyCudaTools = true;
         copyLibdevice = true;
-        depsHash = "sha256-G9ioY7aTQNaVlsBGRM/NuVbo7e/pjVNWX8epAPYAFYk=";
+        cpuMathLibrary = "onednn";
+        cpuNativeTuning = true;
+        depsHash = "sha256-DujVOhD1wZ7afYISgKt7zNMsAkr6CbxGQcMMnXMC/TY=";
       };
 
       # TVM with LLVM 22 (built from XLA-pinned sources).

@@ -181,8 +181,8 @@ in
       # Build MLIR-C first (your Zig links against this).
       cmake --build llvm-build --target MLIR-C
 
-      # If StableHLO’s build links to MLIRCAPI*.so imported targets, they must exist before stablehlo-build runs.
-      # Building them here avoids the “missing and no known rule to make it” failure.
+      # If StableHLO's build links to MLIRCAPI*.so imported targets, they must exist before stablehlo-build runs.
+      # Building them here avoids the "missing and no known rule to make it" failure.
       cmake --build llvm-build --target \
         MLIRCAPIIR \
         MLIRCAPIArith \

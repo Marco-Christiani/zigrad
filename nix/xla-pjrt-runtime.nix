@@ -37,7 +37,17 @@
   # Dev-speed knobs (keep false for hermetic builds)
   persistentBazelOutputBase ? false,
   bazelLogEvents ? false,
-  extraCpuFlags ? false,
+  # CPU math library for the PJRT CPU plugin.
+  #   "eigen"        - Eigen + XNNPACK only (default).
+  #   "onednn"       - open-source oneDNN v3.7.3, JIT contraction kernel, threadpool.
+  #   "onednn-thunk" - onednn + compiler rewrites eligible ops to oneDNN thunks (dev branch).
+  #   "onednn-omp"   - same as "onednn" but uses OpenMP (libiomp5) instead of threadpool.
+  #                    Note: the old proprietary MKL-ML BLAS blobs have been removed from XLA;
+  #                    this variant only differs in threading model. Threadpool is generally
+  #                    preferred (avoids oversubscription with Eigen's threadpool).
+  cpuMathLibrary ? "eigen",
+  # Emit -march=native -mavx2 -mfma for both target and host.
+  cpuNativeTuning ? false,
 }: let
   # -----------------------------------------------------------------------------
   # XLA PJRT runtime bundle
@@ -214,9 +224,55 @@
       "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
     ];
 
-  cpuFlags = lib.optionalString extraCpuFlags ''
-    build --config=mkl_threadpool
+  # -- oneDNN flags --------------------------------------------------------
+  # build_with_mkl:          compile oneDNN sources, set XLA_ONEDNN / ENABLE_ONEDNN_V3 macros.
+  # enable_mkl:              activate runtime paths (ENABLE_MKL). Without this, oneDNN compiles but is inert.
+  # build_with_mkl_opensource: exclude proprietary MKL-ML blobs; only open-source oneDNN.
+  # build_with_openmp:       oneDNN uses OpenMP (links libiomp5). Omit -> threadpool.
+  # build_with_onednn_async: async thunk runtime (ENABLE_ONEDNN_ASYNC). Required for
+  #                          IsOneDnnCompatible() -> compiler rewrites ops to __onednn$* custom calls.
+  #                          Switches dep from stable v3.7.3 to dev-v3.7-thunk-preview.
+  # tensorflow_mkldnn_contraction_kernel:
+  #   =1  replace Eigen's SGEMM (gebp_kernel) with oneDNN JIT (avx/avx2/fma/avx512 via CPUID).
+  #   =0  keep Eigen's default contraction kernel.
+
+  onednnBaseFlags = ''
+    build --define=build_with_mkl=true
+    build --define=enable_mkl=true
     build --define=tensorflow_mkldnn_contraction_kernel=1
+  '';
+
+  asyncFlags = ''
+    build --define=build_with_onednn_async=true
+  '';
+
+  mathLibraryFlags =
+    {
+      "eigen" = "";
+
+      "onednn" = ''
+        ${onednnBaseFlags}
+        build --define=build_with_mkl_opensource=true
+      '';
+
+      "onednn-thunk" = ''
+        ${onednnBaseFlags}
+        build --define=build_with_mkl_opensource=true
+        ${asyncFlags}
+      '';
+
+      # OpenMP threading variant. Only differs from "onednn" in threading model
+      # (libiomp5 vs Eigen threadpool). The old proprietary MKL-ML BLAS blobs
+      # have been removed from XLA; intel_binary_blob now just provides libiomp5.
+      "onednn-omp" = ''
+        ${onednnBaseFlags}
+        build --define=build_with_openmp=true
+      '';
+    }.${
+      cpuMathLibrary
+    };
+
+  nativeTuningFlags = lib.optionalString cpuNativeTuning ''
     build --copt=-march=native
     build --copt=-mtune=native
     build --copt=-mavx2
@@ -224,7 +280,10 @@
     build --host_copt=-march=native
     build --host_copt=-mtune=native
     build --host_copt=-mavx2
-    build --host_copt=-mfma'';
+    build --host_copt=-mfma
+  '';
+
+  cpuFlags = "${mathLibraryFlags}${nativeTuningFlags}";
 
   # see jaxlib
   xlaBazelrc =
