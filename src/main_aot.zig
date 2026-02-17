@@ -17,23 +17,12 @@ pub fn run(
     );
     defer allocator.free(mlir_bytes);
 
-    const compile_opts_pb = try zg.backend.pjrt.build_compile_options_proto(
-        allocator,
-        .{},
-    );
-    defer allocator.free(compile_opts_pb);
-
-    const client = backend.get_client();
-    const topology = try client.get_topology_description();
-
-    var exec = try client.compile_aot(&topology, .mlir_bytecode, mlir_bytes, compile_opts_pb);
-    defer exec.deinit();
-
-    const serialized = try exec.serialize(allocator);
+    // Compile, serialize, then reload — exercises the AOT round-trip.
+    const serialized = try backend.compile_serialized(device, mlir_bytes, true, .{});
     defer allocator.free(serialized);
 
-    var loaded = try client.deserialize_and_load(serialized, null);
-    defer loaded.deinit();
+    var loaded = try backend.load_serialized_executable(serialized, null);
+    defer loaded.deinit(backend.api);
 
     try run_demo_executable(allocator, backend, device, &loaded);
 
@@ -77,19 +66,19 @@ fn run_demo_executable(
     const dims_c = [_]i64{ 2, 2 };
 
     var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer dev_a.deinit();
+    defer dev_a.deinit(backend.api);
     var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer dev_b.deinit();
+    defer dev_b.deinit(backend.api);
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer dev_c.deinit();
+    defer dev_c.deinit(backend.api);
 
-    const result = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try exe.execute(backend.api, allocator, &.{ dev_a, dev_b, dev_c });
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
-            tmp.deinit();
+            tmp.deinit(backend.api);
         }
-        for (result.outputs) |*buf| buf.deinit();
+        for (result.outputs) |*buf| buf.deinit(backend.api);
         allocator.free(result.outputs);
     }
 
@@ -97,9 +86,9 @@ fn run_demo_executable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try result.outputs[0].to_host(out_host.data);
-    defer ev.deinit();
-    try ev.await_();
+    var ev = try result.outputs[0].to_host(backend.api, out_host.data);
+    defer ev.deinit(backend.api);
+    try ev.await_(backend.api);
 
     const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{

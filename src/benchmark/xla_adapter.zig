@@ -49,7 +49,7 @@ pub const XlaContext = struct {
         // Clean up cached executables
         var iter = self.compiled_cache.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.deinit();
+            entry.value_ptr.*.deinit(self.backend.api);
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.compiled_cache.deinit();
@@ -86,37 +86,39 @@ pub const XlaContext = struct {
         const a_bytes = std.mem.sliceAsBytes(a);
         const b_bytes = std.mem.sliceAsBytes(b);
 
+        const api = self.backend.api;
+
         var dev_a = try self.backend.buffer_from_host(self.device, a_bytes, .f32, &.{
             @intCast(m),
             @intCast(k),
         });
-        defer dev_a.deinit();
+        defer dev_a.deinit(api);
 
         var dev_b = try self.backend.buffer_from_host(self.device, b_bytes, .f32, &.{
             @intCast(k),
             @intCast(n),
         });
-        defer dev_b.deinit();
+        defer dev_b.deinit(api);
 
         // Execute
-        const result = try executable.execute(self.allocator, &.{ dev_a, dev_b });
+        const result = try executable.execute(api, self.allocator, &.{ dev_a, dev_b });
         defer {
-            for (result.outputs) |*buf| buf.deinit();
+            for (result.outputs) |*buf| buf.deinit(api);
             self.allocator.free(result.outputs);
         }
 
         // Wait for GPU kernel to complete before copying results
         if (result.device_complete_event) |ev| {
             var device_event = ev;
-            defer device_event.deinit();
-            try device_event.await_();
+            defer device_event.deinit(api);
+            try device_event.await_(api);
         }
 
         // Copy result back to c
         const c_bytes = std.mem.sliceAsBytes(c);
-        var copy_event = try result.outputs[0].to_host(c_bytes);
-        defer copy_event.deinit();
-        try copy_event.await_();
+        var copy_event = try result.outputs[0].to_host(api, c_bytes);
+        defer copy_event.deinit(api);
+        try copy_event.await_(api);
     }
 
     /// Compile XLA matmul for a specific shape.
@@ -155,7 +157,7 @@ pub const XlaContext = struct {
         executable.* = try self.backend.compile(
             self.device,
             mlir_bytes,
-            .stablehlo_portable,
+            true,
             .{},
         );
 

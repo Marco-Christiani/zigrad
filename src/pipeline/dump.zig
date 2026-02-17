@@ -19,12 +19,11 @@ pub const DumpConfig = struct {
     entry_name: ?[]const u8 = null,
 };
 
-pub fn dump_pr_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
+fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     _ = ctx;
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
-    const cfg_ptr = userdata orelse return error.MissingContext;
-    const cfg: *DumpConfig = @ptrCast(@alignCast(cfg_ptr));
+    const cfg: *DumpConfig = @ptrCast(@alignCast(ptr));
 
     const program = artifact.pr;
     const task = struct {
@@ -41,12 +40,11 @@ pub fn dump_pr_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: 
     with_writer(cfg, task) catch return error.ValidationFailed;
 }
 
-pub fn dump_mlir_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
+fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     _ = ctx;
     if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
 
-    const cfg_ptr = userdata orelse return error.MissingContext;
-    const cfg: *DumpConfig = @ptrCast(@alignCast(cfg_ptr));
+    const cfg: *DumpConfig = @ptrCast(@alignCast(ptr));
 
     const mlir = artifact.mlir;
     if (mlir.encoding != .text) return error.ValidationFailed;
@@ -67,21 +65,21 @@ pub fn dump_mlir_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata
 
 pub fn dump_pr_pass_with_config(config: *DumpConfig) pass.Pass {
     return .{
+        .ptr = @ptrCast(config),
+        .run_fn = dump_pr_pass,
         .name = "dump_pr",
         .input_kind = .pr,
         .output_kind = .pr,
-        .run = dump_pr_pass,
-        .userdata = config,
     };
 }
 
 pub fn dump_mlir_pass_with_config(config: *DumpConfig) pass.Pass {
     return .{
+        .ptr = @ptrCast(config),
+        .run_fn = dump_mlir_pass,
         .name = "dump_mlir",
         .input_kind = .mlir,
         .output_kind = .mlir,
-        .run = dump_mlir_pass,
-        .userdata = config,
     };
 }
 

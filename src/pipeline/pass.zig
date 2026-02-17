@@ -1,21 +1,23 @@
 /// Pass-Based Pipeline Infrastructure
 ///
 /// This module defines the core abstractions for the pass-based compilation model:
-/// - Artifact: Tagged union representing IR at various stages (PR, MLIR, EA)
+/// - Artifact: Tagged union representing IR at various stages (PR, MLIR)
 /// - PassContext: Shared state threaded through passes
 /// - Pass: Pass metadata + runnable function + optional user config
 /// - Pipeline: Pass sequence with validation and execution
 ///
+/// The pipeline operates on PR and MLIR only. Compilation (MLIR -> EA) is a
+/// backend responsibility, called separately after the pipeline completes.
+///
 /// Key design principles:
 /// - Passes declare input/output artifact kinds for validation
 /// - Artifact kinds are runtime-validated at pass composition
-/// - PassContext is backend-agnostic; backend-specific config lives in Pass.userdata
+/// - PassContext is backend-agnostic; pass-specific state lives behind Pass.ptr
 ///
 /// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
 const pr_mod = @import("../pr/pr.zig");
-const pjrt_types = @import("../ffi/pjrt/types.zig");
 
 /// Artifact kinds for pass input/output validation.
 pub const ArtifactKind = enum {
@@ -24,12 +26,6 @@ pub const ArtifactKind = enum {
 
     /// MLIR module bytes (StableHLO dialect, text or bytecode)
     mlir,
-
-    /// Executable artifact (backend-specific, ready for execution)
-    ea,
-
-    /// Serialized executable bytes (for caching)
-    serialized_ea,
 };
 
 /// MLIR encoding format
@@ -41,19 +37,15 @@ pub const MlirEncoding = enum {
 /// Artifact: The "IR at some point" in the pipeline.
 ///
 /// This is a tagged union representing the various forms that a program
-/// takes as it flows through compilation passes.
+/// takes as it flows through pipeline passes. The pipeline operates on
+/// PR and MLIR only — compilation to executable artifacts is handled
+/// by the backend after the pipeline completes.
 pub const Artifact = union(ArtifactKind) {
     /// PR program (Zigrad-owned)
     pr: *pr_mod.Program,
 
     /// MLIR module (serialized bytes)
     mlir: MlirArtifact,
-
-    /// Executable artifact (backend-bound handle)
-    ea: ExecutableArtifact,
-
-    /// Serialized executable (for cache/AOT)
-    serialized_ea: []u8,
 
     pub fn kind(self: Artifact) ArtifactKind {
         return @as(ArtifactKind, self);
@@ -64,8 +56,6 @@ pub const Artifact = union(ArtifactKind) {
         switch (self.*) {
             .pr => {}, // PR program is borrowed, not owned here
             .mlir => |*m| m.deinit(allocator),
-            .ea => |*e| e.deinit(),
-            .serialized_ea => |bytes| allocator.free(bytes),
         }
     }
 
@@ -86,22 +76,10 @@ pub const MlirArtifact = struct {
     }
 };
 
-/// Executable artifact (backend-specific handle)
-pub const ExecutableArtifact = union(enum) {
-    /// PJRT loaded executable (JIT)
-    pjrt: pjrt_types.LoadedExecutable,
-
-    pub fn deinit(self: *ExecutableArtifact) void {
-        switch (self.*) {
-            .pjrt => |*exe| exe.deinit(),
-        }
-    }
-};
-
 /// Pass context: shared state threaded through pass execution.
 ///
-/// Passes receive this context for access to allocators, backend sessions,
-/// and other shared resources without needing to thread them explicitly.
+/// Passes receive this context for access to allocators and other shared
+/// resources without needing to thread them explicitly.
 pub const PassContext = struct {
     allocator: std.mem.Allocator,
 };
@@ -117,26 +95,28 @@ pub const PassError = error{
     /// Lowering failed (PR -> MLIR)
     LoweringFailed,
 
-    /// Compilation failed (MLIR -> EA)
-    CompilationFailed,
-
     /// Missing required context (e.g., no backend session)
     MissingContext,
-
-    /// Backend-specific error
-    BackendError,
 
     /// Out of memory
     OutOfMemory,
 };
 
-/// Pass descriptor: metadata + function + optional user config.
+/// Pass: the unit of transformation in the pipeline.
+///
+/// Follows the Zig interface pattern (ptr + run_fn). Stateful passes
+/// store their configuration behind `ptr`; stateless passes leave it
+/// undefined.
 pub const Pass = struct {
+    ptr: *anyopaque,
+    run_fn: *const fn (ptr: *anyopaque, artifact: *Artifact, ctx: *PassContext) PassError!void,
     name: []const u8,
     input_kind: ArtifactKind,
     output_kind: ArtifactKind,
-    run: *const fn (*Artifact, *PassContext, ?*anyopaque) PassError!void,
-    userdata: ?*anyopaque = null,
+
+    pub fn run(self: Pass, artifact: *Artifact, ctx: *PassContext) PassError!void {
+        return self.run_fn(self.ptr, artifact, ctx);
+    }
 };
 
 /// Pipeline: a sequence of passes with validation and execution.
@@ -163,7 +143,7 @@ pub const Pipeline = struct {
         errdefer current.deinit(ctx.allocator);
         for (self.passes) |p| {
             if (current.kind() != p.input_kind) return error.ArtifactKindMismatch;
-            try p.run(&current, ctx, p.userdata);
+            try p.run(&current, ctx);
             if (current.kind() != p.output_kind) return error.ArtifactKindMismatch;
         }
 
@@ -193,16 +173,12 @@ test "artifact kind tagging" {
 
 test "pass chain validation" {
     const noop = struct {
-        fn run(a: *Artifact, ctx: *PassContext, _: ?*anyopaque) PassError!void {
-            _ = a;
-            _ = ctx;
-        }
-    }.run;
+        fn f(_: *anyopaque, _: *Artifact, _: *PassContext) PassError!void {}
+    }.f;
 
     const passes = [_]Pass{
-        .{ .name = "validate", .input_kind = .pr, .output_kind = .pr, .run = noop },
-        .{ .name = "lower", .input_kind = .pr, .output_kind = .mlir, .run = noop },
-        .{ .name = "compile", .input_kind = .mlir, .output_kind = .ea, .run = noop },
+        .{ .ptr = undefined, .run_fn = noop, .name = "validate", .input_kind = .pr, .output_kind = .pr },
+        .{ .ptr = undefined, .run_fn = noop, .name = "lower", .input_kind = .pr, .output_kind = .mlir },
     };
 
     const pipeline = Pipeline{ .passes = &passes };
@@ -211,15 +187,12 @@ test "pass chain validation" {
 
 test "pass chain validation rejects mismatch" {
     const noop = struct {
-        fn run(a: *Artifact, ctx: *PassContext, _: ?*anyopaque) PassError!void {
-            _ = a;
-            _ = ctx;
-        }
-    }.run;
+        fn f(_: *anyopaque, _: *Artifact, _: *PassContext) PassError!void {}
+    }.f;
 
     const passes = [_]Pass{
-        .{ .name = "validate", .input_kind = .pr, .output_kind = .pr, .run = noop },
-        .{ .name = "compile", .input_kind = .mlir, .output_kind = .ea, .run = noop },
+        .{ .ptr = undefined, .run_fn = noop, .name = "validate", .input_kind = .pr, .output_kind = .pr },
+        .{ .ptr = undefined, .run_fn = noop, .name = "lower", .input_kind = .mlir, .output_kind = .mlir },
     };
 
     const pipeline = Pipeline{ .passes = &passes };
@@ -239,22 +212,14 @@ test "pipeline run transforms artifacts" {
     try program.add_function(func);
 
     const to_mlir = struct {
-        fn run(a: *Artifact, ctx: *PassContext, _: ?*anyopaque) PassError!void {
-            const bytes = try ctx.allocator.dupe(u8, "mlir");
+        fn f(_: *anyopaque, a: *Artifact, ctx: *PassContext) PassError!void {
+            const bytes = try ctx.allocator.dupe(u8, "mlir_output");
             a.replace(ctx.allocator, .{ .mlir = .{ .bytes = bytes, .encoding = .text } });
         }
-    }.run;
-
-    const to_serialized = struct {
-        fn run(a: *Artifact, ctx: *PassContext, _: ?*anyopaque) PassError!void {
-            const bytes = try ctx.allocator.dupe(u8, "ea");
-            a.replace(ctx.allocator, .{ .serialized_ea = bytes });
-        }
-    }.run;
+    }.f;
 
     const passes = [_]Pass{
-        .{ .name = "to_mlir", .input_kind = .pr, .output_kind = .mlir, .run = to_mlir },
-        .{ .name = "to_serialized", .input_kind = .mlir, .output_kind = .serialized_ea, .run = to_serialized },
+        .{ .ptr = undefined, .run_fn = to_mlir, .name = "to_mlir", .input_kind = .pr, .output_kind = .mlir },
     };
 
     var ctx = PassContext{ .allocator = testing.allocator };
@@ -263,7 +228,7 @@ test "pipeline run transforms artifacts" {
     defer artifact.deinit(testing.allocator);
 
     switch (artifact) {
-        .serialized_ea => |bytes| try testing.expectEqualStrings("ea", bytes),
+        .mlir => |m| try testing.expectEqualStrings("mlir_output", m.bytes),
         else => return error.ArtifactKindMismatch,
     }
 }

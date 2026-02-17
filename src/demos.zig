@@ -57,19 +57,19 @@ pub fn run_demo_executable(
     const dims_c = [_]i64{ 2, 2 };
 
     var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer dev_a.deinit();
+    defer dev_a.deinit(backend.api);
     var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer dev_b.deinit();
+    defer dev_b.deinit(backend.api);
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer dev_c.deinit();
+    defer dev_c.deinit(backend.api);
 
-    const result = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try exe.execute(backend.api, allocator, &.{ dev_a, dev_b, dev_c });
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
-            tmp.deinit();
+            tmp.deinit(backend.api);
         }
-        for (result.outputs) |*buf| buf.deinit();
+        for (result.outputs) |*buf| buf.deinit(backend.api);
         allocator.free(result.outputs);
     }
 
@@ -77,9 +77,9 @@ pub fn run_demo_executable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try result.outputs[0].to_host(out_host.data);
-    defer ev.deinit();
-    try ev.await_();
+    var ev = try result.outputs[0].to_host(backend.api, out_host.data);
+    defer ev.deinit(backend.api);
+    try ev.await_(backend.api);
 
     const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{
@@ -118,7 +118,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
-    defer exe.deinit();
+    defer exe.deinit(backend.api);
 
     std.log.err("unexpected: custom_call compiled without a handler", .{});
     return error.UnexpectedSuccess;
@@ -137,7 +137,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
         .encoding = lower_encoding,
         .entry_name = "main_vjp",
     }, dump_pr, dump_mlir);
-    defer exe.deinit();
+    defer exe.deinit(backend.api);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
     const A = [_]f32{
@@ -176,21 +176,21 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     const dims_c = [_]i64{ 2, 2 };
 
     var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer dev_a.deinit();
+    defer dev_a.deinit(backend.api);
     var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer dev_b.deinit();
+    defer dev_b.deinit(backend.api);
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer dev_c.deinit();
+    defer dev_c.deinit(backend.api);
     var dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
-    defer dev_ct.deinit();
+    defer dev_ct.deinit(backend.api);
 
-    const result = try exe.execute(allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
+    const result = try exe.execute(backend.api, allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
-            tmp.deinit();
+            tmp.deinit(backend.api);
         }
-        for (result.outputs) |*buf| buf.deinit();
+        for (result.outputs) |*buf| buf.deinit(backend.api);
         allocator.free(result.outputs);
     }
 
@@ -203,16 +203,16 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     var out_c = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
-    var ev_a = try result.outputs[0].to_host(out_a.data);
-    defer ev_a.deinit();
-    var ev_b = try result.outputs[1].to_host(out_b.data);
-    defer ev_b.deinit();
-    var ev_c = try result.outputs[2].to_host(out_c.data);
-    defer ev_c.deinit();
+    var ev_a = try result.outputs[0].to_host(backend.api, out_a.data);
+    defer ev_a.deinit(backend.api);
+    var ev_b = try result.outputs[1].to_host(backend.api, out_b.data);
+    defer ev_b.deinit(backend.api);
+    var ev_c = try result.outputs[2].to_host(backend.api, out_c.data);
+    defer ev_c.deinit(backend.api);
 
-    try ev_a.await_();
-    try ev_b.await_();
-    try ev_c.await_();
+    try ev_a.await_(backend.api);
+    try ev_b.await_(backend.api);
+    try ev_c.await_(backend.api);
 
     const got_a = out_a.as_slice(f32)[0..6];
     const got_b = out_b.as_slice(f32)[0..6];
@@ -328,7 +328,7 @@ pub fn run_train_demo(
     const device = &devices[compile_cfg.device_index];
 
     var compiled = try zg.frontend.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, 6, 1e-2, compile_cfg);
-    defer compiled.deinit();
+    defer compiled.exe.deinit(backend_handle.api);
 
     const true_w1 = try allocator.alloc(f32, in_dim * h1);
     defer allocator.free(true_w1);
@@ -424,7 +424,7 @@ pub fn run_train_demo(
     defer loss_host.deinit();
 
     const output_count = 7;
-    const api = tmp_w1.api;
+    const api = backend_handle.api;
 
     var input_ptrs = [_]zg.backend.pjrt.RawBuffer{
         tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer,
@@ -432,47 +432,45 @@ pub fn run_train_demo(
     };
     var output_ptrs: [output_count]?zg.backend.pjrt.RawBuffer = undefined;
     @memset(output_ptrs[0..], null);
-    const exec_opts: zg.frontend.CompiledForward.ExecuteOptions = .{
-        .non_donatable_input_indices = &.{ 6, 7 },
-    };
+    const non_donatable_input_indices: []const i64 = &.{ 6, 7 };
 
     // Ensure remaining buffers are released even if we replace/donate them in-loop.
     defer {
         for (input_ptrs) |raw| {
-            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = raw };
-            buf.deinit();
+            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
+            buf.deinit(api);
         }
     }
 
     // Check once if we're on CPU for direct memory access optimization.
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = input_ptrs[0] }).is_on_cpu();
+    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = input_ptrs[0] }).is_on_cpu(api);
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
         @memset(output_ptrs[0..], null);
-        const ev = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
+        const ev = try compiled.exe.execute_into_opts(api, &input_ptrs, &output_ptrs, non_donatable_input_indices);
 
         const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw };
+        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
         if (ev) |e| {
             var tmp = e;
-            try tmp.await_();
-            tmp.deinit();
+            try tmp.await_(api);
+            tmp.deinit(api);
         }
         if (!is_cpu and !quiet) {
-            var loss_ev = try loss_buf.to_host(loss_host.data);
-            try loss_ev.await_();
-            loss_ev.deinit();
+            var loss_ev = try loss_buf.to_host(api, loss_host.data);
+            try loss_ev.await_(api);
+            loss_ev.deinit(api);
         }
-        loss_buf.deinit();
+        loss_buf.deinit(api);
         output_ptrs[0] = null;
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
             const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
             if (new_raw == old.*) continue;
-            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
+            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
             old.* = new_raw;
-            buf.deinit();
+            buf.deinit(api);
         }
     }
 
@@ -480,38 +478,38 @@ pub fn run_train_demo(
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
         @memset(output_ptrs[0..], null);
-        const event = try compiled.execute_into(&input_ptrs, &output_ptrs, exec_opts);
+        const event = try compiled.exe.execute_into_opts(api, &input_ptrs, &output_ptrs, non_donatable_input_indices);
         const dispatch_ns = timer.lap();
 
         if (event) |ev| {
             var tmp = ev;
-            try tmp.await_();
-            tmp.deinit();
+            try tmp.await_(api);
+            tmp.deinit(api);
         }
         const wait_ns = timer.lap();
 
         const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw2 };
+        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
-            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer());
+            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
             break :blk ptr[0];
         } else blk: {
-            var loss_ev = try loss_buf.to_host(loss_host.data);
-            try loss_ev.await_();
-            loss_ev.deinit();
+            var loss_ev = try loss_buf.to_host(api, loss_host.data);
+            try loss_ev.await_(api);
+            loss_ev.deinit(api);
             break :blk loss_host.as_slice(f32)[0];
         };
         const loss_read_ns = timer.lap();
 
-        loss_buf.deinit();
+        loss_buf.deinit(api);
         output_ptrs[0] = null;
 
         for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
             const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
             if (new_raw == old.*) continue;
-            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
+            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
             old.* = new_raw;
-            buf.deinit();
+            buf.deinit(api);
         }
 
         const cleanup_ns = timer.lap();
@@ -535,7 +533,7 @@ pub fn run_train_demo(
 }
 
 pub fn compile_program(
-    backend: *zg.backend.PjrtBackend,
+    backend_handle: *zg.backend.PjrtBackend,
     allocator: std.mem.Allocator,
     program: *zg.pr.Program,
     device: *const zg.backend.pjrt.Device,
@@ -544,9 +542,8 @@ pub fn compile_program(
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !zg.backend.pjrt.LoadedExecutable {
     var lower_cfg_mut = lower_cfg;
-    var compile_cfg = zg.backend.pjrt.Backend.CompilePassConfig{ .device = device };
 
-    var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(allocator, 5) catch
+    var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(allocator, 4) catch
         return error.OutOfMemory;
     defer passes.deinit(allocator);
 
@@ -565,20 +562,20 @@ pub fn compile_program(
         dump_mlir_local.?.entry_name = dump_mlir_local.?.entry_name orelse lower_cfg.entry_name;
         try passes.append(allocator, zg.pipeline.dump_mlir_pass_with_config(&dump_mlir_local.?));
     }
-    try passes.append(allocator, backend.compile_pass(&compile_cfg));
 
     const pipeline = zg.pipeline.Pipeline{ .passes = passes.items };
 
     var ctx = zg.pipeline.PassContext{ .allocator = allocator };
 
     var artifact = try pipeline.run(.{ .pr = program }, &ctx);
-    errdefer artifact.deinit(allocator);
-    return switch (artifact) {
-        .ea => |ea| switch (ea) {
-            .pjrt => |exe| exe,
-        },
-        inline else => error.UnexpectedArtifact,
+    defer artifact.deinit(allocator);
+
+    const mlir = switch (artifact) {
+        .mlir => |m| m,
+        else => return error.UnexpectedArtifact,
     };
+
+    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, .{});
 }
 
 pub fn print_pr(allocator: std.mem.Allocator) !void {
@@ -681,11 +678,15 @@ pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool
 
     const pre = try c.add(d);
 
-    const tvm_opts: zg.frontend.OpOptions = .{ .kernelize_provider = "tvm" };
-    const tvm_outline_opts: zg.frontend.OpOptions = .{ .kernelize_provider = "tvm", .outline = true };
-    const dot = try a.annotate(tvm_opts).matmul(b_t);
-    const sum = try dot.annotate(tvm_outline_opts).add(pre);
-    const mul = try sum.annotate(tvm_outline_opts).mul(c);
+    try b.push_region("tvm_matmul", .{ .kernelize = "tvm" });
+    const dot = try a.matmul(b_t);
+    try b.pop_region();
+
+    try b.push_region("tvm_fused", .{ .kernelize = "tvm", .outline = true });
+    const sum = try dot.add(pre);
+    const mul = try sum.mul(c);
+    try b.pop_region();
+
     const out = try mul.add(d);
     _ = try b.finish(&.{out});
 
@@ -729,7 +730,7 @@ fn upload_host_buffer(
     const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
     defer allocator.free(shape_i64);
     for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
-    const dtype: zg.backend.pjrt.BufferType = switch (buf.dtype) {
+    const dtype: zg.pr.DType = switch (buf.dtype) {
         .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
@@ -846,44 +847,45 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     const k = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
     const v = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
 
-    // region annotation
-    const tvm_opts: zg.frontend.OpOptions = .{ .kernelize_provider = "tvm" };
+    // entire attention block as a single TVM-kernelizable region
+    try b.push_region("attention", .{ .kernelize = "tvm" });
 
     // attention scores: Q @ K^T  ->  [B, S, S]
-    // using dot_general for batched matmul with transpose
-    const scores = try q.annotate(tvm_opts).dot_general(k, .{
-        .lhs_batch_dims = &.{0},       // batch dim
+    const scores = try q.dot_general(k, .{
+        .lhs_batch_dims = &.{0},
         .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{2}, // contract on head_dim
-        .rhs_contracting_dims = &.{2}, // K^T: transpose by contracting on last dim
+        .lhs_contracting_dims = &.{2},
+        .rhs_contracting_dims = &.{2},
     });
 
     // scale scores
     const scale_val = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
     const scale = try b.scalar_literal(zg.pr.ops.types.scalar_literal(.f32, scale_val));
-    const scale_broadcast = try scale.annotate(tvm_opts).broadcast_in_dim(scores.tensor.shape.dims, &.{});
-    const scaled = try scores.annotate(tvm_opts).mul(scale_broadcast);
+    const scale_broadcast = try scale.broadcast_in_dim(scores.tensor.shape.dims, &.{});
+    const scaled = try scores.mul(scale_broadcast);
 
     // softmax over last dim [S]
     const rank = scaled.tensor.shape.dims.len;
     const axis: i64 = @intCast(rank - 1);
-    const max_val = try scaled.annotate(tvm_opts).reduce_max(&.{axis});
+    const max_val = try scaled.reduce_max(&.{axis});
 
     // broadcast max back to full shape for stability
-    const max_broadcast = try max_val.annotate(tvm_opts).broadcast_in_dim(scaled.tensor.shape.dims, &.{ 0, 1 });
-    const shifted = try scaled.annotate(tvm_opts).sub(max_broadcast);
-    const exp_vals = try shifted.annotate(tvm_opts).exp();
-    const sum_exp = try exp_vals.annotate(tvm_opts).reduce_sum(&.{axis});
-    const sum_broadcast = try sum_exp.annotate(tvm_opts).broadcast_in_dim(exp_vals.tensor.shape.dims, &.{ 0, 1 });
-    const attn_weights = try exp_vals.annotate(tvm_opts).div(sum_broadcast);
+    const max_broadcast = try max_val.broadcast_in_dim(scaled.tensor.shape.dims, &.{ 0, 1 });
+    const shifted = try scaled.sub(max_broadcast);
+    const exp_vals = try shifted.exp();
+    const sum_exp = try exp_vals.reduce_sum(&.{axis});
+    const sum_broadcast = try sum_exp.broadcast_in_dim(exp_vals.tensor.shape.dims, &.{ 0, 1 });
+    const attn_weights = try exp_vals.div(sum_broadcast);
 
     // output: attn_weights @ V  ->  [B, S, D]
-    const out = try attn_weights.annotate(tvm_opts).dot_general(v, .{
+    const out = try attn_weights.dot_general(v, .{
         .lhs_batch_dims = &.{0},
         .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{2}, // contract on S dimension
+        .lhs_contracting_dims = &.{2},
         .rhs_contracting_dims = &.{1},
     });
+
+    try b.pop_region();
 
     _ = try b.finish(&.{out});
 

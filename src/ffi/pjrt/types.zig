@@ -189,7 +189,6 @@ pub const Client = struct {
 
         const executable_ptr = args.executable orelse return error.PjrtReturnedNullExecutable;
         return Executable{
-            .api = self.api,
             .pjrt_executable = executable_ptr,
         };
     }
@@ -245,7 +244,6 @@ pub const Client = struct {
 
         const buffer_ptr = args.buffer orelse return error.PjrtReturnedNullBuffer;
         return Buffer{
-            .api = self.api,
             .pjrt_buffer = buffer_ptr,
         };
     }
@@ -338,20 +336,19 @@ pub const Device = struct {
 };
 
 pub const Executable = struct {
-    api: *Api,
     pjrt_executable: *c.PJRT_Executable,
 
-    pub fn deinit(self: *Executable) void {
+    pub fn deinit(self: *Executable, api: *Api) void {
         var args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
         args.executable = self.pjrt_executable;
-        self.api.call("PJRT_Executable_Destroy", &args) catch {};
+        api.call("PJRT_Executable_Destroy", &args) catch {};
     }
 
-    pub fn serialize(self: *Executable, allocator: std.mem.Allocator) ![]u8 {
+    pub fn serialize(self: *Executable, api: *Api, allocator: std.mem.Allocator) ![]u8 {
         var args = api_mod.init_args(c.PJRT_Executable_Serialize_Args);
         args.executable = self.pjrt_executable;
 
-        try self.api.call("PJRT_Executable_Serialize", &args);
+        try api.call("PJRT_Executable_Serialize", &args);
 
         const serialized = args.serialized_executable orelse return error.PjrtReturnedNullSerializedExecutable;
         const deleter = args.serialized_executable_deleter orelse return error.PjrtReturnedNullSerializedExecutableDeleter;
@@ -367,7 +364,6 @@ pub const Executable = struct {
 };
 
 pub const LoadedExecutable = struct {
-    api: *Api,
     pjrt_executable: *c.PJRT_LoadedExecutable,
     num_outputs: usize,
 
@@ -406,36 +402,35 @@ pub const LoadedExecutable = struct {
     fn init(api: *Api, pjrt_executable: *c.PJRT_LoadedExecutable) !LoadedExecutable {
         const num_outputs = try query_num_outputs(api, pjrt_executable);
         return .{
-            .api = api,
             .pjrt_executable = pjrt_executable,
             .num_outputs = num_outputs,
         };
     }
 
-    pub fn deinit(self: *LoadedExecutable) void {
+    pub fn deinit(self: *LoadedExecutable, api: *Api) void {
         var args = api_mod.init_args(c.PJRT_LoadedExecutable_Destroy_Args);
         args.executable = self.pjrt_executable;
-        self.api.call("PJRT_LoadedExecutable_Destroy", &args) catch {};
+        api.call("PJRT_LoadedExecutable_Destroy", &args) catch {};
     }
 
-    pub fn serialize(self: *LoadedExecutable, allocator: std.mem.Allocator) ![]u8 {
+    pub fn serialize(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator) ![]u8 {
         // Get the underlying PJRT_Executable to serialize
         var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
-        try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
+        try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
 
         const pjrt_executable = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
             var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_executable;
-            self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+            api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
         var args = api_mod.init_args(c.PJRT_Executable_Serialize_Args);
         args.executable = pjrt_executable;
 
-        try self.api.call("PJRT_Executable_Serialize", &args);
+        try api.call("PJRT_Executable_Serialize", &args);
 
         const serialized = args.serialized_executable orelse return error.PjrtReturnedNullSerializedExecutable;
         const deleter = args.serialized_executable_deleter orelse return error.PjrtReturnedNullSerializedExecutableDeleter;
@@ -449,22 +444,22 @@ pub const LoadedExecutable = struct {
         return allocator.dupe(u8, bytes);
     }
 
-    pub fn get_compiled_memory_stats(self: *LoadedExecutable) !CompiledMemoryStats {
+    pub fn get_compiled_memory_stats(self: *LoadedExecutable, api: *Api) !CompiledMemoryStats {
         var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
-        try self.api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
+        try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
 
         const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
             var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_exec;
-            self.api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+            api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
         var args = api_mod.init_args(c.PJRT_Executable_GetCompiledMemoryStats_Args);
         args.executable = pjrt_exec;
-        try self.api.call("PJRT_Executable_GetCompiledMemoryStats", &args);
+        try api.call("PJRT_Executable_GetCompiledMemoryStats", &args);
 
         return .{
             .generated_code_size_in_bytes = args.generated_code_size_in_bytes,
@@ -481,8 +476,8 @@ pub const LoadedExecutable = struct {
         };
     }
 
-    pub fn execute(self: *LoadedExecutable, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
-        const trace = self.api.trace_execute;
+    pub fn execute(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
+        const trace = api.trace_execute;
         var timer: std.time.Timer = undefined;
         var prep_ns: u64 = 0;
         var call_ns: u64 = 0;
@@ -535,7 +530,7 @@ pub const LoadedExecutable = struct {
             prep_ns = timer.lap();
         }
 
-        try self.api.call("PJRT_LoadedExecutable_Execute", &args);
+        try api.call("PJRT_LoadedExecutable_Execute", &args);
 
         if (trace) {
             call_ns = timer.lap();
@@ -544,12 +539,11 @@ pub const LoadedExecutable = struct {
         const outputs = try allocator.alloc(Buffer, num_outputs);
         for (outputs, 0..) |*buf, i| {
             buf.* = Buffer{
-                .api = self.api,
                 .pjrt_buffer = output_ptrs[i] orelse return error.PjrtReturnedNullOutputBuffer,
             };
         }
 
-        const event = if (device_events[0]) |ev| Event{ .api = self.api, .pjrt_event = ev } else null;
+        const event = if (device_events[0]) |ev| Event{ .pjrt_event = ev } else null;
         if (trace) {
             wrap_ns = timer.lap();
             const ns_per_ms = std.time.ns_per_ms;
@@ -566,14 +560,16 @@ pub const LoadedExecutable = struct {
 
     pub fn execute_into(
         self: *LoadedExecutable,
+        api: *Api,
         input_ptrs: []const *c.PJRT_Buffer,
         output_ptrs: []?*c.PJRT_Buffer,
     ) !?Event {
-        return self.execute_into_opts(input_ptrs, output_ptrs, null);
+        return self.execute_into_opts(api, input_ptrs, output_ptrs, null);
     }
 
     pub fn execute_into_opts(
         self: *LoadedExecutable,
+        api: *Api,
         input_ptrs: []const *c.PJRT_Buffer,
         output_ptrs: []?*c.PJRT_Buffer,
         non_donatable_input_indices: ?[]const i64,
@@ -613,9 +609,9 @@ pub const LoadedExecutable = struct {
         args.device_complete_events = @ptrCast(&device_events);
         args.execute_device = null;
 
-        try self.api.call("PJRT_LoadedExecutable_Execute", &args);
+        try api.call("PJRT_LoadedExecutable_Execute", &args);
 
-        return if (device_events[0]) |ev| Event{ .api = self.api, .pjrt_event = ev } else null;
+        return if (device_events[0]) |ev| Event{ .pjrt_event = ev } else null;
     }
 };
 
@@ -625,22 +621,21 @@ pub const ExecuteResult = struct {
 };
 
 pub const Buffer = struct {
-    api: *Api,
     pjrt_buffer: *c.PJRT_Buffer,
 
-    pub fn deinit(self: *Buffer) void {
+    pub fn deinit(self: *Buffer, api: *Api) void {
         var args = api_mod.init_args(c.PJRT_Buffer_Destroy_Args);
         args.buffer = self.pjrt_buffer;
-        self.api.call("PJRT_Buffer_Destroy", &args) catch {};
+        api.call("PJRT_Buffer_Destroy", &args) catch {};
     }
 
-    pub fn get_dimensions(self: *const Buffer, allocator: std.mem.Allocator) ![]usize {
+    pub fn get_dimensions(self: *const Buffer, api: *Api, allocator: std.mem.Allocator) ![]usize {
         var args = api_mod.init_args(c.PJRT_Buffer_Dimensions_Args);
         args.buffer = self.pjrt_buffer;
         args.dims = null;
         args.num_dims = 0;
 
-        try self.api.call("PJRT_Buffer_Dimensions", &args);
+        try api.call("PJRT_Buffer_Dimensions", &args);
 
         const num_dims = args.num_dims;
         const dims_i64 = args.dims orelse return error.PjrtReturnedNullDimensions;
@@ -654,7 +649,7 @@ pub const Buffer = struct {
         return dims;
     }
 
-    pub fn to_host(self: *Buffer, dst: []u8) !Event {
+    pub fn to_host(self: *Buffer, api: *Api, dst: []u8) !Event {
         var args = api_mod.init_args(c.PJRT_Buffer_ToHostBuffer_Args);
 
         args.src = self.pjrt_buffer;
@@ -663,43 +658,41 @@ pub const Buffer = struct {
         args.dst_size = dst.len;
         args.event = null;
 
-        try self.api.call("PJRT_Buffer_ToHostBuffer", &args);
+        try api.call("PJRT_Buffer_ToHostBuffer", &args);
 
         const event_ptr = args.event orelse return error.PjrtReturnedNullEvent;
         return Event{
-            .api = self.api,
             .pjrt_event = event_ptr,
         };
     }
 
-    pub fn ready_event(self: *Buffer) !Event {
+    pub fn ready_event(self: *Buffer, api: *Api) !Event {
         var args = api_mod.init_args(c.PJRT_Buffer_ReadyEvent_Args);
 
         args.buffer = self.pjrt_buffer;
         args.event = null;
 
-        try self.api.call("PJRT_Buffer_ReadyEvent", &args);
+        try api.call("PJRT_Buffer_ReadyEvent", &args);
 
         const event_ptr = args.event orelse return error.PjrtReturnedNullEvent;
         return Event{
-            .api = self.api,
             .pjrt_event = event_ptr,
         };
     }
 
-    pub fn is_on_cpu(self: *const Buffer) !bool {
+    pub fn is_on_cpu(self: *const Buffer, api: *Api) !bool {
         var args = api_mod.init_args(c.PJRT_Buffer_IsOnCpu_Args);
         args.buffer = self.pjrt_buffer;
         args.is_on_cpu = false;
-        try self.api.call("PJRT_Buffer_IsOnCpu", &args);
+        try api.call("PJRT_Buffer_IsOnCpu", &args);
         return args.is_on_cpu;
     }
 
-    pub fn unsafe_pointer(self: *const Buffer) !usize {
+    pub fn unsafe_pointer(self: *const Buffer, api: *Api) !usize {
         var args = api_mod.init_args(c.PJRT_Buffer_UnsafePointer_Args);
         args.buffer = self.pjrt_buffer;
         args.buffer_pointer = 0;
-        try self.api.call("PJRT_Buffer_UnsafePointer", &args);
+        try api.call("PJRT_Buffer_UnsafePointer", &args);
         return args.buffer_pointer;
     }
 };
@@ -709,25 +702,24 @@ pub const Buffer = struct {
 pub const RawBuffer = *c.PJRT_Buffer;
 
 pub const Event = struct {
-    api: *Api,
     pjrt_event: *c.PJRT_Event,
 
-    pub fn deinit(self: *Event) void {
+    pub fn deinit(self: *Event, api: *Api) void {
         var args = api_mod.init_args(c.PJRT_Event_Destroy_Args);
         args.event = self.pjrt_event;
-        self.api.call("PJRT_Event_Destroy", &args) catch {};
+        api.call("PJRT_Event_Destroy", &args) catch {};
     }
 
-    pub fn await_(self: *Event) !void {
+    pub fn await_(self: *Event, api: *Api) !void {
         var args = api_mod.init_args(c.PJRT_Event_Await_Args);
         args.event = self.pjrt_event;
-        try self.api.call("PJRT_Event_Await", &args);
+        try api.call("PJRT_Event_Await", &args);
     }
 
-    pub fn is_ready(self: *Event) !bool {
+    pub fn is_ready(self: *Event, api: *Api) !bool {
         var args = api_mod.init_args(c.PJRT_Event_IsReady_Args);
         args.event = self.pjrt_event;
-        try self.api.call("PJRT_Event_IsReady", &args);
+        try api.call("PJRT_Event_IsReady", &args);
         return args.is_ready;
     }
 };

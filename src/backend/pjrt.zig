@@ -10,27 +10,21 @@
 /// The Backend provides:
 /// - Plugin loading and client creation (lifecycle)
 /// - Device enumeration and selection
-/// - Compilation pass (MLIR -> EA)
-/// - Execution (EA + buffers -> outputs)
+/// - Compilation (MLIR -> LoadedExecutable)
+/// - Execution (LoadedExecutable + buffers -> outputs)
 /// - Buffer management (host <-> device transfers)
-///
-/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
+const pr = @import("../pr/pr.zig");
 const plugin = @import("../ffi/pjrt/plugin.zig");
 const pjrt_api = @import("../ffi/pjrt/api.zig");
 const pjrt_types = @import("../ffi/pjrt/types.zig");
-const pass = @import("../pipeline/pass.zig");
-
-// Re-export common types for convenience
+// Re-export handle types for callers
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;
 pub const RawBuffer = pjrt_types.RawBuffer;
 pub const Device = pjrt_types.Device;
 pub const Event = pjrt_types.Event;
-pub const BufferType = pjrt_types.BufferType;
-pub const ProgramFormat = pjrt_types.ProgramFormat;
-pub const Api = pjrt_api.Api;
 
 /// Compile options for the PJRT backend.
 pub const CompileOptions = struct {
@@ -104,13 +98,14 @@ pub const Backend = struct {
         self: *Backend,
         device: *const Device,
         mlir_bytes: []const u8,
-        program_format: ProgramFormat,
+        is_bytecode: bool,
         options: CompileOptions,
     ) !LoadedExecutable {
         const compile_opts_pb = try build_compile_options_proto(self.allocator, options);
         defer self.allocator.free(compile_opts_pb);
 
-        return self.client.compile(device, program_format, mlir_bytes, compile_opts_pb);
+        const format: pjrt_types.ProgramFormat = if (is_bytecode) .mlir_bytecode else .mlir_text;
+        return self.client.compile(device, format, mlir_bytes, compile_opts_pb);
     }
 
     /// Compile and serialize the resulting executable (for caching).
@@ -118,12 +113,12 @@ pub const Backend = struct {
         self: *Backend,
         device: *const Device,
         mlir_bytes: []const u8,
-        program_format: ProgramFormat,
+        is_bytecode: bool,
         options: CompileOptions,
     ) ![]u8 {
-        var exe = try self.compile(device, mlir_bytes, program_format, options);
-        defer exe.deinit();
-        return exe.serialize(self.allocator);
+        var exe = try self.compile(device, mlir_bytes, is_bytecode, options);
+        defer exe.deinit(self.api);
+        return exe.serialize(self.api, self.allocator);
     }
 
     /// Load a previously serialized executable.
@@ -144,56 +139,13 @@ pub const Backend = struct {
         self: *Backend,
         device: *const Device,
         data: []const u8,
-        dtype: BufferType,
+        dtype: pr.DType,
         shape: []const i64,
     ) !Buffer {
-        return self.client.buffer_from_host(device, data, dtype, shape);
+        const buf_type = dtype_to_buffer_type(dtype);
+        return self.client.buffer_from_host(device, data, buf_type, shape);
     }
 
-    // ========================================================================
-    // Pass Integration
-    // ========================================================================
-
-    pub const CompilePassConfig = struct {
-        device: *const Device,
-        options: CompileOptions = .{},
-        client: *pjrt_types.Client = undefined,
-    };
-
-    fn compile_pass_run(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
-        if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
-
-        const cfg_ptr = userdata orelse return error.MissingContext;
-        const cfg: *CompilePassConfig = @ptrCast(@alignCast(cfg_ptr));
-
-        const mlir = artifact.mlir;
-
-        const compile_opts_pb = build_compile_options_proto(ctx.allocator, cfg.options) catch return error.OutOfMemory;
-        defer ctx.allocator.free(compile_opts_pb);
-
-        const program_format: ProgramFormat = switch (mlir.encoding) {
-            .text => .mlir_text,
-            .bytecode => .mlir_bytecode,
-        };
-
-        const exe = cfg.client.compile(cfg.device, program_format, mlir.bytes, compile_opts_pb) catch return error.CompilationFailed;
-
-        artifact.replace(ctx.allocator, .{ .ea = .{ .pjrt = exe } });
-    }
-
-    /// Compile pass: MLIR artifact -> EA artifact.
-    ///
-    /// The caller owns `config` and must keep it alive while the pass is used.
-    pub fn compile_pass(self: *Backend, config: *CompilePassConfig) pass.Pass {
-        config.client = &self.client;
-        return .{
-            .name = "pjrt_compile",
-            .input_kind = .mlir,
-            .output_kind = .ea,
-            .run = compile_pass_run,
-            .userdata = config,
-        };
-    }
 };
 
 fn cpu_device_count_from_env() ?usize {
@@ -220,8 +172,21 @@ fn write_varint(writer: anytype, value: u64) !void {
     }
 }
 
+fn dtype_to_buffer_type(dtype: pr.DType) pjrt_types.BufferType {
+    return switch (dtype) {
+        .bf16 => .bf16,
+        .f32 => .f32,
+        .f64 => .f64,
+        .i32 => .i32,
+        .i64 => .i64,
+        .u32 => .u32,
+        .u64 => .u64,
+        .bool => .i32,
+    };
+}
+
 /// Build a minimal CompileOptionsProto for PJRT (protobuf wire format).
-pub fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOptions) ![]u8 {
+fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOptions) ![]u8 {
     var build_opts = try std.ArrayList(u8).initCapacity(allocator, 16);
     defer build_opts.deinit(allocator);
     const b = build_opts.writer(allocator);

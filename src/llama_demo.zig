@@ -211,10 +211,10 @@ pub fn run_llama_ft_demo(
         try zg.frontend.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, 1e-4, compile_cfg)
     else
         try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
-    defer compiled.deinit();
+    defer compiled.exe.deinit(backend_handle.api);
 
     if (!quiet) {
-        log_compiled_memory_stats(&compiled.exe);
+        log_compiled_memory_stats(&compiled.exe, backend_handle.api);
     }
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
@@ -400,7 +400,7 @@ pub fn run_llama_ft_demo(
     defer loss_host.deinit();
 
     const output_count = if (train_mode) 1 + param_count else 1;
-    const api = tmp_w_emb.api;
+    const api = backend_handle.api;
 
     var input_ptrs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
     defer input_ptrs.deinit(allocator);
@@ -438,46 +438,44 @@ pub fn run_llama_ft_demo(
         @as(i64, @intCast(param_count + 5)), // sin
         @as(i64, @intCast(param_count + 6)), // cos
     };
-    const exec_opts: zg.frontend.CompiledForward.ExecuteOptions = .{
-        .non_donatable_input_indices = if (train_mode) non_donatable else null,
-    };
+    const non_donatable_input_indices: ?[]const i64 = if (train_mode) non_donatable else null;
 
     defer {
         for (input_ptrs.items) |raw| {
-            var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = raw };
-            buf.deinit();
+            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
+            buf.deinit(api);
         }
     }
 
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = input_ptrs.items[0] }).is_on_cpu();
+    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = input_ptrs.items[0] }).is_on_cpu(api);
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
         @memset(output_ptrs, null);
-        const ev = try compiled.execute_into(input_ptrs.items, output_ptrs, exec_opts);
+        const ev = try compiled.exe.execute_into_opts(api, input_ptrs.items, output_ptrs, non_donatable_input_indices);
 
         const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw };
+        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
         if (ev) |e| {
             var tmp = e;
-            try tmp.await_();
-            tmp.deinit();
+            try tmp.await_(api);
+            tmp.deinit(api);
         }
         if (!execute_only and !is_cpu and !quiet) {
-            var loss_ev = try loss_buf.to_host(loss_host.data);
-            try loss_ev.await_();
-            loss_ev.deinit();
+            var loss_ev = try loss_buf.to_host(api, loss_host.data);
+            try loss_ev.await_(api);
+            loss_ev.deinit(api);
         }
-        loss_buf.deinit();
+        loss_buf.deinit(api);
         output_ptrs[0] = null;
 
         if (train_mode) {
             for (input_ptrs.items[0..param_count], output_ptrs[1 .. 1 + param_count]) |*old, new| {
                 const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
                 if (new_raw == old.*) continue;
-                var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
+                var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
                 old.* = new_raw;
-                buf.deinit();
+                buf.deinit(api);
             }
         }
     }
@@ -491,29 +489,29 @@ pub fn run_llama_ft_demo(
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
         @memset(output_ptrs, null);
-        const event = try compiled.execute_into(input_ptrs.items, output_ptrs, exec_opts);
+        const event = try compiled.exe.execute_into_opts(api, input_ptrs.items, output_ptrs, non_donatable_input_indices);
         const dispatch_ns = timer.lap();
 
         if (event) |ev| {
             var tmp = ev;
-            try tmp.await_();
-            tmp.deinit();
+            try tmp.await_(api);
+            tmp.deinit(api);
         }
         const exec_ns = timer.lap();
 
         const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = loss_raw2 };
+        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
         const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
             if (loss_dtype == .bf16) {
-                const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer());
+                const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
                 break :blk bf16_to_f32(ptr[0]);
             }
-            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer());
+            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
             break :blk ptr[0];
         } else blk: {
-            var loss_ev = try loss_buf.to_host(loss_host.data);
-            try loss_ev.await_();
-            loss_ev.deinit();
+            var loss_ev = try loss_buf.to_host(api, loss_host.data);
+            try loss_ev.await_(api);
+            loss_ev.deinit(api);
             break :blk if (loss_dtype == .bf16)
                 bf16_to_f32(loss_host.as_slice(u16)[0])
             else
@@ -521,16 +519,16 @@ pub fn run_llama_ft_demo(
         };
         const loss_read_ns = timer.lap();
 
-        loss_buf.deinit();
+        loss_buf.deinit(api);
         output_ptrs[0] = null;
 
         if (train_mode) {
             for (input_ptrs.items[0..param_count], output_ptrs[1 .. 1 + param_count]) |*old, new| {
                 const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
                 if (new_raw == old.*) continue;
-                var buf = zg.backend.pjrt.Buffer{ .api = api, .pjrt_buffer = old.* };
+                var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
                 old.* = new_raw;
-                buf.deinit();
+                buf.deinit(api);
             }
         }
 
@@ -1019,8 +1017,8 @@ fn bytes_to_mb(value: i64) f64 {
     return @as(f64, @floatFromInt(value)) / (1024.0 * 1024.0);
 }
 
-fn log_compiled_memory_stats(exe: *zg.backend.pjrt.LoadedExecutable) void {
-    const stats = exe.get_compiled_memory_stats() catch |err| switch (err) {
+fn log_compiled_memory_stats(exe: *zg.backend.pjrt.LoadedExecutable, api: anytype) void {
+    const stats = exe.get_compiled_memory_stats(api) catch |err| switch (err) {
         error.Unimplemented, error.FunctionNotAvailable => return,
         else => {
             std.log.warn("llama-ft-demo: compiled memory stats unavailable ({s})", .{@errorName(err)});
@@ -1039,7 +1037,7 @@ fn log_compiled_memory_stats(exe: *zg.backend.pjrt.LoadedExecutable) void {
     );
 }
 
-fn log_device_memory_stats(device: *const zg.backend.pjrt.Device, api: *zg.backend.pjrt.Api) void {
+fn log_device_memory_stats(device: *const zg.backend.pjrt.Device, api: anytype) void {
     const stats = device.get_memory_stats(api) catch |err| switch (err) {
         error.Unimplemented, error.FunctionNotAvailable => return,
         else => {
@@ -1088,7 +1086,7 @@ fn upload_host_buffer(
     const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
     defer allocator.free(shape_i64);
     for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
-    const dtype: zg.backend.pjrt.BufferType = switch (buf.dtype) {
+    const dtype: zg.pr.DType = switch (buf.dtype) {
         .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,

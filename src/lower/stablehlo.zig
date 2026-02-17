@@ -891,11 +891,10 @@ pub const LowerPassConfig = struct {
     entry_name: ?[]const u8 = null,
 };
 
-pub fn lower_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*anyopaque) pass.PassError!void {
+pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
-    const cfg_ptr = userdata orelse return error.MissingContext;
-    const cfg: *LowerPassConfig = @ptrCast(@alignCast(cfg_ptr));
+    const cfg: *LowerPassConfig = @ptrCast(@alignCast(ptr));
 
     const program = artifact.pr;
 
@@ -915,16 +914,16 @@ pub fn lower_pass(artifact: *pass.Artifact, ctx: *pass.PassContext, userdata: ?*
 /// Metadata for the lower pass.
 pub fn lower_pass_with_config(config: *LowerPassConfig) pass.Pass {
     return .{
+        .ptr = @ptrCast(config),
+        .run_fn = lower_pass,
         .name = "stablehlo_lower",
         .input_kind = .pr,
         .output_kind = .mlir,
-        .run = lower_pass,
-        .userdata = config,
     };
 }
 
 /// Validate pass: PR artifact -> PR artifact.
-fn validate_pass_run(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyopaque) pass.PassError!void {
+fn validate_pass_run(_: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     _ = ctx;
 
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
@@ -935,10 +934,11 @@ fn validate_pass_run(artifact: *pass.Artifact, ctx: *pass.PassContext, _: ?*anyo
 
 /// Metadata for the validate pass.
 pub const validate_pass = pass.Pass{
+    .ptr = undefined,
+    .run_fn = validate_pass_run,
     .name = "pr_validate",
     .input_kind = .pr,
     .output_kind = .pr,
-    .run = validate_pass_run,
 };
 
 /// Convenience: lower with encoding preference.
@@ -1189,7 +1189,7 @@ test "lower pass produces MLIR artifact" {
 
     try program.add_function(func);
     var output = pass.Artifact{ .pr = &program };
-    try lower_pass(&output, &ctx, &cfg);
+    try lower_pass(@ptrCast(&cfg), &output, &ctx);
     defer output.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(pass.ArtifactKind.mlir, output.kind());
