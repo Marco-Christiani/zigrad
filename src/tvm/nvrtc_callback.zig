@@ -6,8 +6,8 @@
 //!    that TVM generates but NVRTC can't compile in JIT mode
 
 const std = @import("std");
-const c = @import("../ffi/tvm.zig");
-const ffi = @import("../ffi/tvm.zig");
+const c = @import("../ffi/tvm/c.zig");
+const ffi = @import("../ffi/tvm/c.zig");
 const nvrtc = @import("../ffi/nvrtc.zig");
 
 const log = std.log.scoped(.@"zg/nvrtc_callback");

@@ -1,6 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
-pub const c = @import("ffi/tvm.zig");
+pub const c = @import("ffi/tvm/c.zig");
 
 // TVM subsystem modules
 const tvm_common = @import("tvm/common.zig");

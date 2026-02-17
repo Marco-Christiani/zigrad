@@ -4,7 +4,7 @@
 //! Intrinsics are pre-serialized by scripts/generate_cuda_intrinsics.py.
 
 const std = @import("std");
-const c = @import("../ffi/tvm.zig");
+const c = @import("../ffi/tvm/c.zig");
 const ffi = @import("../tvm_runtime.zig"); // For FFI helpers. FIXME: ffi should be centralized.
 
 const log = std.log.scoped(.@"zg/tvm_cuda");

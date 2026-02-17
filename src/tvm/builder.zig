@@ -5,7 +5,7 @@
 //! - CUDA: Host/device split + link
 
 const std = @import("std");
-const c = @import("../ffi/tvm.zig");
+const c = @import("../ffi/tvm/c.zig");
 const common = @import("common.zig");
 const cuda = @import("cuda.zig");
 const ffi = @import("../tvm_runtime.zig"); // For FFI helpers
