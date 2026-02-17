@@ -666,7 +666,7 @@ pub const gather = struct {
         const zero = try ctx.builder.literal_scalar(types.scalar_literal(operand_tensor.dtype, 0.0));
         const zero_full = try ctx.builder.broadcast_in_dim(zero, operand_tensor.shape.dims, &.{});
 
-        const sparams = scatter_params_for_gather(gparams) catch return error.UnsupportedEqn;
+        const sparams = scatter_params_for_gather(gparams);
         const contrib = try ctx.builder.scatter(zero_full, indices, out_cot, sparams);
         try ctx.add_cot(inputs[0], contrib);
     }
@@ -1125,29 +1125,17 @@ fn compare_type_for_dtype(dt: pr.DType) pr.CompareType {
     };
 }
 
-fn scatter_params_for_gather(params: pr.GatherParams) pr.BuildError!pr.ScatterParams {
-    if (params.slice_sizes.len == 0) return error.GatherTypeMismatch;
-    if (params.index_vector_dim < 0) return error.GatherTypeMismatch;
-
-    if (params.start_index_map.len == 1) {
-        return .{
-            .update_window_dims = &.{1},
-            .inserted_window_dims = &.{0},
-            .scatter_dims_to_operand_dims = &.{0},
-            .index_vector_dim = params.index_vector_dim,
-            .reduction = .add,
-        };
-    }
-
-    if (params.start_index_map.len == 2 and params.slice_sizes.len == 2 and params.collapsed_slice_dims.len == 2 and params.offset_dims.len == 0) {
-        return .{
-            .update_window_dims = &.{},
-            .inserted_window_dims = &.{ 0, 1 },
-            .scatter_dims_to_operand_dims = &.{ 0, 1 },
-            .index_vector_dim = params.index_vector_dim,
-            .reduction = .add,
-        };
-    }
-
-    return error.GatherTypeMismatch;
+/// Derive scatter params that invert a gather (for the VJP scatter-add).
+///
+/// The relationship is direct: offset_dims → update_window_dims,
+/// collapsed_slice_dims → inserted_window_dims, start_index_map →
+/// scatter_dims_to_operand_dims.
+fn scatter_params_for_gather(params: pr.GatherParams) pr.ScatterParams {
+    return .{
+        .update_window_dims = params.offset_dims,
+        .inserted_window_dims = params.collapsed_slice_dims,
+        .scatter_dims_to_operand_dims = params.start_index_map,
+        .index_vector_dim = params.index_vector_dim,
+        .reduction = .add,
+    };
 }

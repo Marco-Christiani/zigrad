@@ -207,14 +207,25 @@ pub fn run_llama_ft_demo(
 
     const param_count = 3 + num_layers * 7;
 
-    var compiled = if (train_mode)
-        try zg.frontend.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, 1e-4, compile_cfg)
-    else
-        try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
-    defer compiled.exe.deinit(backend_handle.api);
+    const train = zg.frontend.train;
+    var compiled_train: ?train.CompiledTrainStep = null;
+    var compiled_fwd: ?zg.frontend.CompiledForward = null;
+    if (train_mode) {
+        compiled_train = try train.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, .{
+            .optimizer = .{ .lr = 1e-4 },
+            .compile = compile_cfg,
+        });
+    } else {
+        compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
+    }
+    defer {
+        if (compiled_train) |*ct| ct.exe.deinit(backend_handle.api);
+        if (compiled_fwd) |*cf| cf.exe.deinit(backend_handle.api);
+    }
 
     if (!quiet) {
-        log_compiled_memory_stats(&compiled.exe, backend_handle.api);
+        if (compiled_train) |*ct| log_compiled_memory_stats(&ct.exe, backend_handle.api);
+        if (compiled_fwd) |*cf| log_compiled_memory_stats(&cf.exe, backend_handle.api);
     }
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
@@ -367,9 +378,10 @@ pub fn run_llama_ft_demo(
 
     var total_ns: u64 = 0;
 
-    const tmp_w_emb = try upload_host_buffer(allocator, &backend_handle, device, &host_w_emb);
-    const tmp_w_out = try upload_host_buffer(allocator, &backend_handle, device, &host_w_out);
-    const tmp_norm = try upload_host_buffer(allocator, &backend_handle, device, &host_norm);
+    const upload = zg.frontend.upload_host_buffer;
+    const tmp_w_emb = try upload(allocator, &backend_handle, device, &host_w_emb);
+    const tmp_w_out = try upload(allocator, &backend_handle, device, &host_w_out);
+    const tmp_norm = try upload(allocator, &backend_handle, device, &host_norm);
     var tmp_layer_input_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_layer_post_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_qkv_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
@@ -380,181 +392,252 @@ pub fn run_llama_ft_demo(
 
     var m: usize = 0;
     while (m < num_layers) : (m += 1) {
-        tmp_layer_input_norm[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_layer_input_norm[m]);
-        tmp_layer_post_norm[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_layer_post_norm[m]);
-        tmp_qkv_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_qkv_proj[m]);
-        tmp_o_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_o_proj[m]);
-        tmp_gate_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_gate_proj[m]);
-        tmp_up_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_up_proj[m]);
-        tmp_down_proj[m] = try upload_host_buffer(allocator, &backend_handle, device, &host_down_proj[m]);
+        tmp_layer_input_norm[m] = try upload(allocator, &backend_handle, device, &host_layer_input_norm[m]);
+        tmp_layer_post_norm[m] = try upload(allocator, &backend_handle, device, &host_layer_post_norm[m]);
+        tmp_qkv_proj[m] = try upload(allocator, &backend_handle, device, &host_qkv_proj[m]);
+        tmp_o_proj[m] = try upload(allocator, &backend_handle, device, &host_o_proj[m]);
+        tmp_gate_proj[m] = try upload(allocator, &backend_handle, device, &host_gate_proj[m]);
+        tmp_up_proj[m] = try upload(allocator, &backend_handle, device, &host_up_proj[m]);
+        tmp_down_proj[m] = try upload(allocator, &backend_handle, device, &host_down_proj[m]);
     }
-    const tmp_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
-    const tmp_target_ids = try upload_host_buffer(allocator, &backend_handle, device, &host_target_ids);
-    const tmp_attention_mask = try upload_host_buffer(allocator, &backend_handle, device, &host_attention_mask);
-    const tmp_mask = try upload_host_buffer(allocator, &backend_handle, device, &host_mask);
-    const tmp_sin = try upload_host_buffer(allocator, &backend_handle, device, &host_sin);
-    const tmp_cos = try upload_host_buffer(allocator, &backend_handle, device, &host_cos);
+    const tmp_x = try upload(allocator, &backend_handle, device, &host_x);
+    const tmp_target_ids = try upload(allocator, &backend_handle, device, &host_target_ids);
+    const tmp_attention_mask = try upload(allocator, &backend_handle, device, &host_attention_mask);
+    const tmp_mask = try upload(allocator, &backend_handle, device, &host_mask);
+    const tmp_sin = try upload(allocator, &backend_handle, device, &host_sin);
+    const tmp_cos = try upload(allocator, &backend_handle, device, &host_cos);
 
     const loss_dtype: zg.utils.DType = if (upcast_loss) .f32 else host_dtype;
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
     defer loss_host.deinit();
 
-    const output_count = if (train_mode) 1 + param_count else 1;
     const api = backend_handle.api;
 
-    var input_ptrs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
-    defer input_ptrs.deinit(allocator);
-    try input_ptrs.append(allocator, tmp_w_emb.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_w_out.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_norm.pjrt_buffer);
+    // Build param and batch buffer arrays.
+    var param_bufs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
+    defer param_bufs.deinit(allocator);
+    try param_bufs.append(allocator, tmp_w_emb.pjrt_buffer);
+    try param_bufs.append(allocator, tmp_w_out.pjrt_buffer);
+    try param_bufs.append(allocator, tmp_norm.pjrt_buffer);
     var p: usize = 0;
     while (p < num_layers) : (p += 1) {
-        try input_ptrs.append(allocator, tmp_layer_input_norm[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_layer_post_norm[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_qkv_proj[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_o_proj[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_gate_proj[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_up_proj[p].pjrt_buffer);
-        try input_ptrs.append(allocator, tmp_down_proj[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_layer_input_norm[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_layer_post_norm[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_qkv_proj[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_o_proj[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_gate_proj[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_up_proj[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_down_proj[p].pjrt_buffer);
     }
-    try input_ptrs.append(allocator, tmp_x.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_target_ids.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_attention_mask.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_mask.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_sin.pjrt_buffer);
-    try input_ptrs.append(allocator, tmp_cos.pjrt_buffer);
 
-    var output_ptrs = try allocator.alloc(?zg.backend.pjrt.RawBuffer, output_count);
-    defer allocator.free(output_ptrs);
-    @memset(output_ptrs, null);
-
-    // Disallow donation for all non-parameter inputs (batch + precomputed RoPE tables).
-    // Keep parameters donatable so XLA can alias outputs to inputs when profitable.
-    const non_donatable = &.{
-        @as(i64, @intCast(param_count + 0)), // x
-        @as(i64, @intCast(param_count + 1)), // target_ids
-        @as(i64, @intCast(param_count + 3)), // attention_mask
-        @as(i64, @intCast(param_count + 4)), // mask
-        @as(i64, @intCast(param_count + 5)), // sin
-        @as(i64, @intCast(param_count + 6)), // cos
+    const batch_bufs = [_]zg.backend.pjrt.RawBuffer{
+        tmp_x.pjrt_buffer,
+        tmp_target_ids.pjrt_buffer,
+        tmp_attention_mask.pjrt_buffer,
+        tmp_mask.pjrt_buffer,
+        tmp_sin.pjrt_buffer,
+        tmp_cos.pjrt_buffer,
     };
-    const non_donatable_input_indices: ?[]const i64 = if (train_mode) non_donatable else null;
 
-    defer {
-        for (input_ptrs.items) |raw| {
+    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w_emb.pjrt_buffer }).is_on_cpu(api);
+
+    if (train_mode) {
+        // Use TrainState for the training path.
+        var state = try train.TrainState.init(
+            allocator,
+            &compiled_train.?,
+            api,
+            param_bufs.items,
+            &batch_bufs,
+        );
+        defer state.deinit();
+        // Batch buffers are not owned by TrainState.
+        defer for (batch_bufs) |raw| {
             var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
             buf.deinit(api);
-        }
-    }
-
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = input_ptrs.items[0] }).is_on_cpu(api);
-
-    var warmup: usize = 0;
-    while (warmup < warmup_steps) : (warmup += 1) {
-        @memset(output_ptrs, null);
-        const ev = try compiled.exe.execute_into_opts(api, input_ptrs.items, output_ptrs, non_donatable_input_indices);
-
-        const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
-        if (ev) |e| {
-            var tmp = e;
-            try tmp.await_(api);
-            tmp.deinit(api);
-        }
-        if (!execute_only and !is_cpu and !quiet) {
-            var loss_ev = try loss_buf.to_host(api, loss_host.data);
-            try loss_ev.await_(api);
-            loss_ev.deinit(api);
-        }
-        loss_buf.deinit(api);
-        output_ptrs[0] = null;
-
-        if (train_mode) {
-            for (input_ptrs.items[0..param_count], output_ptrs[1 .. 1 + param_count]) |*old, new| {
-                const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
-                if (new_raw == old.*) continue;
-                var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
-                old.* = new_raw;
-                buf.deinit(api);
-            }
-        }
-    }
-
-    const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
-    var nvtx_range = NvtxRange.init() catch null;
-    defer if (nvtx_range) |*range| range.deinit();
-    if (nvtx_range) |*range| range.push(nvtx_label) catch {};
-
-    var step: usize = 0;
-    while (step < steps) : (step += 1) {
-        var timer = try std.time.Timer.start();
-        @memset(output_ptrs, null);
-        const event = try compiled.exe.execute_into_opts(api, input_ptrs.items, output_ptrs, non_donatable_input_indices);
-        const dispatch_ns = timer.lap();
-
-        if (event) |ev| {
-            var tmp = ev;
-            try tmp.await_(api);
-            tmp.deinit(api);
-        }
-        const exec_ns = timer.lap();
-
-        const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
-        const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
-            if (loss_dtype == .bf16) {
-                const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
-                break :blk bf16_to_f32(ptr[0]);
-            }
-            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
-            break :blk ptr[0];
-        } else blk: {
-            var loss_ev = try loss_buf.to_host(api, loss_host.data);
-            try loss_ev.await_(api);
-            loss_ev.deinit(api);
-            break :blk if (loss_dtype == .bf16)
-                bf16_to_f32(loss_host.as_slice(u16)[0])
-            else
-                loss_host.as_slice(f32)[0];
         };
-        const loss_read_ns = timer.lap();
+        // param_bufs ownership transferred to TrainState; clear to avoid double-free.
+        param_bufs.clearRetainingCapacity();
 
-        loss_buf.deinit(api);
-        output_ptrs[0] = null;
+        var warmup: usize = 0;
+        while (warmup < warmup_steps) : (warmup += 1) {
+            var result = try state.step();
+            if (result.event) |e| {
+                var ev = e;
+                try ev.await_(api);
+                ev.deinit(api);
+            }
+            if (!execute_only and !is_cpu and !quiet) {
+                var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
+                try loss_ev.await_(api);
+                loss_ev.deinit(api);
+            }
+            result.loss_buf.deinit(api);
+        }
 
-        if (train_mode) {
-            for (input_ptrs.items[0..param_count], output_ptrs[1 .. 1 + param_count]) |*old, new| {
-                const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
-                if (new_raw == old.*) continue;
-                var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
-                old.* = new_raw;
+        const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
+        var nvtx_range = NvtxRange.init() catch null;
+        defer if (nvtx_range) |*range| range.deinit();
+        if (nvtx_range) |*range| range.push(nvtx_label) catch {};
+
+        var step: usize = 0;
+        while (step < steps) : (step += 1) {
+            var timer = try std.time.Timer.start();
+            var result = try state.step();
+            const dispatch_ns = timer.lap();
+
+            if (result.event) |e| {
+                var ev = e;
+                try ev.await_(api);
+                ev.deinit(api);
+            }
+            const exec_ns = timer.lap();
+
+            const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
+                if (loss_dtype == .bf16) {
+                    const ptr: [*]const u16 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
+                    break :blk bf16_to_f32(ptr[0]);
+                }
+                const ptr: [*]const f32 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
+                break :blk ptr[0];
+            } else blk: {
+                var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
+                try loss_ev.await_(api);
+                loss_ev.deinit(api);
+                break :blk if (loss_dtype == .bf16)
+                    bf16_to_f32(loss_host.as_slice(u16)[0])
+                else
+                    loss_host.as_slice(f32)[0];
+            };
+            const loss_read_ns = timer.lap();
+
+            result.loss_buf.deinit(api);
+
+            const cleanup_ns = timer.lap();
+            const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
+            total_ns += step_ns;
+            const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
+            const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
+            const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
+            const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
+            const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
+            if (!quiet) {
+                if (loss) |loss_value| {
+                    std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                        step, loss_value, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
+                    });
+                } else {
+                    std.log.info("llama-ft-demo step {d}: dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                        step, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
+                    });
+                }
+            }
+        }
+
+        if (nvtx_range) |*range| range.pop() catch {};
+    } else {
+        // Forward-only mode: simple execute loop, no parameter swapping.
+        var fwd_exe = compiled_fwd.?.exe;
+
+        var input_ptrs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
+        defer input_ptrs.deinit(allocator);
+        try input_ptrs.appendSlice(allocator, param_bufs.items);
+        for (batch_bufs) |b| try input_ptrs.append(allocator, b);
+
+        defer {
+            for (input_ptrs.items) |raw| {
+                var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
                 buf.deinit(api);
             }
         }
+        // param_bufs ownership transferred to input_ptrs; clear to avoid double-free.
+        param_bufs.clearRetainingCapacity();
 
-        const cleanup_ns = timer.lap();
+        var output_ptrs = [1]?zg.backend.pjrt.RawBuffer{null};
 
-        const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
-        total_ns += step_ns;
-        const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
-        const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-        const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
-        const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
-        const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
-        if (!quiet) {
-            if (loss) |loss_value| {
-                std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                    step, loss_value, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-                });
-            } else {
-                std.log.info("llama-ft-demo step {d}: dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                    step, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-                });
+        var warmup: usize = 0;
+        while (warmup < warmup_steps) : (warmup += 1) {
+            @memset(output_ptrs[0..], null);
+            const ev = try fwd_exe.execute_into_opts(api, input_ptrs.items, &output_ptrs, null);
+            const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+            var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
+            if (ev) |e| {
+                var evv = e;
+                try evv.await_(api);
+                evv.deinit(api);
+            }
+            if (!execute_only and !is_cpu and !quiet) {
+                var loss_ev = try loss_buf.to_host(api, loss_host.data);
+                try loss_ev.await_(api);
+                loss_ev.deinit(api);
+            }
+            loss_buf.deinit(api);
+        }
+
+        const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
+        var nvtx_range = NvtxRange.init() catch null;
+        defer if (nvtx_range) |*range| range.deinit();
+        if (nvtx_range) |*range| range.push(nvtx_label) catch {};
+
+        var step: usize = 0;
+        while (step < steps) : (step += 1) {
+            var timer = try std.time.Timer.start();
+            @memset(output_ptrs[0..], null);
+            const event = try fwd_exe.execute_into_opts(api, input_ptrs.items, &output_ptrs, null);
+            const dispatch_ns = timer.lap();
+
+            if (event) |ev| {
+                var evv = ev;
+                try evv.await_(api);
+                evv.deinit(api);
+            }
+            const exec_ns = timer.lap();
+
+            const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+            var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
+            const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
+                if (loss_dtype == .bf16) {
+                    const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
+                    break :blk bf16_to_f32(ptr[0]);
+                }
+                const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
+                break :blk ptr[0];
+            } else blk: {
+                var loss_ev = try loss_buf.to_host(api, loss_host.data);
+                try loss_ev.await_(api);
+                loss_ev.deinit(api);
+                break :blk if (loss_dtype == .bf16)
+                    bf16_to_f32(loss_host.as_slice(u16)[0])
+                else
+                    loss_host.as_slice(f32)[0];
+            };
+            const loss_read_ns = timer.lap();
+
+            loss_buf.deinit(api);
+
+            const cleanup_ns = timer.lap();
+            const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
+            total_ns += step_ns;
+            const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
+            const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
+            const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
+            const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
+            const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
+            if (!quiet) {
+                if (loss) |loss_value| {
+                    std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                        step, loss_value, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
+                    });
+                } else {
+                    std.log.info("llama-ft-demo step {d}: dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
+                        step, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
+                    });
+                }
             }
         }
-    }
 
-    if (nvtx_range) |*range| range.pop() catch {};
+        if (nvtx_range) |*range| range.pop() catch {};
+    }
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
     if (!quiet) {
@@ -1075,27 +1158,6 @@ fn host_dtype_for(dtype: zg.pr.DType) zg.utils.DType {
 fn f32_to_bf16(val: f32) u16 {
     const bits: u32 = @bitCast(val);
     return @intCast(bits >> 16);
-}
-
-fn upload_host_buffer(
-    allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
-    device: *const zg.backend.pjrt.Device,
-    buf: *zg.utils.HostBuffer,
-) !zg.backend.pjrt.Buffer {
-    const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
-    defer allocator.free(shape_i64);
-    for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
-    const dtype: zg.pr.DType = switch (buf.dtype) {
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .i32 => .i32,
-        .i64 => .i64,
-        .u32 => .u32,
-        .u64 => .u64,
-    };
-    return backend.buffer_from_host(device, buf.data, dtype, shape_i64);
 }
 
 fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {

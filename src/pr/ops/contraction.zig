@@ -245,7 +245,7 @@ fn maybe_general_dot_vjp(
 
     const lhs_t = ctx.tensor_of(lhs_id);
     const rhs_t = ctx.tensor_of(rhs_id);
-    const out_t = ctx.tensor_of(out_cot);
+    const out_t = ctx.builder_tensor_of(out_cot);
 
     const lhs_rank = lhs_t.shape.rank();
     const rhs_rank = rhs_t.shape.rank();
@@ -292,13 +292,17 @@ fn maybe_general_dot_vjp(
         .rhs_contracting_dims = out_contract,
     });
 
+    // Canonical layout from dot_general(lhs_primal, out_cot) is
+    // [batch, lhs_remaining, rhs_remaining] = [batch, rhs_contract, rhs_other].
+    // transpose_to_match_multi expects (batch, slot0, slot1) matching canonical
+    // positions, so pass rhs_contracting first, then rhs_other.
     const d_rhs = try transpose_to_match_multi(
         ctx,
         d_rhs_canon,
         rhs_rank,
         params.rhs_batch_dims,
-        rhs_other,
         params.rhs_contracting_dims,
+        rhs_other,
     );
 
     return .{ .lhs = d_lhs, .rhs = d_rhs };

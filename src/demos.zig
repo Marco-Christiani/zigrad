@@ -327,7 +327,11 @@ pub fn run_train_demo(
     if (compile_cfg.device_index >= devices.len) return error.InvalidDeviceIndex;
     const device = &devices[compile_cfg.device_index];
 
-    var compiled = try zg.frontend.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, 6, 1e-2, compile_cfg);
+    const train = zg.frontend.train;
+    var compiled = try train.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, 6, .{
+        .optimizer = .{ .lr = 1e-2 },
+        .compile = compile_cfg,
+    });
     defer compiled.exe.deinit(backend_handle.api);
 
     const true_w1 = try allocator.alloc(f32, in_dim * h1);
@@ -409,108 +413,80 @@ pub fn run_train_demo(
 
     var total_ns: u64 = 0;
 
-    // Note: buffer ownership transfers to `input_ptrs`; do not `defer deinit()` the
-    // temporary wrappers here, or we will double-destroy buffers after donation.
-    const tmp_w1 = try upload_host_buffer(allocator, &backend_handle, device, &host_w1);
-    const tmp_b1 = try upload_host_buffer(allocator, &backend_handle, device, &host_b1);
-    const tmp_w2 = try upload_host_buffer(allocator, &backend_handle, device, &host_w2);
-    const tmp_b2 = try upload_host_buffer(allocator, &backend_handle, device, &host_b2);
-    const tmp_w3 = try upload_host_buffer(allocator, &backend_handle, device, &host_w3);
-    const tmp_b3 = try upload_host_buffer(allocator, &backend_handle, device, &host_b3);
-    const tmp_x = try upload_host_buffer(allocator, &backend_handle, device, &host_x);
-    const tmp_y = try upload_host_buffer(allocator, &backend_handle, device, &host_y);
+    const upload = zg.frontend.upload_host_buffer;
+    const tmp_w1 = try upload(allocator, &backend_handle, device, &host_w1);
+    const tmp_b1 = try upload(allocator, &backend_handle, device, &host_b1);
+    const tmp_w2 = try upload(allocator, &backend_handle, device, &host_w2);
+    const tmp_b2 = try upload(allocator, &backend_handle, device, &host_b2);
+    const tmp_w3 = try upload(allocator, &backend_handle, device, &host_w3);
+    const tmp_b3 = try upload(allocator, &backend_handle, device, &host_b3);
+    const tmp_x = try upload(allocator, &backend_handle, device, &host_x);
+    const tmp_y = try upload(allocator, &backend_handle, device, &host_y);
 
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
     defer loss_host.deinit();
 
-    const output_count = 7;
     const api = backend_handle.api;
 
-    var input_ptrs = [_]zg.backend.pjrt.RawBuffer{
-        tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer,
-        tmp_w3.pjrt_buffer, tmp_b3.pjrt_buffer, tmp_x.pjrt_buffer,  tmp_y.pjrt_buffer,
-    };
-    var output_ptrs: [output_count]?zg.backend.pjrt.RawBuffer = undefined;
-    @memset(output_ptrs[0..], null);
-    const non_donatable_input_indices: []const i64 = &.{ 6, 7 };
-
-    // Ensure remaining buffers are released even if we replace/donate them in-loop.
+    var state = try train.TrainState.init(
+        allocator,
+        &compiled,
+        api,
+        &.{ tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer, tmp_w3.pjrt_buffer, tmp_b3.pjrt_buffer },
+        &.{ tmp_x.pjrt_buffer, tmp_y.pjrt_buffer },
+    );
+    defer state.deinit();
+    // Batch buffers are not owned by TrainState; deinit them separately.
     defer {
-        for (input_ptrs) |raw| {
-            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
-            buf.deinit(api);
-        }
+        var bx = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_x.pjrt_buffer };
+        bx.deinit(api);
+        var by = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_y.pjrt_buffer };
+        by.deinit(api);
     }
 
-    // Check once if we're on CPU for direct memory access optimization.
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = input_ptrs[0] }).is_on_cpu(api);
+    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w1.pjrt_buffer }).is_on_cpu(api);
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
-        @memset(output_ptrs[0..], null);
-        const ev = try compiled.exe.execute_into_opts(api, &input_ptrs, &output_ptrs, non_donatable_input_indices);
-
-        const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
-        if (ev) |e| {
-            var tmp = e;
-            try tmp.await_(api);
-            tmp.deinit(api);
+        var result = try state.step();
+        if (result.event) |e| {
+            var ev = e;
+            try ev.await_(api);
+            ev.deinit(api);
         }
         if (!is_cpu and !quiet) {
-            var loss_ev = try loss_buf.to_host(api, loss_host.data);
+            var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
             try loss_ev.await_(api);
             loss_ev.deinit(api);
         }
-        loss_buf.deinit(api);
-        output_ptrs[0] = null;
-
-        for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
-            const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
-            if (new_raw == old.*) continue;
-            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
-            old.* = new_raw;
-            buf.deinit(api);
-        }
+        result.loss_buf.deinit(api);
     }
 
     var step: usize = 0;
     while (step < steps) : (step += 1) {
         var timer = try std.time.Timer.start();
-        @memset(output_ptrs[0..], null);
-        const event = try compiled.exe.execute_into_opts(api, &input_ptrs, &output_ptrs, non_donatable_input_indices);
+        var result = try state.step();
         const dispatch_ns = timer.lap();
 
-        if (event) |ev| {
-            var tmp = ev;
-            try tmp.await_(api);
-            tmp.deinit(api);
+        if (result.event) |e| {
+            var ev = e;
+            try ev.await_(api);
+            ev.deinit(api);
         }
         const wait_ns = timer.lap();
 
-        const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-        var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
-            const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
+            const ptr: [*]const f32 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
             break :blk ptr[0];
         } else blk: {
-            var loss_ev = try loss_buf.to_host(api, loss_host.data);
+            var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
             try loss_ev.await_(api);
             loss_ev.deinit(api);
             break :blk loss_host.as_slice(f32)[0];
         };
         const loss_read_ns = timer.lap();
 
-        loss_buf.deinit(api);
-        output_ptrs[0] = null;
-
-        for (input_ptrs[0..6], output_ptrs[1..]) |*old, new| {
-            const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
-            if (new_raw == old.*) continue;
-            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = old.* };
-            old.* = new_raw;
-            buf.deinit(api);
-        }
+        result.loss_buf.deinit(api);
 
         const cleanup_ns = timer.lap();
         const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;
@@ -719,27 +695,6 @@ fn expect_all_close(label: []const u8, got: []const f32, expected: []const f32, 
             return error.NumericalMismatch;
         }
     }
-}
-
-fn upload_host_buffer(
-    allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
-    device: *const zg.backend.pjrt.Device,
-    buf: *zg.utils.HostBuffer,
-) !zg.backend.pjrt.Buffer {
-    const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
-    defer allocator.free(shape_i64);
-    for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
-    const dtype: zg.pr.DType = switch (buf.dtype) {
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .i32 => .i32,
-        .i64 => .i64,
-        .u32 => .u32,
-        .u64 => .u64,
-    };
-    return backend.buffer_from_host(device, buf.data, dtype, shape_i64);
 }
 
 fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {

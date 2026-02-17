@@ -7,6 +7,9 @@ const lower = @import("../lower/root.zig");
 const pipeline = @import("../pipeline/root.zig");
 const dump = @import("../pipeline/dump.zig");
 const backend = @import("../backend/root.zig");
+const utils = @import("../utils/host_buffer.zig");
+
+pub const train = @import("train.zig");
 
 pub const TensorSpec = struct {
     dtype: pr.DType,
@@ -361,100 +364,6 @@ pub const CompiledForward = struct {
     output_arity: usize,
 };
 
-pub fn compile_train_step(
-    allocator: std.mem.Allocator,
-    backend_handle: *backend.PjrtBackend,
-    device: *const backend.pjrt.Device,
-    func: anytype,
-    inputs: anytype,
-    param_count: usize,
-    lr: f32,
-    config: CompileConfig,
-) !CompiledForward {
-    var program = pr.Program.init(allocator);
-    defer program.deinit();
-
-    var loss_builder = try Builder.init(&program, "loss");
-    defer loss_builder.deinit();
-
-    const input_tensors = try build_inputs(&loss_builder, inputs);
-
-    const result = if (@typeInfo(@TypeOf(input_tensors)) == .@"struct" and @typeInfo(@TypeOf(input_tensors)).@"struct".is_tuple)
-        @call(.auto, func, input_tensors)
-    else
-        @call(.auto, func, .{input_tensors});
-
-    const outputs = switch (@typeInfo(@TypeOf(result))) {
-        .error_union => try result,
-        else => result,
-    };
-
-    const output_tensors = try flatten_outputs(allocator, outputs);
-    defer allocator.free(output_tensors);
-    if (output_tensors.len != 1) return error.UnexpectedOutputs;
-
-    const loss_func = try loss_builder.finish(output_tensors);
-
-    const vjp_func = try ad.vjp_with_value(program.allocator(), &program, loss_func, "loss_vjp");
-    try program.add_function(vjp_func);
-
-    var step_builder = try pr.FunctionBuilder.init(&program, config.entry_name);
-    defer step_builder.deinit();
-
-    const flat_specs = try flatten_specs(allocator, inputs);
-    defer allocator.free(flat_specs);
-
-    const primals = try allocator.alloc(pr.VarId, flat_specs.len);
-    defer allocator.free(primals);
-    for (flat_specs, 0..) |spec, i| {
-        primals[i] = try step_builder.param_tensor(spec.dtype, spec.dims);
-    }
-    if (param_count > primals.len) return error.InvalidParams;
-
-    const loss_tensor = output_tensors[0].tensor;
-    const cot = try emit_cotangent(&step_builder, loss_tensor);
-
-    const call_inputs = try allocator.alloc(pr.VarId, primals.len + 1);
-    defer allocator.free(call_inputs);
-    @memcpy(call_inputs[0..primals.len], primals);
-    call_inputs[primals.len] = cot;
-
-    const call_outputs = try step_builder.call("loss_vjp", call_inputs);
-    if (call_outputs.len != primals.len + 1) return error.UnexpectedOutputs;
-
-    const loss_value = call_outputs[0];
-    const grads = call_outputs[1..];
-
-    const updated = try allocator.alloc(pr.VarId, param_count);
-    defer allocator.free(updated);
-    for (0..param_count) |i| {
-        updated[i] = try emit_sgd_update(&step_builder, primals[i], grads[i], lr);
-    }
-
-    const returns = try allocator.alloc(pr.VarId, 1 + param_count);
-    defer allocator.free(returns);
-    returns[0] = loss_value;
-    @memcpy(returns[1..], updated);
-
-    const step_func = try step_builder.finish(returns);
-    try program.add_function(step_func);
-
-    const fwd_exe = try compile_program(
-        backend_handle,
-        allocator,
-        &program,
-        device,
-        config,
-        config.entry_name,
-    );
-
-    return .{
-        .exe = fwd_exe,
-        .input_arity = flat_specs.len,
-        .output_arity = 1 + param_count,
-    };
-}
-
 pub fn compile_forward(
     allocator: std.mem.Allocator,
     backend_handle: *backend.PjrtBackend,
@@ -527,7 +436,7 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
     return program;
 }
 
-fn compile_program(
+pub fn compile_program(
     backend_handle: *backend.PjrtBackend,
     allocator: std.mem.Allocator,
     program: *pr.Program,
@@ -581,7 +490,7 @@ pub fn init_backend(allocator: std.mem.Allocator, plugin_path: ?[]const u8) !bac
     return backend.PjrtBackend.init(allocator, path);
 }
 
-fn build_inputs(builder: *Builder, spec: anytype) !SpecToTensorType(@TypeOf(spec)) {
+pub fn build_inputs(builder: *Builder, spec: anytype) !SpecToTensorType(@TypeOf(spec)) {
     const T = @TypeOf(spec);
     if (T == TensorSpec) {
         return try builder.param(spec);
@@ -611,7 +520,7 @@ fn build_inputs(builder: *Builder, spec: anytype) !SpecToTensorType(@TypeOf(spec
     }
 }
 
-fn flatten_outputs(allocator: std.mem.Allocator, output: anytype) ![]Tensor {
+pub fn flatten_outputs(allocator: std.mem.Allocator, output: anytype) ![]Tensor {
     var list = try std.ArrayList(Tensor).initCapacity(allocator, 8);
     errdefer list.deinit(allocator);
     try append_output(allocator, &list, output);
@@ -677,7 +586,7 @@ fn SpecToTensorType(comptime T: type) type {
     }
 }
 
-fn flatten_specs(allocator: std.mem.Allocator, spec: anytype) ![]TensorSpec {
+pub fn flatten_specs(allocator: std.mem.Allocator, spec: anytype) ![]TensorSpec {
     var list = try std.ArrayList(TensorSpec).initCapacity(allocator, 16);
     errdefer list.deinit(allocator);
     try append_specs(allocator, &list, spec);
@@ -721,23 +630,24 @@ fn zero_literal(dtype: pr.DType) pr.Literal {
     };
 }
 
-fn emit_cotangent(builder: *pr.FunctionBuilder, tensor: pr.Tensor) pr.BuildError!pr.VarId {
-    const lit = ops.types.scalar_literal(tensor.dtype, 1.0);
-    const scalar = try builder.literal_scalar(lit);
-    if (tensor.shape.rank() == 0) return scalar;
-    return try builder.broadcast_in_dim(scalar, tensor.shape.dims, &.{});
+/// Upload a host buffer to a device buffer.
+pub fn upload_host_buffer(
+    allocator: std.mem.Allocator,
+    backend_handle: *backend.PjrtBackend,
+    device: *const backend.pjrt.Device,
+    buf: *utils.HostBuffer,
+) !backend.pjrt.Buffer {
+    const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
+    defer allocator.free(shape_i64);
+    for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
+    const dtype: pr.DType = switch (buf.dtype) {
+        .bf16 => .bf16,
+        .f32 => .f32,
+        .f64 => .f64,
+        .i32 => .i32,
+        .i64 => .i64,
+        .u32 => .u32,
+        .u64 => .u64,
+    };
+    return backend_handle.buffer_from_host(device, buf.data, dtype, shape_i64);
 }
-
-fn emit_sgd_update(builder: *pr.FunctionBuilder, param: pr.VarId, grad: pr.VarId, lr: f32) pr.BuildError!pr.VarId {
-    const param_tensor = builder.avals.items[@intCast(param)].as_tensor() orelse return error.UnsupportedAval;
-    const lr_lit = ops.types.scalar_literal(param_tensor.dtype, lr);
-    const lr_scalar = try builder.literal_scalar(lr_lit);
-    const lr_broadcast = if (param_tensor.shape.rank() == 0)
-        lr_scalar
-    else
-        try builder.broadcast_in_dim(lr_scalar, param_tensor.shape.dims, &.{});
-    const scaled = try builder.multiply(grad, lr_broadcast);
-    return try builder.subtract(param, scaled);
-}
-
-

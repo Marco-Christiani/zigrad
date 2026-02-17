@@ -89,6 +89,11 @@ pub const AdContext = struct {
     pub fn tensor_of(self: AdContext, id: pr.VarId) pr.Tensor {
         return self.func.avals[@intCast(id)].as_tensor().?;
     }
+
+    /// Look up tensor info for a VarId created by the VJP builder (e.g. cotangents).
+    pub fn builder_tensor_of(self: AdContext, id: pr.VarId) pr.Tensor {
+        return self.builder.avals.items[@intCast(id)].as_tensor().?;
+    }
 };
 
 /// Context passed to format functions.
