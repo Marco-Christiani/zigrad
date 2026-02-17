@@ -3,8 +3,6 @@
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
-const mlir = @import("../../ffi/mlir/mlir.zig");
-const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
 const log = std.log.scoped(.@"zg/shape");
 
 // ============================================================================
@@ -56,22 +54,6 @@ pub const reshape = struct {
 
         if (num_elements(operand.shape.dims) != num_elements(out_shape)) return error.ReshapeTypeMismatch;
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } } };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_id = outputs[0];
-        const out_tensor = try ctx.tensor_of(out_id);
-        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-
-        const op = stablehlo.reshape(ctx.mlir_ctx, operand, out_type, ctx.loc);
-        ctx.block.append_operation(op);
-        ctx.set_value(out_id, op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -169,23 +151,6 @@ pub const iota = struct {
         return .{ .tensor = .{ .dtype = out_dtype, .shape = .{ .dims = out_shape } } };
     }
 
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 0 or outputs.len != 1) return error.InvalidProgram;
-
-        const iota_dim = pr.param_iota_dimension(params) orelse return error.InvalidProgram;
-        const out_id = outputs[0];
-        const out_tensor = try ctx.tensor_of(out_id);
-        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-
-        const op = stablehlo.iota(ctx.mlir_ctx, iota_dim, out_type, ctx.loc);
-        ctx.block.append_operation(op);
-        ctx.set_value(out_id, op.result(0));
-    }
-
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
@@ -244,24 +209,6 @@ pub const transpose = struct {
         const out_dims = try ctx.alloc().alloc(usize, operand.shape.rank());
         for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-
-        const perm = pr.param_permutation(params) orelse return error.InvalidProgram;
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_id = outputs[0];
-        const out_tensor = try ctx.tensor_of(out_id);
-        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-
-        const op = stablehlo.transpose(ctx.mlir_ctx, operand, out_type, ctx.loc, .{ .permutation = perm });
-        ctx.block.append_operation(op);
-        ctx.set_value(out_id, op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -333,30 +280,6 @@ pub const slice = struct {
         const operand = try ctx.tensor_of(ctx.inputs[0]);
         const out_dims = try slice_output_dims_local(ctx.alloc(), operand.shape.dims, sparams);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-        const sparams = pr.param_slice(params) orelse return error.InvalidProgram;
-
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_tensor = try ctx.tensor_of(outputs[0]);
-        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-        const op = stablehlo.slice(
-            ctx.mlir_ctx,
-            operand,
-            sparams.start_indices,
-            sparams.limit_indices,
-            sparams.strides,
-            out_type,
-            ctx.loc,
-        );
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -452,24 +375,6 @@ pub const concatenate = struct {
         return .{ .tensor = .{ .dtype = first.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len == 0 or outputs.len != 1) return error.InvalidProgram;
-        const axis = pr.param_concat_axis(params) orelse return error.InvalidProgram;
-
-        var values = try ctx.arena.alloc(mlir.Value, inputs.len);
-        for (inputs, 0..) |id, i| {
-            values[i] = ctx.get_value(id) orelse return error.InvalidProgram;
-        }
-
-        const op = stablehlo.concatenate(ctx.mlir_ctx, values, axis, ctx.loc);
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
-    }
-
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -560,36 +465,6 @@ pub const reduce_sum = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-
-        const axes = pr.param_reduce_axes(params) orelse return error.InvalidProgram;
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_id = outputs[0];
-        const out_tensor = try ctx.tensor_of(out_id);
-
-        const elem_type = types.dtype_to_dense_elements_type(out_tensor.dtype);
-        const zero_bytes = scalar_zero_bytes(out_tensor.dtype);
-        const zero_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, zero_bytes, ctx.loc);
-        ctx.block.append_operation(zero_op);
-
-        const op = stablehlo.reduce(
-            ctx.mlir_ctx,
-            &.{operand},
-            &.{zero_op.result(0)},
-            axes,
-            {},
-            reduce_add_block,
-            ctx.loc,
-        );
-        ctx.block.append_operation(op);
-        ctx.set_value(out_id, op.result(0));
-    }
-
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -655,36 +530,6 @@ pub const reduce_max = struct {
         const operand = try ctx.tensor_of(ctx.inputs[0]);
         const out_dims = try reduce_sum_output_dims(ctx.alloc(), operand.shape.dims, axes);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-        const axes = pr.param_reduce_axes(params) orelse return error.InvalidProgram;
-
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_id = outputs[0];
-        const out_tensor = try ctx.tensor_of(out_id);
-
-        const elem_type = types.dtype_to_dense_elements_type(out_tensor.dtype);
-        const min_bytes = scalar_min_bytes(out_tensor.dtype);
-        const min_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, min_bytes, ctx.loc);
-        ctx.block.append_operation(min_op);
-
-        const op = stablehlo.reduce(
-            ctx.mlir_ctx,
-            &.{operand},
-            &.{min_op.result(0)},
-            axes,
-            {},
-            reduce_max_block,
-            ctx.loc,
-        );
-        ctx.block.append_operation(op);
-        ctx.set_value(out_id, op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -794,28 +639,6 @@ pub const gather = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 2 or outputs.len != 1) return error.InvalidProgram;
-        const gparams = pr.param_gather(params) orelse return error.InvalidProgram;
-
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const indices = ctx.get_value(inputs[1]) orelse return error.InvalidProgram;
-        const op = stablehlo.gather(ctx.mlir_ctx, operand, indices, gparams.slice_sizes, ctx.loc, .{
-            .offset_dims = gparams.offset_dims,
-            .collapsed_slice_dims = gparams.collapsed_slice_dims,
-            .operand_batching_dims = &.{},
-            .start_indices_batching_dims = &.{},
-            .start_index_map = gparams.start_index_map,
-            .index_vector_dim = gparams.index_vector_dim,
-        });
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
-    }
-
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -884,38 +707,6 @@ pub const scatter = struct {
         return .{ .tensor = operand };
     }
 
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 3 or outputs.len != 1) return error.InvalidProgram;
-        const sparams = pr.param_scatter(params) orelse return error.InvalidProgram;
-
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const indices = ctx.get_value(inputs[1]) orelse return error.InvalidProgram;
-        const updates = ctx.get_value(inputs[2]) orelse return error.InvalidProgram;
-
-        const update_block = make_update_block(ctx.mlir_ctx, operand.get_type(), ctx.loc, sparams.reduction);
-        const op = stablehlo.scatter(
-            ctx.mlir_ctx,
-            &.{operand},
-            &.{indices},
-            &.{updates},
-            update_block,
-            .{
-                .update_window_dims = sparams.update_window_dims,
-                .inserted_window_dims = sparams.inserted_window_dims,
-                .input_batching_dims = &.{},
-                .scatter_indices_batching_dims = &.{},
-                .scatter_dims_to_operand_dims = sparams.scatter_dims_to_operand_dims,
-                .index_vector_dim = sparams.index_vector_dim,
-            },
-            ctx.loc,
-        );
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
-    }
 };
 
 // ============================================================================
@@ -951,24 +742,6 @@ pub const broadcast_in_dim = struct {
 
         try validate_broadcast_in_dim_op(operand, out_tensor, bd);
         return .{ .tensor = out_tensor };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-
-        const bd = pr.param_broadcast_dims(params) orelse return error.InvalidProgram;
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_id = outputs[0];
-        const out_tensor = try ctx.tensor_of(out_id);
-        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-
-        const op = stablehlo.broadcast_in_dim(ctx.mlir_ctx, operand, bd, out_type, ctx.loc);
-        ctx.block.append_operation(op);
-        ctx.set_value(out_id, op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -1204,61 +977,6 @@ fn broadcast_reduce_axes(
         idx += 1;
     }
     return axes;
-}
-
-fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
-    return switch (dtype) {
-        .bf16 => std.mem.asBytes(&@as(u16, 0)),
-        .f32 => std.mem.asBytes(&@as(f32, 0.0)),
-        .f64 => std.mem.asBytes(&@as(f64, 0.0)),
-        .i32 => std.mem.asBytes(&@as(i32, 0)),
-        .i64 => std.mem.asBytes(&@as(i64, 0)),
-        .u32 => std.mem.asBytes(&@as(u32, 0)),
-        .u64 => std.mem.asBytes(&@as(u64, 0)),
-        .bool => std.mem.asBytes(&@as(bool, false)),
-    };
-}
-
-fn f32_to_bf16_bits(val: f32) u16 {
-    const bits: u32 = @bitCast(val);
-    return @intCast(bits >> 16);
-}
-
-fn scalar_min_bytes(dtype: pr.DType) []const u8 {
-    return switch (dtype) {
-        .bf16 => std.mem.asBytes(&f32_to_bf16_bits(-std.math.inf(f32))),
-        .f32 => std.mem.asBytes(&@as(f32, -std.math.inf(f32))),
-        .f64 => std.mem.asBytes(&@as(f64, -std.math.inf(f64))),
-        .i32 => std.mem.asBytes(&std.math.minInt(i32)),
-        .i64 => std.mem.asBytes(&std.math.minInt(i64)),
-        .u32 => std.mem.asBytes(&@as(u32, 0)),
-        .u64 => std.mem.asBytes(&@as(u64, 0)),
-        .bool => std.mem.asBytes(&@as(bool, false)),
-    };
-}
-
-fn reduce_add_block(_: anytype, ctx: mlir.Context, inputs: []const mlir.Value, accs: []const mlir.Value) mlir.Operation {
-    return stablehlo.add(ctx, inputs[0], accs[0], mlir.Location.unknown(ctx));
-}
-
-fn reduce_max_block(_: anytype, ctx: mlir.Context, inputs: []const mlir.Value, accs: []const mlir.Value) mlir.Operation {
-    return stablehlo.maximum(ctx, inputs[0], accs[0], mlir.Location.unknown(ctx));
-}
-
-fn make_update_block(ctx: mlir.Context, operand_type: mlir.Type, loc: mlir.Location, reduction: pr.ScatterReduction) mlir.Block {
-    const elem_type = if (operand_type.as(mlir.RankedTensorType)) |shaped| shaped.get_element_type() else operand_type;
-    const arg_type: mlir.Type = .tensor(&.{}, elem_type);
-    var block = mlir.Block.init(&.{ arg_type, arg_type }, &.{ loc, loc }) catch unreachable;
-    const op = switch (reduction) {
-        .add => stablehlo.add(ctx, block.argument(0), block.argument(1), loc),
-        .max => stablehlo.maximum(ctx, block.argument(0), block.argument(1), loc),
-        .min => stablehlo.minimum(ctx, block.argument(0), block.argument(1), loc),
-        .mul => stablehlo.multiply(ctx, block.argument(0), block.argument(1), loc),
-    };
-    block.append_operation(op);
-    const ret = stablehlo.return_(ctx, op.result(0), loc);
-    block.append_operation(ret);
-    return block;
 }
 
 fn gather_output_dims_local(

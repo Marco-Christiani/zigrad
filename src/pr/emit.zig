@@ -93,65 +93,78 @@ fn emit_params(params: []const pr.Param, writer: anytype) !void {
             },
             .out_shape => |shape| {
                 try writer.writeAll(" shape=[");
-                for (shape, 0..) |d, i| {
-                    if (i > 0) try writer.writeAll(",");
-                    try writer.print("{d}", .{d});
-                }
+                try emit_i64_or_usize_list(usize, writer, shape);
                 try writer.writeAll("]");
             },
             .broadcast_dimensions => |dims| {
                 try writer.writeAll(" dims=[");
-                for (dims, 0..) |d, i| {
-                    if (i > 0) try writer.writeAll(",");
-                    try writer.print("{d}", .{d});
-                }
+                try emit_i64_or_usize_list(i64, writer, dims);
                 try writer.writeAll("]");
             },
             .permutation => |perm| {
                 try writer.writeAll(" perm=[");
-                for (perm, 0..) |p, i| {
-                    if (i > 0) try writer.writeAll(",");
-                    try writer.print("{d}", .{p});
-                }
+                try emit_i64_or_usize_list(i64, writer, perm);
                 try writer.writeAll("]");
             },
-            .iota_dimension => |dim| {
-                try writer.print(" iota_dim={d}", .{dim});
+            .reduce_axes => |axes| {
+                try writer.writeAll(" axes=[");
+                try emit_i64_or_usize_list(i64, writer, axes);
+                try writer.writeAll("]");
             },
-            .out_dtype => |dt| {
-                try writer.print(" dtype={s}", .{@tagName(dt)});
-            },
-            .call_callee => |name| {
-                try writer.print(" callee=\"{s}\"", .{name});
-            },
-            .call_target_name => |name| {
-                try writer.print(" target=\"{s}\"", .{name});
-            },
+            .iota_dimension => |dim| try writer.print(" iota_dim={d}", .{dim}),
+            .out_dtype => |dt| try writer.print(" dtype={s}", .{@tagName(dt)}),
+            .concat_axis => |axis| try writer.print(" axis={d}", .{axis}),
+            .call_callee => |name| try writer.print(" callee=\"{s}\"", .{name}),
+            .call_target_name => |name| try writer.print(" target=\"{s}\"", .{name}),
             .has_side_effect => |eff| {
                 if (eff) try writer.writeAll(" side_effect");
             },
+            .compare => |cp| try writer.print(" dir={s} type={s}", .{ @tagName(cp.direction), @tagName(cp.compare_type) }),
+            .dot_general => |dg| {
+                try writer.writeAll(" batch_lhs=[");
+                try emit_i64_or_usize_list(i64, writer, dg.lhs_batch_dims);
+                try writer.writeAll("] batch_rhs=[");
+                try emit_i64_or_usize_list(i64, writer, dg.rhs_batch_dims);
+                try writer.writeAll("] contract_lhs=[");
+                try emit_i64_or_usize_list(i64, writer, dg.lhs_contracting_dims);
+                try writer.writeAll("] contract_rhs=[");
+                try emit_i64_or_usize_list(i64, writer, dg.rhs_contracting_dims);
+                try writer.writeAll("]");
+            },
+            .slice => |s| {
+                try writer.writeAll(" start=[");
+                try emit_i64_or_usize_list(i64, writer, s.start_indices);
+                try writer.writeAll("] limit=[");
+                try emit_i64_or_usize_list(i64, writer, s.limit_indices);
+                try writer.writeAll("]");
+            },
+            .gather, .scatter => {}, // Complex params; ZXPR format handles these
             .out_aval => {}, // Type already shown in output declaration
         }
     }
 }
 
-fn emit_literal(lit: pr.Literal, writer: anytype) !void {
-    switch (lit) {
-        .f32 => |v| try writer.print("{d}", .{v}),
-        .f64 => |v| try writer.print("{d}", .{v}),
-        .i32 => |v| try writer.print("{d}", .{v}),
-        .i64 => |v| try writer.print("{d}", .{v}),
-        .u32 => |v| try writer.print("{d}", .{v}),
-        .u64 => |v| try writer.print("{d}", .{v}),
+fn emit_i64_or_usize_list(comptime T: type, writer: anytype, items: []const T) !void {
+    for (items, 0..) |v, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.print("{d}", .{v});
     }
 }
 
-/// Convenience: emit to an ArrayList.
+fn emit_literal(lit: pr.Literal, writer: anytype) !void {
+    switch (lit) {
+        .bf16 => |v| try writer.print("bf16(0x{x:0>4})", .{v}),
+        inline .f32, .f64, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
+        .bool => |v| try writer.writeAll(if (v) "true" else "false"),
+    }
+}
+
+/// Convenience: emit to a heap-allocated buffer.
 pub fn emit_text_alloc(allocator: std.mem.Allocator, func: pr.Function) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-    try emit_text(func, buf.writer());
-    return buf.toOwnedSlice();
+    var buf: std.ArrayList(u8) = try .initCapacity(allocator, 256);
+    errdefer buf.deinit(allocator);
+    try emit_text(func, buf.writer(allocator));
+    return try buf.toOwnedSlice(allocator);
 }
 
 test "emit_text basic function" {

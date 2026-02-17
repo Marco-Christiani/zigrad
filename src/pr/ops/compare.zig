@@ -1,8 +1,7 @@
+/// Compare and Select operations.
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
-const mlir = @import("../../ffi/mlir/mlir.zig");
-const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
 
 fn format_compare(writer: *types.Writer, params: pr.CompareParams) types.FormatError!void {
     try writer.print("dir={s} type={s}", .{ @tagName(params.direction), @tagName(params.compare_type) });
@@ -11,26 +10,6 @@ fn format_compare(writer: *types.Writer, params: pr.CompareParams) types.FormatE
 fn broadcast_scalar_like(bld: *pr.FunctionBuilder, tensor: pr.Tensor, value: f64) pr.BuildError!pr.VarId {
     const lit = try bld.literal_scalar(types.scalar_literal(tensor.dtype, value));
     return bld.broadcast_in_dim(lit, tensor.shape.dims, &.{});
-}
-
-fn map_direction(dir: pr.CompareDirection) stablehlo.ComparisonDirection.Direction {
-    return switch (dir) {
-        .EQ => .EQ,
-        .NE => .NE,
-        .GE => .GE,
-        .GT => .GT,
-        .LE => .LE,
-        .LT => .LT,
-    };
-}
-
-fn map_compare_type(ctype: pr.CompareType) stablehlo.CompareType.Type {
-    return switch (ctype) {
-        .SIGNED => .SIGNED,
-        .UNSIGNED => .UNSIGNED,
-        .FLOAT => .FLOAT,
-        .TOTALORDER => .TOTALORDER,
-    };
 }
 
 // =========================================================================
@@ -81,27 +60,6 @@ pub const compare = struct {
             .bool => if (cparams.compare_type != .UNSIGNED) return error.CompareTypeMismatch,
         }
         return .{ .tensor = .{ .dtype = .bool, .shape = lhs.shape } };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 2 or outputs.len != 1) return error.InvalidProgram;
-
-        const cparams = pr.param_compare(params) orelse return error.InvalidProgram;
-        const lhs = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const rhs = ctx.get_value(inputs[1]) orelse return error.InvalidProgram;
-        const op = stablehlo.compare(
-            ctx.mlir_ctx,
-            lhs,
-            rhs,
-            stablehlo.ComparisonDirection.init(ctx.mlir_ctx, map_direction(cparams.direction)),
-            stablehlo.CompareType.init(ctx.mlir_ctx, map_compare_type(cparams.compare_type)),
-            ctx.loc,
-        );
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -158,19 +116,6 @@ pub const select = struct {
         if (!types.same_tensor_type(on_true, on_false)) return error.SelectTypeMismatch;
         if (!std.mem.eql(usize, cond.shape.dims, on_true.shape.dims)) return error.SelectTypeMismatch;
         return .{ .tensor = on_true };
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 3 or outputs.len != 1) return error.InvalidProgram;
-
-        const cond = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const on_true = ctx.get_value(inputs[1]) orelse return error.InvalidProgram;
-        const on_false = ctx.get_value(inputs[2]) orelse return error.InvalidProgram;
-        const op = stablehlo.select(ctx.mlir_ctx, cond, on_true, on_false, ctx.loc);
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {

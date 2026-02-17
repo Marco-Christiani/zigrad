@@ -1,10 +1,10 @@
-/// Op Types - Shared context and types for op implementations
+/// Op Types — Shared context and types for op implementations.
+///
+/// No external dependencies beyond `std` and the PR module.
 const std = @import("std");
 const pr = @import("../pr.zig");
-const mlir = @import("../../ffi/mlir/mlir.zig");
-const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
 
-/// Context passed to validation functions
+/// Context passed to validation functions.
 pub const ValidateContext = struct {
     func: pr.Function,
     eqn: pr.Eqn,
@@ -28,7 +28,7 @@ pub const ValidateContext = struct {
     }
 };
 
-/// Context passed to type inference functions
+/// Context passed to type inference functions.
 pub const InferContext = struct {
     builder: *pr.FunctionBuilder,
     inputs: []const pr.VarId,
@@ -45,47 +45,7 @@ pub const InferContext = struct {
     }
 };
 
-/// Context passed to lowering functions
-pub const LowerContext = struct {
-    mlir_ctx: mlir.Context,
-    block: mlir.Block,
-    loc: mlir.Location,
-    value_map: []?mlir.Value,
-    func: pr.Function,
-    arena: std.mem.Allocator,
-
-    pub fn inputs(self: LowerContext, eqn: pr.Eqn) []const pr.VarId {
-        return eqn.inputs.slice(pr.VarId, self.func.varids_store);
-    }
-
-    pub fn outputs(self: LowerContext, eqn: pr.Eqn) []const pr.VarId {
-        return eqn.outputs.slice(pr.VarId, self.func.varids_store);
-    }
-
-    pub fn params(self: LowerContext, eqn: pr.Eqn) []const pr.Param {
-        return eqn.params.slice(pr.Param, self.func.params_store);
-    }
-
-    pub fn get_value(self: LowerContext, id: pr.VarId) ?mlir.Value {
-        return self.value_map[@intCast(id)];
-    }
-
-    pub fn set_value(self: LowerContext, id: pr.VarId, value: mlir.Value) void {
-        self.value_map[@intCast(id)] = value;
-    }
-
-    pub fn tensor_of(self: LowerContext, id: pr.VarId) !pr.Tensor {
-        return self.func.avals[@intCast(id)].as_tensor() orelse error.InvalidProgram;
-    }
-
-    pub fn tensor_to_mlir_type(self: LowerContext, t: pr.Tensor) !mlir.Type {
-        const dims_i64 = try self.arena.alloc(i64, t.shape.dims.len);
-        for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
-        return mlir.Type.tensor(dims_i64, dtype_to_mlir_type(self.mlir_ctx, t.dtype));
-    }
-};
-
-/// Context passed to AD backward functions
+/// Context passed to AD forward/backward functions.
 pub const AdContext = struct {
     builder: *pr.FunctionBuilder,
     primal_map: []?pr.VarId,
@@ -131,59 +91,7 @@ pub const AdContext = struct {
     }
 };
 
-// Helper functions
-
-pub fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
-    return switch (dt) {
-        .bf16 => mlir.Type.float(ctx, .bf16),
-        .f32 => mlir.Type.float(ctx, .f32),
-        .f64 => mlir.Type.float(ctx, .f64),
-        .i32 => mlir.Type.int(ctx, .i32),
-        .i64 => mlir.Type.int(ctx, .i64),
-        .u32 => mlir.Type.int(ctx, .i32),
-        .u64 => mlir.Type.int(ctx, .i64),
-        .bool => mlir.Type.int(ctx, .i1),
-    };
-}
-
-pub fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
-    return switch (dt) {
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .i32 => .i32,
-        .i64 => .i64,
-        .u32 => .i32,
-        .u64 => .i64,
-        .bool => .bool,
-    };
-}
-
-fn f32_to_bf16_bits(val: f32) u16 {
-    const bits: u32 = @bitCast(val);
-    return @intCast(bits >> 16);
-}
-
-pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
-    if (a.dtype != b.dtype) return false;
-    if (a.shape.rank() != b.shape.rank()) return false;
-    return std.mem.eql(usize, a.shape.dims, b.shape.dims);
-}
-
-pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
-    return switch (value_dtype) {
-        .bf16 => .{ .bf16 = f32_to_bf16_bits(@floatCast(value)) },
-        .f32 => .{ .f32 = @floatCast(value) },
-        .f64 => .{ .f64 = value },
-        .i32 => .{ .i32 = @intFromFloat(value) },
-        .i64 => .{ .i64 = @intFromFloat(value) },
-        .u32 => .{ .u32 = @intFromFloat(value) },
-        .u64 => .{ .u64 = @intFromFloat(value) },
-        .bool => .{ .bool = value != 0.0 },
-    };
-}
-
-/// Context passed to format functions
+/// Context passed to format functions.
 pub const FormatContext = struct {
     func: pr.Function,
     eqn: pr.Eqn,
@@ -216,6 +124,34 @@ pub const FormatContext = struct {
 pub const Writer = std.Io.Writer;
 pub const FormatError = Writer.Error;
 
+// ============================================================================
+// Shared Helpers
+// ============================================================================
+
+pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
+    if (a.dtype != b.dtype) return false;
+    if (a.shape.rank() != b.shape.rank()) return false;
+    return std.mem.eql(usize, a.shape.dims, b.shape.dims);
+}
+
+fn f32_to_bf16_bits(val: f32) u16 {
+    const bits: u32 = @bitCast(val);
+    return @intCast(bits >> 16);
+}
+
+pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
+    return switch (value_dtype) {
+        .bf16 => .{ .bf16 = f32_to_bf16_bits(@floatCast(value)) },
+        .f32 => .{ .f32 = @floatCast(value) },
+        .f64 => .{ .f64 = value },
+        .i32 => .{ .i32 = @intFromFloat(value) },
+        .i64 => .{ .i64 = @intFromFloat(value) },
+        .u32 => .{ .u32 = @intFromFloat(value) },
+        .u64 => .{ .u64 = @intFromFloat(value) },
+        .bool => .{ .bool = value != 0.0 },
+    };
+}
+
 // Re-export for convenience
 pub const Tensor = pr.Tensor;
 pub const Aval = pr.Aval;
@@ -223,5 +159,4 @@ pub const VarId = pr.VarId;
 pub const Param = pr.Param;
 pub const ValidationError = pr.ValidationError;
 pub const BuildError = pr.BuildError;
-pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 pub const AdError = pr.BuildError || error{ UnsupportedEqn, UnsupportedDType };

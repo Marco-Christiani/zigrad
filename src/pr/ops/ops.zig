@@ -57,10 +57,6 @@ fn validate_op_interface() void {
         if (!@hasDecl(Op, "infer_output")) {
             @compileError("Op " ++ @tagName(prim) ++ " missing infer_output()");
         }
-        if (!@hasDecl(Op, "lower")) {
-            @compileError("Op " ++ @tagName(prim) ++ " missing lower()");
-        }
-
         // Optional: vjp_forward/vjp_backward (AD support)
         // These are checked at runtime when AD is requested
     }
@@ -92,16 +88,6 @@ pub fn infer_output(builder: *pr.FunctionBuilder, prim: pr.Prim, inputs: []const
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
             return OpFor(p).infer_output(ctx);
-        }
-    }
-    unreachable;
-}
-
-/// Lower an equation to MLIR
-pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        if (eqn.prim == prim) {
-            return OpFor(prim).lower(ctx, eqn);
         }
     }
     unreachable;
@@ -185,7 +171,6 @@ test "all prims have op implementations" {
         const Op = OpFor(prim);
         try std.testing.expect(@hasDecl(Op, "validate"));
         try std.testing.expect(@hasDecl(Op, "infer_output"));
-        try std.testing.expect(@hasDecl(Op, "lower"));
     }
 }
 
@@ -215,11 +200,13 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp_forward(.literal));
     try std.testing.expect(!has_vjp(.literal));
 
+    // Ops with VJP (convert has forward + backward)
+    try std.testing.expect(has_vjp(.convert));
+
     // Ops without VJP
     try std.testing.expect(!has_vjp(.maximum));
     try std.testing.expect(!has_vjp(.scatter));
     try std.testing.expect(!has_vjp(.compare));
-    try std.testing.expect(!has_vjp(.convert));
     try std.testing.expect(!has_vjp(.call));
     try std.testing.expect(!has_vjp(.custom_call));
 }

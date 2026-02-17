@@ -2,8 +2,6 @@
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
-const mlir = @import("../../ffi/mlir/mlir.zig");
-const stablehlo = @import("../../ffi/mlir/dialects/stablehlo.zig");
 
 fn validate_unary_elementwise(comptime err: pr.ValidationError, ctx: types.ValidateContext) pr.ValidationError!void {
     const inputs = ctx.inputs();
@@ -19,21 +17,6 @@ fn infer_unary_elementwise(comptime _: pr.ValidationError, ctx: types.InferConte
     if (ctx.inputs.len != 1) return error.InvalidEqnArity;
     const operand = try ctx.tensor_of(ctx.inputs[0]);
     return .{ .tensor = operand };
-}
-
-fn lower_unary_elementwise(
-    comptime lower_fn: fn (mlir.Context, mlir.Value, mlir.Location) mlir.Operation,
-    ctx: types.LowerContext,
-    eqn: pr.Eqn,
-) types.LowerError!void {
-    const inputs = ctx.inputs(eqn);
-    const outputs = ctx.outputs(eqn);
-    if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-
-    const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-    const op = lower_fn(ctx.mlir_ctx, operand, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outputs[0], op.result(0));
 }
 
 fn format_unary_elementwise(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
@@ -60,10 +43,6 @@ pub const exp = struct {
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         return infer_unary_elementwise(error.ExpTypeMismatch, ctx);
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        return lower_unary_elementwise(stablehlo.exponential, ctx, eqn);
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -103,10 +82,6 @@ pub const log = struct {
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         return infer_unary_elementwise(error.LogTypeMismatch, ctx);
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        return lower_unary_elementwise(stablehlo.log, ctx, eqn);
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -160,19 +135,6 @@ pub const convert = struct {
         return .{ .tensor = .{ .dtype = out_dtype, .shape = operand.shape } };
     }
 
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidProgram;
-
-        const operand = ctx.get_value(inputs[0]) orelse return error.InvalidProgram;
-        const out_tensor = try ctx.tensor_of(outputs[0]);
-        const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-        const op = stablehlo.convert(ctx.mlir_ctx, operand, out_type, ctx.loc);
-        ctx.block.append_operation(op);
-        ctx.set_value(outputs[0], op.result(0));
-    }
-
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -214,10 +176,6 @@ pub const rsqrt = struct {
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         return infer_unary_elementwise(error.RsqrtTypeMismatch, ctx);
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        return lower_unary_elementwise(stablehlo.rsqrt, ctx, eqn);
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -263,10 +221,6 @@ pub const logistic = struct {
 
     pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
         return infer_unary_elementwise(error.LogisticTypeMismatch, ctx);
-    }
-
-    pub fn lower(ctx: types.LowerContext, eqn: pr.Eqn) types.LowerError!void {
-        return lower_unary_elementwise(stablehlo.logistic, ctx, eqn);
     }
 
     pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {

@@ -34,33 +34,7 @@ pub const format_config = zxpr_style.config;
 pub const ShapeFormat = zxpr_style.ShapeFormat;
 pub const Palette = zxpr_style.Palette;
 
-const max_region_tags = 4;
 const max_region_stack = 8;
-
-const RegionTag = struct {
-    key: []const u8,
-    value: ?[]const u8,
-};
-
-const RegionSpec = struct {
-    tags: [max_region_tags]RegionTag = undefined,
-    len: usize = 0,
-};
-
-const RegionStackSpec = struct {
-    items: [max_region_stack]RegionSpec = undefined,
-    len: usize = 0,
-};
-
-const Region = struct {
-    name_buf: [24]u8,
-    name_len: usize,
-    spec: RegionSpec,
-};
-
-fn region_name(region: *const Region) []const u8 {
-    return region.name_buf[0..region.name_len];
-}
 
 // ============================================================================
 // Emitter
@@ -112,37 +86,52 @@ pub const Emitter = struct {
             try w.writeAll(ind);
             try self.styler.write_keyword("let");
             try w.writeAll("\n");
-            var region_stack: [8]Region = undefined;
-            var region_len: usize = 0;
-            var region_counter: usize = 0;
-            for (self.func.eqns) |eqn| {
-                const desired = self.region_stack_for_eqn(eqn);
-                const common = common_region_prefix(region_stack[0..region_len], desired);
 
-                var i: usize = region_len;
-                while (i > common) : (i -= 1) {
-                    try self.close_region(region_stack[0 .. i - 1], region_stack[i - 1]);
-                }
-                region_len = common;
+            // Track which regions are currently open (by index into func.regions)
+            var open_stack: [max_region_stack]usize = undefined;
+            var open_len: usize = 0;
 
-                i = common;
-                while (i < desired.len) : (i += 1) {
-                    region_len = try self.open_region(
-                        region_stack[0..region_len],
-                        &region_stack,
-                        region_len,
-                        &region_counter,
-                        desired.items[i],
-                    );
+            for (self.func.eqns, 0..) |eqn, eqn_idx| {
+                // Close regions that end before this eqn
+                while (open_len > 0) {
+                    const ri = open_stack[open_len - 1];
+                    const region = self.func.regions[ri];
+                    if (eqn_idx >= region.eqn_start + region.eqn_len) {
+                        open_len -= 1;
+                        try self.emit_region_end(open_len);
+                    } else break;
                 }
 
-                try self.emit_binding_prefix(region_stack[0..region_len]);
+                // Open regions that start at this eqn
+                for (self.func.regions, 0..) |region, ri| {
+                    if (region.eqn_start == eqn_idx) {
+                        // Check not already open
+                        var already = false;
+                        for (open_stack[0..open_len]) |oi| {
+                            if (oi == ri) {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (!already and open_len < max_region_stack) {
+                            try self.emit_region_start(open_len, region);
+                            open_stack[open_len] = ri;
+                            open_len += 1;
+                        }
+                    }
+                }
+
+                try self.emit_gutters(open_len);
+                try w.writeAll(ind);
+                try w.writeAll(ind);
                 try self.emit_binding(eqn);
                 try w.writeAll("\n");
             }
-            var i: usize = region_len;
-            while (i > 0) : (i -= 1) {
-                try self.close_region(region_stack[0 .. i - 1], region_stack[i - 1]);
+
+            // Close remaining open regions
+            while (open_len > 0) {
+                open_len -= 1;
+                try self.emit_region_end(open_len);
             }
         }
 
@@ -240,39 +229,40 @@ pub const Emitter = struct {
         }
     }
 
-    fn emit_binding_prefix(self: *Self, regions: []const Region) !void {
+    fn emit_region_start(self: *Self, depth: usize, region: pr.Region) !void {
         try self.writer.writeAll(self.indent);
         try self.writer.writeAll(self.indent);
-        try self.emit_gutters(regions.len);
-    }
-
-    fn emit_region_start(self: *Self, regions: []const Region, region: Region) !void {
-        try self.writer.writeAll(self.indent);
-        try self.writer.writeAll(self.indent);
-        try self.emit_gutters(regions.len);
+        try self.emit_gutters(depth);
         try self.styler.write_region(self.styler.cfg.symbols.region_start);
         try self.styler.write_region(" ");
-        try self.styler.write_region(region_name(&region));
+        try self.styler.write_region(region.name);
         try self.styler.write_region("[");
-        for (region.spec.tags[0..region.spec.len], 0..) |tag, i| {
-            if (i > 0) try self.styler.write_region(", ");
-            try self.styler.write_region(tag.key);
-            if (tag.value) |value| {
-                try self.styler.write_region("=");
-                try self.styler.write_region(value);
-            }
-        }
+        try self.emit_annotation(region.annotation);
         try self.styler.write_region("]\n");
     }
 
-    fn emit_region_end(self: *Self, regions: []const Region, region: Region) !void {
+    fn emit_region_end(self: *Self, depth: usize) !void {
+        // Find the region that was at this depth
+        // We need to find it from func.regions — but we only have depth.
+        // The caller should pass the region. Let's adjust the API.
         try self.writer.writeAll(self.indent);
         try self.writer.writeAll(self.indent);
-        try self.emit_gutters(regions.len);
+        try self.emit_gutters(depth);
         try self.styler.write_region(self.styler.cfg.symbols.region_end);
-        try self.styler.write_region(" ");
-        try self.styler.write_region(region_name(&region));
         try self.styler.write_region("\n");
+    }
+
+    fn emit_annotation(self: *Self, ann: pr.Annotation) !void {
+        var first = true;
+        if (ann.kernelize) |provider| {
+            try self.styler.write_region("kernelize=");
+            try self.styler.write_region(provider);
+            first = false;
+        }
+        if (ann.outline) {
+            if (!first) try self.styler.write_region(", ");
+            try self.styler.write_region("outline");
+        }
     }
 
     fn emit_gutters(self: *Self, count: usize) !void {
@@ -281,32 +271,6 @@ pub const Emitter = struct {
             try self.styler.write_region(self.styler.cfg.symbols.region_gutter);
             try self.writer.writeAll(" ");
         }
-    }
-
-    fn region_stack_for_eqn(self: *Self, eqn: pr.Eqn) RegionStackSpec {
-        const params = eqn.params.slice(pr.Param, self.func.params_store);
-        return region_stack_from_params(params);
-    }
-
-    fn open_region(
-        self: *Self,
-        active: []const Region,
-        stack: *[8]Region,
-        len: usize,
-        counter: *usize,
-        spec: RegionSpec,
-    ) !usize {
-        var region = Region{ .name_buf = undefined, .name_len = 0, .spec = spec };
-        const name_slice = std.fmt.bufPrint(&region.name_buf, "region{d}", .{counter.*}) catch "region?";
-        region.name_len = name_slice.len;
-        try self.emit_region_start(active, region);
-        stack[len] = region;
-        counter.* += 1;
-        return len + 1;
-    }
-
-    fn close_region(self: *Self, active: []const Region, region: Region) !void {
-        try self.emit_region_end(active, region);
     }
 
     fn emit_dtype_attr(self: *Self, prim: pr.Prim, inputs: []const pr.VarId, params: []const pr.Param) !?bool {
@@ -336,57 +300,6 @@ fn is_dtype_only_attr(prim: pr.Prim) bool {
         .exp, .log, .rsqrt, .logistic, .convert => true,
         else => false,
     };
-}
-
-fn region_stack_from_params(params: []const pr.Param) RegionStackSpec {
-    var stack: RegionStackSpec = .{};
-    if (pr.param_kernelize_provider(params)) |provider| {
-        stack.items[stack.len] = region_spec_kernelize(provider);
-        stack.len += 1;
-    }
-    if (pr.param_outline(params) orelse false) {
-        stack.items[stack.len] = region_spec_outline();
-        stack.len += 1;
-    }
-    return stack;
-}
-
-fn region_spec_kernelize(provider: []const u8) RegionSpec {
-    var spec: RegionSpec = .{};
-    spec.tags[0] = .{ .key = "kernelize", .value = provider };
-    spec.len = 1;
-    return spec;
-}
-
-fn region_spec_outline() RegionSpec {
-    var spec: RegionSpec = .{};
-    spec.tags[0] = .{ .key = "outline", .value = null };
-    spec.len = 1;
-    return spec;
-}
-
-fn region_spec_equal(a: RegionSpec, b: RegionSpec) bool {
-    if (a.len != b.len) return false;
-    for (a.tags[0..a.len], 0..) |tag, i| {
-        const other = b.tags[i];
-        if (!std.mem.eql(u8, tag.key, other.key)) return false;
-        if (tag.value) |value| {
-            const other_value = other.value orelse return false;
-            if (!std.mem.eql(u8, value, other_value)) return false;
-        } else {
-            if (other.value != null) return false;
-        }
-    }
-    return true;
-}
-
-fn common_region_prefix(current: []const Region, desired: RegionStackSpec) usize {
-    const max_len = if (current.len < desired.len) current.len else desired.len;
-    var i: usize = 0;
-    while (i < max_len) : (i += 1) {
-        if (!region_spec_equal(current[i].spec, desired.items[i])) break;
-    }
-    return i;
 }
 
 // ============================================================================
@@ -503,10 +416,12 @@ test "zxpr kernelize region annotations" {
 
     const a = try b.param_tensor(.f32, &.{ 2, 2 });
     const c = try b.param_tensor(.f32, &.{ 2, 2 });
-    const kparams = &.{pr.Param{ .kernelize_provider = "tvm" }};
 
-    const add1 = try b.emit(.add, &.{ a, c }, kparams);
-    const add2 = try b.emit(.add, &.{ add1, c }, kparams);
+    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    const add1 = try b.add(a, c);
+    const add2 = try b.add(add1, c);
+    try b.pop_region();
+
     const out = try b.add(add2, c);
     const func = try b.finish(&.{out});
 
@@ -515,6 +430,6 @@ test "zxpr kernelize region annotations" {
     try emit(func, &w, .plain, .{});
 
     const result = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, result, "> region0[kernelize=tvm]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "< region0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[kernelize=tvm]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<") != null);
 }

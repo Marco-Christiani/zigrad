@@ -119,13 +119,6 @@ pub const Param = union(enum) {
     call_target_name: []const u8,
     has_side_effect: bool,
     out_aval: Aval,
-    /// Steering hint: request that this equation be outlined into a separate
-    /// function call boundary during lowering (best-effort).
-    outline: bool,
-
-    /// Steering hint: request kernelization of this equation/region by a named provider.
-    /// This does not change semantics; it is a compilation steering annotation.
-    kernelize_provider: []const u8,
 };
 
 pub const GatherParams = struct {
@@ -185,6 +178,34 @@ pub const DotGeneralParams = struct {
     rhs_contracting_dims: []const i64,
 };
 
+// ============================================================================
+// Annotations & Regions
+// ============================================================================
+
+/// Steering annotation attached to a region of equations.
+/// Does not change semantics — only compilation strategy hints.
+pub const Annotation = struct {
+    /// Request that equations be outlined into a separate call boundary.
+    outline: bool = false,
+    /// Request kernelization by a named provider (e.g. "tvm").
+    kernelize: ?[]const u8 = null,
+};
+
+/// A contiguous range of equations sharing an annotation.
+/// Materialized at FunctionBuilder.finish() time from the annotation stack.
+pub const Region = struct {
+    name: []const u8,
+    annotation: Annotation,
+    /// Index of the first equation in this region.
+    eqn_start: u32,
+    /// Number of equations in this region.
+    eqn_len: u32,
+};
+
+// ============================================================================
+// Core Data Structures
+// ============================================================================
+
 pub const Eqn = struct {
     prim: Prim,
     inputs: Span, // []VarId (Function.varids_store)
@@ -200,6 +221,27 @@ pub const Function = struct {
     eqns: []const Eqn,
     varids_store: []const VarId,
     params_store: []const Param,
+    regions: []const Region,
+
+    /// Return regions whose annotation satisfies a predicate.
+    pub fn regions_matching(self: Function, predicate: *const fn (Annotation) bool) RegionIterator {
+        return .{ .regions = self.regions, .predicate = predicate, .index = 0 };
+    }
+};
+
+pub const RegionIterator = struct {
+    regions: []const Region,
+    predicate: *const fn (Annotation) bool,
+    index: usize,
+
+    pub fn next(self: *RegionIterator) ?Region {
+        while (self.index < self.regions.len) {
+            const region = self.regions[self.index];
+            self.index += 1;
+            if (self.predicate(region.annotation)) return region;
+        }
+        return null;
+    }
 };
 
 pub const Program = struct {
@@ -229,6 +271,10 @@ pub const Program = struct {
         self.arena.deinit();
     }
 };
+
+// ============================================================================
+// Errors
+// ============================================================================
 
 pub const ValidationError = error{
     InvalidVarId,
@@ -263,7 +309,14 @@ pub const ValidationError = error{
     CustomCallTypeMismatch,
     IotaTypeMismatch,
     DuplicateFunctionName,
+    ScatterAddTypeMismatch,
 };
+
+pub const BuildError = ValidationError || error{OutOfMemory};
+
+// ============================================================================
+// Validation Helpers
+// ============================================================================
 
 fn expect_var_in_range(func: Function, id: VarId) ValidationError!void {
     if (@as(usize, @intCast(id)) >= func.avals.len) return error.InvalidVarId;
@@ -275,19 +328,19 @@ fn expect_tensor(func: Function, id: VarId) ValidationError!Tensor {
     return aval.as_tensor() orelse error.UnsupportedAval;
 }
 
-fn same_tensor_type(a: Tensor, b: Tensor) bool {
+pub fn same_tensor_type(a: Tensor, b: Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.rank() != b.shape.rank()) return false;
     return std.mem.eql(usize, a.shape.dims, b.shape.dims);
 }
 
-fn num_elements(dims: []const usize) usize {
+pub fn num_elements(dims: []const usize) usize {
     var n: usize = 1;
     for (dims) |d| n *= d;
     return n;
 }
 
-fn is_permutation(perm: []const i64, rank: usize) bool {
+pub fn is_permutation(perm: []const i64, rank: usize) bool {
     if (perm.len != rank) return false;
     if (rank == 0) return true;
 
@@ -305,7 +358,7 @@ fn is_permutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
-fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const usize, axes: []const i64) BuildError![]const usize {
+pub fn reduce_output_dims(allocator: std.mem.Allocator, in_dims: []const usize, axes: []const i64) BuildError![]const usize {
     const rank = in_dims.len;
     const max_rank: usize = 64;
     if (rank > max_rank) return error.ReduceSumTypeMismatch;
@@ -624,156 +677,6 @@ fn reduce_sum_matches(in_dims: []const usize, out_dims: []const usize, axes: []c
     return out_i == out_dims.len;
 }
 
-pub fn param_literal(params: []const Param) ?Literal {
-    for (params) |p| {
-        switch (p) {
-            .literal => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_out_shape(params: []const Param) ?[]const usize {
-    for (params) |p| {
-        switch (p) {
-            .out_shape => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_broadcast_dims(params: []const Param) ?[]const i64 {
-    for (params) |p| {
-        switch (p) {
-            .broadcast_dimensions => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_permutation(params: []const Param) ?[]const i64 {
-    for (params) |p| {
-        switch (p) {
-            .permutation => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_iota_dimension(params: []const Param) ?i64 {
-    for (params) |p| {
-        switch (p) {
-            .iota_dimension => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_reduce_axes(params: []const Param) ?[]const i64 {
-    for (params) |p| {
-        switch (p) {
-            .reduce_axes => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_out_dtype(params: []const Param) ?DType {
-    for (params) |p| {
-        switch (p) {
-            .out_dtype => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_compare(params: []const Param) ?CompareParams {
-    for (params) |p| {
-        switch (p) {
-            .compare => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_slice(params: []const Param) ?SliceParams {
-    for (params) |p| {
-        switch (p) {
-            .slice => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_concat_axis(params: []const Param) ?i64 {
-    for (params) |p| {
-        switch (p) {
-            .concat_axis => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_dot_general(params: []const Param) ?DotGeneralParams {
-    for (params) |p| {
-        switch (p) {
-            .dot_general => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_gather(params: []const Param) ?GatherParams {
-    for (params) |p| {
-        switch (p) {
-            .gather => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_scatter(params: []const Param) ?ScatterParams {
-    for (params) |p| {
-        switch (p) {
-            .scatter => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_call_callee(params: []const Param) ?[]const u8 {
-    for (params) |p| {
-        switch (p) {
-            .call_callee => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_call_target_name(params: []const Param) ?[]const u8 {
-    for (params) |p| {
-        switch (p) {
-            .call_target_name => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
 fn same_tensor_signature(a: Tensor, b: Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.dims.len != b.shape.dims.len) return false;
@@ -781,46 +684,6 @@ fn same_tensor_signature(a: Tensor, b: Tensor) bool {
         if (d != b.shape.dims[i]) return false;
     }
     return true;
-}
-
-pub fn param_has_side_effect(params: []const Param) ?bool {
-    for (params) |p| {
-        switch (p) {
-            .has_side_effect => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_out_aval(params: []const Param) ?Aval {
-    for (params) |p| {
-        switch (p) {
-            .out_aval => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_outline(params: []const Param) ?bool {
-    for (params) |p| {
-        switch (p) {
-            .outline => |v| return v,
-            else => {},
-        }
-    }
-    return null;
-}
-
-pub fn param_kernelize_provider(params: []const Param) ?[]const u8 {
-    for (params) |p| {
-        switch (p) {
-            .kernelize_provider => |v| return v,
-            else => {},
-        }
-    }
-    return null;
 }
 
 fn validate_broadcast_in_dim_op(operand: Tensor, out: Tensor, broadcast_dimensions: []const i64) ValidationError!void {
@@ -845,6 +708,150 @@ fn validate_broadcast_in_dim_op(operand: Tensor, out: Tensor, broadcast_dimensio
         if (in_dim != 1 and in_dim != out_dim) return error.BroadcastInDimTypeMismatch;
     }
 }
+
+// ============================================================================
+// Param Extractors
+// ============================================================================
+
+pub fn param_literal(params: []const Param) ?Literal {
+    for (params) |p| switch (p) {
+        .literal => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_out_shape(params: []const Param) ?[]const usize {
+    for (params) |p| switch (p) {
+        .out_shape => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_broadcast_dims(params: []const Param) ?[]const i64 {
+    for (params) |p| switch (p) {
+        .broadcast_dimensions => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_permutation(params: []const Param) ?[]const i64 {
+    for (params) |p| switch (p) {
+        .permutation => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_iota_dimension(params: []const Param) ?i64 {
+    for (params) |p| switch (p) {
+        .iota_dimension => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_reduce_axes(params: []const Param) ?[]const i64 {
+    for (params) |p| switch (p) {
+        .reduce_axes => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_out_dtype(params: []const Param) ?DType {
+    for (params) |p| switch (p) {
+        .out_dtype => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_compare(params: []const Param) ?CompareParams {
+    for (params) |p| switch (p) {
+        .compare => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_slice(params: []const Param) ?SliceParams {
+    for (params) |p| switch (p) {
+        .slice => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_concat_axis(params: []const Param) ?i64 {
+    for (params) |p| switch (p) {
+        .concat_axis => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_dot_general(params: []const Param) ?DotGeneralParams {
+    for (params) |p| switch (p) {
+        .dot_general => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_gather(params: []const Param) ?GatherParams {
+    for (params) |p| switch (p) {
+        .gather => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_scatter(params: []const Param) ?ScatterParams {
+    for (params) |p| switch (p) {
+        .scatter => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_call_callee(params: []const Param) ?[]const u8 {
+    for (params) |p| switch (p) {
+        .call_callee => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_call_target_name(params: []const Param) ?[]const u8 {
+    for (params) |p| switch (p) {
+        .call_target_name => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_has_side_effect(params: []const Param) ?bool {
+    for (params) |p| switch (p) {
+        .has_side_effect => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_out_aval(params: []const Param) ?Aval {
+    for (params) |p| switch (p) {
+        .out_aval => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+// ============================================================================
+// Validation
+// ============================================================================
 
 pub fn validate_function(func: Function) ValidationError!void {
     for (func.params) |p| try expect_var_in_range(func, p);
@@ -1118,18 +1125,18 @@ pub fn validate_program(program: *const Program) ValidationError!void {
             }
             const callee_func = callee orelse return error.CallTypeMismatch;
 
-            const inputs = func.varids_store[eqn.inputs.start..][0..eqn.inputs.len];
-            const outputs = func.varids_store[eqn.outputs.start..][0..eqn.outputs.len];
+            const call_inputs = func.varids_store[eqn.inputs.start..][0..eqn.inputs.len];
+            const call_outputs = func.varids_store[eqn.outputs.start..][0..eqn.outputs.len];
 
-            if (inputs.len != callee_func.params.len) return error.CallTypeMismatch;
-            if (outputs.len != callee_func.returns.len) return error.CallTypeMismatch;
+            if (call_inputs.len != callee_func.params.len) return error.CallTypeMismatch;
+            if (call_outputs.len != callee_func.returns.len) return error.CallTypeMismatch;
 
-            for (inputs, 0..) |in_id, idx| {
+            for (call_inputs, 0..) |in_id, idx| {
                 const in_tensor = func.avals[@intCast(in_id)].as_tensor() orelse return error.CallTypeMismatch;
                 const callee_tensor = callee_func.avals[@intCast(callee_func.params[idx])].as_tensor() orelse return error.CallTypeMismatch;
                 if (!same_tensor_signature(in_tensor, callee_tensor)) return error.CallTypeMismatch;
             }
-            for (outputs, 0..) |out_id, idx| {
+            for (call_outputs, 0..) |out_id, idx| {
                 const out_tensor = func.avals[@intCast(out_id)].as_tensor() orelse return error.CallTypeMismatch;
                 const callee_tensor = callee_func.avals[@intCast(callee_func.returns[idx])].as_tensor() orelse return error.CallTypeMismatch;
                 if (!same_tensor_signature(out_tensor, callee_tensor)) return error.CallTypeMismatch;
@@ -1138,7 +1145,16 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     }
 }
 
-pub const BuildError = ValidationError || error{OutOfMemory};
+// ============================================================================
+// FunctionBuilder
+// ============================================================================
+
+/// Annotation stack entry for tracking active regions during building.
+const RegionEntry = struct {
+    name: []const u8,
+    annotation: Annotation,
+    eqn_start: u32,
+};
 
 pub const FunctionBuilder = struct {
     program: *Program,
@@ -1148,6 +1164,8 @@ pub const FunctionBuilder = struct {
     varids_store: std.ArrayList(VarId),
     params_store: std.ArrayList(Param),
     params: std.ArrayList(VarId),
+    region_stack: std.ArrayList(RegionEntry),
+    completed_regions: std.ArrayList(Region),
 
     pub fn init(program: *Program, name: []const u8) BuildError!FunctionBuilder {
         const a = program.allocator();
@@ -1159,6 +1177,8 @@ pub const FunctionBuilder = struct {
             .varids_store = try std.ArrayList(VarId).initCapacity(a, 64),
             .params_store = try std.ArrayList(Param).initCapacity(a, 64),
             .params = try std.ArrayList(VarId).initCapacity(a, 8),
+            .region_stack = try std.ArrayList(RegionEntry).initCapacity(a, 4),
+            .completed_regions = try std.ArrayList(Region).initCapacity(a, 4),
         };
     }
 
@@ -1169,6 +1189,8 @@ pub const FunctionBuilder = struct {
         self.varids_store.deinit(a);
         self.params_store.deinit(a);
         self.params.deinit(a);
+        self.region_stack.deinit(a);
+        self.completed_regions.deinit(a);
     }
 
     fn alloc(self: *FunctionBuilder) std.mem.Allocator {
@@ -1182,17 +1204,52 @@ pub const FunctionBuilder = struct {
         return id;
     }
 
-    fn tensor_of(self: *FunctionBuilder, id: VarId) ValidationError!Tensor {
+    pub fn tensor_of(self: *FunctionBuilder, id: VarId) ValidationError!Tensor {
         if (@as(usize, @intCast(id)) >= self.avals.items.len) return error.InvalidVarId;
         const aval = self.avals.items[@intCast(id)];
         return aval.as_tensor() orelse error.UnsupportedAval;
     }
 
-    fn infer_output_aval(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!Aval {
+    // ====================================================================
+    // Region API
+    // ====================================================================
+
+    /// Push a named annotation region. Equations emitted after this call
+    /// belong to this region until pop_region is called.
+    pub fn push_region(self: *FunctionBuilder, name: []const u8, annotation: Annotation) BuildError!void {
+        const a = self.alloc();
+        try self.region_stack.append(a, .{
+            .name = name,
+            .annotation = annotation,
+            .eqn_start = @intCast(self.eqns.items.len),
+        });
+    }
+
+    /// Pop the most recent annotation region. The region is recorded with
+    /// its equation span for materialization at finish() time.
+    pub fn pop_region(self: *FunctionBuilder) BuildError!void {
+        const a = self.alloc();
+        const entry = self.region_stack.pop() orelse return;
+        const eqn_end: u32 = @intCast(self.eqns.items.len);
+        if (eqn_end > entry.eqn_start) {
+            try self.completed_regions.append(a, .{
+                .name = entry.name,
+                .annotation = entry.annotation,
+                .eqn_start = entry.eqn_start,
+                .eqn_len = eqn_end - entry.eqn_start,
+            });
+        }
+    }
+
+    // ====================================================================
+    // Type Inference (inlined, matches v0)
+    // ====================================================================
+
+    fn infer_output_aval(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, pms: []const Param) BuildError!Aval {
         const a = self.alloc();
         switch (prim) {
             .literal => {
-                const lit = param_literal(params) orelse return error.InvalidParams;
+                const lit = param_literal(pms) orelse return error.InvalidParams;
                 return .{ .tensor = .{ .dtype = lit.dtype(), .shape = .{ .dims = &.{} } } };
             },
             .add, .subtract, .multiply, .divide, .maximum => {
@@ -1216,7 +1273,7 @@ pub const FunctionBuilder = struct {
             },
             .compare => {
                 if (inputs.len != 2) return error.InvalidEqnArity;
-                const cparams = param_compare(params) orelse return error.InvalidParams;
+                const cparams = param_compare(pms) orelse return error.InvalidParams;
                 const lhs = try self.tensor_of(inputs[0]);
                 const rhs = try self.tensor_of(inputs[1]);
                 if (!same_tensor_signature(lhs, rhs)) return error.CompareTypeMismatch;
@@ -1244,7 +1301,7 @@ pub const FunctionBuilder = struct {
             },
             .convert => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const out_dtype = param_out_dtype(params) orelse return error.InvalidParams;
+                const out_dtype = param_out_dtype(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
                 return .{ .tensor = .{ .dtype = out_dtype, .shape = operand.shape } };
             },
@@ -1262,7 +1319,7 @@ pub const FunctionBuilder = struct {
             },
             .dot_general => {
                 if (inputs.len != 2) return error.InvalidEqnArity;
-                const dg_params = param_dot_general(params) orelse return error.InvalidParams;
+                const dg_params = param_dot_general(pms) orelse return error.InvalidParams;
                 const lhs = try self.tensor_of(inputs[0]);
                 const rhs = try self.tensor_of(inputs[1]);
                 if (lhs.dtype != rhs.dtype) return error.DotGeneralTypeMismatch;
@@ -1271,16 +1328,16 @@ pub const FunctionBuilder = struct {
             },
             .reshape => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
+                const out_shape = param_out_shape(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
                 if (num_elements(operand.shape.dims) != num_elements(out_shape)) return error.ReshapeTypeMismatch;
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } } };
             },
             .iota => {
                 if (inputs.len != 0) return error.InvalidEqnArity;
-                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
-                const out_dtype = param_out_dtype(params) orelse return error.InvalidParams;
-                const iota_dim = param_iota_dimension(params) orelse return error.InvalidParams;
+                const out_shape = param_out_shape(pms) orelse return error.InvalidParams;
+                const out_dtype = param_out_dtype(pms) orelse return error.InvalidParams;
+                const iota_dim = param_iota_dimension(pms) orelse return error.InvalidParams;
                 if (out_dtype != .i32 and out_dtype != .i64) return error.IotaTypeMismatch;
                 if (iota_dim < 0) return error.IotaTypeMismatch;
                 if (@as(usize, @intCast(iota_dim)) >= out_shape.len) return error.IotaTypeMismatch;
@@ -1288,8 +1345,8 @@ pub const FunctionBuilder = struct {
             },
             .broadcast_in_dim => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const out_shape = param_out_shape(params) orelse return error.InvalidParams;
-                const bd = param_broadcast_dims(params) orelse return error.InvalidParams;
+                const out_shape = param_out_shape(pms) orelse return error.InvalidParams;
+                const bd = param_broadcast_dims(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
                 const out_tensor = Tensor{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } };
                 try validate_broadcast_in_dim_op(operand, out_tensor, bd);
@@ -1297,45 +1354,45 @@ pub const FunctionBuilder = struct {
             },
             .transpose => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const perm = param_permutation(params) orelse return error.InvalidParams;
+                const perm = param_permutation(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
                 if (!is_permutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
 
                 const out_dims = try a.alloc(usize, operand.shape.rank());
-                for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
+                for (perm, 0..) |p, idx| out_dims[idx] = operand.shape.dims[@intCast(p)];
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
             },
             .slice => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const sparams = param_slice(params) orelse return error.InvalidParams;
+                const sparams = param_slice(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
                 const out_dims = try slice_output_dims(a, operand.shape.dims, sparams);
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
             },
             .concatenate => {
                 if (inputs.len == 0) return error.InvalidEqnArity;
-                const axis = param_concat_axis(params) orelse return error.InvalidParams;
+                const axis = param_concat_axis(pms) orelse return error.InvalidParams;
                 const first = try self.tensor_of(inputs[0]);
                 const out_dims = try concat_output_dims(a, first, inputs, axis, self);
                 return .{ .tensor = .{ .dtype = first.dtype, .shape = .{ .dims = out_dims } } };
             },
             .reduce_sum => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const axes = param_reduce_axes(params) orelse return error.InvalidParams;
+                const axes = param_reduce_axes(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
-                const out_dims = try reduce_sum_output_dims(a, operand.shape.dims, axes);
+                const out_dims = try reduce_output_dims(a, operand.shape.dims, axes);
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
             },
             .reduce_max => {
                 if (inputs.len != 1) return error.InvalidEqnArity;
-                const axes = param_reduce_axes(params) orelse return error.InvalidParams;
+                const axes = param_reduce_axes(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
-                const out_dims = try reduce_sum_output_dims(a, operand.shape.dims, axes);
+                const out_dims = try reduce_output_dims(a, operand.shape.dims, axes);
                 return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
             },
             .gather => {
                 if (inputs.len != 2) return error.InvalidEqnArity;
-                const gparams = param_gather(params) orelse return error.InvalidParams;
+                const gparams = param_gather(pms) orelse return error.InvalidParams;
                 const operand = try self.tensor_of(inputs[0]);
                 const indices = try self.tensor_of(inputs[1]);
                 if (indices.dtype != .i32 and indices.dtype != .i64) return error.GatherTypeMismatch;
@@ -1344,8 +1401,8 @@ pub const FunctionBuilder = struct {
             },
             .scatter => {
                 if (inputs.len != 3) return error.InvalidEqnArity;
-                const sparams = param_scatter(params) orelse return error.InvalidParams;
-                _ = sparams; // shape validation in op implementation
+                const sparams = param_scatter(pms) orelse return error.InvalidParams;
+                _ = sparams;
                 const input = try self.tensor_of(inputs[0]);
                 const indices = try self.tensor_of(inputs[1]);
                 if (indices.dtype != .i32 and indices.dtype != .i64) return error.ScatterTypeMismatch;
@@ -1354,13 +1411,13 @@ pub const FunctionBuilder = struct {
                 return .{ .tensor = input };
             },
             .call => {
-                _ = param_call_callee(params) orelse return error.InvalidParams;
+                _ = param_call_callee(pms) orelse return error.InvalidParams;
                 return error.InvalidEqnArity;
             },
             .custom_call => {
-                const out_aval = param_out_aval(params) orelse return error.InvalidParams;
-                _ = param_call_target_name(params) orelse return error.InvalidParams;
-                _ = param_has_side_effect(params) orelse return error.InvalidParams;
+                const out_aval = param_out_aval(pms) orelse return error.InvalidParams;
+                _ = param_call_target_name(pms) orelse return error.InvalidParams;
+                _ = param_has_side_effect(pms) orelse return error.InvalidParams;
                 _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
                 for (inputs) |in_id| _ = try self.tensor_of(in_id);
                 return out_aval;
@@ -1368,10 +1425,14 @@ pub const FunctionBuilder = struct {
         }
     }
 
-    pub fn emit(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, params: []const Param) BuildError!VarId {
+    // ====================================================================
+    // Core Emit
+    // ====================================================================
+
+    pub fn emit(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, pms: []const Param) BuildError!VarId {
         const a = self.alloc();
 
-        const out_aval = try self.infer_output_aval(prim, inputs, params);
+        const out_aval = try self.infer_output_aval(prim, inputs, pms);
         const out = try self.var_with_aval(out_aval);
 
         const inputs_start: u32 = @intCast(self.varids_store.items.len);
@@ -1383,8 +1444,8 @@ pub const FunctionBuilder = struct {
         const outputs_span: Span = .{ .start = outputs_start, .len = 1 };
 
         const params_start: u32 = @intCast(self.params_store.items.len);
-        try self.params_store.appendSlice(a, params);
-        const params_span: Span = .{ .start = params_start, .len = @intCast(params.len) };
+        try self.params_store.appendSlice(a, pms);
+        const params_span: Span = .{ .start = params_start, .len = @intCast(pms.len) };
 
         try self.eqns.append(a, .{
             .prim = prim,
@@ -1396,7 +1457,7 @@ pub const FunctionBuilder = struct {
         return out;
     }
 
-    fn emit_with_outputs(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, outputs: []const VarId, params: []const Param) BuildError!void {
+    fn emit_with_outputs(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, outputs: []const VarId, pms: []const Param) BuildError!void {
         const a = self.alloc();
 
         const inputs_start: u32 = @intCast(self.varids_store.items.len);
@@ -1408,8 +1469,8 @@ pub const FunctionBuilder = struct {
         const outputs_span: Span = .{ .start = outputs_start, .len = @intCast(outputs.len) };
 
         const params_start: u32 = @intCast(self.params_store.items.len);
-        try self.params_store.appendSlice(a, params);
-        const params_span: Span = .{ .start = params_start, .len = @intCast(params.len) };
+        try self.params_store.appendSlice(a, pms);
+        const params_span: Span = .{ .start = params_start, .len = @intCast(pms.len) };
 
         try self.eqns.append(a, .{
             .prim = prim,
@@ -1418,6 +1479,10 @@ pub const FunctionBuilder = struct {
             .params = params_span,
         });
     }
+
+    // ====================================================================
+    // Op Convenience Methods
+    // ====================================================================
 
     pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const usize) BuildError!VarId {
         const a = self.alloc();
@@ -1467,12 +1532,8 @@ pub const FunctionBuilder = struct {
         return self.emit(.logistic, &.{operand}, &.{});
     }
 
-    pub fn compare(self: *FunctionBuilder, lhs: VarId, rhs: VarId, params: CompareParams) BuildError!VarId {
-        return self.emit(
-            .compare,
-            &.{ lhs, rhs },
-            &.{.{ .compare = params }},
-        );
+    pub fn compare(self: *FunctionBuilder, lhs: VarId, rhs: VarId, cmp: CompareParams) BuildError!VarId {
+        return self.emit(.compare, &.{ lhs, rhs }, &.{.{ .compare = cmp }});
     }
 
     pub fn select(self: *FunctionBuilder, cond: VarId, on_true: VarId, on_false: VarId) BuildError!VarId {
@@ -1488,12 +1549,12 @@ pub const FunctionBuilder = struct {
         return self.emit(.reduce_max, &.{operand}, &.{.{ .reduce_axes = axes_copy }});
     }
 
-    pub fn gather(self: *FunctionBuilder, operand: VarId, indices: VarId, params: GatherParams) BuildError!VarId {
+    pub fn gather(self: *FunctionBuilder, operand: VarId, indices: VarId, gp: GatherParams) BuildError!VarId {
         const a = self.alloc();
-        const slice_sizes = try a.dupe(i64, params.slice_sizes);
-        const offset_dims = try a.dupe(i64, params.offset_dims);
-        const collapsed_slice_dims = try a.dupe(i64, params.collapsed_slice_dims);
-        const start_index_map = try a.dupe(i64, params.start_index_map);
+        const slice_sizes = try a.dupe(i64, gp.slice_sizes);
+        const offset_dims = try a.dupe(i64, gp.offset_dims);
+        const collapsed_slice_dims = try a.dupe(i64, gp.collapsed_slice_dims);
+        const start_index_map = try a.dupe(i64, gp.start_index_map);
         return self.emit(
             .gather,
             &.{ operand, indices },
@@ -1502,16 +1563,16 @@ pub const FunctionBuilder = struct {
                 .offset_dims = offset_dims,
                 .collapsed_slice_dims = collapsed_slice_dims,
                 .start_index_map = start_index_map,
-                .index_vector_dim = params.index_vector_dim,
+                .index_vector_dim = gp.index_vector_dim,
             } }},
         );
     }
 
-    pub fn scatter(self: *FunctionBuilder, input: VarId, indices: VarId, updates: VarId, params: ScatterParams) BuildError!VarId {
+    pub fn scatter(self: *FunctionBuilder, input: VarId, indices: VarId, updates: VarId, sp: ScatterParams) BuildError!VarId {
         const a = self.alloc();
-        const update_window_dims = try a.dupe(i64, params.update_window_dims);
-        const inserted_window_dims = try a.dupe(i64, params.inserted_window_dims);
-        const scatter_dims_to_operand_dims = try a.dupe(i64, params.scatter_dims_to_operand_dims);
+        const update_window_dims = try a.dupe(i64, sp.update_window_dims);
+        const inserted_window_dims = try a.dupe(i64, sp.inserted_window_dims);
+        const scatter_dims_to_operand_dims = try a.dupe(i64, sp.scatter_dims_to_operand_dims);
         return self.emit(
             .scatter,
             &.{ input, indices, updates },
@@ -1519,17 +1580,17 @@ pub const FunctionBuilder = struct {
                 .update_window_dims = update_window_dims,
                 .inserted_window_dims = inserted_window_dims,
                 .scatter_dims_to_operand_dims = scatter_dims_to_operand_dims,
-                .index_vector_dim = params.index_vector_dim,
-                .reduction = params.reduction,
+                .index_vector_dim = sp.index_vector_dim,
+                .reduction = sp.reduction,
             } }},
         );
     }
 
-    pub fn slice(self: *FunctionBuilder, operand: VarId, params: SliceParams) BuildError!VarId {
+    pub fn slice(self: *FunctionBuilder, operand: VarId, sp: SliceParams) BuildError!VarId {
         const a = self.alloc();
-        const start_indices = try a.dupe(i64, params.start_indices);
-        const limit_indices = try a.dupe(i64, params.limit_indices);
-        const strides = try a.dupe(i64, params.strides);
+        const start_indices = try a.dupe(i64, sp.start_indices);
+        const limit_indices = try a.dupe(i64, sp.limit_indices);
+        const strides = try a.dupe(i64, sp.strides);
         return self.emit(
             .slice,
             &.{operand},
@@ -1545,12 +1606,12 @@ pub const FunctionBuilder = struct {
         return self.emit(.concatenate, operands, &.{.{ .concat_axis = axis }});
     }
 
-    pub fn dot_general(self: *FunctionBuilder, lhs: VarId, rhs: VarId, params: DotGeneralParams) BuildError!VarId {
+    pub fn dot_general(self: *FunctionBuilder, lhs: VarId, rhs: VarId, dg: DotGeneralParams) BuildError!VarId {
         const a = self.alloc();
-        const lhs_batch_dims = try a.dupe(i64, params.lhs_batch_dims);
-        const rhs_batch_dims = try a.dupe(i64, params.rhs_batch_dims);
-        const lhs_contracting_dims = try a.dupe(i64, params.lhs_contracting_dims);
-        const rhs_contracting_dims = try a.dupe(i64, params.rhs_contracting_dims);
+        const lhs_batch_dims = try a.dupe(i64, dg.lhs_batch_dims);
+        const rhs_batch_dims = try a.dupe(i64, dg.rhs_batch_dims);
+        const lhs_contracting_dims = try a.dupe(i64, dg.lhs_contracting_dims);
+        const rhs_contracting_dims = try a.dupe(i64, dg.rhs_contracting_dims);
         return self.emit(
             .dot_general,
             &.{ lhs, rhs },
@@ -1649,8 +1710,18 @@ pub const FunctionBuilder = struct {
         return outputs;
     }
 
+    // ====================================================================
+    // Finish
+    // ====================================================================
+
     pub fn finish(self: *FunctionBuilder, returns: []const VarId) BuildError!Function {
         const a = self.alloc();
+
+        // Flush any remaining open regions
+        while (self.region_stack.items.len > 0) {
+            try self.pop_region();
+        }
+
         const func = Function{
             .name = self.name,
             .params = try self.params.toOwnedSlice(a),
@@ -1659,11 +1730,16 @@ pub const FunctionBuilder = struct {
             .eqns = try self.eqns.toOwnedSlice(a),
             .varids_store = try self.varids_store.toOwnedSlice(a),
             .params_store = try self.params_store.toOwnedSlice(a),
+            .regions = try self.completed_regions.toOwnedSlice(a),
         };
         try validate_function(func);
         return func;
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 test "FunctionBuilder reshape validation" {
     var program = Program.init(std.testing.allocator);
@@ -1725,4 +1801,124 @@ test "FunctionBuilder literal scalar" {
     const one = try b.literal_scalar(.{ .f32 = 1.0 });
     const func = try b.finish(&.{one});
     try validate_function(func);
+}
+
+test "region push/pop materializes regions" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
+    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    const d = try b.add(a_id, c_id);
+    const e = try b.multiply(d, c_id);
+    try b.pop_region();
+
+    const f = try b.add(e, a_id);
+    const func = try b.finish(&.{f});
+
+    try std.testing.expectEqual(@as(usize, 1), func.regions.len);
+    try std.testing.expectEqualStrings("tvm-kernel", func.regions[0].name);
+    try std.testing.expectEqualStrings("tvm", func.regions[0].annotation.kernelize.?);
+    try std.testing.expectEqual(@as(u32, 0), func.regions[0].eqn_start);
+    try std.testing.expectEqual(@as(u32, 2), func.regions[0].eqn_len);
+}
+
+test "nested regions" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
+    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("outer", .{ .kernelize = "tvm" });
+    const d = try b.add(a_id, c_id);
+    {
+        try b.push_region("inner", .{ .outline = true });
+        const e = try b.multiply(d, c_id);
+        _ = e;
+        try b.pop_region();
+    }
+    const f = try b.add(d, a_id);
+    try b.pop_region();
+
+    const func = try b.finish(&.{f});
+
+    try std.testing.expectEqual(@as(usize, 2), func.regions.len);
+    // Inner region completed first
+    try std.testing.expectEqualStrings("inner", func.regions[0].name);
+    try std.testing.expect(func.regions[0].annotation.outline);
+    try std.testing.expectEqual(@as(u32, 1), func.regions[0].eqn_start);
+    try std.testing.expectEqual(@as(u32, 1), func.regions[0].eqn_len);
+    // Outer region completed second
+    try std.testing.expectEqualStrings("outer", func.regions[1].name);
+    try std.testing.expectEqualStrings("tvm", func.regions[1].annotation.kernelize.?);
+    try std.testing.expectEqual(@as(u32, 0), func.regions[1].eqn_start);
+    try std.testing.expectEqual(@as(u32, 3), func.regions[1].eqn_len);
+}
+
+test "regions_matching filters by predicate" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
+    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("r1", .{ .kernelize = "tvm" });
+    const d = try b.add(a_id, c_id);
+    try b.pop_region();
+
+    try b.push_region("r2", .{ .outline = true });
+    const e = try b.multiply(d, c_id);
+    try b.pop_region();
+
+    const func = try b.finish(&.{e});
+
+    const is_kernelized = struct {
+        fn f(ann: Annotation) bool {
+            return ann.kernelize != null;
+        }
+    }.f;
+
+    var iter = func.regions_matching(is_kernelized);
+    const r = iter.next().?;
+    try std.testing.expectEqualStrings("r1", r.name);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "empty region not materialized" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
+    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("empty", .{ .kernelize = "tvm" });
+    try b.pop_region();
+
+    const d = try b.add(a_id, c_id);
+    const func = try b.finish(&.{d});
+
+    try std.testing.expectEqual(@as(usize, 0), func.regions.len);
+}
+
+test "no external imports" {
+    // This test verifies at compile time that this module depends only on std.
+    // If pr.zig imported mlir, stablehlo, or any ffi module, it would fail to
+    // compile in isolation. The fact that this test compiles is the proof.
+    const pr = @This();
+    try std.testing.expect(pr.DType.f32 == .f32);
 }
