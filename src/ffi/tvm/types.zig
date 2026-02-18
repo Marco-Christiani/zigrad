@@ -27,7 +27,7 @@ pub const IRModule = struct {
         self.handle.deinit();
     }
 
-    fn as_value(self: IRModule) Value {
+    pub fn as_value(self: IRModule) Value {
         // IRModule is a generic TVM object — use kTVMFFIStaticObjectBegin as
         // a safe type index (any object type >= this passes TVM's object check).
         return self.handle.to_value(c.kTVMFFIStaticObjectBegin);
@@ -69,7 +69,7 @@ pub const Target = struct {
         self.handle.deinit();
     }
 
-    fn as_value(self: Target) Value {
+    pub fn as_value(self: Target) Value {
         return self.handle.to_value(c.kTVMFFIStaticObjectBegin);
     }
 

@@ -9,7 +9,7 @@ const tvm_api = @import("../ffi/tvm/api.zig");
 const tune_mod = @import("tune.zig");
 const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
-const TargetKind = @import("common.zig").TargetKind;
+const TargetKind = @import("../ffi/tvm/types.zig").TargetKind;
 
 const log = std.log.scoped(.@"zg/tvm_provider");
 

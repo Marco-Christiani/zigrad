@@ -7,7 +7,7 @@
 const std = @import("std");
 const c = @import("../ffi/tvm/c.zig");
 const api = @import("../ffi/tvm/api.zig");
-const common = @import("common.zig");
+const types = @import("../ffi/tvm/types.zig");
 const cuda = @import("cuda.zig");
 
 const Value = api.Value;
@@ -112,7 +112,7 @@ pub fn build_module(
     allocator: std.mem.Allocator,
     lowered_mod: c.TVMFFIAny,
     target: c.TVMFFIAny,
-    target_kind: common.TargetKind,
+    target_kind: types.TargetKind,
 ) !c.TVMFFIAny {
     return switch (target_kind) {
         .cpu => try build_cpu_module(allocator, lowered_mod, target),

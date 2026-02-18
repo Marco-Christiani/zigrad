@@ -8,7 +8,7 @@ const std = @import("std");
 const api = @import("../ffi/tvm/api.zig");
 const RuntimeModule = @import("../ffi/tvm/types.zig").RuntimeModule;
 const Value = api.Value;
-const TargetKind = @import("common.zig").TargetKind;
+const TargetKind = @import("../ffi/tvm/types.zig").TargetKind;
 
 const log = std.log.scoped(.@"zg/tvm_loader");
 

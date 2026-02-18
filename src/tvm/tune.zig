@@ -12,7 +12,7 @@ const dlpack = @import("../ffi/dlpack.zig");
 const Value = api.Value;
 const IRModule = tvm_types.IRModule;
 const Target = tvm_types.Target;
-const TargetKind = @import("common.zig").TargetKind;
+const TargetKind = @import("../ffi/tvm/types.zig").TargetKind;
 const nvrtc_callback = @import("nvrtc_callback.zig");
 
 const log = std.log.scoped(.@"zg/tvm_tune");
@@ -179,7 +179,7 @@ pub fn tune(
     const add_to_db = try api.call_global(allocator, "meta_schedule.MeasureCallbackAddToDatabase", &.{});
     const callbacks_array = try api.call_global(allocator, "ffi.Array", &.{add_to_db});
 
-    try api.call_global(allocator, "meta_schedule.TaskSchedulerTune", &.{
+    _ = api.call_global(allocator, "meta_schedule.TaskSchedulerTune", &.{
         task_scheduler,
         contexts_array,
         weights_array,
@@ -581,7 +581,7 @@ fn make_random_cost_model() !Value {
 fn register_cpu_count(allocator: std.mem.Allocator) !void {
     const cpu_count_cb = struct {
         fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
-            result.* = Value.int(std.Thread.getCpuCount() catch 1).raw;
+            result.* = Value.int(@intCast(std.Thread.getCpuCount() catch 1)).raw;
             return 0;
         }
     }.f;

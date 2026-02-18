@@ -29,11 +29,7 @@ pub const tvm_ffi = struct {
     pub const tvm_api = @import("ffi/tvm/api.zig");
     pub const tvm_types = @import("ffi/tvm/types.zig");
 };
-pub const tvm = struct {
-    pub const module = @import("tvm/module.zig");
-    pub const provider = @import("tvm/provider.zig");
-    pub const tune = @import("tvm/tune.zig");
-};
+pub const tvm = @import("tvm/root.zig");
 
 // Kernels
 pub const kernels = struct {

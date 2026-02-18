@@ -129,6 +129,7 @@ pub fn main() !void {
             return demos.dump_tvm_ffi_symbols(gpa);
         }
         if (std.mem.eql(u8, m, "tvm-tune")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
