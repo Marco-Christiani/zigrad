@@ -89,7 +89,7 @@ pub fn run_llm_ft_demo(
         .optimizer = .{ .lr = 1e-2 },
         .compile = compile_cfg,
     });
-    defer compiled.exe.deinit(backend_handle.api);
+    defer backend_handle.deinit_executable(&compiled.exe);
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
     const shape_w_out = zg.utils.Shape{ .dims = &.{ hidden, vocab } };
@@ -149,39 +149,37 @@ pub fn run_llm_ft_demo(
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
     defer loss_host.deinit();
 
-    const api = backend_handle.api;
-
     var state = try train.TrainState.init(
         allocator,
         &compiled,
-        api,
+        &backend_handle,
         &.{ tmp_w_emb.pjrt_buffer, tmp_w_out.pjrt_buffer, tmp_b.pjrt_buffer },
         &.{ tmp_x.pjrt_buffer, tmp_y.pjrt_buffer },
     );
     defer state.deinit();
     defer {
         var bx = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_x.pjrt_buffer };
-        bx.deinit(api);
+        backend_handle.deinit_buffer(&bx);
         var by = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_y.pjrt_buffer };
-        by.deinit(api);
+        backend_handle.deinit_buffer(&by);
     }
 
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w_emb.pjrt_buffer }).is_on_cpu(api);
+    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w_emb.pjrt_buffer }));
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
         var result = try state.step();
         if (result.event) |e| {
             var ev = e;
-            try ev.await_(api);
-            ev.deinit(api);
+            try backend_handle.await_event(&ev);
+            backend_handle.deinit_event(&ev);
         }
         if (!is_cpu and !quiet) {
-            var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
-            try loss_ev.await_(api);
-            loss_ev.deinit(api);
+            var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
+            try backend_handle.await_event(&loss_ev);
+            backend_handle.deinit_event(&loss_ev);
         }
-        result.loss_buf.deinit(api);
+        backend_handle.deinit_buffer(&result.loss_buf);
     }
 
     var step: usize = 0;
@@ -192,23 +190,23 @@ pub fn run_llm_ft_demo(
 
         if (result.event) |e| {
             var ev = e;
-            try ev.await_(api);
-            ev.deinit(api);
+            try backend_handle.await_event(&ev);
+            backend_handle.deinit_event(&ev);
         }
         const wait_ns = timer.lap();
 
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
-            const ptr: [*]const f32 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
+            const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
             break :blk ptr[0];
         } else blk: {
-            var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
-            try loss_ev.await_(api);
-            loss_ev.deinit(api);
+            var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
+            try backend_handle.await_event(&loss_ev);
+            backend_handle.deinit_event(&loss_ev);
             break :blk loss_host.as_slice(f32)[0];
         };
         const loss_read_ns = timer.lap();
 
-        result.loss_buf.deinit(api);
+        backend_handle.deinit_buffer(&result.loss_buf);
 
         const cleanup_ns = timer.lap();
         const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;

@@ -57,19 +57,19 @@ pub fn run_demo_executable(
     const dims_c = [_]i64{ 2, 2 };
 
     var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer dev_a.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_a);
     var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer dev_b.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_b);
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer dev_c.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_c);
 
-    const result = try exe.execute(backend.api, allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c });
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
-            tmp.deinit(backend.api);
+            backend.deinit_event(&tmp);
         }
-        for (result.outputs) |*buf| buf.deinit(backend.api);
+        for (result.outputs) |*buf| backend.deinit_buffer(buf);
         allocator.free(result.outputs);
     }
 
@@ -77,9 +77,9 @@ pub fn run_demo_executable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try result.outputs[0].to_host(backend.api, out_host.data);
-    defer ev.deinit(backend.api);
-    try ev.await_(backend.api);
+    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data);
+    defer backend.deinit_event(&ev);
+    try backend.await_event(&ev);
 
     const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{
@@ -118,7 +118,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
-    defer exe.deinit(backend.api);
+    defer backend.deinit_executable(&exe);
 
     std.log.err("unexpected: custom_call compiled without a handler", .{});
     return error.UnexpectedSuccess;
@@ -137,7 +137,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
         .encoding = lower_encoding,
         .entry_name = "main_vjp",
     }, dump_pr, dump_mlir);
-    defer exe.deinit(backend.api);
+    defer backend.deinit_executable(&exe);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
     const A = [_]f32{
@@ -176,21 +176,21 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     const dims_c = [_]i64{ 2, 2 };
 
     var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer dev_a.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_a);
     var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer dev_b.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_b);
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer dev_c.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_c);
     var dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
-    defer dev_ct.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_ct);
 
-    const result = try exe.execute(backend.api, allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
+    const result = try backend.execute(&exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
-            tmp.deinit(backend.api);
+            backend.deinit_event(&tmp);
         }
-        for (result.outputs) |*buf| buf.deinit(backend.api);
+        for (result.outputs) |*buf| backend.deinit_buffer(buf);
         allocator.free(result.outputs);
     }
 
@@ -203,16 +203,16 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     var out_c = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
-    var ev_a = try result.outputs[0].to_host(backend.api, out_a.data);
-    defer ev_a.deinit(backend.api);
-    var ev_b = try result.outputs[1].to_host(backend.api, out_b.data);
-    defer ev_b.deinit(backend.api);
-    var ev_c = try result.outputs[2].to_host(backend.api, out_c.data);
-    defer ev_c.deinit(backend.api);
+    var ev_a = try backend.buffer_to_host(&result.outputs[0], out_a.data);
+    defer backend.deinit_event(&ev_a);
+    var ev_b = try backend.buffer_to_host(&result.outputs[1], out_b.data);
+    defer backend.deinit_event(&ev_b);
+    var ev_c = try backend.buffer_to_host(&result.outputs[2], out_c.data);
+    defer backend.deinit_event(&ev_c);
 
-    try ev_a.await_(backend.api);
-    try ev_b.await_(backend.api);
-    try ev_c.await_(backend.api);
+    try backend.await_event(&ev_a);
+    try backend.await_event(&ev_b);
+    try backend.await_event(&ev_c);
 
     const got_a = out_a.as_slice(f32)[0..6];
     const got_b = out_b.as_slice(f32)[0..6];
@@ -332,7 +332,7 @@ pub fn run_train_demo(
         .optimizer = .{ .lr = 1e-2 },
         .compile = compile_cfg,
     });
-    defer compiled.exe.deinit(backend_handle.api);
+    defer backend_handle.deinit_executable(&compiled.exe);
 
     const true_w1 = try allocator.alloc(f32, in_dim * h1);
     defer allocator.free(true_w1);
@@ -426,12 +426,10 @@ pub fn run_train_demo(
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
     defer loss_host.deinit();
 
-    const api = backend_handle.api;
-
     var state = try train.TrainState.init(
         allocator,
         &compiled,
-        api,
+        &backend_handle,
         &.{ tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer, tmp_w3.pjrt_buffer, tmp_b3.pjrt_buffer },
         &.{ tmp_x.pjrt_buffer, tmp_y.pjrt_buffer },
     );
@@ -439,27 +437,27 @@ pub fn run_train_demo(
     // Batch buffers are not owned by TrainState; deinit them separately.
     defer {
         var bx = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_x.pjrt_buffer };
-        bx.deinit(api);
+        backend_handle.deinit_buffer(&bx);
         var by = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_y.pjrt_buffer };
-        by.deinit(api);
+        backend_handle.deinit_buffer(&by);
     }
 
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w1.pjrt_buffer }).is_on_cpu(api);
+    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w1.pjrt_buffer }));
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
         var result = try state.step();
         if (result.event) |e| {
             var ev = e;
-            try ev.await_(api);
-            ev.deinit(api);
+            try backend_handle.await_event(&ev);
+            backend_handle.deinit_event(&ev);
         }
         if (!is_cpu and !quiet) {
-            var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
-            try loss_ev.await_(api);
-            loss_ev.deinit(api);
+            var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
+            try backend_handle.await_event(&loss_ev);
+            backend_handle.deinit_event(&loss_ev);
         }
-        result.loss_buf.deinit(api);
+        backend_handle.deinit_buffer(&result.loss_buf);
     }
 
     var step: usize = 0;
@@ -470,23 +468,23 @@ pub fn run_train_demo(
 
         if (result.event) |e| {
             var ev = e;
-            try ev.await_(api);
-            ev.deinit(api);
+            try backend_handle.await_event(&ev);
+            backend_handle.deinit_event(&ev);
         }
         const wait_ns = timer.lap();
 
         const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
-            const ptr: [*]const f32 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
+            const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
             break :blk ptr[0];
         } else blk: {
-            var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
-            try loss_ev.await_(api);
-            loss_ev.deinit(api);
+            var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
+            try backend_handle.await_event(&loss_ev);
+            backend_handle.deinit_event(&loss_ev);
             break :blk loss_host.as_slice(f32)[0];
         };
         const loss_read_ns = timer.lap();
 
-        result.loss_buf.deinit(api);
+        backend_handle.deinit_buffer(&result.loss_buf);
 
         const cleanup_ns = timer.lap();
         const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;

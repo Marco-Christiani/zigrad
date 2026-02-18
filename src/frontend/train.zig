@@ -4,7 +4,6 @@ const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
 const ops = @import("../pr/ops/ops.zig");
 const backend = @import("../backend/root.zig");
-const pjrt_api = @import("../ffi/pjrt/api.zig");
 const frontend = @import("frontend.zig");
 
 const Builder = frontend.Builder;
@@ -139,7 +138,7 @@ pub const TrainState = struct {
     input_bufs: []backend.pjrt.RawBuffer,
     output_bufs: []?backend.pjrt.RawBuffer,
     exe: *backend.pjrt.LoadedExecutable,
-    api: *pjrt_api.Api,
+    backend_handle: *backend.PjrtBackend,
     param_count: usize,
     non_donatable: []const i64,
     allocator: std.mem.Allocator,
@@ -149,10 +148,12 @@ pub const TrainState = struct {
         event: ?backend.pjrt.Event,
     };
 
+    /// Caller must keep `compiled` alive for the lifetime of `TrainState`
+    /// (`exe` is a pointer into it).
     pub fn init(
         allocator: std.mem.Allocator,
         compiled: *CompiledTrainStep,
-        api: *pjrt_api.Api,
+        backend_handle: *backend.PjrtBackend,
         initial_param_bufs: []const backend.pjrt.RawBuffer,
         initial_batch_bufs: []const backend.pjrt.RawBuffer,
     ) !TrainState {
@@ -176,7 +177,7 @@ pub const TrainState = struct {
             .input_bufs = input_bufs,
             .output_bufs = output_bufs,
             .exe = &compiled.exe,
-            .api = api,
+            .backend_handle = backend_handle,
             .param_count = compiled.param_count,
             .non_donatable = non_donatable,
             .allocator = allocator,
@@ -189,8 +190,8 @@ pub const TrainState = struct {
     /// The caller is responsible for reading and deiniting the loss buffer.
     pub fn step(self: *TrainState) !StepResult {
         @memset(self.output_bufs, null);
-        const event = try self.exe.execute_into_opts(
-            self.api,
+        const event = try self.backend_handle.execute_into(
+            self.exe,
             self.input_bufs,
             self.output_bufs,
             self.non_donatable,
@@ -204,7 +205,7 @@ pub const TrainState = struct {
             if (new_raw == old.*) continue;
             var buf = backend.pjrt.Buffer{ .pjrt_buffer = old.* };
             old.* = new_raw;
-            buf.deinit(self.api);
+            self.backend_handle.deinit_buffer(&buf);
         }
 
         return .{
@@ -223,7 +224,7 @@ pub const TrainState = struct {
     pub fn deinit(self: *TrainState) void {
         for (self.input_bufs[0..self.param_count]) |raw| {
             var buf = backend.pjrt.Buffer{ .pjrt_buffer = raw };
-            buf.deinit(self.api);
+            self.backend_handle.deinit_buffer(&buf);
         }
         self.allocator.free(self.input_bufs);
         self.allocator.free(self.output_bufs);

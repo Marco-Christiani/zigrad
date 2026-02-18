@@ -219,13 +219,13 @@ pub fn run_llama_ft_demo(
         compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
     }
     defer {
-        if (compiled_train) |*ct| ct.exe.deinit(backend_handle.api);
-        if (compiled_fwd) |*cf| cf.exe.deinit(backend_handle.api);
+        if (compiled_train) |*ct| backend_handle.deinit_executable(&ct.exe);
+        if (compiled_fwd) |*cf| backend_handle.deinit_executable(&cf.exe);
     }
 
     if (!quiet) {
-        if (compiled_train) |*ct| log_compiled_memory_stats(&ct.exe, backend_handle.api);
-        if (compiled_fwd) |*cf| log_compiled_memory_stats(&cf.exe, backend_handle.api);
+        if (compiled_train) |*ct| log_compiled_memory_stats(&backend_handle, &ct.exe);
+        if (compiled_fwd) |*cf| log_compiled_memory_stats(&backend_handle, &cf.exe);
     }
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
@@ -411,8 +411,6 @@ pub fn run_llama_ft_demo(
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
     defer loss_host.deinit();
 
-    const api = backend_handle.api;
-
     // Build param and batch buffer arrays.
     var param_bufs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
     defer param_bufs.deinit(allocator);
@@ -439,14 +437,14 @@ pub fn run_llama_ft_demo(
         tmp_cos.pjrt_buffer,
     };
 
-    const is_cpu = try (zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w_emb.pjrt_buffer }).is_on_cpu(api);
+    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w_emb.pjrt_buffer }));
 
     if (train_mode) {
         // Use TrainState for the training path.
         var state = try train.TrainState.init(
             allocator,
             &compiled_train.?,
-            api,
+            &backend_handle,
             param_bufs.items,
             &batch_bufs,
         );
@@ -454,7 +452,7 @@ pub fn run_llama_ft_demo(
         // Batch buffers are not owned by TrainState.
         defer for (batch_bufs) |raw| {
             var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
-            buf.deinit(api);
+            backend_handle.deinit_buffer(&buf);
         };
         // param_bufs ownership transferred to TrainState; clear to avoid double-free.
         param_bufs.clearRetainingCapacity();
@@ -464,15 +462,15 @@ pub fn run_llama_ft_demo(
             var result = try state.step();
             if (result.event) |e| {
                 var ev = e;
-                try ev.await_(api);
-                ev.deinit(api);
+                try backend_handle.await_event(&ev);
+                backend_handle.deinit_event(&ev);
             }
             if (!execute_only and !is_cpu and !quiet) {
-                var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
-                try loss_ev.await_(api);
-                loss_ev.deinit(api);
+                var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
+                try backend_handle.await_event(&loss_ev);
+                backend_handle.deinit_event(&loss_ev);
             }
-            result.loss_buf.deinit(api);
+            backend_handle.deinit_buffer(&result.loss_buf);
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -488,22 +486,22 @@ pub fn run_llama_ft_demo(
 
             if (result.event) |e| {
                 var ev = e;
-                try ev.await_(api);
-                ev.deinit(api);
+                try backend_handle.await_event(&ev);
+                backend_handle.deinit_event(&ev);
             }
             const exec_ns = timer.lap();
 
             const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
                 if (loss_dtype == .bf16) {
-                    const ptr: [*]const u16 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
+                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
                     break :blk bf16_to_f32(ptr[0]);
                 }
-                const ptr: [*]const f32 = @ptrFromInt(try result.loss_buf.unsafe_pointer(api));
+                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
                 break :blk ptr[0];
             } else blk: {
-                var loss_ev = try result.loss_buf.to_host(api, loss_host.data);
-                try loss_ev.await_(api);
-                loss_ev.deinit(api);
+                var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
+                try backend_handle.await_event(&loss_ev);
+                backend_handle.deinit_event(&loss_ev);
                 break :blk if (loss_dtype == .bf16)
                     bf16_to_f32(loss_host.as_slice(u16)[0])
                 else
@@ -511,7 +509,7 @@ pub fn run_llama_ft_demo(
             };
             const loss_read_ns = timer.lap();
 
-            result.loss_buf.deinit(api);
+            backend_handle.deinit_buffer(&result.loss_buf);
 
             const cleanup_ns = timer.lap();
             const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
@@ -547,7 +545,7 @@ pub fn run_llama_ft_demo(
         defer {
             for (input_ptrs.items) |raw| {
                 var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
-                buf.deinit(api);
+                backend_handle.deinit_buffer(&buf);
             }
         }
         // param_bufs ownership transferred to input_ptrs; clear to avoid double-free.
@@ -558,20 +556,20 @@ pub fn run_llama_ft_demo(
         var warmup: usize = 0;
         while (warmup < warmup_steps) : (warmup += 1) {
             @memset(output_ptrs[0..], null);
-            const ev = try fwd_exe.execute_into_opts(api, input_ptrs.items, &output_ptrs, null);
+            const ev = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null);
             const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
             var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
             if (ev) |e| {
                 var evv = e;
-                try evv.await_(api);
-                evv.deinit(api);
+                try backend_handle.await_event(&evv);
+                backend_handle.deinit_event(&evv);
             }
             if (!execute_only and !is_cpu and !quiet) {
-                var loss_ev = try loss_buf.to_host(api, loss_host.data);
-                try loss_ev.await_(api);
-                loss_ev.deinit(api);
+                var loss_ev = try backend_handle.buffer_to_host(&loss_buf, loss_host.data);
+                try backend_handle.await_event(&loss_ev);
+                backend_handle.deinit_event(&loss_ev);
             }
-            loss_buf.deinit(api);
+            backend_handle.deinit_buffer(&loss_buf);
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -583,13 +581,13 @@ pub fn run_llama_ft_demo(
         while (step < steps) : (step += 1) {
             var timer = try std.time.Timer.start();
             @memset(output_ptrs[0..], null);
-            const event = try fwd_exe.execute_into_opts(api, input_ptrs.items, &output_ptrs, null);
+            const event = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null);
             const dispatch_ns = timer.lap();
 
             if (event) |ev| {
                 var evv = ev;
-                try evv.await_(api);
-                evv.deinit(api);
+                try backend_handle.await_event(&evv);
+                backend_handle.deinit_event(&evv);
             }
             const exec_ns = timer.lap();
 
@@ -597,15 +595,15 @@ pub fn run_llama_ft_demo(
             var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
             const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
                 if (loss_dtype == .bf16) {
-                    const ptr: [*]const u16 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
+                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&loss_buf));
                     break :blk bf16_to_f32(ptr[0]);
                 }
-                const ptr: [*]const f32 = @ptrFromInt(try loss_buf.unsafe_pointer(api));
+                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&loss_buf));
                 break :blk ptr[0];
             } else blk: {
-                var loss_ev = try loss_buf.to_host(api, loss_host.data);
-                try loss_ev.await_(api);
-                loss_ev.deinit(api);
+                var loss_ev = try backend_handle.buffer_to_host(&loss_buf, loss_host.data);
+                try backend_handle.await_event(&loss_ev);
+                backend_handle.deinit_event(&loss_ev);
                 break :blk if (loss_dtype == .bf16)
                     bf16_to_f32(loss_host.as_slice(u16)[0])
                 else
@@ -613,7 +611,7 @@ pub fn run_llama_ft_demo(
             };
             const loss_read_ns = timer.lap();
 
-            loss_buf.deinit(api);
+            backend_handle.deinit_buffer(&loss_buf);
 
             const cleanup_ns = timer.lap();
             const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
@@ -641,7 +639,7 @@ pub fn run_llama_ft_demo(
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
     if (!quiet) {
-        log_device_memory_stats(device, backend_handle.api);
+        log_device_memory_stats(&backend_handle, device);
     }
     std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ avg_ms, warmup_steps, steps, seq });
     std.log.info("OK: llama-ft-demo executed", .{});
@@ -1100,8 +1098,8 @@ fn bytes_to_mb(value: i64) f64 {
     return @as(f64, @floatFromInt(value)) / (1024.0 * 1024.0);
 }
 
-fn log_compiled_memory_stats(exe: *zg.backend.pjrt.LoadedExecutable, api: anytype) void {
-    const stats = exe.get_compiled_memory_stats(api) catch |err| switch (err) {
+fn log_compiled_memory_stats(backend_handle: anytype, exe: *zg.backend.pjrt.LoadedExecutable) void {
+    const stats = backend_handle.executable_memory_stats(exe) catch |err| switch (err) {
         error.Unimplemented, error.FunctionNotAvailable => return,
         else => {
             std.log.warn("llama-ft-demo: compiled memory stats unavailable ({s})", .{@errorName(err)});
@@ -1120,8 +1118,8 @@ fn log_compiled_memory_stats(exe: *zg.backend.pjrt.LoadedExecutable, api: anytyp
     );
 }
 
-fn log_device_memory_stats(device: *const zg.backend.pjrt.Device, api: anytype) void {
-    const stats = device.get_memory_stats(api) catch |err| switch (err) {
+fn log_device_memory_stats(backend_handle: anytype, device: *const zg.backend.pjrt.Device) void {
+    const stats = backend_handle.device_memory_stats(device) catch |err| switch (err) {
         error.Unimplemented, error.FunctionNotAvailable => return,
         else => {
             std.log.warn("llama-ft-demo: device memory stats unavailable ({s})", .{@errorName(err)});

@@ -733,7 +733,7 @@ pub fn main() !void {
             defer gpa.free(serialized);
 
             var exe = try backend.load_serialized_executable(serialized, null);
-            defer exe.deinit(backend.api);
+            defer backend.deinit_executable(&exe);
 
             return demos.run_demo_executable(gpa, &backend, device, &exe);
         }
@@ -750,7 +750,7 @@ pub fn main() !void {
         .encoding = lower_encoding,
         .entry_name = "main",
     }, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
-    defer exe.deinit(backend.api);
+    defer backend.deinit_executable(&exe);
 
     return demos.run_demo_executable(gpa, &backend, device, &exe);
 }

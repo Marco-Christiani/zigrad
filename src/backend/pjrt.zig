@@ -25,6 +25,7 @@ pub const Buffer = pjrt_types.Buffer;
 pub const RawBuffer = pjrt_types.RawBuffer;
 pub const Device = pjrt_types.Device;
 pub const Event = pjrt_types.Event;
+pub const ExecuteResult = pjrt_types.ExecuteResult;
 
 /// Compile options for the PJRT backend.
 pub const CompileOptions = struct {
@@ -146,6 +147,65 @@ pub const Backend = struct {
         return self.client.buffer_from_host(device, data, buf_type, shape);
     }
 
+    // ========================================================================
+    // Execution
+    // ========================================================================
+
+    pub fn execute(self: *Backend, exe: *LoadedExecutable, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
+        return exe.execute(self.api, allocator, inputs);
+    }
+
+    pub fn execute_into(self: *Backend, exe: *LoadedExecutable, input_ptrs: []const RawBuffer, output_ptrs: []?RawBuffer, non_donatable: ?[]const i64) !?Event {
+        return exe.execute_into_opts(self.api, input_ptrs, output_ptrs, non_donatable);
+    }
+
+    // ========================================================================
+    // Handle Lifecycle
+    // ========================================================================
+
+    pub fn deinit_buffer(self: *Backend, buf: *Buffer) void {
+        buf.deinit(self.api);
+    }
+
+    pub fn deinit_event(self: *Backend, ev: *Event) void {
+        ev.deinit(self.api);
+    }
+
+    pub fn deinit_executable(self: *Backend, exe: *LoadedExecutable) void {
+        exe.deinit(self.api);
+    }
+
+    // ========================================================================
+    // Data Transfer
+    // ========================================================================
+
+    pub fn buffer_to_host(self: *Backend, buf: *Buffer, dst: []u8) !Event {
+        return buf.to_host(self.api, dst);
+    }
+
+    pub fn await_event(self: *Backend, ev: *Event) !void {
+        return ev.await_(self.api);
+    }
+
+    // ========================================================================
+    // Extended (PJRT-specific, not part of AsBackend contract)
+    // ========================================================================
+
+    pub fn buffer_unsafe_pointer(self: *Backend, buf: *const Buffer) !usize {
+        return buf.unsafe_pointer(self.api);
+    }
+
+    pub fn buffer_is_on_cpu(self: *Backend, buf: *const Buffer) !bool {
+        return buf.is_on_cpu(self.api);
+    }
+
+    pub fn executable_memory_stats(self: *Backend, exe: *LoadedExecutable) !LoadedExecutable.CompiledMemoryStats {
+        return exe.get_compiled_memory_stats(self.api);
+    }
+
+    pub fn device_memory_stats(self: *Backend, device: *const Device) !Device.MemoryStats {
+        return device.get_memory_stats(self.api);
+    }
 };
 
 fn cpu_device_count_from_env() ?usize {

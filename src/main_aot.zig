@@ -22,7 +22,7 @@ pub fn run(
     defer allocator.free(serialized);
 
     var loaded = try backend.load_serialized_executable(serialized, null);
-    defer loaded.deinit(backend.api);
+    defer backend.deinit_executable(&loaded);
 
     try run_demo_executable(allocator, backend, device, &loaded);
 
@@ -66,19 +66,19 @@ fn run_demo_executable(
     const dims_c = [_]i64{ 2, 2 };
 
     var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer dev_a.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_a);
     var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer dev_b.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_b);
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer dev_c.deinit(backend.api);
+    defer backend.deinit_buffer(&dev_c);
 
-    const result = try exe.execute(backend.api, allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c });
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
-            tmp.deinit(backend.api);
+            backend.deinit_event(&tmp);
         }
-        for (result.outputs) |*buf| buf.deinit(backend.api);
+        for (result.outputs) |*buf| backend.deinit_buffer(buf);
         allocator.free(result.outputs);
     }
 
@@ -86,9 +86,9 @@ fn run_demo_executable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try result.outputs[0].to_host(backend.api, out_host.data);
-    defer ev.deinit(backend.api);
-    try ev.await_(backend.api);
+    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data);
+    defer backend.deinit_event(&ev);
+    try backend.await_event(&ev);
 
     const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{
