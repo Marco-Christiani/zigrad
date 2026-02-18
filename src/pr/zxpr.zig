@@ -121,9 +121,9 @@ pub const Emitter = struct {
                     }
                 }
 
+                try w.writeAll(ind);
+                try w.writeAll(ind);
                 try self.emit_gutters(open_len);
-                try w.writeAll(ind);
-                try w.writeAll(ind);
                 try self.emit_binding(eqn);
                 try w.writeAll("\n");
             }
@@ -242,9 +242,6 @@ pub const Emitter = struct {
     }
 
     fn emit_region_end(self: *Self, depth: usize) !void {
-        // Find the region that was at this depth
-        // We need to find it from func.regions — but we only have depth.
-        // The caller should pass the region. Let's adjust the API.
         try self.writer.writeAll(self.indent);
         try self.writer.writeAll(self.indent);
         try self.emit_gutters(depth);
