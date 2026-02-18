@@ -6,9 +6,11 @@
 
 const std = @import("std");
 const c = @import("../ffi/tvm/c.zig");
+const api = @import("../ffi/tvm/api.zig");
 const common = @import("common.zig");
 const cuda = @import("cuda.zig");
-const ffi = @import("../tvm_runtime.zig"); // For FFI helpers
+
+const Value = api.Value;
 
 const log = std.log.scoped(.@"zg/tvm_builder");
 
@@ -21,11 +23,12 @@ pub fn build_cpu_module(
     lowered_mod: c.TVMFFIAny,
     target: c.TVMFFIAny,
 ) !c.TVMFFIAny {
-    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    var build_args = [_]c.TVMFFIAny{ lowered_mod, target };
-    try ffi.ffi_call_global(allocator, "target.build.llvm", &build_args, &built_mod);
-    log.debug("Built CPU module: type_index={d}", .{built_mod.type_index});
-    return built_mod;
+    const result = try api.call_global(allocator, "target.build.llvm", &.{
+        Value{ .raw = lowered_mod },
+        Value{ .raw = target },
+    });
+    log.debug("Built CPU module: type_index={d}", .{result.raw.type_index});
+    return result.raw;
 }
 
 /// Build a lowered TIR module for CUDA execution.
@@ -48,14 +51,9 @@ pub fn build_cuda_module(
     log.info("Starting CUDA module build (host/device split)", .{});
 
     // Create separate host (LLVM) and device (CUDA) targets
-    var host_target: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    {
-        var args = [_]c.TVMFFIAny{ffi.any_raw_str("llvm")};
-        try ffi.ffi_call_global(allocator, "target.Target", &args, &host_target);
-    }
-    defer if (host_target.unnamed_1.v_obj) |obj| {
-        _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
-    };
+    const host_target_val = try api.call_global(allocator, "target.Target", &.{Value.str("llvm")});
+    defer host_target_val.decref();
+    const host_target = host_target_val.raw;
 
     // 1. Filter to device functions (calling_conv != 1)
     log.info("CUDA build [1/5]: filtering device functions", .{});

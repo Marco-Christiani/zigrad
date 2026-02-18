@@ -5,7 +5,9 @@
 
 const std = @import("std");
 const c = @import("../ffi/tvm/c.zig");
-const ffi = @import("../tvm_runtime.zig"); // For FFI helpers. FIXME: ffi should be centralized.
+const api = @import("../ffi/tvm/api.zig");
+
+const Value = api.Value;
 
 const log = std.log.scoped(.@"zg/tvm_cuda");
 
@@ -67,33 +69,29 @@ pub fn load_intrinsics(allocator: std.mem.Allocator) !void {
         const intrinsic_data = parsed.value;
 
         // convert to C strings
-        const name_cstr = try ffi.cstr_alloc(allocator, intrinsic_data.name);
+        const name_cstr = try api.cstr_alloc(allocator, intrinsic_data.name);
         defer allocator.free(name_cstr);
 
-        const desc_cstr = try ffi.cstr_alloc(allocator, intrinsic_data.desc);
+        const desc_cstr = try api.cstr_alloc(allocator, intrinsic_data.desc);
         defer allocator.free(desc_cstr);
 
-        const impl_cstr = try ffi.cstr_alloc(allocator, intrinsic_data.impl);
+        const impl_cstr = try api.cstr_alloc(allocator, intrinsic_data.impl);
         defer allocator.free(impl_cstr);
 
         // load PrimFuncs from json
-        var desc_primfunc: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-        try ffi.ffi_call_global(allocator, "node.LoadJSON", &.{ffi.any_raw_str(ffi.cstr_ptr(desc_cstr))}, &desc_primfunc);
+        const desc_primfunc = try api.call_global(allocator, "node.LoadJSON", &.{Value.str(desc_cstr.ptr)});
 
-        var impl_primfunc: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-        try ffi.ffi_call_global(allocator, "node.LoadJSON", &.{ffi.any_raw_str(ffi.cstr_ptr(impl_cstr))}, &impl_primfunc);
+        const impl_primfunc = try api.call_global(allocator, "node.LoadJSON", &.{Value.str(impl_cstr.ptr)});
 
         // create TensorIntrin object
-        var tensor_intrin: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-        try ffi.ffi_call_global(allocator, "tir.TensorIntrin", &.{ desc_primfunc, impl_primfunc }, &tensor_intrin);
+        const tensor_intrin = try api.call_global(allocator, "tir.TensorIntrin", &.{ desc_primfunc, impl_primfunc });
 
         // register intrinsic
-        var dummy_out: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-        try ffi.ffi_call_global(allocator, "tir.TensorIntrinRegister", &.{
-            ffi.any_raw_str(ffi.cstr_ptr(name_cstr)),
+        _ = try api.call_global(allocator, "tir.TensorIntrinRegister", &.{
+            Value.str(name_cstr.ptr),
             tensor_intrin,
-            ffi.any_bool(false), // override=false
-        }, &dummy_out);
+            Value.boolean(false), // override=false
+        });
 
         loaded_count += 1;
     }
@@ -149,15 +147,12 @@ pub fn filter_module_by_target(
     _ = c.TVMFFIObjectIncRef(filter_func);
 
     // use tir.transform.Filter(callback) to create a pass
-    var filter_pass: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    try ffi.ffi_call_global(allocator, "tir.transform.Filter", &.{filter_func_any}, &filter_pass);
-    defer if (filter_pass.unnamed_1.v_obj) |obj| {
-        _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
-    };
+    const filter_pass = try api.call_global(allocator, "tir.transform.Filter", &.{Value{ .raw = filter_func_any }});
+    defer filter_pass.decref();
 
     // apply pass: filtered_mod = filter_pass(module)
-    var filtered_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    try ffi.ffi_call_global(allocator, "transform.RunPass", &.{ filter_pass, module }, &filtered_mod);
+    const filtered_result = try api.call_global(allocator, "transform.RunPass", &.{ filter_pass, Value{ .raw = module } });
+    const filtered_mod = filtered_result.raw;
 
     log.debug("Filtered module for {s} (inline FFI), type_index={d}", .{ @tagName(kind), filtered_mod.type_index });
     return filtered_mod;
@@ -212,71 +207,65 @@ fn filter_by_calling_conv(
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    const default_ret = Value.boolean(!want_host).raw;
     var calling_conv: i64 = 0; // default = kDefault (device)
 
     // 1. Get attrs from the PrimFunc
-    var dict_attrs: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    ffi.ffi_call_global(alloc, "ir.BaseFunc_Attrs", &.{func_any}, &dict_attrs) catch {
-        ret.* = ffi.any_bool(!want_host);
+    const dict_attrs = api.call_global(alloc, "ir.BaseFunc_Attrs", &.{Value{ .raw = func_any }}) catch {
+        ret.* = default_ret;
         return 0;
     };
-    defer dec_ref_any(dict_attrs);
+    defer dict_attrs.decref();
 
     // if attrs is None then no attributes set
-    if (dict_attrs.type_index == c.kTVMFFINone) {
-        ret.* = ffi.any_bool(!want_host);
+    if (dict_attrs.is_none()) {
+        ret.* = default_ret;
         return 0;
     }
 
     // 2. Get the underlying Map from DictAttrs
-    var map: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    ffi.ffi_call_global(alloc, "ir.DictAttrsGetDict", &.{dict_attrs}, &map) catch {
-        ret.* = ffi.any_bool(!want_host);
+    const map = api.call_global(alloc, "ir.DictAttrsGetDict", &.{dict_attrs}) catch {
+        ret.* = default_ret;
         return 0;
     };
-    defer dec_ref_any(map);
+    defer map.decref();
 
     // 3. Create a TVM String key for "calling_conv"
     // NB: must be a proper tvm string (not raw c str) so Map key comparison works
-    const key_lit = "calling_conv";
-    var key_bytes: c.TVMFFIByteArray = .{ .data = key_lit.ptr, .size = key_lit.len };
-    var key_any: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    if (c.TVMFFIStringFromByteArray(&key_bytes, &key_any) != 0) {
-        ret.* = ffi.any_bool(!want_host);
+    const key = api.make_tvm_string("calling_conv") catch {
+        ret.* = default_ret;
         return 0;
-    }
-    defer dec_ref_any(key_any);
+    };
+    defer key.decref();
 
     // 4. Check if "calling_conv" exists in the Map
-    var count: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    ffi.ffi_call_global(alloc, "ffi.MapCount", &.{ map, key_any }, &count) catch {
-        ret.* = ffi.any_bool(!want_host);
+    const count = api.call_global(alloc, "ffi.MapCount", &.{ map, key }) catch {
+        ret.* = default_ret;
         return 0;
     };
 
-    if (count.unnamed_1.v_int64 == 0) {
-        ret.* = ffi.any_bool(!want_host);
+    if ((count.as_int() orelse 0) == 0) {
+        ret.* = default_ret;
         return 0;
     }
 
     // 5. Get the calling_conv value from the Map
-    var conv_val: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    ffi.ffi_call_global(alloc, "ffi.MapGetItem", &.{ map, key_any }, &conv_val) catch {
-        ret.* = ffi.any_bool(!want_host);
+    const conv_val = api.call_global(alloc, "ffi.MapGetItem", &.{ map, key }) catch {
+        ret.* = default_ret;
         return 0;
     };
-    defer dec_ref_any(conv_val);
+    defer conv_val.decref();
 
     // 6. Extract integer value
     // NB: needs to handle both raw int and IntImm objects
-    if (get_int_from_any(conv_val)) |val| {
+    if (get_int_from_any(conv_val.raw)) |val| {
         calling_conv = val;
     }
 
     // kDefault=0 (device), kCPackedFunc=1 (host), kDeviceKernelLaunch=2 (device)
     const is_host = (calling_conv == 1);
     log.debug("filter: calling_conv={d}, is_host={}, want_host={}", .{ calling_conv, is_host, want_host });
-    ret.* = ffi.any_bool(is_host == want_host);
+    ret.* = Value.boolean(is_host == want_host).raw;
     return 0;
 }
 
@@ -316,15 +305,6 @@ fn get_int_from_any(any: c.TVMFFIAny) ?i64 {
     return null;
 }
 
-/// Release a TVM object reference if the TVMFFIAny holds one.
-fn dec_ref_any(any: c.TVMFFIAny) void {
-    if (any.type_index >= c.kTVMFFIStaticObjectBegin) {
-        if (any.unnamed_1.v_obj) |obj| {
-            _ = c.TVMFFIObjectDecRef(@ptrCast(obj));
-        }
-    }
-}
-
 /// Build CUDA device kernels.
 ///
 /// Takes a module containing only device functions (after filtering)
@@ -335,12 +315,13 @@ pub fn build_device_kernels(
     target: c.TVMFFIAny,
 ) !c.TVMFFIAny {
     log.debug("build_device_kernels: entering (device_mod type_index={d})", .{device_mod.type_index});
-    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    var build_args = [_]c.TVMFFIAny{ device_mod, target };
     log.debug("build_device_kernels: calling target.build.cuda", .{});
-    try ffi.ffi_call_global(allocator, "target.build.cuda", &build_args, &built_mod);
-    log.debug("build_device_kernels: success (built_mod type_index={d})", .{built_mod.type_index});
-    return built_mod;
+    const result = try api.call_global(allocator, "target.build.cuda", &.{
+        Value{ .raw = device_mod },
+        Value{ .raw = target },
+    });
+    log.debug("build_device_kernels: success (built_mod type_index={d})", .{result.raw.type_index});
+    return result.raw;
 }
 
 /// Build LLVM host wrapper for device kernels.
@@ -352,10 +333,11 @@ pub fn build_host_wrapper(
     host_mod: c.TVMFFIAny,
     target: c.TVMFFIAny,
 ) !c.TVMFFIAny {
-    var built_mod: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    var build_args = [_]c.TVMFFIAny{ host_mod, target };
-    try ffi.ffi_call_global(allocator, "target.build.llvm", &build_args, &built_mod);
-    return built_mod;
+    const result = try api.call_global(allocator, "target.build.llvm", &.{
+        Value{ .raw = host_mod },
+        Value{ .raw = target },
+    });
+    return result.raw;
 }
 
 /// Link device module into host module.
@@ -368,8 +350,9 @@ pub fn link_device_module(
     host_built: c.TVMFFIAny,
     device_built: c.TVMFFIAny,
 ) !void {
-    var args = [_]c.TVMFFIAny{ host_built, device_built };
-    var result: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    try ffi.ffi_call_global(allocator, "ffi.ModuleImportModule", &args, &result);
+    _ = try api.call_global(allocator, "ffi.ModuleImportModule", &.{
+        Value{ .raw = host_built },
+        Value{ .raw = device_built },
+    });
     log.debug("Linked device module into host module", .{});
 }
