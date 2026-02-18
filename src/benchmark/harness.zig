@@ -1,11 +1,12 @@
 /// Main benchmark orchestration for matmul performance testing.
 const std = @import("std");
+const zg = @import("../root.zig");
+const gemm = zg.kernels.gemm;
+const tvm_runtime = zg.tvm_runtime;
 const config = @import("config.zig");
 const stats = @import("stats.zig");
 const correctness = @import("correctness.zig");
-const gemm = @import("../kernels/gemm.zig");
 const tvm_adapter = @import("tvm_adapter.zig");
-const tvm_runtime = @import("../tvm_runtime.zig");
 const xla_adapter = @import("xla_adapter.zig");
 
 pub const BenchmarkConfig = config.BenchmarkConfig;

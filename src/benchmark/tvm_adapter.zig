@@ -1,6 +1,7 @@
 /// TVM CPU matmul adapter for benchmark harness.
 const std = @import("std");
-const tvm = @import("../tvm_runtime.zig");
+const zg = @import("../root.zig");
+const tvm = zg.tvm_runtime;
 const build_options = @import("build_options");
 
 /// Execute TVM CPU matmul using pre-loaded module (for cached execution).

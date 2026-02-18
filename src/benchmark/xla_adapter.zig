@@ -1,15 +1,16 @@
 /// XLA/PJRT CPU matmul adapter for benchmark harness.
 const std = @import("std");
-const pr = @import("../pr/pr.zig");
-const stablehlo = @import("../lower/stablehlo.zig");
-const backend_mod = @import("../backend/pjrt.zig");
+const zg = @import("../root.zig");
+const pr = zg.pr;
+const lower = zg.lower;
+const backend = zg.backend;
 
 /// XLA execution context (cached backend, device, and compiled executables).
 pub const XlaContext = struct {
     allocator: std.mem.Allocator,
-    backend: *backend_mod.Backend,
-    device: *const backend_mod.Device,
-    compiled_cache: std.StringHashMap(*backend_mod.LoadedExecutable),
+    backend_handle: *backend.PjrtBackend,
+    device: *const backend.pjrt.Device,
+    compiled_cache: std.StringHashMap(*backend.pjrt.LoadedExecutable),
 
     /// Initialize XLA context (loads PJRT CPU plugin, creates backend).
     pub fn init(allocator: std.mem.Allocator) !XlaContext {
@@ -28,19 +29,19 @@ pub const XlaContext = struct {
             return error.PjrtCpuPluginPathNotSet;
         };
 
-        const backend = try allocator.create(backend_mod.Backend);
-        errdefer allocator.destroy(backend);
+        const backend_handle = try allocator.create(backend.PjrtBackend);
+        errdefer allocator.destroy(backend_handle);
 
-        backend.* = try backend_mod.Backend.init(allocator, plugin_path);
+        backend_handle.* = try backend.PjrtBackend.init(allocator, plugin_path);
 
-        const devices = try backend.get_devices(allocator);
+        const devices = try backend_handle.get_devices(allocator);
         if (devices.len == 0) return error.NoDevicesFound;
 
         return XlaContext{
             .allocator = allocator,
-            .backend = backend,
+            .backend_handle = backend_handle,
             .device = &devices[0],
-            .compiled_cache = std.StringHashMap(*backend_mod.LoadedExecutable).init(allocator),
+            .compiled_cache = std.StringHashMap(*backend.pjrt.LoadedExecutable).init(allocator),
         };
     }
 
@@ -49,13 +50,13 @@ pub const XlaContext = struct {
         // Clean up cached executables
         var iter = self.compiled_cache.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.deinit(self.backend.api);
+            self.backend_handle.deinit_executable(entry.value_ptr.*);
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.compiled_cache.deinit();
 
-        self.backend.deinit();
-        self.allocator.destroy(self.backend);
+        self.backend_handle.deinit();
+        self.allocator.destroy(self.backend_handle);
     }
 
     /// Execute XLA CPU matmul (compiles on-the-fly, caches per shape).
@@ -86,39 +87,37 @@ pub const XlaContext = struct {
         const a_bytes = std.mem.sliceAsBytes(a);
         const b_bytes = std.mem.sliceAsBytes(b);
 
-        const api = self.backend.api;
-
-        var dev_a = try self.backend.buffer_from_host(self.device, a_bytes, .f32, &.{
+        var dev_a = try self.backend_handle.buffer_from_host(self.device, a_bytes, .f32, &.{
             @intCast(m),
             @intCast(k),
         });
-        defer dev_a.deinit(api);
+        defer self.backend_handle.deinit_buffer(&dev_a);
 
-        var dev_b = try self.backend.buffer_from_host(self.device, b_bytes, .f32, &.{
+        var dev_b = try self.backend_handle.buffer_from_host(self.device, b_bytes, .f32, &.{
             @intCast(k),
             @intCast(n),
         });
-        defer dev_b.deinit(api);
+        defer self.backend_handle.deinit_buffer(&dev_b);
 
         // Execute
-        const result = try executable.execute(api, self.allocator, &.{ dev_a, dev_b });
+        const result = try self.backend_handle.execute(executable, self.allocator, &.{ dev_a, dev_b });
         defer {
-            for (result.outputs) |*buf| buf.deinit(api);
+            for (result.outputs) |*buf| self.backend_handle.deinit_buffer(buf);
             self.allocator.free(result.outputs);
         }
 
         // Wait for GPU kernel to complete before copying results
         if (result.device_complete_event) |ev| {
             var device_event = ev;
-            defer device_event.deinit(api);
-            try device_event.await_(api);
+            defer self.backend_handle.deinit_event(&device_event);
+            try self.backend_handle.await_event(&device_event);
         }
 
         // Copy result back to c
         const c_bytes = std.mem.sliceAsBytes(c);
-        var copy_event = try result.outputs[0].to_host(api, c_bytes);
-        defer copy_event.deinit(api);
-        try copy_event.await_(api);
+        var copy_event = try self.backend_handle.buffer_to_host(&result.outputs[0], c_bytes);
+        defer self.backend_handle.deinit_event(&copy_event);
+        try self.backend_handle.await_event(&copy_event);
     }
 
     /// Compile XLA matmul for a specific shape.
@@ -127,7 +126,7 @@ pub const XlaContext = struct {
         m: usize,
         n: usize,
         k: usize,
-    ) !*backend_mod.LoadedExecutable {
+    ) !*backend.pjrt.LoadedExecutable {
         // Build minimal PR program
         var program = pr.Program.init(self.allocator);
         defer program.deinit();
@@ -142,7 +141,7 @@ pub const XlaContext = struct {
         try program.add_function(func);
 
         // Lower to StableHLO
-        const mlir_bytes = try stablehlo.lower_program_to_mlir(
+        const mlir_bytes = try lower.lower_program_to_mlir(
             self.allocator,
             &program,
             null,
@@ -151,10 +150,10 @@ pub const XlaContext = struct {
         defer self.allocator.free(mlir_bytes);
 
         // Compile
-        const executable = try self.allocator.create(backend_mod.LoadedExecutable);
+        const executable = try self.allocator.create(backend.pjrt.LoadedExecutable);
         errdefer self.allocator.destroy(executable);
 
-        executable.* = try self.backend.compile(
+        executable.* = try self.backend_handle.compile(
             self.device,
             mlir_bytes,
             true,
