@@ -24,13 +24,14 @@ pub const lower = @import("lower/root.zig");
 pub const kernel = @import("kernel.zig");
 
 // TVM subsystem
-pub const tvm_runtime = @import("tvm_runtime.zig");
 pub const tvm_ffi = struct {
     pub const dlpack = @import("ffi/dlpack.zig");
     pub const tvm_api = @import("ffi/tvm/api.zig");
     pub const tvm_types = @import("ffi/tvm/types.zig");
 };
 pub const tvm = struct {
+    pub const common = @import("tvm/common.zig");
+    pub const module = @import("tvm/module.zig");
     pub const provider = @import("tvm/provider.zig");
     pub const tune = @import("tvm/tune.zig");
 };

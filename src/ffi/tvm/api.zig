@@ -306,6 +306,24 @@ pub fn call_global(allocator: std.mem.Allocator, func_name: []const u8, args: []
     }
 }
 
+/// Call a TVM function handle with Value arguments.
+pub fn call_handle(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const Value) TvmError!Value {
+    if (args.len <= 16) {
+        var raw_args: [16]c.TVMFFIAny = undefined;
+        for (args, 0..) |a, i| raw_args[i] = a.raw;
+        var out: c.TVMFFIAny = undefined;
+        try call(allocator, func, raw_args[0..args.len], &out);
+        return .{ .raw = out };
+    } else {
+        const raw_args = try allocator.alloc(c.TVMFFIAny, args.len);
+        defer allocator.free(raw_args);
+        for (args, 0..) |a, i| raw_args[i] = a.raw;
+        var out: c.TVMFFIAny = undefined;
+        try call(allocator, func, raw_args, &out);
+        return .{ .raw = out };
+    }
+}
+
 /// Register a TVM global function by name.
 pub fn set_global(name: []const u8, func_handle: c.TVMFFIObjectHandle, override: bool) TvmError!void {
     var name_arr: c.TVMFFIByteArray = .{ .data = name.ptr, .size = name.len };

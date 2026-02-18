@@ -570,33 +570,30 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
 }
 
 /// Enumerate TVM FFI global functions.
-/// Writes available operations to stdout
-/// Note: Requires TVM runtime to be already loaded (will happen on first FFI call).
+/// Writes available operations to stdout.
 pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
-    const tvm_runtime = zg.tvm_runtime;
+    const api = zg.tvm_ffi.tvm_api;
+    const Value = api.Value;
 
-    // Load TVM compiler to register te.* and topi.* functions
-    try tvm_runtime.ensure_tvm_compiler_loaded(allocator);
+    try api.ensure_loaded(allocator);
 
-    // get function enumeration functor
-    const factory = try tvm_runtime.ffi_get_global(allocator, "ffi.FunctionListGlobalNamesFunctor");
-    defer _ = tvm_runtime.c.TVMFFIObjectDecRef(factory);
+    // Get function enumeration functor
+    const factory_val = try api.call_global(allocator, "ffi.FunctionListGlobalNamesFunctor", &.{});
+    defer factory_val.decref();
 
-    var res0: tvm_runtime.c.TVMFFIAny = std.mem.zeroes(tvm_runtime.c.TVMFFIAny);
-    try tvm_runtime.ffi_call0(allocator, factory, &res0);
-    if (res0.type_index != tvm_runtime.c.kTVMFFIFunction or res0.unnamed_1.v_obj == null) {
-        return error.UnexpectedTvmType;
-    }
-    const functor: tvm_runtime.c.TVMFFIObjectHandle = @ptrCast(res0.unnamed_1.v_obj);
-    defer _ = tvm_runtime.c.TVMFFIObjectDecRef(functor);
+    const factory_handle = factory_val.as_object() orelse return error.UnexpectedTvmType;
 
-    // get count
-    var res_len: tvm_runtime.c.TVMFFIAny = std.mem.zeroes(tvm_runtime.c.TVMFFIAny);
-    try tvm_runtime.ffi_call1_i64(allocator, functor, -1, &res_len);
-    if (res_len.type_index != tvm_runtime.c.kTVMFFIInt) return error.UnexpectedTvmType;
-    const count: usize = @intCast(res_len.unnamed_1.v_int64);
+    // Call factory() -> functor
+    const functor_val = try api.call_handle(allocator, factory_handle, &.{});
+    defer functor_val.decref();
 
-    // collect and sort all function names
+    const functor_handle = functor_val.as_object() orelse return error.UnexpectedTvmType;
+
+    // Get count: functor(-1)
+    const count_val = try api.call_handle(allocator, functor_handle, &.{Value.int(-1)});
+    const count: usize = @intCast(count_val.as_int() orelse return error.UnexpectedTvmType);
+
+    // Collect and sort all function names
     var names = try std.ArrayList([]const u8).initCapacity(allocator, count);
     defer {
         for (names.items) |n| allocator.free(n);
@@ -604,9 +601,8 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
     }
 
     for (0..count) |i| {
-        var res: tvm_runtime.c.TVMFFIAny = std.mem.zeroes(tvm_runtime.c.TVMFFIAny);
-        tvm_runtime.ffi_call1_i64(allocator, functor, @intCast(i), &res) catch continue;
-        const s = tvm_runtime.any_to_string(allocator, &res) catch continue;
+        var name_val = api.call_handle(allocator, functor_handle, &.{Value.int(@intCast(i))}) catch continue;
+        const s = name_val.as_string(allocator) catch continue;
         try names.append(allocator, s);
     }
 
@@ -616,7 +612,7 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
         }
     }.lessThan);
 
-    // print with category headers
+    // Print with category headers
     var stdout_buf: [16384]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const out = &stdout_writer.interface;
