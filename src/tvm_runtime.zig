@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 pub const c = @import("ffi/tvm/c.zig");
+const dlpack = @import("ffi/dlpack.zig");
 
 // TVM subsystem modules
 const tvm_common = @import("tvm/common.zig");
@@ -292,7 +293,7 @@ fn any_device(device_type: i32, device_id: i32) c.TVMFFIAny {
 fn any_dtype_f32() c.TVMFFIAny {
     var v = std.mem.zeroes(c.TVMFFIAny);
     v.type_index = c.kTVMFFIDataType;
-    v.unnamed_1.v_dtype = .{ .code = c.kDLFloat, .bits = 32, .lanes = 1 };
+    v.unnamed_1.v_dtype = .{ .code = @intCast(@intFromEnum(dlpack.DataTypeCode.float)), .bits = 32, .lanes = 1 };
     return v;
 }
 
@@ -642,25 +643,23 @@ fn module_get_function(
     return @ptrCast(out.unnamed_1.v_obj);
 }
 
-pub fn make_dl_tensor_f32(data: []f32, shape: []i64) c.DLTensor {
+pub fn make_dl_tensor_f32(data: []f32, shape: []i64) dlpack.Tensor {
     return .{
         .data = @ptrCast(data.ptr),
-        .device = .{ .device_type = c.kDLCPU, .device_id = 0 },
+        .device = .{ .device_type = .cpu, .device_id = 0 },
         .ndim = @intCast(shape.len),
-        .dtype = .{ .code = c.kDLFloat, .bits = 32, .lanes = 1 },
+        .dtype = dlpack.DataType.f32_,
         .shape = shape.ptr,
         .strides = null,
         .byte_offset = 0,
     };
 }
 
-pub fn dlpack_noop_deleter(tensor: ?*c.DLManagedTensor) callconv(.c) void {
-    _ = tensor;
-}
+pub const dlpack_noop_deleter = dlpack.noop_deleter;
 
-pub fn tensor_from_dlpack(allocator: std.mem.Allocator, managed: *c.DLManagedTensor) !c.TVMFFIObjectHandle {
+pub fn tensor_from_dlpack(allocator: std.mem.Allocator, managed: *dlpack.ManagedTensor) !c.TVMFFIObjectHandle {
     var out: c.TVMFFIObjectHandle = null;
-    if (c.TVMFFITensorFromDLPack(managed, 0, 0, &out) != 0 or out == null) {
+    if (c.TVMFFITensorFromDLPack(@ptrCast(managed), 0, 0, &out) != 0 or out == null) {
         const msg = try get_last_error_message(allocator);
         defer allocator.free(msg);
         std.log.err("TVMFFITensorFromDLPack failed: {s}", .{msg});
@@ -1497,8 +1496,8 @@ fn zig_run_callback(
 
         // allocate tensors on target device
         const dev_type: i32 = switch (ctx.target_kind) {
-            .cpu => c.kDLCPU,
-            .cuda => c.kDLCUDA,
+            .cpu => @intFromEnum(dlpack.DeviceType.cpu),
+            .cuda => @intFromEnum(dlpack.DeviceType.cuda),
         };
 
         // shapes alive for tensor lifetime (allocate_tensor stores shape pointer)
@@ -3009,17 +3008,17 @@ pub fn run_tuned_matmul(
     var shape_b = [_]i64{ @intCast(K), @intCast(N) };
     var shape_c = [_]i64{ @intCast(M), @intCast(N) };
 
-    var dl_a = c.DLManagedTensor{ // NOTE: should we consider DLPack bindings/zig wrapper types going forward? Should discuss the possibility of DLPack as a Zigrad dependency, irrespective of TVM.
+    var dl_a = dlpack.ManagedTensor{ // NOTE: should we consider DLPack bindings/zig wrapper types going forward? Should discuss the possibility of DLPack as a Zigrad dependency, irrespective of TVM.
         .dl_tensor = make_dl_tensor_f32(a_data, &shape_a),
         .manager_ctx = null,
         .deleter = dlpack_noop_deleter,
     };
-    var dl_b = c.DLManagedTensor{
+    var dl_b = dlpack.ManagedTensor{
         .dl_tensor = make_dl_tensor_f32(b_data, &shape_b),
         .manager_ctx = null,
         .deleter = dlpack_noop_deleter,
     };
-    var dl_c = c.DLManagedTensor{
+    var dl_c = dlpack.ManagedTensor{
         .dl_tensor = make_dl_tensor_f32(c_data, &shape_c),
         .manager_ctx = null,
         .deleter = dlpack_noop_deleter,
@@ -3302,15 +3301,15 @@ fn run_attention_pipeline(
         const ss_off = b * seq * seq;
 
         // qk_scaled: Q[S,D], K[S,D] -> scores[S,S]
-        var dl_q = c.DLManagedTensor{
+        var dl_q = dlpack.ManagedTensor{
             .dl_tensor = make_dl_tensor_f32(q_data[sd_off..][0 .. seq * head_dim], shape_sd),
             .manager_ctx = null, .deleter = dlpack_noop_deleter,
         };
-        var dl_k = c.DLManagedTensor{
+        var dl_k = dlpack.ManagedTensor{
             .dl_tensor = make_dl_tensor_f32(k_data[sd_off..][0 .. seq * head_dim], shape_sd),
             .manager_ctx = null, .deleter = dlpack_noop_deleter,
         };
-        var dl_scores = c.DLManagedTensor{
+        var dl_scores = dlpack.ManagedTensor{
             .dl_tensor = make_dl_tensor_f32(scores_data[ss_off..][0 .. seq * seq], shape_ss),
             .manager_ctx = null, .deleter = dlpack_noop_deleter,
         };
@@ -3330,7 +3329,7 @@ fn run_attention_pipeline(
         try ffi_call(allocator, modules[0].main_func, &qk_args, &call_res);
 
         // softmax: scores[S,S] -> weights[S,S]
-        var dl_weights = c.DLManagedTensor{
+        var dl_weights = dlpack.ManagedTensor{
             .dl_tensor = make_dl_tensor_f32(weights_data[ss_off..][0 .. seq * seq], shape_ss),
             .manager_ctx = null, .deleter = dlpack_noop_deleter,
         };
@@ -3344,11 +3343,11 @@ fn run_attention_pipeline(
         try ffi_call(allocator, modules[1].main_func, &sm_args, &call_res);
 
         // sv: weights[S,S], V[S,D] -> output[S,D]
-        var dl_v = c.DLManagedTensor{
+        var dl_v = dlpack.ManagedTensor{
             .dl_tensor = make_dl_tensor_f32(v_data[sd_off..][0 .. seq * head_dim], shape_sd),
             .manager_ctx = null, .deleter = dlpack_noop_deleter,
         };
-        var dl_out = c.DLManagedTensor{
+        var dl_out = dlpack.ManagedTensor{
             .dl_tensor = make_dl_tensor_f32(output_data[sd_off..][0 .. seq * head_dim], shape_sd),
             .manager_ctx = null, .deleter = dlpack_noop_deleter,
         };
@@ -3444,9 +3443,9 @@ fn verify_single_kernel(
             @memset(out, 0);
 
             // Run kernel
-            var dl_q = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(q, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
-            var dl_k = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(k, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
-            var dl_out = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_q = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(q, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_k = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(k, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_out = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
             const t_q = try tensor_from_dlpack(allocator, &dl_q);
             defer _ = c.TVMFFIObjectDecRef(t_q);
             const t_k = try tensor_from_dlpack(allocator, &dl_k);
@@ -3483,8 +3482,8 @@ fn verify_single_kernel(
             for (input) |*v| v.* = rand.float(f32) * 2.0 - 1.0;
             @memset(out, 0);
 
-            var dl_in = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(input, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
-            var dl_out = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_in = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(input, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_out = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
             const t_in = try tensor_from_dlpack(allocator, &dl_in);
             defer _ = c.TVMFFIObjectDecRef(t_in);
             const t_out = try tensor_from_dlpack(allocator, &dl_out);
@@ -3525,9 +3524,9 @@ fn verify_single_kernel(
             for (v) |*val| val.* = rand.float(f32);
             @memset(out, 0);
 
-            var dl_w = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(w, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
-            var dl_v = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(v, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
-            var dl_out = c.DLManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_w = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(w, &shape_ss), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_v = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(v, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
+            var dl_out = dlpack.ManagedTensor{ .dl_tensor = make_dl_tensor_f32(out, &shape_sd), .manager_ctx = null, .deleter = dlpack_noop_deleter };
             const t_w = try tensor_from_dlpack(allocator, &dl_w);
             defer _ = c.TVMFFIObjectDecRef(t_w);
             const t_v = try tensor_from_dlpack(allocator, &dl_v);

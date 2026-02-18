@@ -18,15 +18,23 @@ pub fn build(b: *std.Build) void {
     const sdk_lib = b.fmt("{s}/lib", .{sdk_root});
     const sdk_runtime = b.fmt("{s}/runtime", .{sdk_root});
 
-    const tvm_enable_opt = b.option(bool, "tvm", "Enable TVM runtime if present in SDK");
+    // -Dtvm=true  → force-enable (panic if SDK lacks TVM)
+    // -Dtvm=false → force-disable (skip auto-detection)
+    // omitted     → auto-detect from SDK
+    const tvm_enable_opt = b.option(bool, "tvm", "Enable TVM runtime (true=force on, false=force off, omit=auto-detect)");
     const tvm_available = sdk_has_tvm(b, sdk_root);
     const tvm_enabled = if (tvm_enable_opt) |v| v else tvm_available;
     if (tvm_enabled and !tvm_available) {
-        @panic("-Dtvm requested but TVM not found under SDK (need include/tvm/ffi/c_api.h or include/tvm/runtime/c_runtime_api.h, plus lib/libtvm_runtime.so)");
+        @panic("-Dtvm=true requested but TVM not found under SDK (need include/tvm/ffi/c_api.h or include/tvm/runtime/c_runtime_api.h, plus lib/libtvm_runtime.so)");
     }
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_tvm", tvm_enabled);
+    if (tvm_enable_opt) |explicit| {
+        std.debug.print("TVM: explicitly {s} via -Dtvm={}\n", .{ if (explicit) "enabled" else "disabled", explicit });
+    } else {
+        std.debug.print("TVM: auto-detect {s}\n", .{if (tvm_available) "found, enabled" else "not found, disabled"});
+    }
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const zigrad_mod = b.addModule("zigrad", .{

@@ -1,6 +1,5 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const tvm_runtime = zg.tvm_runtime;
 
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
@@ -574,6 +573,8 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
 /// Writes available operations to stdout
 /// Note: Requires TVM runtime to be already loaded (will happen on first FFI call).
 pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
+    const tvm_runtime = zg.tvm_runtime;
+
     // Load TVM compiler to register te.* and topi.* functions
     try tvm_runtime.ensure_tvm_compiler_loaded(allocator);
 

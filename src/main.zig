@@ -1,7 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const demos = @import("demos.zig");
-const tvm_runtime = zg.tvm_runtime;
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const main_aot = @import("main_aot.zig");
@@ -122,6 +121,7 @@ pub fn main() !void {
             return demos.print_tvm_attention_pr(gpa, false, null);
         }
         if (std.mem.eql(u8, m, "tvm-dump-symbols")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (mode_args.items.len != 0 or have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
@@ -134,7 +134,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var target_kind: tvm_runtime.TargetKind = .cpu;
+            var target_kind: zg.tvm_runtime.TargetKind = .cpu;
             var work_dir: []const u8 = "artifacts/tvm_cache";
             var max_trials: u32 = 64;
             var trials_per_iter: u32 = 16;
@@ -211,7 +211,7 @@ pub fn main() !void {
 
             // build matmul TIR module
             // Note: ir_mod ownership transfers to tune()
-            const ir_mod = try tvm_runtime.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
+            const ir_mod = try zg.tvm_runtime.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
 
             // A[M,K], B[K,N], C[M,N]
             const M_i64: i64 = @intCast(shape.M);
@@ -227,7 +227,7 @@ pub fn main() !void {
             defer gpa.free(tensor_shapes);
 
             // run autotuning
-            return tvm_runtime.tune(gpa, ir_mod, target_kind, tensor_shapes, .{
+            return zg.tvm_runtime.tune(gpa, ir_mod, target_kind, tensor_shapes, .{
                 .work_dir = work_dir,
                 .max_trials = max_trials,
                 .trials_per_iter = trials_per_iter,
@@ -236,6 +236,7 @@ pub fn main() !void {
             });
         }
         if (std.mem.eql(u8, m, "tvm-run")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
@@ -278,11 +279,12 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
 
-            return tvm_runtime.run_tuned_matmul(gpa, shape.M, shape.N, shape.K, .{
+            return zg.tvm_runtime.run_tuned_matmul(gpa, shape.M, shape.N, shape.K, .{
                 .work_dir = work_dir,
             });
         }
         if (std.mem.eql(u8, m, "tvm-run-attention")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
@@ -325,11 +327,12 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
 
-            return tvm_runtime.run_tuned_attention(gpa, shape.batch, shape.seq, shape.head_dim, .{
+            return zg.tvm_runtime.run_tuned_attention(gpa, shape.batch, shape.seq, shape.head_dim, .{
                 .work_dir = work_dir,
             });
         }
         if (std.mem.eql(u8, m, "tvm-run-attention-cpu")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
@@ -373,10 +376,10 @@ pub fn main() !void {
             }
 
             // Run MKL baseline
-            try tvm_runtime.run_cpu_attention(gpa, shape.batch, shape.seq, shape.head_dim);
+            try zg.tvm_runtime.run_cpu_attention(gpa, shape.batch, shape.seq, shape.head_dim);
 
             // Also run TVM if tuned module exists
-            tvm_runtime.run_tuned_attention(gpa, shape.batch, shape.seq, shape.head_dim, .{
+            zg.tvm_runtime.run_tuned_attention(gpa, shape.batch, shape.seq, shape.head_dim, .{
                 .work_dir = work_dir,
             }) catch |err| {
                 if (err == error.NoTuningRecords) {
@@ -390,12 +393,13 @@ pub fn main() !void {
             return;
         }
         if (std.mem.eql(u8, m, "tvm-tune-attention")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;
             }
             var shape: struct { batch: usize = 2, seq: usize = 4, head_dim: usize = 64 } = .{};
-            var target_kind: tvm_runtime.TargetKind = .cpu;
+            var target_kind: zg.tvm_runtime.TargetKind = .cpu;
             var work_dir: []const u8 = "artifacts/tvm_cache_attn";
             var max_trials: u32 = 64;
             var trials_per_iter: u32 = 16;
@@ -463,14 +467,14 @@ pub fn main() !void {
             // tune 3 split attention kernels sequentially
             const S_i64: i64 = @intCast(shape.seq);
             const D_i64: i64 = @intCast(shape.head_dim);
-            const kernels = [_]tvm_runtime.AttentionKernel{ .qk_scaled, .softmax, .sv };
+            const kernels = [_]zg.tvm_runtime.AttentionKernel{ .qk_scaled, .softmax, .sv };
 
             for (kernels) |kernel| {
                 std.log.info("=== Tuning {s} kernel (seq={d}, head_dim={d}) ===", .{
                     kernel.name(), shape.seq, shape.head_dim,
                 });
 
-                const ir_mod = try tvm_runtime.build_attention_kernel_tir(gpa, kernel, shape.seq, shape.head_dim);
+                const ir_mod = try zg.tvm_runtime.build_attention_kernel_tir(gpa, kernel, shape.seq, shape.head_dim);
 
                 const kernel_subdir = try kernel.subdir(gpa, shape.seq, shape.head_dim);
                 defer gpa.free(kernel_subdir);
@@ -493,7 +497,7 @@ pub fn main() !void {
                 };
                 defer gpa.free(tensor_shapes);
 
-                try tvm_runtime.tune(gpa, ir_mod, target_kind, tensor_shapes, .{
+                try zg.tvm_runtime.tune(gpa, ir_mod, target_kind, tensor_shapes, .{
                     .work_dir = kernel_work_dir,
                     .max_trials = max_trials,
                     .trials_per_iter = trials_per_iter,
@@ -502,6 +506,7 @@ pub fn main() !void {
             return;
         }
         if (std.mem.eql(u8, m, "benchmark")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
                 try print_usage();
                 return error.InvalidArguments;

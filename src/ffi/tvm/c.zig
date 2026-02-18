@@ -28,8 +28,6 @@ else
         pub const TVMFFIFieldInfo = opaque {};
         pub const TVMFFIObject = opaque {};
         pub const TVMFFITypeInfo = opaque {};
-        pub const DLTensor = opaque {};
-        pub const DLManagedTensor = opaque {};
         pub const kTVMFFISmallStr: c_int = 0;
     };
 
@@ -42,9 +40,6 @@ pub const TVMFFIErrorCell = if (tvm_enabled) Impl.TVMFFIErrorCell else Impl.TVMF
 pub const TVMFFIFieldInfo = if (tvm_enabled) Impl.TVMFFIFieldInfo else Impl.TVMFFIFieldInfo;
 pub const TVMFFIObject = if (tvm_enabled) Impl.TVMFFIObject else Impl.TVMFFIObject;
 pub const TVMFFITypeInfo = if (tvm_enabled) Impl.TVMFFITypeInfo else Impl.TVMFFITypeInfo;
-pub const DLTensor = if (tvm_enabled) Impl.DLTensor else Impl.DLTensor;
-pub const DLManagedTensor = if (tvm_enabled) Impl.DLManagedTensor else Impl.DLManagedTensor;
-
 // Functions
 pub const TVMFFIObjectDecRef = if (tvm_enabled) Impl.TVMFFIObjectDecRef else @compileError("TVM not enabled");
 pub const TVMFFIObjectIncRef = if (tvm_enabled) Impl.TVMFFIObjectIncRef else @compileError("TVM not enabled");
@@ -73,8 +68,3 @@ pub const kTVMFFIStr = if (tvm_enabled) Impl.kTVMFFIStr else 0;
 pub const kTVMFFIDataType = if (tvm_enabled) Impl.kTVMFFIDataType else 0;
 pub const kTVMFFIDevice = if (tvm_enabled) Impl.kTVMFFIDevice else 0;
 pub const kTVMFFIStaticObjectBegin = if (tvm_enabled) Impl.kTVMFFIStaticObjectBegin else 0;
-
-// DLPack constants
-pub const kDLCPU = if (tvm_enabled) Impl.kDLCPU else 1;
-pub const kDLCUDA = if (tvm_enabled) Impl.kDLCUDA else 2;
-pub const kDLFloat = if (tvm_enabled) Impl.kDLFloat else 2;

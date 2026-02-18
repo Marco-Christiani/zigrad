@@ -8,6 +8,7 @@ const std = @import("std");
 const tvm_types = @import("../ffi/tvm/types.zig");
 const api = @import("../ffi/tvm/api.zig");
 const c = @import("../ffi/tvm/c.zig");
+const dlpack = @import("../ffi/dlpack.zig");
 const Value = api.Value;
 const IRModule = tvm_types.IRModule;
 const Target = tvm_types.Target;
@@ -402,8 +403,8 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
 fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
     const allocator = state.allocator;
     const dev_type: i32 = switch (state.target_kind) {
-        .cpu => c.kDLCPU,
-        .cuda => c.kDLCUDA,
+        .cpu => @intFromEnum(dlpack.DeviceType.cpu),
+        .cuda => @intFromEnum(dlpack.DeviceType.cuda),
     };
 
     // Allocate tensors
@@ -434,7 +435,7 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
 
         var dtype_raw = std.mem.zeroes(c.TVMFFIAny);
         dtype_raw.type_index = c.kTVMFFIDataType;
-        dtype_raw.unnamed_1.v_dtype = .{ .code = c.kDLFloat, .bits = 32, .lanes = 1 };
+        dtype_raw.unnamed_1.v_dtype = .{ .code = @intCast(@intFromEnum(dlpack.DataTypeCode.float)), .bits = 32, .lanes = 1 };
         const dtype_val = Value{ .raw = dtype_raw };
 
         var device_raw = std.mem.zeroes(c.TVMFFIAny);

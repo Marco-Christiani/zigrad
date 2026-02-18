@@ -1,13 +1,21 @@
-/// TVM CPU matmul adapter for benchmark harness.
+/// TVM matmul adapter for benchmark harness.
+///
+/// Bridges the benchmark harness to TVM compiled kernels via DLPack tensors
+/// and the typed TVM FFI wrappers. CPU path borrows host memory via DLPack;
+/// GPU path allocates device tensors and copies data.
 const std = @import("std");
 const zg = @import("../root.zig");
-const tvm = zg.tvm_runtime;
+const tvm_c = @import("../ffi/tvm/c.zig");
+const dlpack = zg.tvm_ffi.dlpack;
+const tvm_api = zg.tvm_ffi.tvm_api;
+const tvm_types = zg.tvm_ffi.tvm_types;
+const tvm_runtime = zg.tvm_runtime;
 const build_options = @import("build_options");
 
 /// Execute TVM CPU matmul using pre-loaded module (for cached execution).
 pub fn execute_with_module(
     allocator: std.mem.Allocator,
-    tuned: *tvm.TunedModule,
+    tuned: *tvm_runtime.TunedModule,
     m: usize,
     n: usize,
     k: usize,
@@ -17,50 +25,44 @@ pub fn execute_with_module(
 ) !void {
     if (!build_options.enable_tvm) return error.TvmDisabled;
 
-    // Create DLPack tensors from existing buffers
+    // Create DLPack tensors borrowing existing host buffers
     var shape_a = [_]i64{ @intCast(m), @intCast(k) };
     var shape_b = [_]i64{ @intCast(k), @intCast(n) };
     var shape_c = [_]i64{ @intCast(m), @intCast(n) };
 
-    var dl_a = tvm.c.DLManagedTensor{
-        .dl_tensor = tvm.make_dl_tensor_f32(@constCast(a), &shape_a),
-        .manager_ctx = null,
-        .deleter = tvm.dlpack_noop_deleter,
-    };
-    var dl_b = tvm.c.DLManagedTensor{
-        .dl_tensor = tvm.make_dl_tensor_f32(@constCast(b), &shape_b),
-        .manager_ctx = null,
-        .deleter = tvm.dlpack_noop_deleter,
-    };
-    var dl_c = tvm.c.DLManagedTensor{
-        .dl_tensor = tvm.make_dl_tensor_f32(c, &shape_c),
-        .manager_ctx = null,
-        .deleter = tvm.dlpack_noop_deleter,
-    };
+    var dl_a = dlpack.ManagedTensor.borrowing(
+        dlpack.Tensor.init_contiguous(f32, @constCast(a), &shape_a),
+    );
+    var dl_b = dlpack.ManagedTensor.borrowing(
+        dlpack.Tensor.init_contiguous(f32, @constCast(b), &shape_b),
+    );
+    var dl_c = dlpack.ManagedTensor.borrowing(
+        dlpack.Tensor.init_contiguous(f32, c, &shape_c),
+    );
 
     // Convert to TVM tensors
-    const t_a = try tvm.tensor_from_dlpack(allocator, &dl_a);
-    defer _ = tvm.c.TVMFFIObjectDecRef(t_a);
-    const t_b = try tvm.tensor_from_dlpack(allocator, &dl_b);
-    defer _ = tvm.c.TVMFFIObjectDecRef(t_b);
-    const t_c = try tvm.tensor_from_dlpack(allocator, &dl_c);
-    defer _ = tvm.c.TVMFFIObjectDecRef(t_c);
+    var t_a = try tvm_types.Tensor.from_dlpack(&dl_a);
+    defer t_a.deinit();
+    var t_b = try tvm_types.Tensor.from_dlpack(&dl_b);
+    defer t_b.deinit();
+    var t_c = try tvm_types.Tensor.from_dlpack(&dl_c);
+    defer t_c.deinit();
 
     // Execute
-    var call_args = [_]tvm.c.TVMFFIAny{
-        tvm.any_obj(t_a, tvm.c.kTVMFFITensor),
-        tvm.any_obj(t_b, tvm.c.kTVMFFITensor),
-        tvm.any_obj(t_c, tvm.c.kTVMFFITensor),
+    var call_args = [_]tvm_c.TVMFFIAny{
+        t_a.as_value().raw,
+        t_b.as_value().raw,
+        t_c.as_value().raw,
     };
-    var call_res: tvm.c.TVMFFIAny = std.mem.zeroes(tvm.c.TVMFFIAny);
+    var call_res = tvm_api.Value.none().raw;
 
-    try tvm.ffi_call(allocator, tuned.main_func, &call_args, &call_res);
+    try tvm_api.call(allocator, tuned.main_func, &call_args, &call_res);
 }
 
 /// Execute TVM GPU matmul using pre-loaded module (for cached execution).
 pub fn execute_gpu_with_module(
     allocator: std.mem.Allocator,
-    tuned: *tvm.TunedModule,
+    tuned: *tvm_runtime.TunedModule,
     m: usize,
     n: usize,
     k: usize,
@@ -75,28 +77,28 @@ pub fn execute_gpu_with_module(
     var shape_b = [_]i64{ @intCast(k), @intCast(n) };
     var shape_c = [_]i64{ @intCast(m), @intCast(n) };
 
-    const t_a = try tvm.allocate_tensor(allocator, @constCast(a), &shape_a, tvm.c.kDLCUDA);
-    defer _ = tvm.c.TVMFFIObjectDecRef(t_a);
-    const t_b = try tvm.allocate_tensor(allocator, @constCast(b), &shape_b, tvm.c.kDLCUDA);
-    defer _ = tvm.c.TVMFFIObjectDecRef(t_b);
+    var t_a = try tvm_types.Tensor.allocate(allocator, @constCast(a), &shape_a, .cuda);
+    defer t_a.deinit();
+    var t_b = try tvm_types.Tensor.allocate(allocator, @constCast(b), &shape_b, .cuda);
+    defer t_b.deinit();
 
     // Allocate output tensor on GPU (zero-initialized)
     const c_init = try allocator.alloc(f32, m * n);
     defer allocator.free(c_init);
     @memset(c_init, 0);
-    const t_c = try tvm.allocate_tensor(allocator, c_init, &shape_c, tvm.c.kDLCUDA);
-    defer _ = tvm.c.TVMFFIObjectDecRef(t_c);
+    var t_c = try tvm_types.Tensor.allocate(allocator, c_init, &shape_c, .cuda);
+    defer t_c.deinit();
 
     // Execute kernel on GPU
-    var call_args = [_]tvm.c.TVMFFIAny{
-        tvm.any_obj(t_a, tvm.c.kTVMFFITensor),
-        tvm.any_obj(t_b, tvm.c.kTVMFFITensor),
-        tvm.any_obj(t_c, tvm.c.kTVMFFITensor),
+    var call_args = [_]tvm_c.TVMFFIAny{
+        t_a.as_value().raw,
+        t_b.as_value().raw,
+        t_c.as_value().raw,
     };
-    var call_res: tvm.c.TVMFFIAny = std.mem.zeroes(tvm.c.TVMFFIAny);
+    var call_res = tvm_api.Value.none().raw;
 
-    try tvm.ffi_call(allocator, tuned.main_func, &call_args, &call_res);
+    try tvm_api.call(allocator, tuned.main_func, &call_args, &call_res);
 
     // Copy result back to host
-    try tvm.copy_tensor_to_host(allocator, t_c, c);
+    try t_c.copy_to_host(allocator, c);
 }

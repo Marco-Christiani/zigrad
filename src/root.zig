@@ -13,6 +13,8 @@
 /// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
+pub const build_options = @import("build_options");
+
 // Core modules
 pub const pr = @import("pr/root.zig");
 pub const frontend = @import("frontend/frontend.zig");
@@ -24,6 +26,7 @@ pub const kernel = @import("kernel.zig");
 // TVM subsystem
 pub const tvm_runtime = @import("tvm_runtime.zig");
 pub const tvm_ffi = struct {
+    pub const dlpack = @import("ffi/dlpack.zig");
     pub const tvm_api = @import("ffi/tvm/api.zig");
     pub const tvm_types = @import("ffi/tvm/types.zig");
 };

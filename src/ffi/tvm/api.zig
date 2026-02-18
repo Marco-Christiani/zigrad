@@ -59,7 +59,7 @@ pub const Value = struct {
         return .{ .raw = v };
     }
 
-    pub fn as_object(self: Value) ?c.TVMFFIObjectHandle {
+    pub fn as_object(self: Value) c.TVMFFIObjectHandle {
         if (self.raw.type_index < c.kTVMFFIStaticObjectBegin) return null;
         const obj = self.raw.unnamed_1.v_obj;
         return @ptrCast(@alignCast(obj));
