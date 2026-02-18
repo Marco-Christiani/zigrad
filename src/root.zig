@@ -30,7 +30,6 @@ pub const tvm_ffi = struct {
     pub const tvm_types = @import("ffi/tvm/types.zig");
 };
 pub const tvm = struct {
-    pub const common = @import("tvm/common.zig");
     pub const module = @import("tvm/module.zig");
     pub const provider = @import("tvm/provider.zig");
     pub const tune = @import("tvm/tune.zig");

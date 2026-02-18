@@ -1,9 +1,5 @@
 //! Common types and enums for TVM integration.
 //!
-//! This module defines shared types used across the TVM subsystem.
+//! Re-exports from the FFI layer for convenience within src/tvm/.
 
-/// Target kind for TVM compilation.
-pub const TargetKind = enum {
-    cpu,
-    cuda,
-};
+pub const TargetKind = @import("../ffi/tvm/types.zig").TargetKind;

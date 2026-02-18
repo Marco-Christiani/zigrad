@@ -11,7 +11,8 @@ const Value = api.Value;
 const ObjectHandle = api.ObjectHandle;
 const TvmError = api.TvmError;
 
-const TargetKind = @import("../../tvm/common.zig").TargetKind;
+/// Target kind for TVM compilation.
+pub const TargetKind = enum { cpu, cuda };
 
 const log = std.log.scoped(.@"zg/tvm_types");
 

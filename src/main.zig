@@ -134,7 +134,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var target_kind: zg.tvm.common.TargetKind = .cpu;
+            var target_kind: zg.tvm_ffi.tvm_types.TargetKind = .cpu;
             var work_dir: []const u8 = "artifacts/tvm_cache";
             var max_trials: u32 = 64;
             var trials_per_iter: u32 = 16;
