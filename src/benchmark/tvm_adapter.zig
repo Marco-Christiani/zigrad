@@ -9,13 +9,13 @@ const tvm_c = @import("../ffi/tvm/c.zig");
 const dlpack = zg.tvm_ffi.dlpack;
 const tvm_api = zg.tvm_ffi.tvm_api;
 const tvm_types = zg.tvm_ffi.tvm_types;
-const tvm_runtime = zg.tvm_runtime;
+const tvm_module = zg.tvm.module;
 const build_options = @import("build_options");
 
 /// Execute TVM CPU matmul using pre-loaded module (for cached execution).
 pub fn execute_with_module(
     allocator: std.mem.Allocator,
-    tuned: *tvm_runtime.TunedModule,
+    tuned: *tvm_module.TunedModule,
     m: usize,
     n: usize,
     k: usize,
@@ -56,13 +56,14 @@ pub fn execute_with_module(
     };
     var call_res = tvm_api.Value.none().raw;
 
-    try tvm_api.call(allocator, tuned.main_func, &call_args, &call_res);
+    const func_handle = tuned.main_func.as_object() orelse return error.TvmCallFailed;
+    try tvm_api.call(allocator, func_handle, &call_args, &call_res);
 }
 
 /// Execute TVM GPU matmul using pre-loaded module (for cached execution).
 pub fn execute_gpu_with_module(
     allocator: std.mem.Allocator,
-    tuned: *tvm_runtime.TunedModule,
+    tuned: *tvm_module.TunedModule,
     m: usize,
     n: usize,
     k: usize,
@@ -97,7 +98,8 @@ pub fn execute_gpu_with_module(
     };
     var call_res = tvm_api.Value.none().raw;
 
-    try tvm_api.call(allocator, tuned.main_func, &call_args, &call_res);
+    const func_handle = tuned.main_func.as_object() orelse return error.TvmCallFailed;
+    try tvm_api.call(allocator, func_handle, &call_args, &call_res);
 
     // Copy result back to host
     try t_c.copy_to_host(allocator, c);

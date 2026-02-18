@@ -112,6 +112,25 @@ pub const RuntimeModule = struct {
         return self.handle.to_value(c.kTVMFFIModule);
     }
 
+    /// Load a compiled module (.so) from disk.
+    pub fn load_from_file(allocator: std.mem.Allocator, path: []const u8) !RuntimeModule {
+        const path_z = try api.cstr_alloc(allocator, path);
+        defer allocator.free(path_z);
+        const result = try api.call_global(allocator, "runtime.ModuleLoadFromFile", &.{
+            Value.str(path_z), Value.str(""),
+        });
+        return .{ .handle = .{ .ptr = result.as_object() orelse return error.TvmCallFailed } };
+    }
+
+    /// Get a packed function from this module by name.
+    pub fn get_function(self: RuntimeModule, allocator: std.mem.Allocator, name: []const u8, query_imports: bool) !Value {
+        const name_z = try api.cstr_alloc(allocator, name);
+        defer allocator.free(name_z);
+        return api.call_global(allocator, "ffi.ModuleGetFunction", &.{
+            self.as_value(), Value.str(name_z), Value.boolean(query_imports),
+        });
+    }
+
     /// Write the module to a file in the given format ("o", "so", "ptx", etc.).
     pub fn write_to_file(self: RuntimeModule, allocator: std.mem.Allocator, path: []const u8, format: []const u8) !void {
         const path_z = try api.cstr_alloc(allocator, path);

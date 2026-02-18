@@ -2,7 +2,7 @@
 const std = @import("std");
 const zg = @import("../root.zig");
 const gemm = zg.kernels.gemm;
-const tvm_runtime = zg.tvm_runtime;
+const tvm_module = zg.tvm.module;
 const config = @import("config.zig");
 const stats = @import("stats.zig");
 const correctness = @import("correctness.zig");
@@ -32,8 +32,8 @@ pub const Harness = struct {
     xla_gpu_ctx: ?xla_adapter.XlaContext = null,
 
     // TVM module caches (lazy-initialized per shape, key = "MxNxK")
-    tvm_cpu_cache: std.StringHashMap(*tvm_runtime.TunedModule),
-    tvm_gpu_cache: std.StringHashMap(*tvm_runtime.TunedModule),
+    tvm_cpu_cache: std.StringHashMap(*tvm_module.TunedModule),
+    tvm_gpu_cache: std.StringHashMap(*tvm_module.TunedModule),
 
     /// Initialize the harness with the given configuration.
     pub fn init(allocator: std.mem.Allocator, cfg: BenchmarkConfig, tvm_cache_dir: []const u8) !Harness {
@@ -44,8 +44,8 @@ pub const Harness = struct {
             .results = results,
             .rng = std.Random.DefaultPrng.init(cfg.seed),
             .tvm_cache_dir = tvm_cache_dir,
-            .tvm_cpu_cache = std.StringHashMap(*tvm_runtime.TunedModule).init(allocator),
-            .tvm_gpu_cache = std.StringHashMap(*tvm_runtime.TunedModule).init(allocator),
+            .tvm_cpu_cache = std.StringHashMap(*tvm_module.TunedModule).init(allocator),
+            .tvm_gpu_cache = std.StringHashMap(*tvm_module.TunedModule).init(allocator),
         };
     }
 
@@ -60,7 +60,7 @@ pub const Harness = struct {
         self.deinit_tvm_cache(&self.tvm_gpu_cache);
     }
 
-    fn deinit_tvm_cache(self: *Harness, cache: *std.StringHashMap(*tvm_runtime.TunedModule)) void {
+    fn deinit_tvm_cache(self: *Harness, cache: *std.StringHashMap(*tvm_module.TunedModule)) void {
         var iter = cache.iterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -247,7 +247,7 @@ pub const Harness = struct {
         const tuned = if (cache.get(cache_key)) |module|
             module
         else blk: {
-            const module = try self.allocator.create(tvm_runtime.TunedModule);
+            const module = try self.allocator.create(tvm_module.TunedModule);
             errdefer self.allocator.destroy(module);
 
             const work_dir = try std.fmt.allocPrint(
@@ -257,7 +257,7 @@ pub const Harness = struct {
             );
             defer self.allocator.free(work_dir);
 
-            module.* = try tvm_runtime.load_tuned_module(self.allocator, .{ .work_dir = work_dir });
+            module.* = try tvm_module.load(self.allocator, .{ .work_dir = work_dir });
 
             const owned_key = try self.allocator.dupe(u8, cache_key);
             try cache.put(owned_key, module);
