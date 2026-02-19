@@ -577,14 +577,8 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
 
     try api.ensure_loaded(allocator);
 
-    // Get function enumeration functor
-    const factory_val = try api.call_global(allocator, "ffi.FunctionListGlobalNamesFunctor", &.{});
-    defer factory_val.decref();
-
-    const factory_handle = factory_val.as_object() orelse return error.UnexpectedTvmType;
-
-    // Call factory() -> functor
-    const functor_val = try api.call_handle(allocator, factory_handle, &.{});
+    // Get function enumeration functor (returns the functor directly)
+    const functor_val = try api.call_global(allocator, "ffi.FunctionListGlobalNamesFunctor", &.{});
     defer functor_val.decref();
 
     const functor_handle = functor_val.as_object() orelse return error.UnexpectedTvmType;

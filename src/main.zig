@@ -200,6 +200,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
 
+            try zg.tvm_ffi.tvm_api.ensure_loaded(gpa);
             var ir_mod = try zg.tvm_ffi.tvm_types.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
             defer ir_mod.deinit();
             var target = try zg.tvm_ffi.tvm_types.Target.create(gpa, target_kind);

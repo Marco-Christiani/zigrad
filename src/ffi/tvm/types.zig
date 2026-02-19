@@ -22,15 +22,15 @@ const log = std.log.scoped(.@"zg/tvm_types");
 
 pub const IRModule = struct {
     handle: ObjectHandle,
+    /// TVM runtime type index, preserved from the FFI call that created this object.
+    type_index: c_int = c.kTVMFFIStaticObjectBegin,
 
     pub fn deinit(self: *IRModule) void {
         self.handle.deinit();
     }
 
     pub fn as_value(self: IRModule) Value {
-        // IRModule is a generic TVM object — use kTVMFFIStaticObjectBegin as
-        // a safe type index (any object type >= this passes TVM's object check).
-        return self.handle.to_value(c.kTVMFFIStaticObjectBegin);
+        return self.handle.to_value(self.type_index);
     }
 
     /// Apply a single TIR transform pass to this module (in-place replacement).
@@ -50,6 +50,7 @@ pub const IRModule = struct {
             self.handle.deinit();
         }
         self.handle.ptr = new_obj;
+        self.type_index = result.raw.type_index;
     }
 
     /// Apply a pass, ignoring failure (for optional/non-fatal passes).
@@ -64,27 +65,32 @@ pub const IRModule = struct {
 
 pub const Target = struct {
     handle: ObjectHandle,
+    type_index: c_int = c.kTVMFFIStaticObjectBegin,
 
     pub fn deinit(self: *Target) void {
         self.handle.deinit();
     }
 
     pub fn as_value(self: Target) Value {
-        return self.handle.to_value(c.kTVMFFIStaticObjectBegin);
+        return self.handle.to_value(self.type_index);
     }
 
     /// Create a Target from a TargetKind.
+    ///
+    /// For CPU targets, includes `-num-cores` (required by MetaSchedule).
     pub fn create(allocator: std.mem.Allocator, kind: TargetKind) !Target {
-        const target_str = switch (kind) {
-            .cpu => "llvm",
-            .cuda => "nvidia/nvidia-a100",
+        const s = switch (kind) {
+            .cpu => blk: {
+                const ncores = std.Thread.getCpuCount() catch 1;
+                break :blk try std.fmt.allocPrintSentinel(allocator, "llvm -num-cores {d}", .{ncores}, 0);
+            },
+            .cuda => try std.fmt.allocPrintSentinel(allocator, "nvidia/nvidia-a100", .{}, 0),
         };
-        const s = try api.cstr_alloc(allocator, target_str);
         defer allocator.free(s);
 
         const result = try api.call_global(allocator, "target.Target", &.{Value.str(s)});
         const obj = result.as_object() orelse return error.TvmCallFailed;
-        return .{ .handle = .{ .ptr = obj } };
+        return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
     }
 
     /// Create a composite target with a host target attached.
@@ -94,7 +100,7 @@ pub const Target = struct {
             host.as_value(),
         });
         const obj = result.as_object() orelse return error.TvmCallFailed;
-        return .{ .handle = .{ .ptr = obj } };
+        return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
     }
 };
 
@@ -398,7 +404,7 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, m: usize, n: usize, k: usi
 
     const obj = ir_mod.as_object() orelse return error.TvmCallFailed;
     log.info("created matmul IRModule ({d}x{d}x{d})", .{ m, n, k });
-    return .{ .handle = .{ .ptr = obj } };
+    return .{ .handle = .{ .ptr = obj }, .type_index = ir_mod.raw.type_index };
 }
 
 // ============================================================================
@@ -540,13 +546,13 @@ fn filter_module(allocator: std.mem.Allocator, ir_mod: IRModule, kind: FilterKin
         // Fallback: use a SelectDevice pass or return a copy
         log.warn("filter pass {s} not found, returning unfiltered", .{filter_name});
         ir_mod.handle.incref();
-        return .{ .handle = .{ .ptr = ir_mod.handle.ptr } };
+        return .{ .handle = .{ .ptr = ir_mod.handle.ptr }, .type_index = ir_mod.type_index };
     };
     defer pass_val.decref();
 
     const result = try api.call_global(allocator, "transform.RunPass", &.{ pass_val, ir_mod.as_value() });
     const obj = result.as_object() orelse return error.TvmCallFailed;
-    return .{ .handle = .{ .ptr = obj } };
+    return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
 }
 
 // ============================================================================

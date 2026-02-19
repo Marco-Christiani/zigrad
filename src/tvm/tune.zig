@@ -252,7 +252,7 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
         var ir_mod = IRModule{ .handle = .{ .ptr = mod_val.as_object() orelse {
             try results_list.append(allocator, try make_builder_error(allocator, "mod not an object"));
             continue;
-        } } };
+        } }, .type_index = mod_val.raw.type_index };
         ir_mod.handle.incref();
 
         const built_mod_result = tvm_types.lower_and_build(allocator, &ir_mod, state.target, state.target_kind);
