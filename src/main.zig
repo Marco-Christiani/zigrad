@@ -630,8 +630,6 @@ fn run_tvm_demo(
     for (b, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.1;
     @memset(result, 0);
 
-    const func_handle = tuned.main_func.as_object() orelse return error.TvmCallFailed;
-
     // Execute
     var timer = try std.time.Timer.start();
 
@@ -658,7 +656,7 @@ fn run_tvm_demo(
             var t_c = try tvm_types.Tensor.from_dlpack(&dl_c);
             defer t_c.deinit();
 
-            _ = try tvm_api.call_handle(gpa, func_handle, &.{
+            try tuned.invoke(gpa, &.{
                 t_a.as_value(), t_b.as_value(), t_c.as_value(),
             });
         },
@@ -678,7 +676,7 @@ fn run_tvm_demo(
             var t_c = try tvm_types.Tensor.allocate(gpa, c_init, &shape_c, .cuda);
             defer t_c.deinit();
 
-            _ = try tvm_api.call_handle(gpa, func_handle, &.{
+            try tuned.invoke(gpa, &.{
                 t_a.as_value(), t_b.as_value(), t_c.as_value(),
             });
 

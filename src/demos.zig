@@ -572,39 +572,15 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
 /// Enumerate TVM FFI global functions.
 /// Writes available operations to stdout.
 pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
-    const api = zg.tvm_ffi.tvm_api;
-    const Value = api.Value;
+    const tvm_api = zg.tvm_ffi.tvm_api;
 
-    try api.ensure_loaded(allocator);
+    try tvm_api.ensure_loaded(allocator);
 
-    // Get function enumeration functor (returns the functor directly)
-    const functor_val = try api.call_global(allocator, "ffi.FunctionListGlobalNamesFunctor", &.{});
-    defer functor_val.decref();
-
-    const functor_handle = functor_val.as_object() orelse return error.UnexpectedTvmType;
-
-    // Get count: functor(-1)
-    const count_val = try api.call_handle(allocator, functor_handle, &.{Value.int(-1)});
-    const count: usize = @intCast(count_val.as_int() orelse return error.UnexpectedTvmType);
-
-    // Collect and sort all function names
-    var names = try std.ArrayList([]const u8).initCapacity(allocator, count);
+    const names = try tvm_api.list_global_names(allocator);
     defer {
-        for (names.items) |n| allocator.free(n);
-        names.deinit(allocator);
+        for (names) |n| allocator.free(n);
+        allocator.free(names);
     }
-
-    for (0..count) |i| {
-        var name_val = api.call_handle(allocator, functor_handle, &.{Value.int(@intCast(i))}) catch continue;
-        const s = name_val.as_string(allocator) catch continue;
-        try names.append(allocator, s);
-    }
-
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.lessThan);
 
     // Print with category headers
     var stdout_buf: [16384]u8 = undefined;
@@ -612,11 +588,11 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
-    try out.print("# TVM FFI Global Functions (total: {d})\n#\n", .{names.items.len});
+    try out.print("# TVM FFI Global Functions (total: {d})\n#\n", .{names.len});
 
     var current_prefix: []const u8 = "";
     var category_count: usize = 0;
-    for (names.items) |name| {
+    for (names) |name| {
         const prefix = if (std.mem.indexOf(u8, name, ".")) |idx| name[0..idx] else "root";
 
         if (!std.mem.eql(u8, prefix, current_prefix)) {

@@ -444,6 +444,41 @@ pub fn get_field(obj: Value, field_name: []const u8) TvmError!Value {
     return .{ .raw = result };
 }
 
+/// List all TVM global function names, sorted alphabetically.
+///
+/// Uses `ffi.FunctionListGlobalNamesFunctor` to enumerate all registered
+/// TVM functions. Caller owns the returned slice and each name within it.
+pub fn list_global_names(allocator: std.mem.Allocator) ![][]const u8 {
+    const functor_val = try call_global(allocator, "ffi.FunctionListGlobalNamesFunctor", &.{});
+    defer functor_val.decref();
+
+    const functor_handle = functor_val.as_object() orelse return error.TvmCallFailed;
+
+    // functor(-1) returns the count
+    const count_val = try call_handle(allocator, functor_handle, &.{Value.int(-1)});
+    const count: usize = @intCast(count_val.as_int() orelse return error.TvmCallFailed);
+
+    var names = try std.ArrayList([]const u8).initCapacity(allocator, count);
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    for (0..count) |i| {
+        var name_val = call_handle(allocator, functor_handle, &.{Value.int(@intCast(i))}) catch continue;
+        const s = name_val.as_string(allocator) catch continue;
+        try names.append(allocator, s);
+    }
+
+    const items = try names.toOwnedSlice(allocator);
+    std.mem.sort([]const u8, items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    return items;
+}
+
 /// Create a TVM String object from a Zig slice.
 pub fn make_tvm_string(s: []const u8) TvmError!Value {
     var bytes: c.TVMFFIByteArray = .{ .data = s.ptr, .size = s.len };

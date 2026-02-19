@@ -32,6 +32,12 @@ pub const TunedModule = struct {
         self.module.deinit();
         self.* = undefined;
     }
+
+    /// Invoke the tuned main function with the given arguments.
+    pub fn invoke(self: TunedModule, allocator: std.mem.Allocator, args: []const Value) !void {
+        const func_handle = self.main_func.as_object() orelse return error.TvmCallFailed;
+        _ = try api.call_handle(allocator, func_handle, args);
+    }
 };
 
 /// Load the best tuned module from a previous tuning run.

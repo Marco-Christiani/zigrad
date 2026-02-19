@@ -5,8 +5,6 @@ const dlpack = @import("ffi/dlpack.zig");
 
 // TVM subsystem modules
 const tvm_common = @import("tvm/common.zig");
-const tvm_cuda = @import("tvm/cuda.zig");
-const tvm_builder = @import("tvm/builder.zig");
 const tvm_correctness = @import("tvm/correctness.zig");
 const nvrtc_callback = @import("tvm/nvrtc_callback.zig");
 

@@ -5,9 +5,7 @@
 /// GPU path allocates device tensors and copies data.
 const std = @import("std");
 const zg = @import("../root.zig");
-const tvm_c = @import("../ffi/tvm/c.zig");
 const dlpack = zg.tvm_ffi.dlpack;
-const tvm_api = zg.tvm_ffi.tvm_api;
 const tvm_types = zg.tvm_ffi.tvm_types;
 const tvm_module = zg.tvm.module;
 const build_options = @import("build_options");
@@ -48,16 +46,10 @@ pub fn execute_with_module(
     var t_c = try tvm_types.Tensor.from_dlpack(&dl_c);
     defer t_c.deinit();
 
-    // Execute
-    var call_args = [_]tvm_c.TVMFFIAny{
-        t_a.as_value().raw,
-        t_b.as_value().raw,
-        t_c.as_value().raw,
-    };
-    var call_res = tvm_api.Value.none().raw;
-
-    const func_handle = tuned.main_func.as_object() orelse return error.TvmCallFailed;
-    try tvm_api.call(allocator, func_handle, &call_args, &call_res);
+    // Execute via typed invoke
+    try tuned.invoke(allocator, &.{
+        t_a.as_value(), t_b.as_value(), t_c.as_value(),
+    });
 }
 
 /// Execute TVM GPU matmul using pre-loaded module (for cached execution).
@@ -90,16 +82,10 @@ pub fn execute_gpu_with_module(
     var t_c = try tvm_types.Tensor.allocate(allocator, c_init, &shape_c, .cuda);
     defer t_c.deinit();
 
-    // Execute kernel on GPU
-    var call_args = [_]tvm_c.TVMFFIAny{
-        t_a.as_value().raw,
-        t_b.as_value().raw,
-        t_c.as_value().raw,
-    };
-    var call_res = tvm_api.Value.none().raw;
-
-    const func_handle = tuned.main_func.as_object() orelse return error.TvmCallFailed;
-    try tvm_api.call(allocator, func_handle, &call_args, &call_res);
+    // Execute kernel on GPU via typed invoke
+    try tuned.invoke(allocator, &.{
+        t_a.as_value(), t_b.as_value(), t_c.as_value(),
+    });
 
     // Copy result back to host
     try t_c.copy_to_host(allocator, c);

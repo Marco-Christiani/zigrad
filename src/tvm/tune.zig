@@ -10,9 +10,13 @@ const api = @import("../ffi/tvm/api.zig");
 const c = @import("../ffi/tvm/c.zig");
 const dlpack = @import("../ffi/dlpack.zig");
 const Value = api.Value;
+const Array = tvm_types.Array;
 const IRModule = tvm_types.IRModule;
+const RuntimeModule = tvm_types.RuntimeModule;
 const Target = tvm_types.Target;
-const TargetKind = @import("../ffi/tvm/types.zig").TargetKind;
+const Tensor = tvm_types.Tensor;
+const TargetKind = tvm_types.TargetKind;
+const MetaSchedule = tvm_types.MetaSchedule;
 const nvrtc_callback = @import("nvrtc_callback.zig");
 
 const log = std.log.scoped(.@"zg/tvm_tune");
@@ -48,50 +52,25 @@ pub fn tune(
     tensor_shapes: []const []const i64,
     opts: TuneOpts,
 ) !void {
-    // Ensure TVM compiler is loaded
     try api.ensure_loaded(allocator);
 
-    // Register NVRTC callback for CUDA targets
     if (kind == .cuda) {
         nvrtc_callback.register(allocator) catch |err| {
             log.warn("failed to register NVRTC callback: {s}", .{@errorName(err)});
         };
     }
 
-    // Ensure work directory exists
     std.fs.cwd().makePath(opts.work_dir) catch {};
 
-    // Register cpu_count helper required by MetaSchedule
     try register_cpu_count(allocator);
 
-    // Schedule rules
-    const rules_fn_name = switch (kind) {
-        .cpu => "meta_schedule.ScheduleRuleDefaultLLVM",
-        .cuda => "meta_schedule.ScheduleRuleDefaultCUDA",
-    };
-    const schedule_rules = try api.call_global(allocator, rules_fn_name, &.{});
+    const schedule_rules = try MetaSchedule.schedule_rules(allocator, kind);
     log.debug("created ScheduleRules", .{});
 
-    // SpaceGenerator
-    const space_gen = try api.call_global(allocator, "meta_schedule.SpaceGeneratorPostOrderApply", &.{
-        Value.none(), // f_block_filter
-        schedule_rules, // sch_rules
-        Value.none(), // postprocs
-        Value.none(), // mutator_probs
-    });
+    const space_gen = try MetaSchedule.space_generator(allocator, schedule_rules);
     log.debug("created SpaceGenerator", .{});
 
-    // Search strategy (evolutionary)
-    const search_strategy = try api.call_global(allocator, "meta_schedule.SearchStrategyEvolutionarySearch", &.{
-        Value.int(512), // population_size
-        Value.float(0.2), // init_measured_ratio
-        Value.int(50), // init_min_unmeasured
-        Value.int(5), // max_fail_count
-        Value.int(3), // genetic_num_iters
-        Value.float(0.85), // genetic_mutate_prob
-        Value.int(10), // genetic_max_fail_count
-        Value.float(0.05), // eps_greedy
-    });
+    const search_strategy = try MetaSchedule.search_strategy(allocator, .{});
     log.debug("created SearchStrategy", .{});
 
     // JSON database
@@ -104,15 +83,8 @@ pub fn tune(
     defer allocator.free(workload_z);
     const record_z = try api.cstr_alloc(allocator, record_path);
     defer allocator.free(record_z);
-    const structural_z = try api.cstr_alloc(allocator, "structural");
-    defer allocator.free(structural_z);
 
-    const database = try api.call_global(allocator, "meta_schedule.DatabaseJSONDatabase", &.{
-        Value.str(workload_z),
-        Value.str(record_z),
-        Value.boolean(true), // allow_missing
-        Value.str(structural_z),
-    });
+    const database = try MetaSchedule.json_database(allocator, workload_z, record_z);
     log.debug("created JSONDatabase", .{});
 
     // TuneContext
@@ -122,15 +94,13 @@ pub fn tune(
     const logger_val = try make_noop_callback();
     defer logger_val.decref();
 
-    const tune_context = try api.call_global(allocator, "meta_schedule.TuneContext", &.{
-        ir_mod.as_value(),
-        target.as_value(),
-        space_gen,
-        search_strategy,
-        Value.str(main_z), // task_name
-        Value.int(1), // num_threads
-        Value.int(42), // rand_state
-        logger_val, // logger
+    const tune_context = try MetaSchedule.tune_context(allocator, .{
+        .ir_mod = ir_mod.as_value(),
+        .target = target.as_value(),
+        .space_gen = space_gen,
+        .search_strat = search_strategy,
+        .task_name = main_z,
+        .logger = logger_val,
     });
     log.debug("created TuneContext", .{});
 
@@ -146,51 +116,48 @@ pub fn tune(
     // Builder callback
     const builder_func = try api.create_packed_func(@ptrCast(&state), build_callback, null);
     defer builder_func.decref();
-
-    const builder = try api.call_global(allocator, "meta_schedule.BuilderPyBuilder", &.{builder_func});
+    const builder = try MetaSchedule.py_builder(allocator, builder_func);
     log.debug("created PyBuilder", .{});
 
     // Runner callback
     const runner_func = try api.create_packed_func(@ptrCast(&state), run_callback, null);
     defer runner_func.decref();
-
-    const runner = try api.call_global(allocator, "meta_schedule.RunnerPyRunner", &.{runner_func});
+    const runner = try MetaSchedule.py_runner(allocator, runner_func);
     log.debug("created PyRunner", .{});
 
     // Cost model (random)
-    const cost_model = try make_random_cost_model();
+    const cost_model = try make_random_cost_model(allocator);
     log.debug("created PyCostModel", .{});
 
     // Task scheduler
-    const task_scheduler = try api.call_global(allocator, "meta_schedule.TaskSchedulerGradientBased", &.{
-        logger_val, // f_logging
-        Value.float(0.8), // alpha
-        Value.int(3), // window_size
-        Value.int(42), // seed
-    });
+    const task_scheduler = try MetaSchedule.task_scheduler(allocator, .{ .logger = logger_val });
     log.debug("created TaskScheduler", .{});
 
     // Run tuning
     log.info("starting tuning ({d} max trials, {d} per iter)...", .{ opts.max_trials, opts.trials_per_iter });
 
-    const contexts_array = try api.call_global(allocator, "ffi.Array", &.{tune_context});
-    const weights_array = try api.call_global(allocator, "ffi.Array", &.{Value.float(1.0)});
+    var contexts_arr = try Array.from_values(allocator, &.{tune_context});
+    defer contexts_arr.deinit();
+    var weights_arr = try Array.from_values(allocator, &.{Value.float(1.0)});
+    defer weights_arr.deinit();
 
-    const add_to_db = try api.call_global(allocator, "meta_schedule.MeasureCallbackAddToDatabase", &.{});
-    const callbacks_array = try api.call_global(allocator, "ffi.Array", &.{add_to_db});
+    const add_to_db = try MetaSchedule.add_to_database(allocator);
+    var callbacks_arr = try Array.from_values(allocator, &.{add_to_db});
+    defer callbacks_arr.deinit();
 
-    _ = api.call_global(allocator, "meta_schedule.TaskSchedulerTune", &.{
-        task_scheduler,
-        contexts_array,
-        weights_array,
-        Value.int(@intCast(opts.max_trials)),
-        Value.int(@intCast(opts.max_trials)),
-        Value.int(@intCast(opts.trials_per_iter)),
-        builder,
-        runner,
-        callbacks_array,
-        database,
-        cost_model,
+    const max_trials: i64 = @intCast(opts.max_trials);
+    MetaSchedule.run_tune(allocator, .{
+        .scheduler = task_scheduler,
+        .contexts = contexts_arr.as_value(),
+        .weights = weights_arr.as_value(),
+        .max_trials = max_trials,
+        .max_trials_global = max_trials,
+        .trials_per_iter = @intCast(opts.trials_per_iter),
+        .builder = builder,
+        .runner = runner,
+        .callbacks = callbacks_arr.as_value(),
+        .database = database,
+        .cost_model = cost_model,
     }) catch |err| {
         log.err("TaskSchedulerTune failed: {s}", .{@errorName(err)});
         return err;
@@ -229,21 +196,21 @@ fn build_callback(
 
 fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *c.TVMFFIAny) !void {
     const allocator = state.allocator;
-    const inputs_array = Value{ .raw = inputs_array_raw };
 
-    // Get array length
-    const len_val = try api.call_global(allocator, "ffi.ArraySize", &.{inputs_array});
-    const num_inputs: usize = @intCast(len_val.as_int() orelse return error.TvmCallFailed);
+    var inputs = try Array.wrap(.{ .raw = inputs_array_raw });
+    defer inputs.deinit();
+
+    const num_inputs = try inputs.len(allocator);
     log.info("building {d} candidates", .{num_inputs});
 
     var results_list = std.ArrayList(Value).empty;
     defer results_list.deinit(allocator);
 
     for (0..num_inputs) |i| {
-        const input = try api.call_global(allocator, "ffi.ArrayGetItem", &.{ inputs_array, Value.int(@intCast(i)) });
+        const input = try inputs.get(allocator, i);
 
         // Extract mod from BuilderInput
-        const mod_val = ffi_get_attr(allocator, input, "mod") catch {
+        const mod_val = api.get_field(input, "mod") catch {
             try results_list.append(allocator, try make_builder_error(allocator, "failed to get mod"));
             continue;
         };
@@ -280,20 +247,16 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
         allocator.free(so_path);
         defer allocator.free(so_z);
 
-        const br = try api.call_global(allocator, "meta_schedule.BuilderResult", &.{
-            Value.str(so_z), Value.none(),
-        });
+        const br = try MetaSchedule.builder_result(allocator, so_z, null);
         try results_list.append(allocator, br);
         log.debug("built candidate {d}", .{i});
     }
 
-    // Convert to raw array for ffi.Array
-    const raw_results = try allocator.alloc(Value, results_list.items.len);
-    defer allocator.free(raw_results);
-    @memcpy(raw_results, results_list.items);
-
-    const array_result = try api.call_global(allocator, "ffi.Array", raw_results);
-    result.* = array_result.raw;
+    var results_arr = try Array.from_values(allocator, results_list.items);
+    defer results_arr.deinit();
+    // Transfer ownership to caller via result pointer
+    results_arr.handle.incref();
+    result.* = results_arr.as_value().raw;
 }
 
 /// Runner callback: loads and benchmarks compiled .so artifacts.
@@ -322,20 +285,21 @@ fn run_callback(
 
 fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *c.TVMFFIAny) !void {
     const allocator = state.allocator;
-    const inputs_array = Value{ .raw = inputs_array_raw };
 
-    const len_val = try api.call_global(allocator, "ffi.ArraySize", &.{inputs_array});
-    const num_inputs: usize = @intCast(len_val.as_int() orelse return error.TvmCallFailed);
+    var inputs = try Array.wrap(.{ .raw = inputs_array_raw });
+    defer inputs.deinit();
+
+    const num_inputs = try inputs.len(allocator);
     log.info("running {d} candidates", .{num_inputs});
 
     var results_list = std.ArrayList(Value).empty;
     defer results_list.deinit(allocator);
 
     for (0..num_inputs) |i| {
-        const input = try api.call_global(allocator, "ffi.ArrayGetItem", &.{ inputs_array, Value.int(@intCast(i)) });
+        const input = try inputs.get(allocator, i);
 
         // Get artifact_path
-        const path_val = ffi_get_attr(allocator, input, "artifact_path") catch {
+        const path_val = api.get_field(input, "artifact_path") catch {
             try results_list.append(allocator, try make_runner_error(allocator, "no artifact_path"));
             continue;
         };
@@ -346,31 +310,14 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
         };
         defer allocator.free(artifact_path);
 
-        // Load module
-        const path_z = api.cstr_alloc(allocator, artifact_path) catch {
-            try results_list.append(allocator, try make_runner_error(allocator, "alloc failed"));
-            continue;
-        };
-        defer allocator.free(path_z);
-
-        const loaded = api.call_global(allocator, "ffi.ModuleLoadFromFile", &.{
-            Value.str(path_z),
-        }) catch {
+        // Load module and get main function via typed wrappers
+        var loaded = RuntimeModule.load_from_file(allocator, artifact_path) catch {
             try results_list.append(allocator, try make_runner_error(allocator, "load failed"));
             continue;
         };
-        defer loaded.decref();
+        defer loaded.deinit();
 
-        // Get main function
-        const main_z = api.cstr_alloc(allocator, "main") catch {
-            try results_list.append(allocator, try make_runner_error(allocator, "alloc failed"));
-            continue;
-        };
-        defer allocator.free(main_z);
-
-        const func = api.call_global(allocator, "ffi.ModuleGetFunction", &.{
-            loaded, Value.str(main_z), Value.boolean(true),
-        }) catch {
+        const func = loaded.get_function(allocator, "main", true) catch {
             try results_list.append(allocator, try make_runner_error(allocator, "GetFunction failed"));
             continue;
         };
@@ -391,27 +338,26 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
         log.debug("candidate {d}: {d:.6}s", .{ i, run_time });
     }
 
-    const raw_results = try allocator.alloc(Value, results_list.items.len);
-    defer allocator.free(raw_results);
-    @memcpy(raw_results, results_list.items);
-
-    const array_result = try api.call_global(allocator, "ffi.Array", raw_results);
-    result.* = array_result.raw;
+    var results_arr = try Array.from_values(allocator, results_list.items);
+    defer results_arr.deinit();
+    // Transfer ownership to caller via result pointer
+    results_arr.handle.incref();
+    result.* = results_arr.as_value().raw;
 }
 
 /// Benchmark a compiled kernel function. Returns median time in seconds.
 fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
     const allocator = state.allocator;
-    const dev_type: i32 = switch (state.target_kind) {
-        .cpu => @intFromEnum(dlpack.DeviceType.cpu),
-        .cuda => @intFromEnum(dlpack.DeviceType.cuda),
+    const dev_type: dlpack.DeviceType = switch (state.target_kind) {
+        .cpu => .cpu,
+        .cuda => .cuda,
     };
 
-    // Allocate tensors
-    var tensor_handles = std.ArrayList(c.TVMFFIObjectHandle).empty;
+    // Allocate tensors via typed Tensor wrapper
+    var tensors = std.ArrayList(Tensor).empty;
     defer {
-        for (tensor_handles.items) |t| _ = c.TVMFFIObjectDecRef(t);
-        tensor_handles.deinit(allocator);
+        for (tensors.items) |*t| t.deinit();
+        tensors.deinit(allocator);
     }
 
     for (state.tensor_shapes) |shape| {
@@ -425,57 +371,26 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
         const shape_copy = try allocator.dupe(i64, shape);
         defer allocator.free(shape_copy);
 
-        // Allocate via TVM FFI
-        var shape_args = try allocator.alloc(Value, shape.len);
-        defer allocator.free(shape_args);
-        for (shape, 0..) |dim, j| shape_args[j] = Value.int(dim);
-
-        const shape_obj = try api.call_global(allocator, "ffi.Shape", shape_args);
-        defer shape_obj.decref();
-
-        var dtype_raw = std.mem.zeroes(c.TVMFFIAny);
-        dtype_raw.type_index = c.kTVMFFIDataType;
-        dtype_raw.unnamed_1.v_dtype = .{ .code = @intCast(@intFromEnum(dlpack.DataTypeCode.float)), .bits = 32, .lanes = 1 };
-        const dtype_val = Value{ .raw = dtype_raw };
-
-        var device_raw = std.mem.zeroes(c.TVMFFIAny);
-        device_raw.type_index = c.kTVMFFIDevice;
-        device_raw.unnamed_1.v_device = .{ .device_type = @intCast(dev_type), .device_id = 0 };
-        const device_val = Value{ .raw = device_raw };
-
-        const tensor = try api.call_global(allocator, "runtime.TVMTensorAllocWithScope", &.{
-            shape_obj, dtype_val, device_val, Value.none(),
-        });
-
-        // Copy data
-        var data_ptr_raw = std.mem.zeroes(c.TVMFFIAny);
-        data_ptr_raw.type_index = c.kTVMFFIOpaquePtr;
-        data_ptr_raw.unnamed_1.v_int64 = @bitCast(@intFromPtr(data.ptr));
-        const nbytes = data.len * @sizeOf(f32);
-        _ = try api.call_global(allocator, "runtime.TVMTensorCopyFromBytes", &.{
-            tensor, Value{ .raw = data_ptr_raw }, Value.int(@intCast(nbytes)),
-        });
-
-        try tensor_handles.append(allocator, tensor.as_object() orelse return error.TvmCallFailed);
+        const tensor = try Tensor.allocate(allocator, data, shape_copy, dev_type);
+        try tensors.append(allocator, tensor);
     }
 
-    // Build call args
-    var call_args = try allocator.alloc(c.TVMFFIAny, tensor_handles.items.len);
+    // Build call args from typed Tensor values
+    var call_args = try allocator.alloc(Value, tensors.items.len);
     defer allocator.free(call_args);
-    for (tensor_handles.items, 0..) |t, j| {
-        call_args[j] = Value.from_object(t, c.kTVMFFITensor).raw;
+    for (tensors.items, 0..) |t, j| {
+        call_args[j] = t.as_value();
     }
 
     // Warmup
-    var out: c.TVMFFIAny = undefined;
-    try api.call(allocator, func, call_args, &out);
+    _ = try api.call_handle(allocator, func, call_args);
 
     // Timed runs (5 iterations, take median)
     const num_runs: usize = 5;
     var times: [5]f64 = std.mem.zeroes([5]f64);
     for (0..num_runs) |run_idx| {
         const start = std.time.nanoTimestamp();
-        try api.call(allocator, func, call_args, &out);
+        _ = try api.call_handle(allocator, func, call_args);
         const end = std.time.nanoTimestamp();
         times[run_idx] = @as(f64, @floatFromInt(end - start)) / 1e9;
     }
@@ -487,10 +402,6 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
 // Helpers
 // ============================================================================
 
-fn ffi_get_attr(_: std.mem.Allocator, obj: Value, attr_name: []const u8) !Value {
-    return api.get_field(obj, attr_name);
-}
-
 fn make_noop_callback() !Value {
     const noop = struct {
         fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
@@ -501,7 +412,7 @@ fn make_noop_callback() !Value {
     return api.create_packed_func(null, noop, null);
 }
 
-fn make_random_cost_model() !Value {
+fn make_random_cost_model(allocator: std.mem.Allocator) !Value {
     const noop = struct {
         fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
             result.* = Value.none().raw;
@@ -518,7 +429,7 @@ fn make_random_cost_model() !Value {
             const candidates = Value{ .raw = args[1] };
             const return_ptr = args[2];
 
-            // Get candidate count (no-allocator path)
+            // Get candidate count via no-allocator path (callback constraint)
             var len_out: c.TVMFFIAny = Value.none().raw;
             var len_args_arr = [_]c.TVMFFIAny{candidates.raw};
             var name_arr: c.TVMFFIByteArray = .{ .data = "ffi.ArraySize", .size = 13 };
@@ -564,13 +475,7 @@ fn make_random_cost_model() !Value {
     const as_string_val = try api.create_packed_func(null, as_string, null);
     defer as_string_val.decref();
 
-    return api.call_global(std.heap.c_allocator, "meta_schedule.CostModelPyCostModel", &.{
-        noop_val, // f_load
-        noop_val, // f_save
-        noop_val, // f_update
-        predict_val, // f_predict
-        as_string_val, // f_as_string
-    });
+    return MetaSchedule.py_cost_model(allocator, noop_val, noop_val, noop_val, predict_val, as_string_val);
 }
 
 fn register_cpu_count(allocator: std.mem.Allocator) !void {
@@ -594,67 +499,21 @@ fn register_cpu_count(allocator: std.mem.Allocator) !void {
 fn make_builder_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
     const msg_z = try api.cstr_alloc(allocator, msg);
     defer allocator.free(msg_z);
-    return api.call_global(allocator, "meta_schedule.BuilderResult", &.{ Value.none(), Value.str(msg_z) });
+    return MetaSchedule.builder_result(allocator, null, msg_z);
 }
 
 /// Create a RunnerFuture wrapping a RunnerResult with an error message.
-///
-/// RunnerFuture(f_done: () -> bool, f_result: () -> RunnerResult).
 fn make_runner_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
     const msg_z = try api.cstr_alloc(allocator, msg);
     defer allocator.free(msg_z);
-    const runner_result = try api.call_global(allocator, "meta_schedule.RunnerResult", &.{
-        Value.none(), // run_secs (None for error)
-        Value.str(msg_z), // error_msg
-    });
-    return make_runner_future(runner_result);
+    const rr = try MetaSchedule.runner_result(allocator, null, msg_z);
+    return MetaSchedule.runner_future(allocator, rr);
 }
 
 /// Create a RunnerFuture wrapping a RunnerResult with timing data.
 fn make_runner_success(allocator: std.mem.Allocator, run_secs: f64) !Value {
-    // RunnerResult expects run_secs as Array[FloatImm]
-    const run_secs_arr = try api.call_global(allocator, "ffi.Array", &.{Value.float(run_secs)});
-    const runner_result = try api.call_global(allocator, "meta_schedule.RunnerResult", &.{
-        run_secs_arr, // run_secs as Array
-        Value.none(), // no error
-    });
-    return make_runner_future(runner_result);
-}
-
-/// Wrap a RunnerResult in a RunnerFuture with trivial done/result callbacks.
-fn make_runner_future(runner_result: Value) !Value {
-    // f_done: always returns true
-    const done_cb = struct {
-        fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
-            result.* = Value.boolean(true).raw;
-            return 0;
-        }
-    }.f;
-    const f_done = try api.create_packed_func(null, done_cb, null);
-    defer f_done.decref();
-
-    // f_result: captures runner_result and returns it
-    // Since we can't capture in a C callback, store the result value
-    // in a static-like manner via the self pointer.
-    const ResultHolder = struct {
-        raw: c.TVMFFIAny,
-        fn callback(self_ptr: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
-            const self: *@This() = @ptrCast(@alignCast(self_ptr orelse return -1));
-            result.* = self.raw;
-            return 0;
-        }
-    };
-    // Allocate holder on the heap so it survives the callback
-    var holder = try std.heap.c_allocator.create(ResultHolder);
-    holder.raw = runner_result.raw;
-
-    const f_result = try api.create_packed_func(@ptrCast(holder), ResultHolder.callback, struct {
-        fn dtor(self_ptr: ?*anyopaque) callconv(.c) void {
-            const self: *ResultHolder = @ptrCast(@alignCast(self_ptr orelse return));
-            std.heap.c_allocator.destroy(self);
-        }
-    }.dtor);
-    defer f_result.decref();
-
-    return api.call_global(std.heap.c_allocator, "meta_schedule.RunnerFuture", &.{ f_done, f_result });
+    var run_secs_arr = try Array.from_values(allocator, &.{Value.float(run_secs)});
+    defer run_secs_arr.deinit();
+    const rr = try MetaSchedule.runner_result(allocator, run_secs_arr.as_value(), null);
+    return MetaSchedule.runner_future(allocator, rr);
 }
