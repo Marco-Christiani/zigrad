@@ -524,6 +524,7 @@ pub fn run_kernel_provider_demo(
 
     var registry = zg.kernel.KernelRegistry.init(allocator);
     defer registry.deinit();
+    try backend.register_kernel_dispatcher(&registry);
 
     var provider_impl = zg.tvm.provider.TvmProvider{
         .allocator = allocator,

@@ -16,9 +16,23 @@
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
+const kernel = @import("../kernel.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const pjrt_types = @import("../c/pjrt/types.zig");
+const c = @import("../c/pjrt/c.zig").c;
+const log = std.log.scoped(.@"zg/pjrt_backend");
+
+const dispatch_target_name = "zigrad.kernel.dispatch";
+
+const Platform = enum {
+    host,
+    cuda,
+    unknown,
+};
+
+var kernel_dispatch_registry: ?*const kernel.KernelRegistry = null;
+var kernel_dispatch_target_registered: bool = false;
 // Re-export handle types for callers
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;
@@ -41,6 +55,8 @@ pub const Backend = struct {
     api: *pjrt_api.Api,
     client: pjrt_types.Client,
     allocator: std.mem.Allocator,
+    platform: Platform,
+    kernel_dispatch_registered: bool,
 
     /// Initialize the backend by loading a PJRT plugin.
     ///
@@ -51,6 +67,9 @@ pub const Backend = struct {
 
         api_ptr.* = try plugin.load_plugin(plugin_path);
         errdefer plugin.unload_plugin(api_ptr.*);
+
+        const platform = detect_platform(plugin_path);
+        try register_dispatch_target(api_ptr, platform);
 
         const is_cpu_plugin = std.mem.endsWith(u8, plugin_path, "pjrt_c_api_cpu_plugin.so");
         var client = if (is_cpu_plugin) blk: {
@@ -64,6 +83,8 @@ pub const Backend = struct {
             .api = api_ptr,
             .client = client,
             .allocator = allocator,
+            .platform = platform,
+            .kernel_dispatch_registered = false,
         };
     }
 
@@ -212,10 +233,298 @@ pub const Backend = struct {
         if (!self.has_typed_ffi()) return error.TypedFfiUnavailable;
     }
 
+    /// Register the temporary single-target typed-FFI dispatcher.
+    ///
+    /// This is a process-global bridge used by the current checkpoint path.
+    /// Caller must ensure `registry` outlives all executable invocations that
+    /// may call into the dispatcher.
+    pub fn register_kernel_dispatcher(self: *Backend, registry: *const kernel.KernelRegistry) !void {
+        try self.require_typed_ffi();
+        if (self.kernel_dispatch_registered) {
+            kernel_dispatch_registry = registry;
+            return;
+        }
+
+        if (kernel_dispatch_target_registered) {
+            kernel_dispatch_registry = registry;
+            self.kernel_dispatch_registered = true;
+            return;
+        }
+
+        const ffi_ext = self.api.ffi_extension() orelse return error.TypedFfiUnavailable;
+
+        var registered_any = false;
+        switch (self.platform) {
+            .host => {
+                const host_title = try register_dispatch_handler_for_platform(self.api, ffi_ext, "Host");
+                const host_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "host");
+                registered_any = host_title or host_lower;
+            },
+            .cuda => {
+                const cuda_title = try register_dispatch_handler_for_platform(self.api, ffi_ext, "CUDA");
+                const cuda_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "cuda");
+                registered_any = cuda_title or cuda_lower;
+            },
+            .unknown => {
+                const host_ok = try register_dispatch_handler_for_platform(self.api, ffi_ext, "Host");
+                const host_ok_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "host");
+                const cuda_ok = try register_dispatch_handler_for_platform(self.api, ffi_ext, "CUDA");
+                const cuda_ok_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "cuda");
+                registered_any = host_ok or host_ok_lower or cuda_ok or cuda_ok_lower;
+            },
+        }
+
+        if (!registered_any) return error.TypedFfiRegistrationFailed;
+
+        kernel_dispatch_registry = registry;
+        self.kernel_dispatch_registered = true;
+    }
+
     pub fn device_memory_stats(self: *Backend, device: *const Device) !Device.MemoryStats {
         return device.get_memory_stats(self.api);
     }
 };
+
+fn register_dispatch_target(api: *pjrt_api.Api, platform: Platform) !void {
+    if (kernel_dispatch_target_registered) return;
+    var registered_any = false;
+
+    if (api.ffi_extension()) |ffi_ext| {
+        const any_platform = try register_dispatch_handler_for_platform(api, ffi_ext, null);
+        registered_any = registered_any or any_platform;
+        switch (platform) {
+            .host => {
+                const host_title = try register_dispatch_handler_for_platform(api, ffi_ext, "Host");
+                const host_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "host");
+                registered_any = registered_any or host_title or host_lower;
+            },
+            .cuda => {
+                const cuda_title = try register_dispatch_handler_for_platform(api, ffi_ext, "CUDA");
+                const cuda_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "cuda");
+                registered_any = registered_any or cuda_title or cuda_lower;
+            },
+            .unknown => {
+                const host_ok = try register_dispatch_handler_for_platform(api, ffi_ext, "Host");
+                const host_ok_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "host");
+                const cuda_ok = try register_dispatch_handler_for_platform(api, ffi_ext, "CUDA");
+                const cuda_ok_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "cuda");
+                registered_any = registered_any or host_ok or host_ok_lower or cuda_ok or cuda_ok_lower;
+            },
+        }
+    }
+
+    if (api.gpu_custom_call_extension()) |gpu_ext| {
+        const gpu_registered = try register_dispatch_handler_via_gpu_extension(api, gpu_ext);
+        registered_any = registered_any or gpu_registered;
+    }
+
+    kernel_dispatch_target_registered = registered_any;
+}
+
+fn register_dispatch_handler_via_gpu_extension(api: *pjrt_api.Api, gpu_ext: *c.PJRT_Gpu_Custom_Call) !bool {
+    const register = gpu_ext.custom_call orelse return false;
+
+    var args: c.PJRT_Gpu_Register_Custom_Call_Args = std.mem.zeroes(c.PJRT_Gpu_Register_Custom_Call_Args);
+    args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_Gpu_Register_Custom_Call_Args);
+    args.function_name = dispatch_target_name.ptr;
+    args.function_name_size = dispatch_target_name.len;
+    args.api_version = 1;
+    args.handler_instantiate = null;
+    args.handler_prepare = null;
+    args.handler_initialize = null;
+    args.handler_execute = @ptrCast(@constCast(&kernel_dispatch_handler));
+
+    const pjrt_err = register(&args);
+    if (pjrt_err == null) {
+        log.info("registered dispatcher via gpu custom-call extension target='{s}'", .{dispatch_target_name});
+        return true;
+    }
+
+    var err = pjrt_api.PjrtError.from_handle(api, pjrt_err.?);
+    const msg = err.get_message(std.heap.page_allocator) catch "<failed to read message>";
+    defer if (msg.ptr != "<failed to read message>".ptr) std.heap.page_allocator.free(msg);
+    const code = err.get_code() catch {
+        err.deinit();
+        return false;
+    };
+    err.deinit();
+
+    log.debug(
+        "gpu custom-call register failed target='{s}' code={d} msg={s}",
+        .{ dispatch_target_name, code, msg },
+    );
+
+    return code == 6;
+}
+
+fn register_dispatch_handler_for_platform(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI, platform_name: ?[]const u8) !bool {
+    var args: c.PJRT_FFI_Register_Handler_Args = std.mem.zeroes(c.PJRT_FFI_Register_Handler_Args);
+    args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_FFI_Register_Handler_Args);
+    args.target_name = dispatch_target_name.ptr;
+    args.target_name_size = dispatch_target_name.len;
+    args.handler = @ptrCast(@constCast(&kernel_dispatch_handler));
+    if (platform_name) |name| {
+        args.platform_name = name.ptr;
+        args.platform_name_size = name.len;
+    } else {
+        args.platform_name = null;
+        args.platform_name_size = 0;
+    }
+    args.traits = 0;
+
+    const register = ffi_ext.register_handler orelse return false;
+    const pjrt_err = register(&args);
+    if (pjrt_err == null) {
+        log.info("registered typed-ffi dispatcher target='{s}' platform='{s}'", .{ dispatch_target_name, platform_name orelse "<any>" });
+        return true;
+    }
+
+    var err = pjrt_api.PjrtError.from_handle(api, pjrt_err.?);
+    const msg = err.get_message(std.heap.page_allocator) catch "<failed to read message>";
+    defer if (msg.ptr != "<failed to read message>".ptr) std.heap.page_allocator.free(msg);
+    const code = err.get_code() catch {
+        err.deinit();
+        return false;
+    };
+    err.deinit();
+
+    log.debug(
+        "typed-ffi register_handler failed target='{s}' platform='{s}' code={d} msg={s}",
+        .{ dispatch_target_name, platform_name orelse "<any>", code, msg },
+    );
+
+    if (code == 6) return true;
+    return false;
+}
+
+fn detect_platform(plugin_path: []const u8) Platform {
+    if (std.mem.endsWith(u8, plugin_path, "pjrt_c_api_cpu_plugin.so")) return .host;
+    if (std.mem.endsWith(u8, plugin_path, "pjrt_c_api_gpu_plugin.so")) return .cuda;
+    if (std.mem.indexOf(u8, plugin_path, "cpu") != null) return .host;
+    if (std.mem.indexOf(u8, plugin_path, "cuda") != null or std.mem.indexOf(u8, plugin_path, "gpu") != null) return .cuda;
+    return .unknown;
+}
+
+fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
+    if (handle_metadata_registration_hook(frame)) return null;
+
+    if (frame.stage != c.XLA_FFI_ExecutionStage_EXECUTE) return null;
+
+    const registry = kernel_dispatch_registry orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: kernel registry is not configured", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
+    };
+
+    const kernel_key = lookup_dispatch_attr(frame.attrs, "zigrad.kernel_key") orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: missing zigrad.kernel_key attribute", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    };
+    const provider = lookup_dispatch_attr(frame.attrs, "zigrad.provider") orelse "";
+
+    const artifact = registry.get(kernel_key) orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: kernel key not found in registry", c.XLA_FFI_Error_Code_NOT_FOUND);
+    };
+
+    if (provider.len != 0 and !std.mem.eql(u8, provider, artifact.provider_name)) {
+        return make_ffi_error(frame, "zigrad kernel dispatch: provider mismatch for kernel key", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
+    }
+
+    const a = get_arg_buffer(frame.args, 0) orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: missing arg0 buffer", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    };
+    const b = get_arg_buffer(frame.args, 1) orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: missing arg1 buffer", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    };
+    const out = get_ret_buffer(frame.rets, 0) orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: missing ret0 buffer", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    };
+
+    if (a.rank != 2 or b.rank != 2 or out.rank != 2) {
+        return make_ffi_error(frame, "zigrad kernel dispatch: expected rank-2 buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    }
+    if (a.dtype != c.XLA_FFI_DataType_F32 or b.dtype != c.XLA_FFI_DataType_F32 or out.dtype != c.XLA_FFI_DataType_F32) {
+        return make_ffi_error(frame, "zigrad kernel dispatch: expected f32 buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    }
+
+    const m: usize = @intCast(a.dims[0]);
+    const k: usize = @intCast(a.dims[1]);
+    const kb: usize = @intCast(b.dims[0]);
+    const n: usize = @intCast(b.dims[1]);
+    const out_m: usize = @intCast(out.dims[0]);
+    const out_n: usize = @intCast(out.dims[1]);
+    if (k != kb or m != out_m or n != out_n) {
+        return make_ffi_error(frame, "zigrad kernel dispatch: matmul shape mismatch", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    }
+
+    const a_data: [*]const f32 = @ptrCast(@alignCast(a.data));
+    const b_data: [*]const f32 = @ptrCast(@alignCast(b.data));
+    const out_data: [*]f32 = @ptrCast(@alignCast(out.data));
+
+    var i: usize = 0;
+    while (i < m) : (i += 1) {
+        var j: usize = 0;
+        while (j < n) : (j += 1) {
+            var acc: f32 = 0;
+            var kk: usize = 0;
+            while (kk < k) : (kk += 1) {
+                acc += a_data[i * k + kk] * b_data[kk * n + j];
+            }
+            out_data[i * n + j] = acc;
+        }
+    }
+
+    return null;
+}
+
+fn handle_metadata_registration_hook(frame: *c.XLA_FFI_CallFrame) bool {
+    const ext = frame.extension_start orelse return false;
+    const ext_ptr: *c.XLA_FFI_Extension_Base = @ptrCast(ext);
+    if (ext_ptr.type != c.XLA_FFI_Extension_Metadata) return false;
+
+    const metadata_ext: *c.XLA_FFI_Metadata_Extension = @fieldParentPtr("extension_base", ext_ptr);
+    const metadata = metadata_ext.metadata orelse return false;
+    const metadata_ptr: *c.XLA_FFI_Metadata = @ptrCast(metadata);
+    metadata_ptr.api_version.major_version = c.XLA_FFI_API_MAJOR;
+    metadata_ptr.api_version.minor_version = c.XLA_FFI_API_MINOR;
+    return true;
+}
+
+fn lookup_dispatch_attr(attrs: c.XLA_FFI_Attrs, name: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(attrs.size))) : (i += 1) {
+        const name_span = attrs.names[i][0];
+        const key = name_span.ptr[0..name_span.len];
+        if (!std.mem.eql(u8, key, name)) continue;
+
+        if (attrs.types[i] != c.XLA_FFI_AttrType_STRING) return null;
+        const attr_value = attrs.attrs[i] orelse return null;
+        const span: *c.XLA_FFI_ByteSpan = @ptrCast(@alignCast(attr_value));
+        return span.ptr[0..span.len];
+    }
+    return null;
+}
+
+fn get_arg_buffer(args: c.XLA_FFI_Args, idx: usize) ?*c.XLA_FFI_Buffer {
+    if (idx >= @as(usize, @intCast(args.size))) return null;
+    if (args.types[idx] != c.XLA_FFI_ArgType_BUFFER) return null;
+    const ptr = args.args[idx] orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn get_ret_buffer(rets: c.XLA_FFI_Rets, idx: usize) ?*c.XLA_FFI_Buffer {
+    if (idx >= @as(usize, @intCast(rets.size))) return null;
+    if (rets.types[idx] != c.XLA_FFI_RetType_BUFFER) return null;
+    const ptr = rets.rets[idx] orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn make_ffi_error(frame: *c.XLA_FFI_CallFrame, message: [:0]const u8, code: c.XLA_FFI_Error_Code) ?*c.XLA_FFI_Error {
+    const ffi_api = frame.api orelse return null;
+    const create_error = ffi_api.*.XLA_FFI_Error_Create orelse return null;
+    var args: c.XLA_FFI_Error_Create_Args = std.mem.zeroes(c.XLA_FFI_Error_Create_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_Error_Create_Args);
+    args.message = message.ptr;
+    args.errc = code;
+    return create_error(&args);
+}
 
 fn cpu_device_count_from_env() ?usize {
     const env = std.posix.getenv("ZG_CPU_DEVICE_COUNT") orelse return null;

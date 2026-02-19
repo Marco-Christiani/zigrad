@@ -71,6 +71,13 @@ pub const Api = struct {
         return ffi_ext;
     }
 
+    pub fn gpu_custom_call_extension(self: *const Api) ?*c.PJRT_Gpu_Custom_Call {
+        const ext = self.find_extension(c.PJRT_Extension_Type_Gpu_Custom_Call) orelse return null;
+        const gpu_ext: *c.PJRT_Gpu_Custom_Call = @ptrCast(@alignCast(ext));
+        if (gpu_ext.custom_call == null) return null;
+        return gpu_ext;
+    }
+
     /// Reflection-based call wrapper
     ///
     /// Usage:

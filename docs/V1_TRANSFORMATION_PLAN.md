@@ -203,12 +203,14 @@ Current implementation status:
 4. Demo path has an end-to-end mode (`kernel-provider-demo`) that runs kernelize -> lower -> compile -> execute.
 5. Policy is hard-fail when typed-FFI extension is unavailable.
 
-Known blocker for full end-to-end completion:
-1. PJRT typed-FFI handler registration for `zigrad.kernel.dispatch` is not wired yet.
-2. Runtime currently fails with "No FFI handler registered ..." even though kernelization and lowering paths are active.
+Resolution (checkpoint continuation):
+1. Full debug-path demo now succeeds: `zig build && ./zig-out/bin/zigrad kernel-provider-demo`.
+2. The missing piece was the XLA FFI metadata registration hook in the dispatcher callback.
+3. At registration/introspection time, handler must detect `XLA_FFI_Extension_Metadata` and populate API version fields before returning.
+4. With that hook in place, runtime recognizes `zigrad.kernel.dispatch` and executes the path end-to-end.
 
-Next implementation target:
-1. Register the typed-FFI dispatcher handler in PJRT integration and route calls through `KernelRegistry` lookup.
+Current follow-up target:
+1. Replace temporary CPU fallback compute inside dispatcher callback with provider-backed execution of compiled kernel artifacts.
 
 **Phase 6: TVM KernelProvider.** Implement TVM as a kernel provider behind the Phase 5 interface. The foreign type containment rule is critical here - v0's TVM integration is the primary example of what went wrong. Depends on Phase 5.
 
