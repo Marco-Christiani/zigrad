@@ -135,6 +135,55 @@ pub const ObjectHandle = struct {
 };
 
 // ============================================================================
+// Comptime helpers — generate boilerplate for ObjectHandle-based types
+// ============================================================================
+
+/// Comptime generators for ObjectHandle-based TVM types. Adapted from the
+/// pattern in `src/c/mlir/mlir.zig:helpers`, tailored for TVM's ObjectHandle
+/// convention instead of MLIR's `_inner` convention.
+pub const helpers = struct {
+    /// Generate deinit for types with a `handle: ObjectHandle` field.
+    pub fn deinit(T: type) fn (*T) void {
+        return struct {
+            fn f(self: *T) void {
+                self.handle.deinit();
+            }
+        }.f;
+    }
+
+    /// Generate as_value for types that carry a runtime `type_index: c_int`.
+    pub fn as_value(T: type) fn (T) Value {
+        return struct {
+            fn f(self: T) Value {
+                return self.handle.to_value(self.type_index);
+            }
+        }.f;
+    }
+
+    /// Generate as_value for types with a fixed comptime-known type_index.
+    pub fn as_value_fixed(T: type, comptime type_index: c_int) fn (T) Value {
+        return struct {
+            fn f(self: T) Value {
+                return self.handle.to_value(type_index);
+            }
+        }.f;
+    }
+
+    /// Generate wrap that constructs `?T` from a Value (null if not an object).
+    pub fn wrap(T: type) fn (Value) ?T {
+        return struct {
+            fn f(val: Value) ?T {
+                const obj = val.as_object() orelse return null;
+                return if (@hasField(T, "type_index"))
+                    .{ .handle = .{ .ptr = obj }, .type_index = val.raw.type_index }
+                else
+                    .{ .handle = .{ .ptr = obj } };
+            }
+        }.f;
+    }
+};
+
+// ============================================================================
 // Library loading
 // ============================================================================
 
@@ -288,26 +337,17 @@ pub fn call(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []co
 pub fn call_global(allocator: std.mem.Allocator, func_name: []const u8, args: []const Value) TvmError!Value {
     const func = try get_global(allocator, func_name);
     defer _ = c.TVMFFIObjectDecRef(func);
-
-    // Convert Value slice to raw TVMFFIAny slice on the stack (or heap for large arg lists).
-    if (args.len <= 16) {
-        var raw_args: [16]c.TVMFFIAny = undefined;
-        for (args, 0..) |a, i| raw_args[i] = a.raw;
-        var out: c.TVMFFIAny = undefined;
-        try call(allocator, func, raw_args[0..args.len], &out);
-        return .{ .raw = out };
-    } else {
-        const raw_args = try allocator.alloc(c.TVMFFIAny, args.len);
-        defer allocator.free(raw_args);
-        for (args, 0..) |a, i| raw_args[i] = a.raw;
-        var out: c.TVMFFIAny = undefined;
-        try call(allocator, func, raw_args, &out);
-        return .{ .raw = out };
-    }
+    return call_with_values(allocator, func, args);
 }
 
 /// Call a TVM function handle with Value arguments.
 pub fn call_handle(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const Value) TvmError!Value {
+    return call_with_values(allocator, func, args);
+}
+
+/// Shared implementation: convert Value args to raw TVMFFIAny and call.
+/// Uses a stack buffer for <=16 args, heap for larger lists.
+fn call_with_values(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const Value) TvmError!Value {
     if (args.len <= 16) {
         var raw_args: [16]c.TVMFFIAny = undefined;
         for (args, 0..) |a, i| raw_args[i] = a.raw;
@@ -534,11 +574,6 @@ pub const Array = struct {
         });
     }
 
-    pub fn as_value(self: Array) Value {
-        return self.handle.to_value(self.type_index);
-    }
-
-    pub fn deinit(self: *Array) void {
-        self.handle.deinit();
-    }
+    pub const as_value = helpers.as_value(Array);
+    pub const deinit = helpers.deinit(Array);
 };

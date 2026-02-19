@@ -12,6 +12,7 @@ const ObjectHandle = api.ObjectHandle;
 const TvmError = api.TvmError;
 const TargetKind = tir.TargetKind;
 
+const helpers = api.helpers;
 const log = std.log.scoped(.@"zg/tvm_runtime");
 
 // ============================================================================
@@ -21,13 +22,8 @@ const log = std.log.scoped(.@"zg/tvm_runtime");
 pub const RuntimeModule = struct {
     handle: ObjectHandle,
 
-    pub fn deinit(self: *RuntimeModule) void {
-        self.handle.deinit();
-    }
-
-    pub fn as_value(self: RuntimeModule) Value {
-        return self.handle.to_value(c.kTVMFFIModule);
-    }
+    pub const deinit = helpers.deinit(RuntimeModule);
+    pub const as_value = helpers.as_value_fixed(RuntimeModule, c.kTVMFFIModule);
 
     /// Load a compiled module (.so) from disk.
     pub fn load_from_file(allocator: std.mem.Allocator, path: []const u8) !RuntimeModule {
@@ -113,9 +109,7 @@ pub const RuntimeModule = struct {
 pub const Tensor = struct {
     handle: ObjectHandle,
 
-    pub fn deinit(self: *Tensor) void {
-        self.handle.deinit();
-    }
+    pub const deinit = helpers.deinit(Tensor);
 
     /// Create a TVM tensor from a DLPack ManagedTensor.
     pub fn from_dlpack(managed: *dlpack.ManagedTensor) TvmError!Tensor {
@@ -169,10 +163,7 @@ pub const Tensor = struct {
         });
     }
 
-    /// Wrap as a Value for passing to TVM function calls.
-    pub fn as_value(self: Tensor) Value {
-        return Value.from_object(self.handle.ptr, c.kTVMFFITensor);
-    }
+    pub const as_value = helpers.as_value_fixed(Tensor, c.kTVMFFITensor);
 };
 
 // Private helpers for constructing special Value types needed by Tensor methods.

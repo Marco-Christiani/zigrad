@@ -6,8 +6,8 @@
 //!    that TVM generates but NVRTC can't compile in JIT mode
 
 const std = @import("std");
+const api = @import("../c/tvm/api.zig");
 const c = @import("../c/tvm/c.zig");
-const ffi = @import("../c/tvm/c.zig");
 const nvrtc = @import("../c/nvrtc.zig");
 
 const log = std.log.scoped(.@"zg/nvrtc_callback");
@@ -15,48 +15,28 @@ const log = std.log.scoped(.@"zg/nvrtc_callback");
 /// Register the NVRTC compilation callback with TVM.
 /// This must be called during initialization, before any CUDA compilation.
 pub fn register(allocator: std.mem.Allocator) !void {
-    _ = allocator;
-
-    // create a tvm function that wraps our callback
-    var func: c.TVMFFIObjectHandle = std.mem.zeroes(c.TVMFFIObjectHandle);
-
-    // cast to the c fn pointer type tvm expects
-    // TVMFFISafeCallType signature: int (*)(void*, const TVMFFIAny*, int32_t, TVMFFIAny*)
-    const callback_fn: *const fn (?*anyopaque, [*c]const c.TVMFFIAny, i32, [*c]c.TVMFFIAny) callconv(.c) c_int = &nvrtc_compile_callback;
-
-    const ret = c.TVMFFIFunctionCreate(
-        null, // no closure context needed (self)
-        @ptrCast(callback_fn), // the actual function pointer (safe_call)
-        null, // no destructor
-        &func, // output handle
-    );
-
-    if (ret != 0) {
-        log.err("Failed to create NVRTC callback function", .{});
+    const func_val = api.create_packed_func(null, &nvrtc_compile_callback, null) catch {
+        log.err("failed to create NVRTC callback function", .{});
         return error.TvmFfiError;
-    }
-
-    // register it globally as "tvm_callback_cuda_compile"
-    const name = "tvm_callback_cuda_compile";
-    var name_arr: c.TVMFFIByteArray = .{ .data = name.ptr, .size = name.len };
-    const ret2 = c.TVMFFIFunctionSetGlobal(&name_arr, func, 0);
-    if (ret2 != 0) {
-        log.err("Failed to register tvm_callback_cuda_compile", .{});
+    };
+    const func_handle = func_val.as_object() orelse {
+        log.err("NVRTC callback function has no object handle", .{});
         return error.TvmFfiError;
-    }
+    };
 
-    log.info("Registered tvm_callback_cuda_compile callback", .{});
-
-    // verify we can retrieve the callback
-    const test_name = "tvm_callback_cuda_compile";
-    var test_name_arr: c.TVMFFIByteArray = .{ .data = test_name.ptr, .size = test_name.len };
-    var test_func: c.TVMFFIObjectHandle = null;
-    const ret3 = c.TVMFFIFunctionGetGlobal(&test_name_arr, &test_func);
-    if (ret3 != 0 or test_func == null) {
-        log.err("Failed to verify callback registration", .{});
+    api.set_global("tvm_callback_cuda_compile", func_handle, false) catch {
+        log.err("failed to register tvm_callback_cuda_compile", .{});
         return error.TvmFfiError;
-    }
-    log.info("Verified: callback is retrievable", .{});
+    };
+    log.info("registered tvm_callback_cuda_compile callback", .{});
+
+    // Verify we can retrieve the callback
+    const verify_handle = api.get_global(allocator, "tvm_callback_cuda_compile") catch {
+        log.err("failed to verify callback registration", .{});
+        return error.TvmFfiError;
+    };
+    _ = c.TVMFFIObjectDecRef(verify_handle);
+    log.info("verified: callback is retrievable", .{});
 }
 
 /// Callback function called by TVM when compiling CUDA code.
@@ -133,16 +113,12 @@ fn nvrtc_compile_callback(
         return -1;
     };
 
-    // return ptx as a tvm String object
-    // NOTE: using kTVMFFIRawStr would return a borrowed pointer that tvm doesnt own, which can
-    //  cause heap corruption when tvm tries to manage the memory.
-    var ptx_bytes: c.TVMFFIByteArray = .{ .data = ptx.ptr, .size = ptx.len };
-    var str_obj: c.TVMFFIAny = std.mem.zeroes(c.TVMFFIAny);
-    if (c.TVMFFIStringFromByteArray(&ptx_bytes, &str_obj) != 0) {
-        log.err("Failed to create TVM string from PTX", .{});
+    // Return PTX as a TVM String object (not kTVMFFIRawStr — TVM must own the data).
+    const str_val = api.make_tvm_string(ptx) catch {
+        log.err("failed to create TVM string from PTX", .{});
         return -1;
-    }
-    ret.* = str_obj;
+    };
+    ret.* = str_val.raw;
     return 0;
 }
 

@@ -10,6 +10,7 @@ const Value = api.Value;
 const ObjectHandle = api.ObjectHandle;
 const TvmError = api.TvmError;
 
+const helpers = api.helpers;
 const log = std.log.scoped(.@"zg/tvm_tir");
 
 /// Target kind for TVM compilation.
@@ -24,13 +25,8 @@ pub const IRModule = struct {
     /// TVM runtime type index, preserved from the FFI call that created this object.
     type_index: c_int = c.kTVMFFIStaticObjectBegin,
 
-    pub fn deinit(self: *IRModule) void {
-        self.handle.deinit();
-    }
-
-    pub fn as_value(self: IRModule) Value {
-        return self.handle.to_value(self.type_index);
-    }
+    pub const deinit = helpers.deinit(IRModule);
+    pub const as_value = helpers.as_value(IRModule);
 
     /// Apply a single TIR transform pass to this module (in-place replacement).
     pub fn apply_pass(self: *IRModule, allocator: std.mem.Allocator, pass: TirPass) !void {
@@ -76,13 +72,8 @@ pub const Target = struct {
     handle: ObjectHandle,
     type_index: c_int = c.kTVMFFIStaticObjectBegin,
 
-    pub fn deinit(self: *Target) void {
-        self.handle.deinit();
-    }
-
-    pub fn as_value(self: Target) Value {
-        return self.handle.to_value(self.type_index);
-    }
+    pub const deinit = helpers.deinit(Target);
+    pub const as_value = helpers.as_value(Target);
 
     /// Create a Target from a TargetKind.
     ///
@@ -160,82 +151,24 @@ pub const TirPass = union(enum) {
     common_subexpr_elim: struct { enable_cse: bool, enable_equiv: bool },
 
     /// Returns the TVM global function name for this pass.
+    ///
+    /// Most names follow `"tir.transform." ++ PascalCase(@tagName)`. Variants
+    /// where TVM's name diverges from that convention have explicit overrides.
     pub fn name(self: TirPass) []const u8 {
         return switch (self) {
-            .lower_cross_thread_reduction => "tir.transform.LowerCrossThreadReduction",
-            .lower_init_block => "tir.transform.LowerInitBlock",
+            // Overrides where TVM name diverges from PascalCase(@tagName)
             .plan_and_update_buffer_allocation => "tir.transform.PlanAndUpdateBufferAllocationLocation",
-            .convert_blocks_to_opaque => "tir.transform.ConvertBlocksToOpaque",
-            .lift_thread_binding => "tir.transform.LiftThreadBinding",
-            .lower_match_buffer => "tir.transform.LowerMatchBuffer",
-            .lower_opaque_block => "tir.transform.LowerOpaqueBlock",
-            .flatten_buffer => "tir.transform.FlattenBuffer",
-            .loop_partition => "tir.transform.LoopPartition",
-            .inject_virtual_thread => "tir.transform.InjectVirtualThread",
-            .inject_double_buffer => "tir.transform.InjectDoubleBuffer",
-            .storage_rewrite => "tir.transform.StorageRewrite",
-            .simplify => "tir.transform.Simplify",
-            .remove_no_op => "tir.transform.RemoveNoOp",
-            .verify_memory => "tir.transform.VerifyMemory",
-            .annotate_entry_func => "tir.transform.AnnotateEntryFunc",
-            .infer_fragment => "tir.transform.InferFragment",
-            .lower_thread_allreduce => "tir.transform.LowerThreadAllreduce",
-            .annotate_device_regions => "tir.transform.AnnotateDeviceRegions",
-            .split_host_device => "tir.transform.SplitHostDevice",
-            .merge_shared_memory_allocations => "tir.transform.MergeSharedMemoryAllocations",
-            .make_packed_api => "tir.transform.MakePackedAPI",
-            .lower_device_kernel_launch => "tir.transform.LowerDeviceKernelLaunch",
-            .lower_tvm_builtin => "tir.transform.LowerTVMBuiltin",
-            .lower_custom_datatypes => "tir.transform.LowerCustomDatatypes",
-            .lower_intrin => "tir.transform.LowerIntrin",
-            .lower_device_storage_access_info => "tir.transform.LowerDeviceStorageAccessInfo",
-            .combine_context_call => "tir.transform.CombineContextCall",
-            .lower_warp_memory => "tir.transform.LowerWarpMemory",
-            .bind_target => "tir.transform.BindTarget",
-            .thread_sync => "tir.transform.ThreadSync",
             .compact_buffer_alloc => "tir.transform.CompactBufferAllocation",
-            .narrow_data_type => "tir.transform.NarrowDataType",
-            .vectorize_loop => "tir.transform.VectorizeLoop",
             .common_subexpr_elim => "tir.transform.CommonSubexprElimTIR",
+            .make_packed_api => "tir.transform.MakePackedAPI",
+            .lower_tvm_builtin => "tir.transform.LowerTVMBuiltin",
+            inline else => |_, tag| comptime tvmPassName(@tagName(tag)),
         };
     }
 
     /// Create the TVM pass object by calling the global function with args.
     fn create(self: TirPass, allocator: std.mem.Allocator) TvmError!Value {
         return switch (self) {
-            // No-arg passes
-            .lower_cross_thread_reduction,
-            .lower_init_block,
-            .plan_and_update_buffer_allocation,
-            .convert_blocks_to_opaque,
-            .lift_thread_binding,
-            .lower_match_buffer,
-            .lower_opaque_block,
-            .flatten_buffer,
-            .loop_partition,
-            .inject_virtual_thread,
-            .inject_double_buffer,
-            .storage_rewrite,
-            .simplify,
-            .remove_no_op,
-            .verify_memory,
-            .annotate_entry_func,
-            .infer_fragment,
-            .lower_thread_allreduce,
-            .annotate_device_regions,
-            .split_host_device,
-            .merge_shared_memory_allocations,
-            .make_packed_api,
-            .lower_device_kernel_launch,
-            .lower_tvm_builtin,
-            .lower_custom_datatypes,
-            .lower_intrin,
-            .lower_device_storage_access_info,
-            .combine_context_call,
-            .lower_warp_memory,
-            => try api.call_global(allocator, self.name(), &.{}),
-
-            // Passes with arguments
             .bind_target => |args| try api.call_global(allocator, self.name(), &.{args.target.as_value()}),
             .thread_sync => |args| blk: {
                 const s = try api.cstr_alloc(allocator, args.scope);
@@ -249,7 +182,36 @@ pub const TirPass = union(enum) {
                 Value.boolean(args.enable_cse),
                 Value.boolean(args.enable_equiv),
             }),
+            else => try api.call_global(allocator, self.name(), &.{}),
         };
+    }
+
+    /// Comptime: "tir.transform." ++ snakeToPascal(tag_name).
+    fn tvmPassName(comptime tag_name: [:0]const u8) [:0]const u8 {
+        @setEvalBranchQuota(5000);
+        const result = comptime blk: {
+            const prefix = "tir.transform.";
+            var underscores: usize = 0;
+            for (tag_name) |ch| {
+                if (ch == '_') underscores += 1;
+            }
+            const total_len = prefix.len + tag_name.len - underscores;
+            var buf: [total_len:0]u8 = undefined;
+            for (prefix, 0..) |ch, i| buf[i] = ch;
+            var ri: usize = prefix.len;
+            var cap_next = true;
+            for (tag_name) |ch| {
+                if (ch == '_') {
+                    cap_next = true;
+                } else {
+                    buf[ri] = if (cap_next) (ch - 32) else ch;
+                    ri += 1;
+                    cap_next = false;
+                }
+            }
+            break :blk buf;
+        };
+        return &result;
     }
 };
 
