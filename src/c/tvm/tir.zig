@@ -143,6 +143,7 @@ pub const TirPass = union(enum) {
     lower_warp_memory,
 
     // Passes with arguments
+    filter: struct { predicate: Value },
     bind_target: struct { target: Target },
     thread_sync: struct { scope: []const u8 },
     compact_buffer_alloc: struct { is_strict: bool },
@@ -157,6 +158,7 @@ pub const TirPass = union(enum) {
     pub fn name(self: TirPass) []const u8 {
         return switch (self) {
             // Overrides where TVM name diverges from PascalCase(@tagName)
+            .filter => "tir.transform.Filter",
             .plan_and_update_buffer_allocation => "tir.transform.PlanAndUpdateBufferAllocationLocation",
             .compact_buffer_alloc => "tir.transform.CompactBufferAllocation",
             .common_subexpr_elim => "tir.transform.CommonSubexprElimTIR",
@@ -167,8 +169,9 @@ pub const TirPass = union(enum) {
     }
 
     /// Create the TVM pass object by calling the global function with args.
-    fn create(self: TirPass, allocator: std.mem.Allocator) TvmError!Value {
+    pub fn create(self: TirPass, allocator: std.mem.Allocator) TvmError!Value {
         return switch (self) {
+            .filter => |args| try api.call_global(allocator, self.name(), &.{args.predicate}),
             .bind_target => |args| try api.call_global(allocator, self.name(), &.{args.target.as_value()}),
             .thread_sync => |args| blk: {
                 const s = try api.cstr_alloc(allocator, args.scope);
@@ -214,6 +217,40 @@ pub const TirPass = union(enum) {
         return &result;
     }
 };
+
+// ============================================================================
+// Function attribute access
+// ============================================================================
+
+/// Get the attribute Map from an IR function (PrimFunc, etc.).
+///
+/// Calls `ir.BaseFunc_Attrs` then `ir.DictAttrsGetDict` and wraps the
+/// result as a Map. Returns null if the function has no attributes.
+pub fn get_func_attrs(allocator: std.mem.Allocator, func: Value) !?api.Map {
+    const dict_attrs = try api.call_global(allocator, "ir.BaseFunc_Attrs", &.{func});
+    defer dict_attrs.decref();
+    if (dict_attrs.raw.type_index == c.kTVMFFINone) return null;
+
+    const map_val = try api.call_global(allocator, "ir.DictAttrsGetDict", &.{dict_attrs});
+    const obj = map_val.as_object() orelse return error.TvmCallFailed;
+    return .{ .handle = .{ .ptr = obj }, .type_index = map_val.raw.type_index };
+}
+
+// ============================================================================
+// TensorIntrin
+// ============================================================================
+
+/// Construct a TensorIntrin from description and implementation PrimFuncs.
+pub fn tensor_intrin(allocator: std.mem.Allocator, desc: Value, impl: Value) !Value {
+    return api.call_global(allocator, "tir.TensorIntrin", &.{ desc, impl });
+}
+
+/// Register a tensor intrinsic by name.
+pub fn register_tensor_intrin(allocator: std.mem.Allocator, name: [:0]const u8, intrin_val: Value, override: bool) !void {
+    _ = try api.call_global(allocator, "tir.TensorIntrinRegister", &.{
+        Value.str(name), intrin_val, Value.boolean(override),
+    });
+}
 
 // ============================================================================
 // Build matmul TIR module

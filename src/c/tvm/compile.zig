@@ -152,23 +152,109 @@ fn build_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Tar
 const FilterKind = enum { host, device };
 
 /// Filter an IRModule to keep only host or device functions.
+///
+/// Uses `tir.transform.Filter(callback)` where the callback inspects each
+/// function's `calling_conv` attribute:
+///  1. kDefault (0) = device, kCPackedFunc (1) = host, kDeviceKernelLaunch (2) = device.
+///  2. Functions without `calling_conv` default to device.
 fn filter_module(allocator: std.mem.Allocator, ir_mod: IRModule, kind: FilterKind) !IRModule {
-    const filter_name = switch (kind) {
-        .host => "tir.transform.FilterHostFunctions",
-        .device => "tir.transform.FilterDeviceFunctions",
+    const callback_fn: api.PackedFuncCallback = switch (kind) {
+        .host => &filter_host_callback,
+        .device => &filter_device_callback,
     };
-    // Try the dedicated filter pass first; fall back to manual attribute filtering
-    const pass_val = api.call_global(allocator, filter_name, &.{}) catch {
-        // Fallback: use a SelectDevice pass or return a copy
-        log.warn("filter pass {s} not found, returning unfiltered", .{filter_name});
-        ir_mod.handle.incref();
-        return .{ .handle = .{ .ptr = ir_mod.handle.ptr }, .type_index = ir_mod.type_index };
-    };
+
+    const filter_func = try api.create_packed_func(null, callback_fn, null);
+    defer filter_func.decref();
+
+    const pass = TirPass{ .filter = .{ .predicate = filter_func } };
+    const pass_val = try pass.create(allocator);
     defer pass_val.decref();
 
     const result = try api.call_global(allocator, "transform.RunPass", &.{ pass_val, ir_mod.as_value() });
     const obj = result.as_object() orelse return error.TvmCallFailed;
     return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
+}
+
+/// Filter callback: keep host functions (calling_conv == 1).
+fn filter_host_callback(
+    handle: ?*anyopaque,
+    args: [*c]const c.TVMFFIAny,
+    num_args: i32,
+    ret: [*c]c.TVMFFIAny,
+) callconv(.c) c_int {
+    return filter_by_calling_conv(handle, args, num_args, ret, true);
+}
+
+/// Filter callback: keep device functions (calling_conv != 1).
+fn filter_device_callback(
+    handle: ?*anyopaque,
+    args: [*c]const c.TVMFFIAny,
+    num_args: i32,
+    ret: [*c]c.TVMFFIAny,
+) callconv(.c) c_int {
+    return filter_by_calling_conv(handle, args, num_args, ret, false);
+}
+
+/// Shared filter logic: check calling_conv attribute of a PrimFunc.
+///
+/// Accesses calling_conv via `tir.get_func_attrs` (Map wrapper), then
+/// looks up the `calling_conv` key and extracts the integer via `Value.to_int`.
+fn filter_by_calling_conv(
+    handle: ?*anyopaque,
+    args: [*c]const c.TVMFFIAny,
+    num_args: i32,
+    ret: [*c]c.TVMFFIAny,
+    want_host: bool,
+) c_int {
+    _ = handle;
+    if (num_args != 1) {
+        log.err("filter callback: expected 1 arg, got {d}", .{num_args});
+        return -1;
+    }
+
+    const func_val = Value{ .raw = args[0] };
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var calling_conv: i64 = 0; // default = kDefault (device)
+
+    // Get the function's attribute Map
+    var attrs_map = (tir.get_func_attrs(alloc, func_val) catch {
+        ret.* = Value.boolean(!want_host).raw;
+        return 0;
+    }) orelse {
+        ret.* = Value.boolean(!want_host).raw;
+        return 0;
+    };
+    defer attrs_map.deinit();
+
+    // Look up "calling_conv" in the attribute Map
+    const key = api.make_tvm_string("calling_conv") catch {
+        ret.* = Value.boolean(!want_host).raw;
+        return 0;
+    };
+    defer key.decref();
+
+    if (!(attrs_map.contains(alloc, key) catch false)) {
+        ret.* = Value.boolean(!want_host).raw;
+        return 0;
+    }
+
+    const conv_val = attrs_map.get(alloc, key) catch {
+        ret.* = Value.boolean(!want_host).raw;
+        return 0;
+    };
+    defer conv_val.decref();
+
+    calling_conv = conv_val.to_int() orelse 0;
+
+    // kDefault=0 (device), kCPackedFunc=1 (host), kDeviceKernelLaunch=2 (device)
+    const is_host = (calling_conv == 1);
+    log.debug("filter: calling_conv={d}, is_host={}, want_host={}", .{ calling_conv, is_host, want_host });
+    ret.* = Value.boolean(is_host == want_host).raw;
+    return 0;
 }
 
 // ============================================================================

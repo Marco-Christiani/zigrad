@@ -139,27 +139,21 @@ fn find_ranked_candidates(allocator: std.mem.Allocator, record_path: []const u8,
 
 /// Extract run_secs from a tuning_record.json line via pattern matching.
 ///
-/// Looks for `]],[` followed by a float (the run_secs array element).
+/// Scans backwards from the end for the run_secs field, which sits between the
+/// decisions array and the target object: `...decisions], [<run_secs>], {target...`.
+/// Handles both float (`1.85e-05`) and integer (`10000000000`) representations.
 fn parse_run_secs(line: []const u8) ?f64 {
-    var i: usize = 0;
-    while (i + 10 < line.len) : (i += 1) {
-        if (i + 4 < line.len and
-            line[i] == ']' and line[i + 1] == ']' and
-            line[i + 2] == ',' and line[i + 3] == '[')
-        {
-            const start = i + 4;
-            if (start < line.len and std.ascii.isDigit(line[start])) {
-                var end = start;
-                while (end < line.len and line[end] != ']') : (end += 1) {}
-                if (end > start) {
-                    const num_str = line[start..end];
-                    if (std.mem.indexOfScalar(u8, num_str, 'e') != null or
-                        std.mem.indexOfScalar(u8, num_str, '.') != null)
-                    {
-                        const val = std.fmt.parseFloat(f64, num_str) catch null;
-                        if (val != null) return val;
-                    }
-                }
+    // Scan backwards from end to find ],{ (boundary between run_secs array and target object)
+    var i: usize = line.len;
+    while (i > 4) {
+        i -= 1;
+        if (line[i] == '{' and line[i - 1] == ',' and line[i - 2] == ']') {
+            // Found ],{ — now find the opening [ of the run_secs array
+            var j = i - 3;
+            while (j > 0 and line[j] != '[') j -= 1;
+            if (j > 0 and line[j] == '[') {
+                const num_str = line[j + 1 .. i - 2];
+                return std.fmt.parseFloat(f64, num_str) catch null;
             }
         }
     }

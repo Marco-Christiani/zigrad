@@ -94,6 +94,16 @@ pub const Value = struct {
         return error.UnexpectedTvmType;
     }
 
+    /// Extract an integer, handling both raw kTVMFFIInt and IntImm objects.
+    ///
+    /// TVM sometimes returns integers as raw `kTVMFFIInt` values and sometimes
+    /// as `IntImm` objects with a `value` field. This method tries both.
+    pub fn to_int(self: Value) ?i64 {
+        if (self.as_int()) |v| return v;
+        if (get_field(self, "value")) |field_val| return field_val.as_int() else |_| {}
+        return null;
+    }
+
     pub fn is_none(self: Value) bool {
         return self.raw.type_index == c.kTVMFFINone;
     }
@@ -577,3 +587,64 @@ pub const Array = struct {
     pub const as_value = helpers.as_value(Array);
     pub const deinit = helpers.deinit(Array);
 };
+
+// ============================================================================
+// Map — TVM runtime Map wrapper (tvm/ffi/container/map.h)
+// ============================================================================
+
+/// Typed wrapper for TVM's `ffi.Map`.
+///
+/// Provides typed access to map construction, size, key existence, and value
+/// lookup. Owns the underlying TVM object handle and decrements its refcount
+/// on deinit.
+pub const Map = struct {
+    handle: ObjectHandle,
+    type_index: c_int = c.kTVMFFIStaticObjectBegin,
+
+    /// Wrap an existing TVM Map Value, taking a reference.
+    ///
+    /// Increments the refcount so `deinit` is safe and symmetric.
+    pub fn wrap(val: Value) !Map {
+        const obj = val.as_object() orelse return error.TvmCallFailed;
+        _ = c.TVMFFIObjectIncRef(obj);
+        return .{ .handle = .{ .ptr = obj }, .type_index = val.raw.type_index };
+    }
+
+    /// Construct a TVM Map from alternating key-value pairs.
+    pub fn from_pairs(allocator: std.mem.Allocator, pairs: []const Value) !Map {
+        const result = try call_global(allocator, "ffi.Map", pairs);
+        return .{
+            .handle = .{ .ptr = result.as_object() orelse return error.TvmCallFailed },
+            .type_index = result.raw.type_index,
+        };
+    }
+
+    /// Number of entries in the map.
+    pub fn len(self: Map, allocator: std.mem.Allocator) !usize {
+        const result = try call_global(allocator, "ffi.MapSize", &.{self.as_value()});
+        return @intCast(result.as_int() orelse return error.TvmCallFailed);
+    }
+
+    /// Check if a key exists. Key must be a TVM object (e.g. TVM String).
+    pub fn contains(self: Map, allocator: std.mem.Allocator, key: Value) !bool {
+        const result = try call_global(allocator, "ffi.MapCount", &.{ self.as_value(), key });
+        return (result.as_int() orelse 0) != 0;
+    }
+
+    /// Get value by key.
+    pub fn get(self: Map, allocator: std.mem.Allocator, key: Value) !Value {
+        return call_global(allocator, "ffi.MapGetItem", &.{ self.as_value(), key });
+    }
+
+    pub const as_value = helpers.as_value(Map);
+    pub const deinit = helpers.deinit(Map);
+};
+
+// ============================================================================
+// Node utilities
+// ============================================================================
+
+/// Deserialize a TVM object from its JSON representation.
+pub fn load_json(allocator: std.mem.Allocator, json: [:0]const u8) TvmError!Value {
+    return call_global(allocator, "node.LoadJSON", &.{Value.str(json)});
+}
