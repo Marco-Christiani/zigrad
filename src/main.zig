@@ -224,6 +224,60 @@ pub fn main() !void {
                 .trials_per_iter = trials_per_iter,
             });
         }
+        if (std.mem.eql(u8, m, "tvm-run")) {
+            if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
+            if (have_dump_pr or have_dump_mlir) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
+            var target_kind: zg.tvm_ffi.tvm_types.TargetKind = .cpu;
+            var work_dir: []const u8 = "artifacts/tvm_cache";
+
+            for (mode_args.items) |arg| {
+                if (std.mem.startsWith(u8, arg, "--shape=")) {
+                    const value = arg["--shape=".len..];
+                    var parts = std.mem.splitScalar(u8, value, 'x');
+                    shape.M = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.N = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    shape.K = std.fmt.parseInt(usize, parts.next() orelse {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    }, 10) catch {
+                        try print_usage();
+                        return error.InvalidArguments;
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "--work-dir=")) {
+                    work_dir = arg["--work-dir=".len..];
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--cuda") or std.mem.eql(u8, arg, "--gpu")) {
+                    target_kind = .cuda;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--cpu")) {
+                    target_kind = .cpu;
+                    continue;
+                }
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return run_tvm_demo(gpa, shape.M, shape.N, shape.K, target_kind, work_dir);
+        }
         if (std.mem.eql(u8, m, "benchmark")) {
             if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
             if (have_dump_pr or have_dump_mlir) {
@@ -507,6 +561,11 @@ fn print_usage() !void {
         \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache)
         \\      --cuda/--gpu             tune for CUDA target
         \\      --cpu                    tune for CPU target (default)
+        \\  tvm-run [options]            loads and runs a tuned TVM matmul (requires -Dtvm + prior tuning)
+        \\      --shape=MxNxK            matmul dimensions (must match tuned shape)
+        \\      --work-dir=PATH          tuning cache directory (default: artifacts/tvm_cache)
+        \\      --cuda/--gpu             run on CUDA target
+        \\      --cpu                    run on CPU target (default)
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
         \\  vjp-demo                     runs the reverse-mode demo
@@ -525,6 +584,134 @@ fn print_usage() !void {
     );
 
     try out.flush();
+}
+
+fn run_tvm_demo(
+    gpa: std.mem.Allocator,
+    M: usize,
+    N: usize,
+    K: usize,
+    target_kind: zg.tvm_ffi.tvm_types.TargetKind,
+    base_work_dir: []const u8,
+) !void {
+    const tvm_api = zg.tvm_ffi.tvm_api;
+    const tvm_types = zg.tvm_ffi.tvm_types;
+    const dlpack_mod = zg.tvm_ffi.dlpack;
+
+    const target_suffix: []const u8 = switch (target_kind) {
+        .cpu => "cpu",
+        .cuda => "cuda",
+    };
+    const work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_work_dir, target_suffix });
+    defer gpa.free(work_dir);
+
+    // Load tuned module
+    try tvm_api.ensure_loaded(gpa);
+    var tuned = try zg.tvm.module.load(gpa, .{ .work_dir = work_dir });
+    defer tuned.deinit();
+
+    // Allocate and fill inputs
+    const a = try gpa.alloc(f32, M * K);
+    defer gpa.free(a);
+    const b = try gpa.alloc(f32, K * N);
+    defer gpa.free(b);
+    const result = try gpa.alloc(f32, M * N);
+    defer gpa.free(result);
+
+    for (a, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.1;
+    for (b, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.1;
+    @memset(result, 0);
+
+    const func_handle = tuned.main_func.as_object() orelse return error.TvmCallFailed;
+
+    // Execute
+    var timer = try std.time.Timer.start();
+
+    switch (target_kind) {
+        .cpu => {
+            var shape_a = [_]i64{ @intCast(M), @intCast(K) };
+            var shape_b = [_]i64{ @intCast(K), @intCast(N) };
+            var shape_c = [_]i64{ @intCast(M), @intCast(N) };
+
+            var dl_a = dlpack_mod.ManagedTensor.borrowing(
+                dlpack_mod.Tensor.init_contiguous(f32, @constCast(a), &shape_a),
+            );
+            var dl_b = dlpack_mod.ManagedTensor.borrowing(
+                dlpack_mod.Tensor.init_contiguous(f32, @constCast(b), &shape_b),
+            );
+            var dl_c = dlpack_mod.ManagedTensor.borrowing(
+                dlpack_mod.Tensor.init_contiguous(f32, result, &shape_c),
+            );
+
+            var t_a = try tvm_types.Tensor.from_dlpack(&dl_a);
+            defer t_a.deinit();
+            var t_b = try tvm_types.Tensor.from_dlpack(&dl_b);
+            defer t_b.deinit();
+            var t_c = try tvm_types.Tensor.from_dlpack(&dl_c);
+            defer t_c.deinit();
+
+            _ = try tvm_api.call_handle(gpa, func_handle, &.{
+                t_a.as_value(), t_b.as_value(), t_c.as_value(),
+            });
+        },
+        .cuda => {
+            var shape_a = [_]i64{ @intCast(M), @intCast(K) };
+            var shape_b = [_]i64{ @intCast(K), @intCast(N) };
+            var shape_c = [_]i64{ @intCast(M), @intCast(N) };
+
+            var t_a = try tvm_types.Tensor.allocate(gpa, @constCast(a), &shape_a, .cuda);
+            defer t_a.deinit();
+            var t_b = try tvm_types.Tensor.allocate(gpa, @constCast(b), &shape_b, .cuda);
+            defer t_b.deinit();
+
+            const c_init = try gpa.alloc(f32, M * N);
+            defer gpa.free(c_init);
+            @memset(c_init, 0);
+            var t_c = try tvm_types.Tensor.allocate(gpa, c_init, &shape_c, .cuda);
+            defer t_c.deinit();
+
+            _ = try tvm_api.call_handle(gpa, func_handle, &.{
+                t_a.as_value(), t_b.as_value(), t_c.as_value(),
+            });
+
+            try t_c.copy_to_host(gpa, result);
+        },
+    }
+
+    const elapsed_ns = timer.read();
+    const elapsed_us = @as(f64, @floatFromInt(elapsed_ns)) / 1000.0;
+
+    // Verify with naive reference
+    const ref = try gpa.alloc(f32, M * N);
+    defer gpa.free(ref);
+    @memset(ref, 0);
+    for (0..M) |i| {
+        for (0..K) |kk| {
+            for (0..N) |j| {
+                ref[i * N + j] += a[i * K + kk] * b[kk * N + j];
+            }
+        }
+    }
+
+    var max_err: f32 = 0;
+    for (result, ref) |got, expected| {
+        const diff = @abs(got - expected);
+        if (diff > max_err) max_err = diff;
+    }
+
+    const pass = max_err < 1e-3;
+
+    var buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&buf);
+    const out = &stdout_writer.interface;
+    try out.print("tvm-run: {d}x{d}x{d} ({s}) candidate={d} tune={d:.1}us exec={d:.1}us max_err={e:.3} {s}\n", .{
+        M, N, K, target_suffix,
+        tuned.best_candidate, tuned.best_time_us, elapsed_us, max_err,
+        if (pass) "PASS" else "FAIL",
+    });
+    try out.flush();
+
+    if (!pass) return error.VerificationFailed;
 }
 
 fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
