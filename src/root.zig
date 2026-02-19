@@ -24,11 +24,6 @@ pub const lower = @import("lower/root.zig");
 pub const kernel = @import("kernel.zig");
 
 // TVM subsystem
-pub const tvm_ffi = struct {
-    pub const dlpack = @import("ffi/dlpack.zig");
-    pub const tvm_api = @import("ffi/tvm/api.zig");
-    pub const tvm_types = @import("ffi/tvm/types.zig");
-};
 pub const tvm = @import("tvm/root.zig");
 
 // Kernels

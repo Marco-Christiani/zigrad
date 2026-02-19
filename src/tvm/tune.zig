@@ -5,18 +5,21 @@
 //! Builder and runner callbacks receive provider state through TVM's
 //! userdata pointer — no globals.
 const std = @import("std");
-const tvm_types = @import("../ffi/tvm/types.zig");
-const api = @import("../ffi/tvm/api.zig");
-const c = @import("../ffi/tvm/c.zig");
-const dlpack = @import("../ffi/dlpack.zig");
+const tir = @import("../c/tvm/tir.zig");
+const runtime = @import("../c/tvm/runtime.zig");
+const ms = @import("../c/tvm/meta_schedule.zig");
+const compile = @import("../c/tvm/compile.zig");
+const api = @import("../c/tvm/api.zig");
+const c = @import("../c/tvm/c.zig");
+const dlpack = @import("../c/dlpack.zig");
 const Value = api.Value;
-const Array = tvm_types.Array;
-const IRModule = tvm_types.IRModule;
-const RuntimeModule = tvm_types.RuntimeModule;
-const Target = tvm_types.Target;
-const Tensor = tvm_types.Tensor;
-const TargetKind = tvm_types.TargetKind;
-const MetaSchedule = tvm_types.MetaSchedule;
+const Array = api.Array;
+const IRModule = tir.IRModule;
+const RuntimeModule = runtime.RuntimeModule;
+const Target = tir.Target;
+const Tensor = runtime.Tensor;
+const TargetKind = tir.TargetKind;
+const MetaSchedule = ms.MetaSchedule;
 const nvrtc_callback = @import("nvrtc_callback.zig");
 
 const log = std.log.scoped(.@"zg/tvm_tune");
@@ -222,7 +225,7 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
         } }, .type_index = mod_val.raw.type_index };
         ir_mod.handle.incref();
 
-        const built_mod_result = tvm_types.lower_and_build(allocator, &ir_mod, state.target, state.target_kind);
+        const built_mod_result = compile.lower_and_build(allocator, &ir_mod, state.target, state.target_kind);
         var built_mod = built_mod_result catch {
             try results_list.append(allocator, try make_builder_error(allocator, "compilation failed"));
             continue;

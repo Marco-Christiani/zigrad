@@ -2,7 +2,7 @@
 //!
 //! Provides Value (wraps TVMFFIAny), ObjectHandle (refcounted), library
 //! loading (dlopen with RTLD_GLOBAL), and call_global / create_packed_func
-//! helpers. All typed wrappers in types.zig are built on top of this layer.
+//! helpers. All typed wrappers (tir.zig, runtime.zig, etc.) are built on top of this layer.
 const std = @import("std");
 const c = @import("c.zig");
 
@@ -489,3 +489,56 @@ pub fn make_tvm_string(s: []const u8) TvmError!Value {
     }
     return .{ .raw = out };
 }
+
+// ============================================================================
+// Array — TVM runtime Array wrapper (tvm/ffi/container/array.h)
+// ============================================================================
+
+/// Typed wrapper for TVM's `ffi.Array`.
+///
+/// Provides typed access to array construction, length, and element access.
+/// Owns the underlying TVM object handle and decrements its refcount on deinit.
+pub const Array = struct {
+    handle: ObjectHandle,
+    type_index: c_int = c.kTVMFFIStaticObjectBegin,
+
+    /// Wrap an existing TVM array Value, taking a reference.
+    ///
+    /// Increments the refcount so `deinit` is safe and symmetric.
+    /// Use this for callback arguments where the caller retains ownership.
+    pub fn wrap(val: Value) !Array {
+        const obj = val.as_object() orelse return error.TvmCallFailed;
+        _ = c.TVMFFIObjectIncRef(obj);
+        return .{ .handle = .{ .ptr = obj }, .type_index = val.raw.type_index };
+    }
+
+    /// Construct a TVM Array from a slice of Values.
+    pub fn from_values(allocator: std.mem.Allocator, items: []const Value) !Array {
+        const result = try call_global(allocator, "ffi.Array", items);
+        return .{
+            .handle = .{ .ptr = result.as_object() orelse return error.TvmCallFailed },
+            .type_index = result.raw.type_index,
+        };
+    }
+
+    /// Number of elements in the array.
+    pub fn len(self: Array, allocator: std.mem.Allocator) !usize {
+        const result = try call_global(allocator, "ffi.ArraySize", &.{self.as_value()});
+        return @intCast(result.as_int() orelse return error.TvmCallFailed);
+    }
+
+    /// Get the element at `idx`.
+    pub fn get(self: Array, allocator: std.mem.Allocator, idx: usize) !Value {
+        return call_global(allocator, "ffi.ArrayGetItem", &.{
+            self.as_value(), Value.int(@intCast(idx)),
+        });
+    }
+
+    pub fn as_value(self: Array) Value {
+        return self.handle.to_value(self.type_index);
+    }
+
+    pub fn deinit(self: *Array) void {
+        self.handle.deinit();
+    }
+};

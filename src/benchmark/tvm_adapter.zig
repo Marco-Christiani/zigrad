@@ -5,8 +5,8 @@
 /// GPU path allocates device tensors and copies data.
 const std = @import("std");
 const zg = @import("../root.zig");
-const dlpack = zg.tvm_ffi.dlpack;
-const tvm_types = zg.tvm_ffi.tvm_types;
+const dlpack = zg.tvm.dlpack;
+const tvm_runtime = zg.tvm.runtime;
 const tvm_module = zg.tvm.module;
 const build_options = @import("build_options");
 
@@ -39,11 +39,11 @@ pub fn execute_with_module(
     );
 
     // Convert to TVM tensors
-    var t_a = try tvm_types.Tensor.from_dlpack(&dl_a);
+    var t_a = try tvm_runtime.Tensor.from_dlpack(&dl_a);
     defer t_a.deinit();
-    var t_b = try tvm_types.Tensor.from_dlpack(&dl_b);
+    var t_b = try tvm_runtime.Tensor.from_dlpack(&dl_b);
     defer t_b.deinit();
-    var t_c = try tvm_types.Tensor.from_dlpack(&dl_c);
+    var t_c = try tvm_runtime.Tensor.from_dlpack(&dl_c);
     defer t_c.deinit();
 
     // Execute via typed invoke
@@ -70,16 +70,16 @@ pub fn execute_gpu_with_module(
     var shape_b = [_]i64{ @intCast(k), @intCast(n) };
     var shape_c = [_]i64{ @intCast(m), @intCast(n) };
 
-    var t_a = try tvm_types.Tensor.allocate(allocator, @constCast(a), &shape_a, .cuda);
+    var t_a = try tvm_runtime.Tensor.allocate(allocator, @constCast(a), &shape_a, .cuda);
     defer t_a.deinit();
-    var t_b = try tvm_types.Tensor.allocate(allocator, @constCast(b), &shape_b, .cuda);
+    var t_b = try tvm_runtime.Tensor.allocate(allocator, @constCast(b), &shape_b, .cuda);
     defer t_b.deinit();
 
     // Allocate output tensor on GPU (zero-initialized)
     const c_init = try allocator.alloc(f32, m * n);
     defer allocator.free(c_init);
     @memset(c_init, 0);
-    var t_c = try tvm_types.Tensor.allocate(allocator, c_init, &shape_c, .cuda);
+    var t_c = try tvm_runtime.Tensor.allocate(allocator, c_init, &shape_c, .cuda);
     defer t_c.deinit();
 
     // Execute kernel on GPU via typed invoke

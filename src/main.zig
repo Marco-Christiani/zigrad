@@ -135,7 +135,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var target_kind: zg.tvm_ffi.tvm_types.TargetKind = .cpu;
+            var target_kind: zg.tvm.tir.TargetKind = .cpu;
             var work_dir: []const u8 = "artifacts/tvm_cache";
             var max_trials: u32 = 64;
             var trials_per_iter: u32 = 16;
@@ -207,10 +207,10 @@ pub fn main() !void {
             const full_work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
             defer gpa.free(full_work_dir);
 
-            try zg.tvm_ffi.tvm_api.ensure_loaded(gpa);
-            var ir_mod = try zg.tvm_ffi.tvm_types.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
+            try zg.tvm.ffi.ensure_loaded(gpa);
+            var ir_mod = try zg.tvm.tir.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
             defer ir_mod.deinit();
-            var target = try zg.tvm_ffi.tvm_types.Target.create(gpa, target_kind);
+            var target = try zg.tvm.tir.Target.create(gpa, target_kind);
             defer target.deinit();
 
             // A[M,K], B[K,N], C[M,N]
@@ -239,7 +239,7 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             var shape: struct { M: usize = 128, N: usize = 128, K: usize = 128 } = .{};
-            var target_kind: zg.tvm_ffi.tvm_types.TargetKind = .cpu;
+            var target_kind: zg.tvm.tir.TargetKind = .cpu;
             var work_dir: []const u8 = "artifacts/tvm_cache";
 
             for (mode_args.items) |arg| {
@@ -599,12 +599,11 @@ fn run_tvm_demo(
     M: usize,
     N: usize,
     K: usize,
-    target_kind: zg.tvm_ffi.tvm_types.TargetKind,
+    target_kind: zg.tvm.tir.TargetKind,
     base_work_dir: []const u8,
 ) !void {
-    const tvm_api = zg.tvm_ffi.tvm_api;
-    const tvm_types = zg.tvm_ffi.tvm_types;
-    const dlpack_mod = zg.tvm_ffi.dlpack;
+    const tvm_runtime = zg.tvm.runtime;
+    const dlpack_mod = zg.tvm.dlpack;
 
     const target_suffix: []const u8 = switch (target_kind) {
         .cpu => "cpu",
@@ -614,7 +613,7 @@ fn run_tvm_demo(
     defer gpa.free(work_dir);
 
     // Load tuned module
-    try tvm_api.ensure_loaded(gpa);
+    try zg.tvm.ffi.ensure_loaded(gpa);
     var tuned = try zg.tvm.module.load(gpa, .{ .work_dir = work_dir });
     defer tuned.deinit();
 
@@ -649,11 +648,11 @@ fn run_tvm_demo(
                 dlpack_mod.Tensor.init_contiguous(f32, result, &shape_c),
             );
 
-            var t_a = try tvm_types.Tensor.from_dlpack(&dl_a);
+            var t_a = try tvm_runtime.Tensor.from_dlpack(&dl_a);
             defer t_a.deinit();
-            var t_b = try tvm_types.Tensor.from_dlpack(&dl_b);
+            var t_b = try tvm_runtime.Tensor.from_dlpack(&dl_b);
             defer t_b.deinit();
-            var t_c = try tvm_types.Tensor.from_dlpack(&dl_c);
+            var t_c = try tvm_runtime.Tensor.from_dlpack(&dl_c);
             defer t_c.deinit();
 
             try tuned.invoke(gpa, &.{
@@ -665,15 +664,15 @@ fn run_tvm_demo(
             var shape_b = [_]i64{ @intCast(K), @intCast(N) };
             var shape_c = [_]i64{ @intCast(M), @intCast(N) };
 
-            var t_a = try tvm_types.Tensor.allocate(gpa, @constCast(a), &shape_a, .cuda);
+            var t_a = try tvm_runtime.Tensor.allocate(gpa, @constCast(a), &shape_a, .cuda);
             defer t_a.deinit();
-            var t_b = try tvm_types.Tensor.allocate(gpa, @constCast(b), &shape_b, .cuda);
+            var t_b = try tvm_runtime.Tensor.allocate(gpa, @constCast(b), &shape_b, .cuda);
             defer t_b.deinit();
 
             const c_init = try gpa.alloc(f32, M * N);
             defer gpa.free(c_init);
             @memset(c_init, 0);
-            var t_c = try tvm_types.Tensor.allocate(gpa, c_init, &shape_c, .cuda);
+            var t_c = try tvm_runtime.Tensor.allocate(gpa, c_init, &shape_c, .cuda);
             defer t_c.deinit();
 
             try tuned.invoke(gpa, &.{

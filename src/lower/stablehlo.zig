@@ -12,8 +12,8 @@
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
-const mlir = @import("../ffi/mlir/mlir.zig");
-const stablehlo = @import("../ffi/mlir/dialects/stablehlo.zig");
+const mlir = @import("../c/mlir/mlir.zig");
+const stablehlo = @import("../c/mlir/dialects/stablehlo.zig");
 const pass = @import("../pipeline/pass.zig");
 const log = std.log.scoped(.@"zg/lower_stablehlo");
 

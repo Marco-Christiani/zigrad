@@ -572,7 +572,7 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
 /// Enumerate TVM FFI global functions.
 /// Writes available operations to stdout.
 pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
-    const tvm_api = zg.tvm_ffi.tvm_api;
+    const tvm_api = zg.tvm.ffi;
 
     try tvm_api.ensure_loaded(allocator);
 

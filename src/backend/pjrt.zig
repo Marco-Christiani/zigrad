@@ -16,9 +16,9 @@
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
-const plugin = @import("../ffi/pjrt/plugin.zig");
-const pjrt_api = @import("../ffi/pjrt/api.zig");
-const pjrt_types = @import("../ffi/pjrt/types.zig");
+const plugin = @import("../c/pjrt/plugin.zig");
+const pjrt_api = @import("../c/pjrt/api.zig");
+const pjrt_types = @import("../c/pjrt/types.zig");
 // Re-export handle types for callers
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;

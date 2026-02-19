@@ -1,10 +1,10 @@
 const std = @import("std");
 const build_options = @import("build_options");
-pub const c = @import("ffi/tvm/c.zig");
-const dlpack = @import("ffi/dlpack.zig");
+pub const c = @import("c/tvm/c.zig");
+const dlpack = @import("c/dlpack.zig");
 
 // TVM subsystem modules
-const tvm_common = @import("tvm/common.zig");
+const tvm_tir = @import("c/tvm/tir.zig");
 const tvm_correctness = @import("tvm/correctness.zig");
 const nvrtc_callback = @import("tvm/nvrtc_callback.zig");
 
@@ -709,7 +709,7 @@ pub fn print_global_functions(allocator: std.mem.Allocator) !void {
 }
 
 // Re-export TargetKind from common for convenience
-pub const TargetKind = tvm_common.TargetKind;
+pub const TargetKind = tvm_tir.TargetKind;
 
 // ============================================================================
 // MetaSchedule Autotuning Infrastructure

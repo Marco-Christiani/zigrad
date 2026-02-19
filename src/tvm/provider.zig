@@ -4,12 +4,13 @@
 //! Handles matmul (dot/dot_general) kernels via MetaSchedule autotuning.
 //! No TVM C types cross this boundary — only PR types and KernelArtifact.
 const std = @import("std");
-const tvm_types = @import("../ffi/tvm/types.zig");
-const tvm_api = @import("../ffi/tvm/api.zig");
+const tir = @import("../c/tvm/tir.zig");
+const tvm_api = @import("../c/tvm/api.zig");
+const tvm_compile = @import("../c/tvm/compile.zig");
 const tune_mod = @import("tune.zig");
 const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
-const TargetKind = @import("../ffi/tvm/types.zig").TargetKind;
+const TargetKind = tir.TargetKind;
 
 const log = std.log.scoped(.@"zg/tvm_provider");
 
@@ -55,14 +56,14 @@ pub const TvmProvider = struct {
         tvm_api.ensure_loaded(allocator) catch return error.CompileFailed;
 
         // Build matmul IRModule
-        var ir_mod = tvm_types.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch |err| {
+        var ir_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch |err| {
             log.err("build_matmul_tir failed: {s}", .{@errorName(err)});
             return error.CompileFailed;
         };
         defer ir_mod.deinit();
 
         // Create target
-        var target = tvm_types.Target.create(allocator, self.target_kind) catch return error.CompileFailed;
+        var target = tir.Target.create(allocator, self.target_kind) catch return error.CompileFailed;
         defer target.deinit();
 
         // Tune
@@ -90,11 +91,11 @@ pub const TvmProvider = struct {
         };
 
         // Rebuild with tuned schedule (re-create IRModule since tuning consumed it)
-        var tuned_mod = tvm_types.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch
+        var tuned_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch
             return error.CompileFailed;
 
         // Lower and build
-        var built = tvm_types.lower_and_build(allocator, &tuned_mod, target, self.target_kind) catch |err| {
+        var built = tvm_compile.lower_and_build(allocator, &tuned_mod, target, self.target_kind) catch |err| {
             log.err("lower_and_build failed: {s}", .{@errorName(err)});
             tuned_mod.deinit();
             return error.CompileFailed;
