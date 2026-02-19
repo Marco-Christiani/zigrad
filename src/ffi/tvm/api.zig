@@ -377,6 +377,73 @@ pub fn create_packed_func(
     return Value.from_object(func_handle, c.kTVMFFIFunction);
 }
 
+// ============================================================================
+// Object reflection
+// ============================================================================
+
+/// Read a named field from a TVM object using the runtime reflection system.
+///
+/// Uses `TVMFFIGetTypeInfo` to look up the object's type metadata, finds the
+/// field by name, then calls the field's getter at (obj_ptr + offset).
+pub fn get_field(obj: Value, field_name: []const u8) TvmError!Value {
+    if (obj.raw.type_index < c.kTVMFFIStaticObjectBegin) {
+        log.warn("get_field: not an object (type_index={d})", .{obj.raw.type_index});
+        return error.TvmCallFailed;
+    }
+    const obj_ptr = obj.raw.unnamed_1.v_obj orelse {
+        log.warn("get_field: null object", .{});
+        return error.TvmCallFailed;
+    };
+
+    const type_info: ?*const c.TVMFFITypeInfo = c.TVMFFIGetTypeInfo(obj.raw.type_index);
+    if (type_info == null) {
+        log.warn("get_field: TVMFFIGetTypeInfo({d}) returned null", .{obj.raw.type_index});
+        return error.TvmCallFailed;
+    }
+
+    const num_fields: usize = @intCast(type_info.?.num_fields);
+    const fields = type_info.?.fields orelse {
+        log.warn("get_field: type has no fields (type_index={d})", .{obj.raw.type_index});
+        return error.TvmCallFailed;
+    };
+
+    // Search for field by name
+    var found_field: ?*const c.TVMFFIFieldInfo = null;
+    for (0..num_fields) |i| {
+        const field = &fields[i];
+        const name = field.name;
+        if (name.data != null and name.size == field_name.len) {
+            if (std.mem.eql(u8, name.data[0..name.size], field_name)) {
+                found_field = field;
+                break;
+            }
+        }
+    }
+
+    const field = found_field orelse {
+        log.debug("get_field: '{s}' not found (type_index={d}, {d} fields)", .{
+            field_name, obj.raw.type_index, num_fields,
+        });
+        return error.TvmCallFailed;
+    };
+
+    const getter = field.getter orelse {
+        log.warn("get_field: '{s}' has no getter", .{field_name});
+        return error.TvmCallFailed;
+    };
+
+    // Compute field address: obj_ptr + offset
+    const offset: usize = @intCast(field.offset);
+    const field_ptr: *anyopaque = @ptrCast(@as([*]u8, @ptrCast(obj_ptr)) + offset);
+
+    var result: c.TVMFFIAny = Value.none().raw;
+    if (getter(field_ptr, &result) != 0) {
+        log.warn("get_field: getter for '{s}' failed", .{field_name});
+        return error.TvmCallFailed;
+    }
+    return .{ .raw = result };
+}
+
 /// Create a TVM String object from a Zig slice.
 pub fn make_tvm_string(s: []const u8) TvmError!Value {
     var bytes: c.TVMFFIByteArray = .{ .data = s.ptr, .size = s.len };

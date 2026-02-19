@@ -200,6 +200,13 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
 
+            const target_suffix: []const u8 = switch (target_kind) {
+                .cpu => "cpu",
+                .cuda => "cuda",
+            };
+            const full_work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
+            defer gpa.free(full_work_dir);
+
             try zg.tvm_ffi.tvm_api.ensure_loaded(gpa);
             var ir_mod = try zg.tvm_ffi.tvm_types.build_matmul_tir(gpa, shape.M, shape.N, shape.K);
             defer ir_mod.deinit();
@@ -220,7 +227,7 @@ pub fn main() !void {
             defer gpa.free(tensor_shapes);
 
             return zg.tvm.tune.tune(gpa, ir_mod, target, target_kind, tensor_shapes, .{
-                .work_dir = work_dir,
+                .work_dir = full_work_dir,
                 .max_trials = max_trials,
                 .trials_per_iter = trials_per_iter,
             });

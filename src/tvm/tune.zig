@@ -353,8 +353,8 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
         };
         defer allocator.free(path_z);
 
-        const loaded = api.call_global(allocator, "runtime.ModuleLoadFromFile", &.{
-            Value.str(path_z), Value.str(""),
+        const loaded = api.call_global(allocator, "ffi.ModuleLoadFromFile", &.{
+            Value.str(path_z),
         }) catch {
             try results_list.append(allocator, try make_runner_error(allocator, "load failed"));
             continue;
@@ -487,13 +487,8 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
 // Helpers
 // ============================================================================
 
-fn ffi_get_attr(allocator: std.mem.Allocator, obj: Value, attr_name: []const u8) !Value {
-    const attr_z = try api.cstr_alloc(allocator, attr_name);
-    defer allocator.free(attr_z);
-    return api.call_global(allocator, "ir.BaseFunc_Attrs", &.{ obj, Value.str(attr_z) }) catch {
-        // Try generic object attribute access
-        return api.call_global(allocator, "ffi.ObjectGetAttr", &.{ obj, Value.str(attr_z) });
-    };
+fn ffi_get_attr(_: std.mem.Allocator, obj: Value, attr_name: []const u8) !Value {
+    return api.get_field(obj, attr_name);
 }
 
 fn make_noop_callback() !Value {
@@ -602,18 +597,64 @@ fn make_builder_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
     return api.call_global(allocator, "meta_schedule.BuilderResult", &.{ Value.none(), Value.str(msg_z) });
 }
 
+/// Create a RunnerFuture wrapping a RunnerResult with an error message.
+///
+/// RunnerFuture(f_done: () -> bool, f_result: () -> RunnerResult).
 fn make_runner_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
     const msg_z = try api.cstr_alloc(allocator, msg);
     defer allocator.free(msg_z);
-    return api.call_global(allocator, "meta_schedule.RunnerFuture", &.{
-        Value.none(), // run_secs
+    const runner_result = try api.call_global(allocator, "meta_schedule.RunnerResult", &.{
+        Value.none(), // run_secs (None for error)
         Value.str(msg_z), // error_msg
     });
+    return make_runner_future(runner_result);
 }
 
+/// Create a RunnerFuture wrapping a RunnerResult with timing data.
 fn make_runner_success(allocator: std.mem.Allocator, run_secs: f64) !Value {
-    return api.call_global(allocator, "meta_schedule.RunnerFuture", &.{
-        Value.float(run_secs),
+    // RunnerResult expects run_secs as Array[FloatImm]
+    const run_secs_arr = try api.call_global(allocator, "ffi.Array", &.{Value.float(run_secs)});
+    const runner_result = try api.call_global(allocator, "meta_schedule.RunnerResult", &.{
+        run_secs_arr, // run_secs as Array
         Value.none(), // no error
     });
+    return make_runner_future(runner_result);
+}
+
+/// Wrap a RunnerResult in a RunnerFuture with trivial done/result callbacks.
+fn make_runner_future(runner_result: Value) !Value {
+    // f_done: always returns true
+    const done_cb = struct {
+        fn f(_: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
+            result.* = Value.boolean(true).raw;
+            return 0;
+        }
+    }.f;
+    const f_done = try api.create_packed_func(null, done_cb, null);
+    defer f_done.decref();
+
+    // f_result: captures runner_result and returns it
+    // Since we can't capture in a C callback, store the result value
+    // in a static-like manner via the self pointer.
+    const ResultHolder = struct {
+        raw: c.TVMFFIAny,
+        fn callback(self_ptr: ?*anyopaque, _: [*c]const c.TVMFFIAny, _: i32, result: [*c]c.TVMFFIAny) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(self_ptr orelse return -1));
+            result.* = self.raw;
+            return 0;
+        }
+    };
+    // Allocate holder on the heap so it survives the callback
+    var holder = try std.heap.c_allocator.create(ResultHolder);
+    holder.raw = runner_result.raw;
+
+    const f_result = try api.create_packed_func(@ptrCast(holder), ResultHolder.callback, struct {
+        fn dtor(self_ptr: ?*anyopaque) callconv(.c) void {
+            const self: *ResultHolder = @ptrCast(@alignCast(self_ptr orelse return));
+            std.heap.c_allocator.destroy(self);
+        }
+    }.dtor);
+    defer f_result.decref();
+
+    return api.call_global(std.heap.c_allocator, "meta_schedule.RunnerFuture", &.{ f_done, f_result });
 }

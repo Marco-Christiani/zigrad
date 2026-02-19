@@ -41,6 +41,8 @@ pub const IRModule = struct {
             if (pass_val.as_object()) |obj| _ = c.TVMFFIObjectDecRef(obj);
         }
 
+        const old_ptr = self.handle.ptr;
+
         // Run it: transform.RunPass(pass, module) -> module
         const result = try api.call_global(allocator, "transform.RunPass", &.{ pass_val, self.as_value() });
 
@@ -51,11 +53,19 @@ pub const IRModule = struct {
         }
         self.handle.ptr = new_obj;
         self.type_index = result.raw.type_index;
+        log.debug("applied {s} (ptr {s}, type_index {d}→{d})", .{
+            pass.name(),
+            if (old_ptr != new_obj) "changed" else "same",
+            @as(c_int, if (old_ptr == new_obj) self.type_index else 0),
+            result.raw.type_index,
+        });
     }
 
     /// Apply a pass, ignoring failure (for optional/non-fatal passes).
     pub fn apply_pass_optional(self: *IRModule, allocator: std.mem.Allocator, pass: TirPass) void {
-        self.apply_pass(allocator, pass) catch {};
+        self.apply_pass(allocator, pass) catch {
+            log.debug("optional pass {s} failed (non-fatal)", .{pass.name()});
+        };
     }
 };
 
@@ -95,7 +105,7 @@ pub const Target = struct {
 
     /// Create a composite target with a host target attached.
     pub fn with_host(self: Target, allocator: std.mem.Allocator, host: Target) !Target {
-        const result = try api.call_global(allocator, "target.TargetWithHost", &.{
+        const result = try api.call_global(allocator, "target.WithHost", &.{
             self.as_value(),
             host.as_value(),
         });
@@ -123,8 +133,8 @@ pub const RuntimeModule = struct {
     pub fn load_from_file(allocator: std.mem.Allocator, path: []const u8) !RuntimeModule {
         const path_z = try api.cstr_alloc(allocator, path);
         defer allocator.free(path_z);
-        const result = try api.call_global(allocator, "runtime.ModuleLoadFromFile", &.{
-            Value.str(path_z), Value.str(""),
+        const result = try api.call_global(allocator, "ffi.ModuleLoadFromFile", &.{
+            Value.str(path_z),
         });
         return .{ .handle = .{ .ptr = result.as_object() orelse return error.TvmCallFailed } };
     }
@@ -416,13 +426,21 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, m: usize, n: usize, k: usi
 /// Pass ordering follows TVM's default_tir_pipeline (tvm/driver/build_module.py).
 /// See MEMORY.md "TVM CUDA Pipeline (Critical Pass Order)" for CUDA specifics.
 pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: Target, kind: TargetKind) !RuntimeModule {
-    // Incref the module since passes replace it
-    ir_mod.handle.incref();
+    // Phase 1: Create composite target with host, then bind.
+    // MakePackedAPI requires target->GetHost() to return a valid host target;
+    // without it, the function is returned unchanged and buffer_map is not cleared.
+    var host_target = switch (kind) {
+        .cpu => target,
+        .cuda => try Target.create(allocator, .cpu),
+    };
+    defer if (kind == .cuda) host_target.deinit();
 
-    // BindTarget
-    try ir_mod.apply_pass(allocator, .{ .bind_target = .{ .target = target } });
+    var composite_target = try target.with_host(allocator, host_target);
+    defer composite_target.deinit();
 
-    // Core lowering (order matters)
+    try ir_mod.apply_pass(allocator, .{ .bind_target = .{ .target = composite_target } });
+
+    // Phase 2: Core lowering
     ir_mod.apply_pass_optional(allocator, .lower_cross_thread_reduction);
     try ir_mod.apply_pass(allocator, .lower_init_block);
     try ir_mod.apply_pass(allocator, .plan_and_update_buffer_allocation);
@@ -433,7 +451,7 @@ pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: 
     try ir_mod.apply_pass(allocator, .lower_opaque_block);
     try ir_mod.apply_pass(allocator, .flatten_buffer);
 
-    // Loop transforms
+    // Phase 3: Loop transforms
     ir_mod.apply_pass_optional(allocator, .{ .narrow_data_type = .{ .target_bits = 32 } });
     ir_mod.apply_pass_optional(allocator, .loop_partition);
     ir_mod.apply_pass_optional(allocator, .{ .vectorize_loop = .{ .enable = true } });
@@ -445,11 +463,11 @@ pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: 
     ir_mod.apply_pass_optional(allocator, .remove_no_op);
     ir_mod.apply_pass_optional(allocator, .{ .common_subexpr_elim = .{ .enable_cse = true, .enable_equiv = false } });
 
-    // Entry function annotation
+    // Phase 4: Entry function annotation
     ir_mod.apply_pass_optional(allocator, .verify_memory);
     try ir_mod.apply_pass(allocator, .annotate_entry_func);
 
-    // CUDA-specific pre-SplitHostDevice passes
+    // Phase 5: CUDA-specific pre-SplitHostDevice
     if (kind == .cuda) {
         ir_mod.apply_pass_optional(allocator, .{ .thread_sync = .{ .scope = "shared" } });
         ir_mod.apply_pass_optional(allocator, .{ .thread_sync = .{ .scope = "shared.dyn" } });
@@ -459,16 +477,15 @@ pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: 
         try ir_mod.apply_pass(allocator, .annotate_device_regions);
     }
 
+    // Phase 6: Host/device split and packed API
     try ir_mod.apply_pass(allocator, .split_host_device);
-
     if (kind == .cuda) {
         ir_mod.apply_pass_optional(allocator, .merge_shared_memory_allocations);
     }
-
     try ir_mod.apply_pass(allocator, .make_packed_api);
     ir_mod.apply_pass_optional(allocator, .lower_device_kernel_launch);
 
-    // Finalization — target-specific
+    // Phase 7: Target-specific finalization and build
     switch (kind) {
         .cpu => {
             ir_mod.apply_pass_optional(allocator, .lower_tvm_builtin);
@@ -480,15 +497,17 @@ pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: 
             return try build_module(allocator, ir_mod.*, target);
         },
         .cuda => {
-            // Filter + finalize host and device separately, then build and link.
             return try build_cuda_module(allocator, ir_mod.*, target);
         },
     }
 }
 
-/// Build a (CPU) RuntimeModule from a lowered IRModule.
+/// Build a (CPU) RuntimeModule from a lowered IRModule via `target.build.llvm`.
 fn build_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Target) !RuntimeModule {
-    const result = try api.call_global(allocator, "target.build", &.{ ir_mod.as_value(), target.as_value() });
+    const result = try api.call_global(allocator, "target.build.llvm", &.{
+        ir_mod.as_value(),
+        target.as_value(),
+    });
     const obj = result.as_object() orelse return error.TvmCallFailed;
     return .{ .handle = .{ .ptr = obj } };
 }
@@ -507,7 +526,7 @@ fn build_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Tar
     device_mod.apply_pass_optional(allocator, .lower_intrin);
 
     // Build device (CUDA/PTX via NVRTC)
-    const device_built = try api.call_global(allocator, "target.build", &.{ device_mod.as_value(), target.as_value() });
+    const device_built = try api.call_global(allocator, "target.build.cuda", &.{ device_mod.as_value(), target.as_value() });
     defer device_built.decref();
 
     // Filter host functions
@@ -524,10 +543,10 @@ fn build_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Tar
     // Build host (LLVM)
     var host_target = try Target.create(allocator, .cpu);
     defer host_target.deinit();
-    const host_built = try api.call_global(allocator, "target.build", &.{ host_mod.as_value(), host_target.as_value() });
+    const host_built = try api.call_global(allocator, "target.build.llvm", &.{ host_mod.as_value(), host_target.as_value() });
 
     // Link device into host
-    _ = try api.call_global(allocator, "ffi.ModuleImport", &.{ host_built, device_built });
+    _ = try api.call_global(allocator, "ffi.ModuleImportModule", &.{ host_built, device_built });
 
     const obj = host_built.as_object() orelse return error.TvmCallFailed;
     return .{ .handle = .{ .ptr = obj } };
