@@ -113,7 +113,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
     var exe = compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
-    }, dump_pr, dump_mlir) catch |err| {
+    }, dump_pr, dump_mlir, null) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -135,7 +135,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     var exe = try compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main_vjp",
-    }, dump_pr, dump_mlir);
+    }, dump_pr, dump_mlir, null);
     defer backend.deinit_executable(&exe);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
@@ -505,6 +505,48 @@ pub fn run_train_demo(
     std.log.info("OK: train-demo executed", .{});
 }
 
+/// End-to-end kernel provider demo using temporary single-dispatch custom_call.
+///
+/// This mode requires TVM support and typed-FFI availability. It intentionally
+/// hard-fails if typed-FFI extension is missing.
+pub fn run_kernel_provider_demo(
+    allocator: std.mem.Allocator,
+    backend: *zg.backend.PjrtBackend,
+    device: *const zg.backend.pjrt.Device,
+    dump_pr: ?*zg.pipeline.DumpConfig,
+    dump_mlir: ?*zg.pipeline.DumpConfig,
+) !void {
+    if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
+    try backend.require_typed_ffi();
+
+    var program = try build_kernelized_demo_program(allocator);
+    defer program.deinit();
+
+    var registry = zg.kernel.KernelRegistry.init(allocator);
+    defer registry.deinit();
+
+    var provider_impl = zg.tvm.provider.TvmProvider{
+        .allocator = allocator,
+        .target_kind = .cpu,
+        .work_dir = "artifacts/tvm_cache",
+        .max_trials = 8,
+        .trials_per_iter = 4,
+    };
+    const providers = [_]zg.kernel.KernelProvider{provider_impl.kernel_provider()};
+
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+    var exe = try compile_program(backend, allocator, &program, device, .{
+        .encoding = lower_encoding,
+        .entry_name = "main",
+    }, dump_pr, dump_mlir, .{
+        .registry = &registry,
+        .providers = providers[0..],
+    });
+    defer backend.deinit_executable(&exe);
+
+    return run_demo_executable(allocator, backend, device, &exe);
+}
+
 pub fn compile_program(
     backend_handle: *zg.backend.PjrtBackend,
     allocator: std.mem.Allocator,
@@ -513,6 +555,7 @@ pub fn compile_program(
     lower_cfg: zg.lower.LowerPassConfig,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    kernelize_cfg: ?KernelizeConfig,
 ) !zg.backend.pjrt.LoadedExecutable {
     var lower_cfg_mut = lower_cfg;
 
@@ -526,6 +569,16 @@ pub fn compile_program(
         dump_pr_local.?.entry_name = dump_pr_local.?.entry_name orelse lower_cfg.entry_name;
         try passes.append(allocator, zg.pipeline.dump_pr_pass_with_config(&dump_pr_local.?));
     }
+
+    var kernelize_state: ?zg.pipeline.KernelizePass = null;
+    if (kernelize_cfg) |cfg| {
+        kernelize_state = .{
+            .registry = cfg.registry,
+            .providers = cfg.providers,
+        };
+        try passes.append(allocator, kernelize_state.?.pass());
+    }
+
     try passes.append(allocator, zg.lower.validate_pass);
     try passes.append(allocator, zg.lower.lower_pass_with_config(&lower_cfg_mut));
 
@@ -550,6 +603,13 @@ pub fn compile_program(
 
     return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, .{});
 }
+
+pub const KernelizeConfig = struct {
+    /// Destination registry where kernel artifacts are stored by kernelize pass.
+    registry: *zg.kernel.KernelRegistry,
+    /// Kernel providers available to kernelize pass (e.g. TVM).
+    providers: []const zg.kernel.KernelProvider,
+};
 
 pub fn print_pr(allocator: std.mem.Allocator) !void {
     var program = try zg.frontend.build_demo_program(allocator);
@@ -667,6 +727,29 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
         const base = @as(f32, @floatFromInt(i % 1024));
         v.* = offset + scale * base;
     }
+}
+
+fn build_kernelized_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
+    var program = zg.pr.Program.init(allocator);
+    errdefer program.deinit();
+
+    var b = try zg.pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a_id = try b.param_tensor(.f32, &.{ 2, 3 });
+    const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
+    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("matmul_region", .{ .kernelize = "tvm" });
+    const dot_id = try b.dot(a_id, b_id);
+    try b.pop_region();
+
+    const add_id = try b.add(dot_id, c_id);
+    const out_id = try b.multiply(add_id, c_id);
+
+    const func = try b.finish(&.{out_id});
+    try program.add_function(func);
+    return program;
 }
 
 fn fill_inputs(x: []f32) void {

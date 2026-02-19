@@ -775,6 +775,8 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
 
     const target = pr.param_call_target_name(eqn_params) orelse return error.InvalidProgram;
     const has_side_effect = pr.param_has_side_effect(eqn_params) orelse return error.InvalidProgram;
+    const kernel_key = pr.param_call_kernel_key(eqn_params);
+    const provider_name = pr.param_call_provider_name(eqn_params);
 
     const out_id = outs[0];
     const out_tensor = try ctx.tensor_of(out_id);
@@ -792,10 +794,24 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const target_z = ctx.arena.allocSentinel(u8, target.len, 0) catch return error.OutOfMemory;
     @memcpy(target_z, target);
 
+    // typed_ffi custom calls expect dictionary backend_config. Keep keys stable
+    // to match backend dispatcher parsing.
+    var backend_fields: [2]mlir.AttrTuple = undefined;
+    var backend_field_count: usize = 0;
+    if (kernel_key) |value| {
+        backend_fields[backend_field_count] = .{ "zigrad.kernel_key", mlir.Attribute.string(ctx.mlir_ctx, value) };
+        backend_field_count += 1;
+    }
+    if (provider_name) |value| {
+        backend_fields[backend_field_count] = .{ "zigrad.provider", mlir.Attribute.string(ctx.mlir_ctx, value) };
+        backend_field_count += 1;
+    }
+    const backend_config = mlir.Attribute.dict(ctx.mlir_ctx, backend_fields[0..backend_field_count]);
+
     const op = stablehlo.custom_call(ctx.mlir_ctx, operand_values, .{
         .call_target_name = target_z,
         .has_side_effect = has_side_effect,
-        .backend_config = mlir.Attribute.dict(ctx.mlir_ctx, &.{}),
+        .backend_config = backend_config,
         .operand_layouts = operand_layouts,
         .result_layouts = &.{result_layout},
         .api_version = .typed_ffi,

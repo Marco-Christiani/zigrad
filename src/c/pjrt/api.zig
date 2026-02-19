@@ -53,6 +53,24 @@ pub const Api = struct {
         };
     }
 
+    pub fn find_extension(self: *const Api, extension_type: c.PJRT_Extension_Type) ?*c.PJRT_Extension_Base {
+        var ext = self.pjrt_api.extension_start;
+        while (ext) |current| {
+            const current_ptr: *c.PJRT_Extension_Base = @ptrCast(current);
+            if (current_ptr.type == extension_type) return current_ptr;
+            ext = current_ptr.next;
+        }
+        return null;
+    }
+
+    /// Resolve the PJRT typed-FFI extension from the extension chain.
+    pub fn ffi_extension(self: *const Api) ?*c.PJRT_FFI {
+        const ext = self.find_extension(c.PJRT_Extension_Type_FFI) orelse return null;
+        const ffi_ext: *c.PJRT_FFI = @ptrCast(@alignCast(ext));
+        if (ffi_ext.register_handler == null) return null;
+        return ffi_ext;
+    }
+
     /// Reflection-based call wrapper
     ///
     /// Usage:

@@ -326,6 +326,13 @@ pub fn main() !void {
             }
             return demos.run_custom_call_negative(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
         }
+        if (std.mem.eql(u8, m, "kernel-provider-demo")) {
+            if (mode_args.items.len != 0) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.run_kernel_provider_demo(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
+        }
         if (std.mem.eql(u8, m, "vjp-demo")) {
             if (mode_args.items.len != 0) {
                 try print_usage();
@@ -535,7 +542,7 @@ pub fn main() !void {
     var exe = try demos.compile_program(&backend, gpa, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
-    }, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
+    }, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null, null);
     defer backend.deinit_executable(&exe);
 
     return demos.run_demo_executable(gpa, &backend, device, &exe);
@@ -576,6 +583,7 @@ fn print_usage() !void {
         \\      --cpu                    run on CPU target (default)
         \\  aot-demo                     runs the AOT compile+load demo
         \\  custom-call-neg              expects missing custom call handler
+        \\  kernel-provider-demo         runs kernelized region via single dispatch target (requires -Dtvm)
         \\  vjp-demo                     runs the reverse-mode demo
         \\  train-demo [warmup] [steps]  runs the frontend training demo
         \\  llm-ft-demo [warmup] [steps] runs a tiny LLM fine-tune demo
@@ -710,8 +718,8 @@ fn run_tvm_demo(
     var stdout_writer = std.fs.File.stdout().writer(&buf);
     const out = &stdout_writer.interface;
     try out.print("tvm-run: {d}x{d}x{d} ({s}) candidate={d} tune={d:.1}us exec={d:.1}us max_err={e:.3} {s}\n", .{
-        M, N, K, target_suffix,
-        tuned.best_candidate, tuned.best_time_us, elapsed_us, max_err,
+        M,                            N,                  K,          target_suffix,
+        tuned.best_candidate,         tuned.best_time_us, elapsed_us, max_err,
         if (pass) "PASS" else "FAIL",
     });
     try out.flush();

@@ -30,6 +30,8 @@ pub const param_broadcast_dims = core.param_broadcast_dims;
 pub const param_permutation = core.param_permutation;
 pub const param_iota_dimension = core.param_iota_dimension;
 pub const param_call_target_name = core.param_call_target_name;
+pub const param_call_kernel_key = core.param_call_kernel_key;
+pub const param_call_provider_name = core.param_call_provider_name;
 pub const param_has_side_effect = core.param_has_side_effect;
 pub const param_out_aval = core.param_out_aval;
 

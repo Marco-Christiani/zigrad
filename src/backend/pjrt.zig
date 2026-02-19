@@ -203,6 +203,15 @@ pub const Backend = struct {
         return exe.get_compiled_memory_stats(self.api);
     }
 
+    pub fn has_typed_ffi(self: *Backend) bool {
+        return self.api.ffi_extension() != null;
+    }
+
+    /// Enforce typed-FFI availability for kernelized custom_call execution.
+    pub fn require_typed_ffi(self: *Backend) !void {
+        if (!self.has_typed_ffi()) return error.TypedFfiUnavailable;
+    }
+
     pub fn device_memory_stats(self: *Backend, device: *const Device) !Device.MemoryStats {
         return device.get_memory_stats(self.api);
     }

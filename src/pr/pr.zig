@@ -116,7 +116,12 @@ pub const Param = union(enum) {
     concat_axis: i64,
     dot_general: DotGeneralParams,
     call_callee: []const u8,
+    /// StableHLO custom_call target name.
     call_target_name: []const u8,
+    /// Kernel registry lookup key for single-dispatch custom calls.
+    call_kernel_key: []const u8,
+    /// Provider identity used by runtime dispatch.
+    call_provider_name: []const u8,
     has_side_effect: bool,
     out_aval: Aval,
 };
@@ -828,6 +833,22 @@ pub fn param_call_callee(params: []const Param) ?[]const u8 {
 pub fn param_call_target_name(params: []const Param) ?[]const u8 {
     for (params) |p| switch (p) {
         .call_target_name => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_call_kernel_key(params: []const Param) ?[]const u8 {
+    for (params) |p| switch (p) {
+        .call_kernel_key => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_call_provider_name(params: []const Param) ?[]const u8 {
+    for (params) |p| switch (p) {
+        .call_provider_name => |v| return v,
         else => {},
     };
     return null;

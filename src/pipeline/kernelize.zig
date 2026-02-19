@@ -10,6 +10,13 @@
 /// 4. Registers the KA in the registry under a target name
 /// 5. Replaces the region's equations with a custom_call op
 ///
+/// Current temporary execution strategy uses one dispatcher target
+/// (`zigrad.kernel.dispatch`) for all kernelized regions. Per-region
+/// dispatch identity is carried via custom_call params and lowering emits
+/// typed-FFI backend_config attributes:
+/// - `zigrad.kernel_key`
+/// - `zigrad.provider`
+///
 /// If a provider cannot handle a region (returns Unsupported), the
 /// region's equations are left unchanged — baseline lowering handles them.
 const std = @import("std");
@@ -18,6 +25,16 @@ const kernel = @import("../kernel.zig");
 const pass_mod = @import("pass.zig");
 
 const log = std.log.scoped(.@"zg/kernelize");
+/// Temporary single custom_call target for kernelized dispatch.
+const dispatcher_target_name = "zigrad.kernel.dispatch";
+
+const RewriteCandidate = struct {
+    region: pr.Region,
+    inputs: []const pr.VarId,
+    outputs: []const pr.VarId,
+    kernel_key: []const u8,
+    provider_name: []const u8,
+};
 
 /// Kernelization pass state. Holds the registry and providers.
 ///
@@ -42,15 +59,28 @@ pub const KernelizePass = struct {
         if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
         const program = artifact.pr;
-        for (program.functions) |func| {
-            self.kernelize_function(func, ctx.allocator) catch |err| {
+        const functions: []pr.Function = @constCast(program.functions);
+        for (program.functions, 0..) |func, idx| {
+            const rewritten = self.kernelize_function(program, func, ctx.allocator) catch |err| {
                 log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
                 return error.ValidationFailed;
             };
+            functions[idx] = rewritten;
         }
     }
 
-    fn kernelize_function(self: *KernelizePass, func: pr.Function, allocator: std.mem.Allocator) !void {
+    fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator) !pr.Function {
+        if (func.regions.len == 0) return func;
+
+        var rewrites = try std.ArrayList(RewriteCandidate).initCapacity(temp_allocator, func.regions.len);
+        defer {
+            for (rewrites.items) |rewrite| {
+                temp_allocator.free(rewrite.inputs);
+                temp_allocator.free(rewrite.outputs);
+            }
+            rewrites.deinit(temp_allocator);
+        }
+
         for (func.regions) |region| {
             const provider_name = region.annotation.kernelize orelse continue;
 
@@ -59,11 +89,19 @@ pub const KernelizePass = struct {
                 continue;
             };
 
-            const desc = try kernel.describe_region(allocator, func, region);
-            defer allocator.free(desc.inputs);
-            defer allocator.free(desc.outputs);
+            const desc = try kernel.describe_region(temp_allocator, func, region);
+            defer temp_allocator.free(desc.inputs);
+            defer temp_allocator.free(desc.outputs);
 
-            const ka = provider.compile(desc, allocator) catch |err| switch (err) {
+            if (desc.outputs.len != 1) {
+                log.debug(
+                    "region '{s}' has {d} outputs; single-dispatch temporary path only supports one output",
+                    .{ region.name, desc.outputs.len },
+                );
+                continue;
+            }
+
+            const ka = provider.compile(desc, temp_allocator) catch |err| switch (err) {
                 error.Unsupported => {
                     log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ provider_name, region.name });
                     continue;
@@ -77,7 +115,48 @@ pub const KernelizePass = struct {
 
             try self.registry.put(ka.target_name, ka);
             log.debug("compiled kernel '{s}' for region '{s}' via provider '{s}'", .{ ka.target_name, region.name, provider_name });
+
+            try rewrites.append(temp_allocator, .{
+                .region = region,
+                .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
+                .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
+                .kernel_key = ka.target_name,
+                .provider_name = ka.provider_name,
+            });
         }
+
+        if (rewrites.items.len == 0) return func;
+
+        const allocator = program.allocator();
+
+        var eqns = try std.ArrayList(pr.Eqn).initCapacity(allocator, func.eqns.len);
+        var varids_store = try std.ArrayList(pr.VarId).initCapacity(allocator, func.varids_store.len);
+        var params_store = try std.ArrayList(pr.Param).initCapacity(allocator, func.params_store.len + rewrites.items.len * 5);
+
+        var eqn_index: usize = 0;
+        while (eqn_index < func.eqns.len) {
+            const rewrite = find_rewrite_starting_at(rewrites.items, eqn_index);
+            if (rewrite) |entry| {
+                try append_custom_call_eqn(allocator, &eqns, &varids_store, &params_store, func, entry);
+                eqn_index += @as(usize, @intCast(entry.region.eqn_len));
+                continue;
+            }
+
+            const eqn = func.eqns[eqn_index];
+            try append_existing_eqn(allocator, &eqns, &varids_store, &params_store, func, eqn);
+            eqn_index += 1;
+        }
+
+        return .{
+            .name = func.name,
+            .params = func.params,
+            .returns = func.returns,
+            .avals = func.avals,
+            .eqns = try eqns.toOwnedSlice(allocator),
+            .varids_store = try varids_store.toOwnedSlice(allocator),
+            .params_store = try params_store.toOwnedSlice(allocator),
+            .regions = &.{},
+        };
     }
 
     fn find_provider(self: *KernelizePass, name: []const u8) ?kernel.KernelProvider {
@@ -85,6 +164,94 @@ pub const KernelizePass = struct {
             if (std.mem.eql(u8, p.name, name)) return p;
         }
         return null;
+    }
+
+    fn find_rewrite_starting_at(rewrites: []const RewriteCandidate, eqn_start: usize) ?RewriteCandidate {
+        for (rewrites) |entry| {
+            if (entry.region.eqn_len == 0) continue;
+            if (@as(usize, @intCast(entry.region.eqn_start)) == eqn_start) return entry;
+        }
+        return null;
+    }
+
+    fn append_existing_eqn(
+        allocator: std.mem.Allocator,
+        eqns: *std.ArrayList(pr.Eqn),
+        varids_store: *std.ArrayList(pr.VarId),
+        params_store: *std.ArrayList(pr.Param),
+        func: pr.Function,
+        eqn: pr.Eqn,
+    ) !void {
+        const inputs = eqn.inputs.slice(pr.VarId, func.varids_store);
+        const outputs = eqn.outputs.slice(pr.VarId, func.varids_store);
+        const params = eqn.params.slice(pr.Param, func.params_store);
+
+        const in_span = try append_varids(allocator, varids_store, inputs);
+        const out_span = try append_varids(allocator, varids_store, outputs);
+        const param_span = try append_params(allocator, params_store, params);
+
+        try eqns.append(allocator, .{
+            .prim = eqn.prim,
+            .inputs = in_span,
+            .outputs = out_span,
+            .params = param_span,
+        });
+    }
+
+    fn append_custom_call_eqn(
+        allocator: std.mem.Allocator,
+        eqns: *std.ArrayList(pr.Eqn),
+        varids_store: *std.ArrayList(pr.VarId),
+        params_store: *std.ArrayList(pr.Param),
+        func: pr.Function,
+        rewrite: RewriteCandidate,
+    ) !void {
+        if (rewrite.outputs.len != 1) return error.InvalidRegion;
+
+        const out_aval = func.avals[@intCast(rewrite.outputs[0])];
+
+        const kernel_key = try allocator.dupe(u8, rewrite.kernel_key);
+        const provider_name = try allocator.dupe(u8, rewrite.provider_name);
+        const target_name = try allocator.dupe(u8, dispatcher_target_name);
+
+        const params = [_]pr.Param{
+            .{ .call_target_name = target_name },
+            .{ .call_kernel_key = kernel_key },
+            .{ .call_provider_name = provider_name },
+            .{ .has_side_effect = false },
+            .{ .out_aval = out_aval },
+        };
+
+        const in_span = try append_varids(allocator, varids_store, rewrite.inputs);
+        const out_span = try append_varids(allocator, varids_store, rewrite.outputs);
+        const param_span = try append_params(allocator, params_store, params[0..]);
+
+        try eqns.append(allocator, .{
+            .prim = .custom_call,
+            .inputs = in_span,
+            .outputs = out_span,
+            .params = param_span,
+        });
+    }
+
+    fn append_varids(
+        allocator: std.mem.Allocator,
+        store: *std.ArrayList(pr.VarId),
+        values: []const pr.VarId,
+    ) !pr.Span {
+        const start: u32 = @intCast(store.items.len);
+        try store.appendSlice(allocator, values);
+        return .{ .start = start, .len = @intCast(values.len) };
+    }
+
+    fn append_params(
+        allocator: std.mem.Allocator,
+        store: *std.ArrayList(pr.Param),
+        values: []const pr.Param,
+    ) !pr.Span {
+        const start: u32 = @intCast(store.items.len);
+        try store.appendSlice(allocator, values);
+        return .{ .start = start, .len = @intCast(values.len) };
     }
 };
 
@@ -183,4 +350,12 @@ test "kernelize pass calls provider and registers KA" {
     const ka = registry.get("test_region");
     try testing.expect(ka != null);
     try testing.expectEqualStrings("mock_kernel_data", ka.?.data);
+
+    const rewritten = program.functions[0].eqns[0];
+    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
+
+    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
+    try testing.expectEqualStrings(dispatcher_target_name, pr.param_call_target_name(params).?);
+    try testing.expectEqualStrings("test_region", pr.param_call_kernel_key(params).?);
+    try testing.expectEqualStrings("mock", pr.param_call_provider_name(params).?);
 }
