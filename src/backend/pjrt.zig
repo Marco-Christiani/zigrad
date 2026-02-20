@@ -17,6 +17,10 @@ const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
+const dlpack = @import("../c/dlpack.zig");
+const tvm_api = @import("../c/tvm/api.zig");
+const tvm_runtime = @import("../c/tvm/runtime.zig");
+const tvm_c = @import("../c/tvm/c.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const pjrt_types = @import("../c/pjrt/types.zig");
@@ -33,6 +37,15 @@ const Platform = enum {
 
 var kernel_dispatch_registry: ?*const kernel.KernelRegistry = null;
 var kernel_dispatch_target_registered: bool = false;
+var kernel_dispatch_platform: Platform = .unknown;
+
+const TvmDispatchEntry = struct {
+    module: tvm_runtime.RuntimeModule,
+    main_func: tvm_api.Value,
+};
+
+var tvm_dispatch_cache_mutex = std.Thread.Mutex{};
+var tvm_dispatch_cache: ?std.StringHashMap(TvmDispatchEntry) = null;
 // Re-export handle types for callers
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;
@@ -228,6 +241,14 @@ pub const Backend = struct {
         return self.api.ffi_extension() != null;
     }
 
+    pub fn device_kind(self: *Backend, device: *const Device) ![]const u8 {
+        return device.get_kind(self.api);
+    }
+
+    pub fn is_cuda(self: *Backend) bool {
+        return self.platform == .cuda;
+    }
+
     /// Enforce typed-FFI availability for kernelized custom_call execution.
     pub fn require_typed_ffi(self: *Backend) !void {
         if (!self.has_typed_ffi()) return error.TypedFfiUnavailable;
@@ -242,11 +263,13 @@ pub const Backend = struct {
         try self.require_typed_ffi();
         if (self.kernel_dispatch_registered) {
             kernel_dispatch_registry = registry;
+            kernel_dispatch_platform = self.platform;
             return;
         }
 
         if (kernel_dispatch_target_registered) {
             kernel_dispatch_registry = registry;
+            kernel_dispatch_platform = self.platform;
             self.kernel_dispatch_registered = true;
             return;
         }
@@ -277,6 +300,7 @@ pub const Backend = struct {
         if (!registered_any) return error.TypedFfiRegistrationFailed;
 
         kernel_dispatch_registry = registry;
+        kernel_dispatch_platform = self.platform;
         self.kernel_dispatch_registered = true;
     }
 
@@ -454,24 +478,147 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
         return make_ffi_error(frame, "zigrad kernel dispatch: matmul shape mismatch", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
     }
 
-    const a_data: [*]const f32 = @ptrCast(@alignCast(a.data));
-    const b_data: [*]const f32 = @ptrCast(@alignCast(b.data));
-    const out_data: [*]f32 = @ptrCast(@alignCast(out.data));
+    if (std.mem.eql(u8, artifact.provider_name, "tvm")) {
+        dispatch_tvm_kernel(frame, artifact, kernel_key, a, b, out) catch {
+            return make_ffi_error(frame, "zigrad kernel dispatch: tvm execution failed", c.XLA_FFI_Error_Code_INTERNAL);
+        };
+        return null;
+    }
 
-    var i: usize = 0;
-    while (i < m) : (i += 1) {
-        var j: usize = 0;
-        while (j < n) : (j += 1) {
-            var acc: f32 = 0;
-            var kk: usize = 0;
-            while (kk < k) : (kk += 1) {
-                acc += a_data[i * k + kk] * b_data[kk * n + j];
-            }
-            out_data[i * n + j] = acc;
+    return make_ffi_error(frame, "zigrad kernel dispatch: unsupported provider", c.XLA_FFI_Error_Code_UNIMPLEMENTED);
+}
+
+fn dispatch_tvm_kernel(
+    frame: *c.XLA_FFI_CallFrame,
+    artifact: kernel.KernelArtifact,
+    kernel_key: []const u8,
+    a: *c.XLA_FFI_Buffer,
+    b: *c.XLA_FFI_Buffer,
+    out: *c.XLA_FFI_Buffer,
+) !void {
+    try tvm_api.ensure_loaded(std.heap.c_allocator);
+
+    var entry: TvmDispatchEntry = undefined;
+    {
+        tvm_dispatch_cache_mutex.lock();
+        defer tvm_dispatch_cache_mutex.unlock();
+
+        var cache = get_tvm_dispatch_cache();
+        if (cache.get(kernel_key)) |cached| {
+            entry = cached;
+        } else {
+            const loaded = try load_tvm_dispatch_entry(kernel_key, artifact);
+            const cache_key = try std.heap.c_allocator.dupe(u8, kernel_key);
+            try cache.put(cache_key, loaded);
+            entry = loaded;
         }
     }
 
-    return null;
+    const m: usize = @intCast(a.dims[0]);
+    const k: usize = @intCast(a.dims[1]);
+    const n: usize = @intCast(b.dims[1]);
+
+    const device_id = get_device_ordinal(frame);
+
+    if (kernel_dispatch_platform == .cuda) {
+        try configure_tvm_cuda_stream(frame, device_id);
+    }
+
+    const device_type: dlpack.DeviceType = if (kernel_dispatch_platform == .cuda) .cuda else .cpu;
+
+    var shape_a = [_]i64{ @intCast(m), @intCast(k) };
+    var shape_b = [_]i64{ @intCast(k), @intCast(n) };
+    var shape_out = [_]i64{ @intCast(m), @intCast(n) };
+
+    var a_tensor = try tensor_from_ffi_buffer(a, shape_a[0..], device_type, device_id);
+    defer a_tensor.deinit();
+    var b_tensor = try tensor_from_ffi_buffer(b, shape_b[0..], device_type, device_id);
+    defer b_tensor.deinit();
+    var out_tensor = try tensor_from_ffi_buffer(out, shape_out[0..], device_type, device_id);
+    defer out_tensor.deinit();
+
+    const func_handle = entry.main_func.as_object() orelse return error.TvmCallFailed;
+    _ = try tvm_api.call_handle(std.heap.c_allocator, func_handle, &.{
+        a_tensor.as_value(),
+        b_tensor.as_value(),
+        out_tensor.as_value(),
+    });
+}
+
+fn tensor_from_ffi_buffer(buffer: *c.XLA_FFI_Buffer, shape: []i64, device_type: dlpack.DeviceType, device_id: i32) !tvm_runtime.Tensor {
+    const dl_tensor: dlpack.Tensor = .{
+        .data = @ptrCast(buffer.data),
+        .device = .{ .device_type = device_type, .device_id = device_id },
+        .ndim = @intCast(shape.len),
+        .dtype = dlpack.DataType.f32_,
+        .shape = shape.ptr, // heap_borrowing dupes this
+        .strides = null,
+        .byte_offset = 0,
+    };
+    const managed = try dlpack.ManagedTensor.heap_borrowing(std.heap.c_allocator, dl_tensor);
+    return tvm_runtime.Tensor.from_dlpack(managed);
+}
+
+fn configure_tvm_cuda_stream(frame: *c.XLA_FFI_CallFrame, device_id: i32) !void {
+    const ffi_api = frame.api orelse return error.TvmCallFailed;
+    const get_stream = ffi_api.*.XLA_FFI_Stream_Get orelse return error.TvmCallFailed;
+
+    var args: c.XLA_FFI_Stream_Get_Args = std.mem.zeroes(c.XLA_FFI_Stream_Get_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_Stream_Get_Args);
+    args.ctx = frame.ctx;
+    const ffi_err = get_stream(&args);
+    if (ffi_err != null) return error.TvmCallFailed;
+    const stream_ptr = args.stream orelse return error.TvmCallFailed;
+
+    _ = try tvm_api.call_global(std.heap.c_allocator, "runtime.TVMSetStream", &.{
+        tvm_api.Value.int(2), // kDLCUDA
+        tvm_api.Value.int(device_id),
+        tvm_opaque_ptr_value(stream_ptr),
+    });
+}
+
+fn get_device_ordinal(frame: *c.XLA_FFI_CallFrame) i32 {
+    const ffi_api = frame.api orelse return 0;
+    const get_ordinal = ffi_api.*.XLA_FFI_DeviceOrdinal_Get orelse return 0;
+    var args: c.XLA_FFI_DeviceOrdinal_Get_Args = std.mem.zeroes(c.XLA_FFI_DeviceOrdinal_Get_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_DeviceOrdinal_Get_Args);
+    args.ctx = frame.ctx;
+    const err = get_ordinal(&args);
+    if (err != null) return 0;
+    return args.device_ordinal;
+}
+
+fn tvm_opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
+    var v = std.mem.zeroes(tvm_c.TVMFFIAny);
+    v.type_index = tvm_c.kTVMFFIOpaquePtr;
+    v.unnamed_1.v_int64 = @bitCast(@intFromPtr(ptr));
+    return .{ .raw = v };
+}
+
+fn load_tvm_dispatch_entry(kernel_key: []const u8, artifact: kernel.KernelArtifact) !TvmDispatchEntry {
+    const hash = std.hash.Wyhash.hash(0, kernel_key);
+    const path = try std.fmt.allocPrint(std.heap.c_allocator, "/tmp/zigrad-kernel-{x}.so", .{hash});
+    defer std.heap.c_allocator.free(path);
+
+    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(artifact.data);
+
+    var module = try tvm_runtime.RuntimeModule.load_from_file(std.heap.c_allocator, path);
+    errdefer module.deinit();
+
+    const main_func = try module.get_function(std.heap.c_allocator, "main", true);
+    return .{
+        .module = module,
+        .main_func = main_func,
+    };
+}
+
+fn get_tvm_dispatch_cache() *std.StringHashMap(TvmDispatchEntry) {
+    if (tvm_dispatch_cache == null) {
+        tvm_dispatch_cache = std.StringHashMap(TvmDispatchEntry).init(std.heap.c_allocator);
+    }
+    return &tvm_dispatch_cache.?;
 }
 
 fn handle_metadata_registration_hook(frame: *c.XLA_FFI_CallFrame) bool {
