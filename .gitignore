@@ -43,3 +43,7 @@ artifacts/
 
 !nix/**/*ccache*
 /weights/
+
+.task/
+
+*.wasm
