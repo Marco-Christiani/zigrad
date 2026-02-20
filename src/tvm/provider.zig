@@ -6,8 +6,8 @@
 const std = @import("std");
 const tir = @import("../c/tvm/tir.zig");
 const tvm_api = @import("../c/tvm/api.zig");
-const tvm_compile = @import("../c/tvm/compile.zig");
 const tune_mod = @import("tune.zig");
+const tuned_module = @import("module.zig");
 const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
 const TargetKind = tir.TargetKind;
@@ -41,9 +41,8 @@ pub const TvmProvider = struct {
     /// 1. Validates region shape (single matmul equation).
     /// 2. Extracts M, N, K from input/output types.
     /// 3. Builds a matmul IRModule via TE.
-    /// 4. Tunes via MetaSchedule.
-    /// 5. Lowers, builds, and exports to .so.
-    /// 6. Reads .so bytes into a KernelArtifact.
+    /// 4. Tunes via MetaSchedule (produces candidate .so files with device code).
+    /// 5. Loads the best candidate .so and returns its bytes as a KernelArtifact.
     fn compile(self: *TvmProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         // Validate: single matmul equation
         const matmul = validate_matmul_region(desc) orelse return error.Unsupported;
@@ -90,35 +89,30 @@ pub const TvmProvider = struct {
             return error.CompileFailed;
         };
 
-        // Rebuild with tuned schedule (re-create IRModule since tuning consumed it)
-        var tuned_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch
-            return error.CompileFailed;
-
-        // Lower and build
-        var built = tvm_compile.lower_and_build(allocator, &tuned_mod, target, self.target_kind) catch |err| {
-            log.err("lower_and_build failed: {s}", .{@errorName(err)});
-            tuned_mod.deinit();
+        // Load the best tuned candidate .so (tuning already compiled candidates with
+        // proper device code; rebuilding from scratch loses the schedule).
+        var best = tuned_module.load(allocator, .{
+            .work_dir = work_dir,
+            .target_kind = self.target_kind,
+        }) catch |err| {
+            log.err("failed to load tuned module: {s}", .{@errorName(err)});
             return error.CompileFailed;
         };
-        defer built.deinit();
+        defer best.deinit();
 
-        // Export to .so
-        const so_path = std.fmt.allocPrint(allocator, "{s}/{s}.so", .{ work_dir, desc.name }) catch
-            return error.OutOfMemory;
+        const so_path = std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{
+            work_dir, best.best_candidate,
+        }) catch return error.OutOfMemory;
         defer allocator.free(so_path);
 
-        built.export_shared(allocator, so_path, self.target_kind) catch |err| {
-            log.err("export_shared failed: {s}", .{@errorName(err)});
-            return error.CompileFailed;
-        };
-
-        // Read .so bytes
         const so_bytes = std.fs.cwd().readFileAlloc(allocator, so_path, 100 * 1024 * 1024) catch |err| {
             log.err("failed to read {s}: {s}", .{ so_path, @errorName(err) });
             return error.CompileFailed;
         };
 
-        log.info("compiled kernel: {s} ({d} bytes)", .{ desc.name, so_bytes.len });
+        log.info("compiled kernel: {s} (candidate {d}, {d:.2} us, {d} bytes)", .{
+            desc.name, best.best_candidate, best.best_time_us, so_bytes.len,
+        });
 
         return .{
             .provider_name = "tvm",
