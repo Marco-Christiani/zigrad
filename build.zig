@@ -28,8 +28,11 @@ pub fn build(b: *std.Build) void {
         @panic("-Dtvm=true requested but TVM not found under SDK (need include/tvm/ffi/c_api.h or include/tvm/runtime/c_runtime_api.h, plus lib/libtvm_runtime.so)");
     }
 
+    const mkl_available = sdk_has_mkl(b, sdk_root);
+
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_tvm", tvm_enabled);
+    build_options.addOption(bool, "enable_mkl", mkl_available);
     if (tvm_enable_opt) |explicit| {
         std.debug.print("TVM: explicitly {s} via -Dtvm={}\n", .{ if (explicit) "enabled" else "disabled", explicit });
     } else {
@@ -46,7 +49,9 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addOptions("build_options", build_options);
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
-    zigrad_mod.linkSystemLibrary("mkl_rt", .{});
+    if (mkl_available) {
+        zigrad_mod.linkSystemLibrary("mkl_rt", .{});
+    }
 
     // Add CUDA include path if available (needed for nvrtc.h in tvm builds)
     if (tvm_enabled) {
@@ -129,6 +134,18 @@ fn link_tvm_runtime(exe: *std.Build.Step.Compile, tvm_lib: []const u8) void {
             exe.root_module.addIncludePath(.{ .cwd_relative = cuda_include });
         }
     }
+}
+
+fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
+    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
+        break :blk sdk_root;
+    } else blk: {
+        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
+        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
+    };
+    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mkl_cblas.h" });
+    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    return true;
 }
 
 fn sdk_has_tvm(b: *std.Build, sdk_root: []const u8) bool {

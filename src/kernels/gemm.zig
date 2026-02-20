@@ -1,5 +1,6 @@
-/// Public API for hand-rolled naive GEMM kernel (baseline).
+/// Public API for hand-rolled naive GEMM kernel and BLAS baselines.
 const std = @import("std");
+const build_options = @import("build_options");
 
 const gemm_naive = @import("gemm_naive.zig");
 
@@ -42,9 +43,9 @@ test "gemm: naive 2x2 matmul" {
     }
 }
 
-const blas = @cImport({
+const blas = if (build_options.enable_mkl) @cImport({
     @cInclude("mkl_cblas.h");
-});
+}) else @compileError("MKL not available -- rebuild with MKL in SDK");
 
 pub fn blas_gemm_f32(
     m: usize,
