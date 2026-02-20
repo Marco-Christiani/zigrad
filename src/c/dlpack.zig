@@ -83,6 +83,31 @@ pub const ManagedTensor = extern struct {
             .deleter = &noop_deleter,
         };
     }
+
+    /// Heap-allocate a ManagedTensor wrapping external memory.
+    ///
+    /// The shape is duped to the heap so TVM can safely reference it after the
+    /// caller's stack frame returns. TVM calls the deleter on refcount drop,
+    /// which frees both the shape and the ManagedTensor itself.
+    pub fn heap_borrowing(allocator: std.mem.Allocator, dl_tensor: Tensor) !*ManagedTensor {
+        const heap_shape = try allocator.dupe(i64, dl_tensor.shape[0..@intCast(dl_tensor.ndim)]);
+        errdefer allocator.free(heap_shape);
+        const managed = try allocator.create(ManagedTensor);
+        managed.* = .{
+            .dl_tensor = dl_tensor,
+            .manager_ctx = null,
+            .deleter = &heap_deleter,
+        };
+        managed.dl_tensor.shape = heap_shape.ptr;
+        return managed;
+    }
+
+    fn heap_deleter(self: ?*ManagedTensor) callconv(.c) void {
+        const m = self orelse return;
+        const ndim: usize = @intCast(m.dl_tensor.ndim);
+        std.heap.c_allocator.free(m.dl_tensor.shape[0..ndim]);
+        std.heap.c_allocator.destroy(m);
+    }
 };
 
 pub fn noop_deleter(_: ?*ManagedTensor) callconv(.c) void {}
