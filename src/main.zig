@@ -302,38 +302,6 @@ pub fn main() !void {
     };
     defer gpa.free(plugin_path);
 
-    if (mode) |m| {
-        if (std.mem.eql(u8, m, "kernel-provider-demo")) {
-            if (mode_args.items.len != 0) {
-                try print_usage();
-                return error.InvalidArguments;
-            }
-
-            const cpu_plugin = try maybe_cpu_plugin_path(gpa, plugin_path);
-            const chosen_plugin = cpu_plugin orelse plugin_path;
-            defer if (cpu_plugin) |path| gpa.free(path);
-
-            if (cpu_plugin == null) {
-                std.log.warn("cpu PJRT plugin was not found next to '{s}'; using configured plugin", .{plugin_path});
-            }
-
-            var mode_backend = try zg.backend.PjrtBackend.init(gpa, chosen_plugin);
-            defer mode_backend.deinit();
-
-            const mode_devs = try mode_backend.get_devices(gpa);
-            defer gpa.free(mode_devs);
-            if (mode_devs.len == 0) return error.NoDevices;
-
-            return demos.run_kernel_provider_demo(
-                gpa,
-                &mode_backend,
-                &mode_devs[0],
-                if (have_dump_pr) &dump_pr_cfg else null,
-                if (have_dump_mlir) &dump_mlir_cfg else null,
-            );
-        }
-    }
-
     // Initialize unified PJRT backend
     var backend = try zg.backend.PjrtBackend.init(gpa, plugin_path);
     defer backend.deinit();
@@ -357,6 +325,13 @@ pub fn main() !void {
                 return error.InvalidArguments;
             }
             return demos.run_custom_call_negative(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
+        }
+        if (std.mem.eql(u8, m, "kernel-provider-demo")) {
+            if (mode_args.items.len != 0) {
+                try print_usage();
+                return error.InvalidArguments;
+            }
+            return demos.run_kernel_provider_demo(gpa, &backend, device, if (have_dump_pr) &dump_pr_cfg else null, if (have_dump_mlir) &dump_mlir_cfg else null);
         }
         if (std.mem.eql(u8, m, "vjp-demo")) {
             if (mode_args.items.len != 0) {
@@ -829,28 +804,6 @@ fn parse_impl(s: []const u8) ?zg.benchmark.Implementation {
     if (std.mem.eql(u8, s, "xla_cpu")) return .xla_cpu;
     if (std.mem.eql(u8, s, "xla_gpu")) return .xla_gpu;
     return null;
-}
-
-fn maybe_cpu_plugin_path(allocator: std.mem.Allocator, plugin_path: []const u8) !?[]u8 {
-    if (std.mem.endsWith(u8, plugin_path, "pjrt_c_api_cpu_plugin.so")) {
-        return try allocator.dupe(u8, plugin_path);
-    }
-    if (!std.mem.endsWith(u8, plugin_path, "pjrt_c_api_gpu_plugin.so")) {
-        return null;
-    }
-
-    const suffix_gpu = "pjrt_c_api_gpu_plugin.so";
-    const suffix_cpu = "pjrt_c_api_cpu_plugin.so";
-    const prefix = plugin_path[0 .. plugin_path.len - suffix_gpu.len];
-    const candidate = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, suffix_cpu });
-    errdefer allocator.free(candidate);
-
-    if (std.fs.path.isAbsolute(candidate)) {
-        std.fs.accessAbsolute(candidate, .{}) catch return null;
-    } else {
-        std.fs.cwd().access(candidate, .{}) catch return null;
-    }
-    return candidate;
 }
 
 fn parse_zxpr_palette(value: []const u8) ?zg.pr.zxpr.Palette {

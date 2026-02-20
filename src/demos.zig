@@ -519,6 +519,8 @@ pub fn run_kernel_provider_demo(
     if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
     try backend.require_typed_ffi();
 
+    const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
+
     var program = try build_kernelized_demo_program(allocator);
     defer program.deinit();
 
@@ -528,7 +530,7 @@ pub fn run_kernel_provider_demo(
 
     var provider_impl = zg.tvm.provider.TvmProvider{
         .allocator = allocator,
-        .target_kind = .cpu,
+        .target_kind = target_kind,
         .work_dir = "artifacts/tvm_cache",
         .max_trials = 8,
         .trials_per_iter = 4,
