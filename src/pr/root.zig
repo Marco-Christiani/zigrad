@@ -39,3 +39,9 @@ pub const ad = @import("ad.zig");
 pub const emit = @import("emit.zig");
 pub const zxpr = @import("zxpr.zig");
 pub const ops = @import("ops/ops.zig");
+
+test {
+    @import("std").testing.refAllDecls(@This());
+    // pure tests are not part of public api
+    _ = @import("tests/root.zig");
+}

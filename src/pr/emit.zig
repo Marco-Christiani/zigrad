@@ -138,6 +138,8 @@ fn emit_params(params: []const pr.Param, writer: anytype) !void {
                 try emit_i64_or_usize_list(i64, writer, s.limit_indices);
                 try writer.writeAll("]");
             },
+            .call_kernel_key => |k| try writer.print(" kernel_key=\"{s}\"", .{k}),
+            .call_provider_name => |p| try writer.print(" provider=\"{s}\"", .{p}),
             .gather, .scatter => {}, // Complex params; ZXPR format handles these
             .out_aval => {}, // Type already shown in output declaration
         }
