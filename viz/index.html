@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
+
+  <!-- dagre library -->
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+
+  <!-- cytoscape-dagre plugin -->
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #111; font-family: monospace; }
+    #container { display: flex; height: 100vh; }
+    #cy { flex: 1; }
+    #controls {
+      width: 300px;
+      background: #1a1a1a;
+      border-left: 1px solid #333;
+      padding: 20px;
+      overflow-y: auto;
+      color: #eee;
+    }
+    h2 { margin-top: 0; color: #4cc9f0; }
+    button {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 10px;
+      background: #0a5a7a;
+      color: #fff;
+      border: 1px solid #0a7a9a;
+      cursor: pointer;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    button:hover { background: #0a7a9a; }
+    button:active { background: #084a6a; }
+    .info {
+      background: #0a1a2a;
+      padding: 10px;
+      border-radius: 4px;
+      margin: 10px 0;
+      font-size: 12px;
+      border: 1px solid #333;
+    }
+    .stat { display: flex; justify-content: space-between; padding: 5px 0; }
+    .stat-label { color: #888; }
+    .stat-value { color: #4cc9f0; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="cy"></div>
+    <div id="controls">
+      <h2>Graph (Zig-driven)</h2>
+      <button onclick="app.buildTransformer()">Build Transformer</button>
+      <button onclick="app.reset()">Reset</button>
+      <button onclick="app.addRandomNode()">Add Random Node</button>
+      <button onclick="app.addRandomEdge()">Add Random Edge</button>
+
+      <div class="info">
+        <div class="stat">
+          <span class="stat-label">Nodes:</span>
+          <span class="stat-value" id="stat-nodes">0</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Edges:</span>
+          <span class="stat-value" id="stat-edges">0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    cytoscape.use(cytoscapeDagre);
+    class GraphApp {
+      constructor(wasmExports, memory) {
+        this.exports = wasmExports;
+        this.mem = new Uint8Array(memory.buffer);
+        this.cy = null;
+        this.initCytoscape();
+      }
+
+      readString(ptr, len) {
+        return new TextDecoder().decode(this.mem.slice(ptr, ptr + len));
+      }
+
+      addString(str) {
+        const encoder = new TextEncoder();
+        const encoded = encoder.encode(str);
+        const ptr = 0x10000; // Safe buffer offset
+        this.mem.set(encoded, ptr);
+        return [ptr, encoded.length];
+      }
+
+      initCytoscape() {
+        this.cy = cytoscape({
+          container: document.getElementById('cy'),
+          elements: [],
+          layout: {
+            name: 'dagre'
+            // name: 'breadthfirst',
+            // directed: true
+          },
+          style: [
+            {
+              selector: 'node',
+              style: {
+                'background-color': '#4cc9f0',
+                'label': 'data(id)',
+                'color': '#111',
+                'shape': 'round-rectangle',
+                'padding': '8px',
+                'font-size': '11px',
+                'font-weight': 'bold'
+              }
+            },
+            {
+              selector: 'edge',
+              style: {
+                'line-color': '#666',
+                'target-arrow-color': '#666',
+                'target-arrow-shape': 'triangle',
+                'curve-style': 'bezier'
+              }
+            },
+            {
+              selector: 'node:selected',
+              style: {
+                'background-color': '#ff6b6b'
+              }
+
+            }
+          ]
+        });
+      }
+
+      render() {
+        const nodes = [];
+        const edges = [];
+        const nodeCount = this.exports.node_count();
+        const edgeCount = this.exports.edge_count();
+
+        for (let i = 0; i < nodeCount; i++) {
+          const ptr = this.exports.node_name_ptr(i);
+          const len = this.exports.node_name_len(i);
+          const name = this.readString(ptr, len);
+          nodes.push({ data: { id: name, idx: i } });
+        }
+
+        for (let i = 0; i < edgeCount; i++) {
+          const src = this.exports.edge_source(i);
+          const tgt = this.exports.edge_target(i);
+          const srcNode = nodes[src];
+          const tgtNode = nodes[tgt];
+          if (srcNode && tgtNode) {
+            edges.push({
+              data: {
+                source: srcNode.data.id,
+                target: tgtNode.data.id
+              }
+            });
+          }
+        }
+
+        this.cy.elements().remove();
+        this.cy.add([...nodes, ...edges]);
+        this.cy.layout({ name: 'breadthfirst', directed: true }).run();
+        this.updateStats();
+      }
+
+      updateStats() {
+        document.getElementById('stat-nodes').textContent = this.exports.node_count();
+        document.getElementById('stat-edges').textContent = this.exports.edge_count();
+      }
+
+      addNode(name) {
+        const [ptr, len] = this.addString(name);
+        this.exports.add_node(ptr, len);
+      }
+
+      addEdge(source, target) {
+        this.exports.add_edge(source, target);
+      }
+
+      reset() {
+        this.exports.reset();
+        this.render();
+      }
+
+      buildTransformer() {
+        this.reset();
+        let step = 0;
+        const doStep = () => {
+          const result = this.exports.build_step();
+          if (result !== 0xFFFFFFFF) {
+            this.render();
+            step++;
+            setTimeout(doStep, 300); // 300ms pause between steps
+          }
+        };
+        doStep();
+      }
+
+      addRandomNode() {
+        const id = 'node_' + Math.random().toString(36).substr(2, 5);
+        this.addNode(id);
+        this.render();
+      }
+
+      addRandomEdge() {
+        const count = this.exports.node_count();
+        if (count < 2) return;
+        const src = Math.floor(Math.random() * count);
+        let tgt = Math.floor(Math.random() * count);
+        while (tgt === src) tgt = Math.floor(Math.random() * count);
+        this.addEdge(src, tgt);
+        this.render();
+      }
+    }
+
+    let app;
+    async function init() {
+      const response = await fetch('graph.wasm');
+      const buffer = await response.arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(buffer);
+      const exports = instance.exports;
+
+      app = new GraphApp(exports, exports.memory);
+      app.buildTransformer();
+    }
+
+    init();
+  </script>
+</body>
+</html>

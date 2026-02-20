@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+tasks:
+  default:
+    deps: [build]
+    cmds:
+      - python -m http.server
+  build:
+    watch: true
+    sources:
+      - index.html
+      - graph.zig
+    cmd: zig build-exe graph.zig -target wasm32-freestanding -fno-entry -rdynamic -O ReleaseSmall

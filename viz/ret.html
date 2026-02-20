@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Rete Graph</title>
+  <style>
+    body { margin: 0; }
+    #rete { width: 100vw; height: 100vh; background: #1e1e1e; }
+  </style>
+</head>
+<body>
+  <div id="rete"></div>
+
+  <!-- Core -->
+  <script src="https://cdn.jsdelivr.net/npm/rete/rete.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/rete-area-plugin/rete-area-plugin.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/rete-connection-plugin/rete-connection-plugin.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/rete-render-utils/rete-render-utils.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/rete-react-plugin/rete-react-plugin.min.js"></script>
+
+  <!-- Peer deps -->
+  <script src="https://cdn.jsdelivr.net/npm/react/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom/umd/react-dom.production.min.js"></script>
+
+  <script>
+    const { NodeEditor, ClassicPreset } = Rete;
+    const { AreaPlugin, AreaExtensions } = ReteAreaPlugin;
+    const { ConnectionPlugin } = ReteConnectionPlugin;
+    const { ReactPlugin } = ReteReactPlugin;
+
+    const container = document.getElementById("rete");
+
+    const editor = new NodeEditor();
+    const area = new AreaPlugin(container);
+    const connection = new ConnectionPlugin();
+    const render = new ReactPlugin({ React, ReactDOM });
+
+    editor.use(area);
+    editor.use(connection);
+    editor.use(render);
+
+    const socket = new ClassicPreset.Socket("tensor");
+    const nodeMap = new Map();
+
+    const graph = {
+      nodes: [
+        { id: "inputA", label: "Input A" },
+        { id: "inputB", label: "Input B" },
+        { id: "linear1", label: "Linear 128" },
+        { id: "relu", label: "ReLU" },
+        { id: "linear2", label: "Linear 64" },
+        { id: "add", label: "Add" },
+        { id: "concat", label: "Concat" },
+        { id: "output", label: "Output" }
+      ],
+      edges: [
+        { from: "inputA", to: "linear1" },
+        { from: "linear1", to: "relu" },
+        { from: "relu", to: "add" },
+        { from: "inputB", to: "linear2" },
+        { from: "linear2", to: "add" },
+        { from: "add", to: "concat" },
+        { from: "relu", to: "concat" },
+        { from: "concat", to: "output" }
+      ]
+    };
+
+    (async () => {
+      for (const n of graph.nodes) {
+        const node = new ClassicPreset.Node(n.label);
+
+        node.addInput("in1", new ClassicPreset.Input(socket));
+        node.addInput("in2", new ClassicPreset.Input(socket));
+        node.addOutput("out", new ClassicPreset.Output(socket));
+
+        await editor.addNode(node);
+        nodeMap.set(n.id, node);
+      }
+
+      for (const e of graph.edges) {
+        const src = nodeMap.get(e.from);
+        const dst = nodeMap.get(e.to);
+
+        await editor.addConnection(
+          new ClassicPreset.Connection(src, "out", dst, "in1")
+        );
+      }
+
+      AreaExtensions.zoomAt(area, editor.getNodes());
+    })();
+  </script>
+</body>
+</html>
