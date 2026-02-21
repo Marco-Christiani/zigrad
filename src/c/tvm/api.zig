@@ -387,11 +387,6 @@ pub fn set_global(name: []const u8, func_handle: c.TVMFFIObjectHandle, override:
 // String helpers
 // ============================================================================
 
-/// Allocate a null-terminated copy of a Zig slice. Caller owns the result.
-pub fn cstr_alloc(allocator: std.mem.Allocator, s: []const u8) ![:0]const u8 {
-    return try allocator.dupeZ(u8, s);
-}
-
 // ============================================================================
 // Packed function creation
 // ============================================================================

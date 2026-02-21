@@ -62,13 +62,11 @@ pub const MetaSchedule = struct {
         workload_path: [:0]const u8,
         record_path: [:0]const u8,
     ) !Value {
-        const structural_z = try api.cstr_alloc(allocator, "structural");
-        defer allocator.free(structural_z);
         return api.call_global(allocator, "meta_schedule.DatabaseJSONDatabase", &.{
             Value.str(workload_path),
             Value.str(record_path),
             Value.boolean(true), // allow_missing
-            Value.str(structural_z),
+            Value.str("structural"),
         });
     }
 

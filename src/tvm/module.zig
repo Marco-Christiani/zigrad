@@ -162,7 +162,7 @@ fn parse_run_secs(line: []const u8) ?f64 {
 
 /// Load a specific candidate module by index.
 fn load_candidate(allocator: std.mem.Allocator, work_dir: []const u8, candidate_idx: usize) !TunedModule {
-    const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ work_dir, candidate_idx });
+    const so_path = try std.fmt.allocPrintSentinel(allocator, "{s}/candidate_{d}.so", .{ work_dir, candidate_idx }, 0);
     defer allocator.free(so_path);
 
     log.info("loading tuned module: {s}", .{so_path});

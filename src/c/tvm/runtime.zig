@@ -26,35 +26,26 @@ pub const RuntimeModule = struct {
     pub const as_value = helpers.as_value_fixed(RuntimeModule, c.kTVMFFIModule);
 
     /// Load a compiled module (.so) from disk.
-    pub fn load_from_file(allocator: std.mem.Allocator, path: []const u8) !RuntimeModule {
-        const path_z = try api.cstr_alloc(allocator, path);
-        defer allocator.free(path_z);
+    pub fn load_from_file(allocator: std.mem.Allocator, path: [:0]const u8) !RuntimeModule {
         const result = try api.call_global(allocator, "ffi.ModuleLoadFromFile", &.{
-            Value.str(path_z),
+            Value.str(path),
         });
         return .{ .handle = .{ .ptr = result.as_object() orelse return error.TvmCallFailed } };
     }
 
     /// Get a packed function from this module by name.
-    pub fn get_function(self: RuntimeModule, allocator: std.mem.Allocator, name: []const u8, query_imports: bool) !Value {
-        const name_z = try api.cstr_alloc(allocator, name);
-        defer allocator.free(name_z);
+    pub fn get_function(self: RuntimeModule, allocator: std.mem.Allocator, name: [:0]const u8, query_imports: bool) !Value {
         return api.call_global(allocator, "ffi.ModuleGetFunction", &.{
-            self.as_value(), Value.str(name_z), Value.boolean(query_imports),
+            self.as_value(), Value.str(name), Value.boolean(query_imports),
         });
     }
 
     /// Write the module to a file in the given format ("o", "so", "ptx", etc.).
-    pub fn write_to_file(self: RuntimeModule, allocator: std.mem.Allocator, path: []const u8, format: []const u8) !void {
-        const path_z = try api.cstr_alloc(allocator, path);
-        defer allocator.free(path_z);
-        const fmt_z = try api.cstr_alloc(allocator, format);
-        defer allocator.free(fmt_z);
-
+    pub fn write_to_file(self: RuntimeModule, allocator: std.mem.Allocator, path: [:0]const u8, format: [:0]const u8) !void {
         _ = try api.call_global(allocator, "ffi.ModuleWriteToFile", &.{
             self.as_value(),
-            Value.str(path_z),
-            Value.str(fmt_z),
+            Value.str(path),
+            Value.str(format),
         });
         log.debug("wrote module to {s} (format={s})", .{ path, format });
     }
@@ -75,10 +66,10 @@ pub const RuntimeModule = struct {
     ///
     /// For CPU: writes a single .o and links to .so.
     /// For CUDA: writes host .o + device .o (packed LLVM blob), then links both.
-    pub fn export_shared(self: RuntimeModule, allocator: std.mem.Allocator, so_path: []const u8, kind: TargetKind) !void {
+    pub fn export_shared(self: RuntimeModule, allocator: std.mem.Allocator, so_path: [:0]const u8, kind: TargetKind) !void {
         const compile_mod = @import("compile.zig");
 
-        const obj_path = try std.fmt.allocPrint(allocator, "{s}.host.o", .{so_path});
+        const obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.host.o", .{so_path}, 0);
         defer allocator.free(obj_path);
 
         try self.write_to_file(allocator, obj_path, "o");
@@ -88,7 +79,7 @@ pub const RuntimeModule = struct {
                 try compile_mod.link_to_shared(allocator, &.{obj_path}, so_path);
             },
             .cuda => {
-                const devc_obj_path = try std.fmt.allocPrint(allocator, "{s}.devc.o", .{so_path});
+                const devc_obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.devc.o", .{so_path}, 0);
                 defer allocator.free(devc_obj_path);
 
                 var pack_mod = try self.pack_imports_to_llvm(allocator);

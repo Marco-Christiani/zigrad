@@ -79,18 +79,21 @@ pub const Target = struct {
     ///
     /// For CPU targets, includes `-num-cores` (required by MetaSchedule).
     pub fn create(allocator: std.mem.Allocator, kind: TargetKind) !Target {
-        const s = switch (kind) {
-            .cpu => blk: {
+        switch (kind) {
+            .cpu => {
                 const ncores = std.Thread.getCpuCount() catch 1;
-                break :blk try std.fmt.allocPrintSentinel(allocator, "llvm -num-cores {d}", .{ncores}, 0);
+                const s = try std.fmt.allocPrintSentinel(allocator, "llvm -num-cores {d}", .{ncores}, 0);
+                defer allocator.free(s);
+                const result = try api.call_global(allocator, "target.Target", &.{Value.str(s)});
+                const obj = result.as_object() orelse return error.TvmCallFailed;
+                return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
             },
-            .cuda => try std.fmt.allocPrintSentinel(allocator, "nvidia/nvidia-a100", .{}, 0),
-        };
-        defer allocator.free(s);
-
-        const result = try api.call_global(allocator, "target.Target", &.{Value.str(s)});
-        const obj = result.as_object() orelse return error.TvmCallFailed;
-        return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
+            .cuda => {
+                const result = try api.call_global(allocator, "target.Target", &.{Value.str("nvidia/nvidia-a100")});
+                const obj = result.as_object() orelse return error.TvmCallFailed;
+                return .{ .handle = .{ .ptr = obj }, .type_index = result.raw.type_index };
+            },
+        }
     }
 
     /// Create a composite target with a host target attached.
@@ -145,7 +148,7 @@ pub const TirPass = union(enum) {
     // Passes with arguments
     filter: struct { predicate: Value },
     bind_target: struct { target: Target },
-    thread_sync: struct { scope: []const u8 },
+    thread_sync: struct { scope: [:0]const u8 },
     compact_buffer_alloc: struct { is_strict: bool },
     narrow_data_type: struct { target_bits: i64 },
     vectorize_loop: struct { enable: bool },
@@ -173,11 +176,7 @@ pub const TirPass = union(enum) {
         return switch (self) {
             .filter => |args| try api.call_global(allocator, self.name(), &.{args.predicate}),
             .bind_target => |args| try api.call_global(allocator, self.name(), &.{args.target.as_value()}),
-            .thread_sync => |args| blk: {
-                const s = try api.cstr_alloc(allocator, args.scope);
-                defer allocator.free(s);
-                break :blk try api.call_global(allocator, self.name(), &.{Value.str(s)});
-            },
+            .thread_sync => |args| try api.call_global(allocator, self.name(), &.{Value.str(args.scope)}),
             .compact_buffer_alloc => |args| try api.call_global(allocator, self.name(), &.{Value.boolean(args.is_strict)}),
             .narrow_data_type => |args| try api.call_global(allocator, self.name(), &.{Value.int(args.target_bits)}),
             .vectorize_loop => |args| try api.call_global(allocator, self.name(), &.{Value.boolean(args.enable)}),
@@ -272,18 +271,11 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, m: usize, n: usize, k: usi
     defer shape_b.decref();
 
     // Placeholder tensors
-    const dtype_z = try api.cstr_alloc(allocator, "float32");
-    defer allocator.free(dtype_z);
-    const name_a_z = try api.cstr_alloc(allocator, "A");
-    defer allocator.free(name_a_z);
-    const name_b_z = try api.cstr_alloc(allocator, "B");
-    defer allocator.free(name_b_z);
-
     const tensor_a = try api.call_global(allocator, "te.Placeholder", &.{
-        shape_a, Value.str(dtype_z), Value.str(name_a_z),
+        shape_a, Value.str("float32"), Value.str("A"),
     });
     const tensor_b = try api.call_global(allocator, "te.Placeholder", &.{
-        shape_b, Value.str(dtype_z), Value.str(name_b_z),
+        shape_b, Value.str("float32"), Value.str("B"),
     });
     log.debug("created placeholders A[{d},{d}] B[{d},{d}]", .{ m, k, k, n });
 
@@ -301,21 +293,13 @@ pub fn build_matmul_tir(allocator: std.mem.Allocator, m: usize, n: usize, k: usi
     const prim_func = try api.call_global(allocator, "te.CreatePrimFunc", &.{ tensors_arr, Value.none() });
 
     // Attach global_symbol="main"
-    const gs_z = try api.cstr_alloc(allocator, "global_symbol");
-    defer allocator.free(gs_z);
-    const main_z = try api.cstr_alloc(allocator, "main");
-    defer allocator.free(main_z);
-
     const prim_func_attr = try api.call_global(allocator, "ir.BaseFuncWithAttr", &.{
-        prim_func, Value.str(gs_z), Value.str(main_z),
+        prim_func, Value.str("global_symbol"), Value.str("main"),
     });
     prim_func.decref();
 
     // Wrap in IRModule
-    const main_z2 = try api.cstr_alloc(allocator, "main");
-    defer allocator.free(main_z2);
-
-    const global_var = try api.call_global(allocator, "ir.GlobalVar", &.{Value.str(main_z2)});
+    const global_var = try api.call_global(allocator, "ir.GlobalVar", &.{Value.str("main")});
     const func_map = try api.call_global(allocator, "ffi.Map", &.{ global_var, prim_func_attr });
     const empty_map = try api.call_global(allocator, "ffi.Map", &.{});
     const ir_mod = try api.call_global(allocator, "ir.IRModule", &.{ func_map, Value.none(), empty_map });

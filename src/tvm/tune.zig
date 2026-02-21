@@ -78,22 +78,13 @@ pub fn tune(
     log.debug("created SearchStrategy", .{});
 
     // JSON database
-    const workload_path = try std.fmt.allocPrint(allocator, "{s}/workload.json", .{opts.work_dir});
+    const workload_path = try std.fmt.allocPrintSentinel(allocator, "{s}/workload.json", .{opts.work_dir}, 0);
     defer allocator.free(workload_path);
-    const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{opts.work_dir});
+    const record_path = try std.fmt.allocPrintSentinel(allocator, "{s}/tuning_record.json", .{opts.work_dir}, 0);
     defer allocator.free(record_path);
 
-    const workload_z = try api.cstr_alloc(allocator, workload_path);
-    defer allocator.free(workload_z);
-    const record_z = try api.cstr_alloc(allocator, record_path);
-    defer allocator.free(record_z);
-
-    const database = try MetaSchedule.json_database(allocator, workload_z, record_z);
+    const database = try MetaSchedule.json_database(allocator, workload_path, record_path);
     log.debug("created JSONDatabase", .{});
-
-    // TuneContext
-    const main_z = try api.cstr_alloc(allocator, "main");
-    defer allocator.free(main_z);
 
     const logger_val = try make_noop_callback();
     defer logger_val.decref();
@@ -103,7 +94,7 @@ pub fn tune(
         .target = target.as_value(),
         .space_gen = space_gen,
         .search_strat = search_strategy,
-        .task_name = main_z,
+        .task_name = "main",
         .logger = logger_val,
     });
     log.debug("created TuneContext", .{});
@@ -235,23 +226,15 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
 
         // Export to .so
         const build_id = @atomicRmw(u32, &state.build_counter, .Add, 1, .seq_cst);
-        const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ state.work_dir, build_id });
+        const so_path = try std.fmt.allocPrintSentinel(allocator, "{s}/candidate_{d}.so", .{ state.work_dir, build_id }, 0);
+        defer allocator.free(so_path);
 
         built_mod.export_shared(allocator, so_path, state.target_kind) catch {
-            allocator.free(so_path);
             try results_list.append(allocator, try make_builder_error(allocator, "export failed"));
             continue;
         };
 
-        const so_z = api.cstr_alloc(allocator, so_path) catch {
-            allocator.free(so_path);
-            try results_list.append(allocator, try make_builder_error(allocator, "alloc failed"));
-            continue;
-        };
-        allocator.free(so_path);
-        defer allocator.free(so_z);
-
-        const br = try MetaSchedule.builder_result(allocator, so_z, null);
+        const br = try MetaSchedule.builder_result(allocator, so_path, null);
         try results_list.append(allocator, br);
         log.debug("built candidate {d}", .{i});
     }
@@ -308,10 +291,13 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
             continue;
         };
         var path_val_mut = path_val;
-        const artifact_path = path_val_mut.as_string(allocator) catch {
+        const artifact_path_slice = path_val_mut.as_string(allocator) catch {
             try results_list.append(allocator, try make_runner_error(allocator, "bad path"));
             continue;
         };
+        defer allocator.free(artifact_path_slice);
+
+        const artifact_path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{artifact_path_slice}, 0);
         defer allocator.free(artifact_path);
 
         // Load module and get main function via typed wrappers
@@ -450,11 +436,11 @@ fn load_cuda_intrinsics(allocator: std.mem.Allocator) !void {
         defer parsed.deinit();
 
         const data = parsed.value;
-        const name_z = api.cstr_alloc(allocator, data.name) catch continue;
+        const name_z = std.fmt.allocPrintSentinel(allocator, "{s}", .{data.name}, 0) catch continue;
         defer allocator.free(name_z);
-        const desc_z = api.cstr_alloc(allocator, data.desc) catch continue;
+        const desc_z = std.fmt.allocPrintSentinel(allocator, "{s}", .{data.desc}, 0) catch continue;
         defer allocator.free(desc_z);
-        const impl_z = api.cstr_alloc(allocator, data.impl) catch continue;
+        const impl_z = std.fmt.allocPrintSentinel(allocator, "{s}", .{data.impl}, 0) catch continue;
         defer allocator.free(impl_z);
 
         const desc_func = api.load_json(allocator, desc_z) catch continue;
@@ -568,14 +554,14 @@ fn register_cpu_count(allocator: std.mem.Allocator) !void {
 }
 
 fn make_builder_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
-    const msg_z = try api.cstr_alloc(allocator, msg);
+    const msg_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{msg}, 0);
     defer allocator.free(msg_z);
     return MetaSchedule.builder_result(allocator, null, msg_z);
 }
 
 /// Create a RunnerFuture wrapping a RunnerResult with an error message.
 fn make_runner_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
-    const msg_z = try api.cstr_alloc(allocator, msg);
+    const msg_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{msg}, 0);
     defer allocator.free(msg_z);
     const rr = try MetaSchedule.runner_result(allocator, null, msg_z);
     return MetaSchedule.runner_future(allocator, rr);

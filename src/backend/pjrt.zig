@@ -597,7 +597,7 @@ fn tvm_opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
 
 fn load_tvm_dispatch_entry(kernel_key: []const u8, artifact: kernel.KernelArtifact) !TvmDispatchEntry {
     const hash = std.hash.Wyhash.hash(0, kernel_key);
-    const path = try std.fmt.allocPrint(std.heap.c_allocator, "/tmp/zigrad-kernel-{x}.so", .{hash});
+    const path = try std.fmt.allocPrintSentinel(std.heap.c_allocator, "/tmp/zigrad-kernel-{x}.so", .{hash}, 0);
     defer std.heap.c_allocator.free(path);
 
     const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
