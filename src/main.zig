@@ -55,8 +55,8 @@ pub fn main() !void {
         const target_suffix: []const u8 = if (target_kind == .cuda) "cuda" else "cpu";
 
         const work_dir = opts.work_dir orelse "artifacts/tvm_cache";
-        const full_work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
-        defer gpa.free(full_work_dir);
+        const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
+        defer gpa.free(base_dir);
 
         try zg.tvm.ffi.ensure_loaded(gpa);
         var ir_mod = try zg.tvm.tir.build_matmul_tir(gpa, shape.m, shape.n, shape.k);
@@ -76,11 +76,20 @@ pub fn main() !void {
         const tensor_shapes = try gpa.dupe([]const i64, &[_][]const i64{ shape_a, shape_b, shape_c });
         defer gpa.free(tensor_shapes);
 
-        return zg.tvm.tune.tune(gpa, ir_mod, target, target_kind, tensor_shapes, .{
+        const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, shape.m, shape.n, shape.k);
+        defer gpa.free(key);
+        const full_work_dir = try zg.tvm.module.ensure_cache_dir(gpa, base_dir, key);
+        defer gpa.free(full_work_dir);
+
+        try zg.tvm.tune.tune(gpa, ir_mod, target, target_kind, tensor_shapes, .{
             .work_dir = full_work_dir,
             .max_trials = opts.trials orelse 64,
             .trials_per_iter = opts.trials_per_iter orelse 16,
         });
+
+        const update = try zg.tvm.module.update_cache_from_work_dir(gpa, base_dir, full_work_dir, key, target_kind);
+        gpa.free(update.stable_path);
+        return;
     }
     if (cmd.matchSubCmd("tvm-run")) |sub_cmd| {
         if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
@@ -249,12 +258,15 @@ fn run_tvm_demo(
         .cpu => "cpu",
         .cuda => "cuda",
     };
-    const work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_work_dir, target_suffix });
-    defer gpa.free(work_dir);
+    const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_work_dir, target_suffix });
+    defer gpa.free(base_dir);
+    const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, M, N, K);
+    defer gpa.free(key);
 
     try zg.tvm.ffi.ensure_loaded(gpa);
-    var tuned = try zg.tvm.module.load(gpa, .{ .work_dir = work_dir });
-    defer tuned.deinit();
+    const tuned = try zg.tvm.module.load_cached(gpa, base_dir, key, target_kind) orelse return error.NoTuningRecords;
+    var tuned_mut = tuned;
+    defer tuned_mut.deinit();
 
     const a = try gpa.alloc(f32, M * K);
     defer gpa.free(a);

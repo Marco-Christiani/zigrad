@@ -86,7 +86,7 @@ pub const TvmProvider = struct {
         defer allocator.free(base_dir);
         std.fs.cwd().makePath(base_dir) catch {};
 
-        const key = try kernel_cache_key(allocator, self.target_kind, matmul);
+        const key = try tuned_module.matmul_cache_key(allocator, self.target_kind, matmul.m, matmul.n, matmul.k);
         defer allocator.free(key);
 
         if (load_cached_kernel(allocator, base_dir, key, self.target_kind) catch null) |cached| {
@@ -112,43 +112,25 @@ pub const TvmProvider = struct {
             return error.CompileFailed;
         };
 
-        const best = tuned_module.best_candidate_from_records(allocator, work_dir) catch |err| {
-            log.err("failed to load tuning records: {s}", .{@errorName(err)});
-            return error.CompileFailed;
-        };
-
-        const candidate_path = std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{
-            work_dir, best.idx,
-        }) catch return error.OutOfMemory;
-        defer allocator.free(candidate_path);
-
-        const stable_path = tuned_module.stable_artifact_path(allocator, work_dir, key) catch
-            return error.OutOfMemory;
-        defer allocator.free(stable_path);
-
-        std.fs.cwd().copyFile(candidate_path, std.fs.cwd(), stable_path, .{}) catch |err| {
-            log.err("failed to copy {s} to {s}: {s}", .{ candidate_path, stable_path, @errorName(err) });
-            return error.CompileFailed;
-        };
-
-        const entry = tuned_module.CacheEntry{
-            .key = key,
-            .target_kind = self.target_kind,
-            .artifact_path = stable_path,
-            .best_time_us = best.time_secs * 1e6,
-        };
-        tuned_module.cache_update(allocator, base_dir, entry) catch |err| {
+        const update = tuned_module.update_cache_from_work_dir(
+            allocator,
+            base_dir,
+            work_dir,
+            key,
+            self.target_kind,
+        ) catch |err| {
             log.err("failed to update kernel cache index: {s}", .{@errorName(err)});
             return error.CompileFailed;
         };
+        defer allocator.free(update.stable_path);
 
-        const so_bytes = std.fs.cwd().readFileAlloc(allocator, stable_path, 100 * 1024 * 1024) catch |err| {
-            log.err("failed to read {s}: {s}", .{ stable_path, @errorName(err) });
+        const so_bytes = std.fs.cwd().readFileAlloc(allocator, update.stable_path, 100 * 1024 * 1024) catch |err| {
+            log.err("failed to read {s}: {s}", .{ update.stable_path, @errorName(err) });
             return error.CompileFailed;
         };
 
         log.info("compiled kernel: {s} (candidate {d}, {d:.2} us, {d} bytes)", .{
-            desc.name, best.idx, best.time_secs * 1e6, so_bytes.len,
+            desc.name, update.best_candidate, update.best_time_us, so_bytes.len,
         });
 
         return .{
@@ -214,20 +196,6 @@ fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
     if (a.dtype != .f32 or b.dtype != .f32) return null;
 
     return .{ .m = m, .n = n, .k = k };
-}
-
-fn kernel_cache_key(allocator: std.mem.Allocator, target_kind: TargetKind, matmul: MatmulShape) ![]u8 {
-    const target_suffix = switch (target_kind) {
-        .cpu => "cpu",
-        .cuda => "cuda",
-    };
-    const key_str = try std.fmt.allocPrint(allocator, "matmul:f32:{s}:{d}:{d}:{d}", .{
-        target_suffix, matmul.m, matmul.n, matmul.k,
-    });
-    defer allocator.free(key_str);
-
-    const hash = std.hash.Wyhash.hash(0, key_str);
-    return std.fmt.allocPrint(allocator, "{x}", .{hash});
 }
 
 fn load_cached_kernel(

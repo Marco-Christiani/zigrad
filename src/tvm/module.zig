@@ -129,6 +129,96 @@ pub fn ensure_cache_dir(allocator: std.mem.Allocator, base_dir: []const u8, key:
     return dir;
 }
 
+pub const UpdateResult = struct {
+    stable_path: []u8,
+    best_candidate: usize,
+    best_time_us: f64,
+};
+
+pub fn update_cache_from_work_dir(
+    allocator: std.mem.Allocator,
+    base_dir: []const u8,
+    work_dir: []const u8,
+    key: []const u8,
+    target_kind: TargetKind,
+) !UpdateResult {
+    const best = try best_candidate_from_records(allocator, work_dir);
+
+    const candidate_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{
+        work_dir, best.idx,
+    });
+    defer allocator.free(candidate_path);
+
+    const stable_path = try stable_artifact_path(allocator, work_dir, key);
+
+    std.fs.cwd().copyFile(candidate_path, std.fs.cwd(), stable_path, .{}) catch |err| {
+        allocator.free(stable_path);
+        return err;
+    };
+
+    const entry = CacheEntry{
+        .key = key,
+        .target_kind = target_kind,
+        .artifact_path = stable_path,
+        .best_time_us = best.time_secs * 1e6,
+    };
+    try cache_update(allocator, base_dir, entry);
+
+    return .{
+        .stable_path = stable_path,
+        .best_candidate = best.idx,
+        .best_time_us = best.time_secs * 1e6,
+    };
+}
+
+pub fn load_cached(
+    allocator: std.mem.Allocator,
+    base_dir: []const u8,
+    key: []const u8,
+    target_kind: TargetKind,
+) !?TunedModule {
+    const cached = try cache_lookup(allocator, base_dir, key, target_kind);
+    if (cached == null) return null;
+    defer {
+        allocator.free(cached.?.key);
+        allocator.free(cached.?.artifact_path);
+    }
+
+    std.fs.cwd().access(cached.?.artifact_path, .{}) catch return null;
+    const path_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{cached.?.artifact_path}, 0);
+    defer allocator.free(path_z);
+    var module = try RuntimeModule.load_from_file(allocator, path_z);
+    errdefer module.deinit();
+    const main_func = try module.get_function(allocator, "main", true);
+
+    return .{
+        .module = module,
+        .main_func = main_func,
+        .best_candidate = 0,
+        .best_time_us = cached.?.best_time_us,
+    };
+}
+
+pub fn matmul_cache_key(
+    allocator: std.mem.Allocator,
+    target_kind: TargetKind,
+    m: usize,
+    n: usize,
+    k: usize,
+) ![]u8 {
+    const target_suffix = switch (target_kind) {
+        .cpu => "cpu",
+        .cuda => "cuda",
+    };
+    const key_str = try std.fmt.allocPrint(allocator, "matmul:f32:{s}:{d}:{d}:{d}", .{
+        target_suffix, m, n, k,
+    });
+    defer allocator.free(key_str);
+
+    const hash = std.hash.Wyhash.hash(0, key_str);
+    return std.fmt.allocPrint(allocator, "{x}", .{hash});
+}
+
 /// Load the best tuned module from a previous tuning run.
 ///
 /// Parses tuning_record.json to find the fastest candidate, then loads
