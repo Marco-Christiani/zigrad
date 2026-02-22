@@ -142,6 +142,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(TvmTuneOpts, .{
             .cmd_name = "tvm-tune",
             .cmd_description = "Run TVM MetaSchedule autotuning on matmul (requires -Dtvm)",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "cuda", "Tune for CUDA target" },
                 .{ "gpu", "Tune for GPU target (alias for --cuda)" },
@@ -155,6 +156,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(TvmRunOpts, .{
             .cmd_name = "tvm-run",
             .cmd_description = "Load and run a tuned TVM matmul (requires -Dtvm + prior tuning)",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "cuda", "Run on CUDA target" },
                 .{ "gpu", "Run on GPU target (alias for --cuda)" },
@@ -166,6 +168,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(TvmZxprOpts, .{
             .cmd_name = "tvm-zxpr",
             .cmd_description = "Print a kernelized TVM region in zxpr format",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "sweep_palettes", "Try all available color palettes" },
                 .{ "palette", "Use specific color palette" },
@@ -174,6 +177,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(TvmZxprOpts, .{
             .cmd_name = "tvm-attention-zxpr",
             .cmd_description = "Print attention pattern with TVM annotation",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "sweep_palettes", "Try all available color palettes" },
                 .{ "palette", "Use specific color palette" },
@@ -182,6 +186,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(TrainDemoOpts, .{
             .cmd_name = "train-demo",
             .cmd_description = "Run the frontend training demo",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "warmup", "Number of warmup iterations" },
                 .{ "steps", "Number of training steps" },
@@ -190,6 +195,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(TrainDemoOpts, .{
             .cmd_name = "llm-ft-demo",
             .cmd_description = "Run a tiny LLM fine-tune demo",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "warmup", "Number of warmup iterations" },
                 .{ "steps", "Number of training steps" },
@@ -198,6 +204,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(LlamaFtDemoOpts, .{
             .cmd_name = "llama-ft-demo",
             .cmd_description = "Run a tiny Llama fine-tune demo",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "warmup", "Number of warmup iterations" },
                 .{ "steps", "Number of training steps" },
@@ -215,6 +222,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(JitCacheOpts, .{
             .cmd_name = "jit-cache-save",
             .cmd_description = "Write PJRT JIT cache artifact",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "path", "Path to save the JIT cache artifact" },
             },
@@ -222,6 +230,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(JitCacheOpts, .{
             .cmd_name = "jit-cache-run",
             .cmd_description = "Load and run PJRT JIT cache artifact",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "path", "Path to the JIT cache artifact" },
             },
@@ -229,6 +238,7 @@ pub const setup_cmd: CommandT = .{
         CommandT.from(BenchmarkOpts, .{
             .cmd_name = "benchmark",
             .cmd_description = "Run matmul performance benchmarks",
+            .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "shapes", "Comma-separated list of shapes (default: 128x128x128)" },
                 .{ "impls", "Implementations to test: zig_naive, tvm_cpu, xla_cpu, etc (default: zig_naive)" },
