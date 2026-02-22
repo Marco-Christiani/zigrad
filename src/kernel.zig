@@ -218,6 +218,8 @@ pub const KernelArtifact = struct {
     provider_name: []const u8,
 
     /// Opaque compiled kernel data (e.g. .so bytes).
+    /// Ownership is transferred to the KernelRegistry; must be allocated
+    /// with the allocator passed to provider.compile.
     data: []const u8,
 
     /// Target name used to reference this KA from custom_call ops.
@@ -227,6 +229,7 @@ pub const KernelArtifact = struct {
     dispatch_fn: ?DispatchFn = null,
 
     /// Provider-owned state passed as first argument to dispatch_fn.
+    /// Non-owning: must outlive all KernelArtifacts that reference it.
     dispatch_ctx: ?*anyopaque = null,
 
     /// Execute this kernel artifact via its provider's dispatch function.
