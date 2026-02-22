@@ -9,6 +9,7 @@ const tvm_api = @import("../c/tvm/api.zig");
 const tune_mod = @import("tune.zig");
 const tuned_module = @import("module.zig");
 const kernel = @import("../kernel.zig");
+const dispatch_mod = @import("dispatch.zig");
 const pr = @import("../pr/pr.zig");
 const TargetKind = tir.TargetKind;
 
@@ -20,6 +21,10 @@ pub const TvmProvider = struct {
     work_dir: []const u8,
     max_trials: u32 = 64,
     trials_per_iter: u32 = 16,
+
+    /// Shared dispatch state owning the TVM module cache.
+    /// Must outlive all KernelArtifacts produced by this provider.
+    dispatch_state: *dispatch_mod.TvmDispatchState,
 
     /// Return a KernelProvider interface backed by this TvmProvider.
     pub fn kernel_provider(self: *TvmProvider) kernel.KernelProvider {
@@ -118,6 +123,8 @@ pub const TvmProvider = struct {
             .provider_name = "tvm",
             .data = so_bytes,
             .target_name = desc.name,
+            .dispatch_fn = &dispatch_mod.TvmDispatchState.dispatch,
+            .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
     }
 };

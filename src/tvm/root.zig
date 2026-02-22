@@ -1,6 +1,7 @@
 // High-level modules
 pub const module = @import("module.zig");
 pub const provider = @import("provider.zig");
+pub const dispatch = @import("dispatch.zig");
 pub const tune = @import("tune.zig");
 
 // C binding subsystem re-exports (named to match TVM namespaces)

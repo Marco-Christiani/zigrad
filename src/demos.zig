@@ -528,12 +528,16 @@ pub fn run_kernel_provider_demo(
     defer registry.deinit();
     try backend.register_kernel_dispatcher(&registry);
 
+    var dispatch_state = zg.tvm.dispatch.TvmDispatchState.init(allocator);
+    defer dispatch_state.deinit();
+
     var provider_impl = zg.tvm.provider.TvmProvider{
         .allocator = allocator,
         .target_kind = target_kind,
         .work_dir = "artifacts/tvm_cache",
         .max_trials = 8,
         .trials_per_iter = 4,
+        .dispatch_state = &dispatch_state,
     };
     const providers = [_]zg.kernel.KernelProvider{provider_impl.kernel_provider()};
 

@@ -17,10 +17,6 @@ const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
-const dlpack = @import("../c/dlpack.zig");
-const tvm_api = @import("../c/tvm/api.zig");
-const tvm_runtime = @import("../c/tvm/runtime.zig");
-const tvm_c = @import("../c/tvm/c.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const pjrt_types = @import("../c/pjrt/types.zig");
@@ -39,13 +35,6 @@ var kernel_dispatch_registry: ?*const kernel.KernelRegistry = null;
 var kernel_dispatch_target_registered: bool = false;
 var kernel_dispatch_platform: Platform = .unknown;
 
-const TvmDispatchEntry = struct {
-    module: tvm_runtime.RuntimeModule,
-    main_func: tvm_api.Value,
-};
-
-var tvm_dispatch_cache_mutex = std.Thread.Mutex{};
-var tvm_dispatch_cache: ?std.StringHashMap(TvmDispatchEntry) = null;
 // Re-export handle types for callers
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
 pub const Buffer = pjrt_types.Buffer;
@@ -429,6 +418,11 @@ fn detect_platform(plugin_path: []const u8) Platform {
     return .unknown;
 }
 
+/// Generic kernel dispatch handler invoked by the XLA FFI framework.
+///
+/// Extracts kernel_key from custom_call attributes, looks up the artifact
+/// in the registry, builds a provider-agnostic DispatchContext from the
+/// FFI frame, and delegates to `artifact.dispatch()`.
 fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
     if (handle_metadata_registration_hook(frame)) return null;
 
@@ -451,130 +445,111 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
         return make_ffi_error(frame, "zigrad kernel dispatch: provider mismatch for kernel key", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
     }
 
-    const a = get_arg_buffer(frame.args, 0) orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: missing arg0 buffer", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    };
-    const b = get_arg_buffer(frame.args, 1) orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: missing arg1 buffer", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    };
-    const out = get_ret_buffer(frame.rets, 0) orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: missing ret0 buffer", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    // Extract all input and output buffers from the FFI frame.
+    var input_descs: [16]kernel.BufferDesc = undefined;
+    const num_inputs = extract_buffers(frame.args.size, frame.args.types, frame.args.args, &input_descs) orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: failed to extract input buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
     };
 
-    if (a.rank != 2 or b.rank != 2 or out.rank != 2) {
-        return make_ffi_error(frame, "zigrad kernel dispatch: expected rank-2 buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    }
-    if (a.dtype != c.XLA_FFI_DataType_F32 or b.dtype != c.XLA_FFI_DataType_F32 or out.dtype != c.XLA_FFI_DataType_F32) {
-        return make_ffi_error(frame, "zigrad kernel dispatch: expected f32 buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    }
+    var output_descs: [16]kernel.BufferDesc = undefined;
+    const num_outputs = extract_ret_buffers(frame.rets.size, frame.rets.types, frame.rets.rets, &output_descs) orelse {
+        return make_ffi_error(frame, "zigrad kernel dispatch: failed to extract output buffers", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    };
 
-    const m: usize = @intCast(a.dims[0]);
-    const k: usize = @intCast(a.dims[1]);
-    const kb: usize = @intCast(b.dims[0]);
-    const n: usize = @intCast(b.dims[1]);
-    const out_m: usize = @intCast(out.dims[0]);
-    const out_n: usize = @intCast(out.dims[1]);
-    if (k != kb or m != out_m or n != out_n) {
-        return make_ffi_error(frame, "zigrad kernel dispatch: matmul shape mismatch", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    }
+    const platform: kernel.DispatchPlatform = switch (kernel_dispatch_platform) {
+        .cuda => .cuda,
+        .host, .unknown => .host,
+    };
 
-    if (std.mem.eql(u8, artifact.provider_name, "tvm")) {
-        dispatch_tvm_kernel(frame, artifact, kernel_key, a, b, out) catch {
-            return make_ffi_error(frame, "zigrad kernel dispatch: tvm execution failed", c.XLA_FFI_Error_Code_INTERNAL);
-        };
-        return null;
-    }
+    const ctx = kernel.DispatchContext{
+        .inputs = input_descs[0..num_inputs],
+        .outputs = output_descs[0..num_outputs],
+        .device_ordinal = get_device_ordinal(frame),
+        .platform = platform,
+        .stream = get_stream(frame),
+        .allocator = std.heap.c_allocator,
+    };
 
-    return make_ffi_error(frame, "zigrad kernel dispatch: unsupported provider", c.XLA_FFI_Error_Code_UNIMPLEMENTED);
+    artifact.dispatch(kernel_key, ctx) catch {
+        return make_ffi_error(frame, "zigrad kernel dispatch: provider execution failed", c.XLA_FFI_Error_Code_INTERNAL);
+    };
+    return null;
 }
 
-fn dispatch_tvm_kernel(
-    frame: *c.XLA_FFI_CallFrame,
-    artifact: kernel.KernelArtifact,
-    kernel_key: []const u8,
-    a: *c.XLA_FFI_Buffer,
-    b: *c.XLA_FFI_Buffer,
-    out: *c.XLA_FFI_Buffer,
-) !void {
-    try tvm_api.ensure_loaded(std.heap.c_allocator);
-
-    var entry: TvmDispatchEntry = undefined;
-    {
-        tvm_dispatch_cache_mutex.lock();
-        defer tvm_dispatch_cache_mutex.unlock();
-
-        var cache = get_tvm_dispatch_cache();
-        if (cache.get(kernel_key)) |cached| {
-            entry = cached;
-        } else {
-            const loaded = try load_tvm_dispatch_entry(kernel_key, artifact);
-            const cache_key = try std.heap.c_allocator.dupe(u8, kernel_key);
-            try cache.put(cache_key, loaded);
-            entry = loaded;
-        }
+/// Extract input buffers from an FFI args structure into BufferDesc array.
+fn extract_buffers(
+    size: i64,
+    types: [*]const c.XLA_FFI_ArgType,
+    args_ptr: [*]const ?*anyopaque,
+    out: *[16]kernel.BufferDesc,
+) ?usize {
+    if (size < 0) return null;
+    const count: usize = @intCast(size);
+    if (count > 16) return null;
+    for (0..count) |i| {
+        if (types[i] != c.XLA_FFI_ArgType_BUFFER) return null;
+        const ptr = args_ptr[i] orelse return null;
+        const buf: *c.XLA_FFI_Buffer = @ptrCast(@alignCast(ptr));
+        out[i] = ffi_buffer_to_desc(buf) orelse return null;
     }
-
-    const m: usize = @intCast(a.dims[0]);
-    const k: usize = @intCast(a.dims[1]);
-    const n: usize = @intCast(b.dims[1]);
-
-    const device_id = get_device_ordinal(frame);
-
-    if (kernel_dispatch_platform == .cuda) {
-        try configure_tvm_cuda_stream(frame, device_id);
-    }
-
-    const device_type: dlpack.DeviceType = if (kernel_dispatch_platform == .cuda) .cuda else .cpu;
-
-    var shape_a = [_]i64{ @intCast(m), @intCast(k) };
-    var shape_b = [_]i64{ @intCast(k), @intCast(n) };
-    var shape_out = [_]i64{ @intCast(m), @intCast(n) };
-
-    var a_tensor = try tensor_from_ffi_buffer(a, shape_a[0..], device_type, device_id);
-    defer a_tensor.deinit();
-    var b_tensor = try tensor_from_ffi_buffer(b, shape_b[0..], device_type, device_id);
-    defer b_tensor.deinit();
-    var out_tensor = try tensor_from_ffi_buffer(out, shape_out[0..], device_type, device_id);
-    defer out_tensor.deinit();
-
-    const func_handle = entry.main_func.as_object() orelse return error.TvmCallFailed;
-    _ = try tvm_api.call_handle(std.heap.c_allocator, func_handle, &.{
-        a_tensor.as_value(),
-        b_tensor.as_value(),
-        out_tensor.as_value(),
-    });
+    return count;
 }
 
-fn tensor_from_ffi_buffer(buffer: *c.XLA_FFI_Buffer, shape: []i64, device_type: dlpack.DeviceType, device_id: i32) !tvm_runtime.Tensor {
-    const dl_tensor: dlpack.Tensor = .{
-        .data = @ptrCast(buffer.data),
-        .device = .{ .device_type = device_type, .device_id = device_id },
-        .ndim = @intCast(shape.len),
-        .dtype = dlpack.DataType.f32_,
-        .shape = shape.ptr, // heap_borrowing dupes this
-        .strides = null,
-        .byte_offset = 0,
+/// Extract output buffers from an FFI rets structure into BufferDesc array.
+fn extract_ret_buffers(
+    size: i64,
+    types: [*]const c.XLA_FFI_RetType,
+    rets_ptr: [*]const ?*anyopaque,
+    out: *[16]kernel.BufferDesc,
+) ?usize {
+    if (size < 0) return null;
+    const count: usize = @intCast(size);
+    if (count > 16) return null;
+    for (0..count) |i| {
+        if (types[i] != c.XLA_FFI_RetType_BUFFER) return null;
+        const ptr = rets_ptr[i] orelse return null;
+        const buf: *c.XLA_FFI_Buffer = @ptrCast(@alignCast(ptr));
+        out[i] = ffi_buffer_to_desc(buf) orelse return null;
+    }
+    return count;
+}
+
+/// Convert an XLA FFI buffer to a provider-agnostic BufferDesc.
+fn ffi_buffer_to_desc(buf: *c.XLA_FFI_Buffer) ?kernel.BufferDesc {
+    const dtype = ffi_dtype_to_kernel_dtype(buf.dtype) orelse return null;
+    const rank: usize = @intCast(buf.rank);
+    return .{
+        .data = @ptrCast(buf.data orelse return null),
+        .dtype = dtype,
+        .dims = buf.dims[0..rank],
+        .rank = rank,
     };
-    const managed = try dlpack.ManagedTensor.heap_borrowing(std.heap.c_allocator, dl_tensor);
-    return tvm_runtime.Tensor.from_dlpack(managed);
 }
 
-fn configure_tvm_cuda_stream(frame: *c.XLA_FFI_CallFrame, device_id: i32) !void {
-    const ffi_api = frame.api orelse return error.TvmCallFailed;
-    const get_stream = ffi_api.*.XLA_FFI_Stream_Get orelse return error.TvmCallFailed;
+/// Map XLA FFI element types to kernel.DType.
+fn ffi_dtype_to_kernel_dtype(xla_dtype: c.XLA_FFI_DataType) ?kernel.DType {
+    if (xla_dtype == c.XLA_FFI_DataType_F16) return .f16;
+    if (xla_dtype == c.XLA_FFI_DataType_BF16) return .bf16;
+    if (xla_dtype == c.XLA_FFI_DataType_F32) return .f32;
+    if (xla_dtype == c.XLA_FFI_DataType_F64) return .f64;
+    if (xla_dtype == c.XLA_FFI_DataType_S8) return .i8;
+    if (xla_dtype == c.XLA_FFI_DataType_S32) return .i32;
+    if (xla_dtype == c.XLA_FFI_DataType_S64) return .i64;
+    if (xla_dtype == c.XLA_FFI_DataType_U32) return .u32;
+    if (xla_dtype == c.XLA_FFI_DataType_U64) return .u64;
+    return null;
+}
 
+/// Extract the GPU stream handle from an FFI call frame.
+fn get_stream(frame: *c.XLA_FFI_CallFrame) ?*anyopaque {
+    const ffi_api = frame.api orelse return null;
+    const get_stream_fn = ffi_api.*.XLA_FFI_Stream_Get orelse return null;
     var args: c.XLA_FFI_Stream_Get_Args = std.mem.zeroes(c.XLA_FFI_Stream_Get_Args);
     args.struct_size = @sizeOf(c.XLA_FFI_Stream_Get_Args);
     args.ctx = frame.ctx;
-    const ffi_err = get_stream(&args);
-    if (ffi_err != null) return error.TvmCallFailed;
-    const stream_ptr = args.stream orelse return error.TvmCallFailed;
-
-    _ = try tvm_api.call_global(std.heap.c_allocator, "runtime.TVMSetStream", &.{
-        tvm_api.Value.int(2), // kDLCUDA
-        tvm_api.Value.int(device_id),
-        tvm_opaque_ptr_value(stream_ptr),
-    });
+    const ffi_err = get_stream_fn(&args);
+    if (ffi_err != null) return null;
+    return args.stream;
 }
 
 fn get_device_ordinal(frame: *c.XLA_FFI_CallFrame) i32 {
@@ -586,39 +561,6 @@ fn get_device_ordinal(frame: *c.XLA_FFI_CallFrame) i32 {
     const err = get_ordinal(&args);
     if (err != null) return 0;
     return args.device_ordinal;
-}
-
-fn tvm_opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
-    var v = std.mem.zeroes(tvm_c.TVMFFIAny);
-    v.type_index = tvm_c.kTVMFFIOpaquePtr;
-    v.unnamed_1.v_int64 = @bitCast(@intFromPtr(ptr));
-    return .{ .raw = v };
-}
-
-fn load_tvm_dispatch_entry(kernel_key: []const u8, artifact: kernel.KernelArtifact) !TvmDispatchEntry {
-    const hash = std.hash.Wyhash.hash(0, kernel_key);
-    const path = try std.fmt.allocPrintSentinel(std.heap.c_allocator, "/tmp/zigrad-kernel-{x}.so", .{hash}, 0);
-    defer std.heap.c_allocator.free(path);
-
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(artifact.data);
-
-    var module = try tvm_runtime.RuntimeModule.load_from_file(std.heap.c_allocator, path);
-    errdefer module.deinit();
-
-    const main_func = try module.get_function(std.heap.c_allocator, "main", true);
-    return .{
-        .module = module,
-        .main_func = main_func,
-    };
-}
-
-fn get_tvm_dispatch_cache() *std.StringHashMap(TvmDispatchEntry) {
-    if (tvm_dispatch_cache == null) {
-        tvm_dispatch_cache = std.StringHashMap(TvmDispatchEntry).init(std.heap.c_allocator);
-    }
-    return &tvm_dispatch_cache.?;
 }
 
 fn handle_metadata_registration_hook(frame: *c.XLA_FFI_CallFrame) bool {

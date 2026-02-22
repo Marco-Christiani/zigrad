@@ -141,22 +141,104 @@ pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: 
 }
 
 // ============================================================================
+// Dispatch Types
+// ============================================================================
+
+/// Element data type for dispatch buffers.
+///
+/// Subset of types relevant to kernel dispatch. Providers validate
+/// dtype support internally; the backend maps from FFI-layer types.
+pub const DType = enum {
+    f16,
+    bf16,
+    f32,
+    f64,
+    i8,
+    i32,
+    i64,
+    u32,
+    u64,
+};
+
+/// Execution platform for dispatch.
+pub const DispatchPlatform = enum { host, cuda };
+
+/// Descriptor for a single buffer passed through the FFI boundary.
+///
+/// Provider-agnostic: the backend extracts these from FFI frames,
+/// providers consume them without knowing about XLA types.
+pub const BufferDesc = struct {
+    data: *anyopaque,
+    dtype: DType,
+    dims: []const i64,
+    rank: usize,
+};
+
+/// Context passed to a provider's dispatch function at execution time.
+///
+/// Contains all information a provider needs to execute a compiled kernel:
+/// input/output buffers, device identity, and an optional device stream
+/// for GPU synchronization.
+pub const DispatchContext = struct {
+    inputs: []const BufferDesc,
+    outputs: []const BufferDesc,
+    device_ordinal: i32,
+    platform: DispatchPlatform,
+    /// GPU stream handle (e.g. CUDA stream). Null on host.
+    stream: ?*anyopaque,
+    allocator: std.mem.Allocator,
+};
+
+pub const DispatchError = error{ DispatchFailed, UnsupportedDType, ShapeMismatch, OutOfMemory };
+
+/// Provider dispatch function signature.
+///
+/// Called by the backend's generic FFI handler when a custom_call
+/// targets a kernelized op. The provider_ctx is the provider's own
+/// state (cast from `*anyopaque`); artifact_data and kernel_key
+/// identify the compiled kernel; ctx carries buffers and device info.
+pub const DispatchFn = *const fn (
+    provider_ctx: *anyopaque,
+    artifact_data: []const u8,
+    kernel_key: []const u8,
+    ctx: DispatchContext,
+) DispatchError!void;
+
+// ============================================================================
 // Kernel Artifact
 // ============================================================================
 
 /// A compiled kernel for a specific target.
 ///
-/// Opaque to the core system — the kernel provider produces it,
-/// the backend consumes it via the registry.
+/// Produced by a kernel provider, consumed by the backend at execution
+/// time. The dispatch_fn + dispatch_ctx pair allow the backend to call
+/// into the provider without knowing its identity.
 pub const KernelArtifact = struct {
     /// Provider that produced this artifact.
     provider_name: []const u8,
 
-    /// Opaque compiled kernel data.
+    /// Opaque compiled kernel data (e.g. .so bytes).
     data: []const u8,
 
     /// Target name used to reference this KA from custom_call ops.
     target_name: []const u8,
+
+    /// Provider dispatch entry point.
+    dispatch_fn: ?DispatchFn = null,
+
+    /// Provider-owned state passed as first argument to dispatch_fn.
+    dispatch_ctx: ?*anyopaque = null,
+
+    /// Execute this kernel artifact via its provider's dispatch function.
+    ///
+    /// The caller supplies the kernel_key used for lookup (from the
+    /// custom_call attributes). This may differ from target_name if
+    /// aliasing or versioned keys are in play.
+    pub fn dispatch(self: *const KernelArtifact, kernel_key: []const u8, ctx: DispatchContext) DispatchError!void {
+        const dfn = self.dispatch_fn orelse return error.DispatchFailed;
+        const dctx = self.dispatch_ctx orelse return error.DispatchFailed;
+        return dfn(dctx, self.data, kernel_key, ctx);
+    }
 
     pub fn deinit(self: *KernelArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
