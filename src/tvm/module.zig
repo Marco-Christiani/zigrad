@@ -3,6 +3,8 @@
 //! After MetaSchedule tuning produces candidate .so files and a
 //! tuning_record.json, this module parses the records, ranks candidates
 //! by measured runtime, and loads the best one.
+//!
+//! Also maintains a cache index for stable lookup by kernel key.
 
 const std = @import("std");
 const api = @import("../c/tvm/api.zig");
@@ -39,6 +41,93 @@ pub const TunedModule = struct {
         _ = try api.call_handle(allocator, func_handle, args);
     }
 };
+
+/// Cache entry for a tuned kernel artifact.
+pub const CacheEntry = struct {
+    key: []const u8,
+    target_kind: TargetKind,
+    artifact_path: []const u8,
+    best_time_us: f64,
+};
+
+const CacheIndex = struct {
+    version: u32 = 1,
+    entries: []CacheEntry = &.{},
+};
+
+pub fn cache_lookup(
+    allocator: std.mem.Allocator,
+    base_dir: []const u8,
+    key: []const u8,
+    target_kind: TargetKind,
+) !?CacheEntry {
+    var index = try read_cache_index(allocator, base_dir);
+    defer deinit_cache_index(allocator, &index);
+
+    for (index.entries) |entry| {
+        if (entry.target_kind != target_kind) continue;
+        if (std.mem.eql(u8, entry.key, key)) {
+            return .{
+                .key = try allocator.dupe(u8, entry.key),
+                .target_kind = entry.target_kind,
+                .artifact_path = try allocator.dupe(u8, entry.artifact_path),
+                .best_time_us = entry.best_time_us,
+            };
+        }
+    }
+    return null;
+}
+
+pub fn cache_update(
+    allocator: std.mem.Allocator,
+    base_dir: []const u8,
+    entry: CacheEntry,
+) !void {
+    var index = try read_cache_index(allocator, base_dir);
+    defer deinit_cache_index(allocator, &index);
+
+    for (index.entries) |*existing| {
+        if (existing.target_kind == entry.target_kind and std.mem.eql(u8, existing.key, entry.key)) {
+            allocator.free(existing.key);
+            allocator.free(existing.artifact_path);
+            existing.key = try allocator.dupe(u8, entry.key);
+            existing.artifact_path = try allocator.dupe(u8, entry.artifact_path);
+            existing.best_time_us = entry.best_time_us;
+            return write_cache_index(allocator, base_dir, index);
+        }
+    }
+
+    var entries = try allocator.alloc(CacheEntry, index.entries.len + 1);
+    @memcpy(entries[0..index.entries.len], index.entries);
+    entries[index.entries.len] = .{
+        .key = try allocator.dupe(u8, entry.key),
+        .target_kind = entry.target_kind,
+        .artifact_path = try allocator.dupe(u8, entry.artifact_path),
+        .best_time_us = entry.best_time_us,
+    };
+    allocator.free(index.entries);
+    index.entries = entries;
+    return write_cache_index(allocator, base_dir, index);
+}
+
+pub fn best_candidate_from_records(allocator: std.mem.Allocator, work_dir: []const u8) !RankedCandidate {
+    const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{work_dir});
+    defer allocator.free(record_path);
+
+    const candidates = try find_ranked_candidates(allocator, record_path, work_dir);
+    defer allocator.free(candidates);
+    return candidates[0];
+}
+
+pub fn stable_artifact_path(allocator: std.mem.Allocator, work_dir: []const u8, key: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/kernel_{s}.so", .{ work_dir, key });
+}
+
+pub fn ensure_cache_dir(allocator: std.mem.Allocator, base_dir: []const u8, key: []const u8) ![]u8 {
+    const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_dir, key });
+    std.fs.cwd().makePath(dir) catch {};
+    return dir;
+}
 
 /// Load the best tuned module from a previous tuning run.
 ///
@@ -178,4 +267,59 @@ fn load_candidate(allocator: std.mem.Allocator, work_dir: []const u8, candidate_
         .best_candidate = candidate_idx,
         .best_time_us = 0, // caller fills this in
     };
+}
+
+fn read_cache_index(allocator: std.mem.Allocator, base_dir: []const u8) !CacheIndex {
+    const path = try std.fmt.allocPrint(allocator, "{s}/index.json", .{base_dir});
+    defer allocator.free(path);
+
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .{ .entries = try allocator.alloc(CacheEntry, 0) },
+        else => return err,
+    };
+    defer file.close();
+
+    const file_size = try file.getEndPos();
+    if (file_size == 0) return .{ .entries = try allocator.alloc(CacheEntry, 0) };
+
+    const contents = try allocator.alloc(u8, file_size);
+    defer allocator.free(contents);
+    const bytes_read = try file.readAll(contents);
+
+    const parsed = try std.json.parseFromSlice(CacheIndex, allocator, contents[0..bytes_read], .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    var entries = try allocator.alloc(CacheEntry, parsed.value.entries.len);
+    for (parsed.value.entries, 0..) |entry, i| {
+        entries[i] = .{
+            .key = try allocator.dupe(u8, entry.key),
+            .target_kind = entry.target_kind,
+            .artifact_path = try allocator.dupe(u8, entry.artifact_path),
+            .best_time_us = entry.best_time_us,
+        };
+    }
+    return .{ .version = parsed.value.version, .entries = entries };
+}
+
+fn write_cache_index(allocator: std.mem.Allocator, base_dir: []const u8, index: CacheIndex) !void {
+    const path = try std.fmt.allocPrint(allocator, "{s}/index.json", .{base_dir});
+    defer allocator.free(path);
+
+    const bytes = try std.json.Stringify.valueAlloc(allocator, index, .{});
+    defer allocator.free(bytes);
+
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
+
+fn deinit_cache_index(allocator: std.mem.Allocator, index: *CacheIndex) void {
+    for (index.entries) |entry| {
+        allocator.free(entry.key);
+        allocator.free(entry.artifact_path);
+    }
+    allocator.free(index.entries);
+    index.* = undefined;
 }

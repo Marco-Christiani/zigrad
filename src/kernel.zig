@@ -288,8 +288,8 @@ pub const KernelProvider = struct {
 pub const KernelRegistry = struct {
     entries: std.StringHashMap(KernelArtifact),
 
-    pub fn init(allocator: std.mem.Allocator) KernelRegistry {
-        return .{ .entries = std.StringHashMap(KernelArtifact).init(allocator) };
+    pub fn init(reg_allocator: std.mem.Allocator) KernelRegistry {
+        return .{ .entries = std.StringHashMap(KernelArtifact).init(reg_allocator) };
     }
 
     pub fn allocator(self: *const KernelRegistry) std.mem.Allocator {
