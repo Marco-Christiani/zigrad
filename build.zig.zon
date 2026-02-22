@@ -36,6 +36,10 @@
             .url = "git+https://github.com/Marco-Christiani/safetensors-zg#15787b35b541a4493630ec383750242eef422b64",
             .hash = "safetensors_zg-0.0.1-dRXUiGDtAAAS8GBHZT5IfFha7hG6KXCtVUuUxB-ob4Jc",
         },
+        .cova = .{
+            .url = "git+https://github.com/Marco-Christiani/cova#89b66faa69d5c8f2131245e6fd71dd1fa8d80351",
+            .hash = "cova-0.10.1-_OE4R6vTBADvQugVWTn-HVjQmsMLh0yc2yp3g8oOOMGT",
+        },
     },
     .paths = .{
         "build.zig",

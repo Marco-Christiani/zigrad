@@ -24,7 +24,7 @@ pub const lower = @import("lower/root.zig");
 pub const kernel = @import("kernel.zig");
 
 // TVM subsystem
-pub const tvm = @import("tvm/root.zig");
+pub const tvm = if (build_options.enable_tvm) @import("tvm/root.zig") else @compileError("TVM not enabled");
 
 // Kernels
 pub const kernels = struct {
