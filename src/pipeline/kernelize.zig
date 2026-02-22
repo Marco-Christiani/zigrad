@@ -36,6 +36,12 @@ const RewriteCandidate = struct {
     provider_name: []const u8,
 };
 
+const RegionCandidate = struct {
+    region: pr.Region,
+    provider: kernel.KernelProvider,
+    provider_name: []const u8,
+};
+
 /// Kernelization pass state. Holds the registry and providers.
 ///
 /// Create this struct, then call `pass()` to get a pipeline-compatible
@@ -72,6 +78,22 @@ pub const KernelizePass = struct {
     fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator) !pr.Function {
         if (func.regions.len == 0) return func;
 
+        var candidates = try std.ArrayList(RegionCandidate).initCapacity(temp_allocator, func.regions.len);
+        defer candidates.deinit(temp_allocator);
+
+        for (func.regions) |region| {
+            const provider_name = region.annotation.kernelize orelse continue;
+            const provider = self.find_provider(provider_name) orelse {
+                log.debug("no provider named '{s}' for region '{s}', skipping", .{ provider_name, region.name });
+                continue;
+            };
+            try candidates.append(temp_allocator, .{
+                .region = region,
+                .provider = provider,
+                .provider_name = provider_name,
+            });
+        }
+
         var rewrites = try std.ArrayList(RewriteCandidate).initCapacity(temp_allocator, func.regions.len);
         defer {
             for (rewrites.items) |rewrite| {
@@ -81,43 +103,49 @@ pub const KernelizePass = struct {
             rewrites.deinit(temp_allocator);
         }
 
-        for (func.regions) |region| {
-            const provider_name = region.annotation.kernelize orelse continue;
-
-            const provider = self.find_provider(provider_name) orelse {
-                log.debug("no provider named '{s}' for region '{s}', skipping", .{ provider_name, region.name });
+        for (candidates.items) |candidate| {
+            if (is_region_nested(candidate.region, candidates.items)) {
+                log.debug("region '{s}' is nested inside a larger kernelized region, skipping", .{ candidate.region.name });
                 continue;
-            };
+            }
 
-            const desc = try kernel.describe_region(temp_allocator, func, region);
+            const desc = try kernel.describe_region(temp_allocator, func, candidate.region);
             defer temp_allocator.free(desc.inputs);
             defer temp_allocator.free(desc.outputs);
 
             if (desc.outputs.len != 1) {
                 log.debug(
                     "region '{s}' has {d} outputs; single-dispatch temporary path only supports one output",
-                    .{ region.name, desc.outputs.len },
+                    .{ candidate.region.name, desc.outputs.len },
                 );
                 continue;
             }
 
-            const ka = provider.compile(desc, temp_allocator) catch |err| switch (err) {
+            const ka = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
                 error.Unsupported => {
-                    log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ provider_name, region.name });
+                    log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
                     continue;
                 },
                 error.CompileFailed => {
-                    log.err("provider '{s}' failed to compile region '{s}'", .{ provider_name, region.name });
+                    log.err("provider '{s}' failed to compile region '{s}'", .{ candidate.provider_name, candidate.region.name });
                     return error.CompileFailed;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
             };
 
-            try self.registry.put(ka.target_name, ka);
-            log.debug("compiled kernel '{s}' for region '{s}' via provider '{s}'", .{ ka.target_name, region.name, provider_name });
+            self.registry.put(ka.target_name, ka) catch |err| switch (err) {
+                error.DuplicateKey => {
+                    var artifact = ka;
+                    artifact.deinit(self.registry.allocator());
+                    log.err("duplicate kernel key '{s}' for region '{s}'", .{ ka.target_name, candidate.region.name });
+                    return error.CompileFailed;
+                },
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            log.debug("compiled kernel '{s}' for region '{s}' via provider '{s}'", .{ ka.target_name, candidate.region.name, candidate.provider_name });
 
             try rewrites.append(temp_allocator, .{
-                .region = region,
+                .region = candidate.region,
                 .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
                 .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
                 .kernel_key = ka.target_name,
@@ -172,6 +200,21 @@ pub const KernelizePass = struct {
             if (@as(usize, @intCast(entry.region.eqn_start)) == eqn_start) return entry;
         }
         return null;
+    }
+
+    fn is_region_nested(region: pr.Region, candidates: []const RegionCandidate) bool {
+        if (region.eqn_len == 0) return false;
+        const start: usize = @intCast(region.eqn_start);
+        const end: usize = start + @as(usize, @intCast(region.eqn_len));
+        for (candidates) |other| {
+            if (other.region.eqn_len == 0) continue;
+            const other_start: usize = @intCast(other.region.eqn_start);
+            const other_end: usize = other_start + @as(usize, @intCast(other.region.eqn_len));
+            const contains = (other_start <= start) and (other_end >= end);
+            const strictly_larger = (other_start < start) or (other_end > end);
+            if (contains and strictly_larger) return true;
+        }
+        return false;
     }
 
     fn append_existing_eqn(

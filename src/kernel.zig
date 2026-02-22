@@ -289,17 +289,25 @@ pub const KernelRegistry = struct {
         return .{ .entries = std.StringHashMap(KernelArtifact).init(allocator) };
     }
 
+    pub fn allocator(self: *const KernelRegistry) std.mem.Allocator {
+        return self.entries.allocator;
+    }
+
     pub fn deinit(self: *KernelRegistry) void {
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             var artifact = entry.value_ptr.*;
             artifact.deinit(self.entries.allocator);
+            self.entries.allocator.free(entry.key_ptr.*);
         }
         self.entries.deinit();
     }
 
-    pub fn put(self: *KernelRegistry, target_name: []const u8, artifact: KernelArtifact) error{OutOfMemory}!void {
-        try self.entries.put(target_name, artifact);
+    pub fn put(self: *KernelRegistry, target_name: []const u8, artifact: KernelArtifact) error{OutOfMemory, DuplicateKey}!void {
+        if (self.entries.contains(target_name)) return error.DuplicateKey;
+        const owned_key = try self.entries.allocator.dupe(u8, target_name);
+        errdefer self.entries.allocator.free(owned_key);
+        try self.entries.put(owned_key, artifact);
     }
 
     pub fn get(self: *const KernelRegistry, target_name: []const u8) ?KernelArtifact {
