@@ -19,15 +19,19 @@ vars:
     --no-times
     --filter=':- .rsync-filter'
   ZG_EXTERNAL_SDK_ROOT: '{{env "ZG_EXTERNAL_SDK_ROOT" | default "./result"}}'
+  ZG_RUNTIME_SDK_ROOT: '{{env "ZG_RUNTIME_SDK_ROOT" | default .ZG_EXTERNAL_SDK_ROOT}}'
   XLA_FLAGS_EXTRA: '{{env "ZG_XLA_FLAGS_EXTRA" | default ""}}'
 
 env:
   ZG_EXTERNAL_SDK_ROOT: "{{.ZG_EXTERNAL_SDK_ROOT}}"
-  PJRT_CPU_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
-  PJRT_GPU_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-  PJRT_PLUGIN_PATH: "{{.ZG_EXTERNAL_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+  ZG_RUNTIME_SDK_ROOT: "{{.ZG_RUNTIME_SDK_ROOT}}"
+  PJRT_CPU_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
+  PJRT_GPU_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+  PJRT_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
   # Perf default: enable the fusion block-level rewriter so XLA can emit Triton softmax fusions.
-  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true {{.XLA_FLAGS_EXTRA}}"
+  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_RUNTIME_SDK_ROOT}}/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true {{.XLA_FLAGS_EXTRA}}"
+  # intentionally unset this
+  NIX_CFLAGS_COMPILE: ""
 
 dotenv: [".env"]
 # env:
@@ -60,6 +64,18 @@ tasks:
       - task: task_timer
         vars:
           start_time: "{{ now | unixEpoch }}"
+
+  sdk:build:
+    desc: Build build-time SDK profile (headers/libs; no TVM runtime DSOs)
+    cmd: nix build .#zigrad-external-sdk-build-devel --print-out-paths --option sandbox false {{.CLI_ARGS}}
+
+  sdk:runtime:full:
+    desc: Build runtime SDK profile with TVM DSOs
+    cmd: nix build .#zigrad-external-sdk-runtime-full-devel --print-out-paths --option sandbox false {{.CLI_ARGS}}
+
+  sdk:runtime:no-tvm:
+    desc: Build runtime SDK profile without TVM DSOs
+    cmd: nix build .#zigrad-external-sdk-runtime-no-tvm-devel --print-out-paths --option sandbox false {{.CLI_ARGS}}
 
   check-sdk:
     cmd:
@@ -115,6 +131,31 @@ tasks:
 
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
+
+  test:tvm-runtime-gating:
+    desc: Validate TVM runtime loader against full vs no-tvm runtime profiles
+    cmd: |
+      set -euo pipefail
+
+      build_sdk="$(nix build .#zigrad-external-sdk-build-devel --print-out-paths --no-link --option sandbox false)"
+      runtime_full="$(nix build .#zigrad-external-sdk-runtime-full-devel --print-out-paths --no-link --option sandbox false)"
+      runtime_no_tvm="$(nix build .#zigrad-external-sdk-runtime-no-tvm-devel --print-out-paths --no-link --option sandbox false)"
+
+      echo "[build] sdk=$build_sdk"
+      zig build -Dsdk="$build_sdk"
+
+      echo "[positive] expecting tvm-dump-symbols success with runtime-full"
+      LD_LIBRARY_PATH="$runtime_full/lib:${LD_LIBRARY_PATH:-}" \
+        ./zig-out/bin/zigrad tvm-dump-symbols >/tmp/zigrad-tvm-symbols.txt
+
+      echo "[negative] expecting tvm-dump-symbols failure without TVM runtime libs"
+      if LD_LIBRARY_PATH="$runtime_no_tvm/lib:${LD_LIBRARY_PATH:-}" \
+        ./zig-out/bin/zigrad tvm-dump-symbols >/tmp/zigrad-tvm-missing.txt 2>&1; then
+        echo "ERROR: expected failure when TVM runtime libs are absent"
+        exit 1
+      fi
+
+      echo "OK: runtime gating validated"
 
   run:
     deps: [build, check-env-rt]
@@ -175,7 +216,7 @@ tasks:
     cmds:
       - |
         nix shell nixpkgs#perf -c bash -lc \
-          'JAX_PLATFORMS=cpu perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- /run/current-system/sw/bin/nix develop .#pyshell --command python scripts/jax_train_demo.py {{.PROFILE_ARGS}} > /tmp/jax_perf_cpu_stdout.log 2>/tmp/jax_perf_cpu_stderr.log'
+          'JAX_PLATFORMS=cpu perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- /run/current-system/sw/bin/nix develop .#default --command python scripts/jax_train_demo.py {{.PROFILE_ARGS}} > /tmp/jax_perf_cpu_stdout.log 2>/tmp/jax_perf_cpu_stderr.log'
   profile:jax:cpu:report:
     desc: "Report perf profile for JAX CPU train demo"
     vars:
@@ -269,7 +310,7 @@ tasks:
   python:
     desc: Run a python command in the devshell (in lieu of uv on NixOS). E.g., `task python -- scripts/reference_experiments.py`
     cmds:
-      - nix develop .#pyshell --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
+      - nix develop .#default --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
   jax:dump-hlo:gpu:
     desc: Run the JAX train demo and dump HLO (GPU).
     vars:
@@ -434,3 +475,28 @@ tasks:
         shape1=32768x1024x1024
         time ./zig-out/bin/zigrad tvm-tune --shape=$shape1 --work-dir=artifacts/tvm_cache/cpu/$shape1 2>&1 | grep -v warning
         ./zig-out/bin/zigrad benchmark --shapes=$shape0,$shape1 --impls=tvm_cpu,xla_cpu
+
+  bench-tvm-mkl-attn-block:
+    cmds:
+      - time ./zig-out/bin/zigrad tvm-tune-attention --shape=4x32x2048 --trials=64 --cpu
+      - time ./zig-out/bin/zigrad tvm-run-attention-cpu --shape=4x32x2048
+
+  bench-tvm-mkl-attn:
+    desc: "Benchmark TVM attention with fresh tuning and backup/restore workflow"
+    deps: [build]
+    vars:
+      SHAPE: '{{.SHAPE | default "32x2048x128"}}'
+      TRIALS: '{{.TRIALS | default "64"}}'
+    cmds:
+      - scripts/bench_tvm_attention.sh --shape={{.SHAPE}} --trials={{.TRIALS}}
+  # polly:zig:
+  #   cmds:
+  #     - zig build -Doptimize=ReleaseFast
+  #     -
+  #       exe.getEmittedLlvmIr
+  #       zig build-exe "$ZIG_SOURCE" \
+  #         -OReleaseFast \
+  #         -femit-llvm-ir \
+  #         -fno-emit-bin \
+  #         -fno-emit-h \
+  #         --name "${RAW_LL/\.ll/}"

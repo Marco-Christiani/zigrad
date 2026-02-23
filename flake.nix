@@ -129,28 +129,75 @@
         inherit lockFile;
       };
 
+      # SDK profiles:
+      # - build: compile-time headers/libs (TVM headers only, no TVM runtime DSOs)
+      # - runtime-full: includes TVM runtime/compiler DSOs
+      # - runtime-no-tvm: intentionally excludes TVM runtime/compiler DSOs
+      # - aggregate: build + runtime-full for default ergonomic workflows
+      zigradExternalSdkBuild = pkgs.symlinkJoin {
+        name = "zigrad-external-sdk-build";
+        paths = [
+          xlaMlirStablehloCapiSdk
+          tvm.dev
+        ];
+      };
+
+      zigradExternalSdkRuntimeFull = pkgs.symlinkJoin {
+        name = "zigrad-external-sdk-runtime-full";
+        paths = [
+          xlaPjrtPluginsCuda
+          tvm
+        ];
+      };
+
+      zigradExternalSdkRuntimeNoTvm = pkgs.symlinkJoin {
+        name = "zigrad-external-sdk-runtime-no-tvm";
+        paths = [
+          xlaPjrtPluginsCuda
+        ];
+      };
+
       # Convenience aggregate.
-      #   others are individually targetable mostly for development reasons
       zigradExternalSdk = pkgs.symlinkJoin {
         name = "zigrad-external-sdk";
         paths = [
-          xlaPjrtPluginsCuda
-          xlaMlirStablehloCapiSdk
-          tvm
+          zigradExternalSdkBuild
+          zigradExternalSdkRuntimeFull
           # zigradMlirShim
         ];
       };
       sdkRoot = toString zigradExternalSdk;
 
+      zigradExternalSdkBuildDevel = pkgs.symlinkJoin {
+        name = "zigrad-external-sdk-build-devel";
+        paths = [
+          xlaMlirStablehloCapiDevel
+          tvmDevel.dev
+          pkgs.mkl
+        ];
+      };
+
+      zigradExternalSdkRuntimeFullDevel = pkgs.symlinkJoin {
+        name = "zigrad-external-sdk-runtime-full-devel";
+        paths = [
+          xlaPjrtPluginsCudaDevel
+          tvmDevel
+        ];
+      };
+
+      zigradExternalSdkRuntimeNoTvmDevel = pkgs.symlinkJoin {
+        name = "zigrad-external-sdk-runtime-no-tvm-devel";
+        paths = [
+          xlaPjrtPluginsCudaDevel
+        ];
+      };
+
       # Dev: ccache + devel (save more build artifacts + NVIDIA headers)
       zigradExternalSdkDevel = pkgs.symlinkJoin {
         name = "zigrad-external-sdk-devel";
         paths = [
-          xlaPjrtPluginsCudaDevel
-          xlaMlirStablehloCapiDevel
-          # tvm
-          tvmDevel
-          pkgs.mkl
+          zigradExternalSdkBuildDevel
+          zigradExternalSdkRuntimeFullDevel
           # zigradMlirShimDevel
         ];
       };
@@ -177,7 +224,8 @@
         cudaSupport = false;
         cudaPackages = null;
         persistentBazelOutputBase = false;
-        cpuMathLibrary = "onednn";
+        # cpuMathLibrary = "onednn";
+        cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
       };
 
@@ -192,7 +240,8 @@
         cudaPackages = null;
         useCudaStdenv = false;
         persistentBazelOutputBase = false;
-        cpuMathLibrary = "onednn";
+        # cpuMathLibrary = "onednn";
+        cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
       };
 
@@ -209,7 +258,8 @@
 
         # Bazel incremental cache outside store
         persistentBazelOutputBase = true;
-        cpuMathLibrary = "onednn";
+        # cpuMathLibrary = "onednn";
+        cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
       };
 
@@ -226,7 +276,8 @@
         cudaPackages = null;
         useCudaStdenv = false;
         persistentBazelOutputBase = true;
-        cpuMathLibrary = "onednn";
+        # cpuMathLibrary = "onednn";
+        cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
       };
       # ------------------------------------------------------------------
@@ -245,7 +296,8 @@
         copyNcclNvshmem = true;
         copyCudaTools = true;
         copyLibdevice = true;
-        cpuMathLibrary = "onednn";
+        # cpuMathLibrary = "onednn";
+        cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
         depsHash = "sha256-DujVOhD1wZ7afYISgKt7zNMsAkr6CbxGQcMMnXMC/TY=";
       };
@@ -432,9 +484,15 @@
         # Convenience aggregate and primary target.
         #   others are individually targetable mostly for development reasons
         zigrad-external-sdk = zigradExternalSdk;
+        zigrad-external-sdk-build = zigradExternalSdkBuild;
+        zigrad-external-sdk-runtime-full = zigradExternalSdkRuntimeFull;
+        zigrad-external-sdk-runtime-no-tvm = zigradExternalSdkRuntimeNoTvm;
 
         # Dev target: ccache + devel
         zigrad-external-sdk-devel = zigradExternalSdkDevel;
+        zigrad-external-sdk-build-devel = zigradExternalSdkBuildDevel;
+        zigrad-external-sdk-runtime-full-devel = zigradExternalSdkRuntimeFullDevel;
+        zigrad-external-sdk-runtime-no-tvm-devel = zigradExternalSdkRuntimeNoTvmDevel;
 
         # ----------------------------------------------------------------
         # Bazel PJRT plugin build
@@ -457,6 +515,7 @@
         xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
 
         tvm = tvm;
+        tvm-dev = tvm.dev;
         tvm-cpu = tvmCpu;
         tvm-devel = tvmDevel;
 

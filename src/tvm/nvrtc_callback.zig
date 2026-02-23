@@ -15,6 +15,11 @@ const log = std.log.scoped(.@"zg/nvrtc_callback");
 /// Register the NVRTC compilation callback with TVM.
 /// This must be called during initialization, before any CUDA compilation.
 pub fn register(allocator: std.mem.Allocator) !void {
+    nvrtc.ensure_loaded() catch {
+        log.err("failed to load NVRTC runtime", .{});
+        return error.NvrtcLoadFailed;
+    };
+
     const func_val = api.create_packed_func(null, &nvrtc_compile_callback, null) catch {
         log.err("failed to create NVRTC callback function", .{});
         return error.TvmFfiError;
@@ -95,7 +100,8 @@ fn nvrtc_compile_callback(
         const trimmed = std.mem.trim(u8, line, " \t\r");
         // skip lines that include cuda.h or cstdint
         if (std.mem.eql(u8, trimmed, "#include <cuda.h>") or
-            std.mem.eql(u8, trimmed, "#include <cstdint>")) {
+            std.mem.eql(u8, trimmed, "#include <cstdint>"))
+        {
             log.debug("Stripped: {s}", .{trimmed});
             continue;
         }

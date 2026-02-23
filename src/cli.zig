@@ -121,7 +121,7 @@ pub const setup_cmd: CommandT = .{
         },
         .{
             .name = "tvm-dump-symbols",
-            .description = "Enumerate all available TVM FFI functions (requires -Dtvm)",
+            .description = "Enumerate all available TVM FFI functions (requires TVM runtime libraries)",
         },
         .{
             .name = "aot-demo",
@@ -133,7 +133,7 @@ pub const setup_cmd: CommandT = .{
         },
         .{
             .name = "kernel-provider-demo",
-            .description = "Run kernelized region via single dispatch target (requires -Dtvm)",
+            .description = "Run kernelized region via single dispatch target (requires TVM runtime libraries)",
         },
         .{
             .name = "vjp-demo",
@@ -141,7 +141,7 @@ pub const setup_cmd: CommandT = .{
         },
         CommandT.from(TvmTuneOpts, .{
             .cmd_name = "tvm-tune",
-            .cmd_description = "Run TVM MetaSchedule autotuning on matmul (requires -Dtvm)",
+            .cmd_description = "Run TVM MetaSchedule autotuning on matmul (requires TVM runtime libraries)",
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "cuda", "Tune for CUDA target" },
@@ -155,7 +155,7 @@ pub const setup_cmd: CommandT = .{
         }),
         CommandT.from(TvmRunOpts, .{
             .cmd_name = "tvm-run",
-            .cmd_description = "Load and run a tuned TVM matmul (requires -Dtvm + prior tuning)",
+            .cmd_description = "Load and run a tuned TVM matmul (requires TVM runtime libraries + prior tuning)",
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "cuda", "Run on CUDA target" },

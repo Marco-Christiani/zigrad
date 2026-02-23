@@ -218,45 +218,49 @@ pub fn ensure_loaded(allocator: std.mem.Allocator) !void {
         if (ffi_lib_handle == null) {
             ffi_lib_handle = dlopen("libtvm_runtime.so", RTLD_NOW | RTLD_GLOBAL);
         }
-        if (ffi_lib_handle != null) {
-            log.info("loaded libtvm_ffi.so with RTLD_GLOBAL", .{});
-        } else {
+        if (ffi_lib_handle == null) {
             if (dlerror()) |err| {
-                log.warn("could not reload TVM FFI with RTLD_GLOBAL: {s}", .{std.mem.span(err)});
+                log.err("failed to load TVM FFI runtime: {s}", .{std.mem.span(err)});
             }
+            return error.TvmLoadFailed;
         }
+        log.info("loaded libtvm_ffi.so with RTLD_GLOBAL", .{});
     }
 
-    // libtvm.so (compiler)
-    if (compiler_lib_handle == null) {
-        const lib_path = try find_tvm_lib_path(allocator);
-        defer if (lib_path) |p| allocator.free(p);
+    c.ensure_loaded(ffi_lib_handle.?) catch |err| {
+        log.err("failed to resolve TVM FFI symbols: {s}", .{@errorName(err)});
+        return error.TvmLoadFailed;
+    };
 
-        if (lib_path) |path| {
-            const path_z = try allocator.allocSentinel(u8, path.len, 0);
-            defer allocator.free(path_z);
-            @memcpy(path_z, path);
+    if (compiler_lib_handle != null) return;
 
-            compiler_lib_handle = dlopen(path_z, RTLD_NOW | RTLD_GLOBAL);
-            if (compiler_lib_handle == null) {
-                if (dlerror()) |err| {
-                    log.err("dlopen({s}) failed: {s}", .{ path, std.mem.span(err) });
-                }
-                return error.TvmLoadFailed;
-            }
-            log.info("loaded libtvm.so (compiler)", .{});
-            return;
-        }
+    const lib_path = try find_tvm_lib_path(allocator);
+    defer if (lib_path) |p| allocator.free(p);
 
-        compiler_lib_handle = dlopen("libtvm.so", RTLD_NOW | RTLD_GLOBAL);
+    if (lib_path) |path| {
+        const path_z = try allocator.allocSentinel(u8, path.len, 0);
+        defer allocator.free(path_z);
+        @memcpy(path_z, path);
+
+        compiler_lib_handle = dlopen(path_z, RTLD_NOW | RTLD_GLOBAL);
         if (compiler_lib_handle == null) {
             if (dlerror()) |err| {
-                log.err("dlopen(libtvm.so) failed: {s}", .{std.mem.span(err)});
+                log.err("dlopen({s}) failed: {s}", .{ path, std.mem.span(err) });
             }
             return error.TvmLoadFailed;
         }
         log.info("loaded libtvm.so (compiler)", .{});
+        return;
     }
+
+    compiler_lib_handle = dlopen("libtvm.so", RTLD_NOW | RTLD_GLOBAL);
+    if (compiler_lib_handle == null) {
+        if (dlerror()) |err| {
+            log.err("dlopen(libtvm.so) failed: {s}", .{std.mem.span(err)});
+        }
+        return error.TvmLoadFailed;
+    }
+    log.info("loaded libtvm.so (compiler)", .{});
 }
 
 /// Find libtvm.so by locating libtvm_ffi.so in /proc/self/maps and
@@ -412,8 +416,8 @@ pub fn create_packed_func(
     var func_handle: c.TVMFFIObjectHandle = null;
     if (c.TVMFFIFunctionCreate(
         self_ptr,
-        @ptrCast(callback),
-        if (destructor) |d| @ptrCast(d) else null,
+        callback,
+        destructor,
         &func_handle,
     ) != 0) {
         log.err("TVMFFIFunctionCreate failed", .{});

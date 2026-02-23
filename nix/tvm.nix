@@ -63,6 +63,7 @@ in
       pname = "tvm";
       version = tvmRev;
       inherit src;
+      outputs = ["out" "dev"];
 
       strictDeps = true;
       dontStrip = true;
@@ -162,7 +163,7 @@ in
     installPhase = ''
       set -euo pipefail
 
-      mkdir -p $out/lib $out/include
+      mkdir -p $out/lib $dev/include
 
       # No custom headers needed - NVRTC uses CUDA's bundled libcxx
 
@@ -193,26 +194,26 @@ in
         fi
       fi
 
-      cp -r --no-preserve=mode,ownership include/. $out/include/
-      chmod -R u+w $out/include
+      cp -r --no-preserve=mode,ownership include/. $dev/include/
+      chmod -R u+w $dev/include
 
       if [ -d 3rdparty/tvm-ffi/include ]; then
-        cp -r --no-preserve=mode,ownership 3rdparty/tvm-ffi/include/. $out/include/
+        cp -r --no-preserve=mode,ownership 3rdparty/tvm-ffi/include/. $dev/include/
       fi
 
       # DLPack headers are a TVM dependency used by the runtime C API.
       if [ -d 3rdparty/dlpack/include/dlpack ]; then
-        mkdir -p $out/include/dlpack
-        cp -r 3rdparty/dlpack/include/dlpack/. $out/include/dlpack/
+        mkdir -p $dev/include/dlpack
+        cp -r 3rdparty/dlpack/include/dlpack/. $dev/include/dlpack/
       elif [ -d 3rdparty/tvm-ffi/3rdparty/dlpack/include/dlpack ]; then
-        mkdir -p $out/include/dlpack
-        cp -r 3rdparty/tvm-ffi/3rdparty/dlpack/include/dlpack/. $out/include/dlpack/
+        mkdir -p $dev/include/dlpack
+        cp -r 3rdparty/tvm-ffi/3rdparty/dlpack/include/dlpack/. $dev/include/dlpack/
       fi
 
       # DMLC headers are required by TVM C++ APIs.
       if [ -d 3rdparty/dmlc-core/include/dmlc ]; then
-        mkdir -p $out/include/dmlc
-        cp -r 3rdparty/dmlc-core/include/dmlc/. $out/include/dmlc/
+        mkdir -p $dev/include/dmlc
+        cp -r 3rdparty/dmlc-core/include/dmlc/. $dev/include/dmlc/
       fi
 
       # Build rpath for TVM libs.

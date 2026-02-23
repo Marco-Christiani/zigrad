@@ -8,7 +8,6 @@ const zg = @import("../root.zig");
 const dlpack = zg.tvm.dlpack;
 const tvm_runtime = zg.tvm.runtime;
 const tvm_module = zg.tvm.module;
-const build_options = @import("build_options");
 
 /// Execute TVM CPU matmul using pre-loaded module (for cached execution).
 pub fn execute_with_module(
@@ -21,7 +20,7 @@ pub fn execute_with_module(
     b: []const f32,
     c: []f32,
 ) !void {
-    if (!build_options.enable_tvm) return error.TvmDisabled;
+    try zg.tvm.ffi.ensure_loaded(allocator);
 
     // Create DLPack tensors borrowing existing host buffers
     var shape_a = [_]i64{ @intCast(m), @intCast(k) };
@@ -63,7 +62,7 @@ pub fn execute_gpu_with_module(
     b: []const f32,
     c: []f32,
 ) !void {
-    if (!build_options.enable_tvm) return error.TvmDisabled;
+    try zg.tvm.ffi.ensure_loaded(allocator);
 
     // Allocate GPU tensors (includes host->device copy)
     var shape_a = [_]i64{ @intCast(m), @intCast(k) };

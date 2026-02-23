@@ -516,7 +516,7 @@ pub fn run_kernel_provider_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
-    if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
+    try zg.tvm.ffi.ensure_loaded(allocator);
     try backend.require_typed_ffi();
 
     const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;

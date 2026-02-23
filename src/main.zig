@@ -42,11 +42,9 @@ pub fn main() !void {
         return demos.print_tvm_attention_pr(gpa, false, null);
     }
     if (cmd.matchSubCmd("tvm-dump-symbols")) |_| {
-        if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
         return demos.dump_tvm_ffi_symbols(gpa);
     }
     if (cmd.matchSubCmd("tvm-tune")) |sub_cmd| {
-        if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
         const opts = try sub_cmd.to(cli.TvmTuneOpts, .{});
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
@@ -92,7 +90,6 @@ pub fn main() !void {
         return;
     }
     if (cmd.matchSubCmd("tvm-run")) |sub_cmd| {
-        if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
         const opts = try sub_cmd.to(cli.TvmRunOpts, .{});
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
@@ -102,7 +99,6 @@ pub fn main() !void {
         return run_tvm_demo(gpa, shape.m, shape.n, shape.k, target_kind, work_dir);
     }
     if (cmd.matchSubCmd("benchmark")) |sub_cmd| {
-        if (!zg.build_options.enable_tvm) return error.TvmNotEnabled;
         const opts = try sub_cmd.to(cli.BenchmarkOpts, .{});
 
         // struct to args array for run_benchmark_mode

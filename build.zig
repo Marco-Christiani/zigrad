@@ -18,26 +18,10 @@ pub fn build(b: *std.Build) void {
     const sdk_lib = b.fmt("{s}/lib", .{sdk_root});
     const sdk_runtime = b.fmt("{s}/runtime", .{sdk_root});
 
-    // -Dtvm=true  -> force-enable (panic if SDK lacks TVM)
-    // -Dtvm=false -> force-disable (skip auto-detection)
-    // omitted     -> auto-detect from SDK
-    const tvm_enable_opt = b.option(bool, "tvm", "Enable TVM runtime (true=force on, false=force off, omit=auto-detect)");
-    const tvm_available = sdk_has_tvm(b, sdk_root);
-    const tvm_enabled = if (tvm_enable_opt) |v| v else tvm_available;
-    if (tvm_enabled and !tvm_available) {
-        @panic("-Dtvm=true requested but TVM not found under SDK (need include/tvm/ffi/c_api.h or include/tvm/runtime/c_runtime_api.h, plus lib/libtvm_runtime.so)");
-    }
-
     const mkl_available = sdk_has_mkl(b, sdk_root);
 
     const build_options = b.addOptions();
-    build_options.addOption(bool, "enable_tvm", tvm_enabled);
     build_options.addOption(bool, "enable_mkl", mkl_available);
-    if (tvm_enable_opt) |explicit| {
-        std.debug.print("TVM: explicitly {s} via -Dtvm={}\n", .{ if (explicit) "enabled" else "disabled", explicit });
-    } else {
-        std.debug.print("TVM: auto-detect {s}\n", .{if (tvm_available) "found, enabled" else "not found, disabled"});
-    }
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const cova_dep = b.dependency("cova", .{});
@@ -54,12 +38,10 @@ pub fn build(b: *std.Build) void {
         zigrad_mod.linkSystemLibrary("mkl_rt", .{});
     }
 
-    // Add CUDA include path if available (needed for nvrtc.h in tvm builds)
-    if (tvm_enabled) {
-        if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
-            const cuda_include = b.fmt("{s}/include", .{cuda_home});
-            zigrad_mod.addIncludePath(.{ .cwd_relative = cuda_include });
-        }
+    // Add CUDA include path if available (needed for nvrtc.h).
+    if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
+        const cuda_include = b.fmt("{s}/include", .{cuda_home});
+        zigrad_mod.addIncludePath(.{ .cwd_relative = cuda_include });
     }
 
     const exe = b.addExecutable(.{
@@ -82,9 +64,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
     link_mlir_stablehlo_capi(exe, sdk_lib);
     add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime);
-    if (tvm_enabled) {
-        link_tvm_runtime(exe, sdk_lib);
-    }
 
     b.installArtifact(exe);
 
@@ -96,9 +75,6 @@ pub fn build(b: *std.Build) void {
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
     link_mlir_stablehlo_capi(lib_tests, sdk_lib);
     add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime);
-    if (tvm_enabled) {
-        link_tvm_runtime(lib_tests, sdk_lib);
-    }
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -224,26 +200,6 @@ fn link_mlir_stablehlo_capi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) v
     exe.root_module.linkSystemLibrary("StablehloCAPI", .{});
 }
 
-fn link_tvm_runtime(exe: *std.Build.Step.Compile, tvm_lib: []const u8) void {
-    exe.root_module.addLibraryPath(.{ .cwd_relative = tvm_lib });
-    exe.root_module.addRPathSpecial(tvm_lib);
-    exe.root_module.linkSystemLibrary("tvm_ffi", .{});
-    exe.root_module.linkSystemLibrary("tvm_runtime", .{});
-    // Full compiler library — registers TE, TIR, codegen packed functions.
-    exe.root_module.linkSystemLibrary("tvm", .{});
-
-    // NVRTC for runtime CUDA compilation callback
-    if (exe.rootModuleTarget().os.tag == .linux) {
-        exe.root_module.linkSystemLibrary("nvrtc", .{});
-
-        // Add CUDA include path for nvrtc.h if CUDA_HOME is set
-        if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
-            const cuda_include = std.fmt.allocPrint(exe.step.owner.allocator, "{s}/include", .{cuda_home}) catch @panic("OOM");
-            exe.root_module.addIncludePath(.{ .cwd_relative = cuda_include });
-        }
-    }
-}
-
 fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
     const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
         break :blk sdk_root;
@@ -253,33 +209,6 @@ fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
     };
     const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mkl_cblas.h" });
     if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
-    return true;
-}
-
-fn sdk_has_tvm(b: *std.Build, sdk_root: []const u8) bool {
-    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
-        break :blk sdk_root;
-    } else blk: {
-        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
-        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
-    };
-
-    const header_runtime_path = b.pathJoin(&.{ sdk_root_abs, "include", "tvm", "runtime", "c_runtime_api.h" });
-    const header_ffi_path = b.pathJoin(&.{ sdk_root_abs, "include", "tvm", "ffi", "c_api.h" });
-    const has_header = blk: {
-        if (std.fs.accessAbsolute(header_runtime_path, .{})) |_| break :blk true else |_| {}
-        if (std.fs.accessAbsolute(header_ffi_path, .{})) |_| break :blk true else |_| {}
-        break :blk false;
-    };
-    if (!has_header) return false;
-
-    const lib_runtime_path = b.pathJoin(&.{ sdk_root_abs, "lib", "libtvm_runtime.so" });
-    if (std.fs.accessAbsolute(lib_runtime_path, .{})) |_| {} else |_| return false;
-
-    // v0.22+: runtime depends on libtvm_ffi.so.
-    const lib_ffi_path = b.pathJoin(&.{ sdk_root_abs, "lib", "libtvm_ffi.so" });
-    if (std.fs.accessAbsolute(lib_ffi_path, .{})) |_| {} else |_| return false;
-
     return true;
 }
 
