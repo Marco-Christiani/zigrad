@@ -70,30 +70,12 @@
       cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
       gccHost = pkgs.${cudaCfg.gccHostAttr};
 
-      # src = pkgs.lib.cleanSource self;
-      allowPrefixes = [
-        "/src/"
-        "/build.zig"
-        "/build.zig.zon"
-        "/nix/"
-        "/tools/"
-        # "/shim/"
-        # "/README.md"
-        # "/LICENSE"
-      ];
-
-      src = pkgs.lib.cleanSourceWith {
-        src = self;
-        filter = path: type: let
-          p = toString path;
-          # relative to repo root
-          rel = pkgs.lib.removePrefix (toString self) p;
-        in
-          # keep directories so traversal can continue but only keep files that match allow-list
-          if type == "directory"
-          then true
-          else pkgs.lib.any (prefix: pkgs.lib.hasPrefix prefix rel) allowPrefixes;
+      zigradSrc = import ./nix/source-filter.nix {
+        lib = pkgs.lib;
+        root = ./.;
       };
+
+      src = zigradSrc;
 
       inherit
         (import ./nix/targets.nix {
@@ -113,6 +95,21 @@
 
       lockFile = ./nix/lock.json;
 
+      # buildBazelPackage fetchAttrs hashes for xla-pjrt-runtime-bazel.nix.
+      # These hashes are configuration-specific (CUDA on/off, cpuMathLibrary,
+      # native tuning flags, etc) and must be maintained per combination.
+      xlaPjrtDepsHashes = {
+        cpu-onednn-native = "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=";
+        cuda-onednn-thunk-native = "sha256-EFE6NyvyOoereFfwwExFu03B6IjfjrBWD5ri6S3F/9Y=";
+      };
+
+      # Compile-time CUDA headers used by Zig @cImport("nvrtc.h").
+      # Keep this isolated from runtime CUDA DSOs, which come from PJRT runtime bundles.
+      cudaCompileHeaders = pkgs.runCommand "cuda-compile-headers" {} ''
+        mkdir -p "$out/include"
+        cp -as ${cudaPackages.cudatoolkit}/include/. "$out/include/"
+      '';
+
       xlaMlirStablehloCapiSdk = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
         inherit lockFile;
       };
@@ -130,7 +127,7 @@
       };
 
       # SDK profiles:
-      # - build: compile-time headers/libs (TVM headers only, no TVM runtime DSOs)
+      # - build: compile-time headers/libs (TVM + CUDA headers, no TVM runtime DSOs)
       # - runtime-full: includes TVM runtime/compiler DSOs
       # - runtime-no-tvm: intentionally excludes TVM runtime/compiler DSOs
       # - aggregate: build + runtime-full for default ergonomic workflows
@@ -139,6 +136,8 @@
         paths = [
           xlaMlirStablehloCapiSdk
           tvm.dev
+          cudaCompileHeaders
+          pkgs.mkl
         ];
       };
 
@@ -173,6 +172,7 @@
         paths = [
           xlaMlirStablehloCapiDevel
           tvmDevel.dev
+          cudaCompileHeaders
           pkgs.mkl
         ];
       };
@@ -203,6 +203,67 @@
       };
       sdkRootDevel = toString zigradExternalSdkDevel;
 
+      zigrad = pkgs.callPackage ./nix/zigrad.nix {
+        zigradSrc = zigradSrc;
+        sdk = zigradExternalSdkBuild;
+        optimize = "ReleaseFast";
+      };
+
+      zigradDevel = pkgs.callPackage ./nix/zigrad.nix {
+        zigradSrc = zigradSrc;
+        sdk = zigradExternalSdkBuildDevel;
+        optimize = "ReleaseSafe";
+      };
+
+      zigradTests = pkgs.callPackage ./nix/zigrad.nix {
+        zigradSrc = zigradSrc;
+        sdk = zigradExternalSdkBuildDevel;
+        optimize = "ReleaseSafe";
+        runTests = true;
+      };
+
+      checkTvmRuntimeFull = pkgs.runCommand "check-zigrad-tvm-runtime-full" {
+        nativeBuildInputs = [
+          zigrad
+        ];
+      } ''
+        set -euo pipefail
+        export HOME="$TMPDIR"
+        runtime_root="${zigradExternalSdkRuntimeFullDevel}"
+        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
+
+        ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/tvm-symbols.txt"
+        test -s "$TMPDIR/tvm-symbols.txt"
+
+        mkdir -p "$out"
+        cp "$TMPDIR/tvm-symbols.txt" "$out/tvm-symbols.txt"
+      '';
+
+      checkTvmRuntimeNoTvm = pkgs.runCommand "check-zigrad-tvm-runtime-no-tvm" {
+        nativeBuildInputs = [
+          zigrad
+        ];
+      } ''
+        set -euo pipefail
+        export HOME="$TMPDIR"
+        runtime_root="${zigradExternalSdkRuntimeNoTvmDevel}"
+        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
+
+        if ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/stdout.txt" 2> "$TMPDIR/stderr.txt"; then
+          echo "expected tvm-dump-symbols to fail without TVM runtime libraries" >&2
+          exit 1
+        fi
+
+        if ! grep -Eq "(TvmLoadFailed|failed to load TVM FFI runtime|dlopen)" "$TMPDIR/stderr.txt"; then
+          echo "expected loader diagnostics in stderr" >&2
+          cat "$TMPDIR/stderr.txt" >&2
+          exit 1
+        fi
+
+        mkdir -p "$out"
+        cp "$TMPDIR/stderr.txt" "$out/tvm-missing-stderr.txt"
+      '';
+
       # zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
       #   inherit xlaMlirStablehloCapiSdk;
       #   src = shimSrc;
@@ -217,79 +278,16 @@
       # };
 
       # ------------------------------------------------------------------
-      # Bazel-built PJRT C API plugins from XLA
-      xlaPjrtPlugins = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        devel = false;
-        cudaSupport = false;
-        cudaPackages = null;
-        persistentBazelOutputBase = false;
-        # cpuMathLibrary = "onednn";
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        inherit (cudaCfg) cudaArchitectures cudaVersion;
-        devel = false;
-        cudaSupport = true;
-        copyNcclNvshmem = true;
-        copyCudaTools = true;
-        copyLibdevice = true;
-        cudaPackages = null;
-        useCudaStdenv = false;
-        persistentBazelOutputBase = false;
-        # cpuMathLibrary = "onednn";
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      # Dev: ccache + devel.
-      # TODO: Can flip cudaSupport=true once we plumb CUDA env/toolchain.
-      xlaPjrtPluginsDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        stdenv = pkgs.ccacheStdenv;
-        devel = true;
-
-        # FIXME: CPU-only rn.
-        cudaSupport = false;
-        cudaPackages = null;
-
-        # Bazel incremental cache outside store
-        persistentBazelOutputBase = true;
-        # cpuMathLibrary = "onednn";
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      # Dev: ccache + devel + CUDA.
-      xlaPjrtPluginsCudaDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        inherit (cudaCfg) cudaArchitectures cudaVersion;
-        stdenv = pkgs.ccacheStdenv;
-        devel = true;
-        cudaSupport = true;
-        copyNcclNvshmem = true;
-        copyCudaTools = true;
-        copyLibdevice = true;
-        cudaPackages = null;
-        useCudaStdenv = false;
-        persistentBazelOutputBase = true;
-        # cpuMathLibrary = "onednn";
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-      # ------------------------------------------------------------------
-      # Simple buildBazelPackage-based PJRT C API plugins (experimental)
-      xlaPjrtPluginsBazel = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
+      # Production PJRT C API plugins from XLA.
+      xlaPjrtPlugins = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
         inherit lockFile;
         cudaSupport = false;
         cpuMathLibrary = "onednn";
         cpuNativeTuning = true;
+        depsHash = xlaPjrtDepsHashes.cpu-onednn-native;
       };
 
-      xlaPjrtPluginsBazelCuda = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
+      xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
         inherit lockFile;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         cudaSupport = true;
@@ -299,8 +297,69 @@
         # cpuMathLibrary = "onednn";
         cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
-        depsHash = "sha256-DujVOhD1wZ7afYISgKt7zNMsAkr6CbxGQcMMnXMC/TY=";
+        depsHash = xlaPjrtDepsHashes.cuda-onednn-thunk-native;
       };
+
+      # Devel aliases currently use the same Bazel artifacts.
+      xlaPjrtPluginsDevel = xlaPjrtPlugins;
+      xlaPjrtPluginsCudaDevel = xlaPjrtPluginsCuda;
+
+      # Legacy non-buildBazelPackage path.
+      xlaPjrtPluginsLegacy = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile;
+        devel = false;
+        cudaSupport = false;
+        cudaPackages = null;
+        persistentBazelOutputBase = false;
+        cpuMathLibrary = "onednn-thunk";
+        cpuNativeTuning = true;
+      };
+
+      xlaPjrtPluginsCudaLegacy = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile;
+        inherit (cudaCfg) cudaArchitectures cudaVersion;
+        devel = false;
+        cudaSupport = true;
+        copyNcclNvshmem = true;
+        copyCudaTools = true;
+        copyLibdevice = true;
+        cudaPackages = null;
+        useCudaStdenv = false;
+        persistentBazelOutputBase = false;
+        cpuMathLibrary = "onednn-thunk";
+        cpuNativeTuning = true;
+      };
+
+      xlaPjrtPluginsLegacyDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile;
+        stdenv = pkgs.ccacheStdenv;
+        devel = true;
+        cudaSupport = false;
+        cudaPackages = null;
+        persistentBazelOutputBase = true;
+        cpuMathLibrary = "onednn-thunk";
+        cpuNativeTuning = true;
+      };
+
+      xlaPjrtPluginsCudaLegacyDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
+        inherit lockFile;
+        inherit (cudaCfg) cudaArchitectures cudaVersion;
+        stdenv = pkgs.ccacheStdenv;
+        devel = true;
+        cudaSupport = true;
+        copyNcclNvshmem = true;
+        copyCudaTools = true;
+        copyLibdevice = true;
+        cudaPackages = null;
+        useCudaStdenv = false;
+        persistentBazelOutputBase = true;
+        cpuMathLibrary = "onednn-thunk";
+        cpuNativeTuning = true;
+      };
+
+      # Compatibility aliases.
+      xlaPjrtPluginsBazel = xlaPjrtPlugins;
+      xlaPjrtPluginsBazelCuda = xlaPjrtPluginsCuda;
 
       # TVM with LLVM 22 (built from XLA-pinned sources).
       # Uses shared LLVM to match SDK, avoiding pass registry conflicts.
@@ -481,6 +540,9 @@
 
       # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
       packages = {
+        zigrad = zigrad;
+        zigrad-devel = zigradDevel;
+
         # Convenience aggregate and primary target.
         #   others are individually targetable mostly for development reasons
         zigrad-external-sdk = zigradExternalSdk;
@@ -508,6 +570,12 @@
         xla-pjrt-plugins-cuda-devel = xlaPjrtPluginsCudaDevel;
         # ----------------------------------------------------------------
 
+        # Legacy PJRT plugin build path.
+        xla-pjrt-plugins-legacy = xlaPjrtPluginsLegacy;
+        xla-pjrt-plugins-legacy-cuda = xlaPjrtPluginsCudaLegacy;
+        xla-pjrt-plugins-legacy-devel = xlaPjrtPluginsLegacyDevel;
+        xla-pjrt-plugins-legacy-cuda-devel = xlaPjrtPluginsCudaLegacyDevel;
+
         # Compile-time SDK (PJRT headers + MLIR + StableHLO)
         xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
@@ -533,39 +601,49 @@
         xla-pjrt-plugins-bazel-cuda = xlaPjrtPluginsBazelCuda;
       };
 
-      apps = {
-        example-cuda-target = {
-          type = "app";
-          program = "${targets.example-cuda.run}/bin/example-cuda";
-        };
-
-        # m1 = {
-        #   # TODO: hermetic zig build/run targets
-        # };
-        m4 = {
-          type = "app";
-          program = "${targets.zigrad-m4.run}/bin/zigrad-m4";
-        };
-
-        gen-clangd = {
-          type = "app";
-          program = "${targets.editor.clangd}/bin/gen-clangd";
-        };
-
-        gen-nvim = {
-          type = "app";
-          program = "${targets.editor.nvim}/bin/gen-nvim";
-        };
-
-        ccache = {
-          type = "app";
-          program = "${pkgs.ccache}/bin/ccache";
-        };
+      checks = {
+        zigrad-build = zigrad;
+        zigrad-unit-tests = zigradTests;
+        tvm-runtime-full = checkTvmRuntimeFull;
+        tvm-runtime-no-tvm = checkTvmRuntimeNoTvm;
       };
+
+      apps =
+        (pkgs.lib.optionalAttrs (targets ? example-cuda) {
+          example-cuda-target = {
+            type = "app";
+            program = "${targets.example-cuda.run}/bin/example-cuda";
+          };
+        })
+        // {
+          # m1 = {
+          #   # TODO: hermetic zig build/run targets
+          # };
+          m4 = {
+            type = "app";
+            program = "${targets.zigrad-m4.run}/bin/zigrad-m4";
+          };
+
+          gen-clangd = {
+            type = "app";
+            program = "${targets.editor.clangd}/bin/gen-clangd";
+          };
+
+          gen-nvim = {
+            type = "app";
+            program = "${targets.editor.nvim}/bin/gen-nvim";
+          };
+
+          ccache = {
+            type = "app";
+            program = "${pkgs.ccache}/bin/ccache";
+          };
+        };
     };
   in {
     devShells = forAllSystems (s: (mkFor s).devShells);
     packages = forAllSystems (s: (mkFor s).packages);
+    checks = forAllSystems (s: (mkFor s).checks);
     apps = forAllSystems (s: (mkFor s).apps);
     formatter = forAllSystems (
       system: let

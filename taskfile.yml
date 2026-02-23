@@ -127,35 +127,20 @@ tasks:
 
   build:
     deps: [check-env-bt]
-    cmd: zig build -Doptimize=ReleaseFast -Dsdk=$ZG_EXTERNAL_SDK_ROOT
+    cmd: zig build -Doptimize=ReleaseFast -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Dinstall-runtime-link=true
 
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
 
   test:tvm-runtime-gating:
-    desc: Validate TVM runtime loader against full vs no-tvm runtime profiles
-    cmd: |
-      set -euo pipefail
+    desc: Run flake checks for TVM runtime gating
+    cmds:
+      - nix build .#checks.tvm-runtime-full --option sandbox false {{.CLI_ARGS}}
+      - nix build .#checks.tvm-runtime-no-tvm --option sandbox false {{.CLI_ARGS}}
 
-      build_sdk="$(nix build .#zigrad-external-sdk-build-devel --print-out-paths --no-link --option sandbox false)"
-      runtime_full="$(nix build .#zigrad-external-sdk-runtime-full-devel --print-out-paths --no-link --option sandbox false)"
-      runtime_no_tvm="$(nix build .#zigrad-external-sdk-runtime-no-tvm-devel --print-out-paths --no-link --option sandbox false)"
-
-      echo "[build] sdk=$build_sdk"
-      zig build -Dsdk="$build_sdk"
-
-      echo "[positive] expecting tvm-dump-symbols success with runtime-full"
-      LD_LIBRARY_PATH="$runtime_full/lib:${LD_LIBRARY_PATH:-}" \
-        ./zig-out/bin/zigrad tvm-dump-symbols >/tmp/zigrad-tvm-symbols.txt
-
-      echo "[negative] expecting tvm-dump-symbols failure without TVM runtime libs"
-      if LD_LIBRARY_PATH="$runtime_no_tvm/lib:${LD_LIBRARY_PATH:-}" \
-        ./zig-out/bin/zigrad tvm-dump-symbols >/tmp/zigrad-tvm-missing.txt 2>&1; then
-        echo "ERROR: expected failure when TVM runtime libs are absent"
-        exit 1
-      fi
-
-      echo "OK: runtime gating validated"
+  check:flake:
+    desc: Run full flake checks
+    cmd: nix flake check --option sandbox false {{.CLI_ARGS}}
 
   run:
     deps: [build, check-env-rt]

@@ -11,8 +11,10 @@ pub fn build(b: *std.Build) void {
     const sdk_root = b.option([]const u8, "sdk", "Path to zigrad external SDK root (include/, lib/, runtime/)") orelse "./result";
 
     // Dev convenience: override runtime bundle root directory.
-    // If set, we symlink `zig-out/runtime` to this path.
+    // If runtime link installation is enabled, we symlink `zig-out/runtime`
+    // to this path.
     const runtime_root_opt = b.option([]const u8, "runtime", "Override runtime bundle root (dev convenience)");
+    const install_runtime_link = b.option(bool, "install-runtime-link", "Create zig-out/runtime symlink (dev convenience)") orelse false;
 
     const sdk_include = b.fmt("{s}/include", .{sdk_root});
     const sdk_lib = b.fmt("{s}/lib", .{sdk_root});
@@ -63,7 +65,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(b.path("src"));
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
     link_mlir_stablehlo_capi(exe, sdk_lib);
-    add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime);
+    add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     b.installArtifact(exe);
 
@@ -74,7 +76,7 @@ pub fn build(b: *std.Build) void {
 
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
     link_mlir_stablehlo_capi(lib_tests, sdk_lib);
-    add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime);
+    add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -212,7 +214,12 @@ fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
     return true;
 }
 
-fn add_runtime_bundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root: []const u8) void {
+fn add_runtime_bundle(
+    b: *std.Build,
+    exe: *std.Build.Step.Compile,
+    runtime_root: []const u8,
+    install_runtime_link: bool,
+) void {
     exe.root_module.linkSystemLibrary("dl", .{});
 
     const rpaths = [_][]const u8{
@@ -235,6 +242,8 @@ fn add_runtime_bundle(b: *std.Build, exe: *std.Build.Step.Compile, runtime_root:
         "/run/opengl-driver/lib",
     };
     inline for (rpaths) |p| exe.root_module.addRPathSpecial(p);
+
+    if (!install_runtime_link) return;
 
     // Dev convenience: symlink `zig-out/runtime` -> runtime_root
     const runtime_root_abs = if (std.fs.path.isAbsolute(runtime_root)) blk: {

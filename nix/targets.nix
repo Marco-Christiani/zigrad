@@ -36,6 +36,7 @@ in {
         zigBuildFlags = [
           "-Doptimize=ReleaseSafe"
           "-Dsdk=${zigradExternalSdk}"
+          "-Dinstall-runtime-link=false"
         ];
 
         postFixup = ''
