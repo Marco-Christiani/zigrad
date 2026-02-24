@@ -914,10 +914,12 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
 
     const program = artifact.pr;
 
-    const mlir_bytes = switch (cfg.encoding) {
-        .text => lower_program_to_mlir(ctx.allocator, program, cfg.entry_name, .mlir_text) catch return error.LoweringFailed,
-        .bytecode => lower_program_to_mlir(ctx.allocator, program, cfg.entry_name, .mlir_bytecode) catch return error.LoweringFailed,
+    const format: OutputFormat = switch (cfg.encoding) {
+        .text => .mlir_text,
+        .bytecode => .mlir_bytecode,
     };
+
+    const mlir_bytes = try lower_program_to_mlir(ctx.allocator, program, cfg.entry_name, format);
 
     artifact.replace(ctx.allocator, .{
         .mlir = .{

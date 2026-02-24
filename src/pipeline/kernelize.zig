@@ -69,7 +69,7 @@ pub const KernelizePass = struct {
         for (program.functions, 0..) |func, idx| {
             const rewritten = self.kernelize_function(program, func, ctx.allocator) catch |err| {
                 log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
-                return error.ValidationFailed;
+                return err;
             };
             functions[idx] = rewritten;
         }
@@ -105,7 +105,7 @@ pub const KernelizePass = struct {
 
         for (candidates.items) |candidate| {
             if (is_region_nested(candidate.region, candidates.items)) {
-                log.debug("region '{s}' is nested inside a larger kernelized region, skipping", .{ candidate.region.name });
+                log.debug("region '{s}' is nested inside a larger kernelized region, skipping", .{candidate.region.name});
                 continue;
             }
 
@@ -126,11 +126,10 @@ pub const KernelizePass = struct {
                     log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
                     continue;
                 },
-                error.CompileFailed => {
-                    log.err("provider '{s}' failed to compile region '{s}'", .{ candidate.provider_name, candidate.region.name });
-                    return error.CompileFailed;
+                else => {
+                    log.err("provider '{s}' failed to compile region '{s}': {s}", .{ candidate.provider_name, candidate.region.name, @errorName(err) });
+                    return err;
                 },
-                error.OutOfMemory => return error.OutOfMemory,
             };
 
             self.registry.put(ka.target_name, ka) catch |err| switch (err) {
@@ -138,7 +137,7 @@ pub const KernelizePass = struct {
                     var artifact = ka;
                     artifact.deinit(self.registry.allocator());
                     log.err("duplicate kernel key '{s}' for region '{s}'", .{ ka.target_name, candidate.region.name });
-                    return error.CompileFailed;
+                    return error.DuplicateKey;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
             };

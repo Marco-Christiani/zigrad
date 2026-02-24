@@ -57,17 +57,14 @@ pub const TvmProvider = struct {
         });
 
         // Ensure TVM is loaded
-        tvm_api.ensure_loaded(allocator, .{}) catch return error.CompileFailed;
+        try tvm_api.ensure_loaded(allocator, .{});
 
         // Build matmul IRModule
-        var ir_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch |err| {
-            log.err("build_matmul_tir failed: {s}", .{@errorName(err)});
-            return error.CompileFailed;
-        };
+        var ir_mod = try tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k);
         defer ir_mod.deinit();
 
         // Create target
-        var target = tir.Target.create(allocator, self.target_kind) catch return error.CompileFailed;
+        var target = try tir.Target.create(allocator, self.target_kind);
         defer target.deinit();
 
         // Tune
@@ -107,9 +104,16 @@ pub const TvmProvider = struct {
             .work_dir = work_dir,
             .max_trials = self.max_trials,
             .trials_per_iter = self.trials_per_iter,
-        }) catch |err| {
-            log.err("tuning failed: {s}", .{@errorName(err)});
-            return error.CompileFailed;
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TvmLoadFailed => return error.TvmLoadFailed,
+            error.TvmCallFailed => return error.TvmCallFailed,
+            error.TvmFunctionNotFound => return error.TvmFunctionNotFound,
+            error.UnexpectedTvmType => return error.UnexpectedTvmType,
+            else => {
+                log.err("tuning failed: {s}", .{@errorName(err)});
+                return error.CompileFailed;
+            },
         };
 
         const update = tuned_module.update_cache_from_work_dir(
@@ -118,15 +122,21 @@ pub const TvmProvider = struct {
             work_dir,
             key,
             self.target_kind,
-        ) catch |err| {
-            log.err("failed to update kernel cache index: {s}", .{@errorName(err)});
-            return error.CompileFailed;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                log.err("failed to update kernel cache index: {s}", .{@errorName(err)});
+                return error.CompileFailed;
+            },
         };
         defer allocator.free(update.stable_path);
 
-        const so_bytes = std.fs.cwd().readFileAlloc(allocator, update.stable_path, 100 * 1024 * 1024) catch |err| {
-            log.err("failed to read {s}: {s}", .{ update.stable_path, @errorName(err) });
-            return error.CompileFailed;
+        const so_bytes = std.fs.cwd().readFileAlloc(allocator, update.stable_path, 100 * 1024 * 1024) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                log.err("failed to read {s}: {s}", .{ update.stable_path, @errorName(err) });
+                return error.CompileFailed;
+            },
         };
 
         log.info("compiled kernel: {s} (candidate {d}, {d:.2} us, {d} bytes)", .{

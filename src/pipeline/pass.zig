@@ -92,8 +92,38 @@ pub const PassError = error{
     /// Pass-specific validation failed
     ValidationFailed,
 
+    /// PR program failed structural/typing validation.
+    InvalidProgram,
+
     /// Lowering failed (PR -> MLIR)
     LoweringFailed,
+
+    /// Lowered MLIR failed verification.
+    InvalidMlir,
+
+    /// TVM runtime/compiler library loading failed.
+    TvmLoadFailed,
+
+    /// TVM function invocation failed.
+    TvmCallFailed,
+
+    /// Required TVM global function was not found.
+    TvmFunctionNotFound,
+
+    /// TVM value type did not match the expected representation.
+    UnexpectedTvmType,
+
+    /// Provider compilation failed for an internal reason.
+    CompileFailed,
+
+    /// Provider reported a region as unsupported.
+    Unsupported,
+
+    /// Kernelize custom-call rewrite encountered an invalid region shape.
+    InvalidRegion,
+
+    /// Duplicate kernel key while registering provider artifact.
+    DuplicateKey,
 
     /// Missing required context (e.g., no backend session)
     MissingContext,
@@ -207,7 +237,7 @@ test "pipeline run transforms artifacts" {
 
     var b = try pr_mod.FunctionBuilder.init(&program, "main");
     defer b.deinit();
-    const x = try b.param_tensor(.f32, &.{ 2 });
+    const x = try b.param_tensor(.f32, &.{2});
     const func = try b.finish(&.{x});
     try program.add_function(func);
 

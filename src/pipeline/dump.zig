@@ -37,7 +37,10 @@ fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContex
         .entry = cfg.entry_name,
     };
 
-    with_writer(cfg, task) catch return error.ValidationFailed;
+    with_writer(cfg, task) catch |err| switch (err) {
+        error.MissingContext => return error.MissingContext,
+        else => return error.ValidationFailed,
+    };
 }
 
 fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
@@ -60,7 +63,10 @@ fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         .entry = cfg.entry_name,
     };
 
-    with_writer(cfg, task) catch return error.ValidationFailed;
+    with_writer(cfg, task) catch |err| switch (err) {
+        error.MissingContext => return error.MissingContext,
+        else => return error.ValidationFailed,
+    };
 }
 
 pub fn dump_pr_pass_with_config(config: *DumpConfig) pass.Pass {

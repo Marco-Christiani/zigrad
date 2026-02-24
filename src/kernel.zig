@@ -256,7 +256,15 @@ pub const KernelArtifact = struct {
 pub const CompileError = error{
     /// Provider cannot handle this region (unsupported ops, shapes, etc.)
     Unsupported,
-    /// Compilation failed for an internal reason.
+    /// TVM runtime/compiler library loading failed.
+    TvmLoadFailed,
+    /// TVM function invocation failed.
+    TvmCallFailed,
+    /// Required TVM global function was not found.
+    TvmFunctionNotFound,
+    /// TVM value type did not match the expected representation.
+    UnexpectedTvmType,
+    /// Compilation failed for an internal reason not covered above.
     CompileFailed,
     OutOfMemory,
 };
@@ -306,7 +314,7 @@ pub const KernelRegistry = struct {
         self.entries.deinit();
     }
 
-    pub fn put(self: *KernelRegistry, target_name: []const u8, artifact: KernelArtifact) error{OutOfMemory, DuplicateKey}!void {
+    pub fn put(self: *KernelRegistry, target_name: []const u8, artifact: KernelArtifact) error{ OutOfMemory, DuplicateKey }!void {
         if (self.entries.contains(target_name)) return error.DuplicateKey;
         const owned_key = try self.entries.allocator.dupe(u8, target_name);
         errdefer self.entries.allocator.free(owned_key);
