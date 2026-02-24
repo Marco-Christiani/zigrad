@@ -32,6 +32,7 @@ in
       "-Doptimize=${optimize}"
       "-Dsdk=${sdk}"
       "-Dinstall-runtime-link=false"
+      "-freference-trace=10"
       "--system"
       zigDeps
     ];
@@ -40,6 +41,7 @@ in
       "-Doptimize=${optimize}"
       "-Dsdk=${sdk}"
       "-Dinstall-runtime-link=false"
+      "-freference-trace=10"
       "--system"
       zigDeps
     ];
