@@ -516,7 +516,7 @@ pub fn run_kernel_provider_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
-    try zg.tvm.ffi.ensure_loaded(allocator);
+    try zg.tvm.ffi.ensure_loaded(allocator, .{});
     try backend.require_typed_ffi();
 
     const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
@@ -641,7 +641,7 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
 pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
     const tvm_api = zg.tvm.ffi;
 
-    try tvm_api.ensure_loaded(allocator);
+    try tvm_api.ensure_loaded(allocator, .{ .load_compiler = false });
 
     const names = try tvm_api.list_global_names(allocator);
     defer {

@@ -65,7 +65,7 @@ pub const TvmDispatchState = struct {
         kernel_key: []const u8,
         ctx: kernel.DispatchContext,
     ) !void {
-        try tvm_api.ensure_loaded(std.heap.c_allocator);
+        try tvm_api.ensure_loaded(std.heap.c_allocator, .{});
 
         var entry: TvmDispatchEntry = undefined;
         {

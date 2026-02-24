@@ -222,7 +222,7 @@
         runTests = true;
       };
 
-      checkTvmRuntimeFull = pkgs.runCommand "check-zigrad-tvm-runtime-full" {
+      checkTvmRuntimeFullFfi = pkgs.runCommand "check-zigrad-tvm-runtime-full-ffi" {
         nativeBuildInputs = [
           zigrad
         ];
@@ -237,6 +237,15 @@
 
         mkdir -p "$out"
         cp "$TMPDIR/tvm-symbols.txt" "$out/tvm-symbols.txt"
+      '';
+
+      hostCheckTvmRuntimeFullCompiler = pkgs.writeShellScriptBin "zigrad-check-tvm-runtime-full-compiler" ''
+        set -euo pipefail
+
+        runtime_root="${zigradExternalSdkRuntimeFullDevel}"
+        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib:/run/opengl-driver/lib:''${LD_LIBRARY_PATH:-}"
+
+        exec ${zigrad}/bin/zigrad tvm-check-compiler-load "$@"
       '';
 
       checkTvmRuntimeNoTvm = pkgs.runCommand "check-zigrad-tvm-runtime-no-tvm" {
@@ -542,6 +551,7 @@
       packages = {
         zigrad = zigrad;
         zigrad-devel = zigradDevel;
+        zigrad-check-tvm-runtime-full-compiler = hostCheckTvmRuntimeFullCompiler;
 
         # Convenience aggregate and primary target.
         #   others are individually targetable mostly for development reasons
@@ -604,7 +614,7 @@
       checks = {
         zigrad-build = zigrad;
         zigrad-unit-tests = zigradTests;
-        tvm-runtime-full = checkTvmRuntimeFull;
+        tvm-runtime-full-ffi = checkTvmRuntimeFullFfi;
         tvm-runtime-no-tvm = checkTvmRuntimeNoTvm;
       };
 
@@ -637,6 +647,11 @@
           ccache = {
             type = "app";
             program = "${pkgs.ccache}/bin/ccache";
+          };
+
+          tvm-runtime-full-compiler-host-check = {
+            type = "app";
+            program = "${hostCheckTvmRuntimeFullCompiler}/bin/zigrad-check-tvm-runtime-full-compiler";
           };
         };
     };

@@ -205,13 +205,18 @@ extern "c" fn dlerror() ?[*:0]const u8;
 var ffi_lib_handle: ?*anyopaque = null;
 var compiler_lib_handle: ?*anyopaque = null;
 
-/// Initialize TVM runtime: dlopen libtvm_ffi.so and libtvm.so with RTLD_GLOBAL.
+pub const EnsureLoadedOpts = struct {
+    /// If true, also load the full compiler library (`libtvm.so`).
+    ///
+    /// Set to false for hermetic checks that only require FFI symbol discovery.
+    load_compiler: bool = true,
+};
+
+/// Initialize TVM runtime libraries with RTLD_GLOBAL.
 ///
-/// The Zig linker loads TVM with RTLD_LOCAL. We reload with RTLD_GLOBAL so
-/// compiled TVM modules can find runtime symbols. Also loads libtvm.so
-/// (full compiler with TE/codegen) which registers TE functions via static
-/// initializers.
-pub fn ensure_loaded(allocator: std.mem.Allocator) !void {
+/// Loads `libtvm_ffi.so` first and resolves typed FFI symbols. Depending on
+/// `opts.load_compiler`, also loads `libtvm.so` (full compiler with TE/codegen).
+pub fn ensure_loaded(allocator: std.mem.Allocator, opts: EnsureLoadedOpts) !void {
     // libtvm_ffi.so
     if (ffi_lib_handle == null) {
         ffi_lib_handle = dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL);
@@ -232,6 +237,7 @@ pub fn ensure_loaded(allocator: std.mem.Allocator) !void {
         return error.TvmLoadFailed;
     };
 
+    if (!opts.load_compiler) return;
     if (compiler_lib_handle != null) return;
 
     const lib_path = try find_tvm_lib_path(allocator);

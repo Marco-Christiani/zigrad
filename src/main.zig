@@ -44,6 +44,11 @@ pub fn main() !void {
     if (cmd.matchSubCmd("tvm-dump-symbols")) |_| {
         return demos.dump_tvm_ffi_symbols(gpa);
     }
+    if (cmd.matchSubCmd("tvm-check-compiler-load")) |_| {
+        try zg.tvm.ffi.ensure_loaded(gpa, .{});
+        std.log.info("tvm compiler load check passed", .{});
+        return;
+    }
     if (cmd.matchSubCmd("tvm-tune")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.TvmTuneOpts, .{});
 
@@ -56,7 +61,7 @@ pub fn main() !void {
         const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
         defer gpa.free(base_dir);
 
-        try zg.tvm.ffi.ensure_loaded(gpa);
+        try zg.tvm.ffi.ensure_loaded(gpa, .{});
         var ir_mod = try zg.tvm.tir.build_matmul_tir(gpa, shape.m, shape.n, shape.k);
         defer ir_mod.deinit();
         var target = try zg.tvm.tir.Target.create(gpa, target_kind);
@@ -259,7 +264,7 @@ fn run_tvm_demo(
     const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, M, N, K);
     defer gpa.free(key);
 
-    try zg.tvm.ffi.ensure_loaded(gpa);
+    try zg.tvm.ffi.ensure_loaded(gpa, .{});
     const tuned = try zg.tvm.module.load_cached(gpa, base_dir, key, target_kind) orelse return error.NoTuningRecords;
     var tuned_mut = tuned;
     defer tuned_mut.deinit();

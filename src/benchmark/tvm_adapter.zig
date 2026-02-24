@@ -20,7 +20,7 @@ pub fn execute_with_module(
     b: []const f32,
     c: []f32,
 ) !void {
-    try zg.tvm.ffi.ensure_loaded(allocator);
+    try zg.tvm.ffi.ensure_loaded(allocator, .{});
 
     // Create DLPack tensors borrowing existing host buffers
     var shape_a = [_]i64{ @intCast(m), @intCast(k) };
@@ -62,7 +62,7 @@ pub fn execute_gpu_with_module(
     b: []const f32,
     c: []f32,
 ) !void {
-    try zg.tvm.ffi.ensure_loaded(allocator);
+    try zg.tvm.ffi.ensure_loaded(allocator, .{});
 
     // Allocate GPU tensors (includes host->device copy)
     var shape_a = [_]i64{ @intCast(m), @intCast(k) };

@@ -132,15 +132,35 @@ tasks:
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
 
+  deps:zig:refresh:
+    desc: Regenerate nix/build.zig.zon.nix from build.zig.zon
+    cmd: zon2nix build.zig.zon > nix/build.zig.zon.nix
+
+  deps:zig:check:
+    desc: Verify nix/build.zig.zon.nix matches build.zig.zon
+    cmd: |
+      set -euo pipefail
+      tmp="$(mktemp)"
+      trap 'rm -f "$tmp"' EXIT
+      zon2nix build.zig.zon > "$tmp"
+      if ! diff -u nix/build.zig.zon.nix "$tmp"; then
+        echo "Zig deps Nix file is out of date. Run: task deps:zig:refresh" >&2
+        exit 1
+      fi
+
   test:tvm-runtime-gating:
     desc: Run flake checks for TVM runtime gating
     cmds:
-      - nix build .#checks.tvm-runtime-full --option sandbox false {{.CLI_ARGS}}
-      - nix build .#checks.tvm-runtime-no-tvm --option sandbox false {{.CLI_ARGS}}
+      - nix build .#checks.tvm-runtime-full-ffi {{.CLI_ARGS}}
+      - nix build .#checks.tvm-runtime-no-tvm {{.CLI_ARGS}}
 
   check:flake:
     desc: Run full flake checks
-    cmd: nix flake check --option sandbox false {{.CLI_ARGS}}
+    cmd: nix flake check {{.CLI_ARGS}}
+
+  check:tvm-runtime:host:
+    desc: Run host integration check for full TVM compiler load
+    cmd: nix run .#tvm-runtime-full-compiler-host-check -- {{.CLI_ARGS}}
 
   run:
     deps: [build, check-env-rt]

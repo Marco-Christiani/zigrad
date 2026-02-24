@@ -124,6 +124,10 @@ pub const setup_cmd: CommandT = .{
             .description = "Enumerate all available TVM FFI functions (requires TVM runtime libraries)",
         },
         .{
+            .name = "tvm-check-compiler-load",
+            .description = "Check that libtvm.so compiler can be loaded (host integration check)",
+        },
+        .{
             .name = "aot-demo",
             .description = "Run the AOT compile+load demo",
         },

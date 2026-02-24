@@ -57,7 +57,7 @@ pub const TvmProvider = struct {
         });
 
         // Ensure TVM is loaded
-        tvm_api.ensure_loaded(allocator) catch return error.CompileFailed;
+        tvm_api.ensure_loaded(allocator, .{}) catch return error.CompileFailed;
 
         // Build matmul IRModule
         var ir_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch |err| {

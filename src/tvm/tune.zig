@@ -55,7 +55,7 @@ pub fn tune(
     tensor_shapes: []const []const i64,
     opts: TuneOpts,
 ) !void {
-    try api.ensure_loaded(allocator);
+    try api.ensure_loaded(allocator, .{});
 
     if (kind == .cuda) {
         nvrtc_callback.register(allocator) catch |err| {
