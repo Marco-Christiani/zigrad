@@ -165,7 +165,11 @@ pub fn main() !void {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
         const provider_kind = kernel_provider_map.get(provider_name) orelse return error.InvalidArgument;
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, opts.mirage_launcher_so);
+        const mirage_launcher_so = switch (provider_kind) {
+            .mirage => opts.mirage_launcher_so orelse return error.InvalidArgument,
+            .tvm => "",
+        };
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, mirage_launcher_so);
     }
     if (cmd.matchSubCmd("vjp-demo")) |_| {
         return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);

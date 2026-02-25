@@ -9,7 +9,7 @@ const log = std.log.scoped(.@"zg/mirage_provider");
 pub const MirageProvider = struct {
     allocator: std.mem.Allocator,
     dispatch_state: *dispatch_mod.MirageDispatchState,
-    launcher_so_path: ?[]const u8 = null,
+    launcher_so_path: []const u8,
 
     pub fn kernel_provider(self: *MirageProvider) kernel.KernelProvider {
         return .{
@@ -25,22 +25,22 @@ pub const MirageProvider = struct {
     }
 
     fn compile(self: *MirageProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-        const launcher_path = self.launcher_so_path orelse blk: {
-            const launcher_path_c = std.posix.getenv("MIRAGE_EXECUTE_MUGRAPH_SO");
-            break :blk if (launcher_path_c) |v| std.mem.sliceTo(v, 0) else "";
-        };
+        if (self.launcher_so_path.len == 0) {
+            log.err("mirage launcher .so path is required", .{});
+            return error.MirageContractError;
+        }
 
         const payload: mirage_c.PayloadV1 = .{
             .eqn_count = @intCast(desc.eqns.len),
             .num_inputs = @intCast(desc.inputs.len),
             .num_outputs = @intCast(desc.outputs.len),
-            .launcher_so_path_len = @intCast(launcher_path.len),
+            .launcher_so_path_len = @intCast(self.launcher_so_path.len),
         };
         const payload_header = std.mem.asBytes(&payload);
-        var payload_bytes = try allocator.alloc(u8, payload_header.len + launcher_path.len);
+        var payload_bytes = try allocator.alloc(u8, payload_header.len + self.launcher_so_path.len);
         defer allocator.free(payload_bytes);
         @memcpy(payload_bytes[0..payload_header.len], payload_header);
-        @memcpy(payload_bytes[payload_header.len..], launcher_path);
+        @memcpy(payload_bytes[payload_header.len..], self.launcher_so_path);
 
         var ctx = mirage_api.Context.init() catch |err| switch (err) {
             error.MirageUnavailable => return error.MirageLoadFailed,

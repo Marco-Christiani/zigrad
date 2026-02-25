@@ -146,7 +146,7 @@ pub const setup_cmd: CommandT = .{
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
-                .{ "mirage_launcher_so", "Path to Mirage launcher .so for --provider=mirage" },
+                .{ "mirage_launcher_so", "Required for --provider=mirage: path to Mirage launcher .so" },
             },
         }),
         .{

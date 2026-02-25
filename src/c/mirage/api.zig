@@ -33,29 +33,6 @@ pub fn ensure_loaded() MirageError!void {
     };
 }
 
-pub fn to_status_error(status: c.MirageStatus) MirageError!void {
-    return switch (status) {
-        .ok => {},
-        .invalid_argument, .unsupported => error.MirageCompileFailed,
-        .internal_error => error.MirageExecuteFailed,
-    };
-}
-
-pub fn compile_status_error(status: c.MirageStatus) MirageError!void {
-    return switch (status) {
-        .ok => {},
-        .unsupported => error.MirageCompileFailed,
-        .invalid_argument, .internal_error => error.MirageCompileFailed,
-    };
-}
-
-pub fn execute_status_error(status: c.MirageStatus) MirageError!void {
-    return switch (status) {
-        .ok => {},
-        .unsupported, .invalid_argument, .internal_error => error.MirageExecuteFailed,
-    };
-}
-
 pub fn status_name(status: c.MirageStatus) []const u8 {
     return std.mem.span(c.mirage_status_string(status));
 }
