@@ -4,6 +4,8 @@ const std = @import("std");
 const log = std.log.scoped(.@"zg/mirage_cffi");
 
 pub const MirageContext = opaque {};
+pub const MirageGraph = opaque {};
+pub const MirageTensor = u32;
 
 pub const MirageStatus = enum(c_int) {
     ok = 0,
@@ -44,20 +46,36 @@ pub const LaunchInfo = extern struct {
     workspace_bytes: usize,
 };
 
-pub const PayloadV1 = extern struct {
-    eqn_count: u32,
-    num_inputs: u32,
-    num_outputs: u32,
-    launcher_so_path_len: u32,
-};
-
 const FnStatusString = *const fn (MirageStatus) callconv(.c) [*:0]const u8;
 const FnContextCreate = *const fn (out_ctx: *?*MirageContext) callconv(.c) MirageStatus;
 const FnContextDestroy = *const fn (ctx: ?*MirageContext) callconv(.c) void;
-const FnCompileKernel = *const fn (
+const FnGraphCreate = *const fn (ctx: ?*MirageContext, out_graph: *?*MirageGraph) callconv(.c) MirageStatus;
+const FnGraphDestroy = *const fn (graph: ?*MirageGraph) callconv(.c) void;
+const FnGraphNewInput = *const fn (
+    graph: ?*MirageGraph,
+    dims: [*]const i64,
+    rank: usize,
+    dtype: MirageDType,
+    out_tensor: *MirageTensor,
+) callconv(.c) MirageStatus;
+const FnGraphMatmul = *const fn (
+    graph: ?*MirageGraph,
+    lhs: MirageTensor,
+    rhs: MirageTensor,
+    out_tensor: *MirageTensor,
+) callconv(.c) MirageStatus;
+const FnGraphMarkOutput = *const fn (
+    graph: ?*MirageGraph,
+    tensor: MirageTensor,
+) callconv(.c) MirageStatus;
+const FnGraphSuperoptimize = *const fn (
+    graph: ?*MirageGraph,
+    config_name: ?[*:0]const u8,
+) callconv(.c) MirageStatus;
+const FnGraphCompile = *const fn (
     ctx: ?*MirageContext,
-    payload_ptr: [*]const u8,
-    payload_len: usize,
+    graph: ?*MirageGraph,
+    target_cc: c_int,
     out_artifact_ptr: *[*]const u8,
     out_artifact_len: *usize,
     out_launch_info: *LaunchInfo,
@@ -83,7 +101,13 @@ const FnReleaseBuffer = *const fn (
 var fn_status_string: ?FnStatusString = null;
 var fn_context_create: ?FnContextCreate = null;
 var fn_context_destroy: ?FnContextDestroy = null;
-var fn_compile_kernel: ?FnCompileKernel = null;
+var fn_graph_create: ?FnGraphCreate = null;
+var fn_graph_destroy: ?FnGraphDestroy = null;
+var fn_graph_new_input: ?FnGraphNewInput = null;
+var fn_graph_matmul: ?FnGraphMatmul = null;
+var fn_graph_mark_output: ?FnGraphMarkOutput = null;
+var fn_graph_superoptimize: ?FnGraphSuperoptimize = null;
+var fn_graph_compile: ?FnGraphCompile = null;
 var fn_execute_kernel: ?FnExecuteKernel = null;
 var fn_validate_artifact: ?FnValidateArtifact = null;
 var fn_release_buffer: ?FnReleaseBuffer = null;
@@ -103,7 +127,13 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_status_string = try load_symbol(FnStatusString, handle, "mirage_status_string");
     fn_context_create = try load_symbol(FnContextCreate, handle, "mirage_context_create");
     fn_context_destroy = try load_symbol(FnContextDestroy, handle, "mirage_context_destroy");
-    fn_compile_kernel = try load_symbol(FnCompileKernel, handle, "mirage_compile_kernel");
+    fn_graph_create = try load_symbol(FnGraphCreate, handle, "mirage_graph_create");
+    fn_graph_destroy = try load_symbol(FnGraphDestroy, handle, "mirage_graph_destroy");
+    fn_graph_new_input = try load_symbol(FnGraphNewInput, handle, "mirage_graph_new_input");
+    fn_graph_matmul = try load_symbol(FnGraphMatmul, handle, "mirage_graph_matmul");
+    fn_graph_mark_output = try load_symbol(FnGraphMarkOutput, handle, "mirage_graph_mark_output");
+    fn_graph_superoptimize = try load_symbol(FnGraphSuperoptimize, handle, "mirage_graph_superoptimize");
+    fn_graph_compile = try load_symbol(FnGraphCompile, handle, "mirage_graph_compile");
     fn_execute_kernel = try load_symbol(FnExecuteKernel, handle, "mirage_execute_kernel");
     fn_validate_artifact = try load_symbol(FnValidateArtifact, handle, "mirage_validate_artifact");
     fn_release_buffer = try load_symbol(FnReleaseBuffer, handle, "mirage_release_buffer");
@@ -126,16 +156,57 @@ pub fn mirage_context_destroy(ctx: ?*MirageContext) void {
     f(ctx);
 }
 
-pub fn mirage_compile_kernel(
+pub fn mirage_graph_create(ctx: ?*MirageContext, out_graph: *?*MirageGraph) MirageStatus {
+    const f = fn_graph_create orelse return .internal_error;
+    return f(ctx, out_graph);
+}
+
+pub fn mirage_graph_destroy(graph: ?*MirageGraph) void {
+    const f = fn_graph_destroy orelse return;
+    f(graph);
+}
+
+pub fn mirage_graph_new_input(
+    graph: ?*MirageGraph,
+    dims: [*]const i64,
+    rank: usize,
+    dtype: MirageDType,
+    out_tensor: *MirageTensor,
+) MirageStatus {
+    const f = fn_graph_new_input orelse return .internal_error;
+    return f(graph, dims, rank, dtype, out_tensor);
+}
+
+pub fn mirage_graph_matmul(
+    graph: ?*MirageGraph,
+    lhs: MirageTensor,
+    rhs: MirageTensor,
+    out_tensor: *MirageTensor,
+) MirageStatus {
+    const f = fn_graph_matmul orelse return .internal_error;
+    return f(graph, lhs, rhs, out_tensor);
+}
+
+pub fn mirage_graph_mark_output(graph: ?*MirageGraph, tensor: MirageTensor) MirageStatus {
+    const f = fn_graph_mark_output orelse return .internal_error;
+    return f(graph, tensor);
+}
+
+pub fn mirage_graph_superoptimize(graph: ?*MirageGraph, config_name: ?[*:0]const u8) MirageStatus {
+    const f = fn_graph_superoptimize orelse return .internal_error;
+    return f(graph, config_name);
+}
+
+pub fn mirage_graph_compile(
     ctx: ?*MirageContext,
-    payload_ptr: [*]const u8,
-    payload_len: usize,
+    graph: ?*MirageGraph,
+    target_cc: c_int,
     out_artifact_ptr: *[*]const u8,
     out_artifact_len: *usize,
     out_launch_info: *LaunchInfo,
 ) MirageStatus {
-    const f = fn_compile_kernel orelse return .internal_error;
-    return f(ctx, payload_ptr, payload_len, out_artifact_ptr, out_artifact_len, out_launch_info);
+    const f = fn_graph_compile orelse return .internal_error;
+    return f(ctx, graph, target_cc, out_artifact_ptr, out_artifact_len, out_launch_info);
 }
 
 pub fn mirage_execute_kernel(

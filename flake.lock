@@ -3,8 +3,8 @@
     "mirage-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1770654792,
-        "narHash": "sha256-axBRj6NkhtQrZwbRQMTJpDlmff1YSVh8XBX1d9nm4tg=",
+        "lastModified": 1771999255,
+        "narHash": "sha256-rAKTxq4yLwDnxn2+7xDwwfZpGLlaPpoLaXXBpLbo9qs=",
         "path": "/home/marco/Github/mirage",
         "type": "path"
       },
@@ -21,8 +21,8 @@
         ]
       },
       "locked": {
-        "lastModified": 1771799958,
-        "narHash": "sha256-Lm6UZnlB/hHDd5XNe6SvTjDgh82XqxvyJflGJURfMm0=",
+        "lastModified": 1771999312,
+        "narHash": "sha256-2gqtAIbk3K0eNaCBZ/L+lVL2jOR6VXUIVHGOJuCuJhU=",
         "path": "/home/marco/flakes/mpk",
         "type": "path"
       },

@@ -19,18 +19,69 @@ var runtime_lib_handle: ?*anyopaque = null;
 
 pub fn ensure_loaded() MirageError!void {
     if (runtime_lib_handle == null) {
-        runtime_lib_handle = dlopen("libmirage_runtime.so", RTLD_NOW | RTLD_GLOBAL);
-        if (runtime_lib_handle == null) {
-            if (dlerror()) |err| {
-                log.err("dlopen(libmirage_runtime.so) failed: {s}", .{std.mem.span(err)});
-            }
-            return error.MirageUnavailable;
-        }
+        runtime_lib_handle = try load_runtime_library();
     }
 
     c.ensure_loaded(runtime_lib_handle.?) catch {
         return error.MirageUnavailable;
     };
+}
+
+fn load_runtime_library() MirageError!*anyopaque {
+    if (dlopen("libmirage_runtime.so", RTLD_NOW | RTLD_GLOBAL)) |h| {
+        return h;
+    } else if (dlerror()) |err| {
+        log.debug("dlopen(libmirage_runtime.so) failed: {s}", .{std.mem.span(err)});
+    }
+
+    const allocator = std.heap.smp_allocator;
+
+    var has_static_archive = false;
+
+    const runtime_handle = try load_runtime_from_sdk_root(allocator, "ZG_RUNTIME_SDK_ROOT", &has_static_archive);
+    if (runtime_handle) |h| return h;
+
+    const external_handle = try load_runtime_from_sdk_root(allocator, "ZG_EXTERNAL_SDK_ROOT", &has_static_archive);
+    if (external_handle) |h| return h;
+
+    if (has_static_archive) {
+        log.err("mirage runtime shared library missing; found static archive only (libmirage_runtime.a)", .{});
+    } else {
+        log.err("mirage runtime shared library not found (libmirage_runtime.so)", .{});
+    }
+    return error.MirageUnavailable;
+}
+
+fn load_runtime_from_sdk_root(
+    allocator: std.mem.Allocator,
+    comptime env_name: []const u8,
+    has_static_archive: *bool,
+) MirageError!?*anyopaque {
+    const sdk_root = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MirageUnavailable,
+    };
+    defer allocator.free(sdk_root);
+
+    const so_path = try std.fmt.allocPrint(allocator, "{s}/lib/libmirage_runtime.so", .{sdk_root});
+    defer allocator.free(so_path);
+
+    const so_path_z = try allocator.allocSentinel(u8, so_path.len, 0);
+    defer allocator.free(so_path_z);
+    @memcpy(so_path_z[0..so_path.len], so_path);
+
+    if (dlopen(so_path_z.ptr, RTLD_NOW | RTLD_GLOBAL)) |h| {
+        return h;
+    } else if (dlerror()) |err| {
+        log.debug("dlopen({s}) failed: {s}", .{ so_path, std.mem.span(err) });
+    }
+
+    const a_path = try std.fmt.allocPrint(allocator, "{s}/lib/libmirage_runtime.a", .{sdk_root});
+    defer allocator.free(a_path);
+    std.fs.accessAbsolute(a_path, .{}) catch return null;
+    has_static_archive.* = true;
+    return null;
 }
 
 pub fn status_name(status: c.MirageStatus) []const u8 {

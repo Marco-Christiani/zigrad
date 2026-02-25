@@ -516,7 +516,6 @@ pub fn run_kernel_provider_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     provider_kind: KernelProviderDemoKind,
-    mirage_launcher_so: []const u8,
 ) !void {
     var program = try build_kernelized_demo_program(allocator, switch (provider_kind) {
         .tvm => "tvm",
@@ -562,15 +561,9 @@ pub fn run_kernel_provider_demo(
     var mirage_dispatch_state = zg.mirage.dispatch.MirageDispatchState.init(allocator);
     defer mirage_dispatch_state.deinit();
 
-    if (mirage_launcher_so.len == 0) {
-        std.log.err("mirage demo requires --mirage-launcher-so", .{});
-        return error.InvalidArgument;
-    }
-
     var mirage_provider_impl = zg.mirage.provider.MirageProvider{
         .allocator = allocator,
         .dispatch_state = &mirage_dispatch_state,
-        .launcher_so_path = mirage_launcher_so,
     };
     const providers = [_]zg.kernel.KernelProvider{mirage_provider_impl.kernel_provider()};
 

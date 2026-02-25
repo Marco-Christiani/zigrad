@@ -46,7 +46,6 @@ pub const TvmZxprOpts = struct {
 
 pub const KernelProviderDemoOpts = struct {
     provider: ?[]const u8 = "tvm",
-    mirage_launcher_so: ?[]const u8 = null,
 };
 
 /// Train demo subcommand
@@ -146,7 +145,6 @@ pub const setup_cmd: CommandT = .{
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
-                .{ "mirage_launcher_so", "Required for --provider=mirage: path to Mirage launcher .so" },
             },
         }),
         .{
