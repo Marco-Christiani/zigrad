@@ -3,8 +3,8 @@
     "mirage-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1771999255,
-        "narHash": "sha256-rAKTxq4yLwDnxn2+7xDwwfZpGLlaPpoLaXXBpLbo9qs=",
+        "lastModified": 1772003255,
+        "narHash": "sha256-ClcjOfe3Um4+IzG1phNRN3PR2LBGusFJUarRHlARIVg=",
         "path": "/home/marco/Github/mirage",
         "type": "path"
       },
@@ -15,14 +15,16 @@
     },
     "mpk": {
       "inputs": {
-        "mirage-src": "mirage-src",
+        "mirage-src": [
+          "mirage-src"
+        ],
         "nixpkgs": [
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1771999312,
-        "narHash": "sha256-2gqtAIbk3K0eNaCBZ/L+lVL2jOR6VXUIVHGOJuCuJhU=",
+        "lastModified": 1772003319,
+        "narHash": "sha256-3MKnWKaiSeKYGTTAWoB+9qTxuBsRd8T1kPHGd2MZOCk=",
         "path": "/home/marco/flakes/mpk",
         "type": "path"
       },
@@ -95,6 +97,7 @@
     },
     "root": {
       "inputs": {
+        "mirage-src": "mirage-src",
         "mpk": "mpk",
         "nixpkgs": "nixpkgs",
         "pyproject-build-systems": "pyproject-build-systems",

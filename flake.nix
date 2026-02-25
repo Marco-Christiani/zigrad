@@ -2,9 +2,15 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    mirage-src = {
+      url = "path:/home/marco/Github/mirage";
+      flake = false;
+    };
+
     mpk = {
       url = "path:/home/marco/flakes/mpk";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.mirage-src.follows = "mirage-src";
     };
 
     pyproject-nix = {
@@ -29,13 +35,14 @@
       };
     };
   };
-  outputs = {
+  outputs = inputs@{
     self,
     nixpkgs,
     mpk,
     pyproject-nix,
     uv2nix,
     pyproject-build-systems,
+    ...
   }: let
     systems = [
       "x86_64-linux"
@@ -75,7 +82,10 @@
 
       cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
       gccHost = pkgs.${cudaCfg.gccHostAttr};
-      mirageRuntime = if builtins.hasAttr system mpk.packages then mpk.packages.${system}.mirage-runtime else null;
+      mirageRuntime =
+        if builtins.hasAttr system mpk.packages
+        then mpk.packages.${system}.mirage-runtime
+        else null;
 
       zigradSrc = import ./nix/source-filter.nix {
         lib = pkgs.lib;
@@ -140,14 +150,16 @@
       # - aggregate: build + runtime-full for default ergonomic workflows
       zigradExternalSdkBuild = pkgs.symlinkJoin {
         name = "zigrad-external-sdk-build";
-        paths = [
-          xlaMlirStablehloCapiSdk
-          tvm.dev
-          cudaCompileHeaders
-          pkgs.mkl
-        ] ++ pkgs.lib.optionals (mirageRuntime != null) [
-          mirageRuntime
-        ];
+        paths =
+          [
+            xlaMlirStablehloCapiSdk
+            tvm.dev
+            cudaCompileHeaders
+            pkgs.mkl
+          ]
+          ++ pkgs.lib.optionals (mirageRuntime != null) [
+            mirageRuntime
+          ];
       };
 
       zigradExternalSdkRuntimeFull = pkgs.symlinkJoin {
@@ -178,14 +190,16 @@
 
       zigradExternalSdkBuildDevel = pkgs.symlinkJoin {
         name = "zigrad-external-sdk-build-devel";
-        paths = [
-          xlaMlirStablehloCapiDevel
-          tvmDevel.dev
-          cudaCompileHeaders
-          pkgs.mkl
-        ] ++ pkgs.lib.optionals (mirageRuntime != null) [
-          mirageRuntime
-        ];
+        paths =
+          [
+            xlaMlirStablehloCapiDevel
+            tvmDevel.dev
+            cudaCompileHeaders
+            pkgs.mkl
+          ]
+          ++ pkgs.lib.optionals (mirageRuntime != null) [
+            mirageRuntime
+          ];
       };
 
       zigradExternalSdkRuntimeFullDevel = pkgs.symlinkJoin {
@@ -233,22 +247,23 @@
         runTests = true;
       };
 
-      checkTvmRuntimeFullFfi = pkgs.runCommand "check-zigrad-tvm-runtime-full-ffi" {
-        nativeBuildInputs = [
-          zigrad
-        ];
-      } ''
-        set -euo pipefail
-        export HOME="$TMPDIR"
-        runtime_root="${zigradExternalSdkRuntimeFullDevel}"
-        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
+      checkTvmRuntimeFullFfi =
+        pkgs.runCommand "check-zigrad-tvm-runtime-full-ffi" {
+          nativeBuildInputs = [
+            zigrad
+          ];
+        } ''
+          set -euo pipefail
+          export HOME="$TMPDIR"
+          runtime_root="${zigradExternalSdkRuntimeFullDevel}"
+          export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
 
-        ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/tvm-symbols.txt"
-        test -s "$TMPDIR/tvm-symbols.txt"
+          ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/tvm-symbols.txt"
+          test -s "$TMPDIR/tvm-symbols.txt"
 
-        mkdir -p "$out"
-        cp "$TMPDIR/tvm-symbols.txt" "$out/tvm-symbols.txt"
-      '';
+          mkdir -p "$out"
+          cp "$TMPDIR/tvm-symbols.txt" "$out/tvm-symbols.txt"
+        '';
 
       hostCheckTvmRuntimeFullCompiler = pkgs.writeShellScriptBin "zigrad-check-tvm-runtime-full-compiler" ''
         set -euo pipefail
@@ -259,30 +274,31 @@
         exec ${zigrad}/bin/zigrad tvm-check-compiler-load "$@"
       '';
 
-      checkTvmRuntimeNoTvm = pkgs.runCommand "check-zigrad-tvm-runtime-no-tvm" {
-        nativeBuildInputs = [
-          zigrad
-        ];
-      } ''
-        set -euo pipefail
-        export HOME="$TMPDIR"
-        runtime_root="${zigradExternalSdkRuntimeNoTvmDevel}"
-        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
+      checkTvmRuntimeNoTvm =
+        pkgs.runCommand "check-zigrad-tvm-runtime-no-tvm" {
+          nativeBuildInputs = [
+            zigrad
+          ];
+        } ''
+          set -euo pipefail
+          export HOME="$TMPDIR"
+          runtime_root="${zigradExternalSdkRuntimeNoTvmDevel}"
+          export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
 
-        if ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/stdout.txt" 2> "$TMPDIR/stderr.txt"; then
-          echo "expected tvm-dump-symbols to fail without TVM runtime libraries" >&2
-          exit 1
-        fi
+          if ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/stdout.txt" 2> "$TMPDIR/stderr.txt"; then
+            echo "expected tvm-dump-symbols to fail without TVM runtime libraries" >&2
+            exit 1
+          fi
 
-        if ! grep -Eq "(TvmLoadFailed|failed to load TVM FFI runtime|dlopen)" "$TMPDIR/stderr.txt"; then
-          echo "expected loader diagnostics in stderr" >&2
-          cat "$TMPDIR/stderr.txt" >&2
-          exit 1
-        fi
+          if ! grep -Eq "(TvmLoadFailed|failed to load TVM FFI runtime|dlopen)" "$TMPDIR/stderr.txt"; then
+            echo "expected loader diagnostics in stderr" >&2
+            cat "$TMPDIR/stderr.txt" >&2
+            exit 1
+          fi
 
-        mkdir -p "$out"
-        cp "$TMPDIR/stderr.txt" "$out/tvm-missing-stderr.txt"
-      '';
+          mkdir -p "$out"
+          cp "$TMPDIR/stderr.txt" "$out/tvm-missing-stderr.txt"
+        '';
 
       # zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
       #   inherit xlaMlirStablehloCapiSdk;
@@ -559,73 +575,73 @@
       };
 
       # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
-      packages = {
-        zigrad = zigrad;
-        zigrad-devel = zigradDevel;
-        zigrad-check-tvm-runtime-full-compiler = hostCheckTvmRuntimeFullCompiler;
-      }
-      // (pkgs.lib.optionalAttrs (mirageRuntime != null) {
-        mirage-runtime = mirageRuntime;
-      })
-      // {
+      packages =
+        {
+          zigrad = zigrad;
+          zigrad-devel = zigradDevel;
+          zigrad-check-tvm-runtime-full-compiler = hostCheckTvmRuntimeFullCompiler;
+        }
+        // (pkgs.lib.optionalAttrs (mirageRuntime != null) {
+          mirage-runtime = mirageRuntime;
+        })
+        // {
+          # Convenience aggregate and primary target.
+          #   others are individually targetable mostly for development reasons
+          zigrad-external-sdk = zigradExternalSdk;
+          zigrad-external-sdk-build = zigradExternalSdkBuild;
+          zigrad-external-sdk-runtime-full = zigradExternalSdkRuntimeFull;
+          zigrad-external-sdk-runtime-no-tvm = zigradExternalSdkRuntimeNoTvm;
 
-        # Convenience aggregate and primary target.
-        #   others are individually targetable mostly for development reasons
-        zigrad-external-sdk = zigradExternalSdk;
-        zigrad-external-sdk-build = zigradExternalSdkBuild;
-        zigrad-external-sdk-runtime-full = zigradExternalSdkRuntimeFull;
-        zigrad-external-sdk-runtime-no-tvm = zigradExternalSdkRuntimeNoTvm;
+          # Dev target: ccache + devel
+          zigrad-external-sdk-devel = zigradExternalSdkDevel;
+          zigrad-external-sdk-build-devel = zigradExternalSdkBuildDevel;
+          zigrad-external-sdk-runtime-full-devel = zigradExternalSdkRuntimeFullDevel;
+          zigrad-external-sdk-runtime-no-tvm-devel = zigradExternalSdkRuntimeNoTvmDevel;
 
-        # Dev target: ccache + devel
-        zigrad-external-sdk-devel = zigradExternalSdkDevel;
-        zigrad-external-sdk-build-devel = zigradExternalSdkBuildDevel;
-        zigrad-external-sdk-runtime-full-devel = zigradExternalSdkRuntimeFullDevel;
-        zigrad-external-sdk-runtime-no-tvm-devel = zigradExternalSdkRuntimeNoTvmDevel;
+          # ----------------------------------------------------------------
+          # Bazel PJRT plugin build
+          xla-pjrt-plugins = xlaPjrtPlugins;
 
-        # ----------------------------------------------------------------
-        # Bazel PJRT plugin build
-        xla-pjrt-plugins = xlaPjrtPlugins;
+          # Bazel PJRT plugin build - Dev target: ccache + devel
+          xla-pjrt-plugins-devel = xlaPjrtPluginsDevel;
 
-        # Bazel PJRT plugin build - Dev target: ccache + devel
-        xla-pjrt-plugins-devel = xlaPjrtPluginsDevel;
+          # Bazel PJRT plugin build - CUDA
+          xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
 
-        # Bazel PJRT plugin build - CUDA
-        xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
+          # Bazel PJRT plugin build - CUDA + devel
+          xla-pjrt-plugins-cuda-devel = xlaPjrtPluginsCudaDevel;
+          # ----------------------------------------------------------------
 
-        # Bazel PJRT plugin build - CUDA + devel
-        xla-pjrt-plugins-cuda-devel = xlaPjrtPluginsCudaDevel;
-        # ----------------------------------------------------------------
+          # Legacy PJRT plugin build path.
+          xla-pjrt-plugins-legacy = xlaPjrtPluginsLegacy;
+          xla-pjrt-plugins-legacy-cuda = xlaPjrtPluginsCudaLegacy;
+          xla-pjrt-plugins-legacy-devel = xlaPjrtPluginsLegacyDevel;
+          xla-pjrt-plugins-legacy-cuda-devel = xlaPjrtPluginsCudaLegacyDevel;
 
-        # Legacy PJRT plugin build path.
-        xla-pjrt-plugins-legacy = xlaPjrtPluginsLegacy;
-        xla-pjrt-plugins-legacy-cuda = xlaPjrtPluginsCudaLegacy;
-        xla-pjrt-plugins-legacy-devel = xlaPjrtPluginsLegacyDevel;
-        xla-pjrt-plugins-legacy-cuda-devel = xlaPjrtPluginsCudaLegacyDevel;
+          # Compile-time SDK (PJRT headers + MLIR + StableHLO)
+          xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
-        # Compile-time SDK (PJRT headers + MLIR + StableHLO)
-        xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
+          # Comptile-time SDK - Dev target: ccache + devel
+          xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
 
-        # Comptile-time SDK - Dev target: ccache + devel
-        xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
+          tvm = tvm;
+          tvm-dev = tvm.dev;
+          tvm-cpu = tvmCpu;
+          tvm-devel = tvmDevel;
 
-        tvm = tvm;
-        tvm-dev = tvm.dev;
-        tvm-cpu = tvmCpu;
-        tvm-devel = tvmDevel;
+          # LLVM 22 built from XLA-pinned sources
+          llvm = llvm;
 
-        # LLVM 22 built from XLA-pinned sources
-        llvm = llvm;
+          gen-clangd = targets.editor.clangd;
+          gen-nvim = targets.editor.nvim;
+          # TODO: hermetic zig build/run targets
+          # m1 = targets.m1.build;
+          m4 = targets.zigrad-m4.build;
 
-        gen-clangd = targets.editor.clangd;
-        gen-nvim = targets.editor.nvim;
-        # TODO: hermetic zig build/run targets
-        # m1 = targets.m1.build;
-        m4 = targets.zigrad-m4.build;
-
-        # new version with buildBazelPackage
-        xla-pjrt-plugins-bazel = xlaPjrtPluginsBazel;
-        xla-pjrt-plugins-bazel-cuda = xlaPjrtPluginsBazelCuda;
-      };
+          # new version with buildBazelPackage
+          xla-pjrt-plugins-bazel = xlaPjrtPluginsBazel;
+          xla-pjrt-plugins-bazel-cuda = xlaPjrtPluginsBazelCuda;
+        };
 
       checks = {
         zigrad-build = zigrad;
