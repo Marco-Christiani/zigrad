@@ -44,6 +44,11 @@ pub const TvmZxprOpts = struct {
     palette: ?[]const u8 = null,
 };
 
+pub const KernelProviderDemoOpts = struct {
+    provider: ?[]const u8 = "tvm",
+    mirage_launcher_so: ?[]const u8 = null,
+};
+
 /// Train demo subcommand
 pub const TrainDemoOpts = struct {
     warmup: ?u32 = null,
@@ -135,10 +140,15 @@ pub const setup_cmd: CommandT = .{
             .name = "custom-call-neg",
             .description = "Expects missing custom call handler (should fail)",
         },
-        .{
-            .name = "kernel-provider-demo",
-            .description = "Run kernelized region via single dispatch target (requires TVM runtime libraries)",
-        },
+        CommandT.from(KernelProviderDemoOpts, .{
+            .cmd_name = "kernel-provider-demo",
+            .cmd_description = "Run kernelized region via single dispatch target",
+            .default_val_opts = true,
+            .sub_descriptions = &.{
+                .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
+                .{ "mirage_launcher_so", "Path to Mirage launcher .so for --provider=mirage" },
+            },
+        }),
         .{
             .name = "vjp-demo",
             .description = "Run the reverse-mode AD demo",

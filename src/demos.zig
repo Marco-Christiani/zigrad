@@ -515,31 +515,68 @@ pub fn run_kernel_provider_demo(
     device: *const zg.backend.pjrt.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    provider_kind: KernelProviderDemoKind,
+    mirage_launcher_so: ?[]const u8,
 ) !void {
-    try zg.tvm.ffi.ensure_loaded(allocator, .{});
-    try backend.require_typed_ffi();
-
-    const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
-
-    var program = try build_kernelized_demo_program(allocator);
+    var program = try build_kernelized_demo_program(allocator, switch (provider_kind) {
+        .tvm => "tvm",
+        .mirage => "mirage",
+    });
     defer program.deinit();
 
     var registry = zg.kernel.KernelRegistry.init(allocator);
     defer registry.deinit();
     try backend.register_kernel_dispatcher(&registry);
 
-    var dispatch_state = zg.tvm.dispatch.TvmDispatchState.init(allocator);
-    defer dispatch_state.deinit();
+    if (provider_kind == .tvm) {
+        try zg.tvm.ffi.ensure_loaded(allocator, .{});
+        try backend.require_typed_ffi();
 
-    var provider_impl = zg.tvm.provider.TvmProvider{
-        .allocator = allocator,
-        .target_kind = target_kind,
-        .work_dir = "artifacts/tvm_cache",
-        .max_trials = 8,
-        .trials_per_iter = 4,
-        .dispatch_state = &dispatch_state,
+        const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
+        var tvm_dispatch_state = zg.tvm.dispatch.TvmDispatchState.init(allocator);
+        defer tvm_dispatch_state.deinit();
+
+        var tvm_provider_impl = zg.tvm.provider.TvmProvider{
+            .allocator = allocator,
+            .target_kind = target_kind,
+            .work_dir = "artifacts/tvm_cache",
+            .max_trials = 8,
+            .trials_per_iter = 4,
+            .dispatch_state = &tvm_dispatch_state,
+        };
+        const tvm_providers = [_]zg.kernel.KernelProvider{tvm_provider_impl.kernel_provider()};
+
+        const tvm_lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+        var tvm_exe = try compile_program(backend, allocator, &program, device, .{
+            .encoding = tvm_lower_encoding,
+            .entry_name = "main",
+        }, dump_pr, dump_mlir, .{
+            .registry = &registry,
+            .providers = tvm_providers[0..],
+        });
+        defer backend.deinit_executable(&tvm_exe);
+
+        return run_demo_executable(allocator, backend, device, &tvm_exe);
+    }
+
+    var mirage_dispatch_state = zg.mirage.dispatch.MirageDispatchState.init(allocator);
+    defer mirage_dispatch_state.deinit();
+
+    const launcher_path = mirage_launcher_so orelse blk: {
+        const env = std.posix.getenv("MIRAGE_EXECUTE_MUGRAPH_SO") orelse break :blk null;
+        break :blk std.mem.sliceTo(env, 0);
     };
-    const providers = [_]zg.kernel.KernelProvider{provider_impl.kernel_provider()};
+    if (launcher_path == null) {
+        std.log.err("mirage demo requires --mirage_launcher_so or MIRAGE_EXECUTE_MUGRAPH_SO", .{});
+        return error.InvalidArgument;
+    }
+
+    var mirage_provider_impl = zg.mirage.provider.MirageProvider{
+        .allocator = allocator,
+        .dispatch_state = &mirage_dispatch_state,
+        .launcher_so_path = launcher_path,
+    };
+    const providers = [_]zg.kernel.KernelProvider{mirage_provider_impl.kernel_provider()};
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     var exe = try compile_program(backend, allocator, &program, device, .{
@@ -551,8 +588,18 @@ pub fn run_kernel_provider_demo(
     });
     defer backend.deinit_executable(&exe);
 
+    if (registry.get("matmul_region") == null) {
+        std.log.err("mirage provider did not produce kernel artifact for 'matmul_region'", .{});
+        return error.KernelArtifactMissing;
+    }
+
     return run_demo_executable(allocator, backend, device, &exe);
 }
+
+pub const KernelProviderDemoKind = enum {
+    tvm,
+    mirage,
+};
 
 pub fn compile_program(
     backend_handle: *zg.backend.PjrtBackend,
@@ -736,7 +783,7 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
     }
 }
 
-fn build_kernelized_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
+fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_name: []const u8) !zg.pr.Program {
     var program = zg.pr.Program.init(allocator);
     errdefer program.deinit();
 
@@ -747,7 +794,7 @@ fn build_kernelized_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("matmul_region", .{ .kernelize = "tvm" });
+    try b.push_region("matmul_region", .{ .kernelize = provider_name });
     const dot_id = try b.dot(a_id, b_id);
     try b.pop_region();
 

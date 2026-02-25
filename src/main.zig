@@ -7,6 +7,11 @@ const main_aot = @import("main_aot.zig");
 const llama_model = @import("llama_model.zig");
 const cli = @import("cli.zig");
 
+const kernel_provider_map = std.StaticStringMap(demos.KernelProviderDemoKind).initComptime(.{
+    .{ "tvm", .tvm },
+    .{ "mirage", .mirage },
+});
+
 // exports for cli gen step in build
 pub const CommandT = cli.CommandT;
 pub const setup_cmd = cli.setup_cmd;
@@ -156,8 +161,11 @@ pub fn main() !void {
     if (cmd.matchSubCmd("custom-call-neg")) |_| {
         return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
     }
-    if (cmd.matchSubCmd("kernel-provider-demo")) |_| {
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
+    if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
+        const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
+        const provider_name = opts.provider orelse "tvm";
+        const provider_kind = kernel_provider_map.get(provider_name) orelse return error.InvalidArgument;
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, opts.mirage_launcher_so);
     }
     if (cmd.matchSubCmd("vjp-demo")) |_| {
         return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);

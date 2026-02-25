@@ -264,6 +264,12 @@ pub const CompileError = error{
     TvmFunctionNotFound,
     /// TVM value type did not match the expected representation.
     UnexpectedTvmType,
+    /// Mirage runtime/API loading failed.
+    MirageLoadFailed,
+    /// Mirage compile invocation failed.
+    MirageCompileFailed,
+    /// Mirage execution contract was invalid.
+    MirageContractError,
     /// Compilation failed for an internal reason not covered above.
     CompileFailed,
     OutOfMemory,

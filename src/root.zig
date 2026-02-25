@@ -26,6 +26,9 @@ pub const kernel = @import("kernel.zig");
 // TVM subsystem
 pub const tvm = @import("tvm/root.zig");
 
+// Mirage subsystem
+pub const mirage = @import("mirage/root.zig");
+
 // Kernels
 pub const kernels = struct {
     pub const gemm = @import("kernels/gemm.zig");

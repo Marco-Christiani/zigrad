@@ -401,3 +401,50 @@ test "kernelize pass calls provider and registers KA" {
     try testing.expectEqualStrings("test_region", pr.param_call_kernel_key(params).?);
     try testing.expectEqualStrings("mock", pr.param_call_provider_name(params).?);
 }
+
+test "kernelize pass falls back when provider returns Unsupported" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("unsupported_region", .{ .kernelize = "mirage" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const StubUnsupportedProvider = struct {
+        fn compile(_: *anyopaque, _: kernel.RegionDescriptor, _: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return error.Unsupported;
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mirage",
+        .ptr = undefined,
+        .compile_fn = StubUnsupportedProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
+    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
+    try testing.expect(registry.get("unsupported_region") == null);
+}

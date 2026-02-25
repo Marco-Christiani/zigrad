@@ -113,6 +113,15 @@ pub const PassError = error{
     /// TVM value type did not match the expected representation.
     UnexpectedTvmType,
 
+    /// Mirage runtime/API loading failed.
+    MirageLoadFailed,
+
+    /// Mirage compile invocation failed.
+    MirageCompileFailed,
+
+    /// Mirage execution contract was invalid.
+    MirageContractError,
+
     /// Provider compilation failed for an internal reason.
     CompileFailed,
 
