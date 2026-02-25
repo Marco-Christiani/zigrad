@@ -2,6 +2,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    mpk = {
+      url = "path:/home/marco/flakes/mpk";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -27,6 +32,7 @@
   outputs = {
     self,
     nixpkgs,
+    mpk,
     pyproject-nix,
     uv2nix,
     pyproject-build-systems,
@@ -69,6 +75,7 @@
 
       cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
       gccHost = pkgs.${cudaCfg.gccHostAttr};
+      mirageRuntime = if builtins.hasAttr system mpk.packages then mpk.packages.${system}.mirage-runtime else null;
 
       zigradSrc = import ./nix/source-filter.nix {
         lib = pkgs.lib;
@@ -138,6 +145,8 @@
           tvm.dev
           cudaCompileHeaders
           pkgs.mkl
+        ] ++ pkgs.lib.optionals (mirageRuntime != null) [
+          mirageRuntime
         ];
       };
 
@@ -174,6 +183,8 @@
           tvmDevel.dev
           cudaCompileHeaders
           pkgs.mkl
+        ] ++ pkgs.lib.optionals (mirageRuntime != null) [
+          mirageRuntime
         ];
       };
 
@@ -552,6 +563,11 @@
         zigrad = zigrad;
         zigrad-devel = zigradDevel;
         zigrad-check-tvm-runtime-full-compiler = hostCheckTvmRuntimeFullCompiler;
+      }
+      // (pkgs.lib.optionalAttrs (mirageRuntime != null) {
+        mirage-runtime = mirageRuntime;
+      })
+      // {
 
         # Convenience aggregate and primary target.
         #   others are individually targetable mostly for development reasons
