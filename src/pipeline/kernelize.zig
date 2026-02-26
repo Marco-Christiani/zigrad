@@ -449,6 +449,52 @@ test "kernelize pass falls back when provider returns Unsupported" {
     try testing.expect(registry.get("unsupported_region") == null);
 }
 
+test "kernelize pass propagates provider errors other than Unsupported" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("broken_region", .{ .kernelize = "mirage" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const StubProvider = struct {
+        fn compile(_: *anyopaque, _: kernel.RegionDescriptor, _: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return error.MirageApiUnsupported;
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mirage",
+        .ptr = undefined,
+        .compile_fn = StubProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try testing.expectError(error.MirageApiUnsupported, kp.pass().run(&artifact, &ctx));
+
+    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
+    try testing.expect(registry.get("broken_region") == null);
+}
+
 test "kernelize pass rewrites multi-output region to custom_call" {
     const testing = std.testing;
 

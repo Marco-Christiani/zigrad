@@ -197,10 +197,25 @@ pub const DispatchContext = struct {
     platform: DispatchPlatform,
     /// GPU stream handle (e.g. CUDA stream). Null on host.
     stream: ?*anyopaque,
+    /// Optional provider workspace pointer.
+    workspace: ?*anyopaque,
+    /// Compile-time workspace requirement reported by the provider artifact.
+    workspace_bytes_required: usize,
     allocator: std.mem.Allocator,
 };
 
-pub const DispatchError = error{ DispatchFailed, UnsupportedDType, ShapeMismatch, OutOfMemory };
+pub const DispatchError = error{
+    DispatchFailed,
+    UnsupportedDType,
+    ShapeMismatch,
+    OutOfMemory,
+    MirageLoadFailed,
+    MirageInvalidArgument,
+    MirageInternalError,
+    MirageApiUnsupported,
+    MirageContractError,
+    WorkspaceUnavailable,
+};
 
 /// Provider dispatch function signature.
 ///
@@ -235,6 +250,12 @@ pub const KernelArtifact = struct {
 
     /// Target name used to reference this KA from custom_call ops.
     target_name: []const u8,
+
+    /// Temporary dispatch-time workspace contract.
+    ///
+    /// Providers set this from compile metadata; backend currently uses it
+    ///  for fail-fast checks until workspace allocation is fully implemented.
+    workspace_bytes: usize = 0,
 
     /// Provider dispatch entry point.
     dispatch_fn: ?DispatchFn = null,

@@ -25,7 +25,7 @@ pub const MirageDispatchState = struct {
         const self: *MirageDispatchState = @ptrCast(@alignCast(provider_ctx));
         self.dispatch_impl(artifact_data, kernel_key, ctx) catch |err| {
             log.err("mirage dispatch failed for '{s}': {s}", .{ kernel_key, @errorName(err) });
-            return error.DispatchFailed;
+            return err;
         };
     }
 
@@ -34,12 +34,14 @@ pub const MirageDispatchState = struct {
         artifact_data: []const u8,
         kernel_key: []const u8,
         ctx: kernel.DispatchContext,
-    ) !void {
+    ) kernel.DispatchError!void {
         _ = kernel_key;
         _ = self;
 
-        var mirage_ctx = try mirage_api.Context.init();
+        var mirage_ctx = mirage_api.Context.init() catch |err| return map_mirage_api_error(err);
         defer mirage_ctx.deinit();
+
+        try require_workspace(ctx);
 
         var input_descs = try ctx.allocator.alloc(mirage_c.BufferDesc, ctx.inputs.len);
         defer ctx.allocator.free(input_descs);
@@ -79,7 +81,7 @@ pub const MirageDispatchState = struct {
         );
         if (valid_status != .ok) {
             log.err("mirage_validate_artifact returned {s}", .{mirage_api.status_name(valid_status)});
-            return error.MirageContractError;
+            return map_mirage_status(valid_status);
         }
 
         const status = mirage_c.mirage_execute_kernel(
@@ -87,14 +89,39 @@ pub const MirageDispatchState = struct {
             artifact_data.ptr,
             artifact_data.len,
             &params,
-            null,
+            ctx.workspace,
         );
         if (status != .ok) {
             log.err("mirage_execute_kernel returned {s}", .{mirage_api.status_name(status)});
-            return error.MirageExecuteFailed;
+            return map_mirage_status(status);
         }
     }
 };
+
+fn map_mirage_api_error(err: mirage_api.MirageError) kernel.DispatchError {
+    return switch (err) {
+        error.MirageUnavailable => error.MirageLoadFailed,
+        error.MirageInvalidArgument => error.MirageInvalidArgument,
+        error.MirageInternalError => error.MirageInternalError,
+        error.MirageApiUnsupported => error.MirageApiUnsupported,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+fn map_mirage_status(status: mirage_c.MirageStatus) kernel.DispatchError {
+    return switch (status) {
+        .ok => unreachable,
+        .invalid_argument => error.MirageInvalidArgument,
+        .internal_error => error.MirageInternalError,
+        .unsupported => error.MirageApiUnsupported,
+    };
+}
+
+fn require_workspace(ctx: kernel.DispatchContext) kernel.DispatchError!void {
+    if (ctx.workspace_bytes_required != 0 and ctx.workspace == null) {
+        return error.WorkspaceUnavailable;
+    }
+}
 
 fn dtype_to_mirage(dtype: kernel.DType) mirage_c.MirageDType {
     return switch (dtype) {
@@ -108,4 +135,24 @@ fn dtype_to_mirage(dtype: kernel.DType) mirage_c.MirageDType {
         .u32 => .u32,
         .u64 => .u64,
     };
+}
+
+test "map_mirage_status preserves runtime detail" {
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument));
+    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error));
+    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(.unsupported));
+}
+
+test "dispatch requires workspace when artifact needs it" {
+    const ctx: kernel.DispatchContext = .{
+        .inputs = &.{},
+        .outputs = &.{},
+        .device_ordinal = 0,
+        .platform = .cuda,
+        .stream = null,
+        .workspace = null,
+        .workspace_bytes_required = 16,
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectError(error.WorkspaceUnavailable, require_workspace(ctx));
 }

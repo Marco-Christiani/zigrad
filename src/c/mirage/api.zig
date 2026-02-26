@@ -5,8 +5,9 @@ const log = std.log.scoped(.@"zg/mirage_api");
 
 pub const MirageError = error{
     MirageUnavailable,
-    MirageCompileFailed,
-    MirageExecuteFailed,
+    MirageInvalidArgument,
+    MirageInternalError,
+    MirageApiUnsupported,
     OutOfMemory,
 };
 
@@ -101,7 +102,12 @@ pub const Context = struct {
         const status = c.mirage_context_create(&raw);
         if (status != .ok) {
             log.err("mirage_context_create failed: {s}", .{status_name(status)});
-            return error.MirageUnavailable;
+            return switch (status) {
+                .ok => unreachable,
+                .invalid_argument => error.MirageInvalidArgument,
+                .internal_error => error.MirageInternalError,
+                .unsupported => error.MirageApiUnsupported,
+            };
         }
         return .{ .raw = raw };
     }

@@ -467,13 +467,40 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
         .device_ordinal = get_device_ordinal(frame),
         .platform = platform,
         .stream = get_stream(frame),
+        .workspace = null,
+        .workspace_bytes_required = artifact.workspace_bytes,
         .allocator = std.heap.c_allocator,
     };
 
-    artifact.dispatch(kernel_key, ctx) catch {
-        return make_ffi_error(frame, "zigrad kernel dispatch: provider execution failed", c.XLA_FFI_Error_Code_INTERNAL);
+    artifact.dispatch(kernel_key, ctx) catch |err| {
+        log.err("kernel dispatch failed for '{s}': {s}", .{ kernel_key, @errorName(err) });
+        return dispatch_error_to_ffi(frame, err);
     };
     return null;
+}
+
+fn dispatch_error_to_ffi(frame: *c.XLA_FFI_CallFrame, err: kernel.DispatchError) ?*c.XLA_FFI_Error {
+    return make_ffi_error(frame, "zigrad kernel dispatch failed", dispatch_error_code(err));
+}
+
+fn dispatch_error_code(err: kernel.DispatchError) c.XLA_FFI_Error_Code {
+    return switch (err) {
+        error.UnsupportedDType,
+        error.ShapeMismatch,
+        error.MirageInvalidArgument,
+        => c.XLA_FFI_Error_Code_INVALID_ARGUMENT,
+
+        error.MirageLoadFailed,
+        error.MirageApiUnsupported,
+        error.WorkspaceUnavailable,
+        => c.XLA_FFI_Error_Code_FAILED_PRECONDITION,
+
+        error.DispatchFailed,
+        error.OutOfMemory,
+        error.MirageInternalError,
+        error.MirageContractError,
+        => c.XLA_FFI_Error_Code_INTERNAL,
+    };
 }
 
 /// Extract input buffers from an FFI args structure into BufferDesc array.
@@ -677,4 +704,21 @@ fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOpt
     try w.writeAll(build_opts.items);
 
     return out.toOwnedSlice(allocator);
+}
+
+test "dispatch_error_to_ffi returns null when frame has no API" {
+    var frame: c.XLA_FFI_CallFrame = std.mem.zeroes(c.XLA_FFI_CallFrame);
+    try std.testing.expect(dispatch_error_to_ffi(&frame, error.MirageInvalidArgument) == null);
+}
+
+test "dispatch_error_code maps invalid-argument class" {
+    try std.testing.expectEqual(c.XLA_FFI_Error_Code_INVALID_ARGUMENT, dispatch_error_code(error.MirageInvalidArgument));
+}
+
+test "dispatch_error_code maps failed-precondition class" {
+    try std.testing.expectEqual(c.XLA_FFI_Error_Code_FAILED_PRECONDITION, dispatch_error_code(error.WorkspaceUnavailable));
+}
+
+test "dispatch_error_code maps internal class" {
+    try std.testing.expectEqual(c.XLA_FFI_Error_Code_INTERNAL, dispatch_error_code(error.MirageInternalError));
 }

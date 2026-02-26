@@ -28,8 +28,10 @@ pub const MirageProvider = struct {
     fn compile(self: *MirageProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         var ctx = mirage_api.Context.init() catch |err| switch (err) {
             error.MirageUnavailable => return error.MirageLoadFailed,
+            error.MirageInvalidArgument => return error.MirageInvalidArgument,
+            error.MirageInternalError => return error.MirageInternalError,
+            error.MirageApiUnsupported => return error.MirageApiUnsupported,
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.MirageCompileFailed,
         };
         defer ctx.deinit();
 
@@ -122,6 +124,7 @@ pub const MirageProvider = struct {
             .provider_name = "mirage",
             .data = artifact_bytes,
             .target_name = try allocator.dupe(u8, desc.name),
+            .workspace_bytes = launch_info.workspace_bytes,
             .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
             .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
@@ -281,4 +284,16 @@ fn map_runtime_status(status: mirage_c.MirageStatus) kernel.CompileError {
         .internal_error => error.MirageInternalError,
         .unsupported => error.MirageApiUnsupported,
     };
+}
+
+test "map_region_status preserves fallback boundary" {
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_region_status(.invalid_argument));
+    try std.testing.expectEqual(error.MirageInternalError, map_region_status(.internal_error));
+    try std.testing.expectEqual(error.Unsupported, map_region_status(.unsupported));
+}
+
+test "map_runtime_status preserves runtime unsupported" {
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_runtime_status(.invalid_argument));
+    try std.testing.expectEqual(error.MirageInternalError, map_runtime_status(.internal_error));
+    try std.testing.expectEqual(error.MirageApiUnsupported, map_runtime_status(.unsupported));
 }
