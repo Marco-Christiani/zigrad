@@ -113,11 +113,8 @@ pub const KernelizePass = struct {
             defer temp_allocator.free(desc.inputs);
             defer temp_allocator.free(desc.outputs);
 
-            if (desc.outputs.len != 1) {
-                log.debug(
-                    "region '{s}' has {d} outputs; single-dispatch temporary path only supports one output",
-                    .{ candidate.region.name, desc.outputs.len },
-                );
+            if (desc.outputs.len == 0) {
+                log.debug("region '{s}' has no externally used outputs; skipping kernelization", .{candidate.region.name});
                 continue;
             }
 
@@ -248,9 +245,12 @@ pub const KernelizePass = struct {
         func: pr.Function,
         rewrite: RewriteCandidate,
     ) !void {
-        if (rewrite.outputs.len != 1) return error.InvalidRegion;
+        if (rewrite.outputs.len == 0) return error.InvalidRegion;
 
-        const out_aval = func.avals[@intCast(rewrite.outputs[0])];
+        const out_avals = try allocator.alloc(pr.Aval, rewrite.outputs.len);
+        for (rewrite.outputs, 0..) |out_id, idx| {
+            out_avals[idx] = func.avals[@intCast(out_id)];
+        }
 
         const kernel_key = try allocator.dupe(u8, rewrite.kernel_key);
         const provider_name = try allocator.dupe(u8, rewrite.provider_name);
@@ -261,7 +261,7 @@ pub const KernelizePass = struct {
             .{ .call_kernel_key = kernel_key },
             .{ .call_provider_name = provider_name },
             .{ .has_side_effect = false },
-            .{ .out_aval = out_aval },
+            .{ .out_avals = out_avals },
         };
 
         const in_span = try append_varids(allocator, varids_store, rewrite.inputs);
@@ -447,4 +447,66 @@ test "kernelize pass falls back when provider returns Unsupported" {
     try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
     try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
     try testing.expect(registry.get("unsupported_region") == null);
+}
+
+test "kernelize pass rewrites multi-output region to custom_call" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("multi_out", .{ .kernelize = "mock" });
+    const a = try b.emit(.exp, &.{x}, &.{});
+    const b_out = try b.emit(.log, &.{y}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{ a, b_out });
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "mock_kernel_data"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = undefined,
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
+    const rewritten = program.functions[0].eqns[0];
+    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
+
+    const outputs = rewritten.outputs.slice(pr.VarId, program.functions[0].varids_store);
+    try testing.expectEqual(@as(usize, 2), outputs.len);
+
+    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
+    const maybe_out_avals = pr.param_out_avals(params);
+    try testing.expect(maybe_out_avals != null);
+    const out_avals = maybe_out_avals.?;
+    try testing.expectEqual(@as(usize, 2), out_avals.len);
 }

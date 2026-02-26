@@ -16,8 +16,12 @@ extern "c" fn dlopen(filename: [*:0]const u8, flags: c_int) ?*anyopaque;
 extern "c" fn dlerror() ?[*:0]const u8;
 
 var runtime_lib_handle: ?*anyopaque = null;
+var runtime_load_mutex: std.Thread.Mutex = .{};
 
 pub fn ensure_loaded() MirageError!void {
+    runtime_load_mutex.lock();
+    defer runtime_load_mutex.unlock();
+
     if (runtime_lib_handle == null) {
         runtime_lib_handle = try load_runtime_library();
     }

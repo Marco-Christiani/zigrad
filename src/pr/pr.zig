@@ -123,7 +123,10 @@ pub const Param = union(enum) {
     /// Provider identity used by runtime dispatch.
     call_provider_name: []const u8,
     has_side_effect: bool,
+    /// Single-output custom_call output type.
     out_aval: Aval,
+    /// Multi-output custom_call output types, ordered by output var list.
+    out_avals: []const Aval,
 };
 
 pub const GatherParams = struct {
@@ -870,6 +873,14 @@ pub fn param_out_aval(params: []const Param) ?Aval {
     return null;
 }
 
+pub fn param_out_avals(params: []const Param) ?[]const Aval {
+    for (params) |p| switch (p) {
+        .out_avals => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
 // ============================================================================
 // Validation
 // ============================================================================
@@ -1104,12 +1115,29 @@ pub fn validate_function(func: Function) ValidationError!void {
                 for (outputs) |out_id| _ = try expect_tensor(func, out_id);
             },
             .custom_call => {
-                if (outputs.len != 1) return error.InvalidEqnArity;
                 _ = param_call_target_name(params) orelse return error.InvalidParams;
                 _ = param_has_side_effect(params) orelse return error.InvalidParams;
-                _ = param_out_aval(params) orelse return error.InvalidParams;
-                _ = try expect_tensor(func, outputs[0]);
                 for (inputs) |in_id| _ = try expect_tensor(func, in_id);
+
+                const single_out = param_out_aval(params);
+                const multi_outs = param_out_avals(params);
+                if ((single_out == null) == (multi_outs == null)) return error.InvalidParams;
+
+                if (single_out) |out_aval| {
+                    if (outputs.len != 1) return error.InvalidEqnArity;
+                    const expected = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
+                    const actual = try expect_tensor(func, outputs[0]);
+                    if (!same_tensor_signature(actual, expected)) return error.CustomCallTypeMismatch;
+                    continue;
+                }
+
+                const out_avals = multi_outs.?;
+                if (outputs.len == 0 or out_avals.len != outputs.len) return error.InvalidEqnArity;
+                for (outputs, 0..) |out_id, idx| {
+                    const expected = out_avals[idx].as_tensor() orelse return error.CustomCallTypeMismatch;
+                    const actual = try expect_tensor(func, out_id);
+                    if (!same_tensor_signature(actual, expected)) return error.CustomCallTypeMismatch;
+                }
             },
         }
     }
@@ -1436,11 +1464,24 @@ pub const FunctionBuilder = struct {
                 return error.InvalidEqnArity;
             },
             .custom_call => {
-                const out_aval = param_out_aval(pms) orelse return error.InvalidParams;
                 _ = param_call_target_name(pms) orelse return error.InvalidParams;
                 _ = param_has_side_effect(pms) orelse return error.InvalidParams;
-                _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
+
+                const single_out = param_out_aval(pms);
+                const multi_outs = param_out_avals(pms);
+                if ((single_out == null) == (multi_outs == null)) return error.InvalidParams;
+
                 for (inputs) |in_id| _ = try self.tensor_of(in_id);
+
+                if (single_out) |out_aval| {
+                    _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
+                    return out_aval;
+                }
+
+                const out_avals = multi_outs.?;
+                if (out_avals.len != 1) return error.InvalidEqnArity;
+                const out_aval = out_avals[0];
+                _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
                 return out_aval;
             },
         }

@@ -60,6 +60,17 @@ pub const RegionDescriptor = struct {
     }
 };
 
+/// Returns whether a dot_general parameter set matches plain rank-2 matmul.
+///
+/// Accepts only no batch dimensions and one contracting dimension per input,
+/// with lhs contracting dim 1 and rhs contracting dim 0.
+pub fn dot_general_is_matrix_matmul(params: []const pr.Param) bool {
+    const dg = pr.param_dot_general(params) orelse return false;
+    if (dg.lhs_batch_dims.len != 0 or dg.rhs_batch_dims.len != 0) return false;
+    if (dg.lhs_contracting_dims.len != 1 or dg.rhs_contracting_dims.len != 1) return false;
+    return dg.lhs_contracting_dims[0] == 1 and dg.rhs_contracting_dims[0] == 0;
+}
+
 /// Build a RegionDescriptor from a Function and a Region.
 ///
 /// Computes the boundary variables (inputs/outputs) by analyzing which
@@ -266,6 +277,12 @@ pub const CompileError = error{
     UnexpectedTvmType,
     /// Mirage runtime/API loading failed.
     MirageLoadFailed,
+    /// Mirage API returned invalid arguments (contract mismatch).
+    MirageInvalidArgument,
+    /// Mirage API reported an internal runtime failure.
+    MirageInternalError,
+    /// Mirage runtime reported unsupported outside region-capability matching.
+    MirageApiUnsupported,
     /// Mirage compile invocation failed.
     MirageCompileFailed,
     /// Mirage execution contract was invalid.
@@ -417,4 +434,32 @@ test "kernel registry put and get" {
     try testing.expectEqualStrings("fake_kernel", found.?.data);
 
     try testing.expect(registry.get("nonexistent") == null);
+}
+
+test "dot_general_is_matrix_matmul canonical" {
+    const params = [_]pr.Param{.{ .dot_general = .{
+        .lhs_batch_dims = &.{},
+        .rhs_batch_dims = &.{},
+        .lhs_contracting_dims = &.{1},
+        .rhs_contracting_dims = &.{0},
+    } }};
+    try std.testing.expect(dot_general_is_matrix_matmul(params[0..]));
+}
+
+test "dot_general_is_matrix_matmul rejects non-canonical" {
+    const with_batch = [_]pr.Param{.{ .dot_general = .{
+        .lhs_batch_dims = &.{0},
+        .rhs_batch_dims = &.{0},
+        .lhs_contracting_dims = &.{1},
+        .rhs_contracting_dims = &.{0},
+    } }};
+    try std.testing.expect(!dot_general_is_matrix_matmul(with_batch[0..]));
+
+    const wrong_contract = [_]pr.Param{.{ .dot_general = .{
+        .lhs_batch_dims = &.{},
+        .rhs_batch_dims = &.{},
+        .lhs_contracting_dims = &.{0},
+        .rhs_contracting_dims = &.{1},
+    } }};
+    try std.testing.expect(!dot_general_is_matrix_matmul(wrong_contract[0..]));
 }

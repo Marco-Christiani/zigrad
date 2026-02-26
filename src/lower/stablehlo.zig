@@ -771,16 +771,20 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    if (outs.len != 1) return error.InvalidProgram;
+    if (outs.len == 0) return error.InvalidProgram;
 
     const target = pr.param_call_target_name(eqn_params) orelse return error.InvalidProgram;
     const has_side_effect = pr.param_has_side_effect(eqn_params) orelse return error.InvalidProgram;
     const kernel_key = pr.param_call_kernel_key(eqn_params);
     const provider_name = pr.param_call_provider_name(eqn_params);
 
-    const out_id = outs[0];
-    const out_tensor = try ctx.tensor_of(out_id);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
+    const result_types = ctx.arena.alloc(mlir.Type, outs.len) catch return error.OutOfMemory;
+    const result_layouts = ctx.arena.alloc([]const usize, outs.len) catch return error.OutOfMemory;
+    for (outs, 0..) |out_id, i| {
+        const out_tensor = try ctx.tensor_of(out_id);
+        result_types[i] = try ctx.tensor_to_mlir_type(out_tensor);
+        result_layouts[i] = default_layout(ctx.arena, out_tensor.shape.rank()) catch return error.OutOfMemory;
+    }
 
     const operand_values = ctx.arena.alloc(mlir.Value, ins.len) catch return error.OutOfMemory;
     const operand_layouts = ctx.arena.alloc([]const usize, ins.len) catch return error.OutOfMemory;
@@ -789,8 +793,6 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         const operand_tensor = try ctx.tensor_of(id);
         operand_layouts[i] = default_layout(ctx.arena, operand_tensor.shape.rank()) catch return error.OutOfMemory;
     }
-
-    const result_layout = default_layout(ctx.arena, out_tensor.shape.rank()) catch return error.OutOfMemory;
     const target_z = ctx.arena.allocSentinel(u8, target.len, 0) catch return error.OutOfMemory;
     @memcpy(target_z, target);
 
@@ -813,12 +815,14 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         .has_side_effect = has_side_effect,
         .backend_config = backend_config,
         .operand_layouts = operand_layouts,
-        .result_layouts = &.{result_layout},
+        .result_layouts = result_layouts,
         .api_version = .typed_ffi,
-    }, &.{out_type}, ctx.loc);
+    }, result_types, ctx.loc);
 
     ctx.block.append_operation(op);
-    ctx.set_value(out_id, op.result(0));
+    for (outs, 0..) |out_id, i| {
+        ctx.set_value(out_id, op.result(i));
+    }
 }
 
 fn default_layout(arena: std.mem.Allocator, rank: usize) error{OutOfMemory}![]const usize {
@@ -1130,6 +1134,64 @@ test "lowering supports custom_call boundary" {
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
+}
+
+test "lowering supports multi-output custom_call boundary" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("mock_multi", .{ .kernelize = "mock" });
+    const ex = try b.emit(.exp, &.{x}, &.{});
+    const lg = try b.emit(.log, &.{y}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{ ex, lg });
+    try program.add_function(func);
+
+    const kernel = @import("../kernel.zig");
+    const kernelize = @import("../pipeline/kernelize.zig");
+
+    const MockProvider = struct {
+        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "mock"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = undefined,
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = kernelize.KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass.Artifact{ .pr = &program };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &pass_ctx);
+
+    const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "stablehlo.custom_call") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "tensor<2xf32>, tensor<2xf32>") != null);
 }
 
 test "lowering supports vjp matmul demo" {

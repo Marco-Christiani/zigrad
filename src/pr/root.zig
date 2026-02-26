@@ -34,6 +34,7 @@ pub const param_call_kernel_key = core.param_call_kernel_key;
 pub const param_call_provider_name = core.param_call_provider_name;
 pub const param_has_side_effect = core.param_has_side_effect;
 pub const param_out_aval = core.param_out_aval;
+pub const param_out_avals = core.param_out_avals;
 
 pub const ad = @import("ad.zig");
 pub const emit = @import("emit.zig");

@@ -116,6 +116,15 @@ pub const PassError = error{
     /// Mirage runtime/API loading failed.
     MirageLoadFailed,
 
+    /// Mirage API returned invalid arguments (contract mismatch).
+    MirageInvalidArgument,
+
+    /// Mirage API reported an internal runtime failure.
+    MirageInternalError,
+
+    /// Mirage runtime reported unsupported outside region-capability matching.
+    MirageApiUnsupported,
+
     /// Mirage compile invocation failed.
     MirageCompileFailed,
 

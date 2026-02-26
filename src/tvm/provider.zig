@@ -168,11 +168,16 @@ const MatmulShape = struct {
 fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
     // Must be exactly one equation
     if (desc.eqns.len != 1) return null;
+    if (desc.inputs.len != 2 or desc.outputs.len != 1) return null;
     const eqn = desc.eqns[0];
 
     // Must be dot or dot_general
     switch (eqn.prim) {
-        .dot, .dot_general => {},
+        .dot => {},
+        .dot_general => {
+            const params = eqn.params.slice(pr.Param, desc.params_store);
+            if (!kernel.dot_general_is_matrix_matmul(params)) return null;
+        },
         else => return null,
     }
 
