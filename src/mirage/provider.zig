@@ -188,7 +188,18 @@ fn lower_eqn(
         },
         .dot_general => {
             if (inputs.len != 2) return error.Unsupported;
-            if (!kernel.dot_general_is_matrix_matmul(eqn.params.slice(pr.Param, desc.params_store))) return error.Unsupported;
+
+            const lhs_aval = desc.aval_of(inputs[0]) orelse return error.Unsupported;
+            const rhs_aval = desc.aval_of(inputs[1]) orelse return error.Unsupported;
+            const lhs_tensor = lhs_aval.as_tensor() orelse return error.Unsupported;
+            const rhs_tensor = rhs_aval.as_tensor() orelse return error.Unsupported;
+
+            if (!kernel.dot_general_is_canonical_batched_matmul(
+                eqn.params.slice(pr.Param, desc.params_store),
+                lhs_tensor.shape.rank(),
+                rhs_tensor.shape.rank(),
+            )) return error.Unsupported;
+
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
             return try emit_matmul(graph, lhs, rhs);
