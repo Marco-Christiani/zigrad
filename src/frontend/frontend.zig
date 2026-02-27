@@ -478,7 +478,12 @@ pub fn compile_program(
         else => return error.UnexpectedArtifact,
     };
 
-    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, config.compile);
+    var compile_opts = config.compile;
+    if (compile_opts.kernel_package == null) {
+        compile_opts.kernel_package = mlir.kernel_package;
+    }
+
+    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
 }
 
 pub fn init_backend(allocator: std.mem.Allocator, plugin_path: ?[]const u8) !backend.PjrtBackend {

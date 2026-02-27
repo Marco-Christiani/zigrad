@@ -20,6 +20,25 @@ pub const c = @cImport({
 
 const log = std.log.scoped(.@"zg/mlir");
 
+const ZgRegisterDialectsFn = *const fn (c.MlirContext) callconv(.c) void;
+const ZgRegisterPassesFn = *const fn () callconv(.c) void;
+
+const ShimHandle = struct {
+    lib: std.DynLib,
+    register_dialects: ZgRegisterDialectsFn,
+    register_passes: ?ZgRegisterPassesFn,
+};
+
+const ShimState = union(enum) {
+    uninitialized,
+    unavailable,
+    loaded: ShimHandle,
+};
+
+var shim_mutex: std.Thread.Mutex = .{};
+var shim_state: ShimState = .uninitialized;
+var shim_passes_registered: bool = false;
+
 test {
     std.testing.refAllDeclsRecursive(@This());
 
@@ -49,6 +68,101 @@ pub inline fn from_string_ref(str: c.MlirStringRef) []const u8 {
 
 pub fn register_passes(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
+}
+
+pub fn maybe_register_zigrad_extensions(ctx: Context) void {
+    shim_mutex.lock();
+    defer shim_mutex.unlock();
+
+    switch (shim_state) {
+        .uninitialized => {
+            const loaded = load_shim_locked() orelse {
+                shim_state = .unavailable;
+                return;
+            };
+            shim_state = .{ .loaded = loaded };
+        },
+        .unavailable => return,
+        .loaded => {},
+    }
+
+    const handle = switch (shim_state) {
+        .loaded => |loaded| loaded,
+        else => unreachable,
+    };
+
+    handle.register_dialects(ctx._inner);
+
+    if (!shim_passes_registered) {
+        if (handle.register_passes) |register_passes_fn| {
+            register_passes_fn();
+            shim_passes_registered = true;
+        }
+    }
+}
+
+fn load_shim_locked() ?ShimHandle {
+    const shim_path = resolve_shim_path(std.heap.page_allocator) catch |err| {
+        log.err("failed to resolve MLIR extension shim path: {s}", .{@errorName(err)});
+        return null;
+    } orelse return null;
+    defer std.heap.page_allocator.free(shim_path);
+
+    var lib = std.DynLib.open(shim_path) catch |err| {
+        log.err("failed to open MLIR extension shim '{s}': {s}", .{ shim_path, @errorName(err) });
+        return null;
+    };
+
+    const register_dialects = lib.lookup(ZgRegisterDialectsFn, "zg_register_dialects") orelse {
+        log.err("MLIR extension shim '{s}' missing symbol zg_register_dialects", .{shim_path});
+        lib.close();
+        return null;
+    };
+
+    const register_passes_fn_opt = lib.lookup(ZgRegisterPassesFn, "zg_register_passes");
+
+    log.info("loaded MLIR extension shim '{s}'", .{shim_path});
+
+    return .{
+        .lib = lib,
+        .register_dialects = register_dialects,
+        .register_passes = register_passes_fn_opt,
+    };
+}
+
+fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
+    if (std.process.getEnvVarOwned(allocator, "ZG_MLIR_SHIM_PATH")) |shim_path| {
+        return shim_path;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const enable_shim = blk: {
+        const raw_enable = std.process.getEnvVarOwned(allocator, "ZG_ENABLE_MLIR_SHIM") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => break :blk false,
+            else => return err,
+        };
+        defer allocator.free(raw_enable);
+        break :blk env_var_truthy(raw_enable);
+    };
+
+    if (!enable_shim) return null;
+
+    const sdk_root = std.process.getEnvVarOwned(allocator, "ZG_EXTERNAL_SDK_ROOT") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(sdk_root);
+
+    return @as(?[]u8, try std.fs.path.join(allocator, &.{ sdk_root, "lib", "libzigrad_mlir_ext.so" }));
+}
+
+fn env_var_truthy(value: []const u8) bool {
+    return std.mem.eql(u8, value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "on");
 }
 
 pub fn success_or(res: c.MlirLogicalResult, err: anytype) @TypeOf(err)!void {

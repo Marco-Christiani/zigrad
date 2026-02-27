@@ -18,15 +18,12 @@ add_library(zigrad_mlir_ext SHARED mlir_ext.cc)
 target_include_directories(zigrad_mlir_ext PRIVATE "${ZG_SDK_INCLUDE}")
 target_link_directories(zigrad_mlir_ext PRIVATE "${ZG_SDK_LIB}")
 
-# Link against MLIR C boundary and stdlib/runtime deps.
-target_link_libraries(zigrad_mlir_ext PRIVATE MLIR-C stdc++ dl)
-
-# Planning on using full paths here for now, depending on how cumbersome that
-# ends up being. Also, might need to extend this (based on previous lessons...)
+# Link against MLIR and StableHLO C API shared libraries from the SDK.
 target_link_libraries(zigrad_mlir_ext PRIVATE
-  "${ZG_SDK_LIB}/libStablehloCAPI.a"
-  "${ZG_SDK_LIB}/libStablehloOps.a"
+  MLIR-C
+  StablehloCAPI
+  stdc++
+  dl
 )
 
 set_target_properties(zigrad_mlir_ext PROPERTIES OUTPUT_NAME "zigrad_mlir_ext")
-

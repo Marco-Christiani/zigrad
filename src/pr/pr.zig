@@ -120,8 +120,12 @@ pub const Param = union(enum) {
     call_target_name: []const u8,
     /// Kernel registry lookup key for single-dispatch custom calls.
     call_kernel_key: []const u8,
+    /// Deterministic numeric kernel id for executable-scoped package lookup.
+    call_kernel_id: u32,
     /// Provider identity used by runtime dispatch.
     call_provider_name: []const u8,
+    /// Optional carrier classification hint for MLIR-side kernelization passes.
+    call_carrier_hint: []const u8,
     has_side_effect: bool,
     /// Single-output custom_call output type.
     out_aval: Aval,
@@ -852,6 +856,22 @@ pub fn param_call_kernel_key(params: []const Param) ?[]const u8 {
 pub fn param_call_provider_name(params: []const Param) ?[]const u8 {
     for (params) |p| switch (p) {
         .call_provider_name => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_call_kernel_id(params: []const Param) ?u32 {
+    for (params) |p| switch (p) {
+        .call_kernel_id => |v| return v,
+        else => {},
+    };
+    return null;
+}
+
+pub fn param_call_carrier_hint(params: []const Param) ?[]const u8 {
+    for (params) |p| switch (p) {
+        .call_carrier_hint => |v| return v,
         else => {},
     };
     return null;

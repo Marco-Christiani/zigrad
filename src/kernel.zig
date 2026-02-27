@@ -394,6 +394,38 @@ pub const KernelRegistry = struct {
     }
 };
 
+/// Executable-scoped kernel artifacts keyed by deterministic kernel id.
+///
+/// This package is the migration target for dialect-first kernelization flows
+/// where custom_call dispatch resolves by numeric kernel id instead of string
+/// target lookup.
+pub const KernelPackage = struct {
+    entries: std.AutoHashMap(u32, KernelArtifact),
+
+    pub fn init(pkg_allocator: std.mem.Allocator) KernelPackage {
+        return .{ .entries = std.AutoHashMap(u32, KernelArtifact).init(pkg_allocator) };
+    }
+
+    pub fn allocator(self: *const KernelPackage) std.mem.Allocator {
+        return self.entries.allocator;
+    }
+
+    pub fn deinit(self: *KernelPackage) void {
+        var it = self.entries.valueIterator();
+        while (it.next()) |artifact| artifact.deinit(self.entries.allocator);
+        self.entries.deinit();
+    }
+
+    pub fn put(self: *KernelPackage, kernel_id: u32, artifact: KernelArtifact) error{ OutOfMemory, DuplicateKey }!void {
+        if (self.entries.contains(kernel_id)) return error.DuplicateKey;
+        try self.entries.put(kernel_id, artifact);
+    }
+
+    pub fn get(self: *const KernelPackage, kernel_id: u32) ?KernelArtifact {
+        return self.entries.get(kernel_id);
+    }
+};
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -479,6 +511,49 @@ test "kernel registry put and get" {
     try testing.expectEqualStrings("fake_kernel", found.?.data);
 
     try testing.expect(registry.get("nonexistent") == null);
+}
+
+test "kernel package put and get" {
+    const testing = std.testing;
+
+    var package = KernelPackage.init(testing.allocator);
+    defer package.deinit();
+
+    const artifact = KernelArtifact{
+        .provider_name = "test",
+        .data = try testing.allocator.dupe(u8, "artifact_payload"),
+        .target_name = "kernel_7",
+    };
+
+    try package.put(7, artifact);
+
+    const found = package.get(7);
+    try testing.expect(found != null);
+    try testing.expectEqualStrings("artifact_payload", found.?.data);
+    try testing.expect(package.get(99) == null);
+}
+
+test "kernel package rejects duplicate ids" {
+    const testing = std.testing;
+
+    var package = KernelPackage.init(testing.allocator);
+    defer package.deinit();
+
+    const first = KernelArtifact{
+        .provider_name = "test",
+        .data = try testing.allocator.dupe(u8, "first"),
+        .target_name = "kernel_1",
+    };
+    try package.put(1, first);
+
+    const second = KernelArtifact{
+        .provider_name = "test",
+        .data = try testing.allocator.dupe(u8, "second"),
+        .target_name = "kernel_1_dup",
+    };
+
+    try testing.expectError(error.DuplicateKey, package.put(1, second));
+    testing.allocator.free(second.data);
 }
 
 test "dot_general_is_matrix_matmul canonical" {

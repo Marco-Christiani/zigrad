@@ -18,6 +18,7 @@
 const std = @import("std");
 
 const pr_mod = @import("../pr/pr.zig");
+const kernel = @import("../kernel.zig");
 
 /// Artifact kinds for pass input/output validation.
 pub const ArtifactKind = enum {
@@ -70,6 +71,7 @@ pub const Artifact = union(ArtifactKind) {
 pub const MlirArtifact = struct {
     bytes: []u8,
     encoding: MlirEncoding,
+    kernel_package: ?*const kernel.KernelPackage = null,
 
     pub fn deinit(self: *MlirArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);

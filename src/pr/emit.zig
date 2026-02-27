@@ -139,7 +139,9 @@ fn emit_params(params: []const pr.Param, writer: anytype) !void {
                 try writer.writeAll("]");
             },
             .call_kernel_key => |k| try writer.print(" kernel_key=\"{s}\"", .{k}),
+            .call_kernel_id => |id| try writer.print(" kernel_id={d}", .{id}),
             .call_provider_name => |p| try writer.print(" provider=\"{s}\"", .{p}),
+            .call_carrier_hint => |hint| try writer.print(" carrier=\"{s}\"", .{hint}),
             .gather, .scatter => {}, // Complex params; ZXPR format handles these
             .out_aval, .out_avals => {}, // Type already shown in output declaration
         }
