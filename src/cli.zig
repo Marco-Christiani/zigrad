@@ -46,11 +46,6 @@ pub const TvmZxprOpts = struct {
 
 pub const KernelProviderDemoOpts = struct {
     provider: ?[]const u8 = "tvm",
-    lane: ?[]const u8 = "pr",
-};
-
-pub const KernelProviderDemoFixedLaneOpts = struct {
-    provider: ?[]const u8 = "tvm",
 };
 
 /// Train demo subcommand
@@ -68,25 +63,6 @@ pub const LlamaFtDemoOpts = struct {
     seq: ?u32 = null,
     batch: ?u32 = null,
     canonical_shapes: bool = false,
-    canonical_qkv: bool = false,
-    canonical_o: bool = false,
-    canonical_mlp: bool = false,
-    execute_only: bool = false,
-    kernel_provider: ?[]const u8 = null,
-    kernel_lane: ?[]const u8 = "mlir",
-};
-
-pub const LlamaFtDemoLaneOpts = struct {
-    warmup: ?u32 = null,
-    steps: ?u32 = null,
-    train: bool = false,
-    dtype: ?[]const u8 = null,
-    seq: ?u32 = null,
-    batch: ?u32 = null,
-    canonical_shapes: bool = false,
-    canonical_qkv: bool = false,
-    canonical_o: bool = false,
-    canonical_mlp: bool = false,
     execute_only: bool = false,
     kernel_provider: ?[]const u8 = null,
 };
@@ -163,14 +139,13 @@ pub const setup_cmd: CommandT = .{
         },
         CommandT.from(KernelProviderDemoOpts, .{
             .cmd_name = "kernel-provider-demo",
-            .cmd_description = "Run kernelized region via single dispatch target",
+            .cmd_description = "Run kernelized region demo",
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
-                .{ "lane", "Kernelization lane: pr or mlir (default: pr)" },
             },
         }),
-        CommandT.from(KernelProviderDemoFixedLaneOpts, .{
+        CommandT.from(KernelProviderDemoOpts, .{
             .cmd_name = "kernel-provider-demo-pr",
             .cmd_description = "Run kernelized region demo on PR lane",
             .default_val_opts = true,
@@ -178,7 +153,7 @@ pub const setup_cmd: CommandT = .{
                 .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
             },
         }),
-        CommandT.from(KernelProviderDemoFixedLaneOpts, .{
+        CommandT.from(KernelProviderDemoOpts, .{
             .cmd_name = "kernel-provider-demo-mlir",
             .cmd_description = "Run kernelized region demo on MLIR lane",
             .default_val_opts = true,
@@ -264,15 +239,11 @@ pub const setup_cmd: CommandT = .{
                 .{ "seq", "Sequence length" },
                 .{ "batch", "Batch size" },
                 .{ "canonical_shapes", "Use canonical shapes" },
-                .{ "canonical_qkv", "Use canonical QKV shapes" },
-                .{ "canonical_o", "Use canonical output shapes" },
-                .{ "canonical_mlp", "Use canonical MLP shapes" },
                 .{ "execute_only", "Execute only, skip compilation" },
                 .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
-                .{ "kernel_lane", "Kernelization lane: pr or mlir (default: mlir)" },
             },
         }),
-        CommandT.from(LlamaFtDemoLaneOpts, .{
+        CommandT.from(LlamaFtDemoOpts, .{
             .cmd_name = "llama-ft-demo-pr",
             .cmd_description = "Run a tiny Llama fine-tune demo on PR lane",
             .default_val_opts = true,
@@ -284,14 +255,11 @@ pub const setup_cmd: CommandT = .{
                 .{ "seq", "Sequence length" },
                 .{ "batch", "Batch size" },
                 .{ "canonical_shapes", "Use canonical shapes" },
-                .{ "canonical_qkv", "Use canonical QKV shapes" },
-                .{ "canonical_o", "Use canonical output shapes" },
-                .{ "canonical_mlp", "Use canonical MLP shapes" },
                 .{ "execute_only", "Execute only, skip compilation" },
                 .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
             },
         }),
-        CommandT.from(LlamaFtDemoLaneOpts, .{
+        CommandT.from(LlamaFtDemoOpts, .{
             .cmd_name = "llama-ft-demo-mlir",
             .cmd_description = "Run a tiny Llama fine-tune demo on MLIR lane",
             .default_val_opts = true,
@@ -303,9 +271,6 @@ pub const setup_cmd: CommandT = .{
                 .{ "seq", "Sequence length" },
                 .{ "batch", "Batch size" },
                 .{ "canonical_shapes", "Use canonical shapes" },
-                .{ "canonical_qkv", "Use canonical QKV shapes" },
-                .{ "canonical_o", "Use canonical output shapes" },
-                .{ "canonical_mlp", "Use canonical MLP shapes" },
                 .{ "execute_only", "Execute only, skip compilation" },
                 .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
             },
