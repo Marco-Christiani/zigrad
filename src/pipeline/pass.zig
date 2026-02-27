@@ -71,9 +71,13 @@ pub const Artifact = union(ArtifactKind) {
 pub const MlirArtifact = struct {
     bytes: []u8,
     encoding: MlirEncoding,
+    pre_pass_text: ?[]u8 = null,
     kernel_package: ?*const kernel.KernelPackage = null,
 
     pub fn deinit(self: *MlirArtifact, allocator: std.mem.Allocator) void {
+        if (self.pre_pass_text) |text| {
+            allocator.free(text);
+        }
         allocator.free(self.bytes);
     }
 };

@@ -53,12 +53,14 @@ fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
     if (mlir.encoding != .text) return error.ValidationFailed;
 
     const task = struct {
+        pre_pass_text: ?[]const u8,
         bytes: []const u8,
         entry: ?[]const u8,
         fn run(self: @This(), out: *std.Io.Writer) !void {
-            try emit_mlir(out, self.bytes, self.entry);
+            try emit_mlir(out, self.pre_pass_text, self.bytes, self.entry);
         }
     }{
+        .pre_pass_text = mlir.pre_pass_text,
         .bytes = mlir.bytes,
         .entry = cfg.entry_name,
     };
@@ -99,10 +101,18 @@ fn emit_program(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const
     }
 }
 
-fn emit_mlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
+fn emit_mlir(out: *std.Io.Writer, pre_pass_text: ?[]const u8, bytes: []const u8, entry: ?[]const u8) !void {
     if (entry) |name| {
         try out.print("entry: {s}\n", .{name});
     }
+
+    if (pre_pass_text) |pre_text| {
+        try out.writeAll("// --- zigrad dialect (pre-pass) ---\n");
+        try out.writeAll(pre_text);
+        if (pre_text.len == 0 or pre_text[pre_text.len - 1] != '\n') try out.writeAll("\n");
+        try out.writeAll("// --- transformed MLIR (post-pass) ---\n");
+    }
+
     try out.writeAll(bytes);
     if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') try out.writeAll("\n");
 }
@@ -160,7 +170,7 @@ test "emit_mlir appends newline" {
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
 
-    try emit_mlir(&writer_state.writer, "module {}", null);
+    try emit_mlir(&writer_state.writer, null, "module {}", null);
     const output = try writer_state.toOwnedSlice();
     defer testing.allocator.free(output);
 
