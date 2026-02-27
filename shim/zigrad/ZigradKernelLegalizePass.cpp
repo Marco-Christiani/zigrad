@@ -138,6 +138,124 @@ static bool rewrite_matmul_add_mul_chain(Operation *mul_op, func::FuncOp func,
     return true;
 }
 
+static bool rewrite_matmul_add_chain(Operation *add_op, func::FuncOp func,
+                                     OpBuilder &builder) {
+    if (add_op->getNumOperands() != 2) return false;
+
+    const auto add_markers = resolve_kernel_markers(add_op, func);
+    if (!add_markers) return false;
+
+    const Value add_lhs = add_op->getOperand(0);
+    const Value add_rhs = add_op->getOperand(1);
+    Operation *add_lhs_def = add_lhs.getDefiningOp();
+    Operation *add_rhs_def = add_rhs.getDefiningOp();
+
+    Operation *dot_op = nullptr;
+    Value passthrough;
+    if (is_kernelizable_carrier_source(add_lhs_def)) {
+        dot_op = add_lhs_def;
+        passthrough = add_rhs;
+    } else if (is_kernelizable_carrier_source(add_rhs_def)) {
+        dot_op = add_rhs_def;
+        passthrough = add_lhs;
+    } else {
+        return false;
+    }
+
+    if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse()) {
+        return false;
+    }
+
+    const auto dot_markers = resolve_kernel_markers(dot_op, func);
+    if (!dot_markers || !marker_pair_equal(*add_markers, *dot_markers)) {
+        return false;
+    }
+
+    if (dot_op->getNumOperands() != 2) return false;
+
+    builder.setInsertionPoint(add_op);
+
+    NamedAttrList backend_fields;
+    backend_fields.append("zigrad.kernel_key", add_markers->kernel_key);
+    backend_fields.append("zigrad.provider", add_markers->provider);
+
+    SmallVector<Value, 3> call_operands = {
+        dot_op->getOperand(0),
+        dot_op->getOperand(1),
+        passthrough,
+    };
+
+    OperationState state(add_op->getLoc(), "zigrad.kernel_call");
+    state.addOperands(call_operands);
+    state.addTypes(add_op->getResultTypes());
+    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
+    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
+    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
+    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
+
+    Operation *replacement = builder.create(state);
+    add_op->replaceAllUsesWith(replacement->getResults());
+    add_op->erase();
+
+    if (dot_op->use_empty()) dot_op->erase();
+
+    return true;
+}
+
+static bool rewrite_matmul_unary_chain(Operation *unary_op, func::FuncOp func,
+                                       OpBuilder &builder) {
+    const StringRef unary_name = unary_op->getName().getStringRef();
+    if (unary_name != "stablehlo.log" && unary_name != "stablehlo.exponential") {
+        return false;
+    }
+
+    if (unary_op->getNumOperands() != 1) return false;
+
+    const auto unary_markers = resolve_kernel_markers(unary_op, func);
+    if (!unary_markers) return false;
+
+    Operation *dot_op = unary_op->getOperand(0).getDefiningOp();
+    if (!is_kernelizable_carrier_source(dot_op)) return false;
+
+    if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse()) {
+        return false;
+    }
+
+    const auto dot_markers = resolve_kernel_markers(dot_op, func);
+    if (!dot_markers || !marker_pair_equal(*unary_markers, *dot_markers)) {
+        return false;
+    }
+
+    if (dot_op->getNumOperands() != 2) return false;
+
+    builder.setInsertionPoint(unary_op);
+
+    NamedAttrList backend_fields;
+    backend_fields.append("zigrad.kernel_key", unary_markers->kernel_key);
+    backend_fields.append("zigrad.provider", unary_markers->provider);
+
+    SmallVector<Value, 2> call_operands = {
+        dot_op->getOperand(0),
+        dot_op->getOperand(1),
+    };
+
+    OperationState state(unary_op->getLoc(), "zigrad.kernel_call");
+    state.addOperands(call_operands);
+    state.addTypes(unary_op->getResultTypes());
+    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
+    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
+    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
+    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
+
+    Operation *replacement = builder.create(state);
+    unary_op->replaceAllUsesWith(replacement->getResults());
+    unary_op->erase();
+
+    if (dot_op->use_empty()) dot_op->erase();
+
+    return true;
+}
+
 static bool has_same_region_consumers(Operation *source_op, func::FuncOp func,
                                       const KernelMarkers &markers) {
     for (Value result : source_op->getResults()) {
@@ -195,6 +313,28 @@ struct ZigradKernelSelectPass final
 
     for (Operation *mul_op : candidates) {
       (void)rewrite_matmul_add_mul_chain(mul_op, func, builder);
+    }
+
+    SmallVector<Operation *> add_candidates;
+    func.walk([&](Operation *op) {
+      if (is_named_op(op, "stablehlo.add")) {
+        add_candidates.push_back(op);
+      }
+    });
+
+    for (Operation *add_op : add_candidates) {
+      (void)rewrite_matmul_add_chain(add_op, func, builder);
+    }
+
+    SmallVector<Operation *> unary_candidates;
+    func.walk([&](Operation *op) {
+      if (is_named_op(op, "stablehlo.log") || is_named_op(op, "stablehlo.exponential")) {
+        unary_candidates.push_back(op);
+      }
+    });
+
+    for (Operation *unary_op : unary_candidates) {
+      (void)rewrite_matmul_unary_chain(unary_op, func, builder);
     }
 
     SmallVector<Operation *> source_candidates;

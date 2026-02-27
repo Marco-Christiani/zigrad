@@ -1450,6 +1450,77 @@ test "lower pass mlir lane selects kernelized ops without outlining" {
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") == null);
 }
 
+test "lower pass mlir lane rewrites dot-add chain" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
+    const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
+    const bias = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("dot_add_region", .{ .kernelize = "mirage" });
+    const dot = try b.dot(lhs, rhs);
+    const out = try b.add(dot, bias);
+    try b.pop_region();
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
+    var artifact = pass.Artifact{ .pr = &program };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+
+    try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
+    defer artifact.deinit(testing.allocator);
+
+    const pre_pass_text = artifact.mlir.pre_pass_text orelse return error.InvalidMlir;
+    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.region") != null);
+
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernel_key = \"dot_add_region\"") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") == null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") == null);
+}
+
+test "lower pass mlir lane rewrites dot-log chain" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
+    const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
+
+    try b.push_region("dot_log_region", .{ .kernelize = "mirage" });
+    const dot = try b.dot(lhs, rhs);
+    const out = try b.log(dot);
+    try b.pop_region();
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
+    var artifact = pass.Artifact{ .pr = &program };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+
+    try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
+    defer artifact.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernel_key = \"dot_log_region\"") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") == null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.log") == null);
+}
+
 test "lower pass mlir lane keeps near-miss region on baseline ops" {
     const testing = std.testing;
 
