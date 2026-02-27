@@ -26,7 +26,7 @@ const ZgRegisterPassesFn = *const fn () callconv(.c) void;
 const ShimHandle = struct {
     lib: std.DynLib,
     register_dialects: ZgRegisterDialectsFn,
-    register_passes: ?ZgRegisterPassesFn,
+    register_passes: ZgRegisterPassesFn,
 };
 
 const ShimState = union(enum) {
@@ -70,7 +70,9 @@ pub fn register_passes(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
-pub fn maybe_register_zigrad_extensions(ctx: Context) void {
+pub const RegisterZigradExtensionsError = error{MissingMlirExtensionShim};
+
+pub fn register_zigrad_extensions(ctx: Context) RegisterZigradExtensionsError!void {
     shim_mutex.lock();
     defer shim_mutex.unlock();
 
@@ -78,11 +80,11 @@ pub fn maybe_register_zigrad_extensions(ctx: Context) void {
         .uninitialized => {
             const loaded = load_shim_locked() orelse {
                 shim_state = .unavailable;
-                return;
+                return error.MissingMlirExtensionShim;
             };
             shim_state = .{ .loaded = loaded };
         },
-        .unavailable => return,
+        .unavailable => return error.MissingMlirExtensionShim,
         .loaded => {},
     }
 
@@ -94,10 +96,9 @@ pub fn maybe_register_zigrad_extensions(ctx: Context) void {
     handle.register_dialects(ctx._inner);
 
     if (!shim_passes_registered) {
-        if (handle.register_passes) |register_passes_fn| {
-            register_passes_fn();
-            shim_passes_registered = true;
-        }
+        log.info("registering zigrad MLIR extension passes", .{});
+        handle.register_passes();
+        shim_passes_registered = true;
     }
 }
 
@@ -119,14 +120,18 @@ fn load_shim_locked() ?ShimHandle {
         return null;
     };
 
-    const register_passes_fn_opt = lib.lookup(ZgRegisterPassesFn, "zg_register_passes");
+    const register_passes_fn = lib.lookup(ZgRegisterPassesFn, "zg_register_passes") orelse {
+        log.err("MLIR extension shim '{s}' missing symbol zg_register_passes", .{shim_path});
+        lib.close();
+        return null;
+    };
 
     log.info("loaded MLIR extension shim '{s}'", .{shim_path});
 
     return .{
         .lib = lib,
         .register_dialects = register_dialects,
-        .register_passes = register_passes_fn_opt,
+        .register_passes = register_passes_fn,
     };
 }
 
@@ -138,17 +143,6 @@ fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
         else => return err,
     }
 
-    const enable_shim = blk: {
-        const raw_enable = std.process.getEnvVarOwned(allocator, "ZG_ENABLE_MLIR_SHIM") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :blk false,
-            else => return err,
-        };
-        defer allocator.free(raw_enable);
-        break :blk env_var_truthy(raw_enable);
-    };
-
-    if (!enable_shim) return null;
-
     const sdk_root = std.process.getEnvVarOwned(allocator, "ZG_EXTERNAL_SDK_ROOT") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
@@ -156,13 +150,6 @@ fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
     defer allocator.free(sdk_root);
 
     return @as(?[]u8, try std.fs.path.join(allocator, &.{ sdk_root, "lib", "libzigrad_mlir_ext.so" }));
-}
-
-fn env_var_truthy(value: []const u8) bool {
-    return std.mem.eql(u8, value, "1") or
-        std.ascii.eqlIgnoreCase(value, "true") or
-        std.ascii.eqlIgnoreCase(value, "yes") or
-        std.ascii.eqlIgnoreCase(value, "on");
 }
 
 pub fn success_or(res: c.MlirLogicalResult, err: anytype) @TypeOf(err)!void {
@@ -298,8 +285,8 @@ pub const PassManager = struct {
 };
 
 fn _mlir_passpipeline_error(err: c.MlirStringRef, ctx: ?*anyopaque) callconv(.c) void {
+    _ = err;
     _ = ctx;
-    std.debug.print(">>ERROR: {s}\n", .{err.data});
 }
 
 pub const OpPassManager = struct {

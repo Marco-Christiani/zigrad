@@ -20,6 +20,7 @@ const log = std.log.scoped(.@"zg/lower_stablehlo");
 pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 
 const zigrad_kernel_call_op_name = "zigrad.kernel_call";
+const zigrad_kernel_legalize_pipeline = "func.func(zg-kernel-legalize),canonicalize,cse";
 
 const LoweredMlir = struct {
     bytes: []u8,
@@ -121,9 +122,12 @@ fn lower_program_to_mlir_capture(
 
     var ctx = mlir.Context.init_with_registry(registry, false) catch return error.OutOfMemory;
     defer ctx.deinit();
-    ctx.allow_unregistered_dialects(true);
+    ctx.allow_unregistered_dialects(false);
 
-    mlir.maybe_register_zigrad_extensions(ctx);
+    mlir.register_zigrad_extensions(ctx) catch {
+        log.err("missing MLIR extension shim; set ZG_MLIR_SHIM_PATH or provide ZG_EXTERNAL_SDK_ROOT with lib/libzigrad_mlir_ext.so", .{});
+        return error.InvalidMlir;
+    };
 
     const func_handle = mlir.DialectHandle.from_string("func");
     func_handle.register_dialect(ctx);
@@ -150,7 +154,7 @@ fn lower_program_to_mlir_capture(
     else
         null;
 
-    try run_zigrad_kernel_call_rewrite_pass(arena, module);
+    try run_zigrad_kernel_legalize_pipeline(ctx, module);
 
     if (!module.op().verify()) return error.InvalidMlir;
 
@@ -172,78 +176,13 @@ fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: Outp
     return writer_state.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn run_zigrad_kernel_call_rewrite_pass(arena: std.mem.Allocator, module: mlir.Module) LowerError!void {
-    const WalkState = struct {
-        arena: std.mem.Allocator,
-        kernel_ops: std.ArrayList(mlir.Operation),
-        oom: bool = false,
-    };
+fn run_zigrad_kernel_legalize_pipeline(mlir_ctx: mlir.Context, module: mlir.Module) LowerError!void {
+    var pm = mlir.PassManager.init(mlir_ctx) catch return error.InvalidMlir;
+    defer pm.deinit();
 
-    var state = WalkState{
-        .arena = arena,
-        .kernel_ops = std.ArrayList(mlir.Operation).initCapacity(arena, 8) catch return error.OutOfMemory,
-    };
-    defer state.kernel_ops.deinit(arena);
-
-    module.op().walk(.pre_order, &state, struct {
-        fn visit(st: anytype, op: mlir.Operation) mlir.Operation.WalkResult {
-            if (!std.mem.eql(u8, op.name().str(), zigrad_kernel_call_op_name)) return .advance;
-            st.kernel_ops.append(st.arena, op) catch {
-                st.oom = true;
-                return .interrupt;
-            };
-            return .advance;
-        }
-    }.visit);
-
-    if (state.oom) return error.OutOfMemory;
-
-    for (state.kernel_ops.items) |kernel_op| {
-        try rewrite_zigrad_kernel_call_op(arena, kernel_op);
-    }
-}
-
-fn rewrite_zigrad_kernel_call_op(arena: std.mem.Allocator, kernel_op: mlir.Operation) LowerError!void {
-    const block = kernel_op.block() orelse return error.InvalidMlir;
-    const call_target_attr = kernel_op.get_attribute_by_name("call_target_name") orelse return error.InvalidMlir;
-    const has_side_effect_attr = kernel_op.get_attribute_by_name("has_side_effect") orelse return error.InvalidMlir;
-    const backend_config = kernel_op.get_attribute_by_name("backend_config") orelse return error.InvalidMlir;
-
-    if (!call_target_attr.is_a(mlir.StringAttribute)) return error.InvalidMlir;
-    if (!has_side_effect_attr.is_a(mlir.BoolAttribute)) return error.InvalidMlir;
-
-    const call_target = (mlir.StringAttribute{ ._inner = call_target_attr._inner }).value();
-    const has_side_effect = (mlir.BoolAttribute{ ._inner = has_side_effect_attr._inner }).value();
-
-    const call_target_z = arena.allocSentinel(u8, call_target.len, 0) catch return error.OutOfMemory;
-    @memcpy(call_target_z, call_target);
-
-    const operand_values = arena.alloc(mlir.Value, kernel_op.num_operands()) catch return error.OutOfMemory;
-    for (operand_values, 0..) |*operand, i| {
-        operand.* = kernel_op.operand(i);
-    }
-
-    const result_types = arena.alloc(mlir.Type, kernel_op.num_results()) catch return error.OutOfMemory;
-    for (result_types, 0..) |*result_type, i| {
-        result_type.* = kernel_op.result(i).get_type();
-    }
-
-    const replacement = stablehlo.custom_call(kernel_op.context(), operand_values, .{
-        .call_target_name = call_target_z,
-        .has_side_effect = has_side_effect,
-        .backend_config = backend_config,
-        .api_version = .typed_ffi,
-    }, result_types, kernel_op.get_location());
-
-    mlir.c.mlirBlockInsertOwnedOperationBefore(block._inner, kernel_op._inner, replacement._inner);
-
-    for (0..kernel_op.num_results()) |i| {
-        mlir.Value.replace_all_uses_with(kernel_op.result(i), replacement.result(i));
-    }
-
-    var old_op = kernel_op;
-    old_op.remove_from_parent();
-    old_op.deinit();
+    var op_pm = pm.as_op_pass_manager();
+    op_pm.add_pipeline(zigrad_kernel_legalize_pipeline) catch return error.InvalidMlir;
+    pm.run_on_op(module.op()) catch return error.InvalidMlir;
 }
 
 pub fn lower_function_to_mlir(allocator: std.mem.Allocator, func: pr.Function, out: OutputFormat) LowerError![]u8 {
@@ -939,12 +878,6 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     for (outs, 0..) |out_id, i| {
         ctx.set_value(out_id, op.result(i));
     }
-}
-
-fn default_layout(arena: std.mem.Allocator, rank: usize) error{OutOfMemory}![]const usize {
-    const layout = arena.alloc(usize, rank) catch return error.OutOfMemory;
-    for (0..rank) |i| layout[i] = rank - i - 1;
-    return layout;
 }
 
 // ============================================================================
