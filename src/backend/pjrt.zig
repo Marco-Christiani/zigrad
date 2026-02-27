@@ -31,9 +31,15 @@ const Platform = enum {
     unknown,
 };
 
-var kernel_dispatch_registry: ?*const kernel.KernelRegistry = null;
 var kernel_dispatch_target_registered: bool = false;
 var kernel_dispatch_platform: Platform = .unknown;
+var kernel_dispatch_package_type_id: i64 = 0;
+var kernel_dispatch_package_type_registered: bool = false;
+var kernel_dispatch_registry_type_id: i64 = 0;
+var kernel_dispatch_registry_type_registered: bool = false;
+
+const dispatch_package_type_name = "zigrad.kernel.package.v1";
+const dispatch_registry_type_name = "zigrad.kernel.registry.v1";
 
 // Re-export handle types for callers
 pub const LoadedExecutable = pjrt_types.LoadedExecutable;
@@ -47,6 +53,17 @@ pub const ExecuteResult = pjrt_types.ExecuteResult;
 pub const CompileOptions = struct {
     num_replicas: u32 = 1,
     num_partitions: u32 = 1,
+    /// Optional kernel package sidecar for id-based dispatch lookup.
+    ///
+    /// The runtime first attempts `zigrad.kernel_id` package lookup when this
+    /// field is set, then falls back to registry key lookup.
+    kernel_package: ?*const kernel.KernelPackage = null,
+
+    /// Optional registry sidecar for executable-scoped fallback key lookup.
+    ///
+    /// When provided, runtime resolves `zigrad.kernel_key` from this
+    /// executable-bound registry before process-global fallback.
+    kernel_registry: ?*const kernel.KernelRegistry = null,
 };
 
 /// Unified PJRT Backend.
@@ -129,7 +146,10 @@ pub const Backend = struct {
         defer self.allocator.free(compile_opts_pb);
 
         const format: pjrt_types.ProgramFormat = if (is_bytecode) .mlir_bytecode else .mlir_text;
-        return self.client.compile(device, format, mlir_bytes, compile_opts_pb);
+        var executable = try self.client.compile(device, format, mlir_bytes, compile_opts_pb);
+        executable.dispatch_sidecar = if (options.kernel_package) |package| @ptrCast(package) else null;
+        executable.dispatch_registry_sidecar = if (options.kernel_registry) |registry| @ptrCast(registry) else null;
+        return executable;
     }
 
     /// Compile and serialize the resulting executable (for caching).
@@ -175,11 +195,15 @@ pub const Backend = struct {
     // ========================================================================
 
     pub fn execute(self: *Backend, exe: *LoadedExecutable, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
-        return exe.execute(self.api, allocator, inputs);
+        const execute_context = try create_dispatch_execute_context(self, exe);
+        defer if (execute_context) |ctx| destroy_execute_context(self.api, ctx);
+        return exe.execute_with_context(self.api, allocator, inputs, execute_context);
     }
 
     pub fn execute_into(self: *Backend, exe: *LoadedExecutable, input_ptrs: []const RawBuffer, output_ptrs: []?RawBuffer, non_donatable: ?[]const i64) !?Event {
-        return exe.execute_into_opts(self.api, input_ptrs, output_ptrs, non_donatable);
+        const execute_context = try create_dispatch_execute_context(self, exe);
+        defer if (execute_context) |ctx| destroy_execute_context(self.api, ctx);
+        return exe.execute_into_opts_with_context(self.api, input_ptrs, output_ptrs, non_donatable, execute_context);
     }
 
     // ========================================================================
@@ -245,19 +269,13 @@ pub const Backend = struct {
 
     /// Register the temporary single-target typed-FFI dispatcher.
     ///
-    /// This is a process-global bridge used by the current checkpoint path.
-    /// Caller must ensure `registry` outlives all executable invocations that
-    /// may call into the dispatcher.
-    pub fn register_kernel_dispatcher(self: *Backend, registry: *const kernel.KernelRegistry) !void {
+    /// Runtime registry/package bindings are now passed per-executable via
+    /// compile options sidecars and per-execute context user data.
+    pub fn register_kernel_dispatcher(self: *Backend) !void {
         try self.require_typed_ffi();
-        if (self.kernel_dispatch_registered) {
-            kernel_dispatch_registry = registry;
-            kernel_dispatch_platform = self.platform;
-            return;
-        }
+        if (self.kernel_dispatch_registered) return;
 
         if (kernel_dispatch_target_registered) {
-            kernel_dispatch_registry = registry;
             kernel_dispatch_platform = self.platform;
             self.kernel_dispatch_registered = true;
             return;
@@ -288,7 +306,6 @@ pub const Backend = struct {
 
         if (!registered_any) return error.TypedFfiRegistrationFailed;
 
-        kernel_dispatch_registry = registry;
         kernel_dispatch_platform = self.platform;
         self.kernel_dispatch_registered = true;
     }
@@ -410,12 +427,213 @@ fn register_dispatch_handler_for_platform(api: *pjrt_api.Api, ffi_ext: *c.PJRT_F
     return false;
 }
 
+fn pjrt_error_to_zig(api: *pjrt_api.Api, pjrt_err: *c.PJRT_Error) !void {
+    const err = pjrt_api.PjrtError.from_handle(api, pjrt_err);
+    return err.to_zig_error();
+}
+
+fn ensure_dispatch_package_type_id(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI) !i64 {
+    if (kernel_dispatch_package_type_registered) return kernel_dispatch_package_type_id;
+
+    const type_register = ffi_ext.type_register orelse return error.TypedFfiUnavailable;
+    var type_info: c.PJRT_FFI_Type_Info = .{
+        .deleter = null,
+        .serialize = null,
+        .deserialize = null,
+    };
+
+    var args: c.PJRT_FFI_Type_Register_Args = std.mem.zeroes(c.PJRT_FFI_Type_Register_Args);
+    args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_FFI_Type_Register_Args);
+    args.extension_start = null;
+    args.type_name = dispatch_package_type_name.ptr;
+    args.type_name_size = dispatch_package_type_name.len;
+    args.type_id = 0;
+    args.type_info = &type_info;
+
+    if (type_register(&args)) |pjrt_err| {
+        try pjrt_error_to_zig(api, pjrt_err);
+    }
+
+    kernel_dispatch_package_type_id = args.type_id;
+    kernel_dispatch_package_type_registered = true;
+    return kernel_dispatch_package_type_id;
+}
+
+fn ensure_dispatch_registry_type_id(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI) !i64 {
+    if (kernel_dispatch_registry_type_registered) return kernel_dispatch_registry_type_id;
+
+    const type_register = ffi_ext.type_register orelse return error.TypedFfiUnavailable;
+    var type_info: c.PJRT_FFI_Type_Info = .{
+        .deleter = null,
+        .serialize = null,
+        .deserialize = null,
+    };
+
+    var args: c.PJRT_FFI_Type_Register_Args = std.mem.zeroes(c.PJRT_FFI_Type_Register_Args);
+    args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_FFI_Type_Register_Args);
+    args.extension_start = null;
+    args.type_name = dispatch_registry_type_name.ptr;
+    args.type_name_size = dispatch_registry_type_name.len;
+    args.type_id = 0;
+    args.type_info = &type_info;
+
+    if (type_register(&args)) |pjrt_err| {
+        try pjrt_error_to_zig(api, pjrt_err);
+    }
+
+    kernel_dispatch_registry_type_id = args.type_id;
+    kernel_dispatch_registry_type_registered = true;
+    return kernel_dispatch_registry_type_id;
+}
+
+fn add_dispatch_user_data(
+    api: *pjrt_api.Api,
+    ffi_ext: *c.PJRT_FFI,
+    context: *c.PJRT_ExecuteContext,
+    type_id: i64,
+    data_ptr: *const anyopaque,
+) !void {
+    const add_user_data = ffi_ext.user_data_add orelse return error.TypedFfiUnavailable;
+
+    var add_args: c.PJRT_FFI_UserData_Add_Args = std.mem.zeroes(c.PJRT_FFI_UserData_Add_Args);
+    add_args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_FFI_UserData_Add_Args);
+    add_args.extension_start = null;
+    add_args.context = context;
+    add_args.user_data = .{
+        .type_id = type_id,
+        .data = @ptrCast(@constCast(data_ptr)),
+    };
+
+    if (add_user_data(&add_args)) |pjrt_err| {
+        try pjrt_error_to_zig(api, pjrt_err);
+    }
+}
+
+fn create_dispatch_execute_context(self: *Backend, executable: *LoadedExecutable) !?*c.PJRT_ExecuteContext {
+    const package_ptr = executable.dispatch_sidecar;
+    const registry_ptr = executable.dispatch_registry_sidecar;
+
+    if (package_ptr == null and registry_ptr == null) return null;
+
+    const ffi_ext = self.api.ffi_extension() orelse return error.TypedFfiUnavailable;
+
+    var create_args = pjrt_api.init_args(c.PJRT_ExecuteContext_Create_Args);
+    create_args.context = null;
+    try self.api.call("PJRT_ExecuteContext_Create", &create_args);
+
+    const context = create_args.context orelse return error.PjrtReturnedNullExecuteContext;
+    errdefer destroy_execute_context(self.api, context);
+
+    if (package_ptr) |ptr| {
+        const type_id = try ensure_dispatch_package_type_id(self.api, ffi_ext);
+        try add_dispatch_user_data(self.api, ffi_ext, context, type_id, ptr);
+    }
+
+    if (registry_ptr) |ptr| {
+        const type_id = try ensure_dispatch_registry_type_id(self.api, ffi_ext);
+        try add_dispatch_user_data(self.api, ffi_ext, context, type_id, ptr);
+    }
+
+    return context;
+}
+
+fn destroy_execute_context(api: *pjrt_api.Api, context: *c.PJRT_ExecuteContext) void {
+    var destroy_args = pjrt_api.init_args(c.PJRT_ExecuteContext_Destroy_Args);
+    destroy_args.context = context;
+    api.call("PJRT_ExecuteContext_Destroy", &destroy_args) catch {};
+}
+
+fn lookup_dispatch_user_data_from_context(frame: *c.XLA_FFI_CallFrame, type_id_value: i64) ?*const anyopaque {
+    if (type_id_value == 0) return null;
+
+    const ffi_api = frame.api orelse return null;
+    const get_context_data = ffi_api.*.XLA_FFI_ExecutionContext_Get orelse return null;
+
+    var type_id = c.XLA_FFI_TypeId{ .type_id = type_id_value };
+    var args: c.XLA_FFI_ExecutionContext_Get_Args = std.mem.zeroes(c.XLA_FFI_ExecutionContext_Get_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_ExecutionContext_Get_Args);
+    args.extension_start = null;
+    args.ctx = frame.ctx;
+    args.type_id = &type_id;
+    args.data = null;
+
+    if (get_context_data(&args) != null) return null;
+
+    const data_ptr = args.data orelse return null;
+    return @ptrCast(@alignCast(data_ptr));
+}
+
+fn lookup_dispatch_package_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.KernelPackage {
+    if (!kernel_dispatch_package_type_registered) return null;
+    const data_ptr = lookup_dispatch_user_data_from_context(frame, kernel_dispatch_package_type_id) orelse return null;
+    return @ptrCast(@alignCast(data_ptr));
+}
+
+fn lookup_dispatch_registry_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.KernelRegistry {
+    if (!kernel_dispatch_registry_type_registered) return null;
+    const data_ptr = lookup_dispatch_user_data_from_context(frame, kernel_dispatch_registry_type_id) orelse return null;
+    return @ptrCast(@alignCast(data_ptr));
+}
+
 fn detect_platform(plugin_path: []const u8) Platform {
     if (std.mem.endsWith(u8, plugin_path, "pjrt_c_api_cpu_plugin.so")) return .host;
     if (std.mem.endsWith(u8, plugin_path, "pjrt_c_api_gpu_plugin.so")) return .cuda;
     if (std.mem.indexOf(u8, plugin_path, "cpu") != null) return .host;
     if (std.mem.indexOf(u8, plugin_path, "cuda") != null or std.mem.indexOf(u8, plugin_path, "gpu") != null) return .cuda;
     return .unknown;
+}
+
+const DispatchLookupError = error{
+    NoRegistryOrPackage,
+    MissingKernelKey,
+    MissingKernelKeyForFallback,
+    KernelNotFound,
+};
+
+const ResolvedDispatch = struct {
+    artifact: kernel.KernelArtifact,
+    dispatch_key: []const u8,
+};
+
+fn resolve_dispatch_artifact(
+    registry: ?*const kernel.KernelRegistry,
+    package: ?*const kernel.KernelPackage,
+    maybe_kernel_key: ?[]const u8,
+    maybe_kernel_id: ?u32,
+) DispatchLookupError!ResolvedDispatch {
+    if (registry == null and package == null) return error.NoRegistryOrPackage;
+
+    if (maybe_kernel_id) |kernel_id| {
+        if (package) |pkg| {
+            if (pkg.get(kernel_id)) |pkg_artifact| {
+                return .{
+                    .artifact = pkg_artifact,
+                    .dispatch_key = maybe_kernel_key orelse pkg_artifact.target_name,
+                };
+            }
+
+            if (registry) |reg| {
+                const kernel_key = maybe_kernel_key orelse return error.MissingKernelKeyForFallback;
+                const artifact = reg.get(kernel_key) orelse return error.KernelNotFound;
+                return .{ .artifact = artifact, .dispatch_key = kernel_key };
+            }
+
+            return error.KernelNotFound;
+        }
+
+        if (registry) |reg| {
+            const kernel_key = maybe_kernel_key orelse return error.MissingKernelKeyForFallback;
+            const artifact = reg.get(kernel_key) orelse return error.KernelNotFound;
+            return .{ .artifact = artifact, .dispatch_key = kernel_key };
+        }
+
+        return error.NoRegistryOrPackage;
+    }
+
+    const kernel_key = maybe_kernel_key orelse return error.MissingKernelKey;
+    const reg = registry orelse return error.NoRegistryOrPackage;
+    const artifact = reg.get(kernel_key) orelse return error.KernelNotFound;
+    return .{ .artifact = artifact, .dispatch_key = kernel_key };
 }
 
 /// Generic kernel dispatch handler invoked by the XLA FFI framework.
@@ -428,18 +646,22 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
 
     if (frame.stage != c.XLA_FFI_ExecutionStage_EXECUTE) return null;
 
-    const registry = kernel_dispatch_registry orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: kernel registry is not configured", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
-    };
+    const registry = lookup_dispatch_registry_from_context(frame);
 
-    const kernel_key = lookup_dispatch_attr(frame.attrs, "zigrad.kernel_key") orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: missing zigrad.kernel_key attribute", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    };
+    const maybe_kernel_key = lookup_dispatch_attr(frame.attrs, "zigrad.kernel_key");
+    const maybe_kernel_id = lookup_dispatch_attr_u32(frame.attrs, "zigrad.kernel_id");
     const provider = lookup_dispatch_attr(frame.attrs, "zigrad.provider") orelse "";
+    const package = lookup_dispatch_package_from_context(frame);
 
-    const artifact = registry.get(kernel_key) orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: kernel key not found in registry", c.XLA_FFI_Error_Code_NOT_FOUND);
+    const resolved = resolve_dispatch_artifact(registry, package, maybe_kernel_key, maybe_kernel_id) catch |err| switch (err) {
+        error.NoRegistryOrPackage => return make_ffi_error(frame, "zigrad kernel dispatch: no registry or package is configured", c.XLA_FFI_Error_Code_FAILED_PRECONDITION),
+        error.MissingKernelKey => return make_ffi_error(frame, "zigrad kernel dispatch: missing zigrad.kernel_key attribute", c.XLA_FFI_Error_Code_INVALID_ARGUMENT),
+        error.MissingKernelKeyForFallback => return make_ffi_error(frame, "zigrad kernel dispatch: kernel key required for fallback lookup", c.XLA_FFI_Error_Code_INVALID_ARGUMENT),
+        error.KernelNotFound => return make_ffi_error(frame, "zigrad kernel dispatch: kernel id/key not found", c.XLA_FFI_Error_Code_NOT_FOUND),
     };
+
+    const artifact = resolved.artifact;
+    const dispatch_key = resolved.dispatch_key;
 
     if (provider.len != 0 and !std.mem.eql(u8, provider, artifact.provider_name)) {
         return make_ffi_error(frame, "zigrad kernel dispatch: provider mismatch for kernel key", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
@@ -472,8 +694,8 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
         .allocator = std.heap.c_allocator,
     };
 
-    artifact.dispatch(kernel_key, ctx) catch |err| {
-        log.err("kernel dispatch failed for '{s}': {s}", .{ kernel_key, @errorName(err) });
+    artifact.dispatch(dispatch_key, ctx) catch |err| {
+        log.err("kernel dispatch failed for '{s}': {s}", .{ dispatch_key, @errorName(err) });
         return dispatch_error_to_ffi(frame, err);
     };
     return null;
@@ -618,6 +840,41 @@ fn lookup_dispatch_attr(attrs: c.XLA_FFI_Attrs, name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn lookup_dispatch_attr_u32(attrs: c.XLA_FFI_Attrs, name: []const u8) ?u32 {
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(attrs.size))) : (i += 1) {
+        const name_span = attrs.names[i][0];
+        const key = name_span.ptr[0..name_span.len];
+        if (!std.mem.eql(u8, key, name)) continue;
+
+        if (attrs.types[i] != c.XLA_FFI_AttrType_SCALAR) return null;
+        const attr_value = attrs.attrs[i] orelse return null;
+        const scalar: *c.XLA_FFI_Scalar = @ptrCast(@alignCast(attr_value));
+        const value_ptr = scalar.value orelse return null;
+
+        return switch (scalar.dtype) {
+            c.XLA_FFI_DataType_S32 => blk: {
+                const value: i32 = @as(*const i32, @ptrCast(@alignCast(value_ptr))).*;
+                if (value < 0) break :blk null;
+                break :blk @intCast(value);
+            },
+            c.XLA_FFI_DataType_U32 => @as(*const u32, @ptrCast(@alignCast(value_ptr))).*,
+            c.XLA_FFI_DataType_S64 => blk: {
+                const value: i64 = @as(*const i64, @ptrCast(@alignCast(value_ptr))).*;
+                if (value < 0 or value > std.math.maxInt(u32)) break :blk null;
+                break :blk @intCast(value);
+            },
+            c.XLA_FFI_DataType_U64 => blk: {
+                const value: u64 = @as(*const u64, @ptrCast(@alignCast(value_ptr))).*;
+                if (value > std.math.maxInt(u32)) break :blk null;
+                break :blk @intCast(value);
+            },
+            else => null,
+        };
+    }
+    return null;
+}
+
 fn get_arg_buffer(args: c.XLA_FFI_Args, idx: usize) ?*c.XLA_FFI_Buffer {
     if (idx >= @as(usize, @intCast(args.size))) return null;
     if (args.types[idx] != c.XLA_FFI_ArgType_BUFFER) return null;
@@ -721,4 +978,130 @@ test "dispatch_error_code maps failed-precondition class" {
 
 test "dispatch_error_code maps internal class" {
     try std.testing.expectEqual(c.XLA_FFI_Error_Code_INTERNAL, dispatch_error_code(error.MirageInternalError));
+}
+
+test "resolve_dispatch_artifact prefers package entry for kernel id" {
+    const testing = std.testing;
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var package = kernel.KernelPackage.init(testing.allocator);
+    defer package.deinit();
+
+    try registry.put("kernel_key", .{
+        .provider_name = "mock",
+        .data = try testing.allocator.dupe(u8, "registry_data"),
+        .target_name = "kernel_key",
+    });
+
+    try package.put(7, .{
+        .provider_name = "mock",
+        .data = try testing.allocator.dupe(u8, "package_data"),
+        .target_name = "kernel_key",
+    });
+
+    const resolved = try resolve_dispatch_artifact(&registry, &package, "kernel_key", 7);
+    try testing.expectEqualStrings("package_data", resolved.artifact.data);
+    try testing.expectEqualStrings("kernel_key", resolved.dispatch_key);
+}
+
+test "resolve_dispatch_artifact falls back to registry on package miss" {
+    const testing = std.testing;
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var package = kernel.KernelPackage.init(testing.allocator);
+    defer package.deinit();
+
+    try registry.put("kernel_key", .{
+        .provider_name = "mock",
+        .data = try testing.allocator.dupe(u8, "registry_data"),
+        .target_name = "kernel_key",
+    });
+
+    const resolved = try resolve_dispatch_artifact(&registry, &package, "kernel_key", 99);
+    try testing.expectEqualStrings("registry_data", resolved.artifact.data);
+    try testing.expectEqualStrings("kernel_key", resolved.dispatch_key);
+}
+
+test "resolve_dispatch_artifact allows package lookup without kernel key" {
+    const testing = std.testing;
+
+    var package = kernel.KernelPackage.init(testing.allocator);
+    defer package.deinit();
+
+    try package.put(42, .{
+        .provider_name = "mock",
+        .data = try testing.allocator.dupe(u8, "package_data"),
+        .target_name = "pkg_kernel",
+    });
+
+    const resolved = try resolve_dispatch_artifact(null, &package, null, 42);
+    try testing.expectEqualStrings("package_data", resolved.artifact.data);
+    try testing.expectEqualStrings("pkg_kernel", resolved.dispatch_key);
+}
+
+test "resolve_dispatch_artifact requires key for registry fallback" {
+    const testing = std.testing;
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    try registry.put("kernel_key", .{
+        .provider_name = "mock",
+        .data = try testing.allocator.dupe(u8, "registry_data"),
+        .target_name = "kernel_key",
+    });
+
+    try testing.expectError(error.MissingKernelKeyForFallback, resolve_dispatch_artifact(&registry, null, null, 5));
+}
+
+test "resolve_dispatch_artifact fails when no registry or package provided" {
+    const testing = std.testing;
+    try testing.expectError(error.NoRegistryOrPackage, resolve_dispatch_artifact(null, null, "kernel_key", null));
+}
+
+test "lookup_dispatch_user_data_from_context returns payload" {
+    const testing = std.testing;
+
+    const FfiStub = struct {
+        var expected_type_id: i64 = 0;
+        var payload: ?*anyopaque = null;
+
+        fn execution_context_get(args: *c.XLA_FFI_ExecutionContext_Get_Args) callconv(.c) ?*c.XLA_FFI_Error {
+            if (args.type_id != null and args.type_id.*.type_id == expected_type_id) {
+                args.data = payload;
+            } else {
+                args.data = null;
+            }
+            return null;
+        }
+    };
+
+    var payload_byte: u8 = 42;
+    FfiStub.expected_type_id = 123;
+    FfiStub.payload = @ptrCast(&payload_byte);
+
+    var api: c.XLA_FFI_Api = std.mem.zeroes(c.XLA_FFI_Api);
+    api.struct_size = @sizeOf(c.XLA_FFI_Api);
+    api.XLA_FFI_ExecutionContext_Get = FfiStub.execution_context_get;
+
+    var frame: c.XLA_FFI_CallFrame = std.mem.zeroes(c.XLA_FFI_CallFrame);
+    frame.struct_size = @sizeOf(c.XLA_FFI_CallFrame);
+    frame.api = &api;
+    frame.ctx = @ptrFromInt(1);
+
+    const looked_up = lookup_dispatch_user_data_from_context(&frame, FfiStub.expected_type_id);
+    try testing.expect(looked_up != null);
+    try testing.expectEqual(@intFromPtr(&payload_byte), @intFromPtr(looked_up.?));
+}
+
+test "lookup_dispatch_user_data_from_context returns null without api" {
+    const testing = std.testing;
+
+    var frame: c.XLA_FFI_CallFrame = std.mem.zeroes(c.XLA_FFI_CallFrame);
+    frame.struct_size = @sizeOf(c.XLA_FFI_CallFrame);
+    frame.api = null;
+
+    try testing.expect(lookup_dispatch_user_data_from_context(&frame, 1) == null);
 }

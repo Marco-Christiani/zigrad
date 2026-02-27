@@ -366,6 +366,10 @@ pub const Executable = struct {
 pub const LoadedExecutable = struct {
     pjrt_executable: *c.PJRT_LoadedExecutable,
     num_outputs: usize,
+    /// Optional backend-managed execution sidecar pointer.
+    dispatch_sidecar: ?*const anyopaque = null,
+    /// Optional backend-managed registry sidecar pointer.
+    dispatch_registry_sidecar: ?*const anyopaque = null,
 
     pub const CompiledMemoryStats = struct {
         generated_code_size_in_bytes: i64,
@@ -404,6 +408,8 @@ pub const LoadedExecutable = struct {
         return .{
             .pjrt_executable = pjrt_executable,
             .num_outputs = num_outputs,
+            .dispatch_sidecar = null,
+            .dispatch_registry_sidecar = null,
         };
     }
 
@@ -477,6 +483,16 @@ pub const LoadedExecutable = struct {
     }
 
     pub fn execute(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
+        return self.execute_with_context(api, allocator, inputs, null);
+    }
+
+    pub fn execute_with_context(
+        self: *LoadedExecutable,
+        api: *Api,
+        allocator: std.mem.Allocator,
+        inputs: []const Buffer,
+        execute_context: ?*c.PJRT_ExecuteContext,
+    ) !ExecuteResult {
         const trace = api.trace_execute;
         var timer: std.time.Timer = undefined;
         var prep_ns: u64 = 0;
@@ -512,7 +528,7 @@ pub const LoadedExecutable = struct {
         execute_opts.launch_id = 0;
         execute_opts.non_donatable_input_indices = null;
         execute_opts.num_non_donatable_input_indices = 0;
-        execute_opts.context = null;
+        execute_opts.context = execute_context;
 
         var device_events = [_]?*c.PJRT_Event{null};
 
@@ -564,7 +580,7 @@ pub const LoadedExecutable = struct {
         input_ptrs: []const *c.PJRT_Buffer,
         output_ptrs: []?*c.PJRT_Buffer,
     ) !?Event {
-        return self.execute_into_opts(api, input_ptrs, output_ptrs, null);
+        return self.execute_into_opts_with_context(api, input_ptrs, output_ptrs, null, null);
     }
 
     pub fn execute_into_opts(
@@ -573,6 +589,17 @@ pub const LoadedExecutable = struct {
         input_ptrs: []const *c.PJRT_Buffer,
         output_ptrs: []?*c.PJRT_Buffer,
         non_donatable_input_indices: ?[]const i64,
+    ) !?Event {
+        return self.execute_into_opts_with_context(api, input_ptrs, output_ptrs, non_donatable_input_indices, null);
+    }
+
+    pub fn execute_into_opts_with_context(
+        self: *LoadedExecutable,
+        api: *Api,
+        input_ptrs: []const *c.PJRT_Buffer,
+        output_ptrs: []?*c.PJRT_Buffer,
+        non_donatable_input_indices: ?[]const i64,
+        execute_context: ?*c.PJRT_ExecuteContext,
     ) !?Event {
         if (output_ptrs.len != self.num_outputs) return error.OutputArityMismatch;
 
@@ -595,7 +622,7 @@ pub const LoadedExecutable = struct {
             execute_opts.non_donatable_input_indices = null;
             execute_opts.num_non_donatable_input_indices = 0;
         }
-        execute_opts.context = null;
+        execute_opts.context = execute_context;
 
         var device_events = [_]?*c.PJRT_Event{null};
 

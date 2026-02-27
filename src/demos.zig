@@ -525,7 +525,9 @@ pub fn run_kernel_provider_demo(
 
     var registry = zg.kernel.KernelRegistry.init(allocator);
     defer registry.deinit();
-    try backend.register_kernel_dispatcher(&registry);
+    var package = zg.kernel.KernelPackage.init(allocator);
+    defer package.deinit();
+    try backend.register_kernel_dispatcher();
 
     if (provider_kind == .tvm) {
         try zg.tvm.ffi.ensure_loaded(allocator, .{});
@@ -551,6 +553,7 @@ pub fn run_kernel_provider_demo(
             .entry_name = "main",
         }, dump_pr, dump_mlir, .{
             .registry = &registry,
+            .package = &package,
             .providers = tvm_providers[0..],
         });
         defer backend.deinit_executable(&tvm_exe);
@@ -573,6 +576,7 @@ pub fn run_kernel_provider_demo(
         .entry_name = "main",
     }, dump_pr, dump_mlir, .{
         .registry = &registry,
+        .package = &package,
         .providers = providers[0..],
     });
     defer backend.deinit_executable(&exe);
@@ -617,6 +621,7 @@ pub fn compile_program(
     if (kernelize_cfg) |cfg| {
         kernelize_state = .{
             .registry = cfg.registry,
+            .package = cfg.package,
             .providers = cfg.providers,
         };
         try passes.append(allocator, kernelize_state.?.pass());
@@ -644,12 +649,17 @@ pub fn compile_program(
         else => return error.UnexpectedArtifact,
     };
 
-    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, .{});
+    var compile_opts: zg.backend.pjrt.CompileOptions = .{};
+    compile_opts.kernel_package = if (kernelize_cfg) |cfg| cfg.package else mlir.kernel_package;
+    compile_opts.kernel_registry = if (kernelize_cfg) |cfg| cfg.registry else null;
+    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
 }
 
 pub const KernelizeConfig = struct {
     /// Destination registry where kernel artifacts are stored by kernelize pass.
     registry: *zg.kernel.KernelRegistry,
+    /// Optional executable-scoped package populated by kernel id.
+    package: ?*zg.kernel.KernelPackage = null,
     /// Kernel providers available to kernelize pass (e.g. TVM).
     providers: []const zg.kernel.KernelProvider,
 };

@@ -33,7 +33,9 @@ const RewriteCandidate = struct {
     inputs: []const pr.VarId,
     outputs: []const pr.VarId,
     kernel_key: []const u8,
+    kernel_id: ?u32,
     provider_name: []const u8,
+    carrier_hint: ?[]const u8,
 };
 
 const RegionCandidate = struct {
@@ -48,6 +50,7 @@ const RegionCandidate = struct {
 /// `pass_mod.Pass` value.
 pub const KernelizePass = struct {
     registry: *kernel.KernelRegistry,
+    package: ?*kernel.KernelPackage = null,
     providers: []const kernel.KernelProvider,
 
     pub fn pass(self: *KernelizePass) pass_mod.Pass {
@@ -140,12 +143,30 @@ pub const KernelizePass = struct {
             };
             log.debug("compiled kernel '{s}' for region '{s}' via provider '{s}'", .{ ka.target_name, candidate.region.name, candidate.provider_name });
 
+            const carrier_hint: ?[]const u8 = if (is_attention_5op_region(func, candidate.region)) "attention_5op_v1" else null;
+            const kernel_id = kernel_id_from_key(ka.target_name);
+
+            if (self.package) |pkg| {
+                const pkg_artifact = try clone_artifact_for_package(pkg.allocator(), ka);
+                pkg.put(kernel_id, pkg_artifact) catch |err| switch (err) {
+                    error.DuplicateKey => {
+                        var artifact = pkg_artifact;
+                        artifact.deinit(pkg.allocator());
+                        log.err("duplicate kernel id {d} for region '{s}'", .{ kernel_id, candidate.region.name });
+                        return error.DuplicateKey;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+            }
+
             try rewrites.append(temp_allocator, .{
                 .region = candidate.region,
                 .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
                 .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
                 .kernel_key = ka.target_name,
+                .kernel_id = kernel_id,
                 .provider_name = ka.provider_name,
+                .carrier_hint = carrier_hint,
             });
         }
 
@@ -155,7 +176,7 @@ pub const KernelizePass = struct {
 
         var eqns = try std.ArrayList(pr.Eqn).initCapacity(allocator, func.eqns.len);
         var varids_store = try std.ArrayList(pr.VarId).initCapacity(allocator, func.varids_store.len);
-        var params_store = try std.ArrayList(pr.Param).initCapacity(allocator, func.params_store.len + rewrites.items.len * 5);
+        var params_store = try std.ArrayList(pr.Param).initCapacity(allocator, func.params_store.len + rewrites.items.len * 7);
 
         var eqn_index: usize = 0;
         while (eqn_index < func.eqns.len) {
@@ -248,25 +269,49 @@ pub const KernelizePass = struct {
         if (rewrite.outputs.len == 0) return error.InvalidRegion;
 
         const out_avals = try allocator.alloc(pr.Aval, rewrite.outputs.len);
+        errdefer allocator.free(out_avals);
         for (rewrite.outputs, 0..) |out_id, idx| {
             out_avals[idx] = func.avals[@intCast(out_id)];
         }
 
         const kernel_key = try allocator.dupe(u8, rewrite.kernel_key);
+        errdefer allocator.free(kernel_key);
         const provider_name = try allocator.dupe(u8, rewrite.provider_name);
+        errdefer allocator.free(provider_name);
         const target_name = try allocator.dupe(u8, dispatcher_target_name);
+        errdefer allocator.free(target_name);
 
-        const params = [_]pr.Param{
-            .{ .call_target_name = target_name },
-            .{ .call_kernel_key = kernel_key },
-            .{ .call_provider_name = provider_name },
-            .{ .has_side_effect = false },
-            .{ .out_avals = out_avals },
-        };
+        const carrier_hint = if (rewrite.carrier_hint) |hint|
+            try allocator.dupe(u8, hint)
+        else
+            null;
+        errdefer if (carrier_hint) |owned_hint| allocator.free(owned_hint);
+
+        var params: [7]pr.Param = undefined;
+        var param_count: usize = 0;
+
+        params[param_count] = .{ .call_target_name = target_name };
+        param_count += 1;
+        params[param_count] = .{ .call_kernel_key = kernel_key };
+        param_count += 1;
+        if (rewrite.kernel_id) |kernel_id| {
+            params[param_count] = .{ .call_kernel_id = kernel_id };
+            param_count += 1;
+        }
+        params[param_count] = .{ .call_provider_name = provider_name };
+        param_count += 1;
+        if (carrier_hint) |owned_hint| {
+            params[param_count] = .{ .call_carrier_hint = owned_hint };
+            param_count += 1;
+        }
+        params[param_count] = .{ .has_side_effect = false };
+        param_count += 1;
+        params[param_count] = .{ .out_avals = out_avals };
+        param_count += 1;
 
         const in_span = try append_varids(allocator, varids_store, rewrite.inputs);
         const out_span = try append_varids(allocator, varids_store, rewrite.outputs);
-        const param_span = try append_params(allocator, params_store, params[0..]);
+        const param_span = try append_params(allocator, params_store, params[0..param_count]);
 
         try eqns.append(allocator, .{
             .prim = .custom_call,
@@ -274,6 +319,43 @@ pub const KernelizePass = struct {
             .outputs = out_span,
             .params = param_span,
         });
+    }
+
+    fn is_attention_5op_region(func: pr.Function, region: pr.Region) bool {
+        if (region.eqn_len != 5) return false;
+
+        const start: usize = @intCast(region.eqn_start);
+        const end = start + @as(usize, @intCast(region.eqn_len));
+        if (end > func.eqns.len) return false;
+
+        const eqns = func.eqns[start..end];
+        const first = eqns[0].prim;
+        if (first != .dot and first != .dot_general) return false;
+
+        return eqns[1].prim == .add and
+            eqns[2].prim == .exp and
+            eqns[3].prim == .multiply and
+            eqns[4].prim == .log;
+    }
+
+    fn kernel_id_from_key(kernel_key: []const u8) u32 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(kernel_key);
+        return @truncate(hasher.final());
+    }
+
+    fn clone_artifact_for_package(
+        dst_allocator: std.mem.Allocator,
+        artifact: kernel.KernelArtifact,
+    ) !kernel.KernelArtifact {
+        return .{
+            .provider_name = artifact.provider_name,
+            .data = try dst_allocator.dupe(u8, artifact.data),
+            .target_name = artifact.target_name,
+            .workspace_bytes = artifact.workspace_bytes,
+            .dispatch_fn = artifact.dispatch_fn,
+            .dispatch_ctx = artifact.dispatch_ctx,
+        };
     }
 
     fn append_varids(
@@ -400,6 +482,126 @@ test "kernelize pass calls provider and registers KA" {
     try testing.expectEqualStrings(dispatcher_target_name, pr.param_call_target_name(params).?);
     try testing.expectEqualStrings("test_region", pr.param_call_kernel_key(params).?);
     try testing.expectEqualStrings("mock", pr.param_call_provider_name(params).?);
+}
+
+test "kernelize pass tags attention-like 5-op region with carrier metadata" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
+    const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
+    const bias = try b.param_tensor(.f32, &.{ 2, 2 });
+    const scale = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("attention_like", .{ .kernelize = "mock" });
+    const dot = try b.emit(.dot, &.{ lhs, rhs }, &.{});
+    const sum = try b.emit(.add, &.{ dot, bias }, &.{});
+    const exp = try b.emit(.exp, &.{sum}, &.{});
+    const mul = try b.emit(.multiply, &.{ exp, scale }, &.{});
+    const out = try b.emit(.log, &.{mul}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{out});
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "mock_kernel_data"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = undefined,
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    const rewritten = program.functions[0].eqns[0];
+    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
+
+    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
+    try testing.expectEqualStrings("attention_5op_v1", pr.param_call_carrier_hint(params).?);
+    try testing.expect(pr.param_call_kernel_id(params) != null);
+}
+
+test "kernelize pass populates kernel package for rewritten region" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("generic_region", .{ .kernelize = "mock" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "mock_kernel_data"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = undefined,
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var package = kernel.KernelPackage.init(testing.allocator);
+    defer package.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .package = &package,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    const rewritten = program.functions[0].eqns[0];
+    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
+    try testing.expect(pr.param_call_kernel_id(params) != null);
+    const kernel_id = pr.param_call_kernel_id(params).?;
+
+    const pkg_artifact = package.get(kernel_id);
+    try testing.expect(pkg_artifact != null);
+    try testing.expectEqualStrings("mock_kernel_data", pkg_artifact.?.data);
 }
 
 test "kernelize pass falls back when provider returns Unsupported" {
