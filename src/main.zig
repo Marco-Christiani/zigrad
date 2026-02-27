@@ -164,6 +164,18 @@ pub fn main() !void {
         const lane = std.meta.stringToEnum(zg.lower.KernelizationLane, lane_name) orelse return error.InvalidArgument;
         return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, lane);
     }
+    if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
+        const opts = try sub_cmd.to(cli.KernelProviderDemoFixedLaneOpts, .{});
+        const provider_name = opts.provider orelse "tvm";
+        const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .pr);
+    }
+    if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
+        const opts = try sub_cmd.to(cli.KernelProviderDemoFixedLaneOpts, .{});
+        const provider_name = opts.provider orelse "tvm";
+        const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .mlir);
+    }
     if (cmd.matchSubCmd("vjp-demo")) |_| {
         return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
     }
@@ -205,6 +217,74 @@ pub fn main() !void {
             .execute_only = opts.execute_only,
             .kernel_provider = kernel_provider,
             .kernel_lane = kernel_lane,
+        };
+
+        return llama_demo.run_llama_ft_demo(
+            gpa,
+            plugin_path,
+            dump_pr_ptr,
+            dump_mlir_ptr,
+            opts.warmup orelse 1,
+            opts.steps orelse 4,
+            quiet,
+            cfg,
+        );
+    }
+    if (cmd.matchSubCmd("llama-ft-demo-pr")) |sub_cmd| {
+        const opts = try sub_cmd.to(cli.LlamaFtDemoLaneOpts, .{});
+        const dtype = if (opts.dtype) |d|
+            std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
+        else
+            zg.pr.DType.bf16;
+
+        const kernel_provider = if (opts.kernel_provider) |provider_name|
+            std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
+        else
+            null;
+
+        const cfg = llama_demo.LlamaDemoConfig{
+            .train = opts.train,
+            .dtype = dtype,
+            .seq = opts.seq orelse 4,
+            .batch = opts.batch orelse 1,
+            .canonical_shapes = opts.canonical_shapes,
+            .execute_only = opts.execute_only,
+            .kernel_provider = kernel_provider,
+            .kernel_lane = .pr,
+        };
+
+        return llama_demo.run_llama_ft_demo(
+            gpa,
+            plugin_path,
+            dump_pr_ptr,
+            dump_mlir_ptr,
+            opts.warmup orelse 1,
+            opts.steps orelse 4,
+            quiet,
+            cfg,
+        );
+    }
+    if (cmd.matchSubCmd("llama-ft-demo-mlir")) |sub_cmd| {
+        const opts = try sub_cmd.to(cli.LlamaFtDemoLaneOpts, .{});
+        const dtype = if (opts.dtype) |d|
+            std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
+        else
+            zg.pr.DType.bf16;
+
+        const kernel_provider = if (opts.kernel_provider) |provider_name|
+            std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
+        else
+            null;
+
+        const cfg = llama_demo.LlamaDemoConfig{
+            .train = opts.train,
+            .dtype = dtype,
+            .seq = opts.seq orelse 4,
+            .batch = opts.batch orelse 1,
+            .canonical_shapes = opts.canonical_shapes,
+            .execute_only = opts.execute_only,
+            .kernel_provider = kernel_provider,
+            .kernel_lane = .mlir,
         };
 
         return llama_demo.run_llama_ft_demo(
