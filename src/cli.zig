@@ -46,6 +46,7 @@ pub const TvmZxprOpts = struct {
 
 pub const KernelProviderDemoOpts = struct {
     provider: ?[]const u8 = "tvm",
+    lane: ?[]const u8 = "pr",
 };
 
 /// Train demo subcommand
@@ -145,6 +146,7 @@ pub const setup_cmd: CommandT = .{
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
+                .{ "lane", "Kernelization lane: pr or mlir (default: pr)" },
             },
         }),
         .{

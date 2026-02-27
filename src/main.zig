@@ -12,6 +12,11 @@ const kernel_provider_map = std.StaticStringMap(demos.KernelProviderDemoKind).in
     .{ "mirage", .mirage },
 });
 
+const kernelization_lane_map = std.StaticStringMap(zg.lower.KernelizationLane).initComptime(.{
+    .{ "pr", .pr },
+    .{ "mlir", .mlir },
+});
+
 // exports for cli gen step in build
 pub const CommandT = cli.CommandT;
 pub const setup_cmd = cli.setup_cmd;
@@ -164,8 +169,10 @@ pub fn main() !void {
     if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
+        const lane_name = opts.lane orelse "pr";
         const provider_kind = kernel_provider_map.get(provider_name) orelse return error.InvalidArgument;
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind);
+        const lane = kernelization_lane_map.get(lane_name) orelse return error.InvalidArgument;
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, lane);
     }
     if (cmd.matchSubCmd("vjp-demo")) |_| {
         return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);

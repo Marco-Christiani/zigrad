@@ -17,3 +17,4 @@ pub const lower = stablehlo.lower;
 pub const lower_program_to_mlir = stablehlo.lower_program_to_mlir;
 pub const lower_function_to_mlir = stablehlo.lower_function_to_mlir;
 pub const OutputFormat = stablehlo.OutputFormat;
+pub const KernelizationLane = stablehlo.KernelizationLane;

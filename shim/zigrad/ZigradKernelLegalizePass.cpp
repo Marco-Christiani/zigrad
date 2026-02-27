@@ -1,9 +1,11 @@
 #include "zigrad/ZigradKernelLegalizePass.h"
 
 #include <memory>
+#include <optional>
 
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -16,6 +18,204 @@
 
 namespace mlir::zigrad {
 namespace {
+
+constexpr const char *kDispatchTargetName = "zigrad.kernel.dispatch";
+constexpr int kTypedFfiApiVersion = 4;
+
+static bool is_kernelizable_carrier_source(Operation *op) {
+    const StringRef op_name = op->getName().getStringRef();
+    return op_name == "stablehlo.dot_general" || op_name == "stablehlo.dot";
+}
+
+struct KernelMarkers {
+    StringAttr provider;
+    StringAttr kernel_key;
+};
+
+static std::optional<KernelMarkers> resolve_kernel_markers(Operation *op, func::FuncOp func) {
+    auto provider = op->getAttrOfType<StringAttr>("zigrad.kernelize.provider");
+    if (!provider) {
+        provider = func->getAttrOfType<StringAttr>("zigrad.kernelize.provider");
+    }
+    if (!provider) return std::nullopt;
+
+    auto kernel_key = op->getAttrOfType<StringAttr>("zigrad.kernelize.region");
+    if (!kernel_key) {
+        kernel_key = func.getSymNameAttr();
+    }
+    if (!kernel_key) return std::nullopt;
+
+    return KernelMarkers{provider, kernel_key};
+}
+
+static bool marker_pair_equal(const KernelMarkers &lhs, const KernelMarkers &rhs) {
+    return lhs.provider == rhs.provider && lhs.kernel_key == rhs.kernel_key;
+}
+
+static bool is_named_op(Operation *op, StringRef name) {
+    return op != nullptr && op->getName().getStringRef() == name;
+}
+
+static bool rewrite_matmul_add_mul_chain(Operation *mul_op, func::FuncOp func,
+                                         OpBuilder &builder) {
+    if (mul_op->getNumOperands() != 2) return false;
+
+    const auto mul_markers = resolve_kernel_markers(mul_op, func);
+    if (!mul_markers) return false;
+
+    const Value mul_lhs = mul_op->getOperand(0);
+    const Value mul_rhs = mul_op->getOperand(1);
+    Operation *mul_lhs_def = mul_lhs.getDefiningOp();
+    Operation *mul_rhs_def = mul_rhs.getDefiningOp();
+
+    Operation *add_op = nullptr;
+    Value passthrough;
+    if (is_named_op(mul_lhs_def, "stablehlo.add")) {
+        add_op = mul_lhs_def;
+        passthrough = mul_rhs;
+    } else if (is_named_op(mul_rhs_def, "stablehlo.add")) {
+        add_op = mul_rhs_def;
+        passthrough = mul_lhs;
+    } else {
+        return false;
+    }
+
+    const auto add_markers = resolve_kernel_markers(add_op, func);
+    if (!add_markers || !marker_pair_equal(*mul_markers, *add_markers)) {
+        return false;
+    }
+
+    if (add_op->getNumOperands() != 2) return false;
+
+    const Value add_lhs = add_op->getOperand(0);
+    const Value add_rhs = add_op->getOperand(1);
+    Operation *add_lhs_def = add_lhs.getDefiningOp();
+    Operation *add_rhs_def = add_rhs.getDefiningOp();
+
+    Operation *dot_op = nullptr;
+    if (is_kernelizable_carrier_source(add_lhs_def) && add_rhs == passthrough) {
+        dot_op = add_lhs_def;
+    } else if (is_kernelizable_carrier_source(add_rhs_def) && add_lhs == passthrough) {
+        dot_op = add_rhs_def;
+    } else {
+        return false;
+    }
+
+    const auto dot_markers = resolve_kernel_markers(dot_op, func);
+    if (!dot_markers || !marker_pair_equal(*mul_markers, *dot_markers)) {
+        return false;
+    }
+
+    if (dot_op->getNumOperands() != 2) return false;
+
+    builder.setInsertionPoint(mul_op);
+
+    NamedAttrList backend_fields;
+    backend_fields.append("zigrad.kernel_key", mul_markers->kernel_key);
+    backend_fields.append("zigrad.provider", mul_markers->provider);
+
+    SmallVector<Value, 3> call_operands = {
+        dot_op->getOperand(0),
+        dot_op->getOperand(1),
+        passthrough,
+    };
+
+    OperationState state(mul_op->getLoc(), "zigrad.kernel_call");
+    state.addOperands(call_operands);
+    state.addTypes(mul_op->getResultTypes());
+    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
+    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
+    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
+    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
+
+    Operation *replacement = builder.create(state);
+    mul_op->replaceAllUsesWith(replacement->getResults());
+    mul_op->erase();
+
+    if (add_op->use_empty()) add_op->erase();
+    if (dot_op->use_empty()) dot_op->erase();
+
+    return true;
+}
+
+static bool has_same_region_consumers(Operation *source_op, func::FuncOp func,
+                                      const KernelMarkers &markers) {
+    for (Value result : source_op->getResults()) {
+        for (OpOperand &use : result.getUses()) {
+            auto use_markers = resolve_kernel_markers(use.getOwner(), func);
+            if (use_markers && marker_pair_equal(*use_markers, markers)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void rewrite_single_source_to_kernel_call(Operation *source_op,
+                                                 const KernelMarkers &markers,
+                                                 OpBuilder &builder) {
+    builder.setInsertionPoint(source_op);
+
+    NamedAttrList backend_fields;
+    backend_fields.append("zigrad.kernel_key", markers.kernel_key);
+    backend_fields.append("zigrad.provider", markers.provider);
+
+    OperationState state(source_op->getLoc(), "zigrad.kernel_call");
+    state.addOperands(source_op->getOperands());
+    state.addTypes(source_op->getResultTypes());
+    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
+    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
+    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
+    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
+
+    Operation *replacement = builder.create(state);
+    source_op->replaceAllUsesWith(replacement->getResults());
+    source_op->erase();
+}
+
+struct ZigradKernelSelectPass final
+    : PassWrapper<ZigradKernelSelectPass, OperationPass<func::FuncOp>> {
+  StringRef getArgument() const final { return "zg-kernel-select"; }
+
+  StringRef getDescription() const final {
+    return "Select kernelizable StableHLO chains and rewrite to zigrad.kernel_call.";
+  }
+
+  void runOnOperation() override {
+    func::FuncOp func = getOperation();
+
+    SmallVector<Operation *> candidates;
+    func.walk([&](Operation *op) {
+      if (is_named_op(op, "stablehlo.multiply")) {
+        candidates.push_back(op);
+      }
+    });
+
+    OpBuilder builder(func.getContext());
+
+    for (Operation *mul_op : candidates) {
+      (void)rewrite_matmul_add_mul_chain(mul_op, func, builder);
+    }
+
+    SmallVector<Operation *> source_candidates;
+    func.walk([&](Operation *op) {
+      if (is_kernelizable_carrier_source(op)) {
+        source_candidates.push_back(op);
+      }
+    });
+
+    for (Operation *source_op : source_candidates) {
+      const auto markers = resolve_kernel_markers(source_op, func);
+      if (!markers) continue;
+
+      if (has_same_region_consumers(source_op, func, *markers)) {
+        continue;
+      }
+
+      rewrite_single_source_to_kernel_call(source_op, *markers, builder);
+    }
+  }
+};
 
 static FailureOr<ArrayAttr> build_default_layouts_for_values(PatternRewriter &rewriter,
                                                               ValueRange values) {
@@ -116,6 +316,7 @@ void registerZigradKernelLegalizePasses() {
   static bool registered = false;
   if (registered) return;
 
+  static PassRegistration<ZigradKernelSelectPass> select_registration;
   static PassRegistration<ZigradKernelLegalizePass> pass_registration;
 
   static PassPipelineRegistration<> pipeline_registration(
@@ -128,6 +329,7 @@ void registerZigradKernelLegalizePasses() {
       });
 
   (void)pass_registration;
+  (void)select_registration;
   (void)pipeline_registration;
 
   registered = true;

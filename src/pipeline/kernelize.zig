@@ -44,6 +44,11 @@ const RegionCandidate = struct {
     provider_name: []const u8,
 };
 
+pub const TargetNameMode = enum {
+    region_name,
+    outlined_eqn,
+};
+
 /// Kernelization pass state. Holds the registry and providers.
 ///
 /// Create this struct, then call `pass()` to get a pipeline-compatible
@@ -52,6 +57,8 @@ pub const KernelizePass = struct {
     registry: *kernel.KernelRegistry,
     package: ?*kernel.KernelPackage = null,
     providers: []const kernel.KernelProvider,
+    rewrite_regions: bool = true,
+    target_name_mode: TargetNameMode = .region_name,
 
     pub fn pass(self: *KernelizePass) pass_mod.Pass {
         return .{
@@ -121,7 +128,7 @@ pub const KernelizePass = struct {
                 continue;
             }
 
-            const ka = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
+            var ka = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
                 error.Unsupported => {
                     log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
                     continue;
@@ -131,6 +138,8 @@ pub const KernelizePass = struct {
                     return err;
                 },
             };
+
+            try self.retarget_kernel_artifact(func, candidate.region, &ka);
 
             self.registry.put(ka.target_name, ka) catch |err| switch (err) {
                 error.DuplicateKey => {
@@ -159,6 +168,10 @@ pub const KernelizePass = struct {
                 };
             }
 
+            if (!self.rewrite_regions) {
+                continue;
+            }
+
             try rewrites.append(temp_allocator, .{
                 .region = candidate.region,
                 .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
@@ -170,7 +183,7 @@ pub const KernelizePass = struct {
             });
         }
 
-        if (rewrites.items.len == 0) return func;
+        if (!self.rewrite_regions or rewrites.items.len == 0) return func;
 
         const allocator = program.allocator();
 
@@ -209,6 +222,20 @@ pub const KernelizePass = struct {
             if (std.mem.eql(u8, p.name, name)) return p;
         }
         return null;
+    }
+
+    fn retarget_kernel_artifact(self: *KernelizePass, func: pr.Function, region: pr.Region, artifact: *kernel.KernelArtifact) !void {
+        switch (self.target_name_mode) {
+            .region_name => {},
+            .outlined_eqn => {
+                if (region.eqn_len != 1) return error.InvalidRegion;
+
+                const allocator = self.registry.allocator();
+                const renamed = try std.fmt.allocPrint(allocator, "{s}_outlined_{d}", .{ func.name, region.eqn_start });
+                allocator.free(artifact.target_name);
+                artifact.target_name = renamed;
+            },
+        }
     }
 
     fn find_rewrite_starting_at(rewrites: []const RewriteCandidate, eqn_start: usize) ?RewriteCandidate {
@@ -757,4 +784,105 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     try testing.expect(maybe_out_avals != null);
     const out_avals = maybe_out_avals.?;
     try testing.expectEqual(@as(usize, 2), out_avals.len);
+}
+
+test "kernelize pass can materialize without rewriting PR" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{ 2, 2 });
+    try b.push_region("matmul_region", .{ .kernelize = "mock" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "mock_kernel_data"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = undefined,
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+        .rewrite_regions = false,
+    };
+
+    const before_eqn_prim = program.functions[0].eqns[0].prim;
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    try testing.expectEqual(before_eqn_prim, program.functions[0].eqns[0].prim);
+    try testing.expect(registry.get("matmul_region") != null);
+}
+
+test "kernelize pass outlined_eqn target naming mode" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    try b.push_region("region_name_unused", .{ .kernelize = "mock" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "mock_kernel_data"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = undefined,
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+        .rewrite_regions = false,
+        .target_name_mode = .outlined_eqn,
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    try testing.expect(registry.get("main_outlined_0") != null);
 }

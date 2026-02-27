@@ -516,6 +516,7 @@ pub fn run_kernel_provider_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     provider_kind: KernelProviderDemoKind,
+    lane: zg.lower.KernelizationLane,
 ) !void {
     var program = try build_kernelized_demo_program(allocator, switch (provider_kind) {
         .tvm => "tvm",
@@ -555,6 +556,7 @@ pub fn run_kernel_provider_demo(
             .registry = &registry,
             .package = &package,
             .providers = tvm_providers[0..],
+            .lane = lane,
         });
         defer backend.deinit_executable(&tvm_exe);
 
@@ -578,11 +580,13 @@ pub fn run_kernel_provider_demo(
         .registry = &registry,
         .package = &package,
         .providers = providers[0..],
+        .lane = lane,
     });
     defer backend.deinit_executable(&exe);
 
-    if (registry.get("matmul_region") == null) {
-        std.log.err("mirage provider did not produce kernel artifact for 'matmul_region'", .{});
+    const expected_kernel_key = "matmul_region";
+    if (registry.get(expected_kernel_key) == null) {
+        std.log.err("mirage provider did not produce kernel artifact for '{s}'", .{expected_kernel_key});
         return error.KernelArtifactMissing;
     }
 
@@ -619,10 +623,13 @@ pub fn compile_program(
 
     var kernelize_state: ?zg.pipeline.KernelizePass = null;
     if (kernelize_cfg) |cfg| {
+        lower_cfg_mut.kernelization_lane = cfg.lane;
         kernelize_state = .{
             .registry = cfg.registry,
             .package = cfg.package,
             .providers = cfg.providers,
+            .rewrite_regions = cfg.lane == .pr,
+            .target_name_mode = .region_name,
         };
         try passes.append(allocator, kernelize_state.?.pass());
     }
@@ -662,6 +669,9 @@ pub const KernelizeConfig = struct {
     package: ?*zg.kernel.KernelPackage = null,
     /// Kernel providers available to kernelize pass (e.g. TVM).
     providers: []const zg.kernel.KernelProvider,
+
+    /// Select the kernelization lane for this compile.
+    lane: zg.lower.KernelizationLane = .pr,
 };
 
 pub fn print_pr(allocator: std.mem.Allocator) !void {
