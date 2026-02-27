@@ -516,8 +516,13 @@ pub fn run_kernel_provider_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     provider_kind: KernelProviderDemoKind,
-    lane: zg.lower.KernelizationLane,
+    pipeline_kind: KernelProviderDemoPipeline,
 ) !void {
+    const lane: zg.lower.KernelizationLane = switch (pipeline_kind) {
+        .pr => .pr,
+        .mlir => .mlir,
+    };
+
     var program = try build_kernelized_demo_program(allocator, switch (provider_kind) {
         .tvm => "tvm",
         .mirage => "mirage",
@@ -552,6 +557,7 @@ pub fn run_kernel_provider_demo(
         var tvm_exe = try compile_program(backend, allocator, &program, device, .{
             .encoding = tvm_lower_encoding,
             .entry_name = "main",
+            .kernelization_lane = lane,
         }, dump_pr, dump_mlir, .{
             .registry = &registry,
             .package = &package,
@@ -576,6 +582,7 @@ pub fn run_kernel_provider_demo(
     var exe = try compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
+        .kernelization_lane = lane,
     }, dump_pr, dump_mlir, .{
         .registry = &registry,
         .package = &package,
@@ -596,6 +603,11 @@ pub fn run_kernel_provider_demo(
 pub const KernelProviderDemoKind = enum {
     tvm,
     mirage,
+};
+
+pub const KernelProviderDemoPipeline = enum {
+    pr,
+    mlir,
 };
 
 pub fn compile_program(

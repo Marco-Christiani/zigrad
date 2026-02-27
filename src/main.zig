@@ -159,19 +159,17 @@ pub fn main() !void {
     if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
-        const lane_name = opts.lane orelse "pr";
         const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
-        const lane = std.meta.stringToEnum(zg.lower.KernelizationLane, lane_name) orelse return error.InvalidArgument;
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, lane);
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .pr);
     }
     if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.KernelProviderDemoFixedLaneOpts, .{});
+        const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
         const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
         return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .pr);
     }
     if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.KernelProviderDemoFixedLaneOpts, .{});
+        const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
         const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
         return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .mlir);
@@ -203,11 +201,6 @@ pub fn main() !void {
         else
             null;
 
-        const kernel_lane = if (opts.kernel_lane) |lane_name|
-            std.meta.stringToEnum(zg.lower.KernelizationLane, lane_name) orelse return error.InvalidArgument
-        else
-            zg.lower.KernelizationLane.mlir;
-
         const cfg = llama_demo.LlamaDemoConfig{
             .train = opts.train,
             .dtype = dtype,
@@ -216,7 +209,6 @@ pub fn main() !void {
             .canonical_shapes = opts.canonical_shapes,
             .execute_only = opts.execute_only,
             .kernel_provider = kernel_provider,
-            .kernel_lane = kernel_lane,
         };
 
         return llama_demo.run_llama_ft_demo(
@@ -227,11 +219,12 @@ pub fn main() !void {
             opts.warmup orelse 1,
             opts.steps orelse 4,
             quiet,
+            .mlir,
             cfg,
         );
     }
     if (cmd.matchSubCmd("llama-ft-demo-pr")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.LlamaFtDemoLaneOpts, .{});
+        const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
         const dtype = if (opts.dtype) |d|
             std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
         else
@@ -250,7 +243,6 @@ pub fn main() !void {
             .canonical_shapes = opts.canonical_shapes,
             .execute_only = opts.execute_only,
             .kernel_provider = kernel_provider,
-            .kernel_lane = .pr,
         };
 
         return llama_demo.run_llama_ft_demo(
@@ -261,11 +253,12 @@ pub fn main() !void {
             opts.warmup orelse 1,
             opts.steps orelse 4,
             quiet,
+            .pr,
             cfg,
         );
     }
     if (cmd.matchSubCmd("llama-ft-demo-mlir")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.LlamaFtDemoLaneOpts, .{});
+        const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
         const dtype = if (opts.dtype) |d|
             std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
         else
@@ -284,7 +277,6 @@ pub fn main() !void {
             .canonical_shapes = opts.canonical_shapes,
             .execute_only = opts.execute_only,
             .kernel_provider = kernel_provider,
-            .kernel_lane = .mlir,
         };
 
         return llama_demo.run_llama_ft_demo(
@@ -295,6 +287,7 @@ pub fn main() !void {
             opts.warmup orelse 1,
             opts.steps orelse 4,
             quiet,
+            .mlir,
             cfg,
         );
     }

@@ -18,7 +18,11 @@ pub const LlamaDemoConfig = struct {
     canonical_shapes: bool = false,
     execute_only: bool = false,
     kernel_provider: ?LlamaKernelProvider = null,
-    kernel_lane: zg.lower.KernelizationLane = .mlir,
+};
+
+pub const LlamaDemoPipeline = enum {
+    pr,
+    mlir,
 };
 
 const upcast_loss = false;
@@ -133,6 +137,7 @@ pub fn run_llama_ft_demo(
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
+    pipeline_kind: LlamaDemoPipeline,
     cfg: LlamaDemoConfig,
 ) !void {
     const TensorSpec = zg.frontend.TensorSpec;
@@ -213,6 +218,13 @@ pub fn run_llama_ft_demo(
         .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
         .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
     };
+
+    const kernel_lane: zg.lower.KernelizationLane = switch (pipeline_kind) {
+        .pr => .pr,
+        .mlir => .mlir,
+    };
+
+    compile_cfg.lower.kernelization_lane = kernel_lane;
     if (compile_cfg.dump_mlir != null) {
         compile_cfg.lower.encoding = .text;
     }
@@ -245,7 +257,7 @@ pub fn run_llama_ft_demo(
                     .registry = &kernel_registry.?,
                     .package = &kernel_package.?,
                     .providers = mirage_providers[0..],
-                    .lane = cfg.kernel_lane,
+                    .lane = kernel_lane,
                 };
             },
         }
