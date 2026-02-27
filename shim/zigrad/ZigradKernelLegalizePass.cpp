@@ -138,6 +138,93 @@ static bool rewrite_matmul_add_mul_chain(Operation *mul_op, func::FuncOp func,
     return true;
 }
 
+struct MatmulAddMulToKernelCallPattern final : RewritePattern {
+  explicit MatmulAddMulToKernelCallPattern(MLIRContext *ctx)
+      : RewritePattern("stablehlo.multiply", 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 2) return failure();
+
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func) return failure();
+
+    const auto mul_markers = resolve_kernel_markers(op, func);
+    if (!mul_markers) return failure();
+
+    const Value mul_lhs = op->getOperand(0);
+    const Value mul_rhs = op->getOperand(1);
+    Operation *mul_lhs_def = mul_lhs.getDefiningOp();
+    Operation *mul_rhs_def = mul_rhs.getDefiningOp();
+
+    Operation *add_op = nullptr;
+    Value passthrough;
+    if (is_named_op(mul_lhs_def, "stablehlo.add")) {
+      add_op = mul_lhs_def;
+      passthrough = mul_rhs;
+    } else if (is_named_op(mul_rhs_def, "stablehlo.add")) {
+      add_op = mul_rhs_def;
+      passthrough = mul_lhs;
+    } else {
+      return failure();
+    }
+
+    const auto add_markers = resolve_kernel_markers(add_op, func);
+    if (!add_markers || !marker_pair_equal(*mul_markers, *add_markers)) {
+      return failure();
+    }
+
+    if (add_op->getNumOperands() != 2) return failure();
+
+    const Value add_lhs = add_op->getOperand(0);
+    const Value add_rhs = add_op->getOperand(1);
+    Operation *add_lhs_def = add_lhs.getDefiningOp();
+    Operation *add_rhs_def = add_rhs.getDefiningOp();
+
+    Operation *dot_op = nullptr;
+    if (is_kernelizable_carrier_source(add_lhs_def) && add_rhs == passthrough) {
+      dot_op = add_lhs_def;
+    } else if (is_kernelizable_carrier_source(add_rhs_def) && add_lhs == passthrough) {
+      dot_op = add_rhs_def;
+    } else {
+      return failure();
+    }
+
+    const auto dot_markers = resolve_kernel_markers(dot_op, func);
+    if (!dot_markers || !marker_pair_equal(*mul_markers, *dot_markers)) {
+      return failure();
+    }
+
+    if (dot_op->getNumOperands() != 2) return failure();
+
+    NamedAttrList backend_fields;
+    backend_fields.append("zigrad.kernel_key", mul_markers->kernel_key);
+    backend_fields.append("zigrad.provider", mul_markers->provider);
+
+    SmallVector<Value, 3> call_operands = {
+        dot_op->getOperand(0),
+        dot_op->getOperand(1),
+        passthrough,
+    };
+
+    OperationState state(op->getLoc(), "zigrad.kernel_call");
+    state.addOperands(call_operands);
+    state.addTypes(op->getResultTypes());
+    state.addAttribute("api_version", rewriter.getI32IntegerAttr(kTypedFfiApiVersion));
+    state.addAttribute("call_target_name", rewriter.getStringAttr(kDispatchTargetName));
+    state.addAttribute("has_side_effect", rewriter.getBoolAttr(false));
+    state.addAttribute("backend_config", rewriter.getDictionaryAttr(backend_fields));
+
+    Operation *replacement = rewriter.create(state);
+    rewriter.replaceOp(op, replacement->getResults());
+
+    if (add_op->use_empty()) rewriter.eraseOp(add_op);
+    if (dot_op->use_empty()) rewriter.eraseOp(dot_op);
+
+    return success();
+  }
+};
+
 static bool rewrite_matmul_add_chain(Operation *add_op, func::FuncOp func,
                                      OpBuilder &builder) {
     if (add_op->getNumOperands() != 2) return false;
@@ -302,18 +389,16 @@ struct ZigradKernelSelectPass final
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
-    SmallVector<Operation *> candidates;
-    func.walk([&](Operation *op) {
-      if (is_named_op(op, "stablehlo.multiply")) {
-        candidates.push_back(op);
+    {
+      RewritePatternSet mul_patterns(&getContext());
+      mul_patterns.add<MatmulAddMulToKernelCallPattern>(&getContext());
+      if (failed(applyPatternsGreedily(func, std::move(mul_patterns)))) {
+        signalPassFailure();
+        return;
       }
-    });
+    }
 
     OpBuilder builder(func.getContext());
-
-    for (Operation *mul_op : candidates) {
-      (void)rewrite_matmul_add_mul_chain(mul_op, func, builder);
-    }
 
     SmallVector<Operation *> add_candidates;
     func.walk([&](Operation *op) {

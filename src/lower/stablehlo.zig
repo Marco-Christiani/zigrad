@@ -21,7 +21,7 @@ pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 
 const zigrad_kernel_call_op_name = "zigrad.kernel_call";
 const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legalize),canonicalize,cse";
-const zigrad_kernel_select_and_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-select,zg-kernel-legalize),canonicalize,cse";
+const zigrad_kernel_select_and_legalize_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-kernel-select,zg-kernel-legalize),canonicalize,cse";
 
 const LoweredMlir = struct {
     bytes: []u8,
