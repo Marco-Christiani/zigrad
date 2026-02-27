@@ -68,6 +68,8 @@ pub const LlamaFtDemoOpts = struct {
     canonical_o: bool = false,
     canonical_mlp: bool = false,
     execute_only: bool = false,
+    kernel_provider: ?[]const u8 = null,
+    kernel_lane: ?[]const u8 = "mlir",
 };
 
 /// Benchmark subcommand
@@ -231,6 +233,8 @@ pub const setup_cmd: CommandT = .{
                 .{ "canonical_o", "Use canonical output shapes" },
                 .{ "canonical_mlp", "Use canonical MLP shapes" },
                 .{ "execute_only", "Execute only, skip compilation" },
+                .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
+                .{ "kernel_lane", "Kernelization lane: pr or mlir (default: mlir)" },
             },
         }),
         CommandT.from(JitCacheOpts, .{

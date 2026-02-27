@@ -3,9 +3,11 @@ const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
 const ops = @import("../pr/ops/ops.zig");
+const kernel = @import("../kernel.zig");
 const lower = @import("../lower/root.zig");
 const pipeline = @import("../pipeline/root.zig");
 const dump = @import("../pipeline/dump.zig");
+const kernelize = @import("../pipeline/kernelize.zig");
 const backend = @import("../backend/root.zig");
 const utils = @import("../utils/host_buffer.zig");
 
@@ -349,9 +351,17 @@ pub const CompileConfig = struct {
     plugin_path: ?[]const u8 = null,
     device_index: usize = 0,
     lower: lower.LowerPassConfig = .{},
+    kernelize: ?KernelizeConfig = null,
     dump_pr: ?dump.DumpConfig = null,
     dump_mlir: ?dump.DumpConfig = null,
     compile: backend.pjrt.CompileOptions = .{},
+};
+
+pub const KernelizeConfig = struct {
+    registry: *kernel.KernelRegistry,
+    package: ?*kernel.KernelPackage = null,
+    providers: []const kernel.KernelProvider,
+    lane: lower.KernelizationLane = .pr,
 };
 
 /// Compiled executable with arity metadata.
@@ -457,6 +467,20 @@ pub fn compile_program(
         dump_pr_local.?.entry_name = dump_pr_local.?.entry_name orelse entry_name;
         try passes.append(allocator, dump.dump_pr_pass_with_config(&dump_pr_local.?));
     }
+
+    var kernelize_state: ?kernelize.KernelizePass = null;
+    if (config.kernelize) |cfg| {
+        lower_cfg.kernelization_lane = cfg.lane;
+        kernelize_state = .{
+            .registry = cfg.registry,
+            .package = cfg.package,
+            .providers = cfg.providers,
+            .rewrite_regions = cfg.lane == .pr,
+            .target_name_mode = .region_name,
+        };
+        try passes.append(allocator, kernelize_state.?.pass());
+    }
+
     try passes.append(allocator, lower.validate_pass);
     try passes.append(allocator, lower.lower_pass_with_config(&lower_cfg));
 
@@ -481,6 +505,9 @@ pub fn compile_program(
     var compile_opts = config.compile;
     if (compile_opts.kernel_package == null) {
         compile_opts.kernel_package = mlir.kernel_package;
+    }
+    if (compile_opts.kernel_registry == null) {
+        compile_opts.kernel_registry = if (config.kernelize) |cfg| cfg.registry else null;
     }
 
     return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);

@@ -7,16 +7,6 @@ const main_aot = @import("main_aot.zig");
 const llama_model = @import("llama_model.zig");
 const cli = @import("cli.zig");
 
-const kernel_provider_map = std.StaticStringMap(demos.KernelProviderDemoKind).initComptime(.{
-    .{ "tvm", .tvm },
-    .{ "mirage", .mirage },
-});
-
-const kernelization_lane_map = std.StaticStringMap(zg.lower.KernelizationLane).initComptime(.{
-    .{ "pr", .pr },
-    .{ "mlir", .mlir },
-});
-
 // exports for cli gen step in build
 pub const CommandT = cli.CommandT;
 pub const setup_cmd = cli.setup_cmd;
@@ -45,7 +35,7 @@ pub fn main() !void {
     if (cmd.matchSubCmd("tvm-zxpr")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.TvmZxprOpts, .{});
         const sweep = opts.sweep_palettes;
-        const palette = if (opts.palette) |p| parse_zxpr_palette(p) else null;
+        const palette = if (opts.palette) |p| std.meta.stringToEnum(zg.pr.zxpr.Palette, p) else null;
         return demos.print_tvm_kernelize_pr(gpa, sweep, palette);
     }
     if (cmd.matchSubCmd("tvm-attention-zxpr")) |_| {
@@ -65,7 +55,7 @@ pub fn main() !void {
         const shape = try parse_shape(opts.shape orelse "128x128x128");
 
         const target_kind: zg.tvm.tir.TargetKind = if (opts.cuda or opts.gpu) .cuda else .cpu;
-        const target_suffix: []const u8 = if (target_kind == .cuda) "cuda" else "cpu";
+        const target_suffix: []const u8 = @tagName(target_kind);
 
         const work_dir = opts.work_dir orelse "artifacts/tvm_cache";
         const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
@@ -170,8 +160,8 @@ pub fn main() !void {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
         const lane_name = opts.lane orelse "pr";
-        const provider_kind = kernel_provider_map.get(provider_name) orelse return error.InvalidArgument;
-        const lane = kernelization_lane_map.get(lane_name) orelse return error.InvalidArgument;
+        const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
+        const lane = std.meta.stringToEnum(zg.lower.KernelizationLane, lane_name) orelse return error.InvalidArgument;
         return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, lane);
     }
     if (cmd.matchSubCmd("vjp-demo")) |_| {
@@ -191,19 +181,30 @@ pub fn main() !void {
     }
     if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
+        const dtype = if (opts.dtype) |d|
+            std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
+        else
+            zg.pr.DType.bf16;
 
-        const dtype = if (opts.dtype) |d| blk: {
-            if (std.mem.eql(u8, d, "bf16")) break :blk zg.pr.DType.bf16;
-            if (std.mem.eql(u8, d, "f32")) break :blk zg.pr.DType.f32;
-            return error.InvalidDType;
-        } else zg.pr.DType.bf16;
+        const kernel_provider = if (opts.kernel_provider) |provider_name|
+            std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
+        else
+            null;
+
+        const kernel_lane = if (opts.kernel_lane) |lane_name|
+            std.meta.stringToEnum(zg.lower.KernelizationLane, lane_name) orelse return error.InvalidArgument
+        else
+            zg.lower.KernelizationLane.mlir;
 
         const cfg = llama_demo.LlamaDemoConfig{
             .train = opts.train,
             .dtype = dtype,
             .seq = opts.seq orelse 4,
             .batch = opts.batch orelse 1,
+            .canonical_shapes = opts.canonical_shapes,
             .execute_only = opts.execute_only,
+            .kernel_provider = kernel_provider,
+            .kernel_lane = kernel_lane,
         };
 
         return llama_demo.run_llama_ft_demo(
@@ -385,7 +386,7 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
             const value = arg["--impls=".len..];
             var impl_strs = std.mem.splitScalar(u8, value, ',');
             while (impl_strs.next()) |s| {
-                if (parse_impl(s)) |impl| {
+                if (std.meta.stringToEnum(zg.benchmark.Implementation, s)) |impl| {
                     try impls.append(gpa, impl);
                 } else {
                     std.log.err("unknown implementation: {s}", .{s});
@@ -435,27 +436,4 @@ fn parse_shape(s: []const u8) !zg.benchmark.Shape {
     const n = try std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10);
     const k = try std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10);
     return .{ .m = m, .n = n, .k = k };
-}
-
-fn parse_impl(s: []const u8) ?zg.benchmark.Implementation {
-    const impl_map = std.StaticStringMap(zg.benchmark.Implementation).initComptime(.{
-        .{ "zig_naive", .zig_naive },
-        .{ "tvm_cpu", .tvm_cpu },
-        .{ "xla_cpu", .xla_cpu },
-        .{ "xla_gpu", .xla_gpu },
-    });
-    return impl_map.get(s);
-}
-
-fn parse_zxpr_palette(value: []const u8) ?zg.pr.zxpr.Palette {
-    const palette_map = std.StaticStringMap(zg.pr.zxpr.Palette).initComptime(.{
-        .{ "default", .default },
-        .{ "alt", .alt },
-        .{ "nord", .nord },
-        .{ "gruvbox_material", .gruvbox_material },
-        .{ "flat_dark", .flat_dark },
-        .{ "catppuccin", .catppuccin },
-        .{ "tokyonight", .tokyonight },
-    });
-    return palette_map.get(value);
 }

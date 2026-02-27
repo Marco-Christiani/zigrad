@@ -6,7 +6,8 @@ const mirage_api = @import("../c/mirage/api.zig");
 const mirage_c = @import("../c/mirage/c.zig");
 
 const log = std.log.scoped(.@"zg/mirage_provider");
-const superopt_max_num_graphs: u32 = 64;
+const superopt_max_num_graphs: u32 = 1024;
+const max_region_eqns: usize = 5;
 
 pub const MirageProvider = struct {
     allocator: std.mem.Allocator,
@@ -26,6 +27,14 @@ pub const MirageProvider = struct {
     }
 
     fn compile(self: *MirageProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+        if (desc.eqns.len > max_region_eqns) {
+            log.debug(
+                "region '{s}' has {d} eqns (> {d}); skipping mirage compile",
+                .{ desc.name, desc.eqns.len, max_region_eqns },
+            );
+            return error.Unsupported;
+        }
+
         var ctx = mirage_api.Context.init() catch |err| switch (err) {
             error.MirageUnavailable => return error.MirageLoadFailed,
             error.MirageInvalidArgument => return error.MirageInvalidArgument,

@@ -6,17 +6,36 @@ const std = @import("std");
 
 const num_layers: usize = 16;
 
+pub const LlamaKernelProvider = enum {
+    mirage,
+};
+
 pub const LlamaDemoConfig = struct {
     train: bool,
     dtype: zg.pr.DType,
     seq: usize,
     batch: usize = 1,
+    canonical_shapes: bool = false,
     execute_only: bool = false,
+    kernel_provider: ?LlamaKernelProvider = null,
+    kernel_lane: zg.lower.KernelizationLane = .mlir,
 };
 
 const upcast_loss = false;
 
 fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
+    return loss_fn_with_options(params, batch, .{});
+}
+
+fn loss_fn_mirage(params: anytype, batch: anytype) !zg.frontend.Tensor {
+    return loss_fn_with_options(params, batch, .{ .kernelize_provider = "mirage" });
+}
+
+fn loss_fn_with_options(
+    params: anytype,
+    batch: anytype,
+    forward_opts: llama_model.ForwardOptions,
+) !zg.frontend.Tensor {
     const batch_size: usize = batch.x.tensor.shape.dims[0];
     const seq: usize = batch.x.tensor.shape.dims[1];
     var layers: [num_layers]llama_model.LayerWeights = undefined;
@@ -32,12 +51,12 @@ fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
             .down_proj = p.down_proj,
         };
     }
-    const logits = try llama_model.forward(batch.x, batch.mask, batch.attention_mask, batch.sin, batch.cos, .{
+    const logits = try llama_model.forward_with_options(batch.x, batch.mask, batch.attention_mask, batch.sin, batch.cos, .{
         .w_emb = params.w_emb,
         .w_out = params.w_out,
         .norm = params.norm,
         .layers = layers[0..],
-    }, 1e-5);
+    }, 1e-5, forward_opts);
     const logits_f0 = if (upcast_loss and logits.tensor.dtype == .bf16) try logits.convert(.f32) else logits;
     const logits_f = logits_f0;
     const b = logits_f.builder;
@@ -150,9 +169,11 @@ pub fn run_llama_ft_demo(
     };
 
     const seq: usize = cfg.seq;
-    const vocab: usize = 128256;
-    const hidden: usize = 2048;
-    const qkv_out: usize = hidden + 512 + 512;
+    const vocab: usize = if (cfg.canonical_shapes) 4096 else 128256;
+    const hidden: usize = if (cfg.canonical_shapes) 512 else 2048;
+    const kv_out: usize = 512;
+    const mlp_hidden: usize = hidden * 4;
+    const qkv_out: usize = hidden + kv_out + kv_out;
 
     var layers_spec: [num_layers]LayerSpec = undefined;
     inline for (0..num_layers) |i| {
@@ -161,9 +182,9 @@ pub fn run_llama_ft_demo(
             .post_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
             .qkv_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, qkv_out } },
             .o_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, hidden } },
-            .gate_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 8192 } },
-            .up_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, 8192 } },
-            .down_proj = .{ .dtype = model_dtype, .dims = &.{ 8192, hidden } },
+            .gate_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, mlp_hidden } },
+            .up_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, mlp_hidden } },
+            .down_proj = .{ .dtype = model_dtype, .dims = &.{ mlp_hidden, hidden } },
         };
     }
 
@@ -196,6 +217,40 @@ pub fn run_llama_ft_demo(
         compile_cfg.lower.encoding = .text;
     }
 
+    var kernel_registry: ?zg.kernel.KernelRegistry = null;
+    defer if (kernel_registry) |*r| r.deinit();
+
+    var kernel_package: ?zg.kernel.KernelPackage = null;
+    defer if (kernel_package) |*p| p.deinit();
+
+    var mirage_dispatch_state: ?zg.mirage.dispatch.MirageDispatchState = null;
+    defer if (mirage_dispatch_state) |*s| s.deinit();
+
+    var mirage_provider_impl: ?zg.mirage.provider.MirageProvider = null;
+    var mirage_providers: [1]zg.kernel.KernelProvider = undefined;
+
+    if (cfg.kernel_provider) |provider| {
+        switch (provider) {
+            .mirage => {
+                kernel_registry = zg.kernel.KernelRegistry.init(allocator);
+                kernel_package = zg.kernel.KernelPackage.init(allocator);
+                mirage_dispatch_state = zg.mirage.dispatch.MirageDispatchState.init(allocator);
+                mirage_provider_impl = .{
+                    .allocator = allocator,
+                    .dispatch_state = &mirage_dispatch_state.?,
+                };
+                mirage_providers = .{mirage_provider_impl.?.kernel_provider()};
+
+                compile_cfg.kernelize = .{
+                    .registry = &kernel_registry.?,
+                    .package = &kernel_package.?,
+                    .providers = mirage_providers[0..],
+                    .lane = cfg.kernel_lane,
+                };
+            },
+        }
+    }
+
     var backend_handle = try zg.frontend.init_backend(allocator, compile_cfg.plugin_path);
     defer backend_handle.deinit();
 
@@ -208,15 +263,27 @@ pub fn run_llama_ft_demo(
     const param_count = 3 + num_layers * 7;
 
     const train = zg.frontend.train;
+    const use_mirage_loss = cfg.kernel_provider != null;
     var compiled_train: ?train.CompiledTrainStep = null;
     var compiled_fwd: ?zg.frontend.CompiledForward = null;
     if (train_mode) {
-        compiled_train = try train.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, .{
-            .optimizer = .{ .lr = 1e-4 },
-            .compile = compile_cfg,
-        });
+        if (use_mirage_loss) {
+            compiled_train = try train.compile_train_step(allocator, &backend_handle, device, loss_fn_mirage, inputs_spec, param_count, .{
+                .optimizer = .{ .lr = 1e-4 },
+                .compile = compile_cfg,
+            });
+        } else {
+            compiled_train = try train.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, .{
+                .optimizer = .{ .lr = 1e-4 },
+                .compile = compile_cfg,
+            });
+        }
     } else {
-        compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
+        if (use_mirage_loss) {
+            compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn_mirage, inputs_spec, compile_cfg);
+        } else {
+            compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
+        }
     }
     defer {
         if (compiled_train) |*ct| backend_handle.deinit_executable(&ct.exe);
@@ -233,12 +300,12 @@ pub fn run_llama_ft_demo(
     const shape_norm = zg.utils.Shape{ .dims = &.{hidden} };
     const shape_layer_norm = zg.utils.Shape{ .dims = &.{hidden} };
     const shape_q_proj = zg.utils.Shape{ .dims = &.{ hidden, hidden } };
-    const shape_kv_proj = zg.utils.Shape{ .dims = &.{ hidden, 512 } };
+    const shape_kv_proj = zg.utils.Shape{ .dims = &.{ hidden, kv_out } };
     const shape_qkv_proj = zg.utils.Shape{ .dims = &.{ hidden, qkv_out } };
     const shape_o_proj = zg.utils.Shape{ .dims = &.{ hidden, hidden } };
-    const shape_gate_proj = zg.utils.Shape{ .dims = &.{ hidden, 8192 } };
-    const shape_up_proj = zg.utils.Shape{ .dims = &.{ hidden, 8192 } };
-    const shape_down_proj = zg.utils.Shape{ .dims = &.{ 8192, hidden } };
+    const shape_gate_proj = zg.utils.Shape{ .dims = &.{ hidden, mlp_hidden } };
+    const shape_up_proj = zg.utils.Shape{ .dims = &.{ hidden, mlp_hidden } };
+    const shape_down_proj = zg.utils.Shape{ .dims = &.{ mlp_hidden, hidden } };
     const shape_x = zg.utils.Shape{ .dims = dims_b_s[0..] };
     const shape_target = zg.utils.Shape{ .dims = dims_b_s[0..] };
     const shape_mask = zg.utils.Shape{ .dims = dims_seq_seq[0..] };
@@ -298,7 +365,7 @@ pub fn run_llama_ft_demo(
     const weights_path = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_SAFETENSORS_PATH") catch default_path;
     defer if (!std.mem.eql(u8, weights_path, default_path)) allocator.free(weights_path);
 
-    if (try load_llama_weights(
+    const loaded_weights = load_llama_weights(
         allocator,
         weights_path,
         &host_w_emb,
@@ -322,7 +389,16 @@ pub fn run_llama_ft_demo(
         shape_gate_proj.dims,
         shape_up_proj.dims,
         shape_down_proj.dims,
-    )) {
+    ) catch |err| switch (err) {
+        error.TensorShapeMismatch,
+        error.TensorSizeMismatch,
+        error.TensorDtypeMismatch,
+        stz.Error.TensorNotFound,
+        => false,
+        else => return err,
+    };
+
+    if (loaded_weights) {
         if (!quiet) {
             std.log.info("llama-ft-demo: loaded weights from {s}", .{weights_path});
         }
@@ -359,8 +435,16 @@ pub fn run_llama_ft_demo(
         std.log.warn("llama-ft-demo: using synthetic weights (set ZG_LLAMA_SAFETENSORS_PATH)", .{});
     }
 
-    const tokens = [_]usize{ 128000, 128009, 128001, 128008 };
-    const targets = [_]usize{ 128009, 128001, 128008, 128001 };
+    const token_seed = [_]usize{ 128000, 128009, 128001, 128008 };
+    const target_seed = [_]usize{ 128009, 128001, 128008, 128001 };
+    var tokens: [token_seed.len]usize = undefined;
+    var targets: [target_seed.len]usize = undefined;
+    for (token_seed, 0..) |value, idx| {
+        tokens[idx] = value % vocab;
+    }
+    for (target_seed, 0..) |value, idx| {
+        targets[idx] = value % vocab;
+    }
     fill_i32_tokens_batched(host_x.as_slice(i32), batch_size, seq, &tokens);
     fill_i32_tokens_batched(host_target_ids.as_slice(i32), batch_size, seq, &targets);
     if (host_dtype == .bf16) {
@@ -794,16 +878,18 @@ fn load_llama_weights(
         const q_view = try st_file.get(q_name);
         const k_view = try st_file.get(k_name);
         const v_view = try st_file.get(v_name);
+        const q_cols = shape_q_proj[1];
+        const k_cols = shape_k_proj[1];
         if (qkv_proj[i].dtype == .bf16) {
             const dst = qkv_proj[i].as_slice(u16);
             try copy_tensor_to_bf16_transposed_into_cols(q_view, dst, shape_qkv_proj, 0, shape_q_proj);
-            try copy_tensor_to_bf16_transposed_into_cols(k_view, dst, shape_qkv_proj, 2048, shape_k_proj);
-            try copy_tensor_to_bf16_transposed_into_cols(v_view, dst, shape_qkv_proj, 2560, shape_k_proj);
+            try copy_tensor_to_bf16_transposed_into_cols(k_view, dst, shape_qkv_proj, q_cols, shape_k_proj);
+            try copy_tensor_to_bf16_transposed_into_cols(v_view, dst, shape_qkv_proj, q_cols + k_cols, shape_k_proj);
         } else {
             const dst = qkv_proj[i].as_slice(f32);
             try copy_tensor_to_f32_transposed_into_cols(q_view, dst, shape_qkv_proj, 0, shape_q_proj);
-            try copy_tensor_to_f32_transposed_into_cols(k_view, dst, shape_qkv_proj, 2048, shape_k_proj);
-            try copy_tensor_to_f32_transposed_into_cols(v_view, dst, shape_qkv_proj, 2560, shape_k_proj);
+            try copy_tensor_to_f32_transposed_into_cols(k_view, dst, shape_qkv_proj, q_cols, shape_k_proj);
+            try copy_tensor_to_f32_transposed_into_cols(v_view, dst, shape_qkv_proj, q_cols + k_cols, shape_k_proj);
         }
         const o_view = try st_file.get(o_name);
         if (o_proj[i].dtype == .bf16) {

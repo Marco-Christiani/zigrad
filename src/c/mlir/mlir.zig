@@ -144,12 +144,37 @@ fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
     }
 
     const sdk_root = std.process.getEnvVarOwned(allocator, "ZG_EXTERNAL_SDK_ROOT") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
+        error.EnvironmentVariableNotFound => null,
         else => return err,
     };
-    defer allocator.free(sdk_root);
+    defer if (sdk_root) |root| allocator.free(root);
 
-    return @as(?[]u8, try std.fs.path.join(allocator, &.{ sdk_root, "lib", "libzigrad_mlir_ext.so" }));
+    if (sdk_root) |root| {
+        const sdk_shim = try std.fs.path.join(allocator, &.{ root, "lib", "libzigrad_mlir_ext.so" });
+        if (path_exists(sdk_shim)) return sdk_shim;
+        allocator.free(sdk_shim);
+    }
+
+    const local_candidates = [_][]const u8{
+        "shim/build-mlir/libzigrad_mlir_ext.so",
+        "shim/build/libzigrad_mlir_ext.so",
+    };
+    for (local_candidates) |candidate| {
+        if (!path_exists(candidate)) continue;
+        return @as(?[]u8, try std.fs.cwd().realpathAlloc(allocator, candidate));
+    }
+
+    return null;
+}
+
+fn path_exists(path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.accessAbsolute(path, .{}) catch return false;
+        return true;
+    }
+
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }
 
 pub fn success_or(res: c.MlirLogicalResult, err: anytype) @TypeOf(err)!void {
