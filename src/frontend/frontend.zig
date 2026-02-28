@@ -480,18 +480,20 @@ pub fn compile_program(
     if (config.kernelize) |cfg| {
         lower_cfg.kernelization_lane = cfg.lane;
 
+        // MLIR lane requires text encoding — MLIR-stage passes (select,
+        // materialize) need to parse/re-serialize the artifact between stages.
         if (cfg.lane == .mlir) {
+            lower_cfg.encoding = .text;
             if (cfg.package == null) return error.ValidationFailed;
             if (!providers_support_mlir_compile(cfg.providers)) return error.Unsupported;
         }
 
         if (cfg.lane == .pr) {
-            const package_for_kernelize = if (cfg.lane == .pr) cfg.package else null;
             kernelize_state = .{
                 .registry = cfg.registry,
-                .package = package_for_kernelize,
+                .package = cfg.package,
                 .providers = cfg.providers,
-                .rewrite_regions = cfg.lane == .pr,
+                .rewrite_regions = true,
                 .target_name_mode = .region_name,
             };
             try passes.append(allocator, kernelize_state.?.pass());
@@ -511,9 +513,18 @@ pub fn compile_program(
     try passes.append(allocator, lower.validate_pass);
     try passes.append(allocator, lower.lower_pass_with_config(&lower_cfg));
 
-    if (mlir_materialize_state) |*state| {
-        try passes.append(allocator, state.pass());
+    // MLIR-stage passes: explicit pipeline ordering.
+    // MLIR lane: select → materialize → legalize
+    // PR lane (or no kernelization): legalize only
+    if (config.kernelize) |cfg| {
+        if (cfg.lane == .mlir) {
+            try passes.append(allocator, pipeline.MlirSelectPass.pass());
+            if (mlir_materialize_state) |*state| {
+                try passes.append(allocator, state.pass());
+            }
+        }
     }
+    try passes.append(allocator, pipeline.MlirLegalizePass.pass());
 
     var dump_mlir_local: ?dump.DumpConfig = null;
     if (config.dump_mlir) |cfg| {

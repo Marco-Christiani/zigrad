@@ -256,6 +256,17 @@ pub const Module = struct {
         ) orelse Error.InvalidMlir;
     }
 
+    /// Parse a module from arbitrary bytes (text or bytecode).
+    ///
+    /// Unlike `parse`, this accepts `[]const u8` without null-termination,
+    /// which is required for MLIR bytecode (which may contain embedded nulls).
+    /// The MLIR C API auto-detects the format from magic bytes.
+    pub fn parse_bytes(ctx: Context, source: []const u8) !Module {
+        return Module.wrap_or(
+            c.mlirModuleCreateParse(ctx._inner, string_ref(source)),
+        ) orelse Error.InvalidMlir;
+    }
+
     pub fn from_operation(operation: Operation) Module {
         return .{ ._inner = c.mlirModuleFromOperation(operation._inner) };
     }

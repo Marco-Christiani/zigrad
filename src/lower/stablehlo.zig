@@ -20,13 +20,6 @@ const log = std.log.scoped(.@"zg/lower_stablehlo");
 pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 
 const zigrad_kernel_call_op_name = "zigrad.kernel_call";
-const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legalize),canonicalize,cse";
-const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-kernel-select),canonicalize,cse";
-
-const LoweredMlir = struct {
-    bytes: []u8,
-    pre_pass_text: ?[]u8 = null,
-};
 
 pub const OutputFormat = enum {
     mlir_text,
@@ -96,25 +89,27 @@ const LowerContext = struct {
 /// - Non-entry functions retain their PR names, except when a non-entry function
 ///   is already named "main" and a different entry is selected; that symbol is
 ///   renamed to avoid collisions.
+/// Lower a PR program to StableHLO MLIR.
+///
+/// This is baseline lowering only: PR ops become MLIR ops. No MLIR-stage
+/// passes (select, legalize) are executed — those are separate pipeline
+/// passes composed explicitly by the caller.
 pub fn lower_program_to_mlir(
     allocator: std.mem.Allocator,
     program: *const pr.Program,
     entry_name: ?[]const u8,
     out: OutputFormat,
 ) LowerError![]u8 {
-    const lowered = try lower_program_to_mlir_capture(allocator, program, entry_name, out, false, .pr);
-    if (lowered.pre_pass_text) |text| allocator.free(text);
-    return lowered.bytes;
+    return lower_program_impl(allocator, program, entry_name, out, .pr);
 }
 
-fn lower_program_to_mlir_capture(
+fn lower_program_impl(
     allocator: std.mem.Allocator,
     program: *const pr.Program,
     entry_name: ?[]const u8,
     out: OutputFormat,
-    capture_pre_pass_text: bool,
     kernelization_lane: KernelizationLane,
-) LowerError!LoweredMlir {
+) LowerError![]u8 {
     pr.validate_program(program) catch return error.InvalidProgram;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -156,33 +151,9 @@ fn lower_program_to_mlir_capture(
         try lower_function_into_module(arena, ctx, module, func, sym_name, kernelization_lane);
     }
 
-    var pre_pass_text: ?[]u8 = null;
-
-    switch (kernelization_lane) {
-        .pr => {
-            if (capture_pre_pass_text) {
-                pre_pass_text = try serialize_module(allocator, module, .mlir_text);
-            }
-            try run_mlir_pass_pipeline(ctx, module, zigrad_kernel_legalize_pipeline);
-        },
-        .mlir => {
-            try run_mlir_pass_pipeline(ctx, module, zigrad_kernel_select_pipeline);
-            if (capture_pre_pass_text) {
-                // MLIR materialization consumes selected carrier ops, so the
-                // captured text must reflect state after `zg-kernel-select` and
-                // before legalization to StableHLO custom_call.
-                pre_pass_text = try serialize_module(allocator, module, .mlir_text);
-            }
-            try run_mlir_pass_pipeline(ctx, module, zigrad_kernel_legalize_pipeline);
-        },
-    }
-
     if (!module.op().verify()) return error.InvalidMlir;
 
-    return .{
-        .bytes = try serialize_module(allocator, module, out),
-        .pre_pass_text = pre_pass_text,
-    };
+    return serialize_module(allocator, module, out);
 }
 
 fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: OutputFormat) LowerError![]u8 {
@@ -195,15 +166,6 @@ fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: Outp
     }
 
     return writer_state.toOwnedSlice() catch return error.OutOfMemory;
-}
-
-fn run_mlir_pass_pipeline(mlir_ctx: mlir.Context, module: mlir.Module, pipeline: [:0]const u8) LowerError!void {
-    var pm = mlir.PassManager.init(mlir_ctx) catch return error.InvalidMlir;
-    defer pm.deinit();
-
-    var op_pm = pm.as_op_pass_manager();
-    op_pm.add_pipeline(pipeline) catch return error.InvalidMlir;
-    pm.run_on_op(module.op()) catch return error.InvalidMlir;
 }
 
 pub fn lower_function_to_mlir(allocator: std.mem.Allocator, func: pr.Function, out: OutputFormat) LowerError![]u8 {
@@ -1009,7 +971,6 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
     const cfg: *LowerPassConfig = @ptrCast(@alignCast(ptr));
-
     const program = artifact.pr;
 
     const format: OutputFormat = switch (cfg.encoding) {
@@ -1017,20 +978,18 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         .bytecode => .mlir_bytecode,
     };
 
-    const lowered = try lower_program_to_mlir_capture(
+    const bytes = try lower_program_impl(
         ctx.allocator,
         program,
         cfg.entry_name,
         format,
-        cfg.encoding == .text or cfg.kernelization_lane == .mlir,
         cfg.kernelization_lane,
     );
 
     artifact.replace(ctx.allocator, .{
         .mlir = .{
-            .bytes = lowered.bytes,
+            .bytes = bytes,
             .encoding = cfg.encoding,
-            .pre_pass_text = lowered.pre_pass_text,
         },
     });
 }
@@ -1416,7 +1375,7 @@ test "lowering tags kernelize provider on outlined functions" {
     try std.testing.expect(std.mem.indexOf(u8, text, "tvm") != null);
 }
 
-test "lower pass mlir lane selects kernelized ops without outlining" {
+test "lower pass mlir lane tags markers without outlining" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1438,6 +1397,7 @@ test "lower pass mlir lane selects kernelized ops without outlining" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
+    // Lower pass is baseline only — no select/legalize.
     var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
@@ -1445,21 +1405,21 @@ test "lower pass mlir lane selects kernelized ops without outlining" {
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    const pre_pass_text = artifact.mlir.pre_pass_text orelse return error.InvalidMlir;
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.region") != null);
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "main_outlined_0") == null);
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "func.call") == null);
+    // Marker attributes present on ops (for select pass to consume later).
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.region") != null);
 
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernel_key = \"matmul_region\"") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.provider = \"mirage\"") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") == null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") == null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") == null);
+    // No outlining (MLIR lane keeps ops inline).
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") == null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "func.call") == null);
+
+    // Original ops preserved — select/legalize are separate passes.
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") != null);
 }
 
-test "lower pass mlir lane rewrites dot-add chain" {
+test "lower pass mlir lane tags dot-add chain markers" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1487,17 +1447,14 @@ test "lower pass mlir lane rewrites dot-add chain" {
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    const pre_pass_text = artifact.mlir.pre_pass_text orelse return error.InvalidMlir;
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.region") != null);
-
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernel_key = \"dot_add_region\"") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") == null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") == null);
+    // Markers present; original ops preserved (select/legalize are separate).
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.region") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") != null);
 }
 
-test "lower pass mlir lane rewrites dot-log chain" {
+test "lower pass mlir lane tags dot-log chain markers" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1524,13 +1481,13 @@ test "lower pass mlir lane rewrites dot-log chain" {
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernel_key = \"dot_log_region\"") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") == null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.log") == null);
+    // Markers present; original ops preserved.
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.log") != null);
 }
 
-test "lower pass mlir lane keeps near-miss region on baseline ops" {
+test "lower pass mlir lane tags near-miss region markers" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1559,11 +1516,9 @@ test "lower pass mlir lane keeps near-miss region on baseline ops" {
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    const pre_pass_text = artifact.mlir.pre_pass_text orelse return error.InvalidMlir;
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, "zigrad.kernelize.region") != null);
-
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") == null);
+    // Markers present; all original ops preserved (near-miss won't match select).
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.region") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.subtract") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") != null);
@@ -1594,7 +1549,7 @@ test "lower pass produces MLIR artifact" {
     try std.testing.expect(output.mlir.bytes.len > 0);
 }
 
-test "lower pass captures pre-pass zigrad dialect and post-pass transformed MLIR" {
+test "lower pass emits zigrad.kernel_call for custom_call ops (pre-legalize)" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1608,6 +1563,7 @@ test "lower pass captures pre-pass zigrad dialect and post-pass transformed MLIR
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
+    // Lower pass is baseline — no legalize.
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
@@ -1615,9 +1571,8 @@ test "lower pass captures pre-pass zigrad dialect and post-pass transformed MLIR
     defer artifact.deinit(testing.allocator);
 
     try testing.expectEqual(pass.ArtifactKind.mlir, artifact.kind());
-    const pre_pass_text = artifact.mlir.pre_pass_text orelse return error.InvalidMlir;
 
-    try testing.expect(std.mem.indexOf(u8, pre_pass_text, zigrad_kernel_call_op_name) != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, zigrad_kernel_call_op_name) == null);
+    // Custom calls are emitted as zigrad.kernel_call (legalize converts to stablehlo.custom_call).
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, zigrad_kernel_call_op_name) != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") == null);
 }

@@ -31,3 +31,7 @@ pub const KernelizePass = kernelize.KernelizePass;
 
 pub const mlir_materialize = @import("mlir_materialize.zig");
 pub const MlirKernelMaterializePass = mlir_materialize.MlirKernelMaterializePass;
+
+pub const mlir_passes = @import("mlir_passes.zig");
+pub const MlirSelectPass = mlir_passes.MlirSelectPass;
+pub const MlirLegalizePass = mlir_passes.MlirLegalizePass;

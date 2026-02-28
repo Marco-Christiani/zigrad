@@ -585,7 +585,9 @@ pub fn run_kernel_provider_demo(
     };
     const providers = [_]zg.kernel.KernelProvider{mirage_provider_impl.kernel_provider()};
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+    // MLIR lane requires text encoding — MLIR-stage passes (select, materialize)
+    // need to parse/re-serialize the artifact between stages.
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null or lane == .mlir) .text else .bytecode;
     var exe = try compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
@@ -676,9 +678,16 @@ pub fn compile_program(
     try passes.append(allocator, zg.lower.validate_pass);
     try passes.append(allocator, zg.lower.lower_pass_with_config(&lower_cfg_mut));
 
-    if (mlir_materialize_state) |*state| {
-        try passes.append(allocator, state.pass());
+    // MLIR-stage passes: explicit pipeline ordering.
+    if (kernelize_cfg) |cfg| {
+        if (cfg.lane == .mlir) {
+            try passes.append(allocator, zg.pipeline.MlirSelectPass.pass());
+            if (mlir_materialize_state) |*state| {
+                try passes.append(allocator, state.pass());
+            }
+        }
     }
+    try passes.append(allocator, zg.pipeline.MlirLegalizePass.pass());
 
     var dump_mlir_local: ?zg.pipeline.DumpConfig = null;
     if (dump_mlir) |cfg| {

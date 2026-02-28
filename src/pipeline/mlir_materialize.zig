@@ -11,13 +11,17 @@ const log = std.log.scoped(.@"zg/mlir_materialize");
 /// pre-legalize `zigrad.kernel_call` operations.
 ///
 /// Responsibilities:
-/// 1. Parse `artifact.mlir.pre_pass_text` as MLIR.
+/// 1. Parse `artifact.mlir.bytes` (the current MLIR state, post-select).
 /// 2. Discover selected `zigrad.kernel_call` operations and extract
 ///    provider/key/pattern/type descriptors.
 /// 3. Ensure each selected key has an artifact:
 ///    - prefer an existing registry entry,
 ///    - otherwise compile from the MLIR descriptor via provider `compile_mlir`.
 /// 4. Populate `KernelPackage` by deterministic kernel id.
+///
+/// This pass must run after `MlirSelectPass` (which emits `zigrad.kernel_call`
+/// ops) and before `MlirLegalizePass` (which converts them to
+/// `stablehlo.custom_call`).
 pub const MlirKernelMaterializePass = struct {
     registry: *kernel.KernelRegistry,
     package: *kernel.KernelPackage,
@@ -42,13 +46,11 @@ pub const MlirKernelMaterializePass = struct {
 
         const self: *MlirKernelMaterializePass = @ptrCast(@alignCast(ptr));
         const mlir_artifact = &artifact.mlir;
-        const pre_pass_text = mlir_artifact.pre_pass_text orelse {
-            log.debug("mlir materialize: no pre-pass text available; skipping", .{});
-            return;
-        };
 
-        const kernel_calls = collect_kernel_calls_from_mlir(ctx.allocator, pre_pass_text) catch {
-            log.err("failed to parse pre-pass MLIR for kernel materialization", .{});
+        const kernel_calls = collect_kernel_calls_from_mlir(ctx.allocator, mlir_artifact.bytes) catch {
+            log.err("failed to parse MLIR artifact for kernel materialization ({s} encoding, {d} bytes)", .{
+                @tagName(mlir_artifact.encoding), mlir_artifact.bytes.len,
+            });
             return error.InvalidMlir;
         };
         defer {
@@ -197,7 +199,7 @@ pub const MlirKernelMaterializePass = struct {
 
     fn collect_kernel_calls_from_mlir(
         allocator: std.mem.Allocator,
-        text: []const u8,
+        bytes: []const u8,
     ) ![]KernelCallPlan {
         var registry = mlir.Registry.init() catch return error.OutOfMemory;
         defer registry.deinit();
@@ -213,10 +215,7 @@ pub const MlirKernelMaterializePass = struct {
         func_handle.register_dialect(mlir_ctx);
         _ = func_handle.load_dialect(mlir_ctx);
 
-        const text_z = try allocator.dupeZ(u8, text);
-        defer allocator.free(text_z);
-
-        var module = mlir.Module.parse(mlir_ctx, text_z) catch return error.InvalidMlir;
+        var module = mlir.Module.parse_bytes(mlir_ctx, bytes) catch return error.InvalidMlir;
         defer module.deinit();
 
         var calls = try std.ArrayList(KernelCallPlan).initCapacity(allocator, 8);
@@ -472,13 +471,13 @@ test "mlir materialize pass populates package from registry" {
         .providers = &.{},
     };
 
+    // Artifact bytes contain zigrad.kernel_call ops (post-select, pre-legalize).
     var artifact = pass_mod.Artifact{ .mlir = .{
-        .bytes = try testing.allocator.dupe(u8, "module"),
-        .encoding = .text,
-        .pre_pass_text = try testing.allocator.dupe(
+        .bytes = try testing.allocator.dupe(
             u8,
             "module { func.func @main(%a: tensor<2x3xf32>, %b: tensor<3x2xf32>) -> tensor<2x2xf32> { %0 = \"zigrad.kernel_call\"(%a, %b) {api_version = 4 : i32, call_target_name = \"zigrad.kernel.dispatch\", has_side_effect = false, backend_config = {zigrad.kernel_key = \"k0\", zigrad.provider = \"mirage\", zigrad.pattern = \"dot\"}} : (tensor<2x3xf32>, tensor<3x2xf32>) -> tensor<2x2xf32> return %0 : tensor<2x2xf32> } }\n",
         ),
+        .encoding = .text,
     } };
     defer artifact.deinit(testing.allocator);
 
@@ -532,12 +531,11 @@ test "mlir materialize compiles missing key via provider compile_mlir" {
     };
 
     var artifact = pass_mod.Artifact{ .mlir = .{
-        .bytes = try testing.allocator.dupe(u8, "module"),
-        .encoding = .text,
-        .pre_pass_text = try testing.allocator.dupe(
+        .bytes = try testing.allocator.dupe(
             u8,
             "module { func.func @main(%a: tensor<2x3xf32>, %b: tensor<3x2xf32>) -> tensor<2x2xf32> { %0 = \"zigrad.kernel_call\"(%a, %b) {api_version = 4 : i32, call_target_name = \"zigrad.kernel.dispatch\", has_side_effect = false, backend_config = {zigrad.kernel_key = \"k_mlir\", zigrad.provider = \"mock\", zigrad.pattern = \"dot\"}} : (tensor<2x3xf32>, tensor<3x2xf32>) -> tensor<2x2xf32> return %0 : tensor<2x2xf32> } }\n",
         ),
+        .encoding = .text,
     } };
     defer artifact.deinit(testing.allocator);
 
