@@ -18,12 +18,22 @@ pub const MirageProvider = struct {
             .name = "mirage",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
+            .compile_mlir_fn = compile_mlir_impl,
         };
     }
 
     fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         const self: *MirageProvider = @ptrCast(@alignCast(ptr));
         return self.compile(desc, allocator);
+    }
+
+    fn compile_mlir_impl(
+        ptr: *anyopaque,
+        desc: kernel.MlirKernelDescriptor,
+        allocator: std.mem.Allocator,
+    ) kernel.CompileError!kernel.KernelArtifact {
+        const self: *MirageProvider = @ptrCast(@alignCast(ptr));
+        return self.compile_mlir(desc, allocator);
     }
 
     fn compile(self: *MirageProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
@@ -63,6 +73,84 @@ pub const MirageProvider = struct {
 
         try lower_region_graph(desc, graph_ptr, &tensor_map, allocator);
 
+        return self.compile_graph_to_artifact(desc.name, allocator, &ctx, graph_ptr);
+    }
+
+    fn compile_mlir(
+        self: *MirageProvider,
+        desc: kernel.MlirKernelDescriptor,
+        allocator: std.mem.Allocator,
+    ) kernel.CompileError!kernel.KernelArtifact {
+        if (desc.outputs.len != 1) return error.Unsupported;
+
+        const required_inputs: usize = switch (desc.pattern) {
+            .dot, .dot_general, .dot_log, .dot_exp => 2,
+            .dot_add, .dot_add_mul => 3,
+        };
+        if (desc.inputs.len != required_inputs) return error.Unsupported;
+
+        var ctx = mirage_api.Context.init() catch |err| switch (err) {
+            error.MirageUnavailable => return error.MirageLoadFailed,
+            error.MirageInvalidArgument => return error.MirageInvalidArgument,
+            error.MirageInternalError => return error.MirageInternalError,
+            error.MirageApiUnsupported => return error.MirageApiUnsupported,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer ctx.deinit();
+
+        var graph: ?*mirage_c.MirageGraph = null;
+        {
+            const st = mirage_c.mirage_graph_create(ctx.raw, &graph);
+            if (st != .ok) {
+                log.err("mirage_graph_create failed for '{s}': {s}", .{ desc.name, mirage_api.status_name(st) });
+                return map_runtime_status(st);
+            }
+        }
+        const graph_ptr = graph orelse {
+            log.err("mirage_graph_create returned null graph for '{s}'", .{desc.name});
+            return error.MirageContractError;
+        };
+        defer mirage_c.mirage_graph_destroy(graph_ptr);
+
+        var handles = try std.ArrayList(mirage_c.MirageTensor).initCapacity(allocator, desc.inputs.len);
+        defer handles.deinit(allocator);
+
+        for (desc.inputs) |input_desc| {
+            const handle = try emit_graph_input(graph_ptr, input_desc, allocator);
+            try handles.append(allocator, handle);
+        }
+
+        var out_tensor = try emit_matmul(graph_ptr, handles.items[0], handles.items[1]);
+        switch (desc.pattern) {
+            .dot, .dot_general => {},
+            .dot_add => {
+                out_tensor = try emit_binary(graph_ptr, .add, out_tensor, handles.items[2]);
+            },
+            .dot_add_mul => {
+                const sum = try emit_binary(graph_ptr, .add, out_tensor, handles.items[2]);
+                out_tensor = try emit_binary(graph_ptr, .mul, sum, handles.items[2]);
+            },
+            .dot_log => {
+                out_tensor = try emit_unary(graph_ptr, .log, out_tensor);
+            },
+            .dot_exp => {
+                out_tensor = try emit_unary(graph_ptr, .exp, out_tensor);
+            },
+        }
+
+        const mark_status = mirage_c.mirage_graph_mark_output(graph_ptr, out_tensor);
+        if (mark_status != .ok) return map_region_status(mark_status);
+
+        return self.compile_graph_to_artifact(desc.name, allocator, &ctx, graph_ptr);
+    }
+
+    fn compile_graph_to_artifact(
+        self: *MirageProvider,
+        target_name: []const u8,
+        allocator: std.mem.Allocator,
+        ctx: *mirage_api.Context,
+        graph_ptr: *mirage_c.MirageGraph,
+    ) kernel.CompileError!kernel.KernelArtifact {
         {
             const superopt_opts = mirage_c.SuperoptOptions{
                 .max_num_graphs = superopt_max_num_graphs,
@@ -85,9 +173,9 @@ pub const MirageProvider = struct {
             const st = mirage_c.mirage_graph_superoptimize_with_options(graph_ptr, null, &superopt_opts);
             if (st != .ok) {
                 if (st == .unsupported) {
-                    log.debug("mirage superopt unsupported for region '{s}'", .{desc.name});
+                    log.debug("mirage superopt unsupported for region '{s}'", .{target_name});
                 } else {
-                    log.err("mirage_graph_superoptimize failed for '{s}': {s}", .{ desc.name, mirage_api.status_name(st) });
+                    log.err("mirage_graph_superoptimize failed for '{s}': {s}", .{ target_name, mirage_api.status_name(st) });
                 }
                 return map_region_status(st);
             }
@@ -107,22 +195,22 @@ pub const MirageProvider = struct {
 
         if (status != .ok) {
             if (status == .unsupported) {
-                log.debug("mirage compile unsupported for region '{s}'", .{desc.name});
+                log.debug("mirage compile unsupported for region '{s}'", .{target_name});
             } else {
-                log.err("mirage_graph_compile failed for '{s}': {s}", .{ desc.name, mirage_api.status_name(status) });
+                log.err("mirage_graph_compile failed for '{s}': {s}", .{ target_name, mirage_api.status_name(status) });
             }
             return map_region_status(status);
         }
 
         if (launch_info.workspace_bytes != 0) {
-            log.debug("mirage launch workspace for '{s}': {d} bytes", .{ desc.name, launch_info.workspace_bytes });
+            log.debug("mirage launch workspace for '{s}': {d} bytes", .{ target_name, launch_info.workspace_bytes });
         }
 
         if (artifact_len == 0) return error.MirageContractError;
 
         const validate_status = mirage_c.mirage_validate_artifact(ctx.raw, artifact_ptr, artifact_len);
         if (validate_status != .ok) {
-            log.err("mirage_validate_artifact failed for '{s}': {s}", .{ desc.name, mirage_api.status_name(validate_status) });
+            log.err("mirage_validate_artifact failed for '{s}': {s}", .{ target_name, mirage_api.status_name(validate_status) });
             return error.MirageContractError;
         }
 
@@ -132,13 +220,33 @@ pub const MirageProvider = struct {
         return .{
             .provider_name = "mirage",
             .data = artifact_bytes,
-            .target_name = try allocator.dupe(u8, desc.name),
+            .target_name = try allocator.dupe(u8, target_name),
             .workspace_bytes = launch_info.workspace_bytes,
             .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
             .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
     }
 };
+
+fn emit_graph_input(
+    graph: *mirage_c.MirageGraph,
+    input_desc: kernel.MlirTensorDesc,
+    allocator: std.mem.Allocator,
+) kernel.CompileError!mirage_c.MirageTensor {
+    const dtype = dtype_to_mirage(input_desc.dtype) orelse return error.Unsupported;
+
+    const dims = try allocator.alloc(i64, input_desc.dims.len);
+    defer allocator.free(dims);
+    for (input_desc.dims, 0..) |dim, idx| {
+        if (dim == 0 or dim > std.math.maxInt(i64)) return error.Unsupported;
+        dims[idx] = @intCast(dim);
+    }
+
+    var handle: mirage_c.MirageTensor = 0;
+    const st = mirage_c.mirage_graph_new_input(graph, dims.ptr, dims.len, dtype, &handle);
+    if (st != .ok) return map_region_status(st);
+    return handle;
+}
 
 fn lower_region_graph(
     desc: kernel.RegionDescriptor,

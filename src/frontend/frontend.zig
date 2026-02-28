@@ -13,6 +13,13 @@ const utils = @import("../utils/host_buffer.zig");
 
 pub const train = @import("train.zig");
 
+fn providers_support_mlir_compile(providers: []const kernel.KernelProvider) bool {
+    for (providers) |provider| {
+        if (provider.compile_mlir_fn == null) return false;
+    }
+    return true;
+}
+
 pub const TensorSpec = struct {
     dtype: pr.DType,
     dims: []const usize,
@@ -457,7 +464,7 @@ pub fn compile_program(
     var lower_cfg = config.lower;
     if (lower_cfg.entry_name == null) lower_cfg.entry_name = entry_name;
 
-    var passes = std.ArrayList(pipeline.Pass).initCapacity(allocator, 4) catch
+    var passes = std.ArrayList(pipeline.Pass).initCapacity(allocator, 6) catch
         return error.OutOfMemory;
     defer passes.deinit(allocator);
 
@@ -469,20 +476,44 @@ pub fn compile_program(
     }
 
     var kernelize_state: ?kernelize.KernelizePass = null;
+    var mlir_materialize_state: ?pipeline.MlirKernelMaterializePass = null;
     if (config.kernelize) |cfg| {
         lower_cfg.kernelization_lane = cfg.lane;
-        kernelize_state = .{
-            .registry = cfg.registry,
-            .package = cfg.package,
-            .providers = cfg.providers,
-            .rewrite_regions = cfg.lane == .pr,
-            .target_name_mode = .region_name,
-        };
-        try passes.append(allocator, kernelize_state.?.pass());
+
+        if (cfg.lane == .mlir) {
+            if (cfg.package == null) return error.ValidationFailed;
+            if (!providers_support_mlir_compile(cfg.providers)) return error.Unsupported;
+        }
+
+        if (cfg.lane == .pr) {
+            const package_for_kernelize = if (cfg.lane == .pr) cfg.package else null;
+            kernelize_state = .{
+                .registry = cfg.registry,
+                .package = package_for_kernelize,
+                .providers = cfg.providers,
+                .rewrite_regions = cfg.lane == .pr,
+                .target_name_mode = .region_name,
+            };
+            try passes.append(allocator, kernelize_state.?.pass());
+        }
+
+        if (cfg.lane == .mlir) {
+            if (cfg.package) |pkg| {
+                mlir_materialize_state = .{
+                    .registry = cfg.registry,
+                    .package = pkg,
+                    .providers = cfg.providers,
+                };
+            }
+        }
     }
 
     try passes.append(allocator, lower.validate_pass);
     try passes.append(allocator, lower.lower_pass_with_config(&lower_cfg));
+
+    if (mlir_materialize_state) |*state| {
+        try passes.append(allocator, state.pass());
+    }
 
     var dump_mlir_local: ?dump.DumpConfig = null;
     if (config.dump_mlir) |cfg| {
@@ -504,7 +535,10 @@ pub fn compile_program(
 
     var compile_opts = config.compile;
     if (compile_opts.kernel_package == null) {
-        compile_opts.kernel_package = mlir.kernel_package;
+        compile_opts.kernel_package = if (config.kernelize) |cfg|
+            cfg.package orelse mlir.kernel_package
+        else
+            mlir.kernel_package;
     }
     if (compile_opts.kernel_registry == null) {
         compile_opts.kernel_registry = if (config.kernelize) |cfg| cfg.registry else null;

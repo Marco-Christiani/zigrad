@@ -21,7 +21,7 @@ pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 
 const zigrad_kernel_call_op_name = "zigrad.kernel_call";
 const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legalize),canonicalize,cse";
-const zigrad_kernel_select_and_legalize_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-kernel-select,zg-kernel-legalize),canonicalize,cse";
+const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-kernel-select),canonicalize,cse";
 
 const LoweredMlir = struct {
     bytes: []u8,
@@ -156,17 +156,26 @@ fn lower_program_to_mlir_capture(
         try lower_function_into_module(arena, ctx, module, func, sym_name, kernelization_lane);
     }
 
-    const pre_pass_text = if (capture_pre_pass_text)
-        try serialize_module(allocator, module, .mlir_text)
-    else
-        null;
+    var pre_pass_text: ?[]u8 = null;
 
-    const pipeline = switch (kernelization_lane) {
-        .pr => zigrad_kernel_legalize_pipeline,
-        .mlir => zigrad_kernel_select_and_legalize_pipeline,
-    };
-
-    try run_zigrad_kernel_legalize_pipeline(ctx, module, pipeline);
+    switch (kernelization_lane) {
+        .pr => {
+            if (capture_pre_pass_text) {
+                pre_pass_text = try serialize_module(allocator, module, .mlir_text);
+            }
+            try run_mlir_pass_pipeline(ctx, module, zigrad_kernel_legalize_pipeline);
+        },
+        .mlir => {
+            try run_mlir_pass_pipeline(ctx, module, zigrad_kernel_select_pipeline);
+            if (capture_pre_pass_text) {
+                // MLIR materialization consumes selected carrier ops, so the
+                // captured text must reflect state after `zg-kernel-select` and
+                // before legalization to StableHLO custom_call.
+                pre_pass_text = try serialize_module(allocator, module, .mlir_text);
+            }
+            try run_mlir_pass_pipeline(ctx, module, zigrad_kernel_legalize_pipeline);
+        },
+    }
 
     if (!module.op().verify()) return error.InvalidMlir;
 
@@ -188,7 +197,7 @@ fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: Outp
     return writer_state.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn run_zigrad_kernel_legalize_pipeline(mlir_ctx: mlir.Context, module: mlir.Module, pipeline: [:0]const u8) LowerError!void {
+fn run_mlir_pass_pipeline(mlir_ctx: mlir.Context, module: mlir.Module, pipeline: [:0]const u8) LowerError!void {
     var pm = mlir.PassManager.init(mlir_ctx) catch return error.InvalidMlir;
     defer pm.deinit();
 
@@ -1013,7 +1022,7 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         program,
         cfg.entry_name,
         format,
-        cfg.encoding == .text,
+        cfg.encoding == .text or cfg.kernelization_lane == .mlir,
         cfg.kernelization_lane,
     );
 

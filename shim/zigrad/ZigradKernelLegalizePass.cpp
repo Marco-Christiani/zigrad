@@ -56,91 +56,129 @@ static bool is_named_op(Operation *op, StringRef name) {
     return op != nullptr && op->getName().getStringRef() == name;
 }
 
-static bool rewrite_matmul_add_mul_chain(Operation *mul_op, func::FuncOp func,
-                                         OpBuilder &builder) {
-    if (mul_op->getNumOperands() != 2) return false;
+static Operation *create_kernel_call(Operation *anchor,
+                                     ValueRange operands,
+                                     TypeRange result_types,
+                                     const KernelMarkers &markers,
+                                     StringRef pattern,
+                                     PatternRewriter &rewriter) {
+  NamedAttrList backend_fields;
+  backend_fields.append("zigrad.kernel_key", markers.kernel_key);
+  backend_fields.append("zigrad.provider", markers.provider);
+  backend_fields.append("zigrad.pattern", rewriter.getStringAttr(pattern));
 
-    const auto mul_markers = resolve_kernel_markers(mul_op, func);
-    if (!mul_markers) return false;
+  OperationState state(anchor->getLoc(), "zigrad.kernel_call");
+  state.addOperands(operands);
+  state.addTypes(result_types);
+  state.addAttribute("api_version", rewriter.getI32IntegerAttr(kTypedFfiApiVersion));
+  state.addAttribute("call_target_name", rewriter.getStringAttr(kDispatchTargetName));
+  state.addAttribute("has_side_effect", rewriter.getBoolAttr(false));
+  state.addAttribute("backend_config", rewriter.getDictionaryAttr(backend_fields));
 
-    const Value mul_lhs = mul_op->getOperand(0);
-    const Value mul_rhs = mul_op->getOperand(1);
-    Operation *mul_lhs_def = mul_lhs.getDefiningOp();
-    Operation *mul_rhs_def = mul_rhs.getDefiningOp();
+  return rewriter.create(state);
+}
 
-    Operation *add_op = nullptr;
-    Value passthrough;
-    if (is_named_op(mul_lhs_def, "stablehlo.add")) {
-        add_op = mul_lhs_def;
-        passthrough = mul_rhs;
-    } else if (is_named_op(mul_rhs_def, "stablehlo.add")) {
-        add_op = mul_rhs_def;
-        passthrough = mul_lhs;
-    } else {
-        return false;
-    }
+static LogicalResult rewrite_matmul_add_chain(Operation *add_op,
+                                              func::FuncOp func,
+                                              PatternRewriter &rewriter) {
+  if (add_op->getNumOperands() != 2) return failure();
 
-    const auto add_markers = resolve_kernel_markers(add_op, func);
-    if (!add_markers || !marker_pair_equal(*mul_markers, *add_markers)) {
-        return false;
-    }
+  const auto add_markers = resolve_kernel_markers(add_op, func);
+  if (!add_markers) return failure();
 
-    if (add_op->getNumOperands() != 2) return false;
+  const Value add_lhs = add_op->getOperand(0);
+  const Value add_rhs = add_op->getOperand(1);
+  Operation *add_lhs_def = add_lhs.getDefiningOp();
+  Operation *add_rhs_def = add_rhs.getDefiningOp();
 
-    const Value add_lhs = add_op->getOperand(0);
-    const Value add_rhs = add_op->getOperand(1);
-    Operation *add_lhs_def = add_lhs.getDefiningOp();
-    Operation *add_rhs_def = add_rhs.getDefiningOp();
+  Operation *dot_op = nullptr;
+  Value passthrough;
+  if (is_kernelizable_carrier_source(add_lhs_def)) {
+    dot_op = add_lhs_def;
+    passthrough = add_rhs;
+  } else if (is_kernelizable_carrier_source(add_rhs_def)) {
+    dot_op = add_rhs_def;
+    passthrough = add_lhs;
+  } else {
+    return failure();
+  }
 
-    Operation *dot_op = nullptr;
-    if (is_kernelizable_carrier_source(add_lhs_def) && add_rhs == passthrough) {
-        dot_op = add_lhs_def;
-    } else if (is_kernelizable_carrier_source(add_rhs_def) && add_lhs == passthrough) {
-        dot_op = add_rhs_def;
-    } else {
-        return false;
-    }
+  if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse()) {
+    return failure();
+  }
 
-    const auto dot_markers = resolve_kernel_markers(dot_op, func);
-    if (!dot_markers || !marker_pair_equal(*mul_markers, *dot_markers)) {
-        return false;
-    }
+  const auto dot_markers = resolve_kernel_markers(dot_op, func);
+  if (dot_markers && !marker_pair_equal(*add_markers, *dot_markers)) {
+    return failure();
+  }
 
-    if (dot_op->getNumOperands() != 2) return false;
+  if (dot_op->getNumOperands() != 2) return failure();
 
-    builder.setInsertionPoint(mul_op);
+  SmallVector<Value, 3> call_operands = {
+      dot_op->getOperand(0),
+      dot_op->getOperand(1),
+      passthrough,
+  };
 
-    NamedAttrList backend_fields;
-    backend_fields.append("zigrad.kernel_key", mul_markers->kernel_key);
-    backend_fields.append("zigrad.provider", mul_markers->provider);
+  Operation *replacement =
+      create_kernel_call(add_op, call_operands, add_op->getResultTypes(),
+                         *add_markers, "dot_add", rewriter);
+  rewriter.replaceOp(add_op, replacement->getResults());
 
-    SmallVector<Value, 3> call_operands = {
-        dot_op->getOperand(0),
-        dot_op->getOperand(1),
-        passthrough,
-    };
+  if (dot_op->use_empty()) rewriter.eraseOp(dot_op);
 
-    OperationState state(mul_op->getLoc(), "zigrad.kernel_call");
-    state.addOperands(call_operands);
-    state.addTypes(mul_op->getResultTypes());
-    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
-    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
-    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
-    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
+  return success();
+}
 
-    Operation *replacement = builder.create(state);
-    mul_op->replaceAllUsesWith(replacement->getResults());
-    mul_op->erase();
+static LogicalResult rewrite_matmul_unary_chain(Operation *unary_op,
+                                                func::FuncOp func,
+                                                PatternRewriter &rewriter) {
+  const StringRef unary_name = unary_op->getName().getStringRef();
+  if (unary_name != "stablehlo.log" && unary_name != "stablehlo.exponential") {
+    return failure();
+  }
 
-    if (add_op->use_empty()) add_op->erase();
-    if (dot_op->use_empty()) dot_op->erase();
+  if (unary_op->getNumOperands() != 1) return failure();
 
-    return true;
+  const auto unary_markers = resolve_kernel_markers(unary_op, func);
+  if (!unary_markers) return failure();
+
+  Operation *dot_op = unary_op->getOperand(0).getDefiningOp();
+  if (!is_kernelizable_carrier_source(dot_op)) return failure();
+
+  if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse()) {
+    return failure();
+  }
+
+  const auto dot_markers = resolve_kernel_markers(dot_op, func);
+  if (dot_markers && !marker_pair_equal(*unary_markers, *dot_markers)) {
+    return failure();
+  }
+
+  if (dot_op->getNumOperands() != 2) return failure();
+
+  SmallVector<Value, 2> call_operands = {
+      dot_op->getOperand(0),
+      dot_op->getOperand(1),
+  };
+
+  Operation *replacement =
+      create_kernel_call(unary_op, call_operands, unary_op->getResultTypes(),
+                         *unary_markers,
+                         unary_name == "stablehlo.log" ? "dot_log" : "dot_exp",
+                         rewriter);
+  rewriter.replaceOp(unary_op, replacement->getResults());
+
+  if (dot_op->use_empty()) rewriter.eraseOp(dot_op);
+
+  return success();
 }
 
 struct MatmulAddMulToKernelCallPattern final : RewritePattern {
+  /// Match stablehlo.multiply(stablehlo.add(stablehlo.dot, x), x) and emit
+  /// one zigrad.kernel_call carrier op.
   explicit MatmulAddMulToKernelCallPattern(MLIRContext *ctx)
-      : RewritePattern("stablehlo.multiply", 1, ctx) {}
+      : RewritePattern("stablehlo.multiply", 3, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
@@ -170,7 +208,7 @@ struct MatmulAddMulToKernelCallPattern final : RewritePattern {
     }
 
     const auto add_markers = resolve_kernel_markers(add_op, func);
-    if (!add_markers || !marker_pair_equal(*mul_markers, *add_markers)) {
+    if (add_markers && !marker_pair_equal(*mul_markers, *add_markers)) {
       return failure();
     }
 
@@ -191,15 +229,11 @@ struct MatmulAddMulToKernelCallPattern final : RewritePattern {
     }
 
     const auto dot_markers = resolve_kernel_markers(dot_op, func);
-    if (!dot_markers || !marker_pair_equal(*mul_markers, *dot_markers)) {
+    if (dot_markers && !marker_pair_equal(*mul_markers, *dot_markers)) {
       return failure();
     }
 
     if (dot_op->getNumOperands() != 2) return failure();
-
-    NamedAttrList backend_fields;
-    backend_fields.append("zigrad.kernel_key", mul_markers->kernel_key);
-    backend_fields.append("zigrad.provider", mul_markers->provider);
 
     SmallVector<Value, 3> call_operands = {
         dot_op->getOperand(0),
@@ -207,15 +241,9 @@ struct MatmulAddMulToKernelCallPattern final : RewritePattern {
         passthrough,
     };
 
-    OperationState state(op->getLoc(), "zigrad.kernel_call");
-    state.addOperands(call_operands);
-    state.addTypes(op->getResultTypes());
-    state.addAttribute("api_version", rewriter.getI32IntegerAttr(kTypedFfiApiVersion));
-    state.addAttribute("call_target_name", rewriter.getStringAttr(kDispatchTargetName));
-    state.addAttribute("has_side_effect", rewriter.getBoolAttr(false));
-    state.addAttribute("backend_config", rewriter.getDictionaryAttr(backend_fields));
-
-    Operation *replacement = rewriter.create(state);
+    Operation *replacement =
+        create_kernel_call(op, call_operands, op->getResultTypes(), *mul_markers,
+                           "dot_add_mul", rewriter);
     rewriter.replaceOp(op, replacement->getResults());
 
     if (add_op->use_empty()) rewriter.eraseOp(add_op);
@@ -224,124 +252,6 @@ struct MatmulAddMulToKernelCallPattern final : RewritePattern {
     return success();
   }
 };
-
-static bool rewrite_matmul_add_chain(Operation *add_op, func::FuncOp func,
-                                     OpBuilder &builder) {
-    if (add_op->getNumOperands() != 2) return false;
-
-    const auto add_markers = resolve_kernel_markers(add_op, func);
-    if (!add_markers) return false;
-
-    const Value add_lhs = add_op->getOperand(0);
-    const Value add_rhs = add_op->getOperand(1);
-    Operation *add_lhs_def = add_lhs.getDefiningOp();
-    Operation *add_rhs_def = add_rhs.getDefiningOp();
-
-    Operation *dot_op = nullptr;
-    Value passthrough;
-    if (is_kernelizable_carrier_source(add_lhs_def)) {
-        dot_op = add_lhs_def;
-        passthrough = add_rhs;
-    } else if (is_kernelizable_carrier_source(add_rhs_def)) {
-        dot_op = add_rhs_def;
-        passthrough = add_lhs;
-    } else {
-        return false;
-    }
-
-    if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse()) {
-        return false;
-    }
-
-    const auto dot_markers = resolve_kernel_markers(dot_op, func);
-    if (!dot_markers || !marker_pair_equal(*add_markers, *dot_markers)) {
-        return false;
-    }
-
-    if (dot_op->getNumOperands() != 2) return false;
-
-    builder.setInsertionPoint(add_op);
-
-    NamedAttrList backend_fields;
-    backend_fields.append("zigrad.kernel_key", add_markers->kernel_key);
-    backend_fields.append("zigrad.provider", add_markers->provider);
-
-    SmallVector<Value, 3> call_operands = {
-        dot_op->getOperand(0),
-        dot_op->getOperand(1),
-        passthrough,
-    };
-
-    OperationState state(add_op->getLoc(), "zigrad.kernel_call");
-    state.addOperands(call_operands);
-    state.addTypes(add_op->getResultTypes());
-    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
-    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
-    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
-    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
-
-    Operation *replacement = builder.create(state);
-    add_op->replaceAllUsesWith(replacement->getResults());
-    add_op->erase();
-
-    if (dot_op->use_empty()) dot_op->erase();
-
-    return true;
-}
-
-static bool rewrite_matmul_unary_chain(Operation *unary_op, func::FuncOp func,
-                                       OpBuilder &builder) {
-    const StringRef unary_name = unary_op->getName().getStringRef();
-    if (unary_name != "stablehlo.log" && unary_name != "stablehlo.exponential") {
-        return false;
-    }
-
-    if (unary_op->getNumOperands() != 1) return false;
-
-    const auto unary_markers = resolve_kernel_markers(unary_op, func);
-    if (!unary_markers) return false;
-
-    Operation *dot_op = unary_op->getOperand(0).getDefiningOp();
-    if (!is_kernelizable_carrier_source(dot_op)) return false;
-
-    if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse()) {
-        return false;
-    }
-
-    const auto dot_markers = resolve_kernel_markers(dot_op, func);
-    if (!dot_markers || !marker_pair_equal(*unary_markers, *dot_markers)) {
-        return false;
-    }
-
-    if (dot_op->getNumOperands() != 2) return false;
-
-    builder.setInsertionPoint(unary_op);
-
-    NamedAttrList backend_fields;
-    backend_fields.append("zigrad.kernel_key", unary_markers->kernel_key);
-    backend_fields.append("zigrad.provider", unary_markers->provider);
-
-    SmallVector<Value, 2> call_operands = {
-        dot_op->getOperand(0),
-        dot_op->getOperand(1),
-    };
-
-    OperationState state(unary_op->getLoc(), "zigrad.kernel_call");
-    state.addOperands(call_operands);
-    state.addTypes(unary_op->getResultTypes());
-    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
-    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
-    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
-    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
-
-    Operation *replacement = builder.create(state);
-    unary_op->replaceAllUsesWith(replacement->getResults());
-    unary_op->erase();
-
-    if (dot_op->use_empty()) dot_op->erase();
-
-    return true;
-}
 
 static bool has_same_region_consumers(Operation *source_op, func::FuncOp func,
                                       const KernelMarkers &markers) {
@@ -356,27 +266,67 @@ static bool has_same_region_consumers(Operation *source_op, func::FuncOp func,
     return false;
 }
 
-static void rewrite_single_source_to_kernel_call(Operation *source_op,
-                                                 const KernelMarkers &markers,
-                                                 OpBuilder &builder) {
-    builder.setInsertionPoint(source_op);
+static LogicalResult rewrite_single_source_to_kernel_call(
+    Operation *source_op, func::FuncOp func, PatternRewriter &rewriter) {
+  const auto markers = resolve_kernel_markers(source_op, func);
+  if (!markers) return failure();
 
-    NamedAttrList backend_fields;
-    backend_fields.append("zigrad.kernel_key", markers.kernel_key);
-    backend_fields.append("zigrad.provider", markers.provider);
+  if (has_same_region_consumers(source_op, func, *markers)) {
+    return failure();
+  }
 
-    OperationState state(source_op->getLoc(), "zigrad.kernel_call");
-    state.addOperands(source_op->getOperands());
-    state.addTypes(source_op->getResultTypes());
-    state.addAttribute("api_version", builder.getI32IntegerAttr(kTypedFfiApiVersion));
-    state.addAttribute("call_target_name", builder.getStringAttr(kDispatchTargetName));
-    state.addAttribute("has_side_effect", builder.getBoolAttr(false));
-    state.addAttribute("backend_config", builder.getDictionaryAttr(backend_fields));
-
-    Operation *replacement = builder.create(state);
-    source_op->replaceAllUsesWith(replacement->getResults());
-    source_op->erase();
+  Operation *replacement =
+      create_kernel_call(source_op, source_op->getOperands(),
+                         source_op->getResultTypes(), *markers,
+                         source_op->getName().getStringRef() == "stablehlo.dot_general"
+                             ? "dot_general"
+                             : "dot",
+                         rewriter);
+  rewriter.replaceOp(source_op, replacement->getResults());
+  return success();
 }
+
+struct MatmulAddToKernelCallPattern final : RewritePattern {
+  /// Match stablehlo.add(stablehlo.dot, x) and emit zigrad.kernel_call.
+  explicit MatmulAddToKernelCallPattern(MLIRContext *ctx)
+      : RewritePattern("stablehlo.add", 2, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func) return failure();
+    return rewrite_matmul_add_chain(op, func, rewriter);
+  }
+};
+
+struct MatmulUnaryToKernelCallPattern final : RewritePattern {
+  /// Match stablehlo.{log,exponential}(stablehlo.dot) and emit
+  /// zigrad.kernel_call.
+  explicit MatmulUnaryToKernelCallPattern(MLIRContext *ctx,
+                                          StringRef op_name)
+      : RewritePattern(op_name, 2, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func) return failure();
+    return rewrite_matmul_unary_chain(op, func, rewriter);
+  }
+};
+
+struct SourceToKernelCallPattern final : RewritePattern {
+  /// Fallback: match a single kernelizable source op with no same-region
+  /// downstream consumers and emit zigrad.kernel_call.
+  explicit SourceToKernelCallPattern(MLIRContext *ctx, StringRef op_name)
+      : RewritePattern(op_name, 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func) return failure();
+    return rewrite_single_source_to_kernel_call(op, func, rewriter);
+  }
+};
 
 struct ZigradKernelSelectPass final
     : PassWrapper<ZigradKernelSelectPass, OperationPass<func::FuncOp>> {
@@ -389,55 +339,19 @@ struct ZigradKernelSelectPass final
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
-    {
-      RewritePatternSet mul_patterns(&getContext());
-      mul_patterns.add<MatmulAddMulToKernelCallPattern>(&getContext());
-      if (failed(applyPatternsGreedily(func, std::move(mul_patterns)))) {
-        signalPassFailure();
-        return;
-      }
-    }
+    RewritePatternSet patterns(&getContext());
+    patterns.add<MatmulAddMulToKernelCallPattern>(&getContext());
+    patterns.add<MatmulAddToKernelCallPattern>(&getContext());
+    patterns.add<MatmulUnaryToKernelCallPattern>(&getContext(),
+                                                 "stablehlo.log");
+    patterns.add<MatmulUnaryToKernelCallPattern>(&getContext(),
+                                                 "stablehlo.exponential");
+    patterns.add<SourceToKernelCallPattern>(&getContext(),
+                                            "stablehlo.dot_general");
+    patterns.add<SourceToKernelCallPattern>(&getContext(), "stablehlo.dot");
 
-    OpBuilder builder(func.getContext());
-
-    SmallVector<Operation *> add_candidates;
-    func.walk([&](Operation *op) {
-      if (is_named_op(op, "stablehlo.add")) {
-        add_candidates.push_back(op);
-      }
-    });
-
-    for (Operation *add_op : add_candidates) {
-      (void)rewrite_matmul_add_chain(add_op, func, builder);
-    }
-
-    SmallVector<Operation *> unary_candidates;
-    func.walk([&](Operation *op) {
-      if (is_named_op(op, "stablehlo.log") || is_named_op(op, "stablehlo.exponential")) {
-        unary_candidates.push_back(op);
-      }
-    });
-
-    for (Operation *unary_op : unary_candidates) {
-      (void)rewrite_matmul_unary_chain(unary_op, func, builder);
-    }
-
-    SmallVector<Operation *> source_candidates;
-    func.walk([&](Operation *op) {
-      if (is_kernelizable_carrier_source(op)) {
-        source_candidates.push_back(op);
-      }
-    });
-
-    for (Operation *source_op : source_candidates) {
-      const auto markers = resolve_kernel_markers(source_op, func);
-      if (!markers) continue;
-
-      if (has_same_region_consumers(source_op, func, *markers)) {
-        continue;
-      }
-
-      rewrite_single_source_to_kernel_call(source_op, *markers, builder);
+    if (failed(applyPatternsGreedily(func, std::move(patterns)))) {
+      signalPassFailure();
     }
   }
 };

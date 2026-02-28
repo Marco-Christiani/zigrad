@@ -306,6 +306,39 @@ pub const KernelArtifact = struct {
 };
 
 // ============================================================================
+// MLIR Kernel Descriptors
+// ============================================================================
+
+/// Ranked tensor descriptor extracted from an MLIR operation signature.
+pub const MlirTensorDesc = struct {
+    dtype: pr.DType,
+    dims: []const usize,
+};
+
+/// Stable operation-pattern identity selected by MLIR kernel passes.
+pub const MlirKernelPattern = enum {
+    dot,
+    dot_general,
+    dot_add,
+    dot_add_mul,
+    dot_log,
+    dot_exp,
+};
+
+/// Provider-neutral descriptor for one selected MLIR kernel call.
+///
+/// This descriptor is intentionally small and stable: it captures only the
+/// information needed to compile known selected carrier patterns without
+/// depending on PR region descriptors.
+pub const MlirKernelDescriptor = struct {
+    name: []const u8,
+    provider_name: []const u8,
+    pattern: MlirKernelPattern,
+    inputs: []const MlirTensorDesc,
+    outputs: []const MlirTensorDesc,
+};
+
+// ============================================================================
 // Kernel Provider
 // ============================================================================
 
@@ -346,9 +379,19 @@ pub const KernelProvider = struct {
     name: []const u8,
     ptr: *anyopaque,
     compile_fn: *const fn (ptr: *anyopaque, desc: RegionDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact,
+    compile_mlir_fn: ?*const fn (ptr: *anyopaque, desc: MlirKernelDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact = null,
 
     pub fn compile(self: KernelProvider, desc: RegionDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact {
         return self.compile_fn(self.ptr, desc, allocator);
+    }
+
+    /// Compile from a selected MLIR kernel call descriptor.
+    ///
+    /// Providers may leave this unimplemented (`null`) to signal that MLIR-side
+    /// materialization must use alternate paths.
+    pub fn compile_mlir(self: KernelProvider, desc: MlirKernelDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact {
+        const compile_mlir_fn = self.compile_mlir_fn orelse return error.Unsupported;
+        return compile_mlir_fn(self.ptr, desc, allocator);
     }
 };
 

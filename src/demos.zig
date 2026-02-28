@@ -1,6 +1,13 @@
 const std = @import("std");
 const zg = @import("zigrad");
 
+fn providers_support_mlir_compile(providers: []const zg.kernel.KernelProvider) bool {
+    for (providers) |provider| {
+        if (provider.compile_mlir_fn == null) return false;
+    }
+    return true;
+}
+
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.createFileAbsolute(path, .{ .truncate = true })
@@ -622,7 +629,7 @@ pub fn compile_program(
 ) !zg.backend.pjrt.LoadedExecutable {
     var lower_cfg_mut = lower_cfg;
 
-    var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(allocator, 4) catch
+    var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(allocator, 6) catch
         return error.OutOfMemory;
     defer passes.deinit(allocator);
 
@@ -634,20 +641,44 @@ pub fn compile_program(
     }
 
     var kernelize_state: ?zg.pipeline.KernelizePass = null;
+    var mlir_materialize_state: ?zg.pipeline.MlirKernelMaterializePass = null;
     if (kernelize_cfg) |cfg| {
         lower_cfg_mut.kernelization_lane = cfg.lane;
-        kernelize_state = .{
-            .registry = cfg.registry,
-            .package = cfg.package,
-            .providers = cfg.providers,
-            .rewrite_regions = cfg.lane == .pr,
-            .target_name_mode = .region_name,
-        };
-        try passes.append(allocator, kernelize_state.?.pass());
+
+        if (cfg.lane == .mlir) {
+            if (cfg.package == null) return error.ValidationFailed;
+            if (!providers_support_mlir_compile(cfg.providers)) return error.Unsupported;
+        }
+
+        if (cfg.lane == .pr) {
+            const package_for_kernelize = if (cfg.lane == .pr) cfg.package else null;
+            kernelize_state = .{
+                .registry = cfg.registry,
+                .package = package_for_kernelize,
+                .providers = cfg.providers,
+                .rewrite_regions = cfg.lane == .pr,
+                .target_name_mode = .region_name,
+            };
+            try passes.append(allocator, kernelize_state.?.pass());
+        }
+
+        if (cfg.lane == .mlir) {
+            if (cfg.package) |pkg| {
+                mlir_materialize_state = .{
+                    .registry = cfg.registry,
+                    .package = pkg,
+                    .providers = cfg.providers,
+                };
+            }
+        }
     }
 
     try passes.append(allocator, zg.lower.validate_pass);
     try passes.append(allocator, zg.lower.lower_pass_with_config(&lower_cfg_mut));
+
+    if (mlir_materialize_state) |*state| {
+        try passes.append(allocator, state.pass());
+    }
 
     var dump_mlir_local: ?zg.pipeline.DumpConfig = null;
     if (dump_mlir) |cfg| {
@@ -669,8 +700,15 @@ pub fn compile_program(
     };
 
     var compile_opts: zg.backend.pjrt.CompileOptions = .{};
-    compile_opts.kernel_package = if (kernelize_cfg) |cfg| cfg.package else mlir.kernel_package;
-    compile_opts.kernel_registry = if (kernelize_cfg) |cfg| cfg.registry else null;
+    if (compile_opts.kernel_package == null) {
+        compile_opts.kernel_package = if (kernelize_cfg) |cfg|
+            cfg.package orelse mlir.kernel_package
+        else
+            mlir.kernel_package;
+    }
+    if (compile_opts.kernel_registry == null) {
+        compile_opts.kernel_registry = if (kernelize_cfg) |cfg| cfg.registry else null;
+    }
     return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
 }
 

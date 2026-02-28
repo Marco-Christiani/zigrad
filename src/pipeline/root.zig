@@ -28,3 +28,6 @@ pub const dump_mlir_pass_with_config = dump.dump_mlir_pass_with_config;
 
 pub const kernelize = @import("kernelize.zig");
 pub const KernelizePass = kernelize.KernelizePass;
+
+pub const mlir_materialize = @import("mlir_materialize.zig");
+pub const MlirKernelMaterializePass = mlir_materialize.MlirKernelMaterializePass;
