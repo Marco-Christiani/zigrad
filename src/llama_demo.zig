@@ -60,7 +60,7 @@ fn loss_fn_with_options(
         .w_out = params.w_out,
         .norm = params.norm,
         .layers = layers[0..],
-    }, 1e-5, forward_opts);
+    }, 1e-6, forward_opts);
     const logits_f0 = if (upcast_loss and logits.tensor.dtype == .bf16) try logits.convert(.f32) else logits;
     const logits_f = logits_f0;
     const b = logits_f.builder;
@@ -1370,18 +1370,47 @@ fn fill_causal_mask_bf16(out: []u16, seq: usize) void {
     }
 }
 
+/// Apply LLaMA 3 wavelength-based three-region frequency correction in-place.
+/// Parameters match LLaMA 3.2-1B config.json rope_scaling section.
+fn llama3_rope_freq_correction(inv_freq: []f32) void {
+    const factor: f32 = 32.0;
+    const low_freq_factor: f32 = 1.0;
+    const high_freq_factor: f32 = 4.0;
+    const old_context_len: f32 = 8192.0;
+
+    const low_freq_wavelen = old_context_len / low_freq_factor;
+    const high_freq_wavelen = old_context_len / high_freq_factor;
+
+    for (inv_freq) |*freq| {
+        const wavelen = 2.0 * std.math.pi / freq.*;
+        if (wavelen > low_freq_wavelen) {
+            // Low-freq region: divide by factor.
+            freq.* /= factor;
+        } else if (wavelen >= high_freq_wavelen) {
+            // Medium-freq region: smooth interpolation.
+            const smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
+            const scaled = freq.* / factor;
+            freq.* = (1.0 - smooth) * scaled + smooth * freq.*;
+        }
+        // High-freq region (wavelen < high_freq_wavelen): unchanged.
+    }
+}
+
 fn fill_rope_tables(out_sin: []f32, out_cos: []f32, seq: usize, head_dim: usize) void {
     const half = head_dim / 2;
     if (out_sin.len != seq * half or out_cos.len != seq * half) return;
 
-    const base: f32 = 10000.0;
-    var i: usize = 0;
-    while (i < seq) : (i += 1) {
-        var j: usize = 0;
-        while (j < half) : (j += 1) {
-            const exp = @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(head_dim));
-            const inv = 1.0 / std.math.pow(f32, base, exp);
-            const theta = @as(f32, @floatFromInt(i)) * inv;
+    const base: f32 = 500000.0;
+    var inv_freq: [32]f32 = undefined;
+    for (0..half) |j| {
+        const exp = @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(head_dim));
+        inv_freq[j] = 1.0 / std.math.pow(f32, base, exp);
+    }
+    llama3_rope_freq_correction(inv_freq[0..half]);
+
+    for (0..seq) |i| {
+        for (0..half) |j| {
+            const theta = @as(f32, @floatFromInt(i)) * inv_freq[j];
             out_sin[i * half + j] = @sin(theta);
             out_cos[i * half + j] = @cos(theta);
         }
@@ -1392,14 +1421,17 @@ fn fill_rope_tables_bf16(out_sin: []u16, out_cos: []u16, seq: usize, head_dim: u
     const half = head_dim / 2;
     if (out_sin.len != seq * half or out_cos.len != seq * half) return;
 
-    const base: f32 = 10000.0;
-    var i: usize = 0;
-    while (i < seq) : (i += 1) {
-        var j: usize = 0;
-        while (j < half) : (j += 1) {
-            const exp = @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(head_dim));
-            const inv = 1.0 / std.math.pow(f32, base, exp);
-            const theta = @as(f32, @floatFromInt(i)) * inv;
+    const base: f32 = 500000.0;
+    var inv_freq: [32]f32 = undefined;
+    for (0..half) |j| {
+        const exp = @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(head_dim));
+        inv_freq[j] = 1.0 / std.math.pow(f32, base, exp);
+    }
+    llama3_rope_freq_correction(inv_freq[0..half]);
+
+    for (0..seq) |i| {
+        for (0..half) |j| {
+            const theta = @as(f32, @floatFromInt(i)) * inv_freq[j];
             out_sin[i * half + j] = f32_to_bf16(@sin(theta));
             out_cos[i * half + j] = f32_to_bf16(@cos(theta));
         }

@@ -224,6 +224,9 @@ fn self_attention(
     return proj_flat.reshape(&.{ batch_size, seq, hidden });
 }
 
+/// Apply rotary position embeddings using split-half layout (LLaMA 3 convention).
+/// x1 = x[:,:,:,:half], x2 = x[:,:,:,half:]
+/// result = concat(x1*cos - x2*sin, x2*cos + x1*sin, dim=3)
 fn apply_rope_bshd(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.frontend.Tensor) !zg.frontend.Tensor {
     std.debug.assert(x.tensor.shape.dims.len == 4);
     std.debug.assert(sin.tensor.shape.dims.len == 2);
@@ -244,28 +247,20 @@ fn apply_rope_bshd(x: zg.frontend.Tensor, sin: zg.frontend.Tensor, cos: zg.front
     const h_i64: i64 = @intCast(heads);
     const half_i64: i64 = @intCast(half);
 
-    const x5 = try x.reshape(&.{ batch_size, seq, heads, half, 2 });
-    const x_even = try x5.slice(&.{ 0, 0, 0, 0, 0 }, &.{ b_i64, s_i64, h_i64, half_i64, 1 }, &.{ 1, 1, 1, 1, 1 });
-    const x_odd = try x5.slice(&.{ 0, 0, 0, 0, 1 }, &.{ b_i64, s_i64, h_i64, half_i64, 2 }, &.{ 1, 1, 1, 1, 1 });
+    // Split-half: x1 = first half of head_dim, x2 = second half.
+    const x1 = try x.slice(&.{ 0, 0, 0, 0 }, &.{ b_i64, s_i64, h_i64, half_i64 }, &.{ 1, 1, 1, 1 });
+    const x2 = try x.slice(&.{ 0, 0, 0, half_i64 }, &.{ b_i64, s_i64, h_i64, @as(i64, @intCast(head_dim)) }, &.{ 1, 1, 1, 1 });
 
-    const x_even3 = try x_even.reshape(&.{ batch_size, seq, heads, half });
-    const x_odd3 = try x_odd.reshape(&.{ batch_size, seq, heads, half });
-
+    // Broadcast sin/cos from [S, half] to [B, S, H, half].
     const sin_b = try sin.broadcast_in_dim(&.{ batch_size, seq, heads, half }, &.{ 1, 3 });
     const cos_b = try cos.broadcast_in_dim(&.{ batch_size, seq, heads, half }, &.{ 1, 3 });
 
-    const a = try x_even3.mul(cos_b);
-    const b = try x_odd3.mul(sin_b);
-    const y_even = try a.sub(b);
+    // y1 = x1 * cos - x2 * sin
+    const y1 = try (try x1.mul(cos_b)).sub(try x2.mul(sin_b));
+    // y2 = x2 * cos + x1 * sin
+    const y2 = try (try x2.mul(cos_b)).add(try x1.mul(sin_b));
 
-    const c = try x_even3.mul(sin_b);
-    const d = try x_odd3.mul(cos_b);
-    const y_odd = try c.add(d);
-
-    const y_even5 = try y_even.reshape(&.{ batch_size, seq, heads, half, 1 });
-    const y_odd5 = try y_odd.reshape(&.{ batch_size, seq, heads, half, 1 });
-    const out = try y_even5.concatenate(&.{y_odd5}, 4);
-    return out.reshape(&.{ batch_size, seq, heads, head_dim });
+    return y1.concatenate(&.{y2}, 3);
 }
 
 fn apply_attention_masks(scores: zg.frontend.Tensor, causal_pred: zg.frontend.Tensor, attn_pred: zg.frontend.Tensor) !zg.frontend.Tensor {
