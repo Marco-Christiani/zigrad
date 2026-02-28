@@ -480,10 +480,7 @@ pub fn compile_program(
     if (config.kernelize) |cfg| {
         lower_cfg.kernelization_lane = cfg.lane;
 
-        // MLIR lane requires text encoding — MLIR-stage passes (select,
-        // materialize) need to parse/re-serialize the artifact between stages.
         if (cfg.lane == .mlir) {
-            lower_cfg.encoding = .text;
             if (cfg.package == null) return error.ValidationFailed;
             if (!providers_support_mlir_compile(cfg.providers)) return error.Unsupported;
         }

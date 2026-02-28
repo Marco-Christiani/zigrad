@@ -197,6 +197,12 @@ pub const MlirKernelMaterializePass = struct {
         }
     };
 
+    /// Parse artifact bytes and collect all `zigrad.kernel_call` operations.
+    ///
+    /// Registers all required dialects including zigrad extensions so that
+    /// both text and bytecode encodings can be parsed. The zigrad extension
+    /// shim is already loaded by earlier passes (singleton with mutex guard),
+    /// so the cost here is just dialect registration on this context.
     fn collect_kernel_calls_from_mlir(
         allocator: std.mem.Allocator,
         bytes: []const u8,
@@ -209,11 +215,20 @@ pub const MlirKernelMaterializePass = struct {
 
         var mlir_ctx = mlir.Context.init_with_registry(registry, false) catch return error.OutOfMemory;
         defer mlir_ctx.deinit();
-        mlir_ctx.allow_unregistered_dialects(true);
+        mlir_ctx.allow_unregistered_dialects(false);
+
+        mlir.register_zigrad_extensions(mlir_ctx) catch {
+            log.err("missing MLIR extension shim; cannot parse zigrad dialect ops", .{});
+            return error.InvalidMlir;
+        };
 
         const func_handle = mlir.DialectHandle.from_string("func");
         func_handle.register_dialect(mlir_ctx);
         _ = func_handle.load_dialect(mlir_ctx);
+
+        const stablehlo_handle = mlir.DialectHandle.from_string("stablehlo");
+        stablehlo_handle.register_dialect(mlir_ctx);
+        _ = stablehlo_handle.load_dialect(mlir_ctx);
 
         var module = mlir.Module.parse_bytes(mlir_ctx, bytes) catch return error.InvalidMlir;
         defer module.deinit();

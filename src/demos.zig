@@ -585,9 +585,7 @@ pub fn run_kernel_provider_demo(
     };
     const providers = [_]zg.kernel.KernelProvider{mirage_provider_impl.kernel_provider()};
 
-    // MLIR lane requires text encoding — MLIR-stage passes (select, materialize)
-    // need to parse/re-serialize the artifact between stages.
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null or lane == .mlir) .text else .bytecode;
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     var exe = try compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
