@@ -160,6 +160,7 @@ const FnReleaseBuffer = *const fn (
     buffer_ptr: [*]const u8,
     buffer_len: usize,
 ) callconv(.c) void;
+const FnReleaseDeviceMemory = *const fn () callconv(.c) void;
 
 var fn_status_string: ?FnStatusString = null;
 var fn_context_create: ?FnContextCreate = null;
@@ -177,6 +178,7 @@ var fn_graph_compile: ?FnGraphCompile = null;
 var fn_execute_kernel: ?FnExecuteKernel = null;
 var fn_validate_artifact: ?FnValidateArtifact = null;
 var fn_release_buffer: ?FnReleaseBuffer = null;
+var fn_release_device_memory: ?FnReleaseDeviceMemory = null;
 
 var load_mutex: std.Thread.Mutex = .{};
 var symbols_ready = false;
@@ -210,6 +212,7 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_execute_kernel = try load_symbol(FnExecuteKernel, handle, "mirage_execute_kernel");
     fn_validate_artifact = try load_symbol(FnValidateArtifact, handle, "mirage_validate_artifact");
     fn_release_buffer = try load_symbol(FnReleaseBuffer, handle, "mirage_release_buffer");
+    fn_release_device_memory = load_symbol_optional(FnReleaseDeviceMemory, handle, "mirage_release_device_memory");
 
     symbols_ready = true;
 }
@@ -338,6 +341,13 @@ pub fn mirage_validate_artifact(
 pub fn mirage_release_buffer(ctx: ?*MirageContext, buffer_ptr: [*]const u8, buffer_len: usize) void {
     const f = fn_release_buffer orelse return;
     f(ctx, buffer_ptr, buffer_len);
+}
+
+/// Release the Mirage DeviceMemoryManager singleton and its GPU allocations.
+/// No-op if the runtime doesn't expose this symbol (older builds).
+pub fn mirage_release_device_memory() void {
+    const f = fn_release_device_memory orelse return;
+    f();
 }
 
 fn load_symbol(comptime T: type, handle: *anyopaque, comptime symbol: [:0]const u8) LoadError!T {

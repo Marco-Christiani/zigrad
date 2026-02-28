@@ -228,6 +228,13 @@ pub const MirageProvider = struct {
     }
 };
 
+/// Release Mirage's DeviceMemoryManager singleton and its GPU allocations.
+/// Call after all kernel compiles are done so the backend allocator can
+/// reclaim the full device memory pool.
+pub fn release_device_memory() void {
+    mirage_c.mirage_release_device_memory();
+}
+
 fn emit_graph_input(
     graph: *mirage_c.MirageGraph,
     input_desc: kernel.MlirTensorDesc,

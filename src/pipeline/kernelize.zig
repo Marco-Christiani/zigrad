@@ -23,6 +23,7 @@ const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
 const pass_mod = @import("pass.zig");
+const mirage_provider = @import("../mirage/provider.zig");
 
 const log = std.log.scoped(.@"zg/kernelize");
 /// Temporary single custom_call target for kernelized dispatch.
@@ -83,6 +84,10 @@ pub const KernelizePass = struct {
             };
             functions[idx] = rewritten;
         }
+
+        // Release provider device memory (e.g. Mirage's DeviceMemoryManager singleton)
+        // so the backend allocator can reclaim the full GPU pool.
+        mirage_provider.release_device_memory();
     }
 
     fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator) !pr.Function {
