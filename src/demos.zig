@@ -701,6 +701,10 @@ pub fn compile_program(
     var artifact = try pipeline.run(.{ .pr = program }, &ctx);
     defer artifact.deinit(allocator);
 
+    if (kernelize_cfg) |cfg| {
+        for (cfg.providers) |provider| provider.finalize();
+    }
+
     const mlir = switch (artifact) {
         .mlir => |m| m,
         else => return error.UnexpectedArtifact,

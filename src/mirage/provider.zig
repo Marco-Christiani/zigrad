@@ -19,7 +19,18 @@ pub const MirageProvider = struct {
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
             .compile_mlir_fn = compile_mlir_impl,
+            .finalize_fn = finalize_impl,
+            .device_memory_info_fn = device_memory_info_impl,
         };
+    }
+
+    fn finalize_impl(_: *anyopaque) void {
+        release_device_memory();
+    }
+
+    fn device_memory_info_impl(_: *anyopaque) ?kernel.DeviceMemoryInfo {
+        const info = mirage_c.mirage_device_mem_info() orelse return null;
+        return .{ .free_bytes = info.free, .total_bytes = info.total };
     }
 
     fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
@@ -59,7 +70,7 @@ pub const MirageProvider = struct {
             const st = mirage_c.mirage_graph_create(ctx.raw, &graph);
             if (st != .ok) {
                 log.err("mirage_graph_create failed for '{s}': {s}", .{ desc.name, mirage_api.status_name(st) });
-                return map_runtime_status(st);
+                return map_mirage_status(st, .runtime);
             }
         }
         const graph_ptr = graph orelse {
@@ -103,7 +114,7 @@ pub const MirageProvider = struct {
             const st = mirage_c.mirage_graph_create(ctx.raw, &graph);
             if (st != .ok) {
                 log.err("mirage_graph_create failed for '{s}': {s}", .{ desc.name, mirage_api.status_name(st) });
-                return map_runtime_status(st);
+                return map_mirage_status(st, .runtime);
             }
         }
         const graph_ptr = graph orelse {
@@ -139,7 +150,7 @@ pub const MirageProvider = struct {
         }
 
         const mark_status = mirage_c.mirage_graph_mark_output(graph_ptr, out_tensor);
-        if (mark_status != .ok) return map_region_status(mark_status);
+        if (mark_status != .ok) return map_mirage_status(mark_status, .region);
 
         return self.compile_graph_to_artifact(desc.name, allocator, &ctx, graph_ptr);
     }
@@ -177,7 +188,7 @@ pub const MirageProvider = struct {
                 } else {
                     log.err("mirage_graph_superoptimize failed for '{s}': {s}", .{ target_name, mirage_api.status_name(st) });
                 }
-                return map_region_status(st);
+                return map_mirage_status(st, .region);
             }
         }
 
@@ -199,7 +210,7 @@ pub const MirageProvider = struct {
             } else {
                 log.err("mirage_graph_compile failed for '{s}': {s}", .{ target_name, mirage_api.status_name(status) });
             }
-            return map_region_status(status);
+            return map_mirage_status(status, .region);
         }
 
         if (launch_info.workspace_bytes != 0) {
@@ -251,7 +262,7 @@ fn emit_graph_input(
 
     var handle: mirage_c.MirageTensor = 0;
     const st = mirage_c.mirage_graph_new_input(graph, dims.ptr, dims.len, dtype, &handle);
-    if (st != .ok) return map_region_status(st);
+    if (st != .ok) return map_mirage_status(st, .region);
     return handle;
 }
 
@@ -275,7 +286,7 @@ fn lower_region_graph(
 
         var handle: mirage_c.MirageTensor = 0;
         const st = mirage_c.mirage_graph_new_input(graph, dims.ptr, dims.len, dtype, &handle);
-        if (st != .ok) return map_region_status(st);
+        if (st != .ok) return map_mirage_status(st, .region);
 
         try tensor_map.put(in_id, handle);
     }
@@ -292,7 +303,7 @@ fn lower_region_graph(
     for (desc.outputs) |out_id| {
         const out_tensor = tensor_map.get(out_id) orelse return error.Unsupported;
         const st = mirage_c.mirage_graph_mark_output(graph, out_tensor);
-        if (st != .ok) return map_region_status(st);
+        if (st != .ok) return map_mirage_status(st, .region);
     }
 }
 
@@ -363,7 +374,7 @@ fn lower_eqn(
 fn emit_matmul(graph: *mirage_c.MirageGraph, lhs: mirage_c.MirageTensor, rhs: mirage_c.MirageTensor) kernel.CompileError!mirage_c.MirageTensor {
     var out_tensor: mirage_c.MirageTensor = 0;
     const st = mirage_c.mirage_graph_matmul(graph, lhs, rhs, &out_tensor);
-    if (st != .ok) return map_region_status(st);
+    if (st != .ok) return map_mirage_status(st, .region);
     return out_tensor;
 }
 
@@ -374,7 +385,7 @@ fn emit_unary(
 ) kernel.CompileError!mirage_c.MirageTensor {
     var out_tensor: mirage_c.MirageTensor = 0;
     const st = mirage_c.mirage_graph_unary(graph, op, input, &out_tensor);
-    if (st != .ok) return map_region_status(st);
+    if (st != .ok) return map_mirage_status(st, .region);
     return out_tensor;
 }
 
@@ -386,7 +397,7 @@ fn emit_binary(
 ) kernel.CompileError!mirage_c.MirageTensor {
     var out_tensor: mirage_c.MirageTensor = 0;
     const st = mirage_c.mirage_graph_binary(graph, op, lhs, rhs, &out_tensor);
-    if (st != .ok) return map_region_status(st);
+    if (st != .ok) return map_mirage_status(st, .region);
     return out_tensor;
 }
 
@@ -403,32 +414,33 @@ fn dtype_to_mirage(dtype: pr.DType) ?mirage_c.MirageDType {
     };
 }
 
-fn map_region_status(status: mirage_c.MirageStatus) kernel.CompileError {
+const StatusContext = enum {
+    /// Region-level operation: `.unsupported` triggers provider fallback.
+    region,
+    /// Runtime API call: `.unsupported` is a hard error.
+    runtime,
+};
+
+fn map_mirage_status(status: mirage_c.MirageStatus, ctx: StatusContext) kernel.CompileError {
     return switch (status) {
         .ok => unreachable,
         .invalid_argument => error.MirageInvalidArgument,
         .internal_error => error.MirageInternalError,
-        .unsupported => error.Unsupported,
+        .unsupported => switch (ctx) {
+            .region => error.Unsupported,
+            .runtime => error.MirageApiUnsupported,
+        },
     };
 }
 
-fn map_runtime_status(status: mirage_c.MirageStatus) kernel.CompileError {
-    return switch (status) {
-        .ok => unreachable,
-        .invalid_argument => error.MirageInvalidArgument,
-        .internal_error => error.MirageInternalError,
-        .unsupported => error.MirageApiUnsupported,
-    };
-}
+test map_mirage_status {
+    // Region context: unsupported triggers provider fallback.
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument, .region));
+    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error, .region));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(.unsupported, .region));
 
-test "map_region_status preserves fallback boundary" {
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_region_status(.invalid_argument));
-    try std.testing.expectEqual(error.MirageInternalError, map_region_status(.internal_error));
-    try std.testing.expectEqual(error.Unsupported, map_region_status(.unsupported));
-}
-
-test "map_runtime_status preserves runtime unsupported" {
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_runtime_status(.invalid_argument));
-    try std.testing.expectEqual(error.MirageInternalError, map_runtime_status(.internal_error));
-    try std.testing.expectEqual(error.MirageApiUnsupported, map_runtime_status(.unsupported));
+    // Runtime context: unsupported is a hard API error.
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument, .runtime));
+    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error, .runtime));
+    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(.unsupported, .runtime));
 }

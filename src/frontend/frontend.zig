@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.@"zg/frontend");
 
 const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
@@ -536,6 +537,14 @@ pub fn compile_program(
     var artifact = try pipeline_run.run(.{ .pr = program }, &ctx);
     defer artifact.deinit(allocator);
 
+    if (config.kernelize) |cfg| {
+        for (cfg.providers) |provider| {
+            log_provider_device_memory("pre-finalize", provider);
+            provider.finalize();
+            log_provider_device_memory("post-finalize", provider);
+        }
+    }
+
     const mlir = switch (artifact) {
         .mlir => |m| m,
         else => return error.UnexpectedArtifact,
@@ -724,4 +733,15 @@ pub fn upload_host_buffer(
         .u64 => .u64,
     };
     return backend_handle.buffer_from_host(device, buf.data, dtype, shape_i64);
+}
+
+fn log_provider_device_memory(label: []const u8, provider: kernel.KernelProvider) void {
+    const info = provider.device_memory_info() orelse return;
+    const mb = 1024.0 * 1024.0;
+    log.info("{s} [{s}]: free={d:.1}MB total={d:.1}MB", .{
+        label,
+        provider.name,
+        @as(f64, @floatFromInt(info.free_bytes)) / mb,
+        @as(f64, @floatFromInt(info.total_bytes)) / mb,
+    });
 }

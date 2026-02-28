@@ -370,6 +370,16 @@ pub const CompileError = error{
     OutOfMemory,
 };
 
+/// Device memory snapshot from a provider's perspective.
+///
+/// Reports raw device memory visible to the provider (e.g. via `cudaMemGetInfo`
+/// or `hipMemGetInfo`), independent of any framework-level allocator like
+/// PJRT's BFC pool.
+pub const DeviceMemoryInfo = struct {
+    free_bytes: usize,
+    total_bytes: usize,
+};
+
 /// Extension component that can claim PR regions and produce KAs.
 ///
 /// Follows the Zig interface pattern (ptr + function pointer).
@@ -380,9 +390,30 @@ pub const KernelProvider = struct {
     ptr: *anyopaque,
     compile_fn: *const fn (ptr: *anyopaque, desc: RegionDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact,
     compile_mlir_fn: ?*const fn (ptr: *anyopaque, desc: MlirKernelDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact = null,
+    finalize_fn: ?*const fn (ptr: *anyopaque) void = null,
+    device_memory_info_fn: ?*const fn (ptr: *anyopaque) ?DeviceMemoryInfo = null,
 
     pub fn compile(self: KernelProvider, desc: RegionDescriptor, allocator: std.mem.Allocator) CompileError!KernelArtifact {
         return self.compile_fn(self.ptr, desc, allocator);
+    }
+
+    /// Release provider resources after all kernels have been compiled.
+    ///
+    /// Providers set this to free heavyweight state (e.g. GPU memory pools)
+    /// that would otherwise compete with the backend allocator. No-op when
+    /// the provider leaves `finalize_fn` as `null`.
+    pub fn finalize(self: KernelProvider) void {
+        const f = self.finalize_fn orelse return;
+        f(self.ptr);
+    }
+
+    /// Query device memory visible to this provider.
+    ///
+    /// Returns null if the provider has no device memory awareness
+    /// (e.g. CPU-only providers, or the runtime symbol is unavailable).
+    pub fn device_memory_info(self: KernelProvider) ?DeviceMemoryInfo {
+        const f = self.device_memory_info_fn orelse return null;
+        return f(self.ptr);
     }
 
     /// Compile from a selected MLIR kernel call descriptor.
@@ -394,6 +425,20 @@ pub const KernelProvider = struct {
         return compile_mlir_fn(self.ptr, desc, allocator);
     }
 };
+
+// ============================================================================
+// Kernel ID
+// ============================================================================
+
+/// Deterministic kernel id from a kernel key string.
+///
+/// Used by both the kernelize pass and MLIR materialize pass to map
+/// string-keyed artifacts to numeric ids for the KernelPackage.
+pub fn kernel_id_from_key(kernel_key: []const u8) u32 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(kernel_key);
+    return @truncate(hasher.final());
+}
 
 // ============================================================================
 // Kernel Registry
@@ -655,4 +700,71 @@ test "dot_general_is_canonical_batched_matmul rejects rank mismatch" {
         .rhs_contracting_dims = &.{1},
     } }};
     try std.testing.expect(!dot_general_is_canonical_batched_matmul(params[0..], 3, 4));
+}
+
+test "finalize calls hook when set" {
+    const Hook = struct {
+        called: bool = false,
+        fn impl(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.called = true;
+        }
+    };
+    var hook = Hook{};
+    const provider = KernelProvider{
+        .name = "test",
+        .ptr = @ptrCast(&hook),
+        .compile_fn = undefined,
+        .finalize_fn = Hook.impl,
+    };
+    provider.finalize();
+    try std.testing.expect(hook.called);
+}
+
+test "finalize is no-op when null" {
+    const provider = KernelProvider{
+        .name = "test",
+        .ptr = undefined,
+        .compile_fn = undefined,
+    };
+    // finalize_fn defaults to null; calling finalize must not panic.
+    provider.finalize();
+}
+
+test "device_memory_info calls hook when set" {
+    const Hook = struct {
+        fn impl(_: *anyopaque) ?DeviceMemoryInfo {
+            return .{ .free_bytes = 1024, .total_bytes = 4096 };
+        }
+    };
+    var dummy: u8 = 0;
+    const provider = KernelProvider{
+        .name = "test",
+        .ptr = @ptrCast(&dummy),
+        .compile_fn = undefined,
+        .device_memory_info_fn = Hook.impl,
+    };
+    const info = provider.device_memory_info() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1024), info.free_bytes);
+    try std.testing.expectEqual(@as(usize, 4096), info.total_bytes);
+}
+
+test "device_memory_info returns null when unset" {
+    const provider = KernelProvider{
+        .name = "test",
+        .ptr = undefined,
+        .compile_fn = undefined,
+    };
+    try std.testing.expect(provider.device_memory_info() == null);
+}
+
+test kernel_id_from_key {
+    // Deterministic: same input always produces the same id.
+    const id1 = kernel_id_from_key("zigrad.kernel.matmul_region");
+    const id2 = kernel_id_from_key("zigrad.kernel.matmul_region");
+    try std.testing.expectEqual(id1, id2);
+
+    // Different inputs produce different ids (with overwhelming probability).
+    const id3 = kernel_id_from_key("zigrad.kernel.other_region");
+    try std.testing.expect(id1 != id3);
 }

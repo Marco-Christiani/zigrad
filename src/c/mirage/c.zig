@@ -161,6 +161,10 @@ const FnReleaseBuffer = *const fn (
     buffer_len: usize,
 ) callconv(.c) void;
 const FnReleaseDeviceMemory = *const fn () callconv(.c) void;
+const FnDeviceMemInfo = *const fn (
+    out_free: *usize,
+    out_total: *usize,
+) callconv(.c) MirageStatus;
 
 var fn_status_string: ?FnStatusString = null;
 var fn_context_create: ?FnContextCreate = null;
@@ -179,6 +183,7 @@ var fn_execute_kernel: ?FnExecuteKernel = null;
 var fn_validate_artifact: ?FnValidateArtifact = null;
 var fn_release_buffer: ?FnReleaseBuffer = null;
 var fn_release_device_memory: ?FnReleaseDeviceMemory = null;
+var fn_device_mem_info: ?FnDeviceMemInfo = null;
 
 var load_mutex: std.Thread.Mutex = .{};
 var symbols_ready = false;
@@ -213,6 +218,7 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_validate_artifact = try load_symbol(FnValidateArtifact, handle, "mirage_validate_artifact");
     fn_release_buffer = try load_symbol(FnReleaseBuffer, handle, "mirage_release_buffer");
     fn_release_device_memory = load_symbol_optional(FnReleaseDeviceMemory, handle, "mirage_release_device_memory");
+    fn_device_mem_info = load_symbol_optional(FnDeviceMemInfo, handle, "mirage_device_mem_info");
 
     symbols_ready = true;
 }
@@ -346,8 +352,23 @@ pub fn mirage_release_buffer(ctx: ?*MirageContext, buffer_ptr: [*]const u8, buff
 /// Release the Mirage DeviceMemoryManager singleton and its GPU allocations.
 /// No-op if the runtime doesn't expose this symbol (older builds).
 pub fn mirage_release_device_memory() void {
-    const f = fn_release_device_memory orelse return;
+    const f = fn_release_device_memory orelse {
+        log.warn("mirage_release_device_memory symbol not found; skipping device memory release", .{});
+        return;
+    };
+    log.info("releasing mirage device memory", .{});
     f();
+}
+
+/// Query device memory from the underlying runtime (e.g. cudaMemGetInfo).
+/// Returns null if the symbol is unavailable or the query fails.
+pub fn mirage_device_mem_info() ?struct { free: usize, total: usize } {
+    const f = fn_device_mem_info orelse return null;
+    var free: usize = 0;
+    var total: usize = 0;
+    const st = f(&free, &total);
+    if (st != .ok) return null;
+    return .{ .free = free, .total = total };
 }
 
 fn load_symbol(comptime T: type, handle: *anyopaque, comptime symbol: [:0]const u8) LoadError!T {

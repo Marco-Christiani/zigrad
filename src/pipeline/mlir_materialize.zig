@@ -69,7 +69,7 @@ pub const MlirKernelMaterializePass = struct {
         self: *MlirKernelMaterializePass,
         call: *const KernelCallPlan,
     ) pass_mod.PassError!void {
-        const kernel_id = kernel_id_from_key(call.kernel_key);
+        const kernel_id = kernel.kernel_id_from_key(call.kernel_key);
         if (self.package.get(kernel_id) != null) return;
 
         var compiled = self.registry.get(call.kernel_key);
@@ -417,12 +417,6 @@ pub const MlirKernelMaterializePass = struct {
         return null;
     }
 
-    fn kernel_id_from_key(kernel_key: []const u8) u32 {
-        var hasher = std.hash.Wyhash.init(0);
-        hasher.update(kernel_key);
-        return @truncate(hasher.final());
-    }
-
     fn clone_artifact_for_package(
         dst_allocator: std.mem.Allocator,
         artifact: kernel.KernelArtifact,
@@ -499,7 +493,7 @@ test "mlir materialize pass populates package from registry" {
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try pass_state.pass().run(&artifact, &ctx);
 
-    const kernel_id = MlirKernelMaterializePass.kernel_id_from_key("k0");
+    const kernel_id = kernel.kernel_id_from_key("k0");
     try testing.expect(package.get(kernel_id) != null);
     try testing.expect(artifact.mlir.kernel_package == &package);
 }
@@ -558,6 +552,6 @@ test "mlir materialize compiles missing key via provider compile_mlir" {
     try pass_state.pass().run(&artifact, &ctx);
 
     try testing.expect(registry.get("k_mlir") != null);
-    const kernel_id = MlirKernelMaterializePass.kernel_id_from_key("k_mlir");
+    const kernel_id = kernel.kernel_id_from_key("k_mlir");
     try testing.expect(package.get(kernel_id) != null);
 }

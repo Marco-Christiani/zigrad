@@ -23,26 +23,22 @@ const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
 const pass_mod = @import("pass.zig");
-const mirage_provider = @import("../mirage/provider.zig");
 
 const log = std.log.scoped(.@"zg/kernelize");
 /// Temporary single custom_call target for kernelized dispatch.
 const dispatcher_target_name = "zigrad.kernel.dispatch";
 
-const RewriteCandidate = struct {
-    region: pr.Region,
-    inputs: []const pr.VarId,
-    outputs: []const pr.VarId,
-    kernel_key: []const u8,
-    kernel_id: ?u32,
-    provider_name: []const u8,
-    carrier_hint: ?[]const u8,
-};
-
-const RegionCandidate = struct {
+const KernelCandidate = struct {
     region: pr.Region,
     provider: kernel.KernelProvider,
     provider_name: []const u8,
+
+    // Populated after successful compilation (used for PR rewriting).
+    inputs: []const pr.VarId = &.{},
+    outputs: []const pr.VarId = &.{},
+    kernel_key: []const u8 = &.{},
+    kernel_id: ?u32 = null,
+    carrier_hint: ?[]const u8 = null,
 };
 
 pub const TargetNameMode = enum {
@@ -84,16 +80,12 @@ pub const KernelizePass = struct {
             };
             functions[idx] = rewritten;
         }
-
-        // Release provider device memory (e.g. Mirage's DeviceMemoryManager singleton)
-        // so the backend allocator can reclaim the full GPU pool.
-        mirage_provider.release_device_memory();
     }
 
     fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator) !pr.Function {
         if (func.regions.len == 0) return func;
 
-        var candidates = try std.ArrayList(RegionCandidate).initCapacity(temp_allocator, func.regions.len);
+        var candidates = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
         defer candidates.deinit(temp_allocator);
 
         for (func.regions) |region| {
@@ -109,7 +101,7 @@ pub const KernelizePass = struct {
             });
         }
 
-        var rewrites = try std.ArrayList(RewriteCandidate).initCapacity(temp_allocator, func.regions.len);
+        var rewrites = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
         defer {
             for (rewrites.items) |rewrite| {
                 temp_allocator.free(rewrite.inputs);
@@ -158,7 +150,7 @@ pub const KernelizePass = struct {
             log.debug("compiled kernel '{s}' for region '{s}' via provider '{s}'", .{ ka.target_name, candidate.region.name, candidate.provider_name });
 
             const carrier_hint: ?[]const u8 = if (is_attention_5op_region(func, candidate.region)) "attention_5op_v1" else null;
-            const kernel_id = kernel_id_from_key(ka.target_name);
+            const kernel_id = kernel.kernel_id_from_key(ka.target_name);
 
             if (self.package) |pkg| {
                 const pkg_artifact = try clone_artifact_for_package(pkg.allocator(), ka);
@@ -179,11 +171,12 @@ pub const KernelizePass = struct {
 
             try rewrites.append(temp_allocator, .{
                 .region = candidate.region,
+                .provider = candidate.provider,
+                .provider_name = ka.provider_name,
                 .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
                 .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
                 .kernel_key = ka.target_name,
                 .kernel_id = kernel_id,
-                .provider_name = ka.provider_name,
                 .carrier_hint = carrier_hint,
             });
         }
@@ -243,7 +236,7 @@ pub const KernelizePass = struct {
         }
     }
 
-    fn find_rewrite_starting_at(rewrites: []const RewriteCandidate, eqn_start: usize) ?RewriteCandidate {
+    fn find_rewrite_starting_at(rewrites: []const KernelCandidate, eqn_start: usize) ?KernelCandidate {
         for (rewrites) |entry| {
             if (entry.region.eqn_len == 0) continue;
             if (@as(usize, @intCast(entry.region.eqn_start)) == eqn_start) return entry;
@@ -251,7 +244,7 @@ pub const KernelizePass = struct {
         return null;
     }
 
-    fn is_region_nested(region: pr.Region, candidates: []const RegionCandidate) bool {
+    fn is_region_nested(region: pr.Region, candidates: []const KernelCandidate) bool {
         if (region.eqn_len == 0) return false;
         const start: usize = @intCast(region.eqn_start);
         const end: usize = start + @as(usize, @intCast(region.eqn_len));
@@ -296,7 +289,7 @@ pub const KernelizePass = struct {
         varids_store: *std.ArrayList(pr.VarId),
         params_store: *std.ArrayList(pr.Param),
         func: pr.Function,
-        rewrite: RewriteCandidate,
+        rewrite: KernelCandidate,
     ) !void {
         if (rewrite.outputs.len == 0) return error.InvalidRegion;
 
@@ -368,12 +361,6 @@ pub const KernelizePass = struct {
             eqns[2].prim == .exp and
             eqns[3].prim == .multiply and
             eqns[4].prim == .log;
-    }
-
-    fn kernel_id_from_key(kernel_key: []const u8) u32 {
-        var hasher = std.hash.Wyhash.init(0);
-        hasher.update(kernel_key);
-        return @truncate(hasher.final());
     }
 
     fn clone_artifact_for_package(
