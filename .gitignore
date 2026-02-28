@@ -47,3 +47,7 @@ artifacts/
 .task/
 
 *.wasm
+shim/build
+shim/build-mlir
+*.mlir
+*.ll
