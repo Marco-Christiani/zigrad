@@ -25,7 +25,7 @@ pub const LlamaDemoPipeline = enum {
     mlir,
 };
 
-const upcast_loss = false;
+const upcast_loss = true; // bf16 logits over 128k vocab overflow bf16 range without this
 
 fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
     return loss_fn_with_options(params, batch, .{});
