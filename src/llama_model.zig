@@ -112,7 +112,7 @@ fn layer_forward(
     const x1 = try x_in.add(attn_out);
 
     const post_norm = try rms_norm(x1, layer.post_norm, eps);
-    const mlp_out = try mlp(post_norm, layer);
+    const mlp_out = try mlp(post_norm, layer, layer_idx, opts);
     return x1.add(mlp_out);
 }
 
@@ -154,9 +154,8 @@ fn self_attention(
     else
         try x.convert(layer.qkv_proj.tensor.dtype);
     const x_flat = try x_dot.reshape(&.{ batch_size * seq, hidden });
-    const qkv_provider = if (layer_idx == 0) opts.kernelize_provider else null;
     const qkv_region_name = try std.fmt.allocPrint(x.builder.program.allocator(), "llama_l{d}_attn_qkv", .{layer_idx});
-    const qkv_flat = try matmul_with_optional_kernel_region(x_flat, layer.qkv_proj, qkv_provider, qkv_region_name);
+    const qkv_flat = try matmul_with_optional_kernel_region(x_flat, layer.qkv_proj, opts.kernelize_provider, qkv_region_name);
     const qkv = try qkv_flat.reshape(&.{ batch_size, seq, total_heads * head_dim });
     // QKV layout is [Q heads | K heads | V heads].
     const qkv4 = try qkv.reshape(&.{ batch_size, seq, total_heads, head_dim });
@@ -220,7 +219,8 @@ fn self_attention(
     else
         try out_bshd.convert(layer.o_proj.tensor.dtype);
     const out_flat = try out_dot.reshape(&.{ batch_size * seq, hidden });
-    const proj_flat = try out_flat.matmul(layer.o_proj);
+    const o_region_name = try std.fmt.allocPrint(x.builder.program.allocator(), "llama_l{d}_attn_o", .{layer_idx});
+    const proj_flat = try matmul_with_optional_kernel_region(out_flat, layer.o_proj, opts.kernelize_provider, o_region_name);
     return proj_flat.reshape(&.{ batch_size, seq, hidden });
 }
 
@@ -330,7 +330,10 @@ fn softmax_last_dim_accum_f32(x: zg.frontend.Tensor) !zg.frontend.Tensor {
     return y_f32.convert(.bf16);
 }
 
-fn mlp(x: zg.frontend.Tensor, layer: LayerWeights) !zg.frontend.Tensor {
+fn mlp(x: zg.frontend.Tensor, layer: LayerWeights, layer_idx: usize, opts: ForwardOptions) !zg.frontend.Tensor {
+    const a = x.builder.program.allocator();
+    const provider = opts.kernelize_provider;
+
     if (x.tensor.shape.dims.len == 3) {
         const batch_size = x.tensor.shape.dims[0];
         const seq = x.tensor.shape.dims[1];
@@ -340,24 +343,24 @@ fn mlp(x: zg.frontend.Tensor, layer: LayerWeights) !zg.frontend.Tensor {
         else
             try x.convert(layer.gate_proj.tensor.dtype);
         const x_flat = try x_dot.reshape(&.{ batch_size * seq, hidden });
-        const gate = try x_flat.matmul(layer.gate_proj);
-        const up = try x_flat.matmul(layer.up_proj);
+        const gate = try matmul_with_optional_kernel_region(x_flat, layer.gate_proj, provider, try std.fmt.allocPrint(a, "llama_l{d}_mlp_gate", .{layer_idx}));
+        const up = try matmul_with_optional_kernel_region(x_flat, layer.up_proj, provider, try std.fmt.allocPrint(a, "llama_l{d}_mlp_up", .{layer_idx}));
         const act = try silu_like(gate);
         const fused = try act.mul(up);
         const fused_dot = if (fused.tensor.dtype == layer.down_proj.tensor.dtype)
             fused
         else
             try fused.convert(layer.down_proj.tensor.dtype);
-        const down_flat = try fused_dot.matmul(layer.down_proj);
+        const down_flat = try matmul_with_optional_kernel_region(fused_dot, layer.down_proj, provider, try std.fmt.allocPrint(a, "llama_l{d}_mlp_down", .{layer_idx}));
         return down_flat.reshape(&.{ batch_size, seq, hidden });
     }
 
     std.debug.assert(x.tensor.shape.dims.len == 2);
-    const gate = try x.matmul(layer.gate_proj);
-    const up = try x.matmul(layer.up_proj);
+    const gate = try matmul_with_optional_kernel_region(x, layer.gate_proj, provider, try std.fmt.allocPrint(a, "llama_l{d}_mlp_gate", .{layer_idx}));
+    const up = try matmul_with_optional_kernel_region(x, layer.up_proj, provider, try std.fmt.allocPrint(a, "llama_l{d}_mlp_up", .{layer_idx}));
     const act = try silu_like(gate);
     const fused = try act.mul(up);
-    return fused.matmul(layer.down_proj);
+    return matmul_with_optional_kernel_region(fused, layer.down_proj, provider, try std.fmt.allocPrint(a, "llama_l{d}_mlp_down", .{layer_idx}));
 }
 
 fn matmul_with_optional_kernel_region(

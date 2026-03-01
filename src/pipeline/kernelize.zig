@@ -41,6 +41,21 @@ const KernelCandidate = struct {
     carrier_hint: ?[]const u8 = null,
 };
 
+/// Cached artifact template keyed by region shape signature.
+///
+/// Stores enough information to clone a `KernelArtifact` for a new region
+/// that has the same structural shape as a previously compiled one, avoiding
+/// a redundant superoptimization + compile cycle.
+const ShapeCacheEntry = struct {
+    /// Copy of the compiled artifact bytes; owned by the cache.
+    data: []const u8,
+    workspace_bytes: usize,
+    dispatch_fn: ?kernel.DispatchFn,
+    /// Non-owning; points into the provider's own name storage.
+    dispatch_ctx: ?*anyopaque,
+    provider_name: []const u8,
+};
+
 pub const TargetNameMode = enum {
     region_name,
     outlined_eqn,
@@ -71,10 +86,22 @@ pub const KernelizePass = struct {
         const self: *KernelizePass = @ptrCast(@alignCast(ptr));
         if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
+        // Shape cache spans all functions so that identical regions across
+        // function boundaries also share a single compiled artifact.
+        var shape_cache = std.StringHashMap(ShapeCacheEntry).init(ctx.allocator);
+        defer {
+            var it = shape_cache.iterator();
+            while (it.next()) |entry| {
+                ctx.allocator.free(entry.key_ptr.*);
+                ctx.allocator.free(entry.value_ptr.data);
+            }
+            shape_cache.deinit();
+        }
+
         const program = artifact.pr;
         const functions: []pr.Function = @constCast(program.functions);
         for (program.functions, 0..) |func, idx| {
-            const rewritten = self.kernelize_function(program, func, ctx.allocator) catch |err| {
+            const rewritten = self.kernelize_function(program, func, ctx.allocator, &shape_cache) catch |err| {
                 log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
                 return err;
             };
@@ -82,7 +109,7 @@ pub const KernelizePass = struct {
         }
     }
 
-    fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator) !pr.Function {
+    fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator, shape_cache: *std.StringHashMap(ShapeCacheEntry)) !pr.Function {
         if (func.regions.len == 0) return func;
 
         var candidates = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
@@ -125,15 +152,50 @@ pub const KernelizePass = struct {
                 continue;
             }
 
-            var ka = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
-                error.Unsupported => {
-                    log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
-                    continue;
-                },
-                else => {
-                    log.err("provider '{s}' failed to compile region '{s}': {s}", .{ candidate.provider_name, candidate.region.name, @errorName(err) });
-                    return err;
-                },
+            // Check the shape cache before invoking the provider. Regions with
+            // identical op sequences and tensor shapes (e.g. the same projection
+            // in different LLaMA layers) share one compiled artifact, avoiding
+            // redundant superoptimization passes and reducing unique .so files.
+            const shape_key = try compute_shape_key(temp_allocator, desc);
+            defer temp_allocator.free(shape_key);
+
+            var ka: kernel.KernelArtifact = if (shape_cache.get(shape_key)) |cached| hit: {
+                log.debug("dedup cache hit: region '{s}' reuses compiled artifact", .{candidate.region.name});
+                const reg_alloc = self.registry.allocator();
+                const target_name = try reg_alloc.dupe(u8, candidate.region.name);
+                errdefer reg_alloc.free(target_name);
+                break :hit .{
+                    .provider_name = cached.provider_name,
+                    .data = try reg_alloc.dupe(u8, cached.data),
+                    .target_name = target_name,
+                    .workspace_bytes = cached.workspace_bytes,
+                    .dispatch_fn = cached.dispatch_fn,
+                    .dispatch_ctx = cached.dispatch_ctx,
+                };
+            } else miss: {
+                const compiled = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
+                    error.Unsupported => {
+                        log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
+                        continue;
+                    },
+                    else => {
+                        log.err("provider '{s}' failed to compile region '{s}': {s}", .{ candidate.provider_name, candidate.region.name, @errorName(err) });
+                        return err;
+                    },
+                };
+                // Populate cache so subsequent same-shape regions skip compilation.
+                const cache_key = try temp_allocator.dupe(u8, shape_key);
+                errdefer temp_allocator.free(cache_key);
+                const cache_data = try temp_allocator.dupe(u8, compiled.data);
+                errdefer temp_allocator.free(cache_data);
+                try shape_cache.put(cache_key, .{
+                    .data = cache_data,
+                    .workspace_bytes = compiled.workspace_bytes,
+                    .dispatch_fn = compiled.dispatch_fn,
+                    .dispatch_ctx = compiled.dispatch_ctx,
+                    .provider_name = compiled.provider_name,
+                });
+                break :miss compiled;
             };
 
             try self.retarget_kernel_artifact(func, candidate.region, &ka);
@@ -397,6 +459,58 @@ pub const KernelizePass = struct {
         return .{ .start = start, .len = @intCast(values.len) };
     }
 };
+
+// ============================================================================
+// Shape Key
+// ============================================================================
+
+/// Build a deterministic shape-signature string for a region descriptor.
+///
+/// The key encodes the region's equation sequence as:
+///   `<prim>,<in0_aval><in1_aval>...-><out0_aval>...;<next_eqn>...`
+///
+/// Two regions produce the same key iff they have identical op sequences with
+/// matching input/output dtypes and dims. This is the criterion for sharing a
+/// compiled artifact via the shape cache in `run_impl`.
+fn compute_shape_key(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 128);
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    for (desc.eqns, 0..) |eqn, ei| {
+        if (ei > 0) try w.writeByte(';');
+        try w.writeAll(@tagName(eqn.prim));
+        try w.writeByte(',');
+        const ins = eqn.inputs.slice(pr.VarId, desc.varids_store);
+        for (ins, 0..) |vid, i| {
+            if (i > 0) try w.writeByte(',');
+            try write_aval_key(w, desc.aval_of(vid));
+        }
+        try w.writeByte('>');
+        const outs = eqn.outputs.slice(pr.VarId, desc.varids_store);
+        for (outs, 0..) |vid, i| {
+            if (i > 0) try w.writeByte(',');
+            try write_aval_key(w, desc.aval_of(vid));
+        }
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+fn write_aval_key(w: anytype, aval: ?pr.Aval) !void {
+    const a = aval orelse return w.writeByte('?');
+    switch (a) {
+        .tensor => |t| {
+            try w.writeAll(@tagName(t.dtype));
+            try w.writeByte('[');
+            for (t.shape.dims, 0..) |d, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print("{d}", .{d});
+            }
+            try w.writeByte(']');
+        },
+    }
+}
 
 // ============================================================================
 // Tests
@@ -877,4 +991,136 @@ test "kernelize pass outlined_eqn target naming mode" {
     try kp.pass().run(&artifact, &ctx);
 
     try testing.expect(registry.get("main_outlined_0") != null);
+}
+
+test "kernelize pass deduplicates same-shape regions across a function" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    // Two exp regions with identical f32[2] input/output — same shape signature.
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("region_a", .{ .kernelize = "mock" });
+    const out_a = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    try b.push_region("region_b", .{ .kernelize = "mock" });
+    const out_b = try b.emit(.exp, &.{y}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{ out_a, out_b });
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        compile_count: usize = 0,
+
+        fn compile(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.compile_count += 1;
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "payload"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    var mock = MockProvider{};
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = @ptrCast(&mock),
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    // Both regions must be registered under their own target names.
+    try testing.expect(registry.get("region_a") != null);
+    try testing.expect(registry.get("region_b") != null);
+
+    // Provider was only called once — region_b reused the cached artifact.
+    try testing.expectEqual(@as(usize, 1), mock.compile_count);
+
+    // Both regions must have been rewritten to custom_call.
+    const eqns = program.functions[0].eqns;
+    try testing.expectEqual(@as(usize, 2), eqns.len);
+    try testing.expectEqual(pr.Prim.custom_call, eqns[0].prim);
+    try testing.expectEqual(pr.Prim.custom_call, eqns[1].prim);
+}
+
+test "kernelize pass does not deduplicate regions with different shapes" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    // Two exp regions with DIFFERENT shapes — distinct signatures.
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{4});
+
+    try b.push_region("region_small", .{ .kernelize = "mock" });
+    const out_small = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    try b.push_region("region_large", .{ .kernelize = "mock" });
+    const out_large = try b.emit(.exp, &.{y}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{ out_small, out_large });
+    try program.add_function(func);
+
+    const MockProvider = struct {
+        compile_count: usize = 0,
+
+        fn compile(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.compile_count += 1;
+            return .{
+                .provider_name = "mock",
+                .data = try allocator.dupe(u8, "payload"),
+                .target_name = try allocator.dupe(u8, desc.name),
+            };
+        }
+    };
+
+    var mock = MockProvider{};
+    const provider = kernel.KernelProvider{
+        .name = "mock",
+        .ptr = @ptrCast(&mock),
+        .compile_fn = MockProvider.compile,
+    };
+
+    var registry = kernel.KernelRegistry.init(testing.allocator);
+    defer registry.deinit();
+
+    var kp = KernelizePass{
+        .registry = &registry,
+        .providers = &.{provider},
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    // Different shapes — provider must be called for each region.
+    try testing.expectEqual(@as(usize, 2), mock.compile_count);
 }

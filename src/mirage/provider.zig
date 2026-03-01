@@ -25,7 +25,16 @@ pub const MirageProvider = struct {
     }
 
     fn finalize_impl(_: *anyopaque) void {
-        release_device_memory();
+        // Intentionally does NOT call release_device_memory().
+        //
+        // The DeviceMemoryManager singleton must remain alive through dispatch:
+        // if it is released here the singleton re-initialises lazily inside
+        // mirage_execute_kernel, by which point PJRT's BFC allocator has
+        // reserved most of the VRAM and the re-init fails with CUDA OOM.
+        //
+        // Keeping the pool alive (~1.4 GB on RTX 3080 Ti) leaves PJRT enough
+        // headroom to compile and run the LLaMA model (~2.8 GB peak). Call
+        // release_device_memory() explicitly only when dispatch is done.
     }
 
     fn device_memory_info_impl(_: *anyopaque) ?kernel.DeviceMemoryInfo {

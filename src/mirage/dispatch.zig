@@ -74,16 +74,9 @@ pub const MirageDispatchState = struct {
             .stream = ctx.stream,
         };
 
-        const valid_status = mirage_c.mirage_validate_artifact(
-            mirage_ctx.raw,
-            artifact_data.ptr,
-            artifact_data.len,
-        );
-        if (valid_status != .ok) {
-            log.err("mirage_validate_artifact returned {s}", .{mirage_api.status_name(valid_status)});
-            return map_mirage_status(valid_status);
-        }
-
+        // Artifact is validated once at compile time (provider.zig:compile_graph_to_artifact).
+        // Re-validating here on every dispatch call is redundant and contributes measurable
+        // CPU overhead on the hot path.
         const status = mirage_c.mirage_execute_kernel(
             mirage_ctx.raw,
             artifact_data.ptr,
