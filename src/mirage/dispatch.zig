@@ -7,13 +7,22 @@ const log = std.log.scoped(.@"zg/mirage_dispatch");
 
 pub const MirageDispatchState = struct {
     allocator: std.mem.Allocator,
+    /// Mirage context kept alive for the lifetime of this dispatch state so that
+    /// the per-context wrapper cache persists across dispatch calls. Creating and
+    /// destroying the context per-call was previously done here but resulted in
+    /// the wrapper cache being discarded after every dispatch, forcing a fresh
+    /// dlopen on every invocation even when the same .so had just been loaded.
+    ctx: mirage_api.Context,
 
-    pub fn init(allocator: std.mem.Allocator) MirageDispatchState {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator) mirage_api.MirageError!MirageDispatchState {
+        return .{
+            .allocator = allocator,
+            .ctx = try mirage_api.Context.init(),
+        };
     }
 
     pub fn deinit(self: *MirageDispatchState) void {
-        _ = self;
+        self.ctx.deinit();
     }
 
     pub fn dispatch(
@@ -36,10 +45,6 @@ pub const MirageDispatchState = struct {
         ctx: kernel.DispatchContext,
     ) kernel.DispatchError!void {
         _ = kernel_key;
-        _ = self;
-
-        var mirage_ctx = mirage_api.Context.init() catch |err| return map_mirage_api_error(err);
-        defer mirage_ctx.deinit();
 
         try require_workspace(ctx);
 
@@ -78,7 +83,7 @@ pub const MirageDispatchState = struct {
         // Re-validating here on every dispatch call is redundant and contributes measurable
         // CPU overhead on the hot path.
         const status = mirage_c.mirage_execute_kernel(
-            mirage_ctx.raw,
+            self.ctx.raw,
             artifact_data.ptr,
             artifact_data.len,
             &params,

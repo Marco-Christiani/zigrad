@@ -104,7 +104,7 @@ fn add_cli_gen_step(
         .root_module = b.createModule(.{
             .root_source_file = cova_dep.path("src/generator.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .ReleaseSafe,
         }),
     });
     cova_gen_exe.root_module.addImport("cova", cova_dep.module("cova"));

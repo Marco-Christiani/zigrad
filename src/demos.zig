@@ -576,7 +576,7 @@ pub fn run_kernel_provider_demo(
         return run_demo_executable(allocator, backend, device, &tvm_exe);
     }
 
-    var mirage_dispatch_state = zg.mirage.dispatch.MirageDispatchState.init(allocator);
+    var mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
     defer mirage_dispatch_state.deinit();
 
     var mirage_provider_impl = zg.mirage.provider.MirageProvider{

@@ -246,7 +246,7 @@ pub fn run_llama_ft_demo(
             .mirage => {
                 kernel_registry = zg.kernel.KernelRegistry.init(allocator);
                 kernel_package = zg.kernel.KernelPackage.init(allocator);
-                mirage_dispatch_state = zg.mirage.dispatch.MirageDispatchState.init(allocator);
+                mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
                 mirage_provider_impl = .{
                     .allocator = allocator,
                     .dispatch_state = &mirage_dispatch_state.?,
