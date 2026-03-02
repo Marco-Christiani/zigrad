@@ -28,7 +28,7 @@ const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legal
 /// Handles context setup, dialect/extension registration, parsing (text or
 /// bytecode), pipeline execution, verification, and re-serialization. The
 /// artifact encoding is preserved across the transformation.
-fn run_pipeline_on_artifact(
+pub fn run_pipeline_on_artifact(
     allocator: std.mem.Allocator,
     mlir_artifact: *pass_mod.MlirArtifact,
     pipeline_str: [:0]const u8,

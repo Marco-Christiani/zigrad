@@ -4,6 +4,7 @@ const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
 const mlir = @import("../c/mlir/mlir.zig");
 const pass_mod = @import("pass.zig");
+const mlir_passes = @import("mlir_passes.zig");
 
 const log = std.log.scoped(.@"zg/mlir_materialize");
 
@@ -73,8 +74,33 @@ pub const MlirKernelMaterializePass = struct {
             shape_cache.deinit();
         }
 
+        var had_unsupported = false;
         for (kernel_calls) |*call| {
-            try self.materialize_selected_call(call, &shape_cache, ctx.allocator);
+            self.materialize_selected_call(call, &shape_cache, ctx.allocator) catch |err| {
+                if (err == error.Unsupported) {
+                    log.warn(
+                        "provider '{s}' returned Unsupported for key '{s}' (pattern={s}); expanding back to StableHLO",
+                        .{ call.provider, call.kernel_key, @tagName(call.pattern) },
+                    );
+                    had_unsupported = true;
+                    continue;
+                }
+                return err;
+            };
+        }
+
+        // If any kernel_calls were unsupported, run the expand pass to revert
+        // those kernel_call ops back to their original StableHLO patterns so
+        // the backend can handle them natively.
+        if (had_unsupported) {
+            mlir_passes.run_pipeline_on_artifact(
+                ctx.allocator,
+                mlir_artifact,
+                "func.func(zg-kernel-call-expand),canonicalize,cse",
+            ) catch {
+                log.err("failed to run kernel-call-expand pipeline", .{});
+                return error.InvalidMlir;
+            };
         }
 
         if (self.dump_kernels and kernel_calls.len > 0) {
