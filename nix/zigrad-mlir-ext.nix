@@ -10,7 +10,7 @@
   devel ? false,
 }:
 stdenv.mkDerivation {
-  pname = "zigrad-mlir-shim";
+  pname = "zigrad-mlir-ext";
   version = xlaMlirStablehloCapiSdk.version + lib.optionalString devel "-devel";
 
   inherit src;
@@ -50,13 +50,13 @@ stdenv.mkDerivation {
 
     so="$(ls -1 build/libzigrad_mlir_ext.so* 2>/dev/null | head -n1 || true)"
     if [ -z "$so" ]; then
-      echo "ERROR: shim .so not built (expected build/libzigrad_mlir_ext.so*)" >&2
+      echo "ERROR: libzigrad_mlir_ext.so not built" >&2
       find build -maxdepth 3 -type f -name "*.so*" -o -name "link.txt" -o -name "compile_commands.json" >&2 || true
       exit 1
     fi
     cp -v build/libzigrad_mlir_ext.so* $out/lib/
 
-    # Make sure shim finds SDK libs at runtime. It will live in the same lib/ dir as MLIR libs via symlinkJoin.
+    # Finds SDK libs at runtime via symlinkJoin (same lib/ dir as MLIR libs).
     patchelf --set-rpath '$ORIGIN' $out/lib/libzigrad_mlir_ext.so || true
 
     if [ "${lib.boolToString devel}" = "true" ]; then
@@ -68,7 +68,7 @@ stdenv.mkDerivation {
   '';
 
   meta = {
-    description = "Zigrad MLIR/StableHLO dialect registration shim (C++ DSO)";
+    description = "Zigrad MLIR dialect extension (C++ DSO)";
     license = lib.licenses.asl20;
     platforms = lib.platforms.linux;
   };

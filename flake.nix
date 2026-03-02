@@ -153,7 +153,7 @@
         paths =
           [
             xlaMlirStablehloCapiSdk
-            zigradMlirShim
+            zigradMlirExt
             tvm.dev
             cudaCompileHeaders
             pkgs.mkl
@@ -193,7 +193,7 @@
         paths =
           [
             xlaMlirStablehloCapiDevel
-            zigradMlirShimDevel
+            zigradMlirExtDevel
             tvmDevel.dev
             cudaCompileHeaders
             pkgs.mkl
@@ -300,7 +300,7 @@
           cp "$TMPDIR/stderr.txt" "$out/tvm-missing-stderr.txt"
         '';
 
-      shimSrc = let
+      mlirExtSrc = let
         fs = pkgs.lib.fileset;
       in
         fs.toSource {
@@ -312,16 +312,16 @@
           ];
         };
 
-      zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+      zigradMlirExt = pkgs.callPackage ./nix/zigrad-mlir-ext.nix {
         inherit xlaMlirStablehloCapiSdk llvm;
-        src = shimSrc;
+        src = mlirExtSrc;
         devel = false;
       };
 
-      zigradMlirShimDevel = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+      zigradMlirExtDevel = pkgs.callPackage ./nix/zigrad-mlir-ext.nix {
         inherit xlaMlirStablehloCapiSdk llvm;
         stdenv = pkgs.ccacheStdenv;
-        src = shimSrc;
+        src = mlirExtSrc;
         devel = true;
       };
 
