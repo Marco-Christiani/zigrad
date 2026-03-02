@@ -6,15 +6,15 @@
   autoAddDriverRunpath,
   zigradSrc,
   sdk,
+  version ? "dev",
   optimize ? "ReleaseFast",
   runTests ? false,
 }: let
   pname = "zigrad";
-  zigDeps = callPackage ./build.zig.zon.nix { };
+  zigDeps = callPackage ./build.zig.zon.nix {};
 in
   stdenvNoCC.mkDerivation {
-    inherit pname;
-    version = "dev";
+    inherit pname version;
     src = zigradSrc;
 
     strictDeps = true;
@@ -53,6 +53,8 @@ in
     '';
 
     meta = {
+      description = "Zigrad: differentiable computation framework";
+      license = lib.licenses.asl20;
       mainProgram = pname;
       platforms = lib.platforms.linux;
     };

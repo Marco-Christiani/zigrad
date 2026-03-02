@@ -58,7 +58,16 @@
         systems
       );
 
-    cudaCfg = import ./nix/cuda.nix;
+    # Project-wide CUDA configuration. Centralized to avoid hardcoding
+    # sm_XX or toolkit versions in random places.
+    cudaCfg = {
+      cudaArchitectures = ["86"];
+      gccHostAttr = "gcc14";
+      cudaPackagesAttr = "cudaPackages_12";
+      cudaVersion = "12.8";
+    };
+
+    zigradVersion = self.shortRev or self.dirtyShortRev or "dev";
 
     colors = {
       yellow = "\\033[33m";
@@ -229,19 +238,22 @@
       sdkRootDevel = toString zigradExternalSdkDevel;
 
       zigrad = pkgs.callPackage ./nix/zigrad.nix {
-        zigradSrc = zigradSrc;
+        inherit zigradSrc;
+        version = zigradVersion;
         sdk = zigradExternalSdkBuild;
         optimize = "ReleaseFast";
       };
 
       zigradDevel = pkgs.callPackage ./nix/zigrad.nix {
-        zigradSrc = zigradSrc;
+        inherit zigradSrc;
+        version = zigradVersion;
         sdk = zigradExternalSdkBuildDevel;
         optimize = "ReleaseSafe";
       };
 
       zigradTests = pkgs.callPackage ./nix/zigrad.nix {
-        zigradSrc = zigradSrc;
+        inherit zigradSrc;
+        version = zigradVersion;
         sdk = zigradExternalSdkBuildDevel;
         optimize = "ReleaseSafe";
         runTests = true;

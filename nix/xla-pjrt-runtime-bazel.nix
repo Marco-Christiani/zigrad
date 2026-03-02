@@ -23,7 +23,7 @@
   copyLibdevice ? true,
   lockFile,
   xlaSrcOverride ? null,
-  depsHash ? "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=",
+  depsHash,
   # CPU math library for the PJRT CPU plugin.
   #   "eigen"        - Eigen + XNNPACK only (default).
   #   "onednn"       - open-source oneDNN v3.7.3, JIT contraction kernel, threadpool.
