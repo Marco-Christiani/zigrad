@@ -6,6 +6,7 @@
   ninja,
   patchelf,
   xlaMlirStablehloCapiSdk,
+  llvm,
   devel ? false,
 }:
 stdenv.mkDerivation {
@@ -37,7 +38,8 @@ stdenv.mkDerivation {
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
       -DZG_SDK_INCLUDE=${xlaMlirStablehloCapiSdk}/include \
-      -DZG_SDK_LIB=${xlaMlirStablehloCapiSdk}/lib
+      -DZG_SDK_LIB=${xlaMlirStablehloCapiSdk}/lib \
+      -DZG_LLVM_ROOT=${llvm}
 
     cmake --build build --target zigrad_mlir_ext
   '';

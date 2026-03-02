@@ -35,7 +35,7 @@
       };
     };
   };
-  outputs = inputs@{
+  outputs = inputs @ {
     self,
     nixpkgs,
     mpk,
@@ -88,7 +88,7 @@
         else null;
 
       zigradSrc = import ./nix/source-filter.nix {
-        lib = pkgs.lib;
+        inherit (pkgs) lib;
         root = ./.;
       };
 
@@ -153,6 +153,7 @@
         paths =
           [
             xlaMlirStablehloCapiSdk
+            zigradMlirShim
             tvm.dev
             cudaCompileHeaders
             pkgs.mkl
@@ -183,7 +184,6 @@
         paths = [
           zigradExternalSdkBuild
           zigradExternalSdkRuntimeFull
-          # zigradMlirShim
         ];
       };
       sdkRoot = toString zigradExternalSdk;
@@ -193,6 +193,7 @@
         paths =
           [
             xlaMlirStablehloCapiDevel
+            zigradMlirShimDevel
             tvmDevel.dev
             cudaCompileHeaders
             pkgs.mkl
@@ -223,7 +224,6 @@
         paths = [
           zigradExternalSdkBuildDevel
           zigradExternalSdkRuntimeFullDevel
-          # zigradMlirShimDevel
         ];
       };
       sdkRootDevel = toString zigradExternalSdkDevel;
@@ -300,18 +300,30 @@
           cp "$TMPDIR/stderr.txt" "$out/tvm-missing-stderr.txt"
         '';
 
-      # zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
-      #   inherit xlaMlirStablehloCapiSdk;
-      #   src = shimSrc;
-      #   devel = false;
-      # };
-      #
-      # zigradMlirShimDevel = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
-      #   inherit xlaMlirStablehloCapiSdk;
-      #   stdenv = pkgs.ccacheStdenv;
-      #   src = shimSrc;
-      #   devel = true;
-      # };
+      shimSrc = let
+        fs = pkgs.lib.fileset;
+      in
+        fs.toSource {
+          root = ./shim;
+          fileset = fs.unions [
+            ./shim/CMakeLists.txt
+            ./shim/mlir_ext.cc
+            ./shim/zigrad
+          ];
+        };
+
+      zigradMlirShim = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+        inherit xlaMlirStablehloCapiSdk llvm;
+        src = shimSrc;
+        devel = false;
+      };
+
+      zigradMlirShimDevel = pkgs.callPackage ./nix/zigrad-mlir-shim.nix {
+        inherit xlaMlirStablehloCapiSdk llvm;
+        stdenv = pkgs.ccacheStdenv;
+        src = shimSrc;
+        devel = true;
+      };
 
       # ------------------------------------------------------------------
       # Production PJRT C API plugins from XLA.
