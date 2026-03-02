@@ -342,7 +342,6 @@
         copyNcclNvshmem = true;
         copyCudaTools = true;
         copyLibdevice = true;
-        # cpuMathLibrary = "onednn";
         cpuMathLibrary = "onednn-thunk";
         cpuNativeTuning = true;
         depsHash = xlaPjrtDepsHashes.cuda-onednn-thunk-native;
@@ -351,63 +350,6 @@
       # Devel aliases currently use the same Bazel artifacts.
       xlaPjrtPluginsDevel = xlaPjrtPlugins;
       xlaPjrtPluginsCudaDevel = xlaPjrtPluginsCuda;
-
-      # Legacy non-buildBazelPackage path.
-      xlaPjrtPluginsLegacy = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        devel = false;
-        cudaSupport = false;
-        cudaPackages = null;
-        persistentBazelOutputBase = false;
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      xlaPjrtPluginsCudaLegacy = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        inherit (cudaCfg) cudaArchitectures cudaVersion;
-        devel = false;
-        cudaSupport = true;
-        copyNcclNvshmem = true;
-        copyCudaTools = true;
-        copyLibdevice = true;
-        cudaPackages = null;
-        useCudaStdenv = false;
-        persistentBazelOutputBase = false;
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      xlaPjrtPluginsLegacyDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        stdenv = pkgs.ccacheStdenv;
-        devel = true;
-        cudaSupport = false;
-        cudaPackages = null;
-        persistentBazelOutputBase = true;
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      xlaPjrtPluginsCudaLegacyDevel = pkgs.callPackage ./nix/xla-pjrt-runtime.nix {
-        inherit lockFile;
-        inherit (cudaCfg) cudaArchitectures cudaVersion;
-        stdenv = pkgs.ccacheStdenv;
-        devel = true;
-        cudaSupport = true;
-        copyNcclNvshmem = true;
-        copyCudaTools = true;
-        copyLibdevice = true;
-        cudaPackages = null;
-        useCudaStdenv = false;
-        persistentBazelOutputBase = true;
-        cpuMathLibrary = "onednn-thunk";
-        cpuNativeTuning = true;
-      };
-
-      # Compatibility aliases.
-      xlaPjrtPluginsBazel = xlaPjrtPlugins;
-      xlaPjrtPluginsBazelCuda = xlaPjrtPluginsCuda;
 
       # TVM with LLVM 22 (built from XLA-pinned sources).
       # Uses shared LLVM to match SDK, avoiding pass registry conflicts.
@@ -610,30 +552,16 @@
           zigrad-external-sdk-runtime-full-devel = zigradExternalSdkRuntimeFullDevel;
           zigrad-external-sdk-runtime-no-tvm-devel = zigradExternalSdkRuntimeNoTvmDevel;
 
-          # ----------------------------------------------------------------
-          # Bazel PJRT plugin build
+          # PJRT C API plugins (buildBazelPackage)
           xla-pjrt-plugins = xlaPjrtPlugins;
-
-          # Bazel PJRT plugin build - Dev target: ccache + devel
           xla-pjrt-plugins-devel = xlaPjrtPluginsDevel;
-
-          # Bazel PJRT plugin build - CUDA
           xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
-
-          # Bazel PJRT plugin build - CUDA + devel
           xla-pjrt-plugins-cuda-devel = xlaPjrtPluginsCudaDevel;
-          # ----------------------------------------------------------------
-
-          # Legacy PJRT plugin build path.
-          xla-pjrt-plugins-legacy = xlaPjrtPluginsLegacy;
-          xla-pjrt-plugins-legacy-cuda = xlaPjrtPluginsCudaLegacy;
-          xla-pjrt-plugins-legacy-devel = xlaPjrtPluginsLegacyDevel;
-          xla-pjrt-plugins-legacy-cuda-devel = xlaPjrtPluginsCudaLegacyDevel;
 
           # Compile-time SDK (PJRT headers + MLIR + StableHLO)
           xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
 
-          # Comptile-time SDK - Dev target: ccache + devel
+          # Compile-time SDK - Dev target: ccache + devel
           xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
 
           tvm = tvm;
@@ -650,9 +578,6 @@
           # m1 = targets.m1.build;
           m4 = targets.zigrad-m4.build;
 
-          # new version with buildBazelPackage
-          xla-pjrt-plugins-bazel = xlaPjrtPluginsBazel;
-          xla-pjrt-plugins-bazel-cuda = xlaPjrtPluginsBazelCuda;
         };
 
       checks = {
