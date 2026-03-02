@@ -265,6 +265,16 @@ pub const Source = struct {
         try check_status(c.mirage_source_kernel_meta(self.raw, index, &meta));
         return meta;
     }
+
+    pub fn kernelNumArgs(self: Source, kernel_index: usize) usize {
+        return c.mirage_source_kernel_num_args(self.raw, kernel_index);
+    }
+
+    pub fn kernelArg(self: Source, kernel_index: usize, arg_index: usize) MirageError!c.KernelArg {
+        var arg: c.KernelArg = std.mem.zeroes(c.KernelArg);
+        try check_status(c.mirage_source_kernel_arg(self.raw, kernel_index, arg_index, &arg));
+        return arg;
+    }
 };
 
 pub fn transpile(graph: ?*const c.MirageGraph, options: ?*const c.TranspileOptions) MirageError!Source {

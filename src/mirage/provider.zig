@@ -2,6 +2,7 @@ const std = @import("std");
 const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
 const dispatch_mod = @import("dispatch.zig");
+const artifact_mod = @import("artifact.zig");
 const mirage_api = @import("../c/mirage/api.zig");
 const mirage_c = @import("../c/mirage/c.zig");
 
@@ -163,8 +164,63 @@ pub const MirageProvider = struct {
             log.debug("mirage workspace for '{s}': {d} bytes", .{ target_name, buf_size });
         }
 
-        // Store the CUDA source as the artifact data.
-        const artifact_data = try allocator.dupe(u8, cuda_code);
+        // Filter source for NVRTC (strip host code, replace runtime.h).
+        const filtered = dispatch_mod.filter_source_for_nvrtc(allocator, cuda_code) catch {
+            log.err("failed to filter source for '{s}'", .{target_name});
+            return error.MirageInternalError;
+        };
+        defer allocator.free(filtered);
+
+        // Build kernel descriptors from Layer 2 metadata.
+        const num_kernels = source.numKernels();
+        var kernel_descs = try std.ArrayList(artifact_mod.KernelDesc).initCapacity(allocator, num_kernels);
+        defer {
+            for (kernel_descs.items) |k| {
+                allocator.free(k.args);
+                allocator.free(k.func_name);
+            }
+            kernel_descs.deinit(allocator);
+        }
+
+        for (0..num_kernels) |ki| {
+            const meta = source.kernelMeta(ki) catch |err| return map_mirage_api_error(err);
+            const num_args = source.kernelNumArgs(ki);
+
+            var args = try allocator.alloc(artifact_mod.KernelArg, num_args);
+            for (0..num_args) |ai| {
+                const arg = source.kernelArg(ki, ai) catch |err| {
+                    allocator.free(args);
+                    return map_mirage_api_error(err);
+                };
+                args[ai] = .{
+                    .source = @enumFromInt(arg.source),
+                    .index_or_offset = arg.index_or_offset,
+                };
+            }
+
+            const func_name = if (meta.func_name) |ptr|
+                @as([*]const u8, @ptrCast(ptr))[0..meta.func_name_len]
+            else
+                "";
+
+            try kernel_descs.append(allocator, .{
+                .func_name = try allocator.dupe(u8, func_name),
+                .smem_bytes = @intCast(meta.smem_bytes),
+                .grid_dim = meta.grid_dim,
+                .block_dim = meta.block_dim,
+                .args = args,
+            });
+        }
+
+        // Serialize the artifact.
+        const artifact_data = artifact_mod.encode(allocator, .{
+            .source = filtered,
+            .buf_size = @intCast(buf_size),
+            .kernels = kernel_descs.items,
+        }) catch {
+            log.err("failed to encode artifact for '{s}'", .{target_name});
+            return error.MirageInternalError;
+        };
 
         return .{
             .provider_name = "mirage",

@@ -4,6 +4,7 @@ const mirage_api = @import("../c/mirage/api.zig");
 const mirage_c = @import("../c/mirage/c.zig");
 const nvrtc = @import("../c/nvrtc.zig");
 const cuda = @import("../c/cuda_driver.zig");
+const artifact_mod = @import("artifact.zig");
 
 const log = std.log.scoped(.@"zg/mirage_dispatch");
 
@@ -11,42 +12,33 @@ const log = std.log.scoped(.@"zg/mirage_dispatch");
 /// CUfunction handles for each custom kernel.
 const CompiledModule = struct {
     cu_module: cuda.CUmodule,
-    kernels: []CachedKernel,
-    allocator: std.mem.Allocator,
+    /// One entry per kernel in the artifact, same order.
+    funcs: []cuda.CUfunction,
 
-    const CachedKernel = struct {
-        func: cuda.CUfunction,
-        grid_dim: [3]u32,
-        block_dim: [3]u32,
-        smem_bytes: u32,
-        func_name: []const u8,
-    };
-
-    fn deinit(self: *CompiledModule) void {
+    fn deinit(self: *CompiledModule, allocator: std.mem.Allocator) void {
         _ = cuda.cuModuleUnload(self.cu_module);
-        self.allocator.free(self.kernels);
+        allocator.free(self.funcs);
     }
 };
 
 pub const MirageDispatchState = struct {
     allocator: std.mem.Allocator,
 
-    /// Cache of compiled modules keyed by a hash of the source code.
-    /// Avoids recompiling the same source on repeated dispatch.
-    cache: std.StringHashMap(CompiledModule),
+    /// Cache of compiled modules keyed by a FNV hash of the artifact data.
+    cache: std.AutoHashMap(u64, CompiledModule),
     cache_mutex: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator) mirage_api.MirageError!MirageDispatchState {
         return .{
             .allocator = allocator,
-            .cache = std.StringHashMap(CompiledModule).init(allocator),
+            .cache = std.AutoHashMap(u64, CompiledModule).init(allocator),
         };
     }
 
     pub fn deinit(self: *MirageDispatchState) void {
         var it = self.cache.valueIterator();
         while (it.next()) |mod| {
-            mod.deinit();
+            mod.deinit(self.allocator);
         }
         self.cache.deinit();
     }
@@ -70,29 +62,166 @@ pub const MirageDispatchState = struct {
         kernel_key: []const u8,
         ctx: kernel.DispatchContext,
     ) kernel.DispatchError!void {
-        _ = kernel_key;
+        // Decode the artifact.
+        const art = artifact_mod.decode(self.allocator, artifact_data) catch {
+            log.err("failed to decode mirage artifact for '{s}'", .{kernel_key});
+            return error.MirageInternalError;
+        };
+        defer self.allocator.free(art.kernels);
+        defer {
+            for (art.kernels) |k| self.allocator.free(k.args);
+        }
 
-        // The artifact data is CUDA source code from mirage_transpile().
-        // We need to: compile to PTX → load module → launch kernels.
-        //
-        // For now, this is a stub until the NVRTC pipeline is wired up
-        // with the correct kernel argument layout from Layer 2/3 metadata.
-        //
-        // The missing piece is mapping DispatchContext (input/output buffers
-        // + workspace) to the kernel argument pointers that _execute_mugraph
-        // would compute (output_ptrs..., input_ptrs..., with buf offsets
-        // for intermediates).
-        _ = self;
-        _ = artifact_data;
-        _ = ctx;
+        if (art.kernels.len == 0) {
+            log.err("mirage artifact for '{s}' has no kernels", .{kernel_key});
+            return error.MirageInternalError;
+        }
 
-        log.err("mirage NVRTC dispatch not yet implemented: kernel argument layout mapping pending", .{});
-        return error.MirageInternalError;
+        // Get or compile the module.
+        const hash = std.hash.Fnv1a_64.hash(artifact_data);
+        const compiled = try self.get_or_compile(hash, art);
+
+        // Launch each kernel.
+        for (art.kernels, 0..) |kd, ki| {
+            try self.launch_kernel(compiled.funcs[ki], kd, ctx);
+        }
+    }
+
+    fn get_or_compile(self: *MirageDispatchState, hash: u64, art: artifact_mod.Artifact) kernel.DispatchError!CompiledModule {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.cache.get(hash)) |mod| {
+            return mod;
+        }
+
+        // Compile: source → PTX → CUmodule.
+        const ptx = compile_to_ptx(self.allocator, art.source, "sm_86") catch {
+            return error.MirageInternalError;
+        };
+        defer self.allocator.free(ptx);
+
+        cuda.ensure_loaded() catch {
+            log.err("CUDA driver not available", .{});
+            return error.MirageInternalError;
+        };
+
+        var cu_module: cuda.CUmodule = undefined;
+        var rc = cuda.cuModuleLoadData(&cu_module, ptx.ptr);
+        if (rc != cuda.CUDA_SUCCESS) {
+            log.err("cuModuleLoadData failed: {d}", .{rc});
+            return error.MirageInternalError;
+        }
+
+        // Extract function handles for each kernel.
+        const funcs = self.allocator.alloc(cuda.CUfunction, art.kernels.len) catch {
+            _ = cuda.cuModuleUnload(cu_module);
+            return error.OutOfMemory;
+        };
+
+        for (art.kernels, 0..) |kd, ki| {
+            const name_z = self.allocator.dupeZ(u8, kd.func_name) catch {
+                _ = cuda.cuModuleUnload(cu_module);
+                self.allocator.free(funcs);
+                return error.OutOfMemory;
+            };
+            defer self.allocator.free(name_z);
+
+            rc = cuda.cuModuleGetFunction(&funcs[ki], cu_module, name_z.ptr);
+            if (rc != cuda.CUDA_SUCCESS) {
+                log.err("cuModuleGetFunction('{s}') failed: {d}", .{ kd.func_name, rc });
+                _ = cuda.cuModuleUnload(cu_module);
+                self.allocator.free(funcs);
+                return error.MirageInternalError;
+            }
+
+            // Set max dynamic shared memory if needed.
+            if (kd.smem_bytes > 48 * 1024) {
+                _ = cuda.cuFuncSetAttribute(
+                    funcs[ki],
+                    cuda.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    @intCast(kd.smem_bytes),
+                );
+            }
+        }
+
+        const compiled = CompiledModule{ .cu_module = cu_module, .funcs = funcs };
+        self.cache.put(hash, compiled) catch {
+            // Cache failure is non-fatal — just won't cache.
+        };
+        return compiled;
+    }
+
+    fn launch_kernel(
+        self: *MirageDispatchState,
+        func: cuda.CUfunction,
+        kd: artifact_mod.KernelDesc,
+        ctx: kernel.DispatchContext,
+    ) kernel.DispatchError!void {
+        // Build kernel argument pointers from the arg mapping.
+        // cuLaunchKernel takes void** kernel_params where each element
+        // is a pointer to the argument value (which is itself a device pointer).
+        const arg_ptrs = self.allocator.alloc(?*anyopaque, kd.args.len) catch
+            return error.OutOfMemory;
+        defer self.allocator.free(arg_ptrs);
+
+        // We need stable storage for the pointer values themselves.
+        const ptr_values = self.allocator.alloc(*anyopaque, kd.args.len) catch
+            return error.OutOfMemory;
+        defer self.allocator.free(ptr_values);
+
+        for (kd.args, 0..) |arg, i| {
+            switch (arg.source) {
+                .input => {
+                    if (arg.index_or_offset >= ctx.inputs.len) {
+                        log.err("kernel arg input index {d} out of range (have {d} inputs)", .{ arg.index_or_offset, ctx.inputs.len });
+                        return error.MirageInvalidArgument;
+                    }
+                    ptr_values[i] = ctx.inputs[arg.index_or_offset].data;
+                },
+                .output => {
+                    if (arg.index_or_offset >= ctx.outputs.len) {
+                        log.err("kernel arg output index {d} out of range (have {d} outputs)", .{ arg.index_or_offset, ctx.outputs.len });
+                        return error.MirageInvalidArgument;
+                    }
+                    ptr_values[i] = ctx.outputs[arg.index_or_offset].data;
+                },
+                .buf => {
+                    if (ctx.workspace == null) {
+                        log.err("kernel arg requires workspace buffer but none provided", .{});
+                        return error.WorkspaceUnavailable;
+                    }
+                    const base: [*]u8 = @ptrCast(ctx.workspace.?);
+                    ptr_values[i] = @ptrCast(base + arg.index_or_offset);
+                },
+            }
+            // cuLaunchKernel wants &ptr_values[i] for each argument.
+            arg_ptrs[i] = @ptrCast(&ptr_values[i]);
+        }
+
+        const stream: ?cuda.CUstream = if (ctx.stream) |s| @ptrCast(s) else null;
+
+        const rc = cuda.cuLaunchKernel(
+            func,
+            kd.grid_dim[0],
+            kd.grid_dim[1],
+            kd.grid_dim[2],
+            kd.block_dim[0],
+            kd.block_dim[1],
+            kd.block_dim[2],
+            kd.smem_bytes,
+            stream,
+            arg_ptrs.ptr,
+            null,
+        );
+        if (rc != cuda.CUDA_SUCCESS) {
+            log.err("cuLaunchKernel failed: {d}", .{rc});
+            return error.MirageInternalError;
+        }
     }
 };
 
 /// Compile CUDA source to PTX using NVRTC.
-/// The source should be the filtered device-only code from mirage_transpile().
 pub fn compile_to_ptx(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -104,13 +233,11 @@ pub fn compile_to_ptx(
     defer arena.deinit();
     const tmp = arena.allocator();
 
-    // Build NVRTC options
     var options = std.ArrayList([*:0]const u8){};
 
     const sdk_root = std.posix.getenv("ZG_EXTERNAL_SDK_ROOT") orelse "./result";
     const cuda_home = std.posix.getenv("CUDA_HOME") orelse std.posix.getenv("CUDA_PATH") orelse "/usr/local/cuda";
 
-    // Include paths: SDK (mirage + cutlass + cute), CUDA, runtime headers
     for ([_][]const u8{
         try std.fmt.allocPrint(tmp, "--include-path={s}/include", .{sdk_root}),
         try std.fmt.allocPrint(tmp, "--include-path={s}/include/mirage/transpiler/runtime", .{sdk_root}),
@@ -119,7 +246,6 @@ pub fn compile_to_ptx(
         try options.append(tmp, (try tmp.dupeZ(u8, opt)).ptr);
     }
 
-    // Nix-specific include paths
     if (std.posix.getenv("NIX_GLIBC_INCLUDE")) |g| {
         try options.append(tmp, (try tmp.dupeZ(u8, try std.fmt.allocPrint(tmp, "--include-path={s}", .{g}))).ptr);
     }
@@ -132,7 +258,6 @@ pub fn compile_to_ptx(
     try options.append(tmp, "-default-device");
     try options.append(tmp, "-DMIRAGE_BACKEND_USE_CUDA");
 
-    // Create and compile program
     var prog: nvrtc.nvrtcProgram = std.mem.zeroes(nvrtc.nvrtcProgram);
     const source_z = try tmp.dupeZ(u8, source);
     const create_rc = nvrtc.nvrtcCreateProgram(&prog, source_z.ptr, "mirage_kernel.cu", 0, null, null);
@@ -148,7 +273,6 @@ pub fn compile_to_ptx(
         if (options.items.len == 0) null else @ptrCast(options.items.ptr),
     );
 
-    // Get compilation log
     var log_size: usize = 0;
     _ = nvrtc.nvrtcGetProgramLogSize(prog, &log_size);
     if (log_size > 1) {
@@ -165,7 +289,6 @@ pub fn compile_to_ptx(
         return error.NvrtcCompileFailed;
     }
 
-    // Extract PTX
     var ptx_size: usize = 0;
     if (nvrtc.nvrtcGetPTXSize(prog, &ptx_size) != nvrtc.NVRTC_SUCCESS) {
         return error.NvrtcCompileFailed;
@@ -182,12 +305,11 @@ pub fn compile_to_ptx(
 }
 
 /// Filter Mirage transpiler output for NVRTC compilation.
-/// Strips host-only code (_init, _execute_mugraph, execute_mugraph wrappers)
-/// and replaces #include "runtime.h" with individual device-compatible includes.
+/// Strips host-only code and replaces #include "runtime.h" with
+/// individual device-compatible includes.
 pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
     var out = std.ArrayList(u8){};
 
-    // Transpiler-defined config macros (normally emitted per-graph).
     try out.appendSlice(allocator, "#define USE_NVSHMEM 0\n#define NUM_GPUS 1\n\n");
 
     var in_host_function = false;
@@ -197,7 +319,6 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
 
-        // Skip host-only includes
         if (std.mem.startsWith(u8, trimmed, "#include <vector>") or
             std.mem.startsWith(u8, trimmed, "#include <cuda_runtime") or
             std.mem.startsWith(u8, trimmed, "#include <cublas"))
@@ -205,7 +326,6 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
             continue;
         }
 
-        // Replace runtime.h with individual device-compatible includes
         if (std.mem.eql(u8, trimmed, "#include \"runtime.h\"")) {
             try out.appendSlice(allocator, "#include <cute/layout.hpp>\n");
             try out.appendSlice(allocator, "#include <cute/tensor.hpp>\n");
@@ -219,7 +339,6 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
             continue;
         }
 
-        // Detect start of host functions and skip them
         if (!in_host_function) {
             if (std.mem.startsWith(u8, trimmed, "static void _init()") or
                 std.mem.startsWith(u8, trimmed, "static void _execute_mugraph(") or

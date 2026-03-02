@@ -66,6 +66,12 @@ pub const source_uses_host_libs = C.MIRAGE_SOURCE_USES_HOST_LIBS;
 pub const source_has_kernels = C.MIRAGE_SOURCE_HAS_KERNELS;
 pub const source_device_callable = C.MIRAGE_SOURCE_DEVICE_CALLABLE;
 
+pub const ArgSource = C.mirage_arg_source_t;
+pub const arg_input = C.MIRAGE_ARG_INPUT;
+pub const arg_output = C.MIRAGE_ARG_OUTPUT;
+pub const arg_buf = C.MIRAGE_ARG_BUF;
+pub const KernelArg = C.mirage_kernel_arg_t;
+
 // IR types
 pub const KnOpType = C.mirage_kn_op_type_t;
 pub const TbOpType = C.mirage_tb_op_type_t;
@@ -115,6 +121,8 @@ const FnSourceNumOutputs = *const fn (?*const MirageSource) callconv(.c) usize;
 const FnSourceOutputSpec = *const fn (?*const MirageSource, usize, *TensorSpec) callconv(.c) MirageStatus;
 const FnSourceNumKernels = *const fn (?*const MirageSource) callconv(.c) usize;
 const FnSourceKernelMeta = *const fn (?*const MirageSource, usize, *KernelMeta) callconv(.c) MirageStatus;
+const FnSourceKernelNumArgs = *const fn (?*const MirageSource, usize) callconv(.c) usize;
+const FnSourceKernelArg = *const fn (?*const MirageSource, usize, usize, *KernelArg) callconv(.c) MirageStatus;
 
 // ir.h — kernel graph walk
 const FnIrNumOps = *const fn (?*const MirageGraph) callconv(.c) usize;
@@ -176,6 +184,8 @@ var fn_source_num_outputs: ?FnSourceNumOutputs = null;
 var fn_source_output_spec: ?FnSourceOutputSpec = null;
 var fn_source_num_kernels: ?FnSourceNumKernels = null;
 var fn_source_kernel_meta: ?FnSourceKernelMeta = null;
+var fn_source_kernel_num_args: ?FnSourceKernelNumArgs = null;
+var fn_source_kernel_arg: ?FnSourceKernelArg = null;
 
 var fn_ir_num_ops: ?FnIrNumOps = null;
 var fn_ir_op_type: ?FnIrOpType = null;
@@ -252,6 +262,8 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_source_output_spec = try load_symbol(FnSourceOutputSpec, handle, "mirage_source_output_spec");
     fn_source_num_kernels = try load_symbol(FnSourceNumKernels, handle, "mirage_source_num_kernels");
     fn_source_kernel_meta = try load_symbol(FnSourceKernelMeta, handle, "mirage_source_kernel_meta");
+    fn_source_kernel_num_args = try load_symbol(FnSourceKernelNumArgs, handle, "mirage_source_kernel_num_args");
+    fn_source_kernel_arg = try load_symbol(FnSourceKernelArg, handle, "mirage_source_kernel_arg");
 
     // ir.h — kernel graph walk
     fn_ir_num_ops = try load_symbol(FnIrNumOps, handle, "mirage_ir_num_ops");
@@ -434,6 +446,18 @@ pub fn mirage_source_num_kernels(source: ?*const MirageSource) usize {
 pub fn mirage_source_kernel_meta(source: ?*const MirageSource, index: usize, out: *KernelMeta) MirageStatus {
     const f = fn_source_kernel_meta orelse return status_internal_error;
     return f(source, index, out);
+}
+
+// source.h — kernel argument mapping
+
+pub fn mirage_source_kernel_num_args(source: ?*const MirageSource, kernel_index: usize) usize {
+    const f = fn_source_kernel_num_args orelse return 0;
+    return f(source, kernel_index);
+}
+
+pub fn mirage_source_kernel_arg(source: ?*const MirageSource, kernel_index: usize, arg_index: usize, out: *KernelArg) MirageStatus {
+    const f = fn_source_kernel_arg orelse return status_internal_error;
+    return f(source, kernel_index, arg_index, out);
 }
 
 // ir.h — kernel graph walk
