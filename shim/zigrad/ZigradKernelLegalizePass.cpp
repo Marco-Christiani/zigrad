@@ -154,45 +154,28 @@ struct ZigradKernelCallExpandPass final
 // Legalize pass: kernel_call → stablehlo.custom_call
 // ============================================================================
 
-static FailureOr<ArrayAttr> build_default_layouts_for_values(PatternRewriter &rewriter,
-                                                              ValueRange values) {
-  SmallVector<Attribute> layouts;
-  layouts.reserve(values.size());
-
-  for (Value value : values) {
-    auto ranked = dyn_cast<RankedTensorType>(value.getType());
-    if (!ranked) return failure();
-
-    const int64_t rank = ranked.getRank();
-    llvm::SmallVector<int64_t> order(rank);
-    for (int64_t i = 0; i < rank; ++i) {
-      order[i] = rank - i - 1;
-    }
-
-    auto layout_ty = RankedTensorType::get({rank}, rewriter.getIndexType());
-    layouts.push_back(DenseIntElementsAttr::get(layout_ty, order));
+/// Build a row-major layout attribute for a single ranked tensor type.
+static FailureOr<Attribute> build_row_major_layout(PatternRewriter &rewriter,
+                                                    RankedTensorType ranked) {
+  const int64_t rank = ranked.getRank();
+  llvm::SmallVector<int64_t> order(rank);
+  for (int64_t i = 0; i < rank; ++i) {
+    order[i] = rank - i - 1;
   }
-
-  return rewriter.getArrayAttr(layouts);
+  auto layout_ty = RankedTensorType::get({rank}, rewriter.getIndexType());
+  return DenseIntElementsAttr::get(layout_ty, order);
 }
 
-static FailureOr<ArrayAttr> build_default_layouts_for_types(PatternRewriter &rewriter,
-                                                             TypeRange types) {
+/// Build default (row-major) layout attributes for a range of types.
+static FailureOr<ArrayAttr> build_default_layouts(PatternRewriter &rewriter,
+                                                    TypeRange types) {
   SmallVector<Attribute> layouts;
   layouts.reserve(types.size());
 
   for (Type type : types) {
     auto ranked = dyn_cast<RankedTensorType>(type);
     if (!ranked) return failure();
-
-    const int64_t rank = ranked.getRank();
-    llvm::SmallVector<int64_t> order(rank);
-    for (int64_t i = 0; i < rank; ++i) {
-      order[i] = rank - i - 1;
-    }
-
-    auto layout_ty = RankedTensorType::get({rank}, rewriter.getIndexType());
-    layouts.push_back(DenseIntElementsAttr::get(layout_ty, order));
+    layouts.push_back(*build_row_major_layout(rewriter, ranked));
   }
 
   return rewriter.getArrayAttr(layouts);
@@ -202,12 +185,12 @@ struct KernelCallToStablehloCustomCallPattern final : OpRewritePattern<KernelCal
   using OpRewritePattern<KernelCallOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(KernelCallOp op, PatternRewriter &rewriter) const override {
-    auto operand_layouts = build_default_layouts_for_values(rewriter, op.getInputs());
+    auto operand_layouts = build_default_layouts(rewriter, op.getInputs().getTypes());
     if (failed(operand_layouts)) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor operands");
     }
 
-    auto result_layouts = build_default_layouts_for_types(rewriter, op->getResultTypes());
+    auto result_layouts = build_default_layouts(rewriter, op->getResultTypes());
     if (failed(result_layouts)) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor results");
     }

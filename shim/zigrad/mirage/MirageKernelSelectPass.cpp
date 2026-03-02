@@ -1,7 +1,5 @@
 #include "zigrad/mirage/MirageKernelSelectPass.h"
 
-#include <atomic>
-
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -16,20 +14,23 @@ namespace {
 
 constexpr StringLiteral kProvider("mirage");
 
-static std::atomic<unsigned> g_kernel_counter{0};
-
-static std::string next_kernel_key() {
-  unsigned id = g_kernel_counter.fetch_add(1, std::memory_order_relaxed);
-  return "mk_" + std::to_string(id);
-}
+/// Per-pass kernel key counter, reset at each pass invocation. Patterns hold a
+/// pointer to the counter owned by MirageKernelSelectPass::runOnOperation so
+/// keys start from mk_0 for every compilation unit.
+struct KeyCounter {
+  unsigned value = 0;
+  std::string next() { return "mk_" + std::to_string(value++); }
+};
 
 // ============================================================================
 // Pattern: mul(add(dot, x), x) -> "dot_add_mul"  (priority 3)
 // ============================================================================
 
 struct DotAddMulPattern final : RewritePattern {
-  explicit DotAddMulPattern(MLIRContext *ctx)
-      : RewritePattern("stablehlo.multiply", 3, ctx) {}
+  KeyCounter *counter;
+
+  explicit DotAddMulPattern(MLIRContext *ctx, KeyCounter *counter)
+      : RewritePattern("stablehlo.multiply", 3, ctx), counter(counter) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
@@ -78,7 +79,7 @@ struct DotAddMulPattern final : RewritePattern {
         mul_passthrough,
     };
 
-    std::string key = next_kernel_key();
+    std::string key = counter->next();
     Operation *replacement = kernel_utils::create_kernel_call(
         op, call_operands, op->getResultTypes(),
         kProvider, key, "dot_add_mul", rewriter);
@@ -96,8 +97,10 @@ struct DotAddMulPattern final : RewritePattern {
 // ============================================================================
 
 struct DotAddPattern final : RewritePattern {
-  explicit DotAddPattern(MLIRContext *ctx)
-      : RewritePattern("stablehlo.add", 2, ctx) {}
+  KeyCounter *counter;
+
+  explicit DotAddPattern(MLIRContext *ctx, KeyCounter *counter)
+      : RewritePattern("stablehlo.add", 2, ctx), counter(counter) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
@@ -130,7 +133,7 @@ struct DotAddPattern final : RewritePattern {
         passthrough,
     };
 
-    std::string key = next_kernel_key();
+    std::string key = counter->next();
     Operation *replacement = kernel_utils::create_kernel_call(
         op, call_operands, op->getResultTypes(),
         kProvider, key, "dot_add", rewriter);
@@ -147,15 +150,14 @@ struct DotAddPattern final : RewritePattern {
 // ============================================================================
 
 struct DotUnaryPattern final : RewritePattern {
-  explicit DotUnaryPattern(MLIRContext *ctx, StringRef op_name)
-      : RewritePattern(op_name, 2, ctx) {}
+  KeyCounter *counter;
+
+  explicit DotUnaryPattern(MLIRContext *ctx, StringRef op_name,
+                           KeyCounter *counter)
+      : RewritePattern(op_name, 2, ctx), counter(counter) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
-    const StringRef unary_name = op->getName().getStringRef();
-    if (unary_name != "stablehlo.exponential" && unary_name != "stablehlo.log")
-      return failure();
-
     if (op->getNumOperands() != 1) return failure();
 
     Operation *dot_op = op->getOperand(0).getDefiningOp();
@@ -170,10 +172,11 @@ struct DotUnaryPattern final : RewritePattern {
         dot_op->getOperand(1),
     };
 
+    const StringRef unary_name = op->getName().getStringRef();
     const StringRef pattern =
         unary_name == "stablehlo.log" ? "dot_log" : "dot_exp";
 
-    std::string key = next_kernel_key();
+    std::string key = counter->next();
     Operation *replacement = kernel_utils::create_kernel_call(
         op, call_operands, op->getResultTypes(),
         kProvider, key, pattern, rewriter);
@@ -199,12 +202,14 @@ struct MirageKernelSelectPass final
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
+    KeyCounter counter;
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<DotAddMulPattern>(&getContext());
-    patterns.add<DotAddPattern>(&getContext());
-    patterns.add<DotUnaryPattern>(&getContext(), "stablehlo.exponential");
-    patterns.add<DotUnaryPattern>(&getContext(), "stablehlo.log");
+    patterns.add<DotAddMulPattern>(&getContext(), &counter);
+    patterns.add<DotAddPattern>(&getContext(), &counter);
+    patterns.add<DotUnaryPattern>(&getContext(), "stablehlo.exponential",
+                                  &counter);
+    patterns.add<DotUnaryPattern>(&getContext(), "stablehlo.log", &counter);
 
     if (failed(applyPatternsGreedily(func, std::move(patterns)))) {
       signalPassFailure();

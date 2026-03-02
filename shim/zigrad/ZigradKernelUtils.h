@@ -1,7 +1,12 @@
 #pragma once
 
-#include "llvm/ADT/SmallVector.h"
-#include "mlir/IR/Builders.h"
+/// Reusable utilities for kernel provider passes.
+///
+/// Shared helpers for matching StableHLO patterns (is_dot_op, is_named_op) and
+/// constructing zigrad.kernel_call carrier ops. Each provider pass (e.g.
+/// MirageKernelSelectPass) uses these to emit kernel_calls without duplicating
+/// the OperationState boilerplate.
+
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
 

@@ -163,12 +163,7 @@ pub const MlirKernelMaterializePass = struct {
                     .{ call.kernel_key, call.provider, @tagName(call.pattern) },
                 );
                 var compiled_from_mlir = provider.compile_mlir(desc, self.registry.allocator()) catch |err| {
-                    if (err == error.Unsupported) {
-                        log.err(
-                            "provider '{s}' does not support MLIR compile for key '{s}' (pattern={s})",
-                            .{ call.provider, call.kernel_key, @tagName(call.pattern) },
-                        );
-                    } else {
+                    if (err != error.Unsupported) {
                         log.err(
                             "provider '{s}' failed MLIR compile for key '{s}': {s}",
                             .{ call.provider, call.kernel_key, @errorName(err) },
@@ -479,20 +474,7 @@ pub const MlirKernelMaterializePass = struct {
     }
 
     fn parse_pattern_name(name: []const u8) ?kernel.MlirKernelPattern {
-        return if (std.mem.eql(u8, name, "dot"))
-            .dot
-        else if (std.mem.eql(u8, name, "dot_general"))
-            .dot_general
-        else if (std.mem.eql(u8, name, "dot_add"))
-            .dot_add
-        else if (std.mem.eql(u8, name, "dot_add_mul"))
-            .dot_add_mul
-        else if (std.mem.eql(u8, name, "dot_log"))
-            .dot_log
-        else if (std.mem.eql(u8, name, "dot_exp"))
-            .dot_exp
-        else
-            null;
+        return std.meta.stringToEnum(kernel.MlirKernelPattern, name);
     }
 
     fn infer_pattern_from_arity(arity: usize) ?kernel.MlirKernelPattern {
