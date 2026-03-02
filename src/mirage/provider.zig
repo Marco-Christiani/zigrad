@@ -93,17 +93,17 @@ pub const MirageProvider = struct {
         switch (desc.pattern) {
             .dot, .dot_general => {},
             .dot_add => {
-                out_tensor = try emit_binary(&graph, .add, out_tensor, handles.items[2]);
+                out_tensor = try emit_binary(&graph, mirage_c.binary_add, out_tensor, handles.items[2]);
             },
             .dot_add_mul => {
-                const sum = try emit_binary(&graph, .add, out_tensor, handles.items[2]);
-                out_tensor = try emit_binary(&graph, .mul, sum, handles.items[2]);
+                const sum = try emit_binary(&graph, mirage_c.binary_add, out_tensor, handles.items[2]);
+                out_tensor = try emit_binary(&graph, mirage_c.binary_mul, sum, handles.items[2]);
             },
             .dot_log => {
-                out_tensor = try emit_unary(&graph, .log, out_tensor);
+                out_tensor = try emit_unary(&graph, mirage_c.unary_log, out_tensor);
             },
             .dot_exp => {
-                out_tensor = try emit_unary(&graph, .exp, out_tensor);
+                out_tensor = try emit_unary(&graph, mirage_c.unary_exp, out_tensor);
             },
         }
 
@@ -285,30 +285,30 @@ fn lower_eqn(
         .exp => {
             if (inputs.len != 1) return error.Unsupported;
             const input = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            return try emit_unary(graph, .exp, input);
+            return try emit_unary(graph, mirage_c.unary_exp, input);
         },
         .log => {
             if (inputs.len != 1) return error.Unsupported;
             const input = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            return try emit_unary(graph, .log, input);
+            return try emit_unary(graph, mirage_c.unary_log, input);
         },
         .add => {
             if (inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
-            return try emit_binary(graph, .add, lhs, rhs);
+            return try emit_binary(graph, mirage_c.binary_add, lhs, rhs);
         },
         .multiply => {
             if (inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
-            return try emit_binary(graph, .mul, lhs, rhs);
+            return try emit_binary(graph, mirage_c.binary_mul, lhs, rhs);
         },
         .divide => {
             if (inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
-            return try emit_binary(graph, .div, lhs, rhs);
+            return try emit_binary(graph, mirage_c.binary_div, lhs, rhs);
         },
         else => return error.Unsupported,
     }
@@ -337,9 +337,9 @@ fn emit_binary(
 
 fn dtype_to_mirage(dtype: pr.DType) ?mirage_c.MirageDType {
     return switch (dtype) {
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
+        .bf16 => mirage_c.dtype_bf16,
+        .f32 => mirage_c.dtype_f32,
+        .f64 => mirage_c.dtype_f64,
         else => null,
     };
 }
@@ -361,25 +361,22 @@ const StatusContext = enum {
 };
 
 fn map_mirage_status(status: mirage_c.MirageStatus, ctx: StatusContext) kernel.CompileError {
-    return switch (status) {
-        .ok => unreachable,
-        .invalid_argument => error.MirageInvalidArgument,
-        .internal_error => error.MirageInternalError,
-        .unsupported => switch (ctx) {
-            .region => error.Unsupported,
-            .runtime => error.MirageApiUnsupported,
-        },
-        .not_found => error.Unsupported,
-        _ => error.MirageInternalError,
+    if (status == mirage_c.status_invalid_argument) return error.MirageInvalidArgument;
+    if (status == mirage_c.status_internal_error) return error.MirageInternalError;
+    if (status == mirage_c.status_unsupported) return switch (ctx) {
+        .region => error.Unsupported,
+        .runtime => error.MirageApiUnsupported,
     };
+    if (status == mirage_c.status_not_found) return error.Unsupported;
+    return error.MirageInternalError;
 }
 
 test map_mirage_status {
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument, .region));
-    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error, .region));
-    try std.testing.expectEqual(error.Unsupported, map_mirage_status(.unsupported, .region));
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(mirage_c.status_invalid_argument, .region));
+    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(mirage_c.status_internal_error, .region));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_unsupported, .region));
 
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument, .runtime));
-    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error, .runtime));
-    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(.unsupported, .runtime));
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(mirage_c.status_invalid_argument, .runtime));
+    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(mirage_c.status_internal_error, .runtime));
+    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(mirage_c.status_unsupported, .runtime));
 }

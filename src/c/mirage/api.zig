@@ -95,13 +95,12 @@ pub fn status_name(status: c.MirageStatus) []const u8 {
 }
 
 fn check_status(status: c.MirageStatus) MirageError!void {
-    switch (status) {
-        .ok => {},
-        .invalid_argument => return error.MirageInvalidArgument,
-        .internal_error => return error.MirageInternalError,
-        .unsupported => return error.MirageApiUnsupported,
-        .not_found => return error.MirageNotFound,
-    }
+    if (status == c.status_ok) return;
+    if (status == c.status_invalid_argument) return error.MirageInvalidArgument;
+    if (status == c.status_internal_error) return error.MirageInternalError;
+    if (status == c.status_unsupported) return error.MirageApiUnsupported;
+    if (status == c.status_not_found) return error.MirageNotFound;
+    return error.MirageInternalError;
 }
 
 // ---------------------------------------------------------------------------

@@ -70,18 +70,15 @@ fn map_mirage_api_error(err: mirage_api.MirageError) kernel.DispatchError {
 }
 
 fn map_mirage_status(status: mirage_c.MirageStatus) kernel.DispatchError {
-    return switch (status) {
-        .ok => unreachable,
-        .invalid_argument => error.MirageInvalidArgument,
-        .internal_error => error.MirageInternalError,
-        .unsupported => error.MirageApiUnsupported,
-        .not_found => error.MirageInternalError,
-        _ => error.MirageInternalError,
-    };
+    if (status == mirage_c.status_invalid_argument) return error.MirageInvalidArgument;
+    if (status == mirage_c.status_internal_error) return error.MirageInternalError;
+    if (status == mirage_c.status_unsupported) return error.MirageApiUnsupported;
+    if (status == mirage_c.status_not_found) return error.MirageInternalError;
+    return error.MirageInternalError;
 }
 
 test "map_mirage_status preserves runtime detail" {
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument));
-    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error));
-    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(.unsupported));
+    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(mirage_c.status_invalid_argument));
+    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(mirage_c.status_internal_error));
+    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(mirage_c.status_unsupported));
 }

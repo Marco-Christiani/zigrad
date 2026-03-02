@@ -1,218 +1,81 @@
-//! Mirage C ABI declarations with runtime symbol loading.
+//! Mirage C ABI declarations.
 //!
-//! Matches the layered C API: types.h, graph.h, source.h, ir.h.
+//! Types are imported from the layered C API headers (types.h, graph.h,
+//! source.h, ir.h) via @cImport. Function calls go through dlsym since
+//! mirage is a runtime plugin, not a link-time dependency.
 const std = @import("std");
 
 const log = std.log.scoped(.@"zg/mirage_cffi");
 
 // ---------------------------------------------------------------------------
-// Shared types (types.h)
+// Types from C headers
 // ---------------------------------------------------------------------------
 
-pub const MirageGraph = opaque {};
-pub const MirageSearchResult = opaque {};
-pub const MirageDevice = opaque {};
-pub const MirageSource = opaque {};
-pub const MirageTBGraph = opaque {};
-pub const MirageTensor = u32;
+const C = @cImport({
+    @cInclude("mirage/c/types.h");
+    @cInclude("mirage/c/graph.h");
+    @cInclude("mirage/c/source.h");
+    @cInclude("mirage/c/ir.h");
+});
 
-pub const max_rank = 4;
+// Re-export C types under cleaner names.
 
-pub const MirageStatus = enum(c_int) {
-    ok = 0,
-    invalid_argument = 1,
-    internal_error = 2,
-    unsupported = 3,
-    not_found = 4,
-};
+pub const MirageGraph = C.mirage_graph_t;
+pub const MirageSearchResult = C.mirage_search_result_t;
+pub const MirageDevice = C.mirage_device_t;
+pub const MirageSource = C.mirage_source_t;
+pub const MirageTBGraph = C.mirage_tbgraph_t;
+pub const MirageTensor = C.mirage_tensor_t;
 
-pub const MirageDType = enum(c_int) {
-    f16 = 0,
-    bf16 = 1,
-    f32 = 2,
-    f64 = 3,
-};
+pub const max_rank = C.MIRAGE_MAX_RANK;
 
-pub const MirageUnaryOp = enum(c_int) {
-    exp = 0,
-    sqrt = 1,
-    silu = 2,
-    gelu = 3,
-    relu = 4,
-    log = 5,
-};
+pub const MirageStatus = C.mirage_status_t;
+pub const status_ok = C.MIRAGE_STATUS_OK;
+pub const status_invalid_argument = C.MIRAGE_STATUS_INVALID_ARGUMENT;
+pub const status_internal_error = C.MIRAGE_STATUS_INTERNAL_ERROR;
+pub const status_unsupported = C.MIRAGE_STATUS_UNSUPPORTED;
+pub const status_not_found = C.MIRAGE_STATUS_NOT_FOUND;
 
-pub const MirageBinaryOp = enum(c_int) {
-    add = 0,
-    mul = 1,
-    div = 2,
-    pow = 3,
-};
+pub const MirageDType = C.mirage_dtype_t;
+pub const dtype_f16 = C.MIRAGE_DTYPE_F16;
+pub const dtype_bf16 = C.MIRAGE_DTYPE_BF16;
+pub const dtype_f32 = C.MIRAGE_DTYPE_F32;
+pub const dtype_f64 = C.MIRAGE_DTYPE_F64;
 
-pub const TensorSpec = extern struct {
-    dtype: MirageDType,
-    rank: u32,
-    dims: [max_rank]i64,
-    strides: [max_rank]i64,
+pub const MirageUnaryOp = C.mirage_unary_op_t;
+pub const unary_exp = C.MIRAGE_UNARY_EXP;
+pub const unary_sqrt = C.MIRAGE_UNARY_SQRT;
+pub const unary_silu = C.MIRAGE_UNARY_SILU;
+pub const unary_gelu = C.MIRAGE_UNARY_GELU;
+pub const unary_relu = C.MIRAGE_UNARY_RELU;
+pub const unary_log = C.MIRAGE_UNARY_LOG;
 
-    pub fn init(dtype: MirageDType, dims: []const i64) TensorSpec {
-        var spec: TensorSpec = .{
-            .dtype = dtype,
-            .rank = @intCast(dims.len),
-            .dims = .{ 0, 0, 0, 0 },
-            .strides = .{ 0, 0, 0, 0 },
-        };
-        for (dims, 0..) |d, i| {
-            spec.dims[i] = d;
-        }
-        return spec;
-    }
-};
+pub const MirageBinaryOp = C.mirage_binary_op_t;
+pub const binary_add = C.MIRAGE_BINARY_ADD;
+pub const binary_mul = C.MIRAGE_BINARY_MUL;
+pub const binary_div = C.MIRAGE_BINARY_DIV;
+pub const binary_pow = C.MIRAGE_BINARY_POW;
 
-// ---------------------------------------------------------------------------
-// Source traits (source.h)
-// ---------------------------------------------------------------------------
+pub const TensorSpec = C.mirage_tensor_spec_t;
+pub const SearchOptions = C.mirage_search_options_t;
+pub const TranspileOptions = C.mirage_transpile_options_t;
+pub const KernelMeta = C.mirage_kernel_meta_t;
+pub const SourceTraits = C.mirage_source_traits_t;
 
-pub const SourceTraits = u32;
-pub const source_uses_host_libs: SourceTraits = 1 << 0;
-pub const source_has_kernels: SourceTraits = 1 << 1;
-pub const source_device_callable: SourceTraits = 1 << 2;
+pub const source_uses_host_libs = C.MIRAGE_SOURCE_USES_HOST_LIBS;
+pub const source_has_kernels = C.MIRAGE_SOURCE_HAS_KERNELS;
+pub const source_device_callable = C.MIRAGE_SOURCE_DEVICE_CALLABLE;
 
-pub const TranspileOptions = extern struct {
-    target_cc: i32 = 0,
-    profiling: u8 = 0,
-    pipeline_stages: i32 = 0,
-    required_traits: SourceTraits = 0,
-};
-
-pub const KernelMeta = extern struct {
-    func_name: ?[*]const u8,
-    func_name_len: usize,
-    smem_bytes: usize,
-    grid_dim: [3]u32,
-    block_dim: [3]u32,
-
-    pub fn funcName(self: KernelMeta) []const u8 {
-        const ptr = self.func_name orelse return "";
-        return ptr[0..self.func_name_len];
-    }
-};
+// IR types
+pub const KnOpType = C.mirage_kn_op_type_t;
+pub const TbOpType = C.mirage_tb_op_type_t;
+pub const STensorSpec = C.mirage_stensor_spec_t;
+pub const TbInputInfo = C.mirage_tb_input_info_t;
+pub const TbOutputInfo = C.mirage_tb_output_info_t;
+pub const Epilogue = C.mirage_epilogue_t;
 
 // ---------------------------------------------------------------------------
-// Search options (graph.h)
-// ---------------------------------------------------------------------------
-
-pub const SearchOptions = extern struct {
-    max_candidates: u32 = 0,
-    verbose: u8 = 0,
-    formal_verify: u8 = 0,
-    grid_dims: ?[*]const i32 = null,
-    num_grid_dims: usize = 0,
-    block_dims: ?[*]const i32 = null,
-    num_block_dims: usize = 0,
-    imaps: ?[*]const i32 = null,
-    num_imaps: usize = 0,
-    omaps: ?[*]const i32 = null,
-    num_omaps: usize = 0,
-    fmaps: ?[*]const i32 = null,
-    num_fmaps: usize = 0,
-    franges: ?[*]const i32 = null,
-    num_franges: usize = 0,
-};
-
-// ---------------------------------------------------------------------------
-// IR types (ir.h)
-// ---------------------------------------------------------------------------
-
-pub const KnOpType = enum(c_int) {
-    input = 1001,
-    output = 1002,
-    matmul = 1003,
-    exp = 1100,
-    square = 1101,
-    sqrt = 1102,
-    silu = 1104,
-    sigmoid = 1105,
-    gelu = 1106,
-    relu = 1150,
-    clamp = 1151,
-    log = 1160,
-    add = 1200,
-    mul = 1201,
-    div = 1202,
-    pow = 1203,
-    reduction_0 = 1300,
-    reduction_1 = 1301,
-    reduction_2 = 1302,
-    rms_norm = 1350,
-    allreduce = 1900,
-    customized = 1999,
-    _,
-};
-
-pub const TbOpType = enum(c_int) {
-    input = 2001,
-    output = 2002,
-    matmul = 2003,
-    exp = 2100,
-    square = 2101,
-    sqrt = 2102,
-    silu = 2104,
-    sigmoid = 2105,
-    gelu = 2106,
-    relu = 2150,
-    clamp = 2151,
-    log = 2160,
-    add = 2200,
-    mul = 2201,
-    div = 2202,
-    sub = 2203,
-    pow = 2204,
-    reduction_0 = 2301,
-    reduction_1 = 2302,
-    reduction_2 = 2303,
-    reduction_0_to_dimx = 2304,
-    reduction_1_to_dimx = 2305,
-    reduction_2_to_dimx = 2306,
-    rms_norm = 2350,
-    forloop_accum_no_red = 2500,
-    forloop_accum_red_ld_sum = 2501,
-    forloop_accum_red_ld_mean = 2502,
-    forloop_accum_red_ld_rms = 2503,
-    forloop_accum_redtox_ld_sum = 2504,
-    forloop_accum_no_red_rescale = 2505,
-    forloop_accum_red_ld_sum_rescale = 2506,
-    forloop_accum_max = 2507,
-    customized = 2999,
-    _,
-};
-
-pub const STensorSpec = extern struct {
-    dtype: MirageDType,
-    rank: u32,
-    dims: [max_rank]i64,
-    smem_offset: i32,
-};
-
-pub const TbInputInfo = extern struct {
-    input_map: [3]i32,
-    forloop_dim: i32,
-};
-
-pub const Epilogue = enum(c_int) {
-    none = 0,
-    allreduce = 1,
-    alltoall = 2,
-};
-
-pub const TbOutputInfo = extern struct {
-    output_map: [3]i32,
-    forloop_dim: i32,
-    epilogue: Epilogue,
-};
-
-// ---------------------------------------------------------------------------
-// Function pointer types
+// Function pointer types for dlsym loading
 // ---------------------------------------------------------------------------
 
 // types.h
@@ -429,7 +292,7 @@ pub fn mirage_status_string(status: MirageStatus) [*:0]const u8 {
 // graph.h — graph building
 
 pub fn mirage_graph_create(out: *?*MirageGraph) MirageStatus {
-    const f = fn_graph_create orelse return .internal_error;
+    const f = fn_graph_create orelse return status_internal_error;
     return f(out);
 }
 
@@ -439,44 +302,44 @@ pub fn mirage_graph_destroy(graph: ?*MirageGraph) void {
 }
 
 pub fn mirage_graph_new_input(graph: ?*MirageGraph, spec: *const TensorSpec, out: *MirageTensor) MirageStatus {
-    const f = fn_graph_new_input orelse return .internal_error;
+    const f = fn_graph_new_input orelse return status_internal_error;
     return f(graph, spec, out);
 }
 
 pub fn mirage_graph_matmul(graph: ?*MirageGraph, lhs: MirageTensor, rhs: MirageTensor, out: *MirageTensor) MirageStatus {
-    const f = fn_graph_matmul orelse return .internal_error;
+    const f = fn_graph_matmul orelse return status_internal_error;
     return f(graph, lhs, rhs, out);
 }
 
 pub fn mirage_graph_unary(graph: ?*MirageGraph, op: MirageUnaryOp, input: MirageTensor, out: *MirageTensor) MirageStatus {
-    const f = fn_graph_unary orelse return .internal_error;
+    const f = fn_graph_unary orelse return status_internal_error;
     return f(graph, op, input, out);
 }
 
 pub fn mirage_graph_binary(graph: ?*MirageGraph, op: MirageBinaryOp, lhs: MirageTensor, rhs: MirageTensor, out: *MirageTensor) MirageStatus {
-    const f = fn_graph_binary orelse return .internal_error;
+    const f = fn_graph_binary orelse return status_internal_error;
     return f(graph, op, lhs, rhs, out);
 }
 
 pub fn mirage_graph_reduction(graph: ?*MirageGraph, input: MirageTensor, dim: i32, factor: i32, out: *MirageTensor) MirageStatus {
-    const f = fn_graph_reduction orelse return .unsupported;
+    const f = fn_graph_reduction orelse return status_unsupported;
     return f(graph, input, dim, factor, out);
 }
 
 pub fn mirage_graph_rms_norm(graph: ?*MirageGraph, input: MirageTensor, normalized_size: i32, out: *MirageTensor) MirageStatus {
-    const f = fn_graph_rms_norm orelse return .unsupported;
+    const f = fn_graph_rms_norm orelse return status_unsupported;
     return f(graph, input, normalized_size, out);
 }
 
 pub fn mirage_graph_mark_output(graph: ?*MirageGraph, tensor: MirageTensor) MirageStatus {
-    const f = fn_graph_mark_output orelse return .internal_error;
+    const f = fn_graph_mark_output orelse return status_internal_error;
     return f(graph, tensor);
 }
 
 // graph.h — device
 
 pub fn mirage_device_create(ordinal: i32, out: *?*MirageDevice) MirageStatus {
-    const f = fn_device_create orelse return .internal_error;
+    const f = fn_device_create orelse return status_internal_error;
     return f(ordinal, out);
 }
 
@@ -490,14 +353,14 @@ pub fn mirage_device_mem_info() ?struct { free: usize, total: usize } {
     var free: usize = 0;
     var total: usize = 0;
     const st = f(null, &free, &total);
-    if (st != .ok) return null;
+    if (st != status_ok) return null;
     return .{ .free = free, .total = total };
 }
 
 // graph.h — search
 
 pub fn mirage_search(device: ?*MirageDevice, graph: ?*const MirageGraph, options: ?*const SearchOptions, out: *?*MirageSearchResult) MirageStatus {
-    const f = fn_search orelse return .internal_error;
+    const f = fn_search orelse return status_internal_error;
     return f(device, graph, options, out);
 }
 
@@ -519,7 +382,7 @@ pub fn mirage_search_result_get(result: ?*const MirageSearchResult, index: usize
 // source.h
 
 pub fn mirage_transpile(graph: ?*const MirageGraph, options: ?*const TranspileOptions, out: *?*MirageSource) MirageStatus {
-    const f = fn_transpile orelse return .internal_error;
+    const f = fn_transpile orelse return status_internal_error;
     return f(graph, options, out);
 }
 
@@ -559,7 +422,7 @@ pub fn mirage_source_num_outputs(source: ?*const MirageSource) usize {
 }
 
 pub fn mirage_source_output_spec(source: ?*const MirageSource, index: usize, out: *TensorSpec) MirageStatus {
-    const f = fn_source_output_spec orelse return .internal_error;
+    const f = fn_source_output_spec orelse return status_internal_error;
     return f(source, index, out);
 }
 
@@ -569,7 +432,7 @@ pub fn mirage_source_num_kernels(source: ?*const MirageSource) usize {
 }
 
 pub fn mirage_source_kernel_meta(source: ?*const MirageSource, index: usize, out: *KernelMeta) MirageStatus {
-    const f = fn_source_kernel_meta orelse return .internal_error;
+    const f = fn_source_kernel_meta orelse return status_internal_error;
     return f(source, index, out);
 }
 
@@ -581,7 +444,7 @@ pub fn mirage_ir_num_ops(graph: ?*const MirageGraph) usize {
 }
 
 pub fn mirage_ir_op_type(graph: ?*const MirageGraph, op_index: usize) KnOpType {
-    const f = fn_ir_op_type orelse return @enumFromInt(0);
+    const f = fn_ir_op_type orelse return 0;
     return f(graph, op_index);
 }
 
@@ -606,14 +469,14 @@ pub fn mirage_ir_op_output(graph: ?*const MirageGraph, op_index: usize, tensor_i
 }
 
 pub fn mirage_ir_tensor_spec(graph: ?*const MirageGraph, tensor: MirageTensor, out: *TensorSpec) MirageStatus {
-    const f = fn_ir_tensor_spec orelse return .internal_error;
+    const f = fn_ir_tensor_spec orelse return status_internal_error;
     return f(graph, tensor, out);
 }
 
 // ir.h — threadblock graph
 
 pub fn mirage_ir_op_tbgraph(graph: ?*const MirageGraph, op_index: usize, out: *?*const MirageTBGraph) MirageStatus {
-    const f = fn_ir_op_tbgraph orelse return .internal_error;
+    const f = fn_ir_op_tbgraph orelse return status_internal_error;
     return f(graph, op_index, out);
 }
 
@@ -643,7 +506,7 @@ pub fn mirage_ir_tbgraph_num_ops(tbg: ?*const MirageTBGraph) usize {
 }
 
 pub fn mirage_ir_tbgraph_op_type(tbg: ?*const MirageTBGraph, op_index: usize) TbOpType {
-    const f = fn_ir_tbgraph_op_type orelse return @enumFromInt(0);
+    const f = fn_ir_tbgraph_op_type orelse return 0;
     return f(tbg, op_index);
 }
 
@@ -658,22 +521,22 @@ pub fn mirage_ir_tbop_num_outputs(tbg: ?*const MirageTBGraph, op_index: usize) u
 }
 
 pub fn mirage_ir_tbop_input_spec(tbg: ?*const MirageTBGraph, op_index: usize, tensor_index: usize, out: *STensorSpec) MirageStatus {
-    const f = fn_ir_tbop_input_spec orelse return .internal_error;
+    const f = fn_ir_tbop_input_spec orelse return status_internal_error;
     return f(tbg, op_index, tensor_index, out);
 }
 
 pub fn mirage_ir_tbop_output_spec(tbg: ?*const MirageTBGraph, op_index: usize, tensor_index: usize, out: *STensorSpec) MirageStatus {
-    const f = fn_ir_tbop_output_spec orelse return .internal_error;
+    const f = fn_ir_tbop_output_spec orelse return status_internal_error;
     return f(tbg, op_index, tensor_index, out);
 }
 
 pub fn mirage_ir_tbop_input_info(tbg: ?*const MirageTBGraph, op_index: usize, out: *TbInputInfo) MirageStatus {
-    const f = fn_ir_tbop_input_info orelse return .internal_error;
+    const f = fn_ir_tbop_input_info orelse return status_internal_error;
     return f(tbg, op_index, out);
 }
 
 pub fn mirage_ir_tbop_output_info(tbg: ?*const MirageTBGraph, op_index: usize, out: *TbOutputInfo) MirageStatus {
-    const f = fn_ir_tbop_output_info orelse return .internal_error;
+    const f = fn_ir_tbop_output_info orelse return status_internal_error;
     return f(tbg, op_index, out);
 }
 
