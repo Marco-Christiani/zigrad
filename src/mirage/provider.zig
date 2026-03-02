@@ -164,6 +164,15 @@ pub const MirageProvider = struct {
             log.debug("mirage workspace for '{s}': {d} bytes", .{ target_name, buf_size });
         }
 
+        // If the transpiled source has no custom kernels (only library ops
+        // like standalone matmul → cuBLAS), we can't launch via NVRTC.
+        // Return Unsupported so the backend handles this natively.
+        const num_kernels = source.numKernels();
+        if (num_kernels == 0) {
+            log.debug("mirage transpile produced 0 custom kernels for '{s}'; falling back to backend", .{target_name});
+            return error.Unsupported;
+        }
+
         // Filter source for NVRTC (strip host code, replace runtime.h).
         const filtered = dispatch_mod.filter_source_for_nvrtc(allocator, cuda_code) catch {
             log.err("failed to filter source for '{s}'", .{target_name});
@@ -172,7 +181,6 @@ pub const MirageProvider = struct {
         defer allocator.free(filtered);
 
         // Build kernel descriptors from Layer 2 metadata.
-        const num_kernels = source.numKernels();
         var kernel_descs = try std.ArrayList(artifact_mod.KernelDesc).initCapacity(allocator, num_kernels);
         defer {
             for (kernel_descs.items) |k| {
