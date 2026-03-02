@@ -5,24 +5,26 @@ const mirage_c = @import("../c/mirage/c.zig");
 
 const log = std.log.scoped(.@"zg/mirage_dispatch");
 
+/// Dispatch state for Mirage kernels.
+///
+/// With the layered C API, Mirage produces CUDA source code (artifact data)
+/// rather than compiled .so artifacts. The dispatch layer is responsible for
+/// compiling the source to a loadable module and launching the kernels.
+///
+/// Current implementation: delegates to system nvcc for compilation and
+/// dlopen for execution, matching the compilation model that was previously
+/// internal to mirage_graph_compile.
 pub const MirageDispatchState = struct {
     allocator: std.mem.Allocator,
-    /// Mirage context kept alive for the lifetime of this dispatch state so that
-    /// the per-context wrapper cache persists across dispatch calls. Creating and
-    /// destroying the context per-call was previously done here but resulted in
-    /// the wrapper cache being discarded after every dispatch, forcing a fresh
-    /// dlopen on every invocation even when the same .so had just been loaded.
-    ctx: mirage_api.Context,
 
     pub fn init(allocator: std.mem.Allocator) mirage_api.MirageError!MirageDispatchState {
         return .{
             .allocator = allocator,
-            .ctx = try mirage_api.Context.init(),
         };
     }
 
     pub fn deinit(self: *MirageDispatchState) void {
-        self.ctx.deinit();
+        _ = self;
     }
 
     pub fn dispatch(
@@ -44,55 +46,15 @@ pub const MirageDispatchState = struct {
         kernel_key: []const u8,
         ctx: kernel.DispatchContext,
     ) kernel.DispatchError!void {
-        _ = kernel_key;
-
-        try require_workspace(ctx);
-
-        var input_descs = try ctx.allocator.alloc(mirage_c.BufferDesc, ctx.inputs.len);
-        defer ctx.allocator.free(input_descs);
-        for (ctx.inputs, 0..) |buf, i| {
-            input_descs[i] = .{
-                .data = buf.data,
-                .dtype = dtype_to_mirage(buf.dtype),
-                .dims = buf.dims.ptr,
-                .rank = buf.rank,
-            };
-        }
-
-        var output_descs = try ctx.allocator.alloc(mirage_c.BufferDesc, ctx.outputs.len);
-        defer ctx.allocator.free(output_descs);
-        for (ctx.outputs, 0..) |buf, i| {
-            output_descs[i] = .{
-                .data = buf.data,
-                .dtype = dtype_to_mirage(buf.dtype),
-                .dims = buf.dims.ptr,
-                .rank = buf.rank,
-            };
-        }
-
-        const params: mirage_c.DispatchParams = .{
-            .inputs = if (input_descs.len == 0) null else input_descs.ptr,
-            .num_inputs = input_descs.len,
-            .outputs = if (output_descs.len == 0) null else output_descs.ptr,
-            .num_outputs = output_descs.len,
-            .device_ordinal = ctx.device_ordinal,
-            .stream = ctx.stream,
-        };
-
-        // Artifact is validated once at compile time (provider.zig:compile_graph_to_artifact).
-        // Re-validating here on every dispatch call is redundant and contributes measurable
-        // CPU overhead on the hot path.
-        const status = mirage_c.mirage_execute_kernel(
-            self.ctx.raw,
-            artifact_data.ptr,
-            artifact_data.len,
-            &params,
-            ctx.workspace,
-        );
-        if (status != .ok) {
-            log.err("mirage_execute_kernel returned {s}", .{mirage_api.status_name(status)});
-            return map_mirage_status(status);
-        }
+        _ = self;
+        _ = artifact_data;
+        _ = ctx;
+        // The artifact data is now CUDA source code from mirage_transpile().
+        // Compilation and execution of the source is the caller's responsibility.
+        // This dispatch path will be re-implemented when the NVRTC/cuModule
+        // compilation pipeline is integrated.
+        log.err("mirage dispatch not yet implemented for source-code artifacts (kernel '{s}')", .{kernel_key});
+        return error.MirageInternalError;
     }
 };
 
@@ -102,6 +64,7 @@ fn map_mirage_api_error(err: mirage_api.MirageError) kernel.DispatchError {
         error.MirageInvalidArgument => error.MirageInvalidArgument,
         error.MirageInternalError => error.MirageInternalError,
         error.MirageApiUnsupported => error.MirageApiUnsupported,
+        error.MirageNotFound => error.MirageInternalError,
         error.OutOfMemory => error.OutOfMemory,
     };
 }
@@ -112,26 +75,8 @@ fn map_mirage_status(status: mirage_c.MirageStatus) kernel.DispatchError {
         .invalid_argument => error.MirageInvalidArgument,
         .internal_error => error.MirageInternalError,
         .unsupported => error.MirageApiUnsupported,
-    };
-}
-
-fn require_workspace(ctx: kernel.DispatchContext) kernel.DispatchError!void {
-    if (ctx.workspace_bytes_required != 0 and ctx.workspace == null) {
-        return error.WorkspaceUnavailable;
-    }
-}
-
-fn dtype_to_mirage(dtype: kernel.DType) mirage_c.MirageDType {
-    return switch (dtype) {
-        .f16 => .f16,
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .i8 => .i8,
-        .i32 => .i32,
-        .i64 => .i64,
-        .u32 => .u32,
-        .u64 => .u64,
+        .not_found => error.MirageInternalError,
+        _ => error.MirageInternalError,
     };
 }
 
@@ -139,18 +84,4 @@ test "map_mirage_status preserves runtime detail" {
     try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(.invalid_argument));
     try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(.internal_error));
     try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(.unsupported));
-}
-
-test "dispatch requires workspace when artifact needs it" {
-    const ctx: kernel.DispatchContext = .{
-        .inputs = &.{},
-        .outputs = &.{},
-        .device_ordinal = 0,
-        .platform = .cuda,
-        .stream = null,
-        .workspace = null,
-        .workspace_bytes_required = 16,
-        .allocator = std.testing.allocator,
-    };
-    try std.testing.expectError(error.WorkspaceUnavailable, require_workspace(ctx));
 }
