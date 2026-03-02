@@ -151,7 +151,7 @@ pub const setup_cmd: CommandT = .{
             .cmd_description = "Run kernelized region demo on PR lane",
             .default_val_opts = true,
             .sub_descriptions = &.{
-                .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
+                .{ "provider", "Kernel provider(s): tvm, mirage, or comma-separated (e.g. tvm,mirage). Default: tvm" },
             },
         }),
         CommandT.from(KernelProviderDemoOpts, .{
@@ -159,7 +159,7 @@ pub const setup_cmd: CommandT = .{
             .cmd_description = "Run kernelized region demo on MLIR lane",
             .default_val_opts = true,
             .sub_descriptions = &.{
-                .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
+                .{ "provider", "Kernel provider(s): tvm, mirage, or comma-separated (e.g. tvm,mirage). Default: tvm" },
             },
         }),
         .{

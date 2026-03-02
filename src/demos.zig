@@ -1,12 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
 
-fn providers_support_mlir_compile(providers: []const zg.kernel.KernelProvider) bool {
-    for (providers) |provider| {
-        if (provider.compile_mlir_fn == null) return false;
-    }
-    return true;
-}
 
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
@@ -440,7 +434,7 @@ pub fn run_train_demo(
         &.{ tmp_x.pjrt_buffer, tmp_y.pjrt_buffer },
     );
     defer state.deinit();
-    // Batch buffers are not owned by TrainState; deinit them separately.
+    // Batch buffers are not owned by TrainState, deinit them separately
     defer {
         var bx = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_x.pjrt_buffer };
         backend_handle.deinit_buffer(&bx);
@@ -512,17 +506,22 @@ pub fn run_train_demo(
     std.log.info("OK: train-demo executed", .{});
 }
 
-/// End-to-end kernel provider demo using temporary single-dispatch custom_call.
+/// End-to-end kernel provider demo.
 ///
-/// This mode requires TVM support and typed-FFI availability. It intentionally
-/// hard-fails if typed-FFI extension is missing.
+/// Compiles and executes a small matmul program through the kernelization
+///  pipeline. Accepts one or more providers, each gets its own kernelized
+///  region in the program.
+///
+/// TVM requires `ZG_EXTERNAL_SDK_ROOT` and XLA typed-FFI support, Mirage
+///  requires the Mirage shared library. Both can be enabled individually 
+///  or simultaneously.
 pub fn run_kernel_provider_demo(
     allocator: std.mem.Allocator,
     backend: *zg.backend.PjrtBackend,
     device: *const zg.backend.pjrt.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
-    provider_kind: KernelProviderDemoKind,
+    provider_kinds: []const KernelProviderDemoKind,
     pipeline_kind: KernelProviderDemoPipeline,
 ) !void {
     const lane: zg.lower.KernelizationLane = switch (pipeline_kind) {
@@ -530,57 +529,71 @@ pub fn run_kernel_provider_demo(
         .mlir => .mlir,
     };
 
-    var program = try build_kernelized_demo_program(allocator, @tagName(provider_kind));
-    defer program.deinit();
-
     var registry = zg.kernel.KernelRegistry.init(allocator);
     defer registry.deinit();
     var package = zg.kernel.KernelPackage.init(allocator);
     defer package.deinit();
     try backend.register_kernel_dispatcher();
 
-    if (provider_kind == .tvm) {
+    // --- TVM setup ---
+    var tvm_dispatch: zg.tvm.dispatch.TvmDispatchState = undefined;
+    var tvm_impl: zg.tvm.provider.TvmProvider = undefined;
+    var has_tvm = false;
+
+    if (kind_requested(provider_kinds, .tvm)) {
         try zg.tvm.ffi.ensure_loaded(allocator, .{});
         try backend.require_typed_ffi();
-
         const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
-        var tvm_dispatch_state = zg.tvm.dispatch.TvmDispatchState.init(allocator);
-        defer tvm_dispatch_state.deinit();
-
-        var tvm_provider_impl = zg.tvm.provider.TvmProvider{
+        tvm_dispatch = zg.tvm.dispatch.TvmDispatchState.init(allocator);
+        tvm_impl = .{
             .allocator = allocator,
             .target_kind = target_kind,
             .work_dir = "artifacts/tvm_cache",
             .max_trials = 8,
             .trials_per_iter = 4,
-            .dispatch_state = &tvm_dispatch_state,
+            .dispatch_state = &tvm_dispatch,
         };
-        const tvm_providers = [_]zg.kernel.KernelProvider{tvm_provider_impl.kernel_provider()};
-
-        const tvm_lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-        var tvm_exe = try compile_program(backend, allocator, &program, device, .{
-            .encoding = tvm_lower_encoding,
-            .entry_name = "main",
-            .kernelization_lane = lane,
-        }, dump_pr, dump_mlir, .{
-            .registry = &registry,
-            .package = &package,
-            .providers = tvm_providers[0..],
-            .lane = lane,
-        });
-        defer backend.deinit_executable(&tvm_exe);
-
-        return run_demo_executable(allocator, backend, device, &tvm_exe);
+        has_tvm = true;
     }
+    defer if (has_tvm) tvm_dispatch.deinit();
 
-    var mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
-    defer mirage_dispatch_state.deinit();
+    // --- Mirage setup ---
+    var mirage_dispatch: zg.mirage.dispatch.MirageDispatchState = undefined;
+    var mirage_impl: zg.mirage.provider.MirageProvider = undefined;
+    var has_mirage = false;
 
-    var mirage_provider_impl = zg.mirage.provider.MirageProvider{
-        .allocator = allocator,
-        .dispatch_state = &mirage_dispatch_state,
+    if (kind_requested(provider_kinds, .mirage)) {
+        mirage_dispatch = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
+        mirage_impl = .{
+            .allocator = allocator,
+            .dispatch_state = &mirage_dispatch,
+        };
+        has_mirage = true;
+    }
+    defer if (has_mirage) mirage_dispatch.deinit();
+
+    // Collect providers in requested order.
+    var providers_buf: [2]zg.kernel.KernelProvider = undefined;
+    var n_providers: usize = 0;
+    for (provider_kinds) |kind| switch (kind) {
+        .tvm => if (has_tvm) {
+            providers_buf[n_providers] = tvm_impl.kernel_provider();
+            n_providers += 1;
+        },
+        .mirage => if (has_mirage) {
+            providers_buf[n_providers] = mirage_impl.kernel_provider();
+            n_providers += 1;
+        },
     };
-    const providers = [_]zg.kernel.KernelProvider{mirage_provider_impl.kernel_provider()};
+    const providers = providers_buf[0..n_providers];
+
+    // Build provider name strings from kinds.
+    var pnames_buf: [2][]const u8 = undefined;
+    for (provider_kinds, 0..) |kind, i| pnames_buf[i] = @tagName(kind);
+    const provider_names = pnames_buf[0..provider_kinds.len];
+
+    var program = try build_kernelized_demo_program(allocator, provider_names);
+    defer program.deinit();
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     var exe = try compile_program(backend, allocator, &program, device, .{
@@ -590,18 +603,85 @@ pub fn run_kernel_provider_demo(
     }, dump_pr, dump_mlir, .{
         .registry = &registry,
         .package = &package,
-        .providers = providers[0..],
+        .providers = providers,
         .lane = lane,
     });
     defer backend.deinit_executable(&exe);
 
-    const expected_kernel_key = "matmul_region";
-    if (registry.get(expected_kernel_key) == null) {
-        std.log.err("mirage provider did not produce kernel artifact for '{s}'", .{expected_kernel_key});
-        return error.KernelArtifactMissing;
+    return run_kernel_provider_demo_executable(allocator, backend, device, &exe, provider_kinds.len);
+}
+
+fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderDemoKind) bool {
+    for (kinds) |k| if (k == target) return true;
+    return false;
+}
+
+/// Execute the kernel provider demo program and verify results.
+fn run_kernel_provider_demo_executable(
+    allocator: std.mem.Allocator,
+    backend: *zg.backend.PjrtBackend,
+    device: *const zg.backend.pjrt.Device,
+    exe: *zg.backend.pjrt.LoadedExecutable,
+    n_providers: usize,
+) !void {
+    const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
+    const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
+    const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
+    const shape_a = zg.utils.Shape{ .dims = &.{ 2, 3 } };
+    const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
+    const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
+
+    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    defer host_a.deinit();
+    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    defer host_b.deinit();
+    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    defer host_c.deinit();
+
+    const dims_a = [_]i64{ 2, 3 };
+    const dims_b = [_]i64{ 3, 2 };
+    const dims_c = [_]i64{ 2, 2 };
+    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    defer backend.deinit_buffer(&dev_a);
+    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    defer backend.deinit_buffer(&dev_b);
+    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    defer backend.deinit_buffer(&dev_c);
+
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c });
+    defer {
+        if (result.device_complete_event) |ev| {
+            var tmp = ev;
+            backend.deinit_event(&tmp);
+        }
+        for (result.outputs) |*buf| backend.deinit_buffer(buf);
+        allocator.free(result.outputs);
     }
 
-    return run_demo_executable(allocator, backend, device, &exe);
+    if (result.outputs.len != 1) return error.UnexpectedOutputs;
+
+    var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
+    defer out_host.deinit();
+    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data);
+    defer backend.deinit_event(&ev);
+    try backend.await_event(&ev);
+
+    // dot(A, B) = [[58, 64], [139, 154]]
+    // (n*dot + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]
+    const n = @as(f32, @floatFromInt(n_providers));
+    const expected = [_]f32{
+        116.0 * n + 4.0, 128.0 * n + 4.0,
+        278.0 * n + 4.0, 308.0 * n + 4.0,
+    };
+    const out = out_host.as_slice(f32)[0..4];
+    for (out, 0..) |v, i| {
+        const diff = @abs(v - expected[i]);
+        if (diff > 1e-4) {
+            std.log.err("mismatch[{d}]: got {d}, expected {d}", .{ i, v, expected[i] });
+            return error.NumericalMismatch;
+        }
+    }
+    std.log.info("OK: kernelized demo output matches expected ({d} provider(s))", .{n_providers});
 }
 
 pub const KernelProviderDemoKind = enum {
@@ -644,7 +724,6 @@ pub fn compile_program(
 
         if (cfg.lane == .mlir) {
             if (cfg.package == null) return error.ValidationFailed;
-            if (!providers_support_mlir_compile(cfg.providers)) return error.Unsupported;
         }
 
         if (cfg.lane == .pr) {
@@ -854,7 +933,16 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
     }
 }
 
-fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_name: []const u8) !zg.pr.Program {
+/// Builds a program for kernel provider demo.
+///
+/// Inputs: 
+///   a (2x3), b (3x2), c (2x2).
+///   One `dot(a,b)` kernelized region per provider, fold-summed into `sum`.
+/// Output:
+///   (sum + c) * c
+/// Expected:
+///   [[116n+4, 128n+4], [278n+4, 308n+4]] where n = provider count
+fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: []const []const u8) !zg.pr.Program {
     var program = zg.pr.Program.init(allocator);
     errdefer program.deinit();
 
@@ -865,11 +953,23 @@ fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_name: []
     const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("matmul_region", .{ .kernelize = provider_name });
-    const dot_id = try b.dot(a_id, b_id);
+    // Stack-allocate name buffers, names must outlive the builder (used within this function).
+    var region_name_bufs: [2][64]u8 = undefined;
+
+    const first_name = try std.fmt.bufPrint(&region_name_bufs[0], "{s}_region_0", .{provider_names[0]});
+    try b.push_region(first_name, .{ .kernelize = provider_names[0] });
+    var acc_id = try b.dot(a_id, b_id);
     try b.pop_region();
 
-    const add_id = try b.add(dot_id, c_id);
+    for (provider_names[1..], 1..) |pname, i| {
+        const rn = try std.fmt.bufPrint(&region_name_bufs[i], "{s}_region_{d}", .{ pname, i });
+        try b.push_region(rn, .{ .kernelize = pname });
+        const dot_id = try b.dot(a_id, b_id);
+        try b.pop_region();
+        acc_id = try b.add(acc_id, dot_id);
+    }
+
+    const add_id = try b.add(acc_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});

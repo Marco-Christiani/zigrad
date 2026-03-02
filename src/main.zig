@@ -159,15 +159,13 @@ pub fn main() !void {
     }
     if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
-        const provider_name = opts.provider orelse "tvm";
-        const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .pr);
+        const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .pr);
     }
     if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
-        const provider_name = opts.provider orelse "tvm";
-        const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .mlir);
+        const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
+        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .mlir);
     }
     if (cmd.matchSubCmd("vjp-demo")) |_| {
         return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
@@ -307,10 +305,7 @@ fn run_tvm_demo(
     const tvm_runtime = zg.tvm.runtime;
     const dlpack_mod = zg.tvm.dlpack;
 
-    const target_suffix: []const u8 = switch (target_kind) {
-        .cpu => "cpu",
-        .cuda => "cuda",
-    };
+    const target_suffix: []const u8 = @tagName(target_kind);
     const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_work_dir, target_suffix });
     defer gpa.free(base_dir);
     const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, M, N, K);
@@ -464,6 +459,28 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
 
     try harness.run();
     try harness.print_results();
+}
+
+const ProviderKindList = struct {
+    buf: [2]demos.KernelProviderDemoKind,
+    len: usize,
+
+    fn slice(self: *const ProviderKindList) []const demos.KernelProviderDemoKind {
+        return self.buf[0..self.len];
+    }
+};
+
+fn parse_provider_kinds(s: []const u8) !ProviderKindList {
+    var result: ProviderKindList = .{ .buf = undefined, .len = 0 };
+    var it = std.mem.splitScalar(u8, s, ',');
+    while (it.next()) |token| {
+        const trimmed = std.mem.trim(u8, token, " ");
+        if (result.len >= result.buf.len) return error.TooManyProviders;
+        result.buf[result.len] = std.meta.stringToEnum(demos.KernelProviderDemoKind, trimmed) orelse return error.InvalidArgument;
+        result.len += 1;
+    }
+    if (result.len == 0) return error.InvalidArgument;
+    return result;
 }
 
 fn parse_shape(s: []const u8) !zg.benchmark.Shape {
