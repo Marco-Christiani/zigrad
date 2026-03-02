@@ -26,6 +26,8 @@ pub const MlirKernelMaterializePass = struct {
     registry: *kernel.KernelRegistry,
     package: *kernel.KernelPackage,
     providers: []const kernel.KernelProvider,
+    /// Print a summary table of materialized kernel calls after the pass.
+    dump_kernels: bool = false,
 
     pub fn pass(self: *MlirKernelMaterializePass) pass_mod.Pass {
         return .{
@@ -58,8 +60,29 @@ pub const MlirKernelMaterializePass = struct {
             ctx.allocator.free(kernel_calls);
         }
 
+        // Shape cache: maps structural signature (pattern + shapes) → compiled artifact
+        // bytes. Regions with identical shapes across layers share one compiled binary,
+        // avoiding redundant superoptimization passes.
+        var shape_cache = std.StringHashMap(ShapeCacheEntry).init(ctx.allocator);
+        defer {
+            var it = shape_cache.iterator();
+            while (it.next()) |entry| {
+                ctx.allocator.free(entry.key_ptr.*);
+                ctx.allocator.free(entry.value_ptr.data);
+            }
+            shape_cache.deinit();
+        }
+
         for (kernel_calls) |*call| {
-            try self.materialize_selected_call(call);
+            try self.materialize_selected_call(call, &shape_cache, ctx.allocator);
+        }
+
+        if (self.dump_kernels and kernel_calls.len > 0) {
+            var buf: [8192]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&buf);
+            const out = &stdout_writer.interface;
+            dump_mlir_kernel_calls(out, kernel_calls) catch {};
+            out.flush() catch {};
         }
 
         mlir_artifact.kernel_package = self.package;
@@ -68,6 +91,8 @@ pub const MlirKernelMaterializePass = struct {
     fn materialize_selected_call(
         self: *MlirKernelMaterializePass,
         call: *const KernelCallPlan,
+        shape_cache: *std.StringHashMap(ShapeCacheEntry),
+        temp_allocator: std.mem.Allocator,
     ) pass_mod.PassError!void {
         const kernel_id = kernel.kernel_id_from_key(call.kernel_key);
         if (self.package.get(kernel_id) != null) return;
@@ -82,50 +107,88 @@ pub const MlirKernelMaterializePass = struct {
                 return error.ValidationFailed;
             };
 
-            const desc = call.descriptor();
-            log.debug(
-                "compiling MLIR-selected key '{s}' via provider '{s}' (pattern={s})",
-                .{ call.kernel_key, call.provider, @tagName(call.pattern) },
-            );
-            var compiled_from_mlir = provider.compile_mlir(desc, self.registry.allocator()) catch |err| {
-                if (err == error.Unsupported) {
+            const shape_key = try compute_call_shape_key(temp_allocator, call);
+            defer temp_allocator.free(shape_key);
+
+            if (shape_cache.get(shape_key)) |cached| {
+                log.debug("dedup cache hit: MLIR key '{s}' reuses compiled artifact", .{call.kernel_key});
+                const reg_alloc = self.registry.allocator();
+                const target_name = try reg_alloc.dupe(u8, call.kernel_key);
+                errdefer reg_alloc.free(target_name);
+                const cloned = kernel.KernelArtifact{
+                    .provider_name = cached.provider_name,
+                    .data = try reg_alloc.dupe(u8, cached.data),
+                    .target_name = target_name,
+                    .workspace_bytes = cached.workspace_bytes,
+                    .dispatch_fn = cached.dispatch_fn,
+                    .dispatch_ctx = cached.dispatch_ctx,
+                };
+                self.registry.put(cloned.target_name, cloned) catch |err| switch (err) {
+                    error.DuplicateKey => {
+                        log.err("duplicate registry key while materializing '{s}'", .{call.kernel_key});
+                        return error.DuplicateKey;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+            } else {
+                const desc = call.descriptor();
+                log.debug(
+                    "compiling MLIR-selected key '{s}' via provider '{s}' (pattern={s})",
+                    .{ call.kernel_key, call.provider, @tagName(call.pattern) },
+                );
+                var compiled_from_mlir = provider.compile_mlir(desc, self.registry.allocator()) catch |err| {
+                    if (err == error.Unsupported) {
+                        log.err(
+                            "provider '{s}' does not support MLIR compile for key '{s}' (pattern={s})",
+                            .{ call.provider, call.kernel_key, @tagName(call.pattern) },
+                        );
+                    } else {
+                        log.err(
+                            "provider '{s}' failed MLIR compile for key '{s}': {s}",
+                            .{ call.provider, call.kernel_key, @errorName(err) },
+                        );
+                    }
+                    return err;
+                };
+                errdefer compiled_from_mlir.deinit(self.registry.allocator());
+
+                if (!std.mem.eql(u8, compiled_from_mlir.provider_name, call.provider)) {
                     log.err(
-                        "provider '{s}' does not support MLIR compile for key '{s}' (pattern={s})",
-                        .{ call.provider, call.kernel_key, @tagName(call.pattern) },
+                        "provider mismatch for key '{s}': selected '{s}', compiled '{s}'",
+                        .{ call.kernel_key, call.provider, compiled_from_mlir.provider_name },
                     );
-                } else {
-                    log.err(
-                        "provider '{s}' failed MLIR compile for key '{s}': {s}",
-                        .{ call.provider, call.kernel_key, @errorName(err) },
-                    );
+                    return error.ValidationFailed;
                 }
-                return err;
-            };
-            errdefer compiled_from_mlir.deinit(self.registry.allocator());
 
-            if (!std.mem.eql(u8, compiled_from_mlir.provider_name, call.provider)) {
-                log.err(
-                    "provider mismatch for key '{s}': selected '{s}', compiled '{s}'",
-                    .{ call.kernel_key, call.provider, compiled_from_mlir.provider_name },
-                );
-                return error.ValidationFailed;
+                if (!std.mem.eql(u8, compiled_from_mlir.target_name, call.kernel_key)) {
+                    log.err(
+                        "compiled key mismatch: expected '{s}', got '{s}'",
+                        .{ call.kernel_key, compiled_from_mlir.target_name },
+                    );
+                    return error.ValidationFailed;
+                }
+
+                // Populate shape cache so subsequent same-shape regions skip compilation.
+                const cache_key = try temp_allocator.dupe(u8, shape_key);
+                errdefer temp_allocator.free(cache_key);
+                const cache_data = try temp_allocator.dupe(u8, compiled_from_mlir.data);
+                errdefer temp_allocator.free(cache_data);
+                try shape_cache.put(cache_key, .{
+                    .data = cache_data,
+                    .workspace_bytes = compiled_from_mlir.workspace_bytes,
+                    .dispatch_fn = compiled_from_mlir.dispatch_fn,
+                    .dispatch_ctx = compiled_from_mlir.dispatch_ctx,
+                    .provider_name = compiled_from_mlir.provider_name,
+                });
+
+                self.registry.put(compiled_from_mlir.target_name, compiled_from_mlir) catch |err| switch (err) {
+                    error.DuplicateKey => {
+                        log.err("duplicate registry key while materializing '{s}'", .{call.kernel_key});
+                        return error.DuplicateKey;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
             }
-
-            if (!std.mem.eql(u8, compiled_from_mlir.target_name, call.kernel_key)) {
-                log.err(
-                    "compiled key mismatch: expected '{s}', got '{s}'",
-                    .{ call.kernel_key, compiled_from_mlir.target_name },
-                );
-                return error.ValidationFailed;
-            }
-
-            self.registry.put(compiled_from_mlir.target_name, compiled_from_mlir) catch |err| switch (err) {
-                error.DuplicateKey => {
-                    log.err("duplicate registry key while materializing '{s}'", .{call.kernel_key});
-                    return error.DuplicateKey;
-                },
-                error.OutOfMemory => return error.OutOfMemory,
-            };
             compiled = self.registry.get(call.kernel_key);
         }
 
@@ -164,6 +227,35 @@ pub const MlirKernelMaterializePass = struct {
             if (std.mem.eql(u8, provider.name, name)) return provider;
         }
         return null;
+    }
+
+    fn dump_mlir_kernel_calls(out: *std.Io.Writer, calls: []const KernelCallPlan) !void {
+        const fields = std.meta.fields(kernel.MlirKernelPattern);
+        var counts: [fields.len]usize = [_]usize{0} ** fields.len;
+        for (calls) |call| counts[@intFromEnum(call.pattern)] += 1;
+
+        try out.print("kernels ({d} total):", .{calls.len});
+        inline for (fields, 0..) |field, i| {
+            if (counts[i] > 0) try out.print(" {s}={d}", .{ field.name, counts[i] });
+        }
+        try out.writeByte('\n');
+        try out.print("  {s:<55} {s:<12} {s:<16} {s}\n", .{ "key", "provider", "pattern", "in0" });
+        try out.writeAll("  " ++ ("-" ** 100) ++ "\n");
+        for (calls) |call| {
+            try out.print("  {s:<55} {s:<12} {s:<16} ", .{ call.kernel_key, call.provider, @tagName(call.pattern) });
+            if (call.inputs.len > 0) {
+                const d = call.inputs[0];
+                try out.print("{s}[", .{@tagName(d.dtype)});
+                for (d.dims, 0..) |dim, i| {
+                    if (i > 0) try out.writeByte(',');
+                    try out.print("{d}", .{dim});
+                }
+                try out.writeByte(']');
+            } else {
+                try out.writeAll("?");
+            }
+            try out.writeByte('\n');
+        }
     }
 
     const KernelCallPlan = struct {
@@ -415,6 +507,55 @@ pub const MlirKernelMaterializePass = struct {
         if (typ.as(mlir.IntegerType(.u64)) != null) return .u64;
 
         return null;
+    }
+
+    /// Cached artifact bytes keyed by structural shape signature.
+    ///
+    /// Stores enough to clone a `KernelArtifact` for a new region with the same
+    /// pattern and tensor shapes, avoiding redundant superoptimization passes.
+    /// `data` is owned by the shape cache (allocated from `temp_allocator` in
+    /// `run_impl`) and freed when the cache is torn down.
+    const ShapeCacheEntry = struct {
+        data: []const u8,
+        workspace_bytes: usize,
+        dispatch_fn: ?kernel.DispatchFn,
+        dispatch_ctx: ?*anyopaque,
+        /// Non-owning; points into the provider's own name storage.
+        provider_name: []const u8,
+    };
+
+    /// Build a deterministic shape-signature string for a `KernelCallPlan`.
+    ///
+    /// Encodes `pattern;dtype[d0,d1,...]x...>dtype[d0,d1,...]x...` so that two
+    /// plans with the same fusion pattern and tensor shapes produce the same key,
+    /// regardless of their `kernel_key` (region name).
+    fn compute_call_shape_key(allocator: std.mem.Allocator, call: *const KernelCallPlan) ![]const u8 {
+        var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
+        errdefer buf.deinit(allocator);
+        const w = buf.writer(allocator);
+        try w.writeAll(@tagName(call.pattern));
+        for (call.inputs) |inp| {
+            try w.writeByte(';');
+            try w.writeAll(@tagName(inp.dtype));
+            try w.writeByte('[');
+            for (inp.dims, 0..) |d, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print("{d}", .{d});
+            }
+            try w.writeByte(']');
+        }
+        try w.writeByte('>');
+        for (call.outputs) |out| {
+            try w.writeByte(';');
+            try w.writeAll(@tagName(out.dtype));
+            try w.writeByte('[');
+            for (out.dims, 0..) |d, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print("{d}", .{d});
+            }
+            try w.writeByte(']');
+        }
+        return buf.toOwnedSlice(allocator);
     }
 
     fn clone_artifact_for_package(

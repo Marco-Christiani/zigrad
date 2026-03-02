@@ -26,6 +26,7 @@ pub fn main() !void {
     var global_opts = try cli.get_global_opts(&cmd, gpa);
     const dump_pr_ptr = if (global_opts.dump_pr) |*cfg| cfg else null;
     const dump_mlir_ptr = if (global_opts.dump_mlir) |*cfg| cfg else null;
+    const dump_kernels = global_opts.dump_kernels;
     const quiet = global_opts.quiet;
 
     // Commands that dont require PJRT backend
@@ -156,12 +157,6 @@ pub fn main() !void {
     if (cmd.matchSubCmd("custom-call-neg")) |_| {
         return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
     }
-    if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
-        const provider_name = opts.provider orelse "tvm";
-        const provider_kind = std.meta.stringToEnum(demos.KernelProviderDemoKind, provider_name) orelse return error.InvalidArgument;
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_kind, .pr);
-    }
     if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
         const provider_name = opts.provider orelse "tvm";
@@ -188,40 +183,6 @@ pub fn main() !void {
         const warmup_steps = opts.warmup orelse 0;
         const steps = opts.steps orelse 8;
         return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
-    }
-    if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
-        const dtype = if (opts.dtype) |d|
-            std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
-        else
-            zg.pr.DType.bf16;
-
-        const kernel_provider = if (opts.kernel_provider) |provider_name|
-            std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
-        else
-            null;
-
-        const cfg = llama_demo.LlamaDemoConfig{
-            .train = opts.train,
-            .dtype = dtype,
-            .seq = opts.seq orelse 4,
-            .batch = opts.batch orelse 1,
-            .canonical_shapes = opts.canonical_shapes,
-            .execute_only = opts.execute_only,
-            .kernel_provider = kernel_provider,
-        };
-
-        return llama_demo.run_llama_ft_demo(
-            gpa,
-            plugin_path,
-            dump_pr_ptr,
-            dump_mlir_ptr,
-            opts.warmup orelse 1,
-            opts.steps orelse 4,
-            quiet,
-            .mlir,
-            cfg,
-        );
     }
     if (cmd.matchSubCmd("llama-ft-demo-pr")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
@@ -255,6 +216,7 @@ pub fn main() !void {
             quiet,
             .pr,
             cfg,
+            dump_kernels,
         );
     }
     if (cmd.matchSubCmd("llama-ft-demo-mlir")) |sub_cmd| {
@@ -289,6 +251,7 @@ pub fn main() !void {
             quiet,
             .mlir,
             cfg,
+            dump_kernels,
         );
     }
     if (cmd.matchSubCmd("jit-cache-save")) |sub_cmd| {

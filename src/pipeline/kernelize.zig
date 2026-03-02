@@ -41,6 +41,20 @@ const KernelCandidate = struct {
     carrier_hint: ?[]const u8 = null,
 };
 
+const KernelEntryOutcome = enum { compiled, dedup, fallback };
+
+/// Diagnostic record for one region encountered during kernelization.
+///
+/// `name` and `provider` are non-owning slices valid for the duration of
+/// `run_impl`. `ops` and `shape` are owned by the entries arena.
+const KernelEntry = struct {
+    name: []const u8,
+    provider: []const u8,
+    ops: []const u8,
+    shape: []const u8,
+    outcome: KernelEntryOutcome,
+};
+
 /// Cached artifact template keyed by region shape signature.
 ///
 /// Stores enough information to clone a `KernelArtifact` for a new region
@@ -71,6 +85,8 @@ pub const KernelizePass = struct {
     providers: []const kernel.KernelProvider,
     rewrite_regions: bool = true,
     target_name_mode: TargetNameMode = .region_name,
+    /// Print a summary table of compiled/dedup/fallback regions after the pass.
+    dump_kernels: bool = false,
 
     pub fn pass(self: *KernelizePass) pass_mod.Pass {
         return .{
@@ -98,18 +114,47 @@ pub const KernelizePass = struct {
             shape_cache.deinit();
         }
 
+        // Arena backing all diagnostic entries; freed after the table is printed.
+        var entries_arena = std.heap.ArenaAllocator.init(ctx.allocator);
+        defer entries_arena.deinit();
+        const entries_alloc = entries_arena.allocator();
+        var entries = std.ArrayList(KernelEntry).empty;
+
         const program = artifact.pr;
         const functions: []pr.Function = @constCast(program.functions);
         for (program.functions, 0..) |func, idx| {
-            const rewritten = self.kernelize_function(program, func, ctx.allocator, &shape_cache) catch |err| {
+            const rewritten = self.kernelize_function(
+                program,
+                func,
+                ctx.allocator,
+                &shape_cache,
+                if (self.dump_kernels) &entries else null,
+                entries_alloc,
+            ) catch |err| {
                 log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
                 return err;
             };
             functions[idx] = rewritten;
         }
+
+        if (self.dump_kernels and entries.items.len > 0) {
+            var buf: [8192]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&buf);
+            const out = &stdout_writer.interface;
+            dump_kernel_entries(out, entries.items) catch {};
+            out.flush() catch {};
+        }
     }
 
-    fn kernelize_function(self: *KernelizePass, program: *pr.Program, func: pr.Function, temp_allocator: std.mem.Allocator, shape_cache: *std.StringHashMap(ShapeCacheEntry)) !pr.Function {
+    fn kernelize_function(
+        self: *KernelizePass,
+        program: *pr.Program,
+        func: pr.Function,
+        temp_allocator: std.mem.Allocator,
+        shape_cache: *std.StringHashMap(ShapeCacheEntry),
+        entries: ?*std.ArrayList(KernelEntry),
+        entries_alloc: std.mem.Allocator,
+    ) !pr.Function {
         if (func.regions.len == 0) return func;
 
         var candidates = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
@@ -159,7 +204,9 @@ pub const KernelizePass = struct {
             const shape_key = try compute_shape_key(temp_allocator, desc);
             defer temp_allocator.free(shape_key);
 
+            var was_dedup = false;
             var ka: kernel.KernelArtifact = if (shape_cache.get(shape_key)) |cached| hit: {
+                was_dedup = true;
                 log.debug("dedup cache hit: region '{s}' reuses compiled artifact", .{candidate.region.name});
                 const reg_alloc = self.registry.allocator();
                 const target_name = try reg_alloc.dupe(u8, candidate.region.name);
@@ -176,6 +223,17 @@ pub const KernelizePass = struct {
                 const compiled = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
                     error.Unsupported => {
                         log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
+                        if (entries) |e| {
+                            const ops = build_ops_str(entries_alloc, desc) catch "";
+                            const shape = build_shape_str(entries_alloc, desc) catch "";
+                            e.append(entries_alloc, .{
+                                .name = candidate.region.name,
+                                .provider = candidate.provider_name,
+                                .ops = ops,
+                                .shape = shape,
+                                .outcome = .fallback,
+                            }) catch {};
+                        }
                         continue;
                     },
                     else => {
@@ -199,6 +257,19 @@ pub const KernelizePass = struct {
             };
 
             try self.retarget_kernel_artifact(func, candidate.region, &ka);
+
+            if (entries) |e| {
+                const outcome: KernelEntryOutcome = if (was_dedup) .dedup else .compiled;
+                const ops = build_ops_str(entries_alloc, desc) catch "";
+                const shape = build_shape_str(entries_alloc, desc) catch "";
+                e.append(entries_alloc, .{
+                    .name = candidate.region.name,
+                    .provider = candidate.provider_name,
+                    .ops = ops,
+                    .shape = shape,
+                    .outcome = outcome,
+                }) catch {};
+            }
 
             self.registry.put(ka.target_name, ka) catch |err| switch (err) {
                 error.DuplicateKey => {
@@ -509,6 +580,51 @@ fn write_aval_key(w: anytype, aval: ?pr.Aval) !void {
             }
             try w.writeByte(']');
         },
+    }
+}
+
+// ============================================================================
+// Kernel Dump Helpers
+// ============================================================================
+
+fn build_ops_str(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    for (desc.eqns, 0..) |eqn, i| {
+        if (i > 0) try w.writeByte('+');
+        try w.writeAll(@tagName(eqn.prim));
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+fn build_shape_str(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    for (desc.inputs, 0..) |vid, i| {
+        if (i > 0) try w.writeByte('x');
+        try write_aval_key(w, desc.aval_of(vid));
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+fn dump_kernel_entries(out: *std.Io.Writer, entries: []const KernelEntry) !void {
+    var compiled: usize = 0;
+    var dedup: usize = 0;
+    var fallback: usize = 0;
+    for (entries) |e| switch (e.outcome) {
+        .compiled => compiled += 1,
+        .dedup => dedup += 1,
+        .fallback => fallback += 1,
+    };
+    try out.print("kernels: {d} compiled, {d} dedup, {d} fallback\n", .{ compiled, dedup, fallback });
+    try out.print("  {s:<50} {s:<10} {s:<30} {s:<50} {s}\n", .{ "region", "provider", "ops", "shapes", "outcome" });
+    try out.writeAll("  " ++ ("-" ** 150) ++ "\n");
+    for (entries) |e| {
+        try out.print("  {s:<50} {s:<10} {s:<30} {s:<50} {s}\n", .{
+            e.name, e.provider, e.ops, e.shape, @tagName(e.outcome),
+        });
     }
 }
 

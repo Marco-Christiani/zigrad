@@ -530,10 +530,7 @@ pub fn run_kernel_provider_demo(
         .mlir => .mlir,
     };
 
-    var program = try build_kernelized_demo_program(allocator, switch (provider_kind) {
-        .tvm => "tvm",
-        .mirage => "mirage",
-    });
+    var program = try build_kernelized_demo_program(allocator, @tagName(provider_kind));
     defer program.deinit();
 
     var registry = zg.kernel.KernelRegistry.init(allocator);
@@ -658,6 +655,7 @@ pub fn compile_program(
                 .providers = cfg.providers,
                 .rewrite_regions = cfg.lane == .pr,
                 .target_name_mode = .region_name,
+                .dump_kernels = cfg.dump_kernels,
             };
             try passes.append(allocator, kernelize_state.?.pass());
         }
@@ -668,6 +666,7 @@ pub fn compile_program(
                     .registry = cfg.registry,
                     .package = pkg,
                     .providers = cfg.providers,
+                    .dump_kernels = cfg.dump_kernels,
                 };
             }
         }
@@ -733,6 +732,8 @@ pub const KernelizeConfig = struct {
 
     /// Select the kernelization lane for this compile.
     lane: zg.lower.KernelizationLane = .pr,
+    /// Print a summary table of kernelized regions after the pass.
+    dump_kernels: bool = false,
 };
 
 pub fn print_pr(allocator: std.mem.Allocator) !void {

@@ -370,6 +370,8 @@ pub const KernelizeConfig = struct {
     package: ?*kernel.KernelPackage = null,
     providers: []const kernel.KernelProvider,
     lane: lower.KernelizationLane = .pr,
+    /// Print a summary table of kernelized regions after the pass.
+    dump_kernels: bool = false,
 };
 
 /// Compiled executable with arity metadata.
@@ -493,6 +495,7 @@ pub fn compile_program(
                 .providers = cfg.providers,
                 .rewrite_regions = true,
                 .target_name_mode = .region_name,
+                .dump_kernels = cfg.dump_kernels,
             };
             try passes.append(allocator, kernelize_state.?.pass());
         }
@@ -503,6 +506,7 @@ pub fn compile_program(
                     .registry = cfg.registry,
                     .package = pkg,
                     .providers = cfg.providers,
+                    .dump_kernels = cfg.dump_kernels,
                 };
             }
         }

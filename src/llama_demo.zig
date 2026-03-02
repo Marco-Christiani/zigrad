@@ -139,6 +139,7 @@ pub fn run_llama_ft_demo(
     quiet: bool,
     pipeline_kind: LlamaDemoPipeline,
     cfg: LlamaDemoConfig,
+    dump_kernels: bool,
 ) !void {
     const TensorSpec = zg.frontend.TensorSpec;
     const train_mode = cfg.train;
@@ -258,6 +259,7 @@ pub fn run_llama_ft_demo(
                     .package = &kernel_package.?,
                     .providers = mirage_providers[0..],
                     .lane = kernel_lane,
+                    .dump_kernels = dump_kernels,
                 };
             },
         }

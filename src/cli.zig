@@ -115,6 +115,15 @@ pub const setup_cmd: CommandT = .{
                 .default_val = false,
             }),
         },
+        .{
+            .name = "dump_kernels",
+            .long_name = "dump-kernels",
+            .description = "Print kernelization summary table after pass (requires --kernel-provider)",
+            .val = ValueT.ofType(bool, .{
+                .name = "dump_kernels_val",
+                .default_val = false,
+            }),
+        },
     },
     .sub_cmds = &.{
         .{
@@ -137,14 +146,6 @@ pub const setup_cmd: CommandT = .{
             .name = "custom-call-neg",
             .description = "Expects missing custom call handler (should fail)",
         },
-        CommandT.from(KernelProviderDemoOpts, .{
-            .cmd_name = "kernel-provider-demo",
-            .cmd_description = "Run kernelized region demo",
-            .default_val_opts = true,
-            .sub_descriptions = &.{
-                .{ "provider", "Kernel provider to use: tvm or mirage (default: tvm)" },
-            },
-        }),
         CommandT.from(KernelProviderDemoOpts, .{
             .cmd_name = "kernel-provider-demo-pr",
             .cmd_description = "Run kernelized region demo on PR lane",
@@ -225,22 +226,6 @@ pub const setup_cmd: CommandT = .{
             .sub_descriptions = &.{
                 .{ "warmup", "Number of warmup iterations" },
                 .{ "steps", "Number of training steps" },
-            },
-        }),
-        CommandT.from(LlamaFtDemoOpts, .{
-            .cmd_name = "llama-ft-demo",
-            .cmd_description = "Run a tiny Llama fine-tune demo",
-            .default_val_opts = true,
-            .sub_descriptions = &.{
-                .{ "warmup", "Number of warmup iterations" },
-                .{ "steps", "Number of training steps" },
-                .{ "train", "Enable training mode" },
-                .{ "dtype", "Data type: bf16 or f32" },
-                .{ "seq", "Sequence length" },
-                .{ "batch", "Batch size" },
-                .{ "canonical_shapes", "Use canonical shapes" },
-                .{ "execute_only", "Execute only, skip compilation" },
-                .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
             },
         }),
         CommandT.from(LlamaFtDemoOpts, .{
@@ -333,6 +318,7 @@ pub fn parse(allocator: std.mem.Allocator) !CommandT {
 const GlobalOptsResult = struct {
     dump_pr: ?zg.pipeline.DumpConfig = null,
     dump_mlir: ?zg.pipeline.DumpConfig = null,
+    dump_kernels: bool = false,
     quiet: bool = false,
 };
 
@@ -354,6 +340,12 @@ pub fn get_global_opts(cmd: *const CommandT, allocator: std.mem.Allocator) !Glob
         if (opt.val.isSet()) {
             const val = try opt.val.getAs([]const u8);
             result.dump_mlir = if (val.len > 0) .{ .target = .file, .path = val } else .{ .target = .stdout };
+        }
+    }
+
+    if (opts.get("dump_kernels")) |opt| {
+        if (opt.val.isSet()) {
+            result.dump_kernels = try opt.val.getAs(bool);
         }
     }
 
