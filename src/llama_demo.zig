@@ -148,6 +148,14 @@ pub fn run_llama_ft_demo(
     const batch_size: usize = cfg.batch;
     const execute_only = cfg.execute_only;
 
+    // Mirage kernel provider uses the MLIR lane for pattern-driven kernel
+    // selection — annotations are not needed when the MLIR pass discovers
+    // fuseable patterns post-lowering.
+    const effective_pipeline_kind: LlamaDemoPipeline = if (cfg.kernel_provider == .mirage)
+        .mlir
+    else
+        pipeline_kind;
+
     const LayerSpec = struct {
         input_norm: TensorSpec,
         post_norm: TensorSpec,
@@ -220,7 +228,7 @@ pub fn run_llama_ft_demo(
         .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
     };
 
-    const kernel_lane: zg.lower.KernelizationLane = switch (pipeline_kind) {
+    const kernel_lane: zg.lower.KernelizationLane = switch (effective_pipeline_kind) {
         .pr => .pr,
         .mlir => .mlir,
     };

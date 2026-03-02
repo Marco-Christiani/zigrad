@@ -7,7 +7,7 @@
 ///
 /// Pipeline ordering:
 /// - Lower (PR -> MLIR, baseline only)
-/// - MlirSelectPass: `canonicalize,cse,func.func(zg-kernel-select),canonicalize,cse`
+/// - MlirSelectPass: `canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse`
 /// - MlirMaterializePass: (separate module, walks selected kernel_call ops)
 /// - MlirLegalizePass: `func.func(zg-kernel-legalize),canonicalize,cse`
 ///
@@ -20,7 +20,7 @@ const pass_mod = @import("pass.zig");
 
 const log = std.log.scoped(.@"zg/mlir_passes");
 
-const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-kernel-select),canonicalize,cse";
+const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse";
 const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legalize),canonicalize,cse";
 
 /// Run an MLIR pass pipeline on the current artifact bytes.
@@ -101,10 +101,10 @@ fn run_pipeline_on_artifact(
 
 /// MLIR -> MLIR pass: kernel selection via greedy pattern matching.
 ///
-/// Runs `zg-kernel-select` which reads `zigrad.kernelize.*` marker attributes
-/// (set during lowering for MLIR-lane regions) and fuses/selects ops into
-/// `zigrad.kernel_call` operations. Canonicalize and CSE run before and after
-/// selection.
+/// Runs `zg-mirage-kernel-select` which structurally matches fuseable
+/// StableHLO patterns (dot+add, dot+exp, etc.) and rewrites them into
+/// `zigrad.kernel_call` operations for the Mirage kernel provider.
+/// Canonicalize and CSE run before and after selection.
 ///
 /// After this pass, the artifact contains `zigrad.kernel_call` ops that
 /// represent selected kernel candidates. These must be materialized

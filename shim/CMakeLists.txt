@@ -97,6 +97,7 @@ add_library(zigrad_mlir_ext SHARED
   mlir_ext.cc
   zigrad/ZigradDialect.cpp
   zigrad/ZigradKernelLegalizePass.cpp
+  zigrad/mirage/MirageKernelSelectPass.cpp
 )
 add_dependencies(zigrad_mlir_ext zigrad_tblgen)
 target_compile_options(zigrad_mlir_ext PRIVATE -fno-rtti)
