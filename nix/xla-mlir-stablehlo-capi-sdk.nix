@@ -1,7 +1,8 @@
 # nix/xla-mlir-stablehlo-capi-sdk.nix
 #
-# Sources are provided as flake inputs (xlaSrc, llvmSrc, stablehloSrc).
-# XLA patches for LLVM and StableHLO are applied from xlaSrc/third_party/.
+# Builds the StableHLO C API against a pre-built LLVM/MLIR (from llvm.nix).
+# Sources are provided as flake inputs (xlaSrc, stablehloSrc).
+# XLA patches for StableHLO are applied from xlaSrc/third_party/.
 {
   lib,
   stdenv,
@@ -20,38 +21,14 @@
   libffi,
   lld,
   binutils,
-  # Flake source inputs (replacing lockFile).
+  # Flake source inputs.
   xlaSrc,
-  llvmSrc,
   stablehloSrc,
+  # Pre-built LLVM/MLIR from llvm.nix (shared with TVM).
+  llvm,
   devel ? false,
 }: let
-  llvmPatches = ["build.patch" "mathextras.patch" "toolchains.patch" "zstd.patch" "lit_test.patch"];
-  llvmIgnoredPatches = ["generated.patch"];
-
   stablehloPatches = ["temporary.patch"];
-
-  patchedLlvmSrc = runCommand "llvm-src-patched" {nativeBuildInputs = [patch];} ''
-    set -euo pipefail
-    cp -r ${llvmSrc} "$out"
-    chmod -R u+w "$out"
-    cd "$out"
-
-    echo "[llvm] Verifying patch set"
-    expected_patches="${lib.concatStringsSep " " llvmPatches} ${lib.concatStringsSep " " llvmIgnoredPatches}"
-    actual_patches="$(cd ${xlaSrc}/third_party/llvm && ls *.patch | tr '\n' ' ')"
-    for p in $actual_patches; do
-      case " $expected_patches " in
-        *" $p "*) ;;
-        *) echo "ERROR: New or unexpected LLVM patch detected: $p" >&2; exit 1;;
-      esac
-    done
-
-    for p in ${lib.concatStringsSep " " llvmPatches}; do
-      echo "[llvm] Applying $p"
-      patch -p1 < "${xlaSrc}/third_party/llvm/$p"
-    done
-  '';
 
   patchedStablehloSrc = runCommand "stablehlo-src-patched" {nativeBuildInputs = [patch perl];} ''
     set -euo pipefail
@@ -101,7 +78,6 @@ in
       cmake
       ninja
       python3
-      perl
       patchelf
       lld
       binutils
@@ -121,57 +97,9 @@ in
       libffi
     ];
 
+    # Only StableHLO is built here; LLVM/MLIR comes pre-built from llvm.nix.
     buildPhase = ''
       set -euo pipefail
-
-      # LLVM/MLIR: shared implementation libraries so MLIR-C and StablehloCAPI share one MLIR/LLVM instance at runtime.
-      cmake_flags=(
-        -G Ninja
-        -DCMAKE_BUILD_TYPE=Release
-
-        -DBUILD_SHARED_LIBS=ON
-        -DLLVM_ENABLE_PROJECTS=mlir
-        -DLLVM_TARGETS_TO_BUILD=host
-
-        -DLLVM_INCLUDE_TESTS=OFF
-        -DLLVM_INCLUDE_EXAMPLES=OFF
-        -DLLVM_INCLUDE_DOCS=OFF
-        -DMLIR_INCLUDE_TESTS=OFF
-        -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
-
-        -DMLIR_BUILD_MLIR_C_DYLIB=ON
-
-        # PICK ONE
-        # Faster linker if available (check StableHLO docs).
-        # -DLLVM_ENABLE_LLD=ON
-        -DLLVM_USE_LINKER=lld
-
-        # RPATH - need libstdc++ DSO
-        -DCMAKE_BUILD_RPATH=${lib.makeLibraryPath [stdenv.cc.cc.lib zlib zstd]}
-        # could also set CMAKE_INSTALL_RPATH to the sam val too, not sure yet, we patchelf later
-        # -DCMAKE_INSTALL_RPATH=...
-        -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON
-      )
-
-      mkdir -p llvm-build
-      cmake -S ${patchedLlvmSrc}/llvm -B llvm-build "''${cmake_flags[@]}"
-
-      # Minimum host tools typically needed by StableHLO generation.
-      cmake --build llvm-build --target llvm-tblgen mlir-tblgen
-
-      # Build MLIR-C first (your Zig links against this).
-      cmake --build llvm-build --target MLIR-C
-
-      # If StableHLO's build links to MLIRCAPI*.so imported targets, they must exist before stablehlo-build runs.
-      # Building them here avoids the "missing and no known rule to make it" failure.
-      cmake --build llvm-build --target \
-        MLIRCAPIIR \
-        MLIRCAPIArith \
-        MLIRCAPIMath \
-        MLIRCAPISCF \
-        MLIRCAPITransforms \
-        MLIRCAPIFunc \
-        MLIRCAPITensor
 
       mkdir -p stablehlo-build
       cmake -S ${patchedStablehloSrc} -B stablehlo-build -G Ninja \
@@ -179,8 +107,8 @@ in
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
-        -DMLIR_DIR="$PWD/llvm-build/lib/cmake/mlir" \
-        -DLLVM_DIR="$PWD/llvm-build/lib/cmake/llvm"
+        -DMLIR_DIR="${llvm}/lib/cmake/mlir" \
+        -DLLVM_DIR="${llvm}/lib/cmake/llvm"
 
       ninja -C stablehlo-build StablehloCAPI
     '';
@@ -191,31 +119,18 @@ in
 
       mkdir -p "$out/include" "$out/lib"
 
-      copy_headers() {
-        local src="$1"
-        local dst="$2"
-        mkdir -p "$dst"
-        cp -r "$src"/* "$dst/"
-      }
-
-      # --- Headers (same layout you already rely on) ---
-      copy_headers "${patchedLlvmSrc}/mlir/include/mlir-c" "$out/include/mlir-c"
-
-      if [ -d llvm-build/include/mlir ]; then
-        mkdir -p "$out/include/mlir"
-        cp -r llvm-build/include/mlir/* "$out/include/mlir/"
-      fi
-      if [ -d llvm-build/tools/mlir/include/mlir ]; then
-        mkdir -p "$out/include/mlir"
-        cp -r llvm-build/tools/mlir/include/mlir/* "$out/include/mlir/" || true
-      fi
-      if [ -d "${patchedLlvmSrc}/mlir/include/mlir" ]; then
-        mkdir -p "$out/include/mlir"
-        cp -r "${patchedLlvmSrc}/mlir/include/mlir/"* "$out/include/mlir/" || true
+      # --- Headers ---
+      # MLIR C API and internal headers from pre-built LLVM
+      cp -r "${llvm}/include/mlir-c" "$out/include/mlir-c"
+      if [ -d "${llvm}/include/mlir" ]; then
+        cp -r "${llvm}/include/mlir" "$out/include/mlir"
       fi
 
-      copy_headers "${patchedStablehloSrc}/stablehlo/integrations/c" "$out/include/stablehlo/integrations/c"
+      # StableHLO C API headers
+      mkdir -p "$out/include/stablehlo/integrations/c"
+      cp -r "${patchedStablehloSrc}/stablehlo/integrations/c/"* "$out/include/stablehlo/integrations/c/"
 
+      # XLA PJRT C API headers
       mkdir -p "$out/include/xla/pjrt/c"
       cp -v "${xlaSrc}/xla/pjrt/c/"*.h "$out/include/xla/pjrt/c/"
 
@@ -225,18 +140,25 @@ in
 
       # --- Libraries ---
       if [ "${lib.boolToString devel}" = "true" ]; then
-        log "Devel mode: copying ALL build artifacts (*.so*, *.a)"
-        find llvm-build stablehlo-build -type f \( -name "*.a" -o -name "*.so*" \) -print -exec cp -v {} "$out/lib/" \;
+        log "Devel mode: copying ALL build artifacts"
+        # All StableHLO build artifacts
+        find stablehlo-build -type f \( -name "*.a" -o -name "*.so*" \) -print -exec cp -v {} "$out/lib/" \;
+        # All LLVM/MLIR libs from pre-built LLVM
+        for f in "${llvm}/lib/"*.so* "${llvm}/lib/"*.a; do
+          [ -f "$f" ] || continue
+          base="$(basename "$f")"
+          [ -f "$out/lib/$base" ] || cp -v "$f" "$out/lib/"
+        done
       else
         log "Minimal mode: copying MLIR-C + StablehloCAPI and DT_NEEDED closure"
 
-        # Copy the two "roots"
-        cp -v llvm-build/lib/libMLIR-C.so* "$out/lib/" || true
+        # Copy the two root DSOs
+        cp -v "${llvm}/lib/libMLIR-C.so"* "$out/lib/" || true
         cp -v stablehlo-build/lib/libStablehloCAPI.so* "$out/lib/" || true
 
-        # Copy their transitive deps from build trees into $out/lib (but do not try to vendor glibc/libstdc++ here).
+        # Copy transitive deps from pre-built LLVM and StableHLO build tree.
         copy_needed_closure() {
-          local search_dirs=("$PWD/llvm-build/lib" "$PWD/stablehlo-build/lib")
+          local search_dirs=("${llvm}/lib" "$PWD/stablehlo-build/lib")
           local -A seen
           local queue=("$@")
 
@@ -272,10 +194,13 @@ in
           done
         }
 
-        mlir_root="$(ls -1 llvm-build/lib/libMLIR-C.so.* 2>/dev/null | head -n1 || true)"
+        mlir_root="$(ls -1 "${llvm}/lib/libMLIR-C.so."* 2>/dev/null | head -n1 || true)"
         stablehlo_root="$(ls -1 stablehlo-build/lib/libStablehloCAPI.so.* 2>/dev/null | head -n1 || true)"
         copy_needed_closure "$mlir_root" "$stablehlo_root"
       fi
+
+      # Files copied from the nix store are read-only; make writable for patchelf.
+      chmod -R u+w "$out/lib"
 
       # Ensure unversioned linker names exist for the two link-entry DSOs
       for name in libMLIR-C libStablehloCAPI; do
@@ -285,7 +210,7 @@ in
         fi
       done
 
-      # Patch RUNPATH for *all* shipped DSOs (not just MLIR-C).
+      # Patch RUNPATH for all shipped DSOs.
       rpath="\$ORIGIN:\$ORIGIN/../runtime/sys/lib:${
         lib.makeLibraryPath [
           zlib
@@ -317,7 +242,6 @@ in
       # Sanity check... C API dialect handle function should be present when StablehloCAPI is built properly.
       if [ -f "$out/lib/libStablehloCAPI.so" ]; then
         if ! nm -D "$out/lib/libStablehloCAPI.so" 2>/dev/null | grep -q "mlirGetDialectHandle__stablehlo__"; then
-          # TODO: maybe this should be a hard error?
           log "WARNING: mlirGetDialectHandle__stablehlo__ not found in libStablehloCAPI.so (symbol export may differ by version/config)"
         fi
       fi

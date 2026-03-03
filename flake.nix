@@ -159,11 +159,11 @@
       '';
 
       xlaMlirStablehloCapiSdk = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-        inherit xlaSrc llvmSrc stablehloSrc;
+        inherit xlaSrc stablehloSrc llvm;
       };
 
       xlaMlirStablehloCapiDevel = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-        inherit xlaSrc llvmSrc stablehloSrc;
+        inherit xlaSrc stablehloSrc llvm;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
       };
