@@ -285,6 +285,10 @@ pub const MlirKernelMaterializePass = struct {
         pattern: kernel.MlirKernelPattern,
         inputs: []kernel.MlirTensorDesc,
         outputs: []kernel.MlirTensorDesc,
+        normalized_size: i32 = 0,
+        reduction_dim: i32 = 0,
+        reduction_factor: i32 = 0,
+        scale: f32 = 0.0,
 
         fn descriptor(self: *const KernelCallPlan) kernel.MlirKernelDescriptor {
             return .{
@@ -293,6 +297,10 @@ pub const MlirKernelMaterializePass = struct {
                 .pattern = self.pattern,
                 .inputs = self.inputs,
                 .outputs = self.outputs,
+                .normalized_size = self.normalized_size,
+                .reduction_dim = self.reduction_dim,
+                .reduction_factor = self.reduction_factor,
+                .scale = self.scale,
             };
         }
 
@@ -454,6 +462,10 @@ pub const MlirKernelMaterializePass = struct {
             .pattern = pattern,
             .inputs = inputs,
             .outputs = outputs,
+            .normalized_size = get_dict_i32(backend_config, "zigrad.normalized_size") orelse 0,
+            .reduction_dim = get_dict_i32(backend_config, "zigrad.reduction_dim") orelse 0,
+            .reduction_factor = get_dict_i32(backend_config, "zigrad.reduction_factor") orelse 0,
+            .scale = get_dict_float(backend_config, "zigrad.scale") orelse 0.0,
         };
     }
 
@@ -471,6 +483,21 @@ pub const MlirKernelMaterializePass = struct {
         const attr = dict.get_by_name(key) orelse return null;
         const str_attr = attr_as_string(attr) orelse return null;
         return str_attr.value();
+    }
+
+    fn get_dict_i32(dict: mlir.DictionaryAttribute, key: [:0]const u8) ?i32 {
+        const attr = dict.get_by_name(key) orelse return null;
+        if (!attr.is_a(mlir.IntegerAttribute(.i32))) return null;
+        const int_attr: mlir.IntegerAttribute(.i32) = .{ ._inner = attr._inner };
+        return @intCast(int_attr.get());
+    }
+
+    fn get_dict_float(dict: mlir.DictionaryAttribute, key: [:0]const u8) ?f32 {
+        const attr = dict.get_by_name(key) orelse return null;
+        // FloatAttribute(.f32) shares is_a_fn with all float types; get() returns f64.
+        if (!attr.is_a(mlir.FloatAttribute(.f32))) return null;
+        const float_attr: mlir.FloatAttribute(.f32) = .{ ._inner = attr._inner };
+        return @floatCast(float_attr.get());
     }
 
     fn parse_pattern_name(name: []const u8) ?kernel.MlirKernelPattern {
@@ -563,6 +590,15 @@ pub const MlirKernelMaterializePass = struct {
             }
             try w.writeByte(']');
         }
+        // Include pattern-specific metadata in the shape key so that
+        // kernels with different normalized_size or reduction params
+        // are not incorrectly deduplicated.
+        if (call.normalized_size != 0)
+            try w.print("|ns={d}", .{call.normalized_size});
+        if (call.reduction_dim != 0 or call.reduction_factor != 0)
+            try w.print("|rd={d},rf={d}", .{ call.reduction_dim, call.reduction_factor });
+        if (call.scale != 0.0)
+            try w.print("|sc={d:.6}", .{call.scale});
         return buf.toOwnedSlice(allocator);
     }
 
@@ -703,4 +739,100 @@ test "mlir materialize compiles missing key via provider compile_mlir" {
     try testing.expect(registry.get("k_mlir") != null);
     const kernel_id = kernel.kernel_id_from_key("k_mlir");
     try testing.expect(package.get(kernel_id) != null);
+}
+
+test "mlir materialize parser extracts rms_norm attributes" {
+    const testing = std.testing;
+
+    const text =
+        "module {\n" ++
+        "  func.func @main(%x: tensor<1x4x128xf32>) -> tensor<1x4x128xf32> {\n" ++
+        "    %0 = \"zigrad.kernel_call\"(%x) {api_version = 4 : i32, call_target_name = \"zigrad.kernel.dispatch\", has_side_effect = false, backend_config = {zigrad.kernel_key = \"mk_0\", zigrad.provider = \"mirage\", zigrad.pattern = \"rms_norm\", zigrad.normalized_size = 128 : i32}} : (tensor<1x4x128xf32>) -> tensor<1x4x128xf32>\n" ++
+        "    return %0 : tensor<1x4x128xf32>\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const calls = try MlirKernelMaterializePass.collect_kernel_calls_from_mlir(testing.allocator, text);
+    defer {
+        for (calls) |*call| call.deinit(testing.allocator);
+        testing.allocator.free(calls);
+    }
+
+    try testing.expectEqual(@as(usize, 1), calls.len);
+    try testing.expectEqual(kernel.MlirKernelPattern.rms_norm, calls[0].pattern);
+    try testing.expectEqual(@as(i32, 128), calls[0].normalized_size);
+    try testing.expectEqual(@as(i32, 0), calls[0].reduction_dim);
+    try testing.expectEqual(@as(i32, 0), calls[0].reduction_factor);
+    try testing.expectEqual(@as(usize, 1), calls[0].inputs.len);
+}
+
+test "mlir materialize parser extracts softmax_matmul attributes" {
+    const testing = std.testing;
+
+    const text =
+        "module {\n" ++
+        "  func.func @main(%s: tensor<1x4x4xf32>, %v: tensor<1x4x64xf32>) -> tensor<1x4x64xf32> {\n" ++
+        "    %0 = \"zigrad.kernel_call\"(%s, %v) {api_version = 4 : i32, call_target_name = \"zigrad.kernel.dispatch\", has_side_effect = false, backend_config = {zigrad.kernel_key = \"mk_1\", zigrad.provider = \"mirage\", zigrad.pattern = \"softmax_matmul\", zigrad.reduction_dim = 2 : i32, zigrad.reduction_factor = 4 : i32}} : (tensor<1x4x4xf32>, tensor<1x4x64xf32>) -> tensor<1x4x64xf32>\n" ++
+        "    return %0 : tensor<1x4x64xf32>\n" ++
+        "  }\n" ++
+        "}\n";
+
+    const calls = try MlirKernelMaterializePass.collect_kernel_calls_from_mlir(testing.allocator, text);
+    defer {
+        for (calls) |*call| call.deinit(testing.allocator);
+        testing.allocator.free(calls);
+    }
+
+    try testing.expectEqual(@as(usize, 1), calls.len);
+    try testing.expectEqual(kernel.MlirKernelPattern.softmax_matmul, calls[0].pattern);
+    try testing.expectEqual(@as(i32, 0), calls[0].normalized_size);
+    try testing.expectEqual(@as(i32, 2), calls[0].reduction_dim);
+    try testing.expectEqual(@as(i32, 4), calls[0].reduction_factor);
+    try testing.expectEqual(@as(usize, 2), calls[0].inputs.len);
+}
+
+test "select pass matches softmax_matmul pattern" {
+    const testing = std.testing;
+
+    // Hand-crafted softmax(scores) @ V pattern in f32.
+    const input =
+        \\module {
+        \\  func.func @main(%scores: tensor<1x32x4x4xf32>, %v: tensor<1x4x32x64xf32>) -> tensor<1x32x4x64xf32> {
+        \\    %cst = stablehlo.constant dense<0.0> : tensor<f32>
+        \\    %exp = stablehlo.exponential %scores : tensor<1x32x4x4xf32>
+        \\    %sum = stablehlo.reduce(%exp init: %cst) applies stablehlo.add across dimensions = [3] : (tensor<1x32x4x4xf32>, tensor<f32>) -> tensor<1x32x4xf32>
+        \\    %bcast = stablehlo.broadcast_in_dim %sum, dims = [0, 1, 2] : (tensor<1x32x4xf32>) -> tensor<1x32x4x4xf32>
+        \\    %div = stablehlo.divide %exp, %bcast : tensor<1x32x4x4xf32>
+        \\    %out = stablehlo.dot_general %div, %v, batching_dims = [0, 1] x [0, 2], contracting_dims = [3] x [1], precision = [DEFAULT, DEFAULT] : (tensor<1x32x4x4xf32>, tensor<1x4x32x64xf32>) -> tensor<1x32x4x64xf32>
+        \\    return %out : tensor<1x32x4x64xf32>
+        \\  }
+        \\}
+        \\
+    ;
+
+    var artifact = pass_mod.MlirArtifact{
+        .bytes = try testing.allocator.dupe(u8, input),
+        .encoding = .text,
+    };
+    defer testing.allocator.free(artifact.bytes);
+
+    try mlir_passes.run_pipeline_on_artifact(testing.allocator, &artifact, mlir_passes.zigrad_kernel_select_pipeline);
+
+    // After the select pass, the softmax+matmul chain should be replaced by
+    // a zigrad.kernel_call with pattern "softmax_matmul".
+    const output = artifact.bytes;
+    const has_kernel_call = std.mem.indexOf(u8, output, "zigrad.kernel_call") != null;
+    const has_softmax_matmul = std.mem.indexOf(u8, output, "softmax_matmul") != null;
+    // The original exp/reduce/div/dot chain should be gone.
+    const has_exp = std.mem.indexOf(u8, output, "stablehlo.exponential") != null;
+    const has_dot_general = std.mem.indexOf(u8, output, "stablehlo.dot_general") != null;
+
+    if (!has_kernel_call or !has_softmax_matmul) {
+        log.err("select pass did not produce softmax_matmul kernel_call.\nOutput:\n{s}", .{output});
+        return error.TestUnexpectedResult;
+    }
+    if (has_exp or has_dot_general) {
+        log.err("select pass left unconsumed ops.\nOutput:\n{s}", .{output});
+        return error.TestUnexpectedResult;
+    }
 }

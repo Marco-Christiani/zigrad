@@ -76,6 +76,9 @@ pub const MirageProvider = struct {
         const required_inputs: usize = switch (desc.pattern) {
             .dot, .dot_general, .dot_log, .dot_exp => 2,
             .dot_add, .dot_add_mul => 3,
+            .rms_norm => 1,
+            .softmax_matmul => 2,
+            .attention => 3,
         };
         if (desc.inputs.len != required_inputs) return error.Unsupported;
 
@@ -90,21 +93,52 @@ pub const MirageProvider = struct {
             try handles.append(allocator, handle);
         }
 
-        var out_tensor = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+        var out_tensor: mirage_c.MirageTensor = undefined;
         switch (desc.pattern) {
-            .dot, .dot_general => {},
+            .dot, .dot_general => {
+                out_tensor = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+            },
             .dot_add => {
-                out_tensor = try emit_binary(&graph, mirage_c.binary_add, out_tensor, handles.items[2]);
+                const dot = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+                out_tensor = try emit_binary(&graph, mirage_c.binary_add, dot, handles.items[2]);
             },
             .dot_add_mul => {
-                const sum = try emit_binary(&graph, mirage_c.binary_add, out_tensor, handles.items[2]);
+                const dot = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+                const sum = try emit_binary(&graph, mirage_c.binary_add, dot, handles.items[2]);
                 out_tensor = try emit_binary(&graph, mirage_c.binary_mul, sum, handles.items[2]);
             },
             .dot_log => {
-                out_tensor = try emit_unary(&graph, mirage_c.unary_log, out_tensor);
+                const dot = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+                out_tensor = try emit_unary(&graph, mirage_c.unary_log, dot);
             },
             .dot_exp => {
-                out_tensor = try emit_unary(&graph, mirage_c.unary_exp, out_tensor);
+                const dot = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+                out_tensor = try emit_unary(&graph, mirage_c.unary_exp, dot);
+            },
+            .rms_norm => {
+                // input: x. Weight multiply stays outside the kernel boundary.
+                out_tensor = graph.rmsNorm(handles.items[0], desc.normalized_size) catch |err|
+                    return map_mirage_api_error(err);
+            },
+            .softmax_matmul => {
+                // inputs: scores, V
+                const exp_result = try emit_unary(&graph, mirage_c.unary_exp, handles.items[0]);
+                const sum_result = graph.reduction(exp_result, desc.reduction_dim, desc.reduction_factor) catch |err|
+                    return map_mirage_api_error(err);
+                const attn_probs = try emit_binary(&graph, mirage_c.binary_div, exp_result, sum_result);
+                out_tensor = try emit_matmul(&graph, attn_probs, handles.items[1]);
+            },
+            .attention => {
+                // inputs: Q, K, V
+                // Mirage graph omits scaling — the superoptimizer works on the
+                // structural pattern. If Mirage returns Unsupported, the expand
+                // pass reconstructs the full chain WITH scale correctly.
+                const scores = try emit_matmul(&graph, handles.items[0], handles.items[1]);
+                const exp_result = try emit_unary(&graph, mirage_c.unary_exp, scores);
+                const sum_result = graph.reduction(exp_result, desc.reduction_dim, desc.reduction_factor) catch |err|
+                    return map_mirage_api_error(err);
+                const attn_probs = try emit_binary(&graph, mirage_c.binary_div, exp_result, sum_result);
+                out_tensor = try emit_matmul(&graph, attn_probs, handles.items[2]);
             },
         }
 

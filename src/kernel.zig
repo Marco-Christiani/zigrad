@@ -323,6 +323,9 @@ pub const MlirKernelPattern = enum {
     dot_add_mul,
     dot_log,
     dot_exp,
+    rms_norm,
+    softmax_matmul,
+    attention,
 };
 
 /// Provider-neutral descriptor for one selected MLIR kernel call.
@@ -336,6 +339,14 @@ pub const MlirKernelDescriptor = struct {
     pattern: MlirKernelPattern,
     inputs: []const MlirTensorDesc,
     outputs: []const MlirTensorDesc,
+    /// rms_norm: size of the last dimension (normalized axis).
+    normalized_size: i32 = 0,
+    /// softmax_matmul, attention: dimension index for the reduce-sum.
+    reduction_dim: i32 = 0,
+    /// softmax_matmul, attention: size of the reduction dimension.
+    reduction_factor: i32 = 0,
+    /// attention: scale factor applied to raw scores (1/sqrt(d)).
+    scale: f32 = 0.0,
 };
 
 // ============================================================================
