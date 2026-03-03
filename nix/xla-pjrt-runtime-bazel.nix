@@ -1,8 +1,6 @@
 {
   lib,
   stdenv,
-  fetchurl,
-  runCommand,
   buildBazelPackage,
   # native build inputs
   python3,
@@ -21,8 +19,8 @@
   copyCudaTools ? true,
   # Copy libdevice bitcode into runtime/nvidia/nvvm/libdevice.
   copyLibdevice ? true,
-  lockFile,
-  xlaSrcOverride ? null,
+  # XLA source (flake input).
+  xlaSrc,
   depsHash,
   # CPU math library for the PJRT CPU plugin.
   #   "eigen"        - Eigen + XNNPACK only (default).
@@ -37,24 +35,6 @@
   cpuNativeTuning ? false,
   ...
 }: let
-  lock = builtins.fromJSON (builtins.readFile lockFile);
-  inherit (lock.pins) xla;
-
-  xlaTar = fetchurl {
-    url = xla.tarball_url;
-    hash = xla.hash_sri;
-  };
-
-  xlaSrc =
-    if xlaSrcOverride != null
-    then lib.cleanSource xlaSrcOverride
-    else
-      runCommand "xla-src-${builtins.substring 0 12 xla.commit}" {} ''
-        set -euo pipefail
-        mkdir -p "$out"
-        tar -xzf ${xlaTar} -C "$out" --strip-components=1
-      '';
-
   cudaVersionChecked =
     if cudaSupport && cudaVersion == null
     then throw "cudaVersion required when cudaSupport is true"
@@ -321,7 +301,7 @@ in
 
     buildAttrs = {
       pname = "xla-pjrt-plugins";
-      version = "xla-${builtins.substring 0 12 xla.commit}";
+      version = "xla-${xlaSrc.shortRev or "unknown"}";
       src = xlaSrc;
 
       nativeBuildInputs = [
@@ -591,7 +571,7 @@ in
 
         # Provenance
         cat > "$out/runtime/PROVENANCE.json" <<EOF
-        ${builtins.toJSON lock}
+        ${builtins.toJSON {xla-rev = xlaSrc.rev or xlaSrc.shortRev or "unknown";}}
         EOF
         mkdir -p "$out/runtime/logs"
         cp -v ./bazel-config.json "$out/runtime/BAZEL_CONFIG.json"

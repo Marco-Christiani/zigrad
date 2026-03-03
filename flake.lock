@@ -1,10 +1,27 @@
 {
   "nodes": {
+    "llvmSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1765567400,
+        "narHash": "sha256-kt+SJeJe0vbDQjAw20PgC9iURhcq3IrruNLYLYND9n0=",
+        "owner": "llvm",
+        "repo": "llvm-project",
+        "rev": "8f264586d7521b0e305ca7bb78825aa3382ffef7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "llvm",
+        "repo": "llvm-project",
+        "rev": "8f264586d7521b0e305ca7bb78825aa3382ffef7",
+        "type": "github"
+      }
+    },
     "mirage-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1772404746,
-        "narHash": "sha256-C1ifmTqp0EtVtv0buiiOhaYDAflDhcGlGyQPOeykIZ8=",
+        "lastModified": 1772429297,
+        "narHash": "sha256-LxDAPja/iKZaszdjK8SknbFiIm9Yb7e19guJ+Ih4S2k=",
         "path": "/home/marco/Github/mirage",
         "type": "path"
       },
@@ -97,12 +114,32 @@
     },
     "root": {
       "inputs": {
+        "llvmSrc": "llvmSrc",
         "mirage-src": "mirage-src",
         "mpk": "mpk",
         "nixpkgs": "nixpkgs",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
-        "uv2nix": "uv2nix"
+        "stablehloSrc": "stablehloSrc",
+        "uv2nix": "uv2nix",
+        "xlaSrc": "xlaSrc"
+      }
+    },
+    "stablehloSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1764884727,
+        "narHash": "sha256-QfX+k/BWBTtBT2gq5wcNyz098w7cmQnFgwlepeS5aBs=",
+        "owner": "openxla",
+        "repo": "stablehlo",
+        "rev": "1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "openxla",
+        "repo": "stablehlo",
+        "rev": "1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f",
+        "type": "github"
       }
     },
     "uv2nix": {
@@ -125,6 +162,23 @@
       "original": {
         "owner": "pyproject-nix",
         "repo": "uv2nix",
+        "type": "github"
+      }
+    },
+    "xlaSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1766029309,
+        "narHash": "sha256-pvZ3ARzv/fjPYVcq5wrH3tH1kgU88dFp7Q1w1lA8H2c=",
+        "owner": "openxla",
+        "repo": "xla",
+        "rev": "913ae2eaa3cb88971003592a90959685a78c9e30",
+        "type": "github"
+      },
+      "original": {
+        "owner": "openxla",
+        "repo": "xla",
+        "rev": "913ae2eaa3cb88971003592a90959685a78c9e30",
         "type": "github"
       }
     }

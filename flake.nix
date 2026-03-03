@@ -34,6 +34,26 @@
         uv2nix.follows = "uv2nix";
       };
     };
+
+    # Source pins (previously in nix/lock.json).
+    # Update with: nix flake update --update-input xla-src (etc.)
+    # LLVM and StableHLO commits are derived from XLA's third_party/;
+    # after updating xla-src, check third_party/llvm/workspace.bzl
+    # and third_party/stablehlo/workspace.bzl for new commits.
+    xlaSrc = {
+      url = "github:openxla/xla/913ae2eaa3cb88971003592a90959685a78c9e30";
+      flake = false;
+    };
+
+    llvmSrc = {
+      url = "github:llvm/llvm-project/8f264586d7521b0e305ca7bb78825aa3382ffef7";
+      flake = false;
+    };
+
+    stablehloSrc = {
+      url = "github:openxla/stablehlo/1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f";
+      flake = false;
+    };
   };
   outputs = inputs @ {
     self,
@@ -42,6 +62,9 @@
     pyproject-nix,
     uv2nix,
     pyproject-build-systems,
+    xlaSrc,
+    llvmSrc,
+    stablehloSrc,
     ...
   }: let
     systems = [
@@ -119,14 +142,13 @@
         targets
         ;
 
-      lockFile = ./nix/lock.json;
-
       # buildBazelPackage fetchAttrs hashes for xla-pjrt-runtime-bazel.nix.
       # These hashes are configuration-specific (CUDA on/off, cpuMathLibrary,
       # native tuning flags, etc) and must be maintained per combination.
       xlaPjrtDepsHashes = {
         cpu-onednn-native = "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=";
-        cuda-onednn-thunk-native = "sha256-EFE6NyvyOoereFfwwExFu03B6IjfjrBWD5ri6S3F/9Y=";
+        # cuda-onednn-thunk-native = "sha256-EFE6NyvyOoereFfwwExFu03B6IjfjrBWD5ri6S3F/9Y=";
+        cuda-onednn-thunk-native = "sha256-ECduu/VXD+wsTKex9lfo+B6zXZdvw1nMWWEE5D/FtY8=";
       };
 
       # Compile-time CUDA headers used by Zig @cImport("nvrtc.h").
@@ -137,11 +159,11 @@
       '';
 
       xlaMlirStablehloCapiSdk = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-        inherit lockFile;
+        inherit xlaSrc llvmSrc stablehloSrc;
       };
 
       xlaMlirStablehloCapiDevel = pkgs.callPackage ./nix/xla-mlir-stablehlo-capi-sdk.nix {
-        inherit lockFile;
+        inherit xlaSrc llvmSrc stablehloSrc;
         stdenv = pkgs.ccacheStdenv;
         devel = true;
       };
@@ -149,7 +171,7 @@
       # LLVM 22 built from XLA-pinned sources. Shared by SDK and TVM to ensure
       # they use the same LLVM version (same pass registry, no ABI conflicts).
       llvm = pkgs.callPackage ./nix/llvm.nix {
-        inherit lockFile;
+        inherit xlaSrc llvmSrc;
       };
 
       # SDK profiles:
@@ -340,7 +362,7 @@
       # ------------------------------------------------------------------
       # Production PJRT C API plugins from XLA.
       xlaPjrtPlugins = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
-        inherit lockFile;
+        inherit xlaSrc;
         cudaSupport = false;
         cpuMathLibrary = "onednn";
         cpuNativeTuning = true;
@@ -348,7 +370,7 @@
       };
 
       xlaPjrtPluginsCuda = pkgs.callPackage ./nix/xla-pjrt-runtime-bazel.nix {
-        inherit lockFile;
+        inherit xlaSrc;
         inherit (cudaCfg) cudaArchitectures cudaVersion;
         cudaSupport = true;
         copyNcclNvshmem = true;
@@ -589,7 +611,6 @@
           # TODO: hermetic zig build/run targets
           # m1 = targets.m1.build;
           m4 = targets.zigrad-m4.build;
-
         };
 
       checks = {

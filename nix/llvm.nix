@@ -1,11 +1,12 @@
 # nix/llvm.nix
 #
-# Builds LLVM 22 from XLA-pinned sources (via lockFile). Used by both the
+# Builds LLVM 22 from XLA-pinned sources. Used by both the
 # MLIR/StableHLO SDK and TVM to ensure they share the same LLVM version.
+#
+# Sources are provided as flake inputs (xlaSrc for patches, llvmSrc for LLVM tree).
 {
   lib,
   stdenv,
-  fetchurl,
   runCommand,
   cmake,
   ninja,
@@ -21,33 +22,17 @@
   libffi,
   lld,
   binutils,
-  lockFile,
+  # Flake source inputs (replacing lockFile).
+  xlaSrc,
+  llvmSrc,
 }: let
-  lock = builtins.fromJSON (builtins.readFile lockFile);
-  inherit (lock) pins;
-  inherit (pins) xla llvm;
-
-  xlaTar = fetchurl {
-    url = xla.tarball_url;
-    hash = xla.hash_sri;
-  };
-  llvmTar = fetchurl {
-    inherit (llvm) urls;
-    hash = llvm.hash_sri;
-  };
-
   llvmPatches = ["build.patch" "mathextras.patch" "toolchains.patch" "zstd.patch" "lit_test.patch"];
   llvmIgnoredPatches = ["generated.patch"];
 
-  xlaSrc = runCommand "xla-src-${builtins.substring 0 12 xla.commit}" {} ''
-    mkdir -p $out
-    tar -xzf ${xlaTar} -C $out --strip-components=1
-  '';
-
-  llvmSrc = runCommand "llvm-src-${builtins.substring 0 12 llvm.commit}" {nativeBuildInputs = [patch];} ''
+  patchedLlvmSrc = runCommand "llvm-src-patched" {nativeBuildInputs = [patch];} ''
     set -euo pipefail
-    mkdir -p "$out"
-    tar -xzf ${llvmTar} -C "$out" --strip-components=1
+    cp -r ${llvmSrc} "$out"
+    chmod -R u+w "$out"
     cd "$out"
 
     echo "[llvm] Verifying patch set"
@@ -68,9 +53,9 @@
 in
   stdenv.mkDerivation {
     pname = "llvm";
-    version = "22.0git-${builtins.substring 0 12 llvm.commit}";
+    version = "22.0git-${llvmSrc.shortRev or "unknown"}";
 
-    src = llvmSrc;
+    src = patchedLlvmSrc;
 
     strictDeps = true;
     dontStrip = true;

@@ -1,14 +1,15 @@
 # nix/xla-mlir-stablehlo-capi-sdk.nix
+#
+# Sources are provided as flake inputs (xlaSrc, llvmSrc, stablehloSrc).
+# XLA patches for LLVM and StableHLO are applied from xlaSrc/third_party/.
 {
   lib,
   stdenv,
-  fetchurl,
   runCommand,
   cmake,
   ninja,
   python3,
   perl,
-  unzip,
   patch,
   patchelf,
   zlib,
@@ -19,40 +20,21 @@
   libffi,
   lld,
   binutils,
-  lockFile,
+  # Flake source inputs (replacing lockFile).
+  xlaSrc,
+  llvmSrc,
+  stablehloSrc,
   devel ? false,
 }: let
-  lock = builtins.fromJSON (builtins.readFile lockFile);
-  inherit (lock) pins;
-  inherit (pins) xla llvm stablehlo;
-
-  xlaTar = fetchurl {
-    url = xla.tarball_url;
-    hash = xla.hash_sri;
-  };
-  llvmTar = fetchurl {
-    inherit (llvm) urls;
-    hash = llvm.hash_sri;
-  };
-  stablehloZip = fetchurl {
-    inherit (stablehlo) urls;
-    hash = stablehlo.hash_sri;
-  };
-
   llvmPatches = ["build.patch" "mathextras.patch" "toolchains.patch" "zstd.patch" "lit_test.patch"];
   llvmIgnoredPatches = ["generated.patch"];
 
   stablehloPatches = ["temporary.patch"];
 
-  xlaSrc = runCommand "xla-src-${builtins.substring 0 12 xla.commit}" {} ''
-    mkdir -p $out
-    tar -xzf ${xlaTar} -C $out --strip-components=1
-  '';
-
-  llvmSrc = runCommand "llvm-src-${builtins.substring 0 12 llvm.commit}" {nativeBuildInputs = [patch];} ''
+  patchedLlvmSrc = runCommand "llvm-src-patched" {nativeBuildInputs = [patch];} ''
     set -euo pipefail
-    mkdir -p "$out"
-    tar -xzf ${llvmTar} -C "$out" --strip-components=1
+    cp -r ${llvmSrc} "$out"
+    chmod -R u+w "$out"
     cd "$out"
 
     echo "[llvm] Verifying patch set"
@@ -71,11 +53,10 @@
     done
   '';
 
-  stablehloSrc = runCommand "stablehlo-src-${builtins.substring 0 12 stablehlo.commit}" {nativeBuildInputs = [unzip patch perl];} ''
+  patchedStablehloSrc = runCommand "stablehlo-src-patched" {nativeBuildInputs = [patch perl];} ''
     set -euo pipefail
-    mkdir -p "$out"
-    unzip -q ${stablehloZip} -d "$out"
-    mv "$out"/*/* "$out"/
+    cp -r ${stablehloSrc} "$out"
+    chmod -R u+w "$out"
     cd "$out"
 
     echo "[stablehlo] Verifying patch set"
@@ -109,7 +90,7 @@
 in
   stdenv.mkDerivation {
     pname = "xla-mlir-stablehlo-capi-sdk";
-    version = "xla-${builtins.substring 0 12 xla.commit}" + lib.optionalString devel "-devel";
+    version = "xla-${xlaSrc.shortRev or "unknown"}" + lib.optionalString devel "-devel";
 
     strictDeps = true;
     dontUnpack = true;
@@ -173,7 +154,7 @@ in
       )
 
       mkdir -p llvm-build
-      cmake -S ${llvmSrc}/llvm -B llvm-build "''${cmake_flags[@]}"
+      cmake -S ${patchedLlvmSrc}/llvm -B llvm-build "''${cmake_flags[@]}"
 
       # Minimum host tools typically needed by StableHLO generation.
       cmake --build llvm-build --target llvm-tblgen mlir-tblgen
@@ -193,7 +174,7 @@ in
         MLIRCAPITensor
 
       mkdir -p stablehlo-build
-      cmake -S ${stablehloSrc} -B stablehlo-build -G Ninja \
+      cmake -S ${patchedStablehloSrc} -B stablehlo-build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -218,7 +199,7 @@ in
       }
 
       # --- Headers (same layout you already rely on) ---
-      copy_headers "${llvmSrc}/mlir/include/mlir-c" "$out/include/mlir-c"
+      copy_headers "${patchedLlvmSrc}/mlir/include/mlir-c" "$out/include/mlir-c"
 
       if [ -d llvm-build/include/mlir ]; then
         mkdir -p "$out/include/mlir"
@@ -228,12 +209,12 @@ in
         mkdir -p "$out/include/mlir"
         cp -r llvm-build/tools/mlir/include/mlir/* "$out/include/mlir/" || true
       fi
-      if [ -d "${llvmSrc}/mlir/include/mlir" ]; then
+      if [ -d "${patchedLlvmSrc}/mlir/include/mlir" ]; then
         mkdir -p "$out/include/mlir"
-        cp -r "${llvmSrc}/mlir/include/mlir/"* "$out/include/mlir/" || true
+        cp -r "${patchedLlvmSrc}/mlir/include/mlir/"* "$out/include/mlir/" || true
       fi
 
-      copy_headers "${stablehloSrc}/stablehlo/integrations/c" "$out/include/stablehlo/integrations/c"
+      copy_headers "${patchedStablehloSrc}/stablehlo/integrations/c" "$out/include/stablehlo/integrations/c"
 
       mkdir -p "$out/include/xla/pjrt/c"
       cp -v "${xlaSrc}/xla/pjrt/c/"*.h "$out/include/xla/pjrt/c/"
@@ -345,7 +326,7 @@ in
     '';
 
     meta = {
-      description = "MLIR + StableHLO + PJRT C API SDK derived from JAX->XLA lock.json";
+      description = "MLIR + StableHLO + PJRT C API SDK";
       license = lib.licenses.asl20;
     };
   }
