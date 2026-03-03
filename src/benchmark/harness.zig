@@ -411,7 +411,7 @@ test "harness: init and deinit" {
         .bench_iters = 5,
     };
 
-    var harness = try Harness.init(allocator, cfg);
+    var harness = try Harness.init(allocator, cfg, "artifacts/tvm_cache");
     defer harness.deinit();
 
     try std.testing.expect(harness.results.items.len == 0);

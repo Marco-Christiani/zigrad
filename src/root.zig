@@ -22,6 +22,9 @@ pub const pipeline = @import("pipeline/root.zig");
 pub const backend = @import("backend/root.zig");
 pub const lower = @import("lower/root.zig");
 pub const kernel = @import("kernel.zig");
+pub const utils = @import("utils/root.zig");
+pub const kernels = @import("kernels/root.zig");
+pub const benchmark = @import("benchmark/root.zig");
 
 // TVM subsystem
 pub const tvm = @import("tvm/root.zig");
@@ -29,25 +32,11 @@ pub const tvm = @import("tvm/root.zig");
 // Mirage subsystem
 pub const mirage = @import("mirage/root.zig");
 
-// Kernels
-pub const kernels = struct {
-    pub const gemm = @import("kernels/gemm.zig");
-};
-
-// Benchmark infrastructure
-pub const benchmark = struct {
-    pub const Harness = @import("benchmark/harness.zig").Harness;
-    pub const BenchmarkConfig = @import("benchmark/config.zig").BenchmarkConfig;
-    pub const Shape = @import("benchmark/config.zig").Shape;
-    pub const Implementation = @import("benchmark/config.zig").Implementation;
-};
-
-// Utility types
-pub const utils = struct {
-    pub const HostBuffer = @import("utils/host_buffer.zig").HostBuffer;
-    pub const DType = @import("utils/host_buffer.zig").DType;
-    pub const Shape = @import("utils/host_buffer.zig").Shape;
-};
+// Tier 1: commonly used types at top level
+pub const Backend = backend.PjrtBackend;
+pub const HostBuffer = utils.HostBuffer;
+pub const DType = utils.DType;
+pub const Shape = utils.Shape;
 
 test {
     std.testing.refAllDecls(@This());

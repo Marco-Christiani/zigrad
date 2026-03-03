@@ -969,15 +969,18 @@ test "dispatch_error_to_ffi returns null when frame has no API" {
 }
 
 test "dispatch_error_code maps invalid-argument class" {
-    try std.testing.expectEqual(c.XLA_FFI_Error_Code_INVALID_ARGUMENT, dispatch_error_code(error.MirageInvalidArgument));
+    const expected: c.XLA_FFI_Error_Code = @intCast(c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+    try std.testing.expectEqual(expected, dispatch_error_code(error.MirageInvalidArgument));
 }
 
 test "dispatch_error_code maps failed-precondition class" {
-    try std.testing.expectEqual(c.XLA_FFI_Error_Code_FAILED_PRECONDITION, dispatch_error_code(error.WorkspaceUnavailable));
+    const expected: c.XLA_FFI_Error_Code = @intCast(c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
+    try std.testing.expectEqual(expected, dispatch_error_code(error.WorkspaceUnavailable));
 }
 
 test "dispatch_error_code maps internal class" {
-    try std.testing.expectEqual(c.XLA_FFI_Error_Code_INTERNAL, dispatch_error_code(error.MirageInternalError));
+    const expected: c.XLA_FFI_Error_Code = @intCast(c.XLA_FFI_Error_Code_INTERNAL);
+    try std.testing.expectEqual(expected, dispatch_error_code(error.MirageInternalError));
 }
 
 test "resolve_dispatch_artifact prefers package entry for kernel id" {
@@ -1068,7 +1071,8 @@ test "lookup_dispatch_user_data_from_context returns payload" {
         var expected_type_id: i64 = 0;
         var payload: ?*anyopaque = null;
 
-        fn execution_context_get(args: *c.XLA_FFI_ExecutionContext_Get_Args) callconv(.c) ?*c.XLA_FFI_Error {
+        fn execution_context_get(raw_args: [*c]c.XLA_FFI_ExecutionContext_Get_Args) callconv(.c) ?*c.XLA_FFI_Error {
+            const args: *c.XLA_FFI_ExecutionContext_Get_Args = @ptrCast(raw_args);
             if (args.type_id != null and args.type_id.*.type_id == expected_type_id) {
                 args.data = payload;
             } else {

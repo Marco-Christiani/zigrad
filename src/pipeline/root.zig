@@ -35,3 +35,7 @@ pub const MlirKernelMaterializePass = mlir_materialize.MlirKernelMaterializePass
 pub const mlir_passes = @import("mlir_passes.zig");
 pub const MlirSelectPass = mlir_passes.MlirSelectPass;
 pub const MlirLegalizePass = mlir_passes.MlirLegalizePass;
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}

@@ -94,7 +94,7 @@ pub const RuntimeModule = struct {
 };
 
 // ============================================================================
-// Tensor — DLPack ↔ TVM tensor bridge
+// Tensor - DLPack <-> TVM tensor bridge
 // ============================================================================
 
 pub const Tensor = struct {

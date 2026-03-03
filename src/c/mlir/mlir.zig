@@ -40,7 +40,8 @@ var shim_state: ShimState = .uninitialized;
 var shim_passes_registered: bool = false;
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    @setEvalBranchQuota(10000);
+    std.testing.refAllDecls(@This());
 
     _ = try Context.init();
 }

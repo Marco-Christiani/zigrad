@@ -21,7 +21,6 @@ const log = std.log.scoped(.@"zg/tvm_compile");
 /// Apply the full TIR lowering pipeline and build for a target.
 ///
 /// Pass ordering follows TVM's default_tir_pipeline (tvm/driver/build_module.py).
-/// See MEMORY.md "TVM CUDA Pipeline (Critical Pass Order)" for CUDA specifics.
 pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: Target, kind: TargetKind) !RuntimeModule {
     // Phase 1: Create composite target with host, then bind.
     // MakePackedAPI requires target->GetHost() to return a valid host target;
