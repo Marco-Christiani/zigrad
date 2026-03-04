@@ -157,7 +157,6 @@ fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
     }
 
     const local_candidates = [_][]const u8{
-        "shim/build-mlir/libzigrad_mlir_ext.so",
         "shim/build/libzigrad_mlir_ext.so",
     };
     for (local_candidates) |candidate| {

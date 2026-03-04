@@ -20,7 +20,7 @@ const pass_mod = @import("pass.zig");
 
 const log = std.log.scoped(.@"zg/mlir_passes");
 
-const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse";
+pub const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse";
 const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legalize),canonicalize,cse";
 
 /// Run an MLIR pass pipeline on the current artifact bytes.
