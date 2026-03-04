@@ -3,6 +3,8 @@
 #include "mlir-c/Transforms.h"
 
 #include "mlir/CAPI/IR.h"
+#include "mlir/Tools/Plugins/DialectPlugin.h"
+#include "mlir/Tools/Plugins/PassPlugin.h"
 
 #include "zigrad/ZigradDialect.h"
 #include "zigrad/ZigradKernelLegalizePass.h"
@@ -11,6 +13,10 @@
 // dialect registration header, should come from our sdk derivation
 #include "stablehlo/integrations/c/StablehloDialect.h"
 #include "stablehlo/integrations/c/StablehloPasses.h"
+
+// ============================================================================
+// C entry points
+// ============================================================================
 
 extern "C" void zg_register_dialects(MlirContext ctx) {
   // func
@@ -32,4 +38,31 @@ extern "C" void zg_register_passes() {
   mlirRegisterAllStablehloPasses();
   mlir::zigrad::registerZigradKernelLegalizePasses();
   mlir::zigrad::mirage::registerMirageKernelSelectPass();
+}
+
+// ============================================================================
+// mlir-opt plugin ABI hooks (for --load-dialect-plugin / --load-pass-plugin)
+// ============================================================================
+
+extern "C" LLVM_ATTRIBUTE_WEAK ::mlir::DialectPluginLibraryInfo
+mlirGetDialectPluginInfo() {
+  return {MLIR_PLUGIN_API_VERSION, "ZigradDialect", "0.1",
+          [](::mlir::DialectRegistry *registry) {
+            registry->insert<mlir::zigrad::ZigradDialect>();
+            MlirDialectRegistry cReg = wrap(registry);
+            mlirDialectHandleInsertDialect(
+                mlirGetDialectHandle__stablehlo__(), cReg);
+            mlirDialectHandleInsertDialect(mlirGetDialectHandle__func__(),
+                                           cReg);
+          }};
+}
+
+extern "C" LLVM_ATTRIBUTE_WEAK ::mlir::PassPluginLibraryInfo
+mlirGetPassPluginInfo() {
+  return {MLIR_PLUGIN_API_VERSION, "ZigradPasses", "0.1",
+          []() {
+            mlirRegisterAllStablehloPasses();
+            mlir::zigrad::registerZigradKernelLegalizePasses();
+            mlir::zigrad::mirage::registerMirageKernelSelectPass();
+          }};
 }
