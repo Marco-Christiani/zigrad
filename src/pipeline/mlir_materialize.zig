@@ -82,6 +82,7 @@ pub const MlirKernelMaterializePass = struct {
                         "provider '{s}' returned Unsupported for key '{s}' (pattern={s}); expanding back to StableHLO",
                         .{ call.provider, call.kernel_key, @tagName(call.pattern) },
                     );
+                    call.status = .fallback;
                     had_unsupported = true;
                     continue;
                 }
@@ -116,12 +117,15 @@ pub const MlirKernelMaterializePass = struct {
 
     fn materialize_selected_call(
         self: *MlirKernelMaterializePass,
-        call: *const KernelCallPlan,
+        call: *KernelCallPlan,
         shape_cache: *std.StringHashMap(ShapeCacheEntry),
         temp_allocator: std.mem.Allocator,
     ) pass_mod.PassError!void {
         const kernel_id = kernel.kernel_id_from_key(call.kernel_key);
-        if (self.package.get(kernel_id) != null) return;
+        if (self.package.get(kernel_id) != null) {
+            call.status = .dedup;
+            return;
+        }
 
         var compiled = self.registry.get(call.kernel_key);
         if (compiled == null) {
@@ -138,6 +142,7 @@ pub const MlirKernelMaterializePass = struct {
 
             if (shape_cache.get(shape_key)) |cached| {
                 log.debug("dedup cache hit: MLIR key '{s}' reuses compiled artifact", .{call.kernel_key});
+                call.status = .dedup;
                 const reg_alloc = self.registry.allocator();
                 const target_name = try reg_alloc.dupe(u8, call.kernel_key);
                 errdefer reg_alloc.free(target_name);
@@ -188,6 +193,8 @@ pub const MlirKernelMaterializePass = struct {
                     );
                     return error.ValidationFailed;
                 }
+
+                call.status = .compiled;
 
                 // Populate shape cache so subsequent same-shape regions skip compilation.
                 const cache_key = try temp_allocator.dupe(u8, shape_key);
@@ -253,17 +260,32 @@ pub const MlirKernelMaterializePass = struct {
     fn dump_mlir_kernel_calls(out: *std.Io.Writer, calls: []const KernelCallPlan) !void {
         const fields = std.meta.fields(kernel.MlirKernelPattern);
         var counts: [fields.len]usize = [_]usize{0} ** fields.len;
-        for (calls) |call| counts[@intFromEnum(call.pattern)] += 1;
+        var n_compiled: usize = 0;
+        var n_dedup: usize = 0;
+        var n_fallback: usize = 0;
+        for (calls) |call| {
+            counts[@intFromEnum(call.pattern)] += 1;
+            switch (call.status) {
+                .compiled => n_compiled += 1,
+                .dedup => n_dedup += 1,
+                .fallback => n_fallback += 1,
+                .pending => {},
+            }
+        }
 
-        try out.print("kernels ({d} total):", .{calls.len});
+        try out.print("kernels ({d} total, {d} compiled, {d} dedup, {d} fallback):", .{
+            calls.len, n_compiled, n_dedup, n_fallback,
+        });
         inline for (fields, 0..) |field, i| {
             if (counts[i] > 0) try out.print(" {s}={d}", .{ field.name, counts[i] });
         }
         try out.writeByte('\n');
-        try out.print("  {s:<55} {s:<12} {s:<16} {s}\n", .{ "key", "provider", "pattern", "in0" });
-        try out.writeAll("  " ++ ("-" ** 100) ++ "\n");
+        try out.print("  {s:<40} {s:<12} {s:<20} {s:<10} {s}\n", .{ "key", "provider", "pattern", "status", "in0" });
+        try out.writeAll("  " ++ ("-" ** 105) ++ "\n");
         for (calls) |call| {
-            try out.print("  {s:<55} {s:<12} {s:<16} ", .{ call.kernel_key, call.provider, @tagName(call.pattern) });
+            try out.print("  {s:<40} {s:<12} {s:<20} {s:<10} ", .{
+                call.kernel_key, call.provider, @tagName(call.pattern), @tagName(call.status),
+            });
             if (call.inputs.len > 0) {
                 const d = call.inputs[0];
                 try out.print("{s}[", .{@tagName(d.dtype)});
@@ -289,6 +311,9 @@ pub const MlirKernelMaterializePass = struct {
         reduction_dim: i32 = 0,
         reduction_factor: i32 = 0,
         scale: f32 = 0.0,
+        status: Status = .pending,
+
+        const Status = enum { pending, compiled, dedup, fallback };
 
         fn descriptor(self: *const KernelCallPlan) kernel.MlirKernelDescriptor {
             return .{

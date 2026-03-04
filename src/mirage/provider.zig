@@ -199,13 +199,30 @@ pub const MirageProvider = struct {
         };
         defer result.deinit();
 
-        // Use the best candidate if search found improvements, otherwise the original graph.
-        const transpile_graph: ?*const mirage_c.MirageGraph = if (result.count() > 0)
-            result.get(0)
-        else
-            graph.raw;
+        // If search found no valid execution strategies, skip transpile.
+        // The raw graph is not directly transpilable — it needs a search-
+        // discovered threadblock decomposition to produce a kernel.
+        const num_candidates = result.count();
+        if (num_candidates == 0) {
+            log.debug("mirage search found 0 valid graphs for '{s}'; falling back", .{target_name});
+            return error.Unsupported;
+        }
 
-        // Transpile to CUDA source.
+        // Mirage's transpiler has unimplemented code paths that abort() the
+        // process. Probe each top candidate in a forked child to detect
+        // crashes before committing to a transpile in the parent.
+        const max_probes = @min(num_candidates, 5);
+        const transpile_graph = for (0..max_probes) |i| {
+            const g = result.get(i) orelse continue;
+            if (probe_transpile_safe(g)) break g;
+            log.warn("mirage transpile probe crashed for '{s}' (candidate {d}); trying next", .{ target_name, i });
+        } else {
+            log.warn("top {d} mirage candidates all crashed for '{s}'; falling back", .{ max_probes, target_name });
+            return error.Unsupported;
+        };
+
+        // Transpile in parent — safe because the same deterministic graph
+        // passed the fork-canary probe above.
         var source = mirage_api.transpile(transpile_graph, null) catch |err| {
             if (err == error.MirageApiUnsupported) {
                 log.debug("mirage transpile unsupported for region '{s}'", .{target_name});
@@ -302,6 +319,42 @@ pub const MirageProvider = struct {
         };
     }
 };
+
+/// Test if transpiling a graph is safe by running it in a forked child.
+///
+/// Mirage's transpiler has unimplemented code paths that call `assert(false)`,
+/// triggering `abort()` which kills the process. Since `abort()` cannot be
+/// caught from Zig, we fork a canary process: the child attempts the transpile
+/// and exits with status 0 on success. If the child is killed by a signal
+/// (SIGABRT from the assert), the parent detects this via `waitpid` and
+/// returns false. The parent then re-transpiles the same deterministic graph
+/// when it is confirmed safe.
+fn probe_transpile_safe(graph: ?*const mirage_c.MirageGraph) bool {
+    const pid = std.posix.fork() catch |err| {
+        log.warn("fork failed for transpile probe: {}", .{err});
+        return false;
+    };
+
+    if (pid == 0) {
+        // Child: suppress stderr (hides the assert message) and attempt
+        // transpile. Use exit_group to avoid running atexit handlers.
+        if (std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0)) |devnull| {
+            std.posix.dup2(devnull, std.posix.STDERR_FILENO) catch {};
+            std.posix.close(devnull);
+        } else |_| {}
+
+        var source = mirage_api.transpile(graph, null) catch {
+            std.os.linux.exit_group(1);
+        };
+        source.deinit();
+        std.os.linux.exit_group(0);
+    }
+
+    // Parent: wait for the canary child.
+    const wait = std.posix.waitpid(pid, 0);
+    const W = std.os.linux.W;
+    return W.IFEXITED(wait.status) and W.EXITSTATUS(wait.status) == 0;
+}
 
 /// Release Mirage device memory. With the new API this destroys the
 /// device handle; currently a no-op since device handles are scoped to
