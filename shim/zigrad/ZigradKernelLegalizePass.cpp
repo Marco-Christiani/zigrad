@@ -362,6 +362,91 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
       return success();
     }
 
+    if (pattern == "rms_norm_matmul" && inputs.size() == 2) {
+      // Expand: rms_norm_matmul(X_2D, W') -> dot_general(rms_norm(X_2D), W')
+      // Reconstructs the rms_norm chain on X_2D, then appends a dot_general.
+      Location loc = op.getLoc();
+      Value x = inputs[0];
+      Value w = inputs[1];
+      int32_t normalized_size = get_backend_config_int(op, "zigrad.normalized_size");
+      if (normalized_size <= 0) return failure();
+
+      auto x_type = cast<RankedTensorType>(x.getType());
+      Type elem = x_type.getElementType();
+      int64_t last_dim = x_type.getRank() - 1;
+
+      // x_sq = multiply(x, x)
+      OperationState sq_state(loc, "stablehlo.multiply");
+      sq_state.addOperands({x, x});
+      sq_state.addTypes(x_type);
+      Operation *x_sq = rewriter.create(sq_state);
+
+      // sum = reduce_sum(x_sq, last_dim)
+      Operation *sum = create_reduce_sum(loc, x_sq->getResult(0), last_dim, rewriter);
+
+      // scale = constant(1.0 / normalized_size) broadcast to sum shape
+      auto sum_type = cast<RankedTensorType>(sum->getResult(0).getType());
+      auto scalar_type = RankedTensorType::get({}, elem);
+      float scale_val = 1.0f / static_cast<float>(normalized_size);
+      auto scale_attr = DenseElementsAttr::get(scalar_type, rewriter.getFloatAttr(elem, scale_val));
+      OperationState scale_state(loc, "stablehlo.constant");
+      scale_state.addTypes(scalar_type);
+      scale_state.addAttribute("value", scale_attr);
+      Operation *scale_const = rewriter.create(scale_state);
+
+      SmallVector<int64_t> empty_dims;
+      Operation *scale_broadcast = create_broadcast_in_dim(
+          loc, scale_const->getResult(0), empty_dims, sum_type, rewriter);
+
+      // mean = multiply(sum, scale_broadcast)
+      OperationState mean_state(loc, "stablehlo.multiply");
+      mean_state.addOperands({sum->getResult(0), scale_broadcast->getResult(0)});
+      mean_state.addTypes(sum_type);
+      Operation *mean = rewriter.create(mean_state);
+
+      // eps = constant(1e-5) broadcast to sum shape
+      auto eps_attr = DenseElementsAttr::get(scalar_type, rewriter.getFloatAttr(elem, 1.0e-5));
+      OperationState eps_state(loc, "stablehlo.constant");
+      eps_state.addTypes(scalar_type);
+      eps_state.addAttribute("value", eps_attr);
+      Operation *eps_const = rewriter.create(eps_state);
+      Operation *eps_broadcast = create_broadcast_in_dim(
+          loc, eps_const->getResult(0), empty_dims, sum_type, rewriter);
+
+      // denom = add(mean, eps_broadcast)
+      OperationState denom_state(loc, "stablehlo.add");
+      denom_state.addOperands({mean->getResult(0), eps_broadcast->getResult(0)});
+      denom_state.addTypes(sum_type);
+      Operation *denom = rewriter.create(denom_state);
+
+      // inv = rsqrt(denom)
+      OperationState rsqrt_state(loc, "stablehlo.rsqrt");
+      rsqrt_state.addOperands(denom->getResult(0));
+      rsqrt_state.addTypes(sum_type);
+      Operation *inv = rewriter.create(rsqrt_state);
+
+      // broadcast inv to x shape
+      SmallVector<int64_t> inv_broadcast_dims;
+      for (int64_t i = 0; i < x_type.getRank(); ++i) {
+        if (i != last_dim) inv_broadcast_dims.push_back(i);
+      }
+      Operation *inv_broadcast = create_broadcast_in_dim(
+          loc, inv->getResult(0), inv_broadcast_dims, x_type, rewriter);
+
+      // normed = multiply(x, inv_broadcast)
+      OperationState normed_state(loc, "stablehlo.multiply");
+      normed_state.addOperands({x, inv_broadcast->getResult(0)});
+      normed_state.addTypes(x_type);
+      Operation *normed = rewriter.create(normed_state);
+
+      // result = dot_general(normed, W')
+      Operation *result = create_dot_general(loc, normed->getResult(0), w,
+                                              op->getResultTypes(), rewriter);
+      if (!result) return failure();
+      rewriter.replaceOp(op, result->getResults());
+      return success();
+    }
+
     if (pattern == "softmax_matmul" && inputs.size() == 2) {
       // Expand: softmax_matmul(scores, V) -> dot_general(div(exp(scores), broadcast(reduce_sum(exp(scores)))), V)
       Location loc = op.getLoc();

@@ -324,6 +324,7 @@ pub const MlirKernelPattern = enum {
     dot_log,
     dot_exp,
     rms_norm,
+    rms_norm_matmul,
     softmax_matmul,
     attention,
 };

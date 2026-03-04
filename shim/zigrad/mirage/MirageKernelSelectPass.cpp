@@ -332,6 +332,285 @@ struct RmsNormPattern final : RewritePattern {
 };
 
 // ============================================================================
+// Pattern: rms_norm(X) @ W -> "rms_norm_matmul"  (priority 5)
+//
+// Anchored on stablehlo.dot_general, walks backward through:
+//   dot_general(lhs, W)
+//     lhs = [reshape] -> [convert f32→bf16] -> multiply(normed, gamma_bc) -> ...
+//     normed = multiply(x, broadcast(rsqrt(add(multiply(reduce_sum(multiply(x,x)), scale), eps))))
+//
+// Pre-multiplies gamma into W (rms_norm(X)*γ)@W = rms_norm(X)@(γ*W)) to avoid
+// passing a rank-1 gamma through Mirage (which can't broadcast rank-1 vs rank-2).
+// ============================================================================
+
+struct RmsNormMatmulPattern final : RewritePattern {
+  KeyCounter *counter;
+
+  explicit RmsNormMatmulPattern(MLIRContext *ctx, KeyCounter *counter)
+      : RewritePattern("stablehlo.dot_general", 5, ctx), counter(counter) {}
+
+  LogicalResult matchAndRewrite(Operation *dot_op,
+                                PatternRewriter &rewriter) const override {
+    if (dot_op->getNumOperands() != 2 || dot_op->getNumResults() != 1)
+      return failure();
+
+    Value dot_lhs = dot_op->getOperand(0);
+    Value w = dot_op->getOperand(1);
+
+    // Walk backward through optional reshape and convert.
+    Value pre_gamma = dot_lhs;
+    Operation *reshape_op = nullptr;
+    Operation *convert_to_bf16_op = nullptr;
+
+    // Optional: reshape (e.g. [1,4,2048] -> [4,2048])
+    {
+      Operation *def = pre_gamma.getDefiningOp();
+      if (kernel_utils::is_named_op(def, "stablehlo.reshape")) {
+        reshape_op = def;
+        if (reshape_op->getNumOperands() != 1) return failure();
+        pre_gamma = reshape_op->getOperand(0);
+      }
+    }
+
+    // Optional: convert f32 -> bf16 (precision cast after rms_norm)
+    {
+      Operation *def = pre_gamma.getDefiningOp();
+      if (kernel_utils::is_named_op(def, "stablehlo.convert")) {
+        convert_to_bf16_op = def;
+        if (convert_to_bf16_op->getNumOperands() != 1) return failure();
+        pre_gamma = convert_to_bf16_op->getOperand(0);
+      }
+    }
+
+    // gamma_mul = multiply(normed, gamma_bc)
+    Operation *gamma_mul_op = pre_gamma.getDefiningOp();
+    if (!kernel_utils::is_named_op(gamma_mul_op, "stablehlo.multiply"))
+      return failure();
+    if (gamma_mul_op->getNumOperands() != 2) return failure();
+
+    // Identify which operand is the gamma broadcast and which is normed.
+    Operation *gamma_bc_op = nullptr;
+    Value normed_val;
+    for (int i = 0; i < 2; ++i) {
+      Operation *def = gamma_mul_op->getOperand(i).getDefiningOp();
+      if (kernel_utils::is_named_op(def, "stablehlo.broadcast_in_dim")) {
+        gamma_bc_op = def;
+        normed_val = gamma_mul_op->getOperand(1 - i);
+        break;
+      }
+    }
+    if (!gamma_bc_op) return failure();
+    if (gamma_bc_op->getNumOperands() != 1) return failure();
+
+    // gamma_val: the 1D gamma tensor (possibly through a convert bf16->f32).
+    Value gamma_val = gamma_bc_op->getOperand(0);
+    Operation *gamma_convert_op = nullptr;
+    {
+      Operation *def = gamma_val.getDefiningOp();
+      if (def && kernel_utils::is_named_op(def, "stablehlo.convert")) {
+        gamma_convert_op = def;
+        if (gamma_convert_op->getNumOperands() != 1) return failure();
+        gamma_val = gamma_convert_op->getOperand(0);
+      }
+    }
+    // gamma_val is the original gamma (bf16 or f32).
+    Value gamma_original = gamma_val;
+
+    // normed = multiply(x, inv_bc)
+    Operation *normed_mul_op = normed_val.getDefiningOp();
+    if (!kernel_utils::is_named_op(normed_mul_op, "stablehlo.multiply"))
+      return failure();
+    if (normed_mul_op->getNumOperands() != 2) return failure();
+
+    // Find inv_bc (broadcast_in_dim) and x among normed_mul operands.
+    Operation *inv_bc_op = nullptr;
+    Value x;
+    for (int i = 0; i < 2; ++i) {
+      Operation *def = normed_mul_op->getOperand(i).getDefiningOp();
+      if (kernel_utils::is_named_op(def, "stablehlo.broadcast_in_dim")) {
+        inv_bc_op = def;
+        x = normed_mul_op->getOperand(1 - i);
+        break;
+      }
+    }
+    if (!inv_bc_op) return failure();
+    if (inv_bc_op->getNumOperands() != 1) return failure();
+
+    // inv = rsqrt(denom)
+    Operation *rsqrt_op = inv_bc_op->getOperand(0).getDefiningOp();
+    if (!kernel_utils::is_named_op(rsqrt_op, "stablehlo.rsqrt"))
+      return failure();
+    if (rsqrt_op->getNumOperands() != 1) return failure();
+
+    // denom = add(mean, eps)
+    Operation *denom_add_op = rsqrt_op->getOperand(0).getDefiningOp();
+    if (!kernel_utils::is_named_op(denom_add_op, "stablehlo.add"))
+      return failure();
+    if (denom_add_op->getNumOperands() != 2) return failure();
+
+    // mean = multiply(reduce_sum, scale)
+    Operation *mean_mul_op = nullptr;
+    for (int i = 0; i < 2; ++i) {
+      Operation *def = denom_add_op->getOperand(i).getDefiningOp();
+      if (kernel_utils::is_named_op(def, "stablehlo.multiply")) {
+        mean_mul_op = def;
+        break;
+      }
+    }
+    if (!mean_mul_op || mean_mul_op->getNumOperands() != 2) return failure();
+
+    // reduce_sum(sq)
+    Operation *reduce_op = nullptr;
+    for (int i = 0; i < 2; ++i) {
+      Operation *def = mean_mul_op->getOperand(i).getDefiningOp();
+      if (kernel_utils::is_named_op(def, "stablehlo.reduce")) {
+        reduce_op = def;
+        break;
+      }
+    }
+    if (!reduce_op) return failure();
+
+    // Verify reduce body is add.
+    if (reduce_op->getNumRegions() != 1) return failure();
+    Region &body = reduce_op->getRegion(0);
+    if (body.empty() || !body.hasOneBlock()) return failure();
+    {
+      Operation *combiner = nullptr;
+      for (Operation &inner : body.front().without_terminator())
+        combiner = &inner;
+      if (!combiner || !kernel_utils::is_named_op(combiner, "stablehlo.add"))
+        return failure();
+    }
+
+    // sq = multiply(x, x)
+    if (reduce_op->getNumOperands() < 1) return failure();
+    Operation *sq_op = reduce_op->getOperand(0).getDefiningOp();
+    if (!kernel_utils::is_named_op(sq_op, "stablehlo.multiply"))
+      return failure();
+    if (sq_op->getNumOperands() != 2) return failure();
+    if (sq_op->getOperand(0) != sq_op->getOperand(1))
+      return failure();
+
+    // Verify x is the same Value used in sq_op.
+    if (sq_op->getOperand(0) != x) return failure();
+
+    // Single-use checks for internal chain ops.
+    if (!denom_add_op->getResult(0).hasOneUse()) return failure();
+    if (!mean_mul_op->getResult(0).hasOneUse()) return failure();
+    if (!reduce_op->getResult(0).hasOneUse()) return failure();
+    if (!sq_op->getResult(0).hasOneUse()) return failure();
+    if (!rsqrt_op->getResult(0).hasOneUse()) return failure();
+    if (!inv_bc_op->getResult(0).hasOneUse()) return failure();
+    if (!normed_mul_op->getResult(0).hasOneUse()) return failure();
+    if (!gamma_bc_op->getResult(0).hasOneUse()) return failure();
+    // NOTE: gamma_mul_op, convert_to_bf16_op, and reshape_op may have >1 use
+    // in the dual-use case (e.g. gate+up matmuls share the same rms_norm chain).
+    // The first match replaces one dot_general, the second replaces the other,
+    // then the shared chain becomes dead and is erased.
+
+    // Look through bf16->f32 convert on x to find the original bf16 input.
+    Value x_original = x;
+    Operation *x_convert_op = nullptr;
+    {
+      Operation *def = x.getDefiningOp();
+      if (def && kernel_utils::is_named_op(def, "stablehlo.convert")) {
+        x_convert_op = def;
+        x_original = def->getOperand(0);
+      }
+    }
+
+    // Extract normalized_size from the last dim of x.
+    auto x_type = dyn_cast<RankedTensorType>(x.getType());
+    if (!x_type || x_type.getRank() == 0) return failure();
+    int64_t normalized_size = x_type.getDimSize(x_type.getRank() - 1);
+    if (normalized_size <= 0) return failure();
+
+    // === Emit pre-multiply: W' = broadcast(gamma) * W ===
+    rewriter.setInsertionPoint(dot_op);
+
+    // Determine X_2D: if x_original is rank > 2, reshape to 2D.
+    Value x_2d = x_original;
+    auto x_orig_type = dyn_cast<RankedTensorType>(x_original.getType());
+    if (!x_orig_type) return failure();
+    if (x_orig_type.getRank() > 2) {
+      // Collapse leading dims: [d0, d1, ..., dn-1, last] -> [d0*d1*...*dn-1, last]
+      int64_t leading = 1;
+      for (int64_t i = 0; i < x_orig_type.getRank() - 1; ++i)
+        leading *= x_orig_type.getDimSize(i);
+      int64_t last = x_orig_type.getDimSize(x_orig_type.getRank() - 1);
+      auto reshaped_type = RankedTensorType::get({leading, last}, x_orig_type.getElementType());
+      OperationState rs(dot_op->getLoc(), "stablehlo.reshape");
+      rs.addOperands(x_original);
+      rs.addTypes(reshaped_type);
+      Operation *rs_op = rewriter.create(rs);
+      x_2d = rs_op->getResult(0);
+    }
+
+    // Match gamma dtype to W dtype for pre-multiply.
+    auto w_type = dyn_cast<RankedTensorType>(w.getType());
+    if (!w_type || w_type.getRank() != 2) return failure();
+    auto gamma_orig_type = dyn_cast<RankedTensorType>(gamma_original.getType());
+    if (!gamma_orig_type) return failure();
+
+    Value gamma_matched = gamma_original;
+    if (gamma_orig_type.getElementType() != w_type.getElementType()) {
+      auto cvt_type = RankedTensorType::get(gamma_orig_type.getShape(), w_type.getElementType());
+      OperationState cvt(dot_op->getLoc(), "stablehlo.convert");
+      cvt.addOperands(gamma_original);
+      cvt.addTypes(cvt_type);
+      Operation *cvt_op = rewriter.create(cvt);
+      gamma_matched = cvt_op->getResult(0);
+    }
+
+    // broadcast gamma to W shape along dim 0.
+    OperationState gbc(dot_op->getLoc(), "stablehlo.broadcast_in_dim");
+    gbc.addOperands(gamma_matched);
+    gbc.addTypes(w_type);
+    gbc.addAttribute("broadcast_dimensions", rewriter.getDenseI64ArrayAttr({0}));
+    Operation *gamma_bc_w = rewriter.create(gbc);
+
+    // W' = multiply(gamma_bc_w, W)
+    OperationState wmul(dot_op->getLoc(), "stablehlo.multiply");
+    wmul.addOperands({gamma_bc_w->getResult(0), w});
+    wmul.addTypes(w_type);
+    Operation *w_prime = rewriter.create(wmul);
+
+    // Emit kernel_call(X_2D, W').
+    SmallVector<Value, 2> call_operands = {x_2d, w_prime->getResult(0)};
+    SmallVector<NamedAttribute, 1> extra_config;
+    extra_config.push_back(rewriter.getNamedAttr(
+        "zigrad.normalized_size",
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(normalized_size))));
+
+    std::string key = counter->next();
+    Operation *replacement = kernel_utils::create_kernel_call(
+        dot_op, call_operands, dot_op->getResultTypes(),
+        kProvider, key, "rms_norm_matmul", extra_config, rewriter);
+    rewriter.replaceOp(dot_op, replacement->getResults());
+
+    // Clean up dead ops in reverse order (only erase if no remaining uses).
+    if (reshape_op && reshape_op->use_empty()) rewriter.eraseOp(reshape_op);
+    if (convert_to_bf16_op && convert_to_bf16_op->use_empty())
+      rewriter.eraseOp(convert_to_bf16_op);
+    if (gamma_mul_op->use_empty()) rewriter.eraseOp(gamma_mul_op);
+    if (gamma_bc_op->use_empty()) rewriter.eraseOp(gamma_bc_op);
+    if (gamma_convert_op && gamma_convert_op->use_empty())
+      rewriter.eraseOp(gamma_convert_op);
+    if (normed_mul_op->use_empty()) rewriter.eraseOp(normed_mul_op);
+    if (inv_bc_op->use_empty()) rewriter.eraseOp(inv_bc_op);
+    if (rsqrt_op->use_empty()) rewriter.eraseOp(rsqrt_op);
+    if (denom_add_op->use_empty()) rewriter.eraseOp(denom_add_op);
+    if (mean_mul_op->use_empty()) rewriter.eraseOp(mean_mul_op);
+    if (reduce_op->use_empty()) rewriter.eraseOp(reduce_op);
+    if (sq_op->use_empty()) rewriter.eraseOp(sq_op);
+    if (x_convert_op && x_convert_op->use_empty())
+      rewriter.eraseOp(x_convert_op);
+
+    return success();
+  }
+};
+
+// ============================================================================
 // Pattern: softmax(scores) @ V -> "softmax_matmul"  (priority 5)
 //
 // Matches: dot_general(div(exp(scores), broadcast(reduce_sum(exp(scores)))), V)
@@ -716,10 +995,9 @@ struct MirageKernelSelectPass final
     RewritePatternSet patterns(&getContext());
     patterns.add<AttentionPattern>(&getContext(), &counter);
     patterns.add<SoftmaxMatmulPattern>(&getContext(), &counter);
-    // RmsNormPattern disabled: rmsNorm alone is a single Mirage library op
-    // (0 custom kernels). Including the weight multiply triggers a Mirage
-    // threadblock assertion (element_binary.cc:67). Re-enable when Mirage
-    // fixes the assertion or adds a broadcast graph op.
+    patterns.add<RmsNormMatmulPattern>(&getContext(), &counter);
+    // RmsNormPattern disabled: standalone rmsNorm produces 0 Mirage custom
+    // kernels. The fused rms_norm_matmul pattern above handles the useful case.
     // patterns.add<RmsNormPattern>(&getContext(), &counter);
     patterns.add<DotAddMulPattern>(&getContext(), &counter);
     patterns.add<DotAddPattern>(&getContext(), &counter);

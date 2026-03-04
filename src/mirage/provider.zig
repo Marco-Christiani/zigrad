@@ -77,6 +77,7 @@ pub const MirageProvider = struct {
             .dot, .dot_general, .dot_log, .dot_exp => 2,
             .dot_add, .dot_add_mul => 3,
             .rms_norm => 1,
+            .rms_norm_matmul => 2,
             .softmax_matmul => 2,
             .attention => 3,
         };
@@ -147,6 +148,11 @@ pub const MirageProvider = struct {
             .rms_norm => {
                 return graph.rmsNorm(input_handles[0], desc.normalized_size) catch |err|
                     return map_mirage_api_error(err);
+            },
+            .rms_norm_matmul => {
+                const rms_result = graph.rmsNorm(input_handles[0], desc.normalized_size) catch |err|
+                    return map_mirage_api_error(err);
+                return try emit_matmul(graph, rms_result, input_handles[1]);
             },
             .softmax_matmul => {
                 const exp_result = try emit_unary(graph, mirage_c.unary_exp, input_handles[0]);
