@@ -12,6 +12,7 @@ in {
     ...
   }: let
     inherit (inputs) xlaSrc llvmSrc stablehloSrc;
+    inherit (inputs) ireeSrc ireeLlvmSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc;
 
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
@@ -266,6 +267,20 @@ in {
       inherit (cudaCfg) cudaArchitectures;
       cudaSupport = false;
     };
+
+    # IREE compiler: BYO-LLVM path using iree-org/llvm-project fork.
+    # ireeLlvm: LLVM+Clang+LLD+MLIR built from IREE's fork. Separate from our
+    #   XLA-pinned llvm because the two forks diverge in MLIR internals.
+    ireeLlvm = pkgs.callPackage ../iree-llvm.nix {
+      inherit ireeLlvmSrc;
+    };
+    ireeCompiler = pkgs.callPackage ../iree-compiler.nix {
+      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
+    };
+    ireeCompilerDevel = pkgs.callPackage ../iree-compiler.nix {
+      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
+      devel = true;
+    };
   in {
     # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
     packages =
@@ -310,6 +325,11 @@ in {
 
         # LLVM 22 built from XLA-pinned sources
         llvm = llvm;
+
+        # IREE compiler (BYO-LLVM using iree-org/llvm-project fork).
+        iree-llvm = ireeLlvm;
+        iree-compiler = ireeCompiler;
+        iree-compiler-devel = ireeCompilerDevel;
 
         gen-clangd = targets.editor.clangd;
         gen-nvim = targets.editor.nvim;

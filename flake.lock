@@ -20,6 +20,91 @@
         "type": "github"
       }
     },
+    "ireeBenchmarkSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1769001408,
+        "narHash": "sha256-Mm4pG7zMB00iof32CxreoNBFnduPZTMp3reHMCIAFPQ=",
+        "owner": "google",
+        "repo": "benchmark",
+        "rev": "192ef10025eb2c4cdd392bc502f0c852196baa48",
+        "type": "github"
+      },
+      "original": {
+        "owner": "google",
+        "repo": "benchmark",
+        "rev": "192ef10025eb2c4cdd392bc502f0c852196baa48",
+        "type": "github"
+      }
+    },
+    "ireeFlatccSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1715669061,
+        "narHash": "sha256-umZ9TvNYDZtF/mNwQUGuhAGve0kPw7uXkaaQX0EzkBY=",
+        "owner": "dvidelabs",
+        "repo": "flatcc",
+        "rev": "9362cd00f0007d8cbee7bff86e90fb4b6b227ff3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "dvidelabs",
+        "repo": "flatcc",
+        "rev": "9362cd00f0007d8cbee7bff86e90fb4b6b227ff3",
+        "type": "github"
+      }
+    },
+    "ireeLlvmSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772481736,
+        "narHash": "sha256-bEGgQ5ODu0qNkhj4XLVPx7M+RnWpWOmWSp1yC2Hb95Q=",
+        "owner": "iree-org",
+        "repo": "llvm-project",
+        "rev": "c95bd0bba5be9710292ce3a29832b67a0e33f887",
+        "type": "github"
+      },
+      "original": {
+        "owner": "iree-org",
+        "repo": "llvm-project",
+        "rev": "c95bd0bba5be9710292ce3a29832b67a0e33f887",
+        "type": "github"
+      }
+    },
+    "ireeSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772585283,
+        "narHash": "sha256-1DxBnX2ZTZqnU6NUHxGBnBnl0b7Kl+6ygTKKDyMNQQw=",
+        "owner": "iree-org",
+        "repo": "iree",
+        "rev": "776210bd36896f8ca14288637592a9d5cebfcea1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "iree-org",
+        "repo": "iree",
+        "rev": "776210bd36896f8ca14288637592a9d5cebfcea1",
+        "type": "github"
+      }
+    },
+    "ireeStablehloSrc": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1765912843,
+        "narHash": "sha256-6pc9A54vjDEafYXSAIT0gxss7LNfNTATZnOGzGiM0FI=",
+        "owner": "iree-org",
+        "repo": "stablehlo",
+        "rev": "6fabd27b15885179a3b6a601ea1e4171f2ed2c91",
+        "type": "github"
+      },
+      "original": {
+        "owner": "iree-org",
+        "repo": "stablehlo",
+        "rev": "6fabd27b15885179a3b6a601ea1e4171f2ed2c91",
+        "type": "github"
+      }
+    },
     "llvmSrc": {
       "flake": false,
       "locked": {
@@ -135,6 +220,11 @@
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
+        "ireeBenchmarkSrc": "ireeBenchmarkSrc",
+        "ireeFlatccSrc": "ireeFlatccSrc",
+        "ireeLlvmSrc": "ireeLlvmSrc",
+        "ireeSrc": "ireeSrc",
+        "ireeStablehloSrc": "ireeStablehloSrc",
         "llvmSrc": "llvmSrc",
         "mirage-src": "mirage-src",
         "mpk": "mpk",

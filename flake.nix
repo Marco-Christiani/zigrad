@@ -59,6 +59,31 @@
       url = "github:openxla/stablehlo/1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f";
       flake = false;
     };
+
+    # IREE compiler + its BYO-LLVM dependency.
+    # ireeLlvmSrc: iree-org/llvm-project fork that IREE carries patches on top of.
+    # ireeStablehloSrc: iree-org/stablehlo fork (diverges from openxla/stablehlo).
+    # ireeFlatccSrc: flatcc library (IREE VM flatbuffer runtime).
+    ireeSrc = {
+      url = "github:iree-org/iree/776210bd36896f8ca14288637592a9d5cebfcea1";
+      flake = false;
+    };
+    ireeLlvmSrc = {
+      url = "github:iree-org/llvm-project/c95bd0bba5be9710292ce3a29832b67a0e33f887";
+      flake = false;
+    };
+    ireeStablehloSrc = {
+      url = "github:iree-org/stablehlo/6fabd27b15885179a3b6a601ea1e4171f2ed2c91";
+      flake = false;
+    };
+    ireeFlatccSrc = {
+      url = "github:dvidelabs/flatcc/9362cd00f0007d8cbee7bff86e90fb4b6b227ff3";
+      flake = false;
+    };
+    ireeBenchmarkSrc = {
+      url = "github:google/benchmark/192ef10025eb2c4cdd392bc502f0c852196baa48";
+      flake = false;
+    };
   };
 
   outputs = inputs @ {flake-parts, ...}: let
