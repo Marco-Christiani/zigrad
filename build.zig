@@ -21,9 +21,11 @@ pub fn build(b: *std.Build) void {
     const sdk_runtime = b.fmt("{s}/runtime", .{sdk_root});
 
     const mkl_available = sdk_has_mkl(b, sdk_root);
+    const iree_backend = b.option(bool, "iree-backend", "Enable IREE backend (requires ireeCompiler + ireeRuntime in SDK)") orelse false;
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_mkl", mkl_available);
+    build_options.addOption(bool, "iree_backend", iree_backend);
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const cova_dep = b.dependency("cova", .{});
@@ -60,11 +62,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.root_module.addOptions("build_options", build_options);
-
     exe.root_module.addIncludePath(b.path("src"));
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
     link_mlir_stablehlo_capi(exe, sdk_lib);
+    if (iree_backend) link_iree(exe, sdk_lib);
     add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     b.installArtifact(exe);
@@ -76,6 +77,7 @@ pub fn build(b: *std.Build) void {
 
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
     link_mlir_stablehlo_capi(lib_tests, sdk_lib);
+    if (iree_backend) link_iree(lib_tests, sdk_lib);
     add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
@@ -151,7 +153,7 @@ fn add_cli_gen_step(
     help_conf.addOption(bool, "recursive_gen", true);
     help_conf.addOption(u8, "recursive_max_depth", 3);
     help_conf.addOption([]const []const u8, "recursive_blocklist", &.{ "usage", "help" });
-    // Shared metadata — null -> inherited from md_config_opts
+    // Shared metadata -- null -> inherited from md_config_opts
     help_conf.addOption(?[]const u8, "version", null);
     help_conf.addOption(?[]const u8, "ver_date", null);
     help_conf.addOption(?[]const u8, "name", null);
@@ -200,6 +202,28 @@ fn link_mlir_stablehlo_capi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) v
 
     // StableHLO C API boundary (libStablehloCAPI.so provides stablehlo dialect handle symbols).
     exe.root_module.linkSystemLibrary("StablehloCAPI", .{});
+}
+
+/// Link the IREERuntime shared library and compile the IREE C shim.
+///
+/// libIREECompiler.so is NOT linked at build time (loaded via dlopen).
+/// libIREERuntime.so IS linked because @cImport in runtime.zig emits
+/// references to IREE runtime symbols.
+///
+/// The shim (`src/c/iree/shim.c`) wraps `static inline` functions and
+/// macros from the IREE headers that `@cImport` cannot translate.
+fn link_iree(exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
+    exe.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
+    exe.root_module.linkSystemLibrary("IREERuntime", .{});
+    exe.root_module.addRPathSpecial(sdk_lib);
+
+    // Compile the C shim that wraps IREE static inline / macro helpers.
+    exe.addCSourceFile(.{
+        .file = exe.step.owner.path("src/c/iree/shim.c"),
+        .flags = &.{
+            "-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl",
+        },
+    });
 }
 
 fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {

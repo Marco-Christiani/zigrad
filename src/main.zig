@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const build_options = zg.build_options;
 const demos = @import("demos.zig");
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
@@ -134,6 +135,15 @@ pub fn main() !void {
 
         defer for (args.items) |arg| gpa.free(arg);
         return run_benchmark_mode(gpa, args.items);
+    }
+
+    // IREE backend commands.
+    if (cmd.matchSubCmd("iree-aot-demo")) |_| {
+        if (comptime build_options.iree_backend) {
+            return run_iree_demo(gpa, dump_pr_ptr, dump_mlir_ptr);
+        }
+        std.log.err("iree-aot-demo requires building with -Diree-backend=true", .{});
+        return error.IreeBackendDisabled;
     }
 
     // Commands that require PJRT backend
@@ -280,18 +290,13 @@ pub fn main() !void {
         return demos.run_demo_executable(gpa, &backend, device, &exe);
     }
 
-    // default to running demo program
-    var program = try zg.frontend.build_demo_program(gpa);
-    defer program.deinit();
+    if (cmd.sub_cmd) |sub| {
+        std.log.err("unhandled subcommand: '{s}'", .{sub.name});
+        return error.UnhandledSubcommand;
+    }
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (global_opts.dump_mlir != null) .text else .bytecode;
-    var exe = try demos.compile_program(&backend, gpa, &program, device, .{
-        .encoding = lower_encoding,
-        .entry_name = "main",
-    }, dump_pr_ptr, dump_mlir_ptr, null);
-    defer backend.deinit_executable(&exe);
-
-    return demos.run_demo_executable(gpa, &backend, device, &exe);
+    std.log.err("no subcommand specified. Run 'zigrad --help' for usage.", .{});
+    return error.NoSubcommand;
 }
 
 fn run_tvm_demo(
@@ -481,6 +486,106 @@ fn parse_provider_kinds(s: []const u8) !ProviderKindList {
     }
     if (result.len == 0) return error.InvalidArgument;
     return result;
+}
+
+fn run_iree_demo(
+    gpa: std.mem.Allocator,
+    dump_pr: ?*zg.pipeline.DumpConfig,
+    dump_mlir: ?*zg.pipeline.DumpConfig,
+) !void {
+    const iree_mod = zg.backend.iree;
+    const compiler_lib = std.process.getEnvVarOwned(gpa, "IREE_COMPILER_LIB") catch blk: {
+        // Fallback: look next to the binary or in the SDK.
+        break :blk try gpa.dupe(u8, "libIREECompiler.so");
+    };
+    defer gpa.free(compiler_lib);
+
+    const driver = std.process.getEnvVarOwned(gpa, "IREE_HAL_DRIVER") catch
+        try gpa.dupe(u8, "local-sync");
+    defer gpa.free(driver);
+
+    var backend = try iree_mod.Backend.init(gpa, compiler_lib, driver);
+    defer backend.deinit();
+
+    const devs = try backend.get_devices(gpa);
+    defer gpa.free(devs);
+    if (devs.len == 0) return error.NoDevices;
+    const device = &devs[0];
+
+    var program = try zg.frontend.build_demo_program(gpa);
+    defer program.deinit();
+
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+    const lower_cfg = zg.lower.LowerPassConfig{
+        .encoding = lower_encoding,
+        .entry_name = "main",
+    };
+
+    // Lower PR -> MLIR bytes.
+    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, lower_cfg.entry_name, lower_cfg.encoding);
+    defer gpa.free(mlir_bytes);
+
+    if (dump_pr) |cfg| {
+        var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(gpa, 1) catch return error.OutOfMemory;
+        defer passes.deinit(gpa);
+        var cfg_local = cfg.*;
+        cfg_local.entry_name = cfg_local.entry_name orelse lower_cfg.entry_name;
+        try passes.append(gpa, zg.pipeline.dump_pr_pass_with_config(&cfg_local));
+        var runner = zg.pipeline.Runner.init(gpa, passes.items);
+        _ = try runner.run(&program);
+    }
+    if (dump_mlir) |cfg| {
+        _ = cfg;
+        // Print the MLIR text for inspection.
+        if (lower_cfg.encoding == .text) {
+            std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
+        }
+    }
+
+    const is_bytecode = lower_cfg.encoding == .bytecode;
+    var exe = try backend.compile(device, mlir_bytes, is_bytecode, .{});
+    defer backend.deinit_executable(&exe);
+
+    // Run the matmul demo: A(2x3) x B(3x2) + C(2x2).
+    const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
+    const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
+    const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
+
+    var buf_a = try backend.buffer_from_host(device, std.mem.asBytes(&A), .f32, &[_]i64{ 2, 3 });
+    defer backend.deinit_buffer(&buf_a);
+    var buf_b = try backend.buffer_from_host(device, std.mem.asBytes(&B), .f32, &[_]i64{ 3, 2 });
+    defer backend.deinit_buffer(&buf_b);
+    var buf_c = try backend.buffer_from_host(device, std.mem.asBytes(&C), .f32, &[_]i64{ 2, 2 });
+    defer backend.deinit_buffer(&buf_c);
+
+    const inputs = [_]iree_mod.Buffer{ buf_a, buf_b, buf_c };
+    var result = try backend.execute(&exe, gpa, &inputs);
+    defer {
+        for (result.outputs) |*b| backend.deinit_buffer(b);
+        gpa.free(result.outputs);
+        backend.deinit_event(&result.event);
+    }
+
+    if (result.outputs.len == 0) {
+        std.log.err("iree-aot-demo: no outputs", .{});
+        return error.NoOutputs;
+    }
+
+    var out: [4]f32 = undefined;
+    var ev = try backend.buffer_to_host(&result.outputs[0], std.mem.asBytes(&out));
+    backend.await_event(&ev);
+
+    std.log.info("iree-aot-demo result: [{d}, {d}, {d}, {d}]", .{ out[0], out[1], out[2], out[3] });
+
+    // Expected: AxB+C = [[120+2, 132+2], [282+2, 312+2]] = [122, 134, 284, 314].
+    const expected = [_]f32{ 122.0, 134.0, 284.0, 314.0 };
+    for (out, expected) |got, exp| {
+        if (@abs(got - exp) > 1e-3) {
+            std.log.err("iree-aot-demo: mismatch got={d} expected={d}", .{ got, exp });
+            return error.NumericalMismatch;
+        }
+    }
+    std.log.info("iree-aot-demo: OK", .{});
 }
 
 fn parse_shape(s: []const u8) !zg.benchmark.Shape {

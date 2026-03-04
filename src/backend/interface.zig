@@ -4,8 +4,8 @@
 /// top-level namespace) exports a `Backend` struct with the right methods AND
 /// the required associated handle types. Returns `Module.Backend`.
 ///
-/// Associated types (`Buffer`, `Device`, etc.) live at module scope — NOT inside
-/// the `Backend` struct — because Zig 0.15 treats same-name decls in both scopes
+/// Associated types (`Buffer`, `Device`, etc.) live at module scope -- NOT inside
+/// the `Backend` struct -- because Zig 0.15 treats same-name decls in both scopes
 /// as ambiguous within method signatures.
 ///
 /// This does NOT enforce exact error sets (Zig infers those per-backend).
@@ -150,4 +150,10 @@ fn check_method(
 
 test "pjrt backend conforms" {
     _ = AsBackend(@import("pjrt.zig"));
+}
+
+test "iree backend conforms" {
+    const build_options = @import("build_options");
+    if (comptime !build_options.iree_backend) return error.SkipZigTest;
+    _ = AsBackend(@import("iree.zig"));
 }

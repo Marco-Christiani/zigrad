@@ -143,6 +143,10 @@ pub const setup_cmd: CommandT = .{
             .description = "Run the AOT compile+load demo",
         },
         .{
+            .name = "iree-aot-demo",
+            .description = "Run the IREE AOT compile+execute demo (requires -Diree-backend=true and IREE_COMPILER_LIB env var)",
+        },
+        .{
             .name = "custom-call-neg",
             .description = "Expects missing custom call handler (should fail)",
         },

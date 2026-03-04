@@ -1,6 +1,6 @@
 # nix/flake/sdk.nix
 #
-# SDK assembly: the LLVM → StableHLO → TVM → PJRT dependency graph,
+# SDK assembly: the LLVM -> StableHLO -> TVM -> PJRT dependency graph,
 # all package exports, and apps (which share the `targets` import).
 {inputs, ...}: let
   zigradVersion = inputs.self.shortRev or inputs.self.dirtyShortRev or "dev";
@@ -90,6 +90,8 @@ in {
           tvm.dev
           cudaCompileHeaders
           pkgs.mkl
+          ireeCompiler
+          ireeRuntime
         ]
         ++ pkgs.lib.optionals (mirageRuntime != null) [
           mirageRuntime
@@ -129,6 +131,8 @@ in {
           tvmDevel.dev
           cudaCompileHeaders
           pkgs.mkl
+          ireeCompilerDevel
+          ireeRuntime
         ]
         ++ pkgs.lib.optionals (mirageRuntime != null) [
           mirageRuntime
@@ -281,6 +285,12 @@ in {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
       devel = true;
     };
+
+    # IREE runtime: combined libIREERuntime.so with CPU HAL drivers.
+    # Uses the same IREE fork and LLVM as the compiler derivation.
+    ireeRuntime = pkgs.callPackage ../iree-runtime.nix {
+      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
+    };
   in {
     # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
     packages =
@@ -326,10 +336,11 @@ in {
         # LLVM 22 built from XLA-pinned sources
         llvm = llvm;
 
-        # IREE compiler (BYO-LLVM using iree-org/llvm-project fork).
+        # IREE compiler + runtime (BYO-LLVM using iree-org/llvm-project fork).
         iree-llvm = ireeLlvm;
         iree-compiler = ireeCompiler;
         iree-compiler-devel = ireeCompilerDevel;
+        iree-runtime = ireeRuntime;
 
         gen-clangd = targets.editor.clangd;
         gen-nvim = targets.editor.nvim;
