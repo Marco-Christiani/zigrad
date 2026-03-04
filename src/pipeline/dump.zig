@@ -2,6 +2,7 @@ const std = @import("std");
 
 const pass = @import("pass.zig");
 const pr = @import("../pr/pr.zig");
+const json = @import("../pr/json.zig");
 const zxpr = @import("../pr/zxpr.zig");
 
 pub const DumpTarget = enum {
@@ -9,9 +10,15 @@ pub const DumpTarget = enum {
     file,
 };
 
+pub const DumpFormat = enum {
+    zxpr,
+    json,
+};
+
 pub const DumpConfig = struct {
     target: DumpTarget = .stdout,
     path: ?[]const u8 = null,
+    format: DumpFormat = .zxpr,
 
     /// Optional label identifying which PR function was selected as entry.
     /// Printed as "entry: <name>" header in dump output for user reference.
@@ -29,12 +36,14 @@ fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContex
     const task = struct {
         program: *const pr.Program,
         entry: ?[]const u8,
+        format: DumpFormat,
         fn run(self: @This(), out: *std.Io.Writer) !void {
-            try emit_program(out, self.program, self.entry);
+            try emit_program(out, self.program, self.entry, self.format);
         }
     }{
         .program = program,
         .entry = cfg.entry_name,
+        .format = cfg.format,
     };
 
     with_writer(cfg, task) catch |err| switch (err) {
@@ -89,13 +98,18 @@ pub fn dump_mlir_pass_with_config(config: *DumpConfig) pass.Pass {
     };
 }
 
-fn emit_program(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const u8) !void {
-    if (entry) |name| {
-        try out.print("entry: {s}\n", .{name});
-    }
-    for (program.functions, 0..) |func, i| {
-        if (i > 0) try out.writeAll("\n");
-        try zxpr.emit(func, out, .auto_stdout, .{});
+fn emit_program(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const u8, format: DumpFormat) !void {
+    switch (format) {
+        .zxpr => {
+            if (entry) |name| {
+                try out.print("entry: {s}\n", .{name});
+            }
+            for (program.functions, 0..) |func, i| {
+                if (i > 0) try out.writeAll("\n");
+                try zxpr.emit(func, out, .auto_stdout, .{});
+            }
+        },
+        .json => try json.emit_program(program, out),
     }
 }
 
@@ -147,12 +161,36 @@ test "emit_program includes entry header and zxpr output" {
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
 
-    try emit_program(&writer_state.writer, &program, "main");
+    try emit_program(&writer_state.writer, &program, "main", .zxpr);
     const output = try writer_state.toOwnedSlice();
     defer testing.allocator.free(output);
 
     try testing.expect(std.mem.indexOf(u8, output, "entry: main") != null);
     try testing.expect(std.mem.indexOf(u8, output, "zxpr main") != null);
+}
+
+test "emit_program json format" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{1});
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
+    defer writer_state.deinit();
+
+    try emit_program(&writer_state.writer, &program, "main", .json);
+    const output = try writer_state.toOwnedSlice();
+    defer testing.allocator.free(output);
+
+    // JSON format: no entry header, produces JSON object
+    try testing.expect(std.mem.indexOf(u8, output, "entry:") == null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"name\":\"main\"") != null);
 }
 
 test "emit_mlir appends newline" {

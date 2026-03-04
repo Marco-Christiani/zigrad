@@ -304,7 +304,7 @@ fn is_dtype_only_attr(prim: pr.Prim) bool {
 // ============================================================================
 
 /// Generate readable variable name from ID: 0->a, 1->b, ..., 26->aa, etc.
-fn var_name(id: pr.VarId) []const u8 {
+pub fn var_name(id: pr.VarId) []const u8 {
     const names = comptime blk: {
         @setEvalBranchQuota(20000);
         const single = 26;
@@ -343,6 +343,32 @@ pub fn emit(func: pr.Function, writer: *Writer, mode: FormatMode, opts: FormatOp
     const cfg = format_config(mode, opts);
     var emitter = Emitter.init(writer, func, cfg);
     try emitter.emit();
+}
+
+/// Emit a single param declaration: `a: 2x3<f32>`
+pub fn emit_param_line(func: pr.Function, id: pr.VarId, writer: *Writer) !void {
+    var emitter = Emitter.init(writer, func, format_config(.plain, .{}));
+    try emitter.emit_var_with_type(id);
+}
+
+/// Emit a single equation binding: `c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp`
+pub fn emit_eqn_line(func: pr.Function, eqn: pr.Eqn, writer: *Writer) !void {
+    var emitter = Emitter.init(writer, func, format_config(.plain, .{}));
+    try emitter.emit_binding(eqn);
+}
+
+/// Emit a region block: header + equations + footer.
+pub fn emit_region_block(func: pr.Function, region: pr.Region, writer: *Writer) !void {
+    var emitter = Emitter.init(writer, func, format_config(.plain, .{}));
+    try emitter.emit_region_start(0, region);
+    const eqn_end = region.eqn_start + region.eqn_len;
+    var eqn_i: u32 = region.eqn_start;
+    while (eqn_i < eqn_end and eqn_i < func.eqns.len) : (eqn_i += 1) {
+        try writer.writeAll("  ");
+        try emitter.emit_binding(func.eqns[eqn_i]);
+        try writer.writeAll("\n");
+    }
+    try emitter.emit_region_end(0);
 }
 
 // ============================================================================

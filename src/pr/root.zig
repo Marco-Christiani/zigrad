@@ -40,6 +40,7 @@ pub const param_out_avals = core.param_out_avals;
 
 pub const ad = @import("ad.zig");
 pub const emit = @import("emit.zig");
+pub const json = @import("json.zig");
 pub const zxpr = @import("zxpr.zig");
 pub const ops = @import("ops/ops.zig");
 
