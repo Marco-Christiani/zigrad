@@ -431,15 +431,21 @@ struct SoftmaxMatmulPattern final : RewritePattern {
     int64_t reduction_factor = exp_type.getDimSize(reduction_dim);
     if (reduction_factor <= 0) return failure();
 
+    // Store the V dot_general's dimension numbers for faithful expand round-trip.
+    Attribute value_dot_dims = dot_op->getAttr("dot_dimension_numbers");
+    if (!value_dot_dims) return failure();
+
     // Emit kernel_call.
     SmallVector<Value, 2> call_operands = {scores, v};
-    SmallVector<NamedAttribute, 2> extra_config;
+    SmallVector<NamedAttribute, 3> extra_config;
     extra_config.push_back(rewriter.getNamedAttr(
         "zigrad.reduction_dim",
         rewriter.getI32IntegerAttr(static_cast<int32_t>(reduction_dim))));
     extra_config.push_back(rewriter.getNamedAttr(
         "zigrad.reduction_factor",
         rewriter.getI32IntegerAttr(static_cast<int32_t>(reduction_factor))));
+    extra_config.push_back(rewriter.getNamedAttr(
+        "zigrad.value_dot_dims", value_dot_dims));
 
     std::string key = counter->next();
     Operation *replacement = kernel_utils::create_kernel_call(

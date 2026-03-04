@@ -368,6 +368,8 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
       Value scores = inputs[0];
       Value v = inputs[1];
       int32_t reduction_dim = get_backend_config_int(op, "zigrad.reduction_dim");
+      Attribute value_dot_dims = get_backend_config_attr(op, "zigrad.value_dot_dims");
+
 
       auto scores_type = cast<RankedTensorType>(scores.getType());
 
@@ -411,9 +413,11 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
         dot_lhs = cvt->getResult(0);
       }
 
-      // result = dot_general(attn_probs, V)
-      Operation *result = create_dot_general(loc, dot_lhs, v,
-                                              op->getResultTypes(), rewriter);
+      // result = dot_general(attn_probs, V) using stored dimension numbers.
+      if (!value_dot_dims) return failure();
+      Operation *result = create_dot_general_with_dims(loc, dot_lhs, v,
+                                                        value_dot_dims,
+                                                        op->getResultTypes(), rewriter);
       if (!result) return failure();
       rewriter.replaceOp(op, result->getResults());
       return success();
