@@ -190,6 +190,7 @@ in {
           ../../shim/CMakeLists.txt
           ../../shim/mlir_ext.cc
           ../../shim/zigrad
+          ../../shim/test
         ];
       };
 

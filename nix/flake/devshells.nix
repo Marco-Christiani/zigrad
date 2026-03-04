@@ -32,6 +32,8 @@ in {
       git
       gccHost
       clang
+      cmake
+      ninja
     ];
 
     pyShellPkgs = pkgs.callPackage ../pydev.nix {
