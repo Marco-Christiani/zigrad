@@ -496,6 +496,28 @@ fn parse_provider_kinds(s: []const u8) !ProviderKindList {
     return result;
 }
 
+/// Read an environment variable, falling back to `default` if unset.
+/// Caller owns the returned slice.
+fn iree_env(gpa: std.mem.Allocator, comptime key: []const u8, default: []const u8) ![]u8 {
+    return std.process.getEnvVarOwned(gpa, key) catch try gpa.dupe(u8, default);
+}
+
+/// Build a subprocess Compiler with the standard IREE flags.
+///
+/// Both `flag_buf` and `flags` must outlive the returned Compiler
+/// (it borrows into both buffers).
+fn iree_subprocess_compiler(
+    exe_path: []const u8,
+    target_backend: []const u8,
+    flag_buf: *[128]u8,
+    flags: *[2][]const u8,
+) !zg.backend.iree.Compiler {
+    const backend_flag = std.fmt.bufPrint(flag_buf, "--iree-hal-target-backends={s}", .{target_backend}) catch
+        return error.BackendNameTooLong;
+    flags.* = .{ backend_flag, "--iree-input-type=stablehlo" };
+    return zg.backend.iree.Compiler.init_subprocess(exe_path, flags);
+}
+
 fn run_iree_demo(
     gpa: std.mem.Allocator,
     dump_pr: ?*zg.pipeline.DumpConfig,
@@ -503,31 +525,21 @@ fn run_iree_demo(
 ) !void {
     const iree_mod = zg.backend.iree;
 
-    const compiler_exe = std.process.getEnvVarOwned(gpa, "IREE_COMPILE_EXE") catch blk: {
-        break :blk try gpa.dupe(u8, "iree-compile");
-    };
+    const compiler_exe = try iree_env(gpa, "IREE_COMPILE_EXE", "iree-compile");
     defer gpa.free(compiler_exe);
 
-    const driver = std.process.getEnvVarOwned(gpa, "IREE_HAL_DRIVER") catch
-        try gpa.dupe(u8, "local-sync");
+    const driver = try iree_env(gpa, "IREE_HAL_DRIVER", "local-sync");
     defer gpa.free(driver);
 
-    // TECH DEBT: subprocess mode works around an LLVM version conflict.
-    // libIREECompiler.so links LLVM 23 (IREE's custom build) while
-    // libMLIR-C.so (linked unconditionally for StableHLO lowering) links
-    // LLVM 22.  Two LLVM versions in one process causes segfaults during
-    // invocation_pipeline.  The proper fix is aligning LLVM versions in
-    // nix (build IREE compiler against SDK's LLVM 22, or upgrade SDK to 23).
-    // The dlopen path (init_dlopen) is correct and tested -- use it once
-    // LLVM versions align.  See also: compiler.zig module docstring.
-    // TECH DEBT: use vmvx (interpreter) backend for now. llvm-cpu requires
-    // an embedded lld linker that isn't shipped with our nix-built IREE compiler.
-    // Fix: patch nix/iree-compiler.nix to include lld, then switch to llvm-cpu.
-    const iree_flags = [_][]const u8{
-        "--iree-hal-target-backends=vmvx",
-        "--iree-input-type=stablehlo",
-    };
-    const compiler = iree_mod.Compiler.init_subprocess(compiler_exe, &iree_flags);
+    // TECH DEBT: subprocess mode works around LLVM 22/23 version conflict
+    // between libMLIR-C.so and libIREECompiler.so. See compiler.zig docstring.
+    // TECH DEBT: vmvx (interpreter) until nix IREE compiler ships lld for llvm-cpu.
+    var flag_buf: [128]u8 = undefined;
+    var iree_flags: [2][]const u8 = undefined;
+    const target_backend = try iree_env(gpa, "IREE_TARGET_BACKEND", "vmvx");
+    defer gpa.free(target_backend);
+    const compiler = iree_subprocess_compiler(compiler_exe, target_backend, &flag_buf, &iree_flags) catch
+        return error.BackendNameTooLong;
     var backend = try iree_mod.Backend.init(gpa, compiler, driver);
     defer backend.deinit();
 
@@ -615,23 +627,15 @@ fn run_iree_aot_compile(
     opts: cli.IreeAotCompileOpts,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
-    const iree_mod = zg.backend.iree;
-
-    const compiler_exe = std.process.getEnvVarOwned(gpa, "IREE_COMPILE_EXE") catch
-        try gpa.dupe(u8, "iree-compile");
+    const compiler_exe = try iree_env(gpa, "IREE_COMPILE_EXE", "iree-compile");
     defer gpa.free(compiler_exe);
 
     const target_backend = opts.backend orelse "vmvx";
 
     var flag_buf: [128]u8 = undefined;
-    const backend_flag = std.fmt.bufPrint(&flag_buf, "--iree-hal-target-backends={s}", .{target_backend}) catch
+    var iree_flags: [2][]const u8 = undefined;
+    const compiler = iree_subprocess_compiler(compiler_exe, target_backend, &flag_buf, &iree_flags) catch
         return error.BackendNameTooLong;
-
-    const iree_flags = [_][]const u8{
-        backend_flag,
-        "--iree-input-type=stablehlo",
-    };
-    const compiler = iree_mod.Compiler.init_subprocess(compiler_exe, &iree_flags);
 
     var program = try zg.frontend.build_demo_program(gpa);
     defer program.deinit();

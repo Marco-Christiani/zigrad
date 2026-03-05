@@ -275,15 +275,22 @@ fn write_temp_file(
     suffix: []const u8,
     path_buf: *[std.fs.max_path_bytes]u8,
 ) ![]const u8 {
-    const path = std.fmt.bufPrint(path_buf, "/tmp/zigrad-iree-{x}{s}", .{
-        @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
-        suffix,
-    }) catch return error.PathTooLong;
+    // Try up to a few times with exclusive creation to avoid collisions.
+    for (0..8) |_| {
+        const path = std.fmt.bufPrint(path_buf, "/tmp/zigrad-iree-{x}{s}", .{
+            @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
+            suffix,
+        }) catch return error.PathTooLong;
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(data);
-    return path;
+        const file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| {
+            if (err == error.PathAlreadyExists) continue;
+            return err;
+        };
+        defer file.close();
+        try file.writeAll(data);
+        return path;
+    }
+    return error.TempFileCollision;
 }
 
 fn make_output_path(

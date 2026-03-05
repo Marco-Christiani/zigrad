@@ -150,7 +150,7 @@ pub const setup_cmd: CommandT = .{
         },
         .{
             .name = "iree-aot-demo",
-            .description = "Run the IREE AOT compile+execute demo (requires -Diree-backend=true and IREE_COMPILER_LIB env var)",
+            .description = "Run the IREE AOT compile+execute demo (requires -Diree-backend=true and IREE_COMPILE_EXE env var)",
         },
         CommandT.from(IreeAotCompileOpts, .{
             .cmd_name = "iree-aot-compile",
