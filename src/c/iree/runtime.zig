@@ -14,10 +14,9 @@ const std = @import("std");
 const log = std.log.scoped(.@"zg/iree_runtime");
 
 pub const c = @cImport({
-    @cInclude("iree/runtime/api.h");
-    @cInclude("iree/hal/api.h");
-    @cInclude("iree/vm/api.h");
-    @cInclude("iree/base/api.h");
+    // iree_zig.h forces the GCC atomics path (plain int32_t typedefs)
+    // to avoid _Atomic qualifiers that Zig's C translator cannot handle.
+    @cInclude("c/iree/iree_zig.h");
 });
 
 // Re-export commonly used types for callers.
@@ -35,7 +34,8 @@ pub const Status = c.iree_status_t;
 pub const HalDim = c.iree_hal_dim_t;
 pub const HalElementType = c.iree_hal_element_type_t;
 pub const HalBufferParams = c.iree_hal_buffer_params_t;
-pub const HalBufferMapping = c.iree_hal_buffer_mapping_t;
+// HalBufferMapping omitted: bitfields make it opaque to @cImport.
+// Buffer read/write is handled via shim functions in shim.c.
 pub const Allocator = c.iree_allocator_t;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,8 @@ extern fn zg_iree_status_is_ok(status: Status) callconv(.c) bool;
 extern fn zg_iree_hal_element_bit_count(element_type: HalElementType) callconv(.c) usize;
 extern fn zg_iree_hal_buffer_view_deref(ref: VmRef) callconv(.c) ?*HalBufferView;
 extern fn zg_iree_hal_buffer_view_retain_ref(view: *HalBufferView) callconv(.c) VmRef;
+extern fn zg_iree_hal_buffer_read(buffer: *HalBuffer, dst: [*]u8, dst_len: usize) callconv(.c) Status;
+extern fn zg_iree_hal_buffer_write(buffer: *HalBuffer, src: [*]const u8, src_len: usize) callconv(.c) Status;
 
 // ---------------------------------------------------------------------------
 // Status checking.
@@ -186,11 +188,11 @@ pub fn call_invoke(call: *Call) !void {
 }
 
 pub fn call_inputs(call: *Call) *VmList {
-    return c.iree_runtime_call_inputs(call);
+    return c.iree_runtime_call_inputs(call).?;
 }
 
 pub fn call_outputs(call: *Call) *VmList {
-    return c.iree_runtime_call_outputs(call);
+    return c.iree_runtime_call_outputs(call).?;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +237,7 @@ pub fn buffer_view_create_from_host(
         .usage = c.IREE_HAL_BUFFER_USAGE_DEFAULT,
         .access = c.IREE_HAL_MEMORY_ACCESS_ALL,
         .queue_affinity = c.IREE_HAL_QUEUE_AFFINITY_ANY,
-        .min_compatibility = 0,
+        .min_alignment = 0,
     };
 
     var out: ?*HalBufferView = null;
@@ -276,37 +278,13 @@ pub fn buffer_view_element_type(view: *HalBufferView) HalElementType {
 /// Maps the buffer for read, copies, and unmaps.
 pub fn buffer_view_to_host(view: *HalBufferView, dst: []u8) !void {
     const buf = c.iree_hal_buffer_view_buffer(view);
-    var mapping: HalBufferMapping = undefined;
-    try check(c.iree_hal_buffer_map_range(
-        buf,
-        c.IREE_HAL_MAPPING_MODE_SCOPED,
-        c.IREE_HAL_MEMORY_ACCESS_READ,
-        0,
-        c.IREE_WHOLE_BUFFER,
-        &mapping,
-    ));
-    defer _ = c.iree_hal_buffer_unmap_range(&mapping);
-
-    const len = @min(mapping.contents.data_length, dst.len);
-    @memcpy(dst[0..len], mapping.contents.data[0..len]);
+    try check(zg_iree_hal_buffer_read(buf.?, dst.ptr, dst.len));
 }
 
 /// Write host bytes `src` into a pre-existing buffer view (must be CPU-accessible).
 pub fn buffer_view_from_host(view: *HalBufferView, src: []const u8) !void {
     const buf = c.iree_hal_buffer_view_buffer(view);
-    var mapping: HalBufferMapping = undefined;
-    try check(c.iree_hal_buffer_map_range(
-        buf,
-        c.IREE_HAL_MAPPING_MODE_SCOPED,
-        c.IREE_HAL_MEMORY_ACCESS_WRITE,
-        0,
-        c.IREE_WHOLE_BUFFER,
-        &mapping,
-    ));
-    defer _ = c.iree_hal_buffer_unmap_range(&mapping);
-
-    const len = @min(mapping.contents.data_length, src.len);
-    @memcpy(mapping.contents.data[0..len], src[0..len]);
+    try check(zg_iree_hal_buffer_write(buf.?, src.ptr, src.len));
 }
 
 // ---------------------------------------------------------------------------

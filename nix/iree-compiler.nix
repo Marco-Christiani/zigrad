@@ -7,10 +7,10 @@
 # source tree before the build, keeping the derivation hermetic.
 #
 # Output layout:
-#   $out/lib/libIREECompiler.so   — stable C embedding API
-#   $out/include/iree/compiler/   — embedding_api.h, loader.h, mlir_interop.h
-#   $out/include/mlir-c/          — MLIR C API headers (re-exported by IREE)
-#   $out/bin/iree-compile         — compiler CLI tool (when devel=true)
+#   $out/lib/libIREECompiler.so   - stable C embedding API
+#   $out/include/iree/compiler/   - embedding_api.h, loader.h, mlir_interop.h
+#   $out/include/mlir-c/          - MLIR C API headers (re-exported by IREE)
+#   $out/bin/iree-compile         - compiler CLI tool (when devel=true)
 #
 # ## What is built
 #
@@ -58,6 +58,7 @@ stdenv.mkDerivation {
   dontUnpack = true;
   dontConfigure = true;
   dontStrip = true;
+  dontPatchELF = true;
 
   strictDeps = true;
 
@@ -216,7 +217,18 @@ stdenv.mkDerivation {
     log "Patching RUNPATH"
     chmod -R u+w "$out/lib"
 
-    rpath="\$ORIGIN:${ireeLlvm}/lib:${
+    lib_rpath="\$ORIGIN:${ireeLlvm}/lib:${
+      lib.makeLibraryPath [
+        zlib
+        zstd
+        libxml2
+        ncurses
+        libffi
+        stdenv.cc.cc.lib
+      ]
+    }"
+
+    bin_rpath="\$ORIGIN/../lib:${ireeLlvm}/lib:${
       lib.makeLibraryPath [
         zlib
         zstd
@@ -229,13 +241,13 @@ stdenv.mkDerivation {
 
     for f in "$out/lib/"*.so*; do
       [ -f "$f" ] || continue
-      patchelf --set-rpath "$rpath" "$f" || true
+      patchelf --set-rpath "$lib_rpath" "$f" || true
     done
 
     ${lib.optionalString devel ''
       for f in "$out/bin/"*; do
         [ -f "$f" ] && [ -x "$f" ] || continue
-        patchelf --set-rpath "$rpath" "$f" 2>/dev/null || true
+        patchelf --set-rpath "$bin_rpath" "$f" 2>/dev/null || true
       done
     ''}
 
@@ -247,7 +259,7 @@ stdenv.mkDerivation {
       if nm -D "$lib_path" 2>/dev/null | grep -q "ireeCompilerGetAPIVersion"; then
         log "OK: ireeCompilerGetAPIVersion found in libIREECompiler.so"
       else
-        log "WARNING: ireeCompilerGetAPIVersion not found — check symbol export configuration"
+        log "WARNING: ireeCompilerGetAPIVersion not found -- check symbol export configuration"
       fi
     else
       log "ERROR: libIREECompiler.so was not produced"

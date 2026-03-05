@@ -145,6 +145,14 @@ pub fn main() !void {
         std.log.err("iree-aot-demo requires building with -Diree-backend=true", .{});
         return error.IreeBackendDisabled;
     }
+    if (cmd.matchSubCmd("iree-aot-compile")) |sub_cmd| {
+        if (comptime build_options.iree_backend) {
+            const opts = try sub_cmd.to(cli.IreeAotCompileOpts, .{});
+            return run_iree_aot_compile(gpa, opts, dump_mlir_ptr);
+        }
+        std.log.err("iree-aot-compile requires building with -Diree-backend=true", .{});
+        return error.IreeBackendDisabled;
+    }
 
     // Commands that require PJRT backend
     const plugin_path = std.process.getEnvVarOwned(gpa, "PJRT_PLUGIN_PATH") catch |err| {
@@ -494,17 +502,33 @@ fn run_iree_demo(
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
     const iree_mod = zg.backend.iree;
-    const compiler_lib = std.process.getEnvVarOwned(gpa, "IREE_COMPILER_LIB") catch blk: {
-        // Fallback: look next to the binary or in the SDK.
-        break :blk try gpa.dupe(u8, "libIREECompiler.so");
+
+    const compiler_exe = std.process.getEnvVarOwned(gpa, "IREE_COMPILE_EXE") catch blk: {
+        break :blk try gpa.dupe(u8, "iree-compile");
     };
-    defer gpa.free(compiler_lib);
+    defer gpa.free(compiler_exe);
 
     const driver = std.process.getEnvVarOwned(gpa, "IREE_HAL_DRIVER") catch
         try gpa.dupe(u8, "local-sync");
     defer gpa.free(driver);
 
-    var backend = try iree_mod.Backend.init(gpa, compiler_lib, driver);
+    // TECH DEBT: subprocess mode works around an LLVM version conflict.
+    // libIREECompiler.so links LLVM 23 (IREE's custom build) while
+    // libMLIR-C.so (linked unconditionally for StableHLO lowering) links
+    // LLVM 22.  Two LLVM versions in one process causes segfaults during
+    // invocation_pipeline.  The proper fix is aligning LLVM versions in
+    // nix (build IREE compiler against SDK's LLVM 22, or upgrade SDK to 23).
+    // The dlopen path (init_dlopen) is correct and tested -- use it once
+    // LLVM versions align.  See also: compiler.zig module docstring.
+    // TECH DEBT: use vmvx (interpreter) backend for now. llvm-cpu requires
+    // an embedded lld linker that isn't shipped with our nix-built IREE compiler.
+    // Fix: patch nix/iree-compiler.nix to include lld, then switch to llvm-cpu.
+    const iree_flags = [_][]const u8{
+        "--iree-hal-target-backends=vmvx",
+        "--iree-input-type=stablehlo",
+    };
+    const compiler = iree_mod.Compiler.init_subprocess(compiler_exe, &iree_flags);
+    var backend = try iree_mod.Backend.init(gpa, compiler, driver);
     defer backend.deinit();
 
     const devs = try backend.get_devices(gpa);
@@ -522,22 +546,19 @@ fn run_iree_demo(
     };
 
     // Lower PR -> MLIR bytes.
-    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, lower_cfg.entry_name, lower_cfg.encoding);
+    const out_fmt: zg.lower.stablehlo.OutputFormat = switch (lower_cfg.encoding) {
+        .text => .mlir_text,
+        .bytecode => .mlir_bytecode,
+    };
+    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, lower_cfg.entry_name, out_fmt);
     defer gpa.free(mlir_bytes);
 
-    if (dump_pr) |cfg| {
-        var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(gpa, 1) catch return error.OutOfMemory;
-        defer passes.deinit(gpa);
-        var cfg_local = cfg.*;
-        cfg_local.entry_name = cfg_local.entry_name orelse lower_cfg.entry_name;
-        try passes.append(gpa, zg.pipeline.dump_pr_pass_with_config(&cfg_local));
-        var runner = zg.pipeline.Runner.init(gpa, passes.items);
-        _ = try runner.run(&program);
+    if (dump_pr) |_| {
+        // TODO: pipeline.Runner not yet available for IREE path.
+        std.log.warn("--dump-pr not yet supported in iree-aot-demo", .{});
     }
-    if (dump_mlir) |cfg| {
-        _ = cfg;
-        // Print the MLIR text for inspection.
-        if (lower_cfg.encoding == .text) {
+    if (dump_mlir) |_| {
+        if (out_fmt == .mlir_text) {
             std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
         }
     }
@@ -577,8 +598,9 @@ fn run_iree_demo(
 
     std.log.info("iree-aot-demo result: [{d}, {d}, {d}, {d}]", .{ out[0], out[1], out[2], out[3] });
 
-    // Expected: AxB+C = [[120+2, 132+2], [282+2, 312+2]] = [122, 134, 284, 314].
-    const expected = [_]f32{ 122.0, 134.0, 284.0, 314.0 };
+    // Demo program: out = (dot(A, B) + C) * C.
+    // AxB = [58, 64, 139, 154]; AxB+C = [60, 66, 141, 156]; (AxB+C)*C = [120, 132, 282, 312].
+    const expected = [_]f32{ 120.0, 132.0, 282.0, 312.0 };
     for (out, expected) |got, exp| {
         if (@abs(got - exp) > 1e-3) {
             std.log.err("iree-aot-demo: mismatch got={d} expected={d}", .{ got, exp });
@@ -586,6 +608,55 @@ fn run_iree_demo(
         }
     }
     std.log.info("iree-aot-demo: OK", .{});
+}
+
+fn run_iree_aot_compile(
+    gpa: std.mem.Allocator,
+    opts: cli.IreeAotCompileOpts,
+    dump_mlir: ?*zg.pipeline.DumpConfig,
+) !void {
+    const iree_mod = zg.backend.iree;
+
+    const compiler_exe = std.process.getEnvVarOwned(gpa, "IREE_COMPILE_EXE") catch
+        try gpa.dupe(u8, "iree-compile");
+    defer gpa.free(compiler_exe);
+
+    const target_backend = opts.backend orelse "vmvx";
+
+    var flag_buf: [128]u8 = undefined;
+    const backend_flag = std.fmt.bufPrint(&flag_buf, "--iree-hal-target-backends={s}", .{target_backend}) catch
+        return error.BackendNameTooLong;
+
+    const iree_flags = [_][]const u8{
+        backend_flag,
+        "--iree-input-type=stablehlo",
+    };
+    const compiler = iree_mod.Compiler.init_subprocess(compiler_exe, &iree_flags);
+
+    var program = try zg.frontend.build_demo_program(gpa);
+    defer program.deinit();
+
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+    const out_fmt: zg.lower.stablehlo.OutputFormat = switch (lower_encoding) {
+        .text => .mlir_text,
+        .bytecode => .mlir_bytecode,
+    };
+    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", out_fmt);
+    defer gpa.free(mlir_bytes);
+
+    if (dump_mlir) |_| {
+        if (out_fmt == .mlir_text) {
+            std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
+        }
+    }
+
+    const is_bytecode = lower_encoding == .bytecode;
+    const vmfb = try compiler.compile(gpa, mlir_bytes, is_bytecode);
+    defer gpa.free(vmfb);
+
+    const output_path = opts.output orelse "demo.vmfb";
+    try demos.write_bytes_to_path(output_path, vmfb);
+    std.log.info("wrote {d} bytes VMFB -> {s}", .{ vmfb.len, output_path });
 }
 
 fn parse_shape(s: []const u8) !zg.benchmark.Shape {

@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(b.path("src"));
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
     link_mlir_stablehlo_capi(exe, sdk_lib);
-    if (iree_backend) link_iree(exe, sdk_lib);
+    if (iree_backend) link_iree(zigrad_mod, sdk_lib);
     add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     b.installArtifact(exe);
@@ -77,7 +77,6 @@ pub fn build(b: *std.Build) void {
 
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
     link_mlir_stablehlo_capi(lib_tests, sdk_lib);
-    if (iree_backend) link_iree(lib_tests, sdk_lib);
     add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
@@ -88,6 +87,24 @@ pub fn build(b: *std.Build) void {
     const gen_completions = add_cli_gen_step(b, cova_dep, exe);
     gen_completions.step.dependOn(&exe.step);
     b.getInstallStep().dependOn(&gen_completions.step);
+
+    // Minimal IREE VMFB runner (no zigrad, no MLIR/PJRT).
+    if (iree_backend) {
+        const iree_runner = b.addExecutable(.{
+            .name = "iree-runner",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/iree_runner.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        iree_runner.root_module.addIncludePath(b.path("src"));
+        iree_runner.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
+        link_iree(iree_runner.root_module, sdk_lib);
+        b.installArtifact(iree_runner);
+        b.step("iree-runner", "Build minimal IREE VMFB runner").dependOn(&iree_runner.step);
+    }
 }
 
 /// Add CLI completion/manpage gen step
@@ -204,22 +221,35 @@ fn link_mlir_stablehlo_capi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) v
     exe.root_module.linkSystemLibrary("StablehloCAPI", .{});
 }
 
-/// Link the IREERuntime shared library and compile the IREE C shim.
+/// Link the IREE runtime static archives and compile the IREE C shim.
 ///
-/// libIREECompiler.so is NOT linked at build time (loaded via dlopen).
-/// libIREERuntime.so IS linked because @cImport in runtime.zig emits
-/// references to IREE runtime symbols.
+/// Added to `zigrad_mod` so the link artifacts propagate once through
+/// module imports (avoids duplicate symbols when the completion generator
+/// transitively imports `zigrad_mod`).
+///
+/// libIREECompiler.so is NOT linked at build time.  Compilation is handled
+/// out-of-process via `iree-compile` (subprocess) or optionally via dlopen.
+/// The runtime is linked statically from archives produced by nix/iree-runtime.nix.
 ///
 /// The shim (`src/c/iree/shim.c`) wraps `static inline` functions and
 /// macros from the IREE headers that `@cImport` cannot translate.
-fn link_iree(exe: *std.Build.Step.Compile, sdk_lib: []const u8) void {
-    exe.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
-    exe.root_module.linkSystemLibrary("IREERuntime", .{});
-    exe.root_module.addRPathSpecial(sdk_lib);
+fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8) void {
+    const b = mod.owner;
+
+    // Link IREE runtime static archive directly.
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/libiree_runtime_unified.a", .{sdk_lib}) });
+
+    // flatcc archives (IREE's FlatBuffer dependency).
+    for ([_][]const u8{ "libflatcc_parsing.a", "libflatcc_runtime.a" }) |name| {
+        const path = b.fmt("{s}/{s}", .{ sdk_lib, name });
+        if (std.fs.cwd().access(path, .{})) |_| {
+            mod.addObjectFile(.{ .cwd_relative = path });
+        } else |_| {}
+    }
 
     // Compile the C shim that wraps IREE static inline / macro helpers.
-    exe.addCSourceFile(.{
-        .file = exe.step.owner.path("src/c/iree/shim.c"),
+    mod.addCSourceFile(.{
+        .file = b.path("src/c/iree/shim.c"),
         .flags = &.{
             "-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl",
         },

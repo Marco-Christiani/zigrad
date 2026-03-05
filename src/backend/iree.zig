@@ -1,11 +1,13 @@
 /// IREE Backend
 ///
 /// Implements the backend interface using IREE's two-phase model:
-///   1. Compile: StableHLO MLIR -> VMFB (VM FlatBuffer) via libIREECompiler.so.
-///   2. Execute: load VMFB into a runtime session and invoke via libIREERuntime.so.
+///   1. Compile: StableHLO MLIR -> VMFB (VM FlatBuffer) via `iree-compile`
+///      (subprocess, default) or `libIREECompiler.so` (dlopen, when LLVM
+///      versions align).
+///   2. Execute: load VMFB into a runtime session and invoke via the IREE
+///      runtime (statically linked).
 ///
-/// Both the compiler and runtime are CPU-only in the initial version
-/// (local-sync HAL driver).  CUDA can be layered later.
+/// CPU-only in the initial version (local-sync HAL driver).
 ///
 /// ## Lifetime model
 ///
@@ -18,6 +20,9 @@ const pr = @import("../pr/pr.zig");
 const iree_compiler = @import("../c/iree/compiler.zig");
 const rt = @import("../c/iree/runtime.zig");
 const log = std.log.scoped(.@"zg/iree_backend");
+
+/// Re-exported so callers can construct a Compiler without reaching into `c/iree/`.
+pub const Compiler = iree_compiler.Compiler;
 
 // ---------------------------------------------------------------------------
 // Module-level associated types (required by interface.zig).
@@ -62,12 +67,12 @@ pub const ExecuteResult = struct {
     allocator: std.mem.Allocator,
 };
 
-/// Compile-time options for the IREE backend.
-///
-/// `extra_flags` are passed verbatim to `ireeCompilerSessionSetFlags`.
 pub const CompileOptions = struct {
-    extra_flags: ?[]const []const u8 = null,
+    /// Entry function name as it appears in the MLIR module (e.g. "main").
+    /// IREE requires fully-qualified lookup ("module.<entry_name>").
+    entry_name: []const u8 = "main",
 };
+
 
 // ---------------------------------------------------------------------------
 // Backend struct.
@@ -75,8 +80,8 @@ pub const CompileOptions = struct {
 
 /// IREE Backend owning the runtime instance and HAL device.
 ///
-/// The compiler is optional -- pass `null` for `compiler_lib_path` if you
-/// only need to execute pre-compiled VMFB artifacts.
+/// The compiler is optional -- pass `null` to `init` if you only need to
+/// execute pre-compiled VMFB artifacts.
 pub const Backend = struct {
     compiler: ?iree_compiler.Compiler,
     instance: *rt.Instance,
@@ -87,23 +92,17 @@ pub const Backend = struct {
 
     /// Initialize the backend.
     ///
-    /// `compiler_lib_path`: path to libIREECompiler.so, or null to skip loading.
+    /// `compiler`: a pre-constructed `Compiler` (subprocess or dlopen mode), or
+    ///  null to skip compilation (execute-only with pre-compiled VMFB artifacts).
     /// `driver_name`: HAL driver (default "local-sync").
     pub fn init(
         allocator: std.mem.Allocator,
-        compiler_lib_path: ?[]const u8,
+        compiler: ?iree_compiler.Compiler,
         driver_name: []const u8,
     ) !Backend {
-        // Load the compiler (optional).
-        var compiler: ?iree_compiler.Compiler = null;
-        if (compiler_lib_path) |path| {
-            compiler = try iree_compiler.Compiler.load(path);
-            errdefer if (compiler) |*c| c.unload();
-            compiler.?.global_init();
-        }
-        errdefer if (compiler) |*c| {
-            c.global_shutdown();
-            c.unload();
+        errdefer if (compiler) |c| {
+            var c_mut = c;
+            c_mut.deinit();
         };
 
         // Create IREE runtime instance.
@@ -129,10 +128,7 @@ pub const Backend = struct {
     pub fn deinit(self: *Backend) void {
         rt.device_release(self.hal_device);
         rt.instance_release(self.instance);
-        if (self.compiler) |*c| {
-            c.global_shutdown();
-            c.unload();
-        }
+        if (self.compiler) |*c| c.deinit();
     }
 
     // -----------------------------------------------------------------------
@@ -154,11 +150,11 @@ pub const Backend = struct {
 
     /// Compile MLIR bytes to a `LoadedExecutable`.
     ///
-    /// 1. Calls the IREE compiler (libIREECompiler.so) to produce VMFB bytes.
+    /// 1. Invokes the IREE compiler to produce VMFB bytes.
     /// 2. Creates a runtime session, appends the VMFB module.
-    /// 3. Looks up the `"main"` function.
+    /// 3. Looks up the entry function (`opts.entry_name`).
     ///
-    /// Precondition: backend was initialized with a compiler lib path.
+    /// Precondition: backend was initialized with a compiler.
     pub fn compile(
         self: *Backend,
         device: *const Device,
@@ -166,8 +162,6 @@ pub const Backend = struct {
         is_bytecode: bool,
         opts: CompileOptions,
     ) !LoadedExecutable {
-        _ = opts; // extra_flags not yet forwarded
-
         const cmp = self.compiler orelse {
             log.err("compile() called but no compiler library loaded", .{});
             return error.NoCompiler;
@@ -186,8 +180,12 @@ pub const Backend = struct {
         // Session borrows vmfb bytes (null allocator = no copy).
         try rt.session_append_module(session, vmfb);
 
-        // Phase 3: resolve the "main" function.
-        const function = try rt.session_lookup_function(session, "main");
+        // Phase 3: resolve the entry function.
+        // IREE requires fully-qualified names: "module.<func_name>".
+        var fq_buf: [256]u8 = undefined;
+        const fq_name = std.fmt.bufPrint(&fq_buf, "module.{s}", .{opts.entry_name}) catch
+            return error.EntryNameTooLong;
+        const function = try rt.session_lookup_function(session, fq_name);
 
         return .{
             .session = session,

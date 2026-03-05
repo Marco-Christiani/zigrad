@@ -76,6 +76,12 @@ pub const BenchmarkOpts = struct {
     tvm_cache_dir: ?[]const u8 = "artifacts/tvm_cache",
 };
 
+/// IREE offline compile subcommand
+pub const IreeAotCompileOpts = struct {
+    output: ?[]const u8 = null,
+    backend: ?[]const u8 = null,
+};
+
 /// JIT cache commands that take a path argument
 pub const JitCacheOpts = struct {
     path: []const u8,
@@ -146,6 +152,15 @@ pub const setup_cmd: CommandT = .{
             .name = "iree-aot-demo",
             .description = "Run the IREE AOT compile+execute demo (requires -Diree-backend=true and IREE_COMPILER_LIB env var)",
         },
+        CommandT.from(IreeAotCompileOpts, .{
+            .cmd_name = "iree-aot-compile",
+            .cmd_description = "Compile demo program to IREE VMFB (offline, no runtime needed)",
+            .default_val_opts = true,
+            .sub_descriptions = &.{
+                .{ "output", "Output VMFB path (default: demo.vmfb)" },
+                .{ "backend", "IREE target backend (default: vmvx)" },
+            },
+        }),
         .{
             .name = "custom-call-neg",
             .description = "Expects missing custom call handler (should fail)",

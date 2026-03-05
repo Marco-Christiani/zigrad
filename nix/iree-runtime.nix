@@ -1,14 +1,15 @@
 # nix/iree-runtime.nix
 #
-# Builds the IREE runtime shared library (libIREERuntime.so) using the BYO-LLVM path.
+# Builds the IREE runtime static archives using the BYO-LLVM path.
 # Depends on iree-llvm.nix for LLVM+Clang+LLD+MLIR.
 #
 # Required submodules are injected as separate flake inputs and linked into the
 # source tree before the build, keeping the derivation hermetic.
 #
 # Output layout:
-#   $out/lib/libIREERuntime.so    - combined runtime DSO (base + hal + vm + local drivers)
-#   $out/include/iree/            - C API headers (base, hal, vm, runtime, task, io, ...)
+#   $out/lib/libiree_runtime_unified.a  - unified runtime archive (base + hal + vm + local drivers)
+#   $out/lib/libflatcc_*.a              - flatcc archives (IREE's FlatBuffer dependency)
+#   $out/include/iree/                  - C API headers (base, hal, vm, runtime, task, io, ...)
 #
 # ## What is built
 #
@@ -17,26 +18,20 @@
 # - No GPU backends (CUDA/Vulkan/Metal all OFF).
 # - Tests, samples, Python bindings: all OFF.
 #
-# ## libIREERuntime.so construction
-#
-# IREE cmake does not produce a standard combined runtime DSO.  After building
-# the static archives for the runtime, hal, vm, and base subsystems, this
-# derivation links them together using --whole-archive to export all symbols.
-# The rpath is set to $ORIGIN and the ireeLlvm lib directory.
+# Static archives are installed directly for static linking at build time.
+# The IREE compiler (libIREECompiler.so) is loaded via dlopen and is NOT
+# part of this derivation.
 {
   lib,
   stdenv,
   cmake,
   ninja,
   python3,
-  patchelf,
   zlib,
   zstd,
   libxml2,
   ncurses,
   libffi,
-  lld,
-  binutils,
   # Flake source inputs.
   ## Main IREE repository (without submodules checked out).
   ireeSrc,
@@ -67,9 +62,6 @@ stdenv.mkDerivation {
     cmake
     ninja
     python3
-    patchelf
-    lld
-    binutils
     stdenv.cc.cc.lib
     zlib
     zstd
@@ -173,79 +165,23 @@ stdenv.mkDerivation {
         mkdir -p "$out/lib" "$out/include"
 
         # -----------------------------------------------------------------------
-        # Collect runtime static archives.
-        # Exclude compiler, tools, test, and benchmark artifacts.
+        # Install static archives directly.
         # -----------------------------------------------------------------------
-        log "Collecting runtime static archives"
+        log "Installing static archives"
 
-        # Prefer the unified archive (libiree_runtime_unified.a) which already
-        # bundles vm, hal, base, etc.  Mixing it with the individual component
-        # archives causes duplicate-symbol errors under --whole-archive.
         unified=$(find iree-build -name "libiree_runtime_unified.a" | head -1)
 
-        if [ -n "$unified" ]; then
-          log "Using unified archive: $unified"
-          # The unified archive plus flatcc is sufficient.
-          echo "$unified" > runtime_libs.txt
-          find iree-build -name "libflatcc*.a" \
-            ! -name "*test*" \
-            >> runtime_libs.txt
-        else
-          log "No unified archive found - collecting individual archives"
-          find iree-build \
-            \( -name "libiree_*.a" -o -name "libflatcc*.a" \) \
-            ! -path "*/compiler/*" \
-            ! -path "*/tools/*" \
-            ! -name "*test*" \
-            ! -name "*benchmark*" \
-            | sort > runtime_libs.txt
-        fi
-
-        n=$(wc -l < runtime_libs.txt)
-        log "Found $n static archives"
-
-        if [ "$n" -eq 0 ]; then
-          log "ERROR: No runtime static archives found - cmake build may have failed"
+        if [ -z "$unified" ]; then
+          log "ERROR: libiree_runtime_unified.a not found - cmake build may have failed"
           exit 1
         fi
 
-        # -----------------------------------------------------------------------
-        # Create combined runtime DSO.
-        # -----------------------------------------------------------------------
-        log "Creating libIREERuntime.so via --whole-archive link"
+        log "Installing unified archive: $unified"
+        cp "$unified" "$out/lib/libiree_runtime_unified.a"
 
-        sys_rpath="${lib.makeLibraryPath [
-      zlib
-      zstd
-      libxml2
-      ncurses
-      libffi
-      stdenv.cc.cc.lib
-    ]}"
-
-        # Generate a version script that exports all iree_* symbols.
-        # The static archives are compiled with -fvisibility=hidden so the
-        # symbols default to local in the DSO.  This script overrides that.
-        cat > export.map <<'VERSCRIPT'
-    {
-      global:
-        iree_*;
-      local:
-        *;
-    };
-    VERSCRIPT
-
-        g++ -shared -fPIC \
-          -o "$out/lib/libIREERuntime.so" \
-          -Wl,--whole-archive \
-          $(cat runtime_libs.txt | tr '\n' ' ') \
-          -Wl,--no-whole-archive \
-          -lz -lzstd -lxml2 -lncurses -lffi -lstdc++ -lm \
-          -Wl,--allow-shlib-undefined \
-          -Wl,--version-script=export.map
-
-        patchelf --set-rpath "\$ORIGIN:${ireeLlvm}/lib:$sys_rpath" \
-          "$out/lib/libIREERuntime.so"
+        # flatcc archives (IREE's FlatBuffer dependency).
+        find iree-build -name "libflatcc*.a" ! -name "*test*" \
+          -exec cp {} "$out/lib/" \;
 
         # -----------------------------------------------------------------------
         # Install runtime headers from source tree.
@@ -285,16 +221,10 @@ stdenv.mkDerivation {
         # -----------------------------------------------------------------------
         # Sanity checks.
         # -----------------------------------------------------------------------
-        lib_path="$out/lib/libIREERuntime.so"
-        if [ -f "$lib_path" ]; then
-          if nm -D "$lib_path" 2>/dev/null | grep -q "iree_runtime_instance_create"; then
-            log "OK: iree_runtime_instance_create exported from libIREERuntime.so"
-          else
-            log "WARNING: iree_runtime_instance_create not found - check archive selection"
-          fi
+        if nm "$out/lib/libiree_runtime_unified.a" 2>/dev/null | grep -q 'T iree_runtime_instance_create'; then
+          log "OK: iree_runtime_instance_create found in archive"
         else
-          log "ERROR: libIREERuntime.so was not produced"
-          exit 1
+          log "WARNING: iree_runtime_instance_create not found"
         fi
 
         if [ -f "$out/include/iree/runtime/api.h" ]; then
@@ -307,7 +237,7 @@ stdenv.mkDerivation {
   '';
 
   meta = {
-    description = "IREE runtime shared library (libIREERuntime.so) with CPU HAL drivers (local-sync + local-task)";
+    description = "IREE runtime static archives with CPU HAL drivers (local-sync + local-task)";
     license = lib.licenses.asl20;
   };
 }
