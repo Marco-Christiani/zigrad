@@ -7,6 +7,7 @@ const llm_demo = @import("llm_demo.zig");
 const main_aot = @import("main_aot.zig");
 const llama_model = @import("llama_model.zig");
 const cli = @import("cli.zig");
+const log = std.log.scoped(.@"zg/main");
 
 // exports for cli gen step in build
 pub const CommandT = cli.CommandT;
@@ -166,7 +167,10 @@ pub fn main() !void {
 
     const devs = try backend.get_devices(gpa);
     defer gpa.free(devs);
-    if (devs.len == 0) return error.NoDevices;
+    if (devs.len == 0) {
+        log.err("no devices available from backend", .{});
+        return error.NoDevices;
+    }
     const device = &devs[0];
 
     if (cmd.matchSubCmd("aot-demo")) |_| {
@@ -479,8 +483,10 @@ fn iree_subprocess_compiler(
     flag_buf: *[128]u8,
     flags: *[2][]const u8,
 ) !zg.backend.iree.Compiler {
-    const backend_flag = std.fmt.bufPrint(flag_buf, "--iree-hal-target-backends={s}", .{target_backend}) catch
+    const backend_flag = std.fmt.bufPrint(flag_buf, "--iree-hal-target-backends={s}", .{target_backend}) catch {
+        log.err("IREE target backend name too long: '{s}'", .{target_backend});
         return error.BackendNameTooLong;
+    };
     flags.* = .{ backend_flag, "--iree-input-type=stablehlo" };
     return zg.backend.iree.Compiler.init_subprocess(exe_path, flags);
 }
@@ -531,7 +537,10 @@ fn run_iree_demo(
 
     const devs = try backend.get_devices(gpa);
     defer gpa.free(devs);
-    if (devs.len == 0) return error.NoDevices;
+    if (devs.len == 0) {
+        log.err("no devices available from backend", .{});
+        return error.NoDevices;
+    }
     const device = &devs[0];
 
     var program = try zg.frontend.build_demo_program(gpa);

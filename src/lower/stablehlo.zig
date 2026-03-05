@@ -17,6 +17,9 @@ const stablehlo = @import("../c/mlir/dialects/stablehlo.zig");
 const pass = @import("../pipeline/pass.zig");
 const log = std.log.scoped(.@"zg/lower_stablehlo");
 
+/// Maximum tensor rank supported by the lowering pass (matches PR validation).
+const max_rank = 64;
+
 pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 
 const zigrad_kernel_call_op_name = "zigrad.kernel_call";
@@ -69,7 +72,8 @@ const LowerContext = struct {
     }
 
     fn tensor_to_mlir_type(self: LowerContext, t: pr.Tensor) LowerError!mlir.Type {
-        const dims_i64 = self.arena.alloc(i64, t.shape.dims.len) catch return error.OutOfMemory;
+        var buf: [max_rank]i64 = undefined;
+        const dims_i64 = buf[0..t.shape.dims.len];
         for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
         return mlir.Type.tensor(dims_i64, dtype_to_mlir_type(self.mlir_ctx, t.dtype));
     }
@@ -131,13 +135,8 @@ fn lower_program_impl(
         return error.InvalidMlir;
     };
 
-    const func_handle = mlir.DialectHandle.from_string("func");
-    func_handle.register_dialect(ctx);
-    _ = func_handle.load_dialect(ctx);
-
-    const stablehlo_handle = mlir.DialectHandle.from_string("stablehlo");
-    stablehlo_handle.register_dialect(ctx);
-    _ = stablehlo_handle.load_dialect(ctx);
+    load_dialect(ctx, "func");
+    load_dialect(ctx, "stablehlo");
 
     const loc = mlir.Location.unknown(ctx);
 
@@ -190,14 +189,14 @@ fn lower_function_into_module(
     const param_locs = arena.alloc(mlir.Location, func.params.len) catch return error.OutOfMemory;
     for (func.params, 0..) |param_id, i| {
         const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.InvalidProgram;
-        param_types[i] = try tensor_to_mlir_type_standalone(ctx, tensor, arena);
+        param_types[i] = try tensor_to_mlir_type_standalone(ctx, tensor);
         param_locs[i] = loc;
     }
 
     const result_types = arena.alloc(mlir.Type, func.returns.len) catch return error.OutOfMemory;
     for (func.returns, 0..) |ret_id, i| {
         const tensor = func.avals[@intCast(ret_id)].as_tensor() orelse return error.InvalidProgram;
-        result_types[i] = try tensor_to_mlir_type_standalone(ctx, tensor, arena);
+        result_types[i] = try tensor_to_mlir_type_standalone(ctx, tensor);
     }
 
     const fn_type = mlir.Type.function(ctx, param_types, result_types);
@@ -316,10 +315,8 @@ fn lower_outlined_eqn(
     const out_tensor = try ctx.tensor_of(out_id);
     const out_type = try ctx.tensor_to_mlir_type(out_tensor);
 
-    const callee_name = std.fmt.allocPrint(arena, "{s}_outlined_{d}", .{ outlined_prefix, outlined_index.* }) catch return error.OutOfMemory;
+    const callee_name_z = std.fmt.allocPrintSentinel(arena, "{s}_outlined_{d}", .{ outlined_prefix, outlined_index.* }, 0) catch return error.OutOfMemory;
     outlined_index.* += 1;
-    const callee_name_z = arena.allocSentinel(u8, callee_name.len, 0) catch return error.OutOfMemory;
-    @memcpy(callee_name_z, callee_name);
 
     // Build callee signature (inputs -> output).
     const callee_param_types = arena.alloc(mlir.Type, eqn_inputs.len) catch return error.OutOfMemory;
@@ -362,7 +359,7 @@ fn lower_outlined_eqn(
         .results = &.{},
         .blocks = &.{callee_entry},
         .attributes = &.{
-            .{ "sym_name", mlir.Attribute.string(mlir_ctx, callee_name) },
+            .{ "sym_name", mlir.Attribute.string(mlir_ctx, callee_name_z) },
             .{ "function_type", mlir.Attribute.type_(callee_fn_type) },
             .{ "llvm.noinline", mlir.Attribute.unit(mlir_ctx) },
         },
@@ -801,8 +798,7 @@ fn lower_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         result_types[i] = try ctx.tensor_to_mlir_type(out_tensor);
     }
 
-    const callee_z = ctx.arena.allocSentinel(u8, callee.len, 0) catch return error.OutOfMemory;
-    @memcpy(callee_z, callee);
+    const callee_z = ctx.arena.dupeZ(u8, callee) catch return error.OutOfMemory;
 
     const op = mlir.Operation.make(ctx.mlir_ctx, "func.call", .{
         .results = result_types,
@@ -915,8 +911,15 @@ fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     };
 }
 
-fn tensor_to_mlir_type_standalone(ctx: mlir.Context, t: pr.Tensor, arena: std.mem.Allocator) LowerError!mlir.Type {
-    const dims_i64 = arena.alloc(i64, t.shape.dims.len) catch return error.OutOfMemory;
+fn load_dialect(ctx: mlir.Context, comptime name: [:0]const u8) void {
+    const handle = mlir.DialectHandle.from_string(name);
+    handle.register_dialect(ctx);
+    _ = handle.load_dialect(ctx);
+}
+
+fn tensor_to_mlir_type_standalone(ctx: mlir.Context, t: pr.Tensor) LowerError!mlir.Type {
+    var buf: [max_rank]i64 = undefined;
+    const dims_i64 = buf[0..t.shape.dims.len];
     for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
     return mlir.Type.tensor(dims_i64, dtype_to_mlir_type(ctx, t.dtype));
 }

@@ -183,8 +183,10 @@ pub const Backend = struct {
         // Phase 3: resolve the entry function.
         // IREE requires fully-qualified names: "module.<func_name>".
         var fq_buf: [256]u8 = undefined;
-        const fq_name = std.fmt.bufPrint(&fq_buf, "module.{s}", .{opts.entry_name}) catch
+        const fq_name = std.fmt.bufPrint(&fq_buf, "module.{s}", .{opts.entry_name}) catch {
+            log.err("entry name too long for IREE lookup: '{s}'", .{opts.entry_name});
             return error.EntryNameTooLong;
+        };
         const function = try rt.session_lookup_function(session, fq_name);
 
         return .{
