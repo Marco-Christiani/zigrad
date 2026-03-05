@@ -61,7 +61,7 @@ pub const MlirKernelMaterializePass = struct {
             ctx.allocator.free(kernel_calls);
         }
 
-        // Shape cache: maps structural signature (pattern + shapes) → compiled artifact
+        // Shape cache: maps structural signature (pattern + shapes) -> compiled artifact
         // bytes. Regions with identical shapes across layers share one compiled binary,
         // avoiding redundant superoptimization passes.
         var shape_cache = std.StringHashMap(ShapeCacheEntry).init(ctx.allocator);
@@ -634,7 +634,7 @@ pub const MlirKernelMaterializePass = struct {
         return .{
             .provider_name = artifact.provider_name,
             .data = try dst_allocator.dupe(u8, artifact.data),
-            .target_name = artifact.target_name,
+            .target_name = try dst_allocator.dupe(u8, artifact.target_name),
             .workspace_bytes = artifact.workspace_bytes,
             .dispatch_fn = artifact.dispatch_fn,
             .dispatch_ctx = artifact.dispatch_ctx,
@@ -681,7 +681,7 @@ test "mlir materialize pass populates package from registry" {
     try registry.put("k0", .{
         .provider_name = "mirage",
         .data = data0,
-        .target_name = "k0",
+        .target_name = try testing.allocator.dupe(u8, "k0"),
     });
 
     var pass_state = MlirKernelMaterializePass{

@@ -955,13 +955,13 @@ test "resolve_dispatch_artifact prefers package entry for kernel id" {
     try registry.put("kernel_key", .{
         .provider_name = "mock",
         .data = try testing.allocator.dupe(u8, "registry_data"),
-        .target_name = "kernel_key",
+        .target_name = try testing.allocator.dupe(u8, "kernel_key"),
     });
 
     try package.put(7, .{
         .provider_name = "mock",
         .data = try testing.allocator.dupe(u8, "package_data"),
-        .target_name = "kernel_key",
+        .target_name = try testing.allocator.dupe(u8, "kernel_key"),
     });
 
     const resolved = try resolve_dispatch_artifact(&registry, &package, "kernel_key", 7);
@@ -980,7 +980,7 @@ test "resolve_dispatch_artifact falls back to registry on package miss" {
     try registry.put("kernel_key", .{
         .provider_name = "mock",
         .data = try testing.allocator.dupe(u8, "registry_data"),
-        .target_name = "kernel_key",
+        .target_name = try testing.allocator.dupe(u8, "kernel_key"),
     });
 
     const resolved = try resolve_dispatch_artifact(&registry, &package, "kernel_key", 99);
@@ -997,7 +997,7 @@ test "resolve_dispatch_artifact allows package lookup without kernel key" {
     try package.put(42, .{
         .provider_name = "mock",
         .data = try testing.allocator.dupe(u8, "package_data"),
-        .target_name = "pkg_kernel",
+        .target_name = try testing.allocator.dupe(u8, "pkg_kernel"),
     });
 
     const resolved = try resolve_dispatch_artifact(null, &package, null, 42);
@@ -1014,7 +1014,7 @@ test "resolve_dispatch_artifact requires key for registry fallback" {
     try registry.put("kernel_key", .{
         .provider_name = "mock",
         .data = try testing.allocator.dupe(u8, "registry_data"),
-        .target_name = "kernel_key",
+        .target_name = try testing.allocator.dupe(u8, "kernel_key"),
     });
 
     try testing.expectError(error.MissingKernelKeyForFallback, resolve_dispatch_artifact(&registry, null, null, 5));

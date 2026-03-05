@@ -1,6 +1,6 @@
 /// Kernel Provider Interface
 ///
-/// Defines the extension point for kernel providers — components that can
+/// Defines the extension point for kernel providers -- components that can
 /// claim PR regions and produce compiled kernel artifacts (KAs) for specific
 /// targets.
 ///
@@ -23,7 +23,7 @@ const pr = @import("pr/pr.zig");
 /// information a kernel provider needs to decide whether it can handle
 /// a region and to compile a kernel for it.
 ///
-/// RegionDescriptor does not own any memory — all slices are views into
+/// RegionDescriptor does not own any memory -- all slices are views into
 /// the parent Function's storage.
 pub const RegionDescriptor = struct {
     name: []const u8,
@@ -301,6 +301,7 @@ pub const KernelArtifact = struct {
 
     pub fn deinit(self: *KernelArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
+        allocator.free(self.target_name);
         self.* = undefined;
     }
 };
@@ -602,7 +603,7 @@ test "kernel registry put and get" {
     const artifact = KernelArtifact{
         .provider_name = "test",
         .data = try testing.allocator.dupe(u8, "fake_kernel"),
-        .target_name = "zigrad.kernel.test_0",
+        .target_name = try testing.allocator.dupe(u8, "zigrad.kernel.test_0"),
     };
     try registry.put("zigrad.kernel.test_0", artifact);
 
@@ -622,7 +623,7 @@ test "kernel package put and get" {
     const artifact = KernelArtifact{
         .provider_name = "test",
         .data = try testing.allocator.dupe(u8, "artifact_payload"),
-        .target_name = "kernel_7",
+        .target_name = try testing.allocator.dupe(u8, "kernel_7"),
     };
 
     try package.put(7, artifact);
@@ -642,18 +643,19 @@ test "kernel package rejects duplicate ids" {
     const first = KernelArtifact{
         .provider_name = "test",
         .data = try testing.allocator.dupe(u8, "first"),
-        .target_name = "kernel_1",
+        .target_name = try testing.allocator.dupe(u8, "kernel_1"),
     };
     try package.put(1, first);
 
     const second = KernelArtifact{
         .provider_name = "test",
         .data = try testing.allocator.dupe(u8, "second"),
-        .target_name = "kernel_1_dup",
+        .target_name = try testing.allocator.dupe(u8, "kernel_1_dup"),
     };
 
     try testing.expectError(error.DuplicateKey, package.put(1, second));
     testing.allocator.free(second.data);
+    testing.allocator.free(second.target_name);
 }
 
 test "dot_general_is_matrix_matmul canonical" {

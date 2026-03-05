@@ -1,6 +1,6 @@
 /// Kernelization Pass
 ///
-/// PR → PR pass that replaces annotated regions with custom_call ops,
+/// PR -> PR pass that replaces annotated regions with custom_call ops,
 /// compiling kernel artifacts via registered providers.
 ///
 /// For each region with a `kernelize` annotation, the pass:
@@ -18,7 +18,7 @@
 /// - `zigrad.provider`
 ///
 /// If a provider cannot handle a region (returns Unsupported), the
-/// region's equations are left unchanged — baseline lowering handles them.
+/// region's equations are left unchanged -- baseline lowering handles them.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
@@ -131,7 +131,8 @@ pub const KernelizePass = struct {
                 if (self.dump_kernels) &entries else null,
                 entries_alloc,
             ) catch |err| {
-                log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
+                if (!@import("builtin").is_test)
+                    log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
                 return err;
             };
             functions[idx] = rewritten;
@@ -237,7 +238,8 @@ pub const KernelizePass = struct {
                         continue;
                     },
                     else => {
-                        log.err("provider '{s}' failed to compile region '{s}': {s}", .{ candidate.provider_name, candidate.region.name, @errorName(err) });
+                        if (!@import("builtin").is_test)
+                            log.err("provider '{s}' failed to compile region '{s}': {s}", .{ candidate.provider_name, candidate.region.name, @errorName(err) });
                         return err;
                     },
                 };
@@ -503,7 +505,7 @@ pub const KernelizePass = struct {
         return .{
             .provider_name = artifact.provider_name,
             .data = try dst_allocator.dupe(u8, artifact.data),
-            .target_name = artifact.target_name,
+            .target_name = try dst_allocator.dupe(u8, artifact.target_name),
             .workspace_bytes = artifact.workspace_bytes,
             .dispatch_fn = artifact.dispatch_fn,
             .dispatch_ctx = artifact.dispatch_ctx,
@@ -695,7 +697,7 @@ test "kernelize pass calls provider and registers KA" {
             return .{
                 .provider_name = "mock",
                 .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = desc.name,
+                .target_name = try allocator.dupe(u8, desc.name),
             };
         }
     };
@@ -1118,7 +1120,7 @@ test "kernelize pass deduplicates same-shape regions across a function" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    // Two exp regions with identical f32[2] input/output — same shape signature.
+    // Two exp regions with identical f32[2] input/output -- same shape signature.
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
@@ -1170,7 +1172,7 @@ test "kernelize pass deduplicates same-shape regions across a function" {
     try testing.expect(registry.get("region_a") != null);
     try testing.expect(registry.get("region_b") != null);
 
-    // Provider was only called once — region_b reused the cached artifact.
+    // Provider was only called once -- region_b reused the cached artifact.
     try testing.expectEqual(@as(usize, 1), mock.compile_count);
 
     // Both regions must have been rewritten to custom_call.
@@ -1189,7 +1191,7 @@ test "kernelize pass does not deduplicate regions with different shapes" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    // Two exp regions with DIFFERENT shapes — distinct signatures.
+    // Two exp regions with DIFFERENT shapes -- distinct signatures.
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{4});
 
@@ -1237,6 +1239,6 @@ test "kernelize pass does not deduplicate regions with different shapes" {
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try kp.pass().run(&artifact, &ctx);
 
-    // Different shapes — provider must be called for each region.
+    // Different shapes -- provider must be called for each region.
     try testing.expectEqual(@as(usize, 2), mock.compile_count);
 }
