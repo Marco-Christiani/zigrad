@@ -200,7 +200,9 @@ pub fn main() !void {
         const steps = opts.steps orelse 8;
         return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
     }
-    if (cmd.matchSubCmd("llama-ft-demo-pr")) |sub_cmd| {
+    const llama_ft_sub = cmd.matchSubCmd("llama-ft-demo-pr") orelse cmd.matchSubCmd("llama-ft-demo-mlir");
+    if (llama_ft_sub) |sub_cmd| {
+        const lane: llama_demo.LlamaDemoPipeline = if (std.mem.eql(u8, sub_cmd.name, "llama-ft-demo-pr")) .pr else .mlir;
         const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
         const dtype = if (opts.dtype) |d|
             std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
@@ -230,42 +232,7 @@ pub fn main() !void {
             opts.warmup orelse 1,
             opts.steps orelse 4,
             quiet,
-            .pr,
-            cfg,
-            dump_kernels,
-        );
-    }
-    if (cmd.matchSubCmd("llama-ft-demo-mlir")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
-        const dtype = if (opts.dtype) |d|
-            std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
-        else
-            zg.pr.DType.bf16;
-
-        const kernel_provider = if (opts.kernel_provider) |provider_name|
-            std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
-        else
-            null;
-
-        const cfg = llama_demo.LlamaDemoConfig{
-            .train = opts.train,
-            .dtype = dtype,
-            .seq = opts.seq orelse 4,
-            .batch = opts.batch orelse 1,
-            .canonical_shapes = opts.canonical_shapes,
-            .execute_only = opts.execute_only,
-            .kernel_provider = kernel_provider,
-        };
-
-        return llama_demo.run_llama_ft_demo(
-            gpa,
-            plugin_path,
-            dump_pr_ptr,
-            dump_mlir_ptr,
-            opts.warmup orelse 1,
-            opts.steps orelse 4,
-            quiet,
-            .mlir,
+            lane,
             cfg,
             dump_kernels,
         );
@@ -518,6 +485,25 @@ fn iree_subprocess_compiler(
     return zg.backend.iree.Compiler.init_subprocess(exe_path, flags);
 }
 
+const LowerResult = struct {
+    mlir_bytes: []u8,
+    is_bytecode: bool,
+};
+
+/// Lower a demo program to MLIR, optionally dumping the text representation.
+fn lower_demo_to_mlir(
+    gpa: std.mem.Allocator,
+    program: *const zg.pr.Program,
+    dump_mlir: ?*zg.pipeline.DumpConfig,
+) !LowerResult {
+    const out_fmt: zg.lower.stablehlo.OutputFormat = if (dump_mlir != null) .mlir_text else .mlir_bytecode;
+    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, program, "main", out_fmt);
+    if (dump_mlir != null and out_fmt == .mlir_text) {
+        std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
+    }
+    return .{ .mlir_bytes = mlir_bytes, .is_bytecode = out_fmt == .mlir_bytecode };
+}
+
 fn run_iree_demo(
     gpa: std.mem.Allocator,
     dump_pr: ?*zg.pipeline.DumpConfig,
@@ -551,31 +537,16 @@ fn run_iree_demo(
     var program = try zg.frontend.build_demo_program(gpa);
     defer program.deinit();
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    const lower_cfg = zg.lower.LowerPassConfig{
-        .encoding = lower_encoding,
-        .entry_name = "main",
-    };
-
-    // Lower PR -> MLIR bytes.
-    const out_fmt: zg.lower.stablehlo.OutputFormat = switch (lower_cfg.encoding) {
-        .text => .mlir_text,
-        .bytecode => .mlir_bytecode,
-    };
-    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, lower_cfg.entry_name, out_fmt);
-    defer gpa.free(mlir_bytes);
-
     if (dump_pr) |_| {
         // TODO: pipeline.Runner not yet available for IREE path.
         std.log.warn("--dump-pr not yet supported in iree-aot-demo", .{});
     }
-    if (dump_mlir) |_| {
-        if (out_fmt == .mlir_text) {
-            std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
-        }
-    }
 
-    const is_bytecode = lower_cfg.encoding == .bytecode;
+    const lowered = try lower_demo_to_mlir(gpa, &program, dump_mlir);
+    const mlir_bytes = lowered.mlir_bytes;
+    defer gpa.free(mlir_bytes);
+
+    const is_bytecode = lowered.is_bytecode;
     var exe = try backend.compile(device, mlir_bytes, is_bytecode, .{});
     defer backend.deinit_executable(&exe);
 
@@ -640,21 +611,11 @@ fn run_iree_aot_compile(
     var program = try zg.frontend.build_demo_program(gpa);
     defer program.deinit();
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    const out_fmt: zg.lower.stablehlo.OutputFormat = switch (lower_encoding) {
-        .text => .mlir_text,
-        .bytecode => .mlir_bytecode,
-    };
-    const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", out_fmt);
+    const lowered = try lower_demo_to_mlir(gpa, &program, dump_mlir);
+    const mlir_bytes = lowered.mlir_bytes;
     defer gpa.free(mlir_bytes);
 
-    if (dump_mlir) |_| {
-        if (out_fmt == .mlir_text) {
-            std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
-        }
-    }
-
-    const is_bytecode = lower_encoding == .bytecode;
+    const is_bytecode = lowered.is_bytecode;
     const vmfb = try compiler.compile(gpa, mlir_bytes, is_bytecode);
     defer gpa.free(vmfb);
 

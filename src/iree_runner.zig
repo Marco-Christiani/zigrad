@@ -134,39 +134,62 @@ pub fn main() !void {
         try rt.buffer_view_to_host(out_view, buf);
 
         try stdout.print("output[{d}]: [", .{i});
-        if (elem_type == rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32) {
-            const vals: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, buf));
-            for (vals, 0..) |v, j| {
-                if (j > 0) try stdout.writeAll(", ");
-                try stdout.print("{d}", .{v});
-            }
-        } else if (elem_type == rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64) {
-            const vals: []const f64 = @alignCast(std.mem.bytesAsSlice(f64, buf));
-            for (vals, 0..) |v, j| {
-                if (j > 0) try stdout.writeAll(", ");
-                try stdout.print("{d}", .{v});
-            }
-        } else if (elem_type == rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32) {
-            const vals: []const i32 = @alignCast(std.mem.bytesAsSlice(i32, buf));
-            for (vals, 0..) |v, j| {
-                if (j > 0) try stdout.writeAll(", ");
-                try stdout.print("{d}", .{v});
-            }
-        } else if (elem_type == rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64) {
-            const vals: []const i64 = @alignCast(std.mem.bytesAsSlice(i64, buf));
-            for (vals, 0..) |v, j| {
-                if (j > 0) try stdout.writeAll(", ");
-                try stdout.print("{d}", .{v});
-            }
-        } else {
-            try stdout.print("<{d} bytes, unsupported element type>", .{byte_count});
-        }
+        try print_typed_values(stdout, elem_type, buf, byte_count);
         try stdout.writeAll("]\n");
     }
 
     if (n_out == 0) {
         try stdout.writeAll("(no outputs)\n");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Element-type dispatch helpers.
+// ---------------------------------------------------------------------------
+
+/// Supported element types for printing and parsing, mapped to Zig types.
+const element_type_map = .{
+    .{ rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32, f32 },
+    .{ rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64, f64 },
+    .{ rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32, i32 },
+    .{ rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64, i64 },
+};
+
+fn print_typed_values(writer: anytype, elem_type: rt.HalElementType, buf: []const u8, byte_count: usize) !void {
+    inline for (element_type_map) |entry| {
+        if (elem_type == entry[0]) {
+            const T = entry[1];
+            const vals: []const T = @alignCast(std.mem.bytesAsSlice(T, buf));
+            for (vals, 0..) |v, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.print("{d}", .{v});
+            }
+            return;
+        }
+    }
+    try writer.print("<{d} bytes, unsupported element type>", .{byte_count});
+}
+
+fn parse_typed_value(elem_type: rt.HalElementType, trimmed: []const u8, data: []u8, idx: usize) !void {
+    inline for (element_type_map) |entry| {
+        if (elem_type == entry[0]) {
+            const T = entry[1];
+            const v = parse_scalar(T, trimmed) catch {
+                log.err("invalid {s} value: '{s}'", .{ @typeName(T), trimmed });
+                return error.InvalidValue;
+            };
+            @as(*align(1) T, @ptrCast(data.ptr + idx * @sizeOf(T))).* = v;
+            return;
+        }
+    }
+}
+
+fn parse_scalar(comptime T: type, s: []const u8) !T {
+    return switch (@typeInfo(T)) {
+        .float => std.fmt.parseFloat(T, s),
+        .int => std.fmt.parseInt(T, s, 10),
+        else => @compileError("unsupported scalar type"),
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -260,31 +283,7 @@ fn parse_values(vs: []const u8, dtype: DTypeInfo, data: []u8, n_elem: usize) !vo
             return error.TooManyValues;
         }
 
-        if (dtype.element_type == rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32) {
-            const v = std.fmt.parseFloat(f32, trimmed) catch {
-                log.err("invalid f32 value: '{s}'", .{trimmed});
-                return error.InvalidValue;
-            };
-            @as(*align(1) f32, @ptrCast(data.ptr + idx * 4)).* = v;
-        } else if (dtype.element_type == rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64) {
-            const v = std.fmt.parseFloat(f64, trimmed) catch {
-                log.err("invalid f64 value: '{s}'", .{trimmed});
-                return error.InvalidValue;
-            };
-            @as(*align(1) f64, @ptrCast(data.ptr + idx * 8)).* = v;
-        } else if (dtype.element_type == rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32) {
-            const v = std.fmt.parseInt(i32, trimmed, 10) catch {
-                log.err("invalid i32 value: '{s}'", .{trimmed});
-                return error.InvalidValue;
-            };
-            @as(*align(1) i32, @ptrCast(data.ptr + idx * 4)).* = v;
-        } else if (dtype.element_type == rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64) {
-            const v = std.fmt.parseInt(i64, trimmed, 10) catch {
-                log.err("invalid i64 value: '{s}'", .{trimmed});
-                return error.InvalidValue;
-            };
-            @as(*align(1) i64, @ptrCast(data.ptr + idx * 8)).* = v;
-        }
+        try parse_typed_value(dtype.element_type, trimmed, data, idx);
 
         idx += 1;
     }

@@ -162,30 +162,37 @@ pub const Compiler = struct {
         return .{ .mode = .{ .dlopen = .{ .lib = lib, .vt = vt } } };
     }
 
+    /// Maps Vtable field names to their IREE C API symbol names.
+    const symbol_names = .{
+        .get_api_version = "ireeCompilerGetAPIVersion",
+        .global_initialize = "ireeCompilerGlobalInitialize",
+        .global_shutdown = "ireeCompilerGlobalShutdown",
+        .setup_global_cl = "ireeCompilerSetupGlobalCL",
+        .session_create = "ireeCompilerSessionCreate",
+        .session_destroy = "ireeCompilerSessionDestroy",
+        .session_set_flags = "ireeCompilerSessionSetFlags",
+        .invocation_create = "ireeCompilerInvocationCreate",
+        .invocation_enable_callback_diagnostics = "ireeCompilerInvocationEnableCallbackDiagnostics",
+        .invocation_destroy = "ireeCompilerInvocationDestroy",
+        .invocation_parse_source = "ireeCompilerInvocationParseSource",
+        .invocation_pipeline = "ireeCompilerInvocationPipeline",
+        .invocation_output_vm_bytecode = "ireeCompilerInvocationOutputVMBytecode",
+        .source_wrap_buffer = "ireeCompilerSourceWrapBuffer",
+        .source_destroy = "ireeCompilerSourceDestroy",
+        .output_open_membuffer = "ireeCompilerOutputOpenMembuffer",
+        .output_destroy = "ireeCompilerOutputDestroy",
+        .output_map_memory = "ireeCompilerOutputMapMemory",
+        .output_keep = "ireeCompilerOutputKeep",
+        .error_destroy = "ireeCompilerErrorDestroy",
+        .error_get_message = "ireeCompilerErrorGetMessage",
+    };
+
     fn load_vtable(lib: *std.DynLib) !Vtable {
-        return .{
-            .get_api_version = try resolve(@TypeOf(@as(Vtable, undefined).get_api_version), lib, "ireeCompilerGetAPIVersion"),
-            .global_initialize = try resolve(@TypeOf(@as(Vtable, undefined).global_initialize), lib, "ireeCompilerGlobalInitialize"),
-            .global_shutdown = try resolve(@TypeOf(@as(Vtable, undefined).global_shutdown), lib, "ireeCompilerGlobalShutdown"),
-            .setup_global_cl = try resolve(@TypeOf(@as(Vtable, undefined).setup_global_cl), lib, "ireeCompilerSetupGlobalCL"),
-            .session_create = try resolve(@TypeOf(@as(Vtable, undefined).session_create), lib, "ireeCompilerSessionCreate"),
-            .session_destroy = try resolve(@TypeOf(@as(Vtable, undefined).session_destroy), lib, "ireeCompilerSessionDestroy"),
-            .session_set_flags = try resolve(@TypeOf(@as(Vtable, undefined).session_set_flags), lib, "ireeCompilerSessionSetFlags"),
-            .invocation_create = try resolve(@TypeOf(@as(Vtable, undefined).invocation_create), lib, "ireeCompilerInvocationCreate"),
-            .invocation_enable_callback_diagnostics = try resolve(@TypeOf(@as(Vtable, undefined).invocation_enable_callback_diagnostics), lib, "ireeCompilerInvocationEnableCallbackDiagnostics"),
-            .invocation_destroy = try resolve(@TypeOf(@as(Vtable, undefined).invocation_destroy), lib, "ireeCompilerInvocationDestroy"),
-            .invocation_parse_source = try resolve(@TypeOf(@as(Vtable, undefined).invocation_parse_source), lib, "ireeCompilerInvocationParseSource"),
-            .invocation_pipeline = try resolve(@TypeOf(@as(Vtable, undefined).invocation_pipeline), lib, "ireeCompilerInvocationPipeline"),
-            .invocation_output_vm_bytecode = try resolve(@TypeOf(@as(Vtable, undefined).invocation_output_vm_bytecode), lib, "ireeCompilerInvocationOutputVMBytecode"),
-            .source_wrap_buffer = try resolve(@TypeOf(@as(Vtable, undefined).source_wrap_buffer), lib, "ireeCompilerSourceWrapBuffer"),
-            .source_destroy = try resolve(@TypeOf(@as(Vtable, undefined).source_destroy), lib, "ireeCompilerSourceDestroy"),
-            .output_open_membuffer = try resolve(@TypeOf(@as(Vtable, undefined).output_open_membuffer), lib, "ireeCompilerOutputOpenMembuffer"),
-            .output_destroy = try resolve(@TypeOf(@as(Vtable, undefined).output_destroy), lib, "ireeCompilerOutputDestroy"),
-            .output_map_memory = try resolve(@TypeOf(@as(Vtable, undefined).output_map_memory), lib, "ireeCompilerOutputMapMemory"),
-            .output_keep = try resolve(@TypeOf(@as(Vtable, undefined).output_keep), lib, "ireeCompilerOutputKeep"),
-            .error_destroy = try resolve(@TypeOf(@as(Vtable, undefined).error_destroy), lib, "ireeCompilerErrorDestroy"),
-            .error_get_message = try resolve(@TypeOf(@as(Vtable, undefined).error_get_message), lib, "ireeCompilerErrorGetMessage"),
-        };
+        var vt: Vtable = undefined;
+        inline for (std.meta.fields(Vtable)) |field| {
+            @field(vt, field.name) = try resolve(field.type, lib, @field(symbol_names, field.name));
+        }
+        return vt;
     }
 
     pub fn deinit(self: *Compiler) void {

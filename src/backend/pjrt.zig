@@ -33,10 +33,14 @@ const Platform = enum {
 
 var kernel_dispatch_target_registered: bool = false;
 var kernel_dispatch_platform: Platform = .unknown;
-var kernel_dispatch_package_type_id: i64 = 0;
-var kernel_dispatch_package_type_registered: bool = false;
-var kernel_dispatch_registry_type_id: i64 = 0;
-var kernel_dispatch_registry_type_registered: bool = false;
+
+const DispatchTypeReg = struct {
+    id: i64 = 0,
+    registered: bool = false,
+};
+
+var dispatch_package_type: DispatchTypeReg = .{};
+var dispatch_registry_type: DispatchTypeReg = .{};
 
 const dispatch_package_type_name = "zigrad.kernel.package.v1";
 const dispatch_registry_type_name = "zigrad.kernel.registry.v1";
@@ -283,28 +287,8 @@ pub const Backend = struct {
 
         const ffi_ext = self.api.ffi_extension() orelse return error.TypedFfiUnavailable;
 
-        var registered_any = false;
-        switch (self.platform) {
-            .host => {
-                const host_title = try register_dispatch_handler_for_platform(self.api, ffi_ext, "Host");
-                const host_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "host");
-                registered_any = host_title or host_lower;
-            },
-            .cuda => {
-                const cuda_title = try register_dispatch_handler_for_platform(self.api, ffi_ext, "CUDA");
-                const cuda_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "cuda");
-                registered_any = cuda_title or cuda_lower;
-            },
-            .unknown => {
-                const host_ok = try register_dispatch_handler_for_platform(self.api, ffi_ext, "Host");
-                const host_ok_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "host");
-                const cuda_ok = try register_dispatch_handler_for_platform(self.api, ffi_ext, "CUDA");
-                const cuda_ok_lower = try register_dispatch_handler_for_platform(self.api, ffi_ext, "cuda");
-                registered_any = host_ok or host_ok_lower or cuda_ok or cuda_ok_lower;
-            },
-        }
-
-        if (!registered_any) return error.TypedFfiRegistrationFailed;
+        if (!try register_ffi_for_platform(self.api, ffi_ext, self.platform))
+            return error.TypedFfiRegistrationFailed;
 
         kernel_dispatch_platform = self.platform;
         self.kernel_dispatch_registered = true;
@@ -322,25 +306,7 @@ fn register_dispatch_target(api: *pjrt_api.Api, platform: Platform) !void {
     if (api.ffi_extension()) |ffi_ext| {
         const any_platform = try register_dispatch_handler_for_platform(api, ffi_ext, null);
         registered_any = registered_any or any_platform;
-        switch (platform) {
-            .host => {
-                const host_title = try register_dispatch_handler_for_platform(api, ffi_ext, "Host");
-                const host_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "host");
-                registered_any = registered_any or host_title or host_lower;
-            },
-            .cuda => {
-                const cuda_title = try register_dispatch_handler_for_platform(api, ffi_ext, "CUDA");
-                const cuda_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "cuda");
-                registered_any = registered_any or cuda_title or cuda_lower;
-            },
-            .unknown => {
-                const host_ok = try register_dispatch_handler_for_platform(api, ffi_ext, "Host");
-                const host_ok_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "host");
-                const cuda_ok = try register_dispatch_handler_for_platform(api, ffi_ext, "CUDA");
-                const cuda_ok_lower = try register_dispatch_handler_for_platform(api, ffi_ext, "cuda");
-                registered_any = registered_any or host_ok or host_ok_lower or cuda_ok or cuda_ok_lower;
-            },
-        }
+        registered_any = try register_ffi_for_platform(api, ffi_ext, platform) or registered_any;
     }
 
     if (api.gpu_custom_call_extension()) |gpu_ext| {
@@ -349,6 +315,23 @@ fn register_dispatch_target(api: *pjrt_api.Api, platform: Platform) !void {
     }
 
     kernel_dispatch_target_registered = registered_any;
+}
+
+/// Register the dispatch handler for all platform name variants matching `platform`.
+/// For `.unknown`, tries all known platforms.
+fn register_ffi_for_platform(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI, platform: Platform) !bool {
+    const platform_names: []const struct { []const u8, []const u8 } = switch (platform) {
+        .host => &.{.{ "Host", "host" }},
+        .cuda => &.{.{ "CUDA", "cuda" }},
+        .unknown => &.{ .{ "Host", "host" }, .{ "CUDA", "cuda" } },
+    };
+    var registered_any = false;
+    for (platform_names) |names| {
+        const a = try register_dispatch_handler_for_platform(api, ffi_ext, names[0]);
+        const b = try register_dispatch_handler_for_platform(api, ffi_ext, names[1]);
+        registered_any = registered_any or a or b;
+    }
+    return registered_any;
 }
 
 fn register_dispatch_handler_via_gpu_extension(api: *pjrt_api.Api, gpu_ext: *c.PJRT_Gpu_Custom_Call) !bool {
@@ -432,8 +415,13 @@ fn pjrt_error_to_zig(api: *pjrt_api.Api, pjrt_err: *c.PJRT_Error) !void {
     return err.to_zig_error();
 }
 
-fn ensure_dispatch_package_type_id(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI) !i64 {
-    if (kernel_dispatch_package_type_registered) return kernel_dispatch_package_type_id;
+fn ensure_dispatch_type_id(
+    api: *pjrt_api.Api,
+    ffi_ext: *c.PJRT_FFI,
+    type_name: []const u8,
+    reg: *DispatchTypeReg,
+) !i64 {
+    if (reg.registered) return reg.id;
 
     const type_register = ffi_ext.type_register orelse return error.TypedFfiUnavailable;
     var type_info: c.PJRT_FFI_Type_Info = .{
@@ -445,8 +433,8 @@ fn ensure_dispatch_package_type_id(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI) !i6
     var args: c.PJRT_FFI_Type_Register_Args = std.mem.zeroes(c.PJRT_FFI_Type_Register_Args);
     args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_FFI_Type_Register_Args);
     args.extension_start = null;
-    args.type_name = dispatch_package_type_name.ptr;
-    args.type_name_size = dispatch_package_type_name.len;
+    args.type_name = type_name.ptr;
+    args.type_name_size = type_name.len;
     args.type_id = 0;
     args.type_info = &type_info;
 
@@ -454,36 +442,9 @@ fn ensure_dispatch_package_type_id(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI) !i6
         try pjrt_error_to_zig(api, pjrt_err);
     }
 
-    kernel_dispatch_package_type_id = args.type_id;
-    kernel_dispatch_package_type_registered = true;
-    return kernel_dispatch_package_type_id;
-}
-
-fn ensure_dispatch_registry_type_id(api: *pjrt_api.Api, ffi_ext: *c.PJRT_FFI) !i64 {
-    if (kernel_dispatch_registry_type_registered) return kernel_dispatch_registry_type_id;
-
-    const type_register = ffi_ext.type_register orelse return error.TypedFfiUnavailable;
-    var type_info: c.PJRT_FFI_Type_Info = .{
-        .deleter = null,
-        .serialize = null,
-        .deserialize = null,
-    };
-
-    var args: c.PJRT_FFI_Type_Register_Args = std.mem.zeroes(c.PJRT_FFI_Type_Register_Args);
-    args.struct_size = pjrt_api.pjrt_struct_size(c.PJRT_FFI_Type_Register_Args);
-    args.extension_start = null;
-    args.type_name = dispatch_registry_type_name.ptr;
-    args.type_name_size = dispatch_registry_type_name.len;
-    args.type_id = 0;
-    args.type_info = &type_info;
-
-    if (type_register(&args)) |pjrt_err| {
-        try pjrt_error_to_zig(api, pjrt_err);
-    }
-
-    kernel_dispatch_registry_type_id = args.type_id;
-    kernel_dispatch_registry_type_registered = true;
-    return kernel_dispatch_registry_type_id;
+    reg.id = args.type_id;
+    reg.registered = true;
+    return reg.id;
 }
 
 fn add_dispatch_user_data(
@@ -525,12 +486,12 @@ fn create_dispatch_execute_context(self: *Backend, executable: *LoadedExecutable
     errdefer destroy_execute_context(self.api, context);
 
     if (package_ptr) |ptr| {
-        const type_id = try ensure_dispatch_package_type_id(self.api, ffi_ext);
+        const type_id = try ensure_dispatch_type_id(self.api, ffi_ext, dispatch_package_type_name, &dispatch_package_type);
         try add_dispatch_user_data(self.api, ffi_ext, context, type_id, ptr);
     }
 
     if (registry_ptr) |ptr| {
-        const type_id = try ensure_dispatch_registry_type_id(self.api, ffi_ext);
+        const type_id = try ensure_dispatch_type_id(self.api, ffi_ext, dispatch_registry_type_name, &dispatch_registry_type);
         try add_dispatch_user_data(self.api, ffi_ext, context, type_id, ptr);
     }
 
@@ -564,14 +525,14 @@ fn lookup_dispatch_user_data_from_context(frame: *c.XLA_FFI_CallFrame, type_id_v
 }
 
 fn lookup_dispatch_package_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.KernelPackage {
-    if (!kernel_dispatch_package_type_registered) return null;
-    const data_ptr = lookup_dispatch_user_data_from_context(frame, kernel_dispatch_package_type_id) orelse return null;
+    if (!dispatch_package_type.registered) return null;
+    const data_ptr = lookup_dispatch_user_data_from_context(frame, dispatch_package_type.id) orelse return null;
     return @ptrCast(@alignCast(data_ptr));
 }
 
 fn lookup_dispatch_registry_from_context(frame: *c.XLA_FFI_CallFrame) ?*const kernel.KernelRegistry {
-    if (!kernel_dispatch_registry_type_registered) return null;
-    const data_ptr = lookup_dispatch_user_data_from_context(frame, kernel_dispatch_registry_type_id) orelse return null;
+    if (!dispatch_registry_type.registered) return null;
+    const data_ptr = lookup_dispatch_user_data_from_context(frame, dispatch_registry_type.id) orelse return null;
     return @ptrCast(@alignCast(data_ptr));
 }
 
