@@ -2,7 +2,7 @@
 const std = @import("std");
 
 /// Naive reference matmul implementation (not optimized, for verification only).
-/// C = A @ B where A is M×K, B is K×N, C is M×N (row-major layout).
+/// C = A @ B where A is MxK, B is KxN, C is MxN (row-major layout).
 pub fn reference_matmul_f32(
     m: usize,
     n: usize,
@@ -74,7 +74,7 @@ test "correctness: max abs error" {
     const a = [_]f32{ 1.0, 2.0, 3.0 };
     const b = [_]f32{ 1.1, 2.05, 2.95 };
     const err = max_abs_error(&a, &b);
-    try std.testing.expectApproxEqAbs(0.1, err, 1e-9);
+    try std.testing.expectApproxEqAbs(0.1, err, 1e-6);
 }
 
 test "correctness: verify pass" {

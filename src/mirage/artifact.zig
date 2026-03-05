@@ -79,7 +79,7 @@ pub fn encode(allocator: std.mem.Allocator, artifact: Artifact) ![]const u8 {
         }
     }
 
-    return buf.items;
+    return try buf.toOwnedSlice(allocator);
 }
 
 /// Decode an artifact from a byte buffer. All returned slices point into
@@ -172,8 +172,8 @@ test "encode-decode round trip" {
     defer allocator.free(encoded);
 
     const decoded = try decode(allocator, encoded);
-    defer allocator.free(decoded.kernels[0].args);
     defer allocator.free(decoded.kernels);
+    defer allocator.free(decoded.kernels[0].args);
 
     try std.testing.expectEqualStrings(artifact.source, decoded.source);
     try std.testing.expectEqual(artifact.buf_size, decoded.buf_size);

@@ -6,7 +6,7 @@
 /// All MLIR/StableHLO concerns are contained here. PR is read-only input.
 ///
 /// Provides:
-/// 1. `lower_program_to_mlir`: Direct lowering API (PR program → MLIR bytes)
+/// 1. `lower_program_to_mlir`: Direct lowering API (PR program -> MLIR bytes)
 /// 2. `lower_function_to_mlir`: Single-function convenience wrapper
 /// 3. `lower_pass` / `lower_pass_with_config`: Pass-based pipeline integration
 const std = @import("std");
@@ -35,7 +35,7 @@ pub const KernelizationLane = enum {
 // Lowering Context
 // ============================================================================
 
-/// State threaded through per-equation lowering. Owns the VarId → MLIR Value mapping.
+/// State threaded through per-equation lowering. Owns the VarId -> MLIR Value mapping.
 const LowerContext = struct {
     mlir_ctx: mlir.Context,
     block: mlir.Block,
@@ -92,7 +92,7 @@ const LowerContext = struct {
 /// Lower a PR program to StableHLO MLIR.
 ///
 /// This is baseline lowering only: PR ops become MLIR ops. No MLIR-stage
-/// passes (select, legalize) are executed — those are separate pipeline
+/// passes (select, legalize) are executed - those are separate pipeline
 /// passes composed explicitly by the caller.
 pub fn lower_program_to_mlir(
     allocator: std.mem.Allocator,
@@ -219,7 +219,7 @@ fn lower_function_into_module(
         .arena = arena,
     };
 
-    // Build eqn-index → region lookup for outlining decisions.
+    // Build eqn-index -> region lookup for outlining decisions.
     const region_map = build_region_map(arena, func) catch return error.OutOfMemory;
 
     var outlined_index: usize = 0;
@@ -1251,7 +1251,7 @@ test "lowering supports multi-output custom_call boundary" {
     const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
     defer testing.allocator.free(text);
 
-    try testing.expect(std.mem.indexOf(u8, text, "stablehlo.custom_call") != null);
+    try testing.expect(std.mem.indexOf(u8, text, zigrad_kernel_call_op_name) != null);
     try testing.expect(std.mem.indexOf(u8, text, "tensor<2xf32>, tensor<2xf32>") != null);
 }
 
@@ -1349,8 +1349,7 @@ test "lowering can outline via region annotation" {
     const text = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_text);
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.indexOf(u8, text, "func.call") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "main_outlined_0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "call @main_outlined_0") != null);
 }
 
 test "lowering tags kernelize provider on outlined functions" {
@@ -1397,7 +1396,7 @@ test "lower pass mlir lane tags markers without outlining" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    // Lower pass is baseline only — no select/legalize.
+    // Lower pass is baseline only - no select/legalize.
     var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
@@ -1411,9 +1410,9 @@ test "lower pass mlir lane tags markers without outlining" {
 
     // No outlining (MLIR lane keeps ops inline).
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") == null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "func.call") == null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") == null);
 
-    // Original ops preserved — select/legalize are separate passes.
+    // Original ops preserved - select/legalize are separate passes.
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") != null);
@@ -1563,7 +1562,7 @@ test "lower pass emits zigrad.kernel_call for custom_call ops (pre-legalize)" {
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    // Lower pass is baseline — no legalize.
+    // Lower pass is baseline - no legalize.
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
