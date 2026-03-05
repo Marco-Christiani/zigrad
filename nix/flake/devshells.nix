@@ -27,6 +27,7 @@ in {
       zig
       # zls
       go-task
+      nodejs_22
       binutils
       patchelf
       git

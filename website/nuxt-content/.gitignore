@@ -1,0 +1,13 @@
+node_modules
+.nuxt
+.output
+.nitro
+.cache
+.dist
+.data
+
+# autodoc artifacts
+public/api/index.html
+public/api/main.js
+public/api/main.wasm
+public/api/sources.tar
