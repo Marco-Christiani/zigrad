@@ -1,5 +1,4 @@
 const std = @import("std");
-const log = std.log.scoped(.@"zg/frontend");
 
 const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
@@ -7,12 +6,12 @@ const ops = @import("../pr/ops/ops.zig");
 const kernel = @import("../kernel.zig");
 const lower = @import("../lower/root.zig");
 const pipeline = @import("../pipeline/root.zig");
-const dump = @import("../pipeline/dump.zig");
-const kernelize = @import("../pipeline/kernelize.zig");
 const backend = @import("../backend/root.zig");
 const utils = @import("../utils/host_buffer.zig");
 
 pub const train = @import("train.zig");
+
+const log = std.log.scoped(.@"zg/frontend");
 
 fn providers_support_mlir_compile(providers: []const kernel.KernelProvider) bool {
     for (providers) |provider| {
@@ -360,8 +359,8 @@ pub const CompileConfig = struct {
     device_index: usize = 0,
     lower: lower.LowerPassConfig = .{},
     kernelize: ?KernelizeConfig = null,
-    dump_pr: ?dump.DumpConfig = null,
-    dump_mlir: ?dump.DumpConfig = null,
+    dump_pr: ?pipeline.DumpConfig = null,
+    dump_mlir: ?pipeline.DumpConfig = null,
     compile: backend.pjrt.CompileOptions = .{},
 };
 
@@ -471,14 +470,14 @@ pub fn compile_program(
         return error.OutOfMemory;
     defer passes.deinit(allocator);
 
-    var dump_pr_local: ?dump.DumpConfig = null;
+    var dump_pr_local: ?pipeline.DumpConfig = null;
     if (config.dump_pr) |cfg| {
         dump_pr_local = cfg;
         dump_pr_local.?.entry_name = dump_pr_local.?.entry_name orelse entry_name;
-        try passes.append(allocator, dump.dump_pr_pass_with_config(&dump_pr_local.?));
+        try passes.append(allocator, pipeline.dump_pr_pass_with_config(&dump_pr_local.?));
     }
 
-    var kernelize_state: ?kernelize.KernelizePass = null;
+    var kernelize_state: ?pipeline.KernelizePass = null;
     var mlir_materialize_state: ?pipeline.MlirKernelMaterializePass = null;
     if (config.kernelize) |cfg| {
         lower_cfg.kernelization_lane = cfg.lane;
@@ -516,7 +515,7 @@ pub fn compile_program(
     try passes.append(allocator, lower.lower_pass_with_config(&lower_cfg));
 
     // MLIR-stage passes: explicit pipeline ordering.
-    // MLIR lane: select → materialize → legalize
+    // MLIR lane: select -> materialize -> legalize
     // PR lane (or no kernelization): legalize only
     if (config.kernelize) |cfg| {
         if (cfg.lane == .mlir) {
@@ -528,11 +527,11 @@ pub fn compile_program(
     }
     try passes.append(allocator, pipeline.MlirLegalizePass.pass());
 
-    var dump_mlir_local: ?dump.DumpConfig = null;
+    var dump_mlir_local: ?pipeline.DumpConfig = null;
     if (config.dump_mlir) |cfg| {
         dump_mlir_local = cfg;
         dump_mlir_local.?.entry_name = dump_mlir_local.?.entry_name orelse entry_name;
-        try passes.append(allocator, dump.dump_mlir_pass_with_config(&dump_mlir_local.?));
+        try passes.append(allocator, pipeline.dump_mlir_pass_with_config(&dump_mlir_local.?));
     }
 
     const pipeline_run = pipeline.Pipeline{ .passes = passes.items };

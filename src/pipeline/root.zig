@@ -1,14 +1,14 @@
 /// Pipeline Module
 ///
 /// Pass-based pipeline infrastructure for compilation.
-/// The pipeline operates on PR and MLIR only — compilation to executable
-/// artifacts is a backend responsibility.
+/// The pipeline operates on PR and MLIR only - compilation to executable
+///  artifacts is a backend responsibility.
 ///
 /// Key types:
 /// - Artifact: Tagged union representing IR at various stages (PR, MLIR)
 /// - PassContext: Shared state threaded through passes
 /// - Pass: Pass descriptor (name + input/output kinds + run)
-pub const pass = @import("pass.zig");
+const pass = @import("pass.zig");
 
 // Re-export pass types
 pub const Artifact = pass.Artifact;
@@ -20,7 +20,7 @@ pub const Pass = pass.Pass;
 pub const PassError = pass.PassError;
 pub const Pipeline = pass.Pipeline;
 
-pub const dump = @import("dump.zig");
+const dump = @import("dump.zig");
 pub const DumpConfig = dump.DumpConfig;
 pub const DumpTarget = dump.DumpTarget;
 pub const DumpSpec = dump.DumpSpec;
