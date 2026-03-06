@@ -13,12 +13,6 @@
   cudaSupport ? false,
   cudaVersion ? null,
   cudaArchitectures ? null,
-  # Copy NCCL/NVSHMEM DSOs into the runtime bundle (usually required for GPU).
-  copyNcclNvshmem ? true,
-  # Copy CUDA tools (ptxas/nvlink) into runtime/nvidia.
-  copyCudaTools ? true,
-  # Copy libdevice bitcode into runtime/nvidia/nvvm/libdevice.
-  copyLibdevice ? true,
   # XLA source (flake input).
   xlaSrc,
   depsHash,
@@ -40,22 +34,20 @@
     then throw "cudaVersion required when cudaSupport is true"
     else cudaVersion;
 
-  cudaRuntimeNames = lib.optionals cudaSupport (
-    [
-      "cudnn"
-      "cublas"
-      "cufft"
-      "cusparse"
-      "cudart"
-      "cupti"
-      "nvrtc"
-      "nvjitlink"
-    ]
-    ++ lib.optionals copyNcclNvshmem [
-      "nccl"
-      "nvshmem"
-    ]
-  );
+  # Runtime dir names for CUDA DSOs. Used only for GPU plugin RPATH computation.
+  # The actual CUDA DSOs are provided by cuda-redist.nix, not extracted from Bazel.
+  cudaRuntimeNames = lib.optionals cudaSupport [
+    "cudnn"
+    "cublas"
+    "cufft"
+    "cusparse"
+    "cudart"
+    "cupti"
+    "nvrtc"
+    "nvjitlink"
+    "nccl"
+    "nvshmem"
+  ];
 
   cudaComputeCapabilities =
     if cudaSupport && cudaArchitectures != null
@@ -330,6 +322,13 @@ in
           sed -i "s|/usr/bin/env python|${python3}/bin/python|g" "$f" || true
         done < <(grep -rl "/usr/bin/env python" "$install_base" 2>/dev/null || true)
 
+        # Re-patch shebangs in the unpacked deps with current nixpkgs tools.
+        # The deps tarball may contain stale shebangs from a previous fetch
+        # (e.g. /nix/store/<old-hash>-bash that no longer exists).
+        if [ -d "$bazelOut/external/rules_ml_toolchain" ]; then
+          patchShebangs "$bazelOut/external/rules_ml_toolchain" || true
+        fi
+
         if [ -d "$bazelOut/external/XNNPACK" ]; then
           patchShebangs "$bazelOut/external/XNNPACK" || true
           substituteInPlace "$bazelOut/external/XNNPACK/ynnpack/build_defs.bzl" \
@@ -349,7 +348,7 @@ in
 
       installPhase = ''
         set -euo pipefail
-        mkdir -p "$out/runtime/xla/pjrt/c" "$out/runtime/sys/lib"
+        mkdir -p "$out/runtime/xla/pjrt/c"
 
         for f in ${lib.concatStringsSep " " builtOutputs}; do
           if [[ ! -f "$f" ]]; then
@@ -359,208 +358,17 @@ in
           fi
         done
 
+        # Copy plugin .so files
         cpu_out="bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
         cp -v --no-preserve=mode "$cpu_out" "$out/runtime/xla/pjrt/c/"
 
         ${lib.optionalString cudaSupport ''
-          mkdir -p "$out/runtime/xla/pjrt/c"
           gpu_out="bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
           cp -v --no-preserve=mode "$gpu_out" "$out/runtime/xla/pjrt/c/"
         ''}
 
-        # Runtime sys libs (self-contained)
-        cp -v ${stdenv.cc.cc.lib}/lib/libstdc++.so.6 "$out/runtime/sys/lib/"
-        cp -v ${stdenv.cc.cc.lib}/lib/libgcc_s.so.1 "$out/runtime/sys/lib/"
-        cp -v ${zlib}/lib/libz.so.1 "$out/runtime/sys/lib/"
-
-        ${lib.optionalString cudaSupport ''
-          # Prefer Bazel runfiles (_solib) for hermetic CUDA/NVSHMEM DSOs.
-          log_copy() {
-            echo "[cuda-copy] $*"
-          }
-
-          is_valid_tool() {
-            local p="$1"
-            [ -f "$p" ] || return 1
-            [ -s "$p" ] || return 1
-            [ -x "$p" ] || return 1
-            file -L "$p" | grep -q 'ELF ' || return 1
-          }
-
-          copy_one() {
-            local src="$1"
-            local dest_dir="$2"
-            local base=""
-            base="$(basename "$src")"
-            mkdir -p "$dest_dir"
-            if [ -e "$dest_dir/$base" ]; then
-              log_copy "overwrite $dest_dir/$base"
-            fi
-            rm -f "$dest_dir/$base"
-            if command -v readlink >/dev/null 2>&1; then
-              local resolved=""
-              resolved="$(readlink -f "$src" 2>/dev/null || true)"
-              if [ -n "$resolved" ] && [ -f "$resolved" ]; then
-                log_copy "copy resolved $src -> $resolved -> $dest_dir/$base"
-                cp -a "$resolved" "$dest_dir/$base"
-                return 0
-              fi
-            fi
-            log_copy "copy (no resolve) $src -> $dest_dir/$base"
-            cp -aL "$src" "$dest_dir/$base"
-          }
-
-          copy_bazel_libs_from() {
-            local src_dir="$1"
-            local dest_dir="$2"
-            local pattern="$3"
-            if [ -d "$src_dir" ]; then
-              log_copy "scan $src_dir (pattern=$pattern)"
-              mkdir -p "$dest_dir"
-              for f in "$src_dir"/$pattern; do
-                [ -e "$f" ] || continue
-                copy_one "$f" "$dest_dir"
-              done
-              chmod -R u+w "$dest_dir"
-            fi
-          }
-
-          solib_candidates=(
-            "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/_solib_x86_64"
-            "bazel-bin/_solib_x86_64"
-            "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/_solib_x86_64"
-            "bazel-out/k8-opt/bin/_solib_x86_64"
-          )
-
-          log_copy "solib candidates: ''${solib_candidates[*]}"
-          for d in "''${solib_candidates[@]}"; do
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cublas/lib" "libcublas*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cublas/lib" "libcublasLt*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cudnn/lib" "libcudnn*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cufft/lib" "libcufft*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cupti/lib" "libcupti*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/cusparse/lib" "libcusparse*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/nvjitlink/lib" "libnvJitLink*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/nvrtc/lib" "libnvrtc*.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/nvshmem/lib" "libnvshmem_host.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/nvshmem/lib" "nvshmem_bootstrap_uid.so*"
-            copy_bazel_libs_from "$d" "$out/runtime/nvidia/nvshmem/lib" "nvshmem_transport_ibrc.so*"
-          done
-
-          # Fallback: find missing hermetic DSOs anywhere under bazel-bin/bazel-out.
-          copy_find() {
-            local pattern="$1"
-            local dest="$2"
-            log_copy "fallback find pattern=$pattern"
-            mkdir -p "$dest"
-            local find_roots=()
-            if [ -d "bazel-bin" ]; then
-              find_roots+=("bazel-bin")
-            fi
-            if [ -d "bazel-out" ]; then
-              find_roots+=("bazel-out")
-            fi
-            if [ "''${#find_roots[@]}" -eq 0 ]; then
-              log_copy "fallback find skipped: no bazel roots found"
-              return 0
-            fi
-            while IFS= read -r -d $'\0' f; do
-              copy_one "$f" "$dest"
-            done < <(find -L "''${find_roots[@]}" -type f -name "$pattern" -print0 2>/dev/null || true)
-            chmod -R u+w "$dest"
-          }
-
-          copy_find "libcublas*.so*" "$out/runtime/nvidia/cublas/lib"
-          copy_find "libcublasLt*.so*" "$out/runtime/nvidia/cublas/lib"
-          copy_find "libcudnn*.so*" "$out/runtime/nvidia/cudnn/lib"
-          copy_find "libcufft*.so*" "$out/runtime/nvidia/cufft/lib"
-          copy_find "libcupti*.so*" "$out/runtime/nvidia/cupti/lib"
-          copy_find "libcusparse*.so*" "$out/runtime/nvidia/cusparse/lib"
-          copy_find "libcudart*.so*" "$out/runtime/nvidia/cudart/lib"
-          copy_find "libnvrtc*.so*" "$out/runtime/nvidia/nvrtc/lib"
-          copy_find "libnvJitLink*.so*" "$out/runtime/nvidia/nvjitlink/lib"
-          ${lib.optionalString copyNcclNvshmem ''
-            copy_find "libnccl*.so*" "$out/runtime/nvidia/nccl/lib"
-            copy_find "libnvshmem_host.so.3*" "$out/runtime/nvidia/nvshmem/lib"
-            copy_find "nvshmem_bootstrap_uid.so.3*" "$out/runtime/nvidia/nvshmem/lib"
-            copy_find "nvshmem_transport_ibrc.so.3*" "$out/runtime/nvidia/nvshmem/lib"
-          ''}
-          copy_find "libnvrtc-builtins.so.*" "$out/runtime/nvidia/nvrtc/lib"
-
-          ${lib.optionalString copyCudaTools ''
-            copy_tool_safe() {
-              local name="$1"
-              local dest="$2"
-
-              mkdir -p "$dest"
-
-              tool_candidates=(
-                "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
-                "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
-                "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvcc/bin"
-                "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvcc/bin"
-              )
-
-              for d in "''${tool_candidates[@]}"; do
-                candidate="$d/$name"
-                if is_valid_tool "$candidate"; then
-                  copy_one "$candidate" "$dest"
-                  return 0
-                fi
-              done
-
-              echo "ERROR: no valid $name found (ELF + executable + non-empty)" >&2
-              return 1
-            }
-
-            copy_tool_safe "ptxas"  "$out/runtime/nvidia/cuda_nvcc/bin"
-            copy_tool_safe "nvlink" "$out/runtime/nvidia/cuda_nvcc/bin"
-
-            # Mirror into <cuda_data_dir>/bin (XLA lookup path)
-            copy_one "$out/runtime/nvidia/cuda_nvcc/bin/ptxas"  "$out/runtime/nvidia/bin"
-            copy_one "$out/runtime/nvidia/cuda_nvcc/bin/nvlink" "$out/runtime/nvidia/bin"
-          ''}
-
-          ${lib.optionalString copyLibdevice ''
-            # libdevice bitcode for NVVM (fixes libdevice lookup warning)
-            nvvm_candidates=(
-              "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvvm/nvvm/libdevice"
-              "bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvvm/nvvm/libdevice"
-              "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/cuda_nvvm/nvvm/libdevice"
-              "bazel-out/k8-opt/bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so.runfiles/xla/external/cuda_nvvm/nvvm/libdevice"
-            )
-            for d in "''${nvvm_candidates[@]}"; do
-              if [ -d "$d" ]; then
-                log_copy "copy libdevice from $d"
-                mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
-                cp -aL "$d/." "$out/runtime/nvidia/nvvm/libdevice/"
-                chmod -R u+w "$out/runtime/nvidia/nvvm/libdevice"
-              fi
-            done
-            if [ ! -d "$out/runtime/nvidia/nvvm/libdevice" ]; then
-              log_copy "fallback find libdevice"
-              mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
-              while IFS= read -r -d $'\0' f; do
-                copy_one "$f" "$out/runtime/nvidia/nvvm/libdevice"
-              done < <(find -L bazel-bin bazel-out -type f -path "*/nvvm/libdevice/*" -print0 2>/dev/null || true)
-              chmod -R u+w "$out/runtime/nvidia/nvvm/libdevice"
-            fi
-          ''}
-
-          # Ensure NVIDIA libs find the bundled sys libs AND sibling libs in same directory
-          # ($ORIGIN needed for libnvrtc -> libnvrtc-builtins internal dlopen)
-          for so in "$out/runtime/nvidia/"*/lib/*.so*; do
-            [ -f "$so" ] || continue
-            patchelf --set-rpath '$ORIGIN:$ORIGIN/../../../sys/lib' "$so" || true
-          done
-
-          if ! find "$out/runtime/nvidia" -type f -name "*.so*" -print -quit | grep -q .; then
-            echo "ERROR: no CUDA DSOs copied into runtime/nvidia; check Bazel runfiles paths." >&2
-            exit 1
-          fi
-        ''}
-
-        # Patch plugin rpaths to the bundled runtime lib dirs
+        # Patch plugin rpaths to the bundled runtime lib dirs.
+        # CUDA DSOs and sys libs are provided by cuda-redist.nix (merged via symlinkJoin).
         chmod u+w "$out/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
         patchelf --set-rpath '$ORIGIN/../../../sys/lib' "$out/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
         ${lib.optionalString cudaSupport ''
@@ -583,10 +391,10 @@ in
       '';
 
       meta = {
-        description = "XLA PJRT C API runtime plugins";
+        description = "XLA PJRT C API runtime plugins (CPU + GPU .so only)";
         longDescription = ''
-          Bundles XLA PJRT CPU/GPU plugins plus a self-contained CUDA runtime
-          tree. CUDA/NVSHMEM DSOs are copied from Bazel runfiles (_solib).
+          Builds XLA PJRT CPU/GPU plugin .so files via Bazel. CUDA runtime DSOs
+          are provided separately by cuda-redist.nix and merged at the SDK level.
         '';
         platforms = lib.platforms.linux;
       };

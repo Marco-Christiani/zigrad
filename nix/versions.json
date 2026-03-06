@@ -1,0 +1,231 @@
+{
+  "cuda": {
+    "12.8.1": {
+      "components": {
+        "cuda_cudart": {
+          "hash_sri": "sha256-jVZrX+dFxGhC3BaUXPNmhiJ1Nt7NIwLDcr6G2jf6ymg=",
+          "kind": "tarball",
+          "runtime_dir": "cudart",
+          "sha256_hex": "8d566b5fe745c46842dc16945cf36686227536decd2302c372be86da37faca68",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz",
+          "version": "12.8.90"
+        },
+        "cuda_cupti": {
+          "hash_sri": "sha256-e/XbhsuC8mpqPLni+k3CoTHSWIX1n9vGR5OJKZJEBds=",
+          "kind": "tarball",
+          "runtime_dir": "cupti",
+          "sha256_hex": "7bf5db86cb82f26a6a3cb9e2fa4dc2a131d25885f59fdbc647938929924405db",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cupti/linux-x86_64/cuda_cupti-linux-x86_64-12.8.90-archive.tar.xz",
+          "version": "12.8.90"
+        },
+        "cuda_nvcc": {
+          "hash_sri": "sha256-mWGzSEtrcTFAY3CaT5UpZU+WeCrTnnK/HgDwcNuCENM=",
+          "kind": "tarball",
+          "runtime_dir": "cuda_nvcc",
+          "sha256_hex": "9961b3484b6b71314063709a4f9529654f96782ad39e72bf1e00f070db8210d3",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.8.93-archive.tar.xz",
+          "version": "12.8.93"
+        },
+        "cuda_nvrtc": {
+          "hash_sri": "sha256-mS9eTZXLSZ9B5EIkXvqHfb1gxxFFGv5oCiZwDWHrOEM=",
+          "kind": "tarball",
+          "runtime_dir": "nvrtc",
+          "sha256_hex": "992f5e4d95cb499f41e442245efa877dbd60c711451afe680a26700d61eb3843",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/linux-x86_64/cuda_nvrtc-linux-x86_64-12.8.93-archive.tar.xz",
+          "version": "12.8.93"
+        },
+        "cudnn": {
+          "hash_sri": "sha256-MhubM7sSh0BNk9VnLTUvFv6rxLIgrGrguG5LJ/JX3PQ=",
+          "kind": "tarball",
+          "runtime_dir": "cudnn",
+          "sha256_hex": "321b9b33bb1287404d93d5672d352f16feabc4b220ac6ae0b86e4b27f257dcf4",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz",
+          "version": "9.8.0.87"
+        },
+        "libcublas": {
+          "hash_sri": "sha256-IXGJV8LPAAus1p02yVcIojGRmeOeBW+LTw9o47nzI7s=",
+          "kind": "tarball",
+          "runtime_dir": "cublas",
+          "sha256_hex": "21718957c2cf000bacd69d36c95708a2319199e39e056f8b4f0f68e3b9f323bb",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.4.1-archive.tar.xz",
+          "version": "12.8.4.1"
+        },
+        "libcufft": {
+          "hash_sri": "sha256-Em/gj8DfB6dCDC2gWirnLqGWYP/3m/Bt4WUg0fkVy4M=",
+          "kind": "tarball",
+          "runtime_dir": "cufft",
+          "sha256_hex": "126fe08fc0df07a7420c2da05a2ae72ea19660fff79bf06de16520d1f915cb83",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/linux-x86_64/libcufft-linux-x86_64-11.3.3.83-archive.tar.xz",
+          "version": "11.3.3.83"
+        },
+        "libcusparse": {
+          "hash_sri": "sha256-qlNc61ZpBRjIklfZhbE9UF+VHku6dZHb+qF5/C//Mp4=",
+          "kind": "tarball",
+          "runtime_dir": "cusparse",
+          "sha256_hex": "aa535ceb56690518c89257d985b13d505f951e4bba7591dbfaa179fc2fff329e",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/linux-x86_64/libcusparse-linux-x86_64-12.5.8.93-archive.tar.xz",
+          "version": "12.5.8.93"
+        },
+        "libnvjitlink": {
+          "hash_sri": "sha256-KSIGZK0nLFE9MhMTOs5tZZAwPka0KhewW8K+6Q5UqIg=",
+          "kind": "tarball",
+          "runtime_dir": "nvjitlink",
+          "sha256_hex": "29220664ad272c513d3213133ace6d6590303e46b42a17b05bc2bee90e54a888",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvjitlink/linux-x86_64/libnvjitlink-linux-x86_64-12.8.93-archive.tar.xz",
+          "version": "12.8.93"
+        },
+        "libnvshmem": {
+          "hash_sri": "sha256-B+SEE5oN3d9rYrdX+eoyrWyvEorPqDyOE3pVEvDJeHU=",
+          "kind": "tarball",
+          "runtime_dir": "nvshmem",
+          "sha256_hex": "07e484139a0ddddf6b62b757f9ea32ad6caf128acfa83c8e137a5512f0c97875",
+          "url": "https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-3.2.5_cuda12-archive.tar.xz",
+          "version": "3.2.5"
+        },
+        "nccl": {
+          "hash_sri": "sha256-6l7T4FPHNfFoCb7nER3qxirDWxASiowQKWCgRizhbL4=",
+          "kind": "wheel",
+          "runtime_dir": "nccl",
+          "sha256_hex": "ea5ed3e053c735f16809bee7111deac62ac35b10128a8c102960a0462ce16cbe",
+          "url": "https://files.pythonhosted.org/packages/48/fb/ec4ac065d9b0d56f72eaf1d9b0df601e33da28197b32ca351dc05b342611/nvidia_nccl_cu12-2.26.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "version": "2.26.5"
+        }
+      },
+      "cudnn_version": "9.8.0",
+      "nccl_version": "2.26.5",
+      "nvshmem_version": "3.2.5"
+    },
+    "12.9.1": {
+      "components": {
+        "cuda_cudart": {
+          "hash_sri": "sha256-H2rULU9TCyS/o1iUzPa3IJ0jVPWRAf1i7EphkqGEzpk=",
+          "kind": "tarball",
+          "runtime_dir": "cudart",
+          "sha256_hex": "1f6ad42d4f530b24bfa35894ccf6b7209d2354f59101fd62ec4a6192a184ce99",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.9.79-archive.tar.xz",
+          "version": "12.9.79"
+        },
+        "cuda_cupti": {
+          "hash_sri": "sha256-93miTo8Bd7TORcvxGMtHATn7UQeFjflmidCgqgHw+6E=",
+          "kind": "tarball",
+          "runtime_dir": "cupti",
+          "sha256_hex": "f779a24e8f0177b4ce45cbf118cb470139fb5107858df96689d0a0aa01f0fba1",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cupti/linux-x86_64/cuda_cupti-linux-x86_64-12.9.79-archive.tar.xz",
+          "version": "12.9.79"
+        },
+        "cuda_nvcc": {
+          "hash_sri": "sha256-ehpbZS5e+FyCtyHRBnL8mi26q0TpvTxlppUXv1OZjDU=",
+          "kind": "tarball",
+          "runtime_dir": "cuda_nvcc",
+          "sha256_hex": "7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.9.86-archive.tar.xz",
+          "version": "12.9.86"
+        },
+        "cuda_nvrtc": {
+          "hash_sri": "sha256-gpE2WDY4ktvA8mOLBwR2I0R24G4IT+1g24Yct+Fhpq8=",
+          "kind": "tarball",
+          "runtime_dir": "nvrtc",
+          "sha256_hex": "82913658363892dbc0f2638b070476234476e06e084fed60db861cb7e161a6af",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/linux-x86_64/cuda_nvrtc-linux-x86_64-12.9.86-archive.tar.xz",
+          "version": "12.9.86"
+        },
+        "cudnn": {
+          "hash_sri": "sha256-MhubM7sSh0BNk9VnLTUvFv6rxLIgrGrguG5LJ/JX3PQ=",
+          "kind": "tarball",
+          "runtime_dir": "cudnn",
+          "sha256_hex": "321b9b33bb1287404d93d5672d352f16feabc4b220ac6ae0b86e4b27f257dcf4",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz",
+          "version": "9.8.0.87"
+        },
+        "libcublas": {
+          "hash_sri": "sha256-VGrdxKnYK48jqpupJ0trwEKaYwCKMcdZiErCSIB5YFc=",
+          "kind": "tarball",
+          "runtime_dir": "cublas",
+          "sha256_hex": "546addc4a9d82b8f23aa9ba9274b6bc0429a63008a31c759884ac24880796057",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux-x86_64/libcublas-linux-x86_64-12.9.1.4-archive.tar.xz",
+          "version": "12.9.1.4"
+        },
+        "libcufft": {
+          "hash_sri": "sha256-sOZa9ZsML2yO2fVVKps3WJCFW3kmriwEBNFdzyVlvaQ=",
+          "kind": "tarball",
+          "runtime_dir": "cufft",
+          "sha256_hex": "b0e65af59b0c2f6c8ed9f5552a9b375890855b7926ae2c0404d15dcf2565bda4",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/linux-x86_64/libcufft-linux-x86_64-11.4.1.4-archive.tar.xz",
+          "version": "11.4.1.4"
+        },
+        "libcusparse": {
+          "hash_sri": "sha256-qDQV3NPhGDr+Nj1HQPnwMJz+VgxsCAFsKmFGgwT0uEg=",
+          "kind": "tarball",
+          "runtime_dir": "cusparse",
+          "sha256_hex": "a83415dcd3e1183afe363d4740f9f0309cfe560c6c08016c2a61468304f4b848",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/linux-x86_64/libcusparse-linux-x86_64-12.5.10.65-archive.tar.xz",
+          "version": "12.5.10.65"
+        },
+        "libnvjitlink": {
+          "hash_sri": "sha256-OSysMUS1K6FJALxyWepkBa5tqIqMcE6rm7vMm6SCSwc=",
+          "kind": "tarball",
+          "runtime_dir": "nvjitlink",
+          "sha256_hex": "392cac3144b52ba14900bc7259ea6405ae6da88a8c704eab9bbbcc9ba4824b07",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvjitlink/linux-x86_64/libnvjitlink-linux-x86_64-12.9.86-archive.tar.xz",
+          "version": "12.9.86"
+        },
+        "libnvshmem": {
+          "hash_sri": "sha256-B+SEE5oN3d9rYrdX+eoyrWyvEorPqDyOE3pVEvDJeHU=",
+          "kind": "tarball",
+          "runtime_dir": "nvshmem",
+          "sha256_hex": "07e484139a0ddddf6b62b757f9ea32ad6caf128acfa83c8e137a5512f0c97875",
+          "url": "https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-3.2.5_cuda12-archive.tar.xz",
+          "version": "3.2.5"
+        },
+        "nccl": {
+          "hash_sri": "sha256-6l7T4FPHNfFoCb7nER3qxirDWxASiowQKWCgRizhbL4=",
+          "kind": "wheel",
+          "runtime_dir": "nccl",
+          "sha256_hex": "ea5ed3e053c735f16809bee7111deac62ac35b10128a8c102960a0462ce16cbe",
+          "url": "https://files.pythonhosted.org/packages/48/fb/ec4ac065d9b0d56f72eaf1d9b0df601e33da28197b32ca351dc05b342611/nvidia_nccl_cu12-2.26.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "version": "2.26.5"
+        }
+      },
+      "cudnn_version": "9.8.0",
+      "nccl_version": "2.26.5",
+      "nvshmem_version": "3.2.5"
+    }
+  },
+  "generated_at_utc": "2026-03-06T07:50:41.424733+00:00",
+  "iree": {
+    "commit": "776210bd36896f8ca14288637592a9d5cebfcea1",
+    "llvm": {
+      "commit": "c95bd0bba5be9710292ce3a29832b67a0e33f887",
+      "url": "github:iree-org/llvm-project/c95bd0bba5be9710292ce3a29832b67a0e33f887"
+    },
+    "stablehlo": {
+      "commit": "6fabd27b15885179a3b6a601ea1e4171f2ed2c91",
+      "url": "github:iree-org/stablehlo/6fabd27b15885179a3b6a601ea1e4171f2ed2c91"
+    }
+  },
+  "xla": {
+    "commit": "913ae2eaa3cb88971003592a90959685a78c9e30",
+    "cuda_defaults": {
+      "cuda": "12.9.1",
+      "cudnn": "9.8.0",
+      "nvshmem": "3.2.5"
+    },
+    "llvm": {
+      "commit": "8f264586d7521b0e305ca7bb78825aa3382ffef7",
+      "hash_sri": "sha256-V4TEr5TKuma8jEYOB+Ii91Hk9MnbnEWzpo/1U3nPWH0=",
+      "sha256_hex": "5784c4af94caba66bc8c460e07e222f751e4f4c9db9c45b3a68ff55379cf587d",
+      "urls": [
+        "https://storage.googleapis.com/mirror.tensorflow.org/github.com/llvm/llvm-project/archive/8f264586d7521b0e305ca7bb78825aa3382ffef7.tar.gz",
+        "https://github.com/llvm/llvm-project/archive/8f264586d7521b0e305ca7bb78825aa3382ffef7.tar.gz"
+      ]
+    },
+    "stablehlo": {
+      "commit": "1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f",
+      "hash_sri": "sha256-gYyVGtC6CsbCbT7QH+2Pmg5cqT9a7TUAX3Xw+vEb37A=",
+      "sha256_hex": "818c951ad0ba0ac6c26d3ed01fed8f9a0e5ca93f5aed35005f75f0faf11bdfb0",
+      "urls": [
+        "https://github.com/openxla/stablehlo/archive/1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f.zip"
+      ]
+    }
+  }
+}

@@ -50,7 +50,7 @@ in {
     xlaPjrtDepsHashes = {
       cpu-onednn-native = "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=";
       # cuda-onednn-thunk-native = "sha256-EFE6NyvyOoereFfwwExFu03B6IjfjrBWD5ri6S3F/9Y=";
-      cuda-onednn-thunk-native = "sha256-ECduu/VXD+wsTKex9lfo+B6zXZdvw1nMWWEE5D/FtY8=";
+      cuda-onednn-thunk-native = "sha256-ivbrLtStbE1IW9hTiqyL0KoBdK9IZRPXcDmokH01eCE=";
     };
 
     # Compile-time CUDA headers used by Zig @cImport("nvrtc.h").
@@ -102,6 +102,7 @@ in {
       name = "zigrad-external-sdk-runtime-full";
       paths = [
         xlaPjrtPluginsCuda
+        cudaRedist
         tvm
       ];
     };
@@ -110,6 +111,7 @@ in {
       name = "zigrad-external-sdk-runtime-no-tvm";
       paths = [
         xlaPjrtPluginsCuda
+        cudaRedist
       ];
     };
 
@@ -143,6 +145,7 @@ in {
       name = "zigrad-external-sdk-runtime-full-devel";
       paths = [
         xlaPjrtPluginsCudaDevel
+        cudaRedist
         tvmDevel
       ];
     };
@@ -151,6 +154,7 @@ in {
       name = "zigrad-external-sdk-runtime-no-tvm-devel";
       paths = [
         xlaPjrtPluginsCudaDevel
+        cudaRedist
       ];
     };
 
@@ -226,12 +230,15 @@ in {
       inherit xlaSrc;
       inherit (cudaCfg) cudaArchitectures cudaVersion;
       cudaSupport = true;
-      copyNcclNvshmem = true;
-      copyCudaTools = true;
-      copyLibdevice = true;
       cpuMathLibrary = "onednn-thunk";
       cpuNativeTuning = true;
       depsHash = xlaPjrtDepsHashes.cuda-onednn-thunk-native;
+    };
+
+    # CUDA redistributable bundle (pre-built NVIDIA DSOs from CDN).
+    # Decoupled from the Bazel build for faster iteration and independent caching.
+    cudaRedist = pkgs.callPackage ../cuda-redist.nix {
+      inherit (cudaCfg) cudaVersion;
     };
 
     # Devel aliases currently use the same Bazel artifacts.
@@ -332,6 +339,9 @@ in {
         tvm-dev = tvm.dev;
         tvm-cpu = tvmCpu;
         tvm-devel = tvmDevel;
+
+        # CUDA redistributable bundle (pre-built NVIDIA DSOs)
+        cuda-redist = cudaRedist;
 
         # LLVM 22 built from XLA-pinned sources
         llvm = llvm;
