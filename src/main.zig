@@ -38,7 +38,7 @@ pub fn main() !void {
     if (cmd.matchSubCmd("tvm-zxpr")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.TvmZxprOpts, .{});
         const sweep = opts.sweep_palettes;
-        const palette = if (opts.palette) |p| std.meta.stringToEnum(zg.pr.zxpr.Palette, p) else null;
+        const palette = if (opts.palette) |p| std.meta.stringToEnum(zg.pr.zxpr.style.Palette, p) else null;
         return demos.print_tvm_kernelize_pr(gpa, sweep, palette);
     }
     if (cmd.matchSubCmd("tvm-attention-zxpr")) |_| {

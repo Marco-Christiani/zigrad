@@ -2,29 +2,11 @@ const std = @import("std");
 
 const pass = @import("pass.zig");
 const pr = @import("../pr/pr.zig");
-const json = @import("../pr/json.zig");
-const zxpr = @import("../pr/zxpr.zig");
+const pr_dump = @import("../pr/dump.zig");
 
-pub const DumpTarget = enum {
-    stdout,
-    file,
-};
-
-pub const DumpFormat = enum {
-    zxpr,
-    json,
-};
-
-pub const DumpConfig = struct {
-    target: DumpTarget = .stdout,
-    path: ?[]const u8 = null,
-    format: DumpFormat = .zxpr,
-
-    /// Optional label identifying which PR function was selected as entry.
-    /// Printed as "entry: <name>" header in dump output for user reference.
-    /// Does not affect the actual function names in the dumped content.
-    entry_name: ?[]const u8 = null,
-};
+pub const DumpTarget = pr_dump.OutputTarget;
+pub const DumpSpec = pr_dump.DumpSpec;
+pub const DumpConfig = pr_dump.Config;
 
 fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     _ = ctx;
@@ -35,21 +17,16 @@ fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContex
     const program = artifact.pr;
     const task = struct {
         program: *const pr.Program,
-        entry: ?[]const u8,
-        format: DumpFormat,
+        cfg: DumpConfig,
         fn run(self: @This(), out: *std.Io.Writer) !void {
-            try emit_program(out, self.program, self.entry, self.format);
+            try pr_dump.emit_program(self.program, out, self.cfg);
         }
     }{
         .program = program,
-        .entry = cfg.entry_name,
-        .format = cfg.format,
+        .cfg = cfg.*,
     };
 
-    with_writer(cfg, task) catch |err| switch (err) {
-        error.MissingContext => return error.MissingContext,
-        else => return error.ValidationFailed,
-    };
+    with_writer(cfg, task) catch return error.ValidationFailed;
 }
 
 fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
@@ -72,10 +49,7 @@ fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         .entry = cfg.entry_name,
     };
 
-    with_writer(cfg, task) catch |err| switch (err) {
-        error.MissingContext => return error.MissingContext,
-        else => return error.ValidationFailed,
-    };
+    with_writer(cfg, task) catch return error.ValidationFailed;
 }
 
 pub fn dump_pr_pass_with_config(config: *DumpConfig) pass.Pass {
@@ -98,21 +72,6 @@ pub fn dump_mlir_pass_with_config(config: *DumpConfig) pass.Pass {
     };
 }
 
-fn emit_program(out: *std.Io.Writer, program: *const pr.Program, entry: ?[]const u8, format: DumpFormat) !void {
-    switch (format) {
-        .zxpr => {
-            if (entry) |name| {
-                try out.print("entry: {s}\n", .{name});
-            }
-            for (program.functions, 0..) |func, i| {
-                if (i > 0) try out.writeAll("\n");
-                try zxpr.emit(func, out, .auto_stdout, .{});
-            }
-        },
-        .json => try json.emit_program(program, out),
-    }
-}
-
 fn emit_mlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
     if (entry) |name| {
         try out.print("entry: {s}\n", .{name});
@@ -125,25 +84,26 @@ fn emit_mlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
 fn with_writer(config: *const DumpConfig, task: anytype) !void {
     var buffer: [8192]u8 = undefined;
 
-    if (config.target == .stdout) {
-        var stdout_writer = std.fs.File.stdout().writer(&buffer);
-        const out = &stdout_writer.interface;
-        try task.run(out);
-        try out.flush();
-        return;
+    switch (config.target) {
+        .stdout => {
+            var stdout_writer = std.fs.File.stdout().writer(&buffer);
+            const out = &stdout_writer.interface;
+            try task.run(out);
+            try out.flush();
+        },
+        .file => |path| {
+            var file = if (std.fs.path.isAbsolute(path))
+                try std.fs.createFileAbsolute(path, .{ .truncate = true })
+            else
+                try std.fs.cwd().createFile(path, .{ .truncate = true });
+            defer file.close();
+
+            var file_writer = file.writer(&buffer);
+            const out = &file_writer.interface;
+            try task.run(out);
+            try out.flush();
+        },
     }
-
-    const path = config.path orelse return error.MissingContext;
-    var file = if (std.fs.path.isAbsolute(path))
-        try std.fs.createFileAbsolute(path, .{ .truncate = true })
-    else
-        try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-
-    var file_writer = file.writer(&buffer);
-    const out = &file_writer.interface;
-    try task.run(out);
-    try out.flush();
 }
 
 test "emit_program includes entry header and zxpr output" {
@@ -152,7 +112,7 @@ test "emit_program includes entry header and zxpr output" {
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
 
-    var b = try pr.FunctionBuilder.init(&program, "main");
+    var b = try pr.FunctionBuilder.init(&program, "main_fn");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{1});
     const func = try b.finish(&.{x});
@@ -161,12 +121,16 @@ test "emit_program includes entry header and zxpr output" {
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
 
-    try emit_program(&writer_state.writer, &program, "main", .zxpr);
+    try pr_dump.emit_program(&program, &writer_state.writer, .{
+        .target = .stdout,
+        .entry_name = "test_main",
+        .spec = .{ .zxpr = .{ .mode = .plain } },
+    });
     const output = try writer_state.toOwnedSlice();
     defer testing.allocator.free(output);
 
-    try testing.expect(std.mem.indexOf(u8, output, "entry: main") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "zxpr main") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "entry: test_main") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "zxpr main_fn") != null);
 }
 
 test "emit_program json format" {
@@ -184,7 +148,11 @@ test "emit_program json format" {
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
 
-    try emit_program(&writer_state.writer, &program, "main", .json);
+    try pr_dump.emit_program(&program, &writer_state.writer, .{
+        .target = .stdout,
+        .entry_name = "main",
+        .spec = .json,
+    });
     const output = try writer_state.toOwnedSlice();
     defer testing.allocator.free(output);
 

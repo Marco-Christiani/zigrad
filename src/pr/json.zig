@@ -12,7 +12,7 @@
 const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
-const zxpr = @import("zxpr.zig");
+const zxpr = @import("zxpr/root.zig");
 
 const Writer = std.Io.Writer;
 const var_name = zxpr.var_name;

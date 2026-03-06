@@ -828,9 +828,9 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
     defer stdout.flush() catch {};
 
     try stdout.writeAll("=== Forward ===\n");
-    try zg.pr.zxpr.emit(fwd, stdout, .auto_stdout, .{});
+    try zg.pr.zxpr.emit(fwd, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{}));
     try stdout.writeAll("\n=== VJP ===\n");
-    try zg.pr.zxpr.emit(vjp_func, stdout, .auto_stdout, .{});
+    try zg.pr.zxpr.emit(vjp_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{}));
 }
 
 /// Enumerate TVM FFI global functions.
@@ -869,7 +869,7 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
     }
 }
 
-pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.Palette) !void {
+pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.style.Palette) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -903,15 +903,15 @@ pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     defer stdout.flush() catch {};
 
     if (sweep_palettes) {
-        const palettes = [_]zg.pr.zxpr.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
+        const palettes = [_]zg.pr.zxpr.style.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
         for (palettes) |pal| {
             try stdout.print("=== Kernelize(TVM subgraph) [{s}] ===\n", .{@tagName(pal)});
-            try zg.pr.zxpr.emit(func, stdout, .auto_stdout, .{ .palette = pal });
+            try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal }));
             try stdout.writeAll("\n");
         }
     } else {
         try stdout.writeAll("=== Kernelize(TVM subgraph) ===\n");
-        try zg.pr.zxpr.emit(func, stdout, .auto_stdout, .{ .palette = palette });
+        try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = palette }));
     }
 }
 
@@ -1058,7 +1058,7 @@ fn fill_targets(
 ///
 /// Builds simplified attention compute: Q @ K^T -> scale -> softmax -> @ V
 /// with region annotations to visualize what would be lowered.
-pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.Palette) !void {
+pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.style.Palette) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -1125,13 +1125,13 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     defer stdout.flush() catch @panic("Flush failed");
 
     if (sweep_palettes) {
-        const palettes = [_]zg.pr.zxpr.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
+        const palettes = [_]zg.pr.zxpr.style.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
         for (palettes) |pal| {
             try stdout.print("\n==== Palette: {s} ====\n", .{@tagName(pal)});
-            try zg.pr.zxpr.emit(func, stdout, .auto_stdout, .{ .palette = pal });
+            try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal }));
         }
     } else {
         const pal = palette orelse .default;
-        try zg.pr.zxpr.emit(func, stdout, .auto_stdout, .{ .palette = pal });
+        try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal }));
     }
 }

@@ -20,19 +20,11 @@
 ///!   in c
 ///! }
 const std = @import("std");
-const pr = @import("pr.zig");
-const ops = @import("ops/ops.zig");
-const zxpr_style = @import("zxpr_style.zig");
+const pr = @import("../pr.zig");
+const ops = @import("../ops/ops.zig");
+pub const style = @import("style.zig");
 
 const Writer = std.Io.Writer;
-
-pub const Symbols = zxpr_style.Symbols;
-pub const FormatConfig = zxpr_style.Config;
-pub const FormatMode = zxpr_style.ConfigMode;
-pub const FormatOpts = zxpr_style.ConfigOpts;
-pub const format_config = zxpr_style.config;
-pub const ShapeFormat = zxpr_style.ShapeFormat;
-pub const Palette = zxpr_style.Palette;
 
 const max_region_stack = 8;
 
@@ -46,14 +38,14 @@ pub const Emitter = struct {
     writer: *Writer,
     func: pr.Function,
     indent: []const u8,
-    styler: zxpr_style.Styler,
+    styler: style.Styler,
 
-    pub fn init(writer: *Writer, func: pr.Function, cfg: FormatConfig) Self {
+    pub fn init(writer: *Writer, func: pr.Function, cfg: style.Config) Self {
         return .{
             .writer = writer,
             .func = func,
             .indent = "  ",
-            .styler = zxpr_style.Styler.init(writer, cfg),
+            .styler = style.Styler.init(writer, cfg),
         };
     }
 
@@ -339,27 +331,26 @@ pub fn var_name(id: pr.VarId) []const u8 {
 // ============================================================================
 
 /// Emit ZXPR representation of a function.
-pub fn emit(func: pr.Function, writer: *Writer, mode: FormatMode, opts: FormatOpts) !void {
-    const cfg = format_config(mode, opts);
+pub fn emit(func: pr.Function, writer: *Writer, cfg: style.Config) !void {
     var emitter = Emitter.init(writer, func, cfg);
     try emitter.emit();
 }
 
 /// Emit a single param declaration: `a: 2x3<f32>`
 pub fn emit_param_line(func: pr.Function, id: pr.VarId, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func, format_config(.plain, .{}));
+    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
     try emitter.emit_var_with_type(id);
 }
 
 /// Emit a single equation binding: `c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp`
 pub fn emit_eqn_line(func: pr.Function, eqn: pr.Eqn, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func, format_config(.plain, .{}));
+    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
     try emitter.emit_binding(eqn);
 }
 
 /// Emit a region block: header + equations + footer.
 pub fn emit_region_block(func: pr.Function, region: pr.Region, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func, format_config(.plain, .{}));
+    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
     try emitter.emit_region_start(0, region);
     const eqn_end = region.eqn_start + region.eqn_len;
     var eqn_i: u32 = region.eqn_start;
@@ -389,7 +380,7 @@ test "zxpr format" {
 
     var buf: [512]u8 = undefined;
     var w: Writer = .fixed(&buf);
-    try emit(func, &w, .plain, .{});
+    try emit(func, &w, style.config(.plain, .{}));
 
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "zxpr main {") != null);
@@ -424,7 +415,7 @@ test "zxpr with transpose shows permutation" {
 
     var buf: [256]u8 = undefined;
     var w: Writer = .fixed(&buf);
-    try emit(func, &w, .plain, .{});
+    try emit(func, &w, style.config(.plain, .{}));
 
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "transpose[perm=[1, 0]]") != null);
@@ -450,7 +441,7 @@ test "zxpr kernelize region annotations" {
 
     var buf: [512]u8 = undefined;
     var w: Writer = .fixed(&buf);
-    try emit(func, &w, .plain, .{});
+    try emit(func, &w, style.config(.plain, .{}));
 
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[kernelize=tvm]") != null);

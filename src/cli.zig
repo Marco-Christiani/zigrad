@@ -95,10 +95,10 @@ pub const setup_cmd: CommandT = .{
         .{
             .name = "dump_pr",
             .long_name = "dump-pr",
-            .description = "Dump PR: no value=zxpr to stdout, 'json'=JSON to stdout, PATH=write to file (.json extension selects JSON format)",
+            .description = "Dump PR: no value='auto' zxpr to stdout, 'plain' zxpr, 'json', or PATH ('.json' selects JSON)",
             .val = ValueT.ofType([]const u8, .{
                 .name = "dump_pr_val",
-                .description = "Format ('json') or path to write PR output",
+                .description = "Format ('auto'|'plain'|'json') or path to write PR output",
                 .default_val = "",
             }),
         },
@@ -358,7 +358,7 @@ pub fn get_global_opts(cmd: *const CommandT, allocator: std.mem.Allocator) !Glob
     if (opts.get("dump_mlir")) |opt| {
         if (opt.val.isSet()) {
             const val = try opt.val.getAs([]const u8);
-            result.dump_mlir = if (val.len > 0) .{ .target = .file, .path = val } else .{ .target = .stdout };
+            result.dump_mlir = if (val.len > 0) .{ .target = .{ .file = val } } else .{ .target = .stdout };
         }
     }
 
@@ -379,13 +379,17 @@ pub fn get_global_opts(cmd: *const CommandT, allocator: std.mem.Allocator) !Glob
 
 /// Parse `--dump-pr` value into a DumpConfig.
 ///
-/// - empty string -> zxpr to stdout
+/// - empty string -> auto zxpr to stdout
+/// - "auto" -> auto zxpr to stdout
+/// - "plain" -> plain zxpr to stdout
 /// - "json" -> json to stdout
 /// - path ending in ".json" -> json to file
 /// - any other path -> zxpr to file
 fn parse_dump_pr_value(val: []const u8) zg.pipeline.DumpConfig {
-    if (val.len == 0) return .{ .target = .stdout, .format = .zxpr };
-    if (std.mem.eql(u8, val, "json")) return .{ .target = .stdout, .format = .json };
-    const format: zg.pipeline.DumpFormat = if (std.mem.endsWith(u8, val, ".json")) .json else .zxpr;
-    return .{ .target = .file, .path = val, .format = format };
+    if (val.len == 0) return .{ .target = .stdout, .spec = .{ .zxpr = .{ .mode = .auto } } };
+    if (std.mem.eql(u8, val, "auto")) return .{ .target = .stdout, .spec = .{ .zxpr = .{ .mode = .auto } } };
+    if (std.mem.eql(u8, val, "plain")) return .{ .target = .stdout, .spec = .{ .zxpr = .{ .mode = .plain } } };
+    if (std.mem.eql(u8, val, "json")) return .{ .target = .stdout, .spec = .json };
+    const spec: zg.pipeline.DumpSpec = if (std.mem.endsWith(u8, val, ".json")) .json else .{ .zxpr = .{ .mode = .auto } };
+    return .{ .target = .{ .file = val }, .spec = spec };
 }
