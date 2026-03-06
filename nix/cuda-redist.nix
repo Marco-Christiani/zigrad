@@ -19,14 +19,17 @@
 
   availableVersions = builtins.attrNames versionsJson.cuda;
 
-  # Find the best matching version: try exact match first, then prefix match.
+  # Find the best matching version: try exact match first, then prefix match
+  # picking the newest patch release via semantic version comparison.
   # This handles e.g. cudaVersion="12.8" matching "12.8.1" in versions.json.
   resolvedVersion = let
     exact = versionsJson.cuda.${cudaVersion} or null;
     prefixMatches = builtins.filter (v: lib.hasPrefix cudaVersion v) availableVersions;
+    # Sort descending by semantic version (lib.versionOlder does proper
+    # numeric comparison per component), then take the first (newest).
     bestPrefix =
       if builtins.length prefixMatches > 0
-      then builtins.head (builtins.sort (a: b: a < b) prefixMatches)
+      then builtins.head (builtins.sort (a: b: lib.versionOlder b a) prefixMatches)
       else null;
   in
     if exact != null
