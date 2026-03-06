@@ -1,12 +1,32 @@
-node_modules
-.nuxt
+# Nuxt dev/build outputs
 .output
+.data
+.nuxt
 .nitro
 .cache
-.dist
-.data
+dist
 
-# autodoc artifacts
+# Node dependencies
+node_modules
+
+# Logs
+logs
+*.log
+
+# Misc
+.DS_Store
+.fleet
+.idea
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# VSC
+.history
+
+# Zig-generated autodoc artifacts (synced via `task docs:web`)
 public/api/index.html
 public/api/main.js
 public/api/main.wasm
