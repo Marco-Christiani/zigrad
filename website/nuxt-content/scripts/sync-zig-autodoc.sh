@@ -10,7 +10,7 @@ fi
 src_dir="$1"
 out_dir="$(cd "$(dirname "$0")/.." && pwd)/public/api"
 
-for required in main.js main.wasm sources.tar; do
+for required in index.html main.js main.wasm sources.tar; do
   if [ ! -f "$src_dir/$required" ]; then
     echo "missing required file: $src_dir/$required"
     exit 1
@@ -18,6 +18,7 @@ for required in main.js main.wasm sources.tar; do
 done
 
 mkdir -p "$out_dir"
+cp "$src_dir/index.html" "$out_dir/index.html"
 cp "$src_dir/main.js" "$out_dir/main.js"
 cp "$src_dir/main.wasm" "$out_dir/main.wasm"
 cp "$src_dir/sources.tar" "$out_dir/sources.tar"

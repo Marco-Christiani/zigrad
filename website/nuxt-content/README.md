@@ -1,42 +1,27 @@
-# Zigrad Documentation Site
+# Zigrad Website (Nuxt UI + Nuxt Content)
 
-## Run
+Template-based docs site with Zigrad-specific routes and autodoc embedding.
+
+## Workflow
 
 ```bash
 task site:install
+task docs:web
 task site:dev
 ```
 
-## Build static site
+## Build static output
 
 ```bash
 task site:build
 ```
 
-## Routes in this spike
+## Zig autodoc integration
 
-- `/docs` and `/docs/*`: Markdown docs rendered by Nuxt Content
-- `/product`, `/demo`, `/contact`: custom Vue pages
-- `/autodoc`: embedded Zig autodoc app loading files from `public/api`
+`task docs:web` does three things:
 
-## Sync Zig autodoc bundle
+1. Runs `zig build ... docs-web` to emit docs and sync into `public/api`.
+2. Applies branding patch from `scripts/brand-zig-autodoc.sh`.
+3. Keeps generated artifacts out of git via `.gitignore`.
 
-The autodoc route expects:
-
-- `public/api/main.js`
-- `public/api/main.wasm`
-- `public/api/sources.tar`
-
-Sync from generated artifacts:
-
-```bash
-./scripts/sync-zig-autodoc.sh /path/to/autodoc-output
-```
-
-Or use the integrated Zig build step:
-
-```bash
-task docs:web
-```
-
-`task docs:web` also applies the project branding patch to `public/api/index.html`.
+The `/autodoc` route embeds `public/api/index.html` in an iframe.

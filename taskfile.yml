@@ -132,6 +132,33 @@ tasks:
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
 
+  docs:
+    desc: Emit Zig autodocs to zig-out/autodoc
+    deps: [check-env-bt]
+    cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT docs
+
+  docs:web:
+    desc: Emit Zig autodocs and sync website/nuxt-content/public/api
+    deps: [check-env-bt]
+    cmd: ./website/nuxt-content/scripts/prepare-zig-autodoc-web.sh
+
+  site:install:
+    desc: Install Nuxt site dependencies
+    dir: website/nuxt-content
+    cmd: npm install
+
+  site:dev:
+    desc: Sync autodocs, then run Nuxt dev server
+    deps: [docs:web]
+    dir: website/nuxt-content
+    cmd: npm run dev
+
+  site:build:
+    desc: Sync autodocs, then build static Nuxt site
+    deps: [docs:web]
+    dir: website/nuxt-content
+    cmd: npx nuxt generate
+
   deps:zig:refresh:
     desc: Regenerate nix/build.zig.zon.nix from build.zig.zon
     cmd: zon2nix build.zig.zon > nix/build.zig.zon.nix

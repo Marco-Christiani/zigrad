@@ -11,10 +11,10 @@ pub fn build(b: *std.Build) void {
     const sdk_root = b.option([]const u8, "sdk", "Path to zigrad external SDK root (include/, lib/, runtime/)") orelse "./result";
 
     // Dev convenience: override runtime bundle root directory.
-    // If runtime link installation is enabled, we symlink `zig-out/runtime`
-    // to this path.
+    // If runtime link installation is enabled, we symlink `zig-out/runtime` to this path.
     const runtime_root_opt = b.option([]const u8, "runtime", "Override runtime bundle root (dev convenience)");
     const install_runtime_link = b.option(bool, "install-runtime-link", "Create zig-out/runtime symlink (dev convenience)") orelse false;
+    const autodoc_web_dir_opt = b.option([]const u8, "autodoc-web-dir", "Nuxt public/api target for `docs-web` sync") orelse "website/nuxt-content/public/api";
 
     const sdk_include = b.fmt("{s}/include", .{sdk_root});
     const sdk_lib = b.fmt("{s}/lib", .{sdk_root});
@@ -82,6 +82,37 @@ pub fn build(b: *std.Build) void {
     const run_lib_tests = b.addRunArtifact(lib_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_tests.step);
+
+    // Emit library autodocs to zig-out/autodoc.
+    const docs_obj = b.addObject(.{
+        .name = "zigrad",
+        .root_module = zigrad_mod,
+    });
+    const install_autodoc = b.addInstallDirectory(.{
+        .source_dir = docs_obj.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "autodoc",
+    });
+    const docs_step = b.step("docs", "Emit Zig autodocs to zig-out/autodoc");
+    docs_step.dependOn(&install_autodoc.step);
+
+    // Emit docs and mirror them into the web app's public/api directory.
+    const autodoc_web_dir = resolve_absolute_path(b, autodoc_web_dir_opt);
+    const sync_autodoc_to_web = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "-lc",
+        std.fmt.allocPrint(b.allocator,
+            \\set -euo pipefail
+            \\src="{s}/autodoc"
+            \\dst="{s}"
+            \\mkdir -p "$dst"
+            \\cp -fR "$src/." "$dst/"
+            \\chmod -R u+w "$dst"
+        , .{ b.install_prefix, autodoc_web_dir }) catch @panic("OOM"),
+    });
+    sync_autodoc_to_web.step.dependOn(&install_autodoc.step);
+    const docs_web_step = b.step("docs-web", "Emit Zig autodocs and sync website/nuxt-content/public/api");
+    docs_web_step.dependOn(&sync_autodoc_to_web.step);
 
     // CLI completion + manpage gen
     const gen_completions = add_cli_gen_step(b, cova_dep, exe);
@@ -266,6 +297,13 @@ fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
     const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mkl_cblas.h" });
     if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
     return true;
+}
+
+fn resolve_absolute_path(b: *std.Build, path: []const u8) []const u8 {
+    if (std.fs.path.isAbsolute(path)) return path;
+
+    const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch @panic("realpathAlloc failed");
+    return std.fs.path.join(b.allocator, &.{ cwd_abs, path }) catch @panic("path join failed");
 }
 
 fn add_runtime_bundle(
