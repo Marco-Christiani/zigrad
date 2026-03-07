@@ -57,25 +57,22 @@ tasks:
       - 'tmux display-message "{{.CLI_ARGS }} elapsed={{ sub .end_time .start_time | duration }}"'
     silent: true
     internal: true
-  sdk-devel:
+  sdk:
+    desc: Build full SDK (compile + runtime) and reload direnv
     cmds:
-      - nix build .#zigrad-external-sdk-devel --print-out-paths {{.CLI_ARGS}}
+      - nix build .#zigrad-sdk-full-gpu --print-out-paths {{.CLI_ARGS}}
       - direnv reload
       - task: task_timer
         vars:
           start_time: "{{ now | unixEpoch }}"
 
-  sdk:build:
-    desc: Build build-time SDK profile (headers/libs; no TVM runtime DSOs)
-    cmd: nix build .#zigrad-external-sdk-build-devel --print-out-paths {{.CLI_ARGS}}
+  sdk:compile:
+    desc: Build compile-time SDK profile (headers/libs)
+    cmd: nix build .#zigrad-sdk-full-gpu-compile --print-out-paths {{.CLI_ARGS}}
 
-  sdk:runtime:full:
-    desc: Build runtime SDK profile with TVM DSOs
-    cmd: nix build .#zigrad-external-sdk-runtime-full-devel --print-out-paths {{.CLI_ARGS}}
-
-  sdk:runtime:no-tvm:
-    desc: Build runtime SDK profile without TVM DSOs
-    cmd: nix build .#zigrad-external-sdk-runtime-no-tvm-devel --print-out-paths {{.CLI_ARGS}}
+  sdk:runtime:
+    desc: Build runtime SDK profile (PJRT plugins + TVM DSOs + CUDA redist)
+    cmd: nix build .#zigrad-sdk-full-gpu-runtime --print-out-paths {{.CLI_ARGS}}
 
   check-sdk:
     cmd:

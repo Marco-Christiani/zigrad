@@ -111,9 +111,6 @@
       perSystem = {system, ...}: let
         pkgs = import inputs.nixpkgs {
           inherit system;
-          overlays = [
-            (import ./nix/overlays/ccache.nix)
-          ];
           config = {
             allowUnfree = true;
             # note to self: avoid enabling cudaSupport globally unless you need nixpkgs packages to flip CUDA paths.

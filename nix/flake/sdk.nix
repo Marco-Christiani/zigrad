@@ -1,7 +1,7 @@
 # nix/flake/sdk.nix
 #
-# SDK assembly: the LLVM -> StableHLO -> TVM -> PJRT dependency graph,
-# all package exports, and apps (which share the `targets` import).
+# SDK assembly: leaf derivations, mkSdk compositor with feature flags,
+# named presets, package exports, and apps.
 {inputs, ...}: let
   zigradVersion = inputs.self.shortRev or inputs.self.dirtyShortRev or "dev";
 in {
@@ -13,6 +13,7 @@ in {
   }: let
     inherit (inputs) xlaSrc llvmSrc stablehloSrc;
     inherit (inputs) ireeSrc ireeLlvmSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc;
+    inherit (pkgs) lib;
 
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
@@ -30,28 +31,29 @@ in {
 
     inherit
       (import ../targets.nix {
-        inherit
-          pkgs
-          cudaPackages
-          gccHost
-          src
-          ;
+        inherit pkgs cudaPackages gccHost src;
         inherit (cudaCfg) cudaArchitectures;
-        # FIXME: this is currently intentionally the impure devel variant
-        zigradExternalSdk = zigradExternalSdkDevel;
+        zigradExternalSdk = sdkProfiles.full-gpu.full;
         inherit (pkgs) zig;
       })
       targets
       ;
 
-    # buildBazelPackage fetchAttrs hashes for xla-pjrt-runtime-bazel.nix.
-    # These hashes are configuration-specific (CUDA on/off, cpuMathLibrary,
-    # native tuning flags, etc) and must be maintained per combination.
+    # -- Bazel deps hashes ---------------------------------------------
+    # Configuration-specific; must be maintained per combination.
     xlaPjrtDepsHashes = {
       cpu-onednn-native = "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=";
-      # cuda-onednn-thunk-native = "sha256-EFE6NyvyOoereFfwwExFu03B6IjfjrBWD5ri6S3F/9Y=";
       cuda-onednn-thunk-native = "sha256-ivbrLtStbE1IW9hTiqyL0KoBdK9IZRPXcDmokH01eCE=";
     };
+
+    # -- Leaf derivations -----------------------------------------------
+
+    # PJRT + XLA FFI headers (pure source copy, zero build cost).
+    pjrtHeaders = pkgs.runCommand "pjrt-xla-ffi-headers" {} ''
+      mkdir -p $out/include/xla/pjrt/c $out/include/xla/ffi/api
+      cp ${xlaSrc}/xla/pjrt/c/*.h $out/include/xla/pjrt/c/
+      cp ${xlaSrc}/xla/ffi/api/*.h $out/include/xla/ffi/api/
+    '';
 
     # Compile-time CUDA headers used by Zig @cImport("nvrtc.h").
     # Keep this isolated from runtime CUDA DSOs, which come from PJRT runtime bundles.
@@ -60,138 +62,18 @@ in {
       cp -as ${cudaPackages.cudatoolkit}/include/. "$out/include/"
     '';
 
-    xlaMlirStablehloCapiSdk = pkgs.callPackage ../xla-mlir-stablehlo-capi-sdk.nix {
-      inherit xlaSrc stablehloSrc llvm;
-    };
-
-    xlaMlirStablehloCapiDevel = pkgs.callPackage ../xla-mlir-stablehlo-capi-sdk.nix {
-      inherit xlaSrc stablehloSrc llvm;
-      stdenv = pkgs.ccacheStdenv;
-      devel = true;
-    };
-
     # LLVM 22 built from XLA-pinned sources. Shared by SDK and TVM to ensure
     # they use the same LLVM version (same pass registry, no ABI conflicts).
     llvm = pkgs.callPackage ../llvm.nix {
       inherit xlaSrc llvmSrc;
     };
 
-    # SDK profiles:
-    # - build: compile-time headers/libs (TVM + CUDA headers, no TVM runtime DSOs)
-    # - runtime-full: includes TVM runtime/compiler DSOs
-    # - runtime-no-tvm: intentionally excludes TVM runtime/compiler DSOs
-    # - aggregate: build + runtime-full for default ergonomic workflows
-    zigradExternalSdkBuild = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-build";
-      paths =
-        [
-          xlaMlirStablehloCapiSdk
-          zigradMlirExt
-          tvm.dev
-          cudaCompileHeaders
-          pkgs.mkl
-          ireeCompiler
-          ireeRuntime
-        ]
-        ++ pkgs.lib.optionals (mirageRuntime != null) [
-          mirageRuntime
-        ];
+    xlaMlirStablehloCapiSdk = pkgs.callPackage ../xla-mlir-stablehlo-capi-sdk.nix {
+      inherit xlaSrc stablehloSrc llvm;
     };
-
-    zigradExternalSdkRuntimeFull = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-runtime-full";
-      paths = [
-        xlaPjrtPluginsCuda
-        cudaRedist
-        tvm
-      ];
-    };
-
-    zigradExternalSdkRuntimeNoTvm = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-runtime-no-tvm";
-      paths = [
-        xlaPjrtPluginsCuda
-        cudaRedist
-      ];
-    };
-
-    # Convenience aggregate.
-    zigradExternalSdk = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk";
-      paths = [
-        zigradExternalSdkBuild
-        zigradExternalSdkRuntimeFull
-      ];
-    };
-
-    zigradExternalSdkBuildDevel = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-build-devel";
-      paths =
-        [
-          xlaMlirStablehloCapiDevel
-          zigradMlirExtDevel
-          tvmDevel.dev
-          cudaCompileHeaders
-          pkgs.mkl
-          ireeCompilerDevel
-          ireeRuntime
-        ]
-        ++ pkgs.lib.optionals (mirageRuntime != null) [
-          mirageRuntime
-        ];
-    };
-
-    zigradExternalSdkRuntimeFullDevel = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-runtime-full-devel";
-      paths = [
-        xlaPjrtPluginsCudaDevel
-        cudaRedist
-        tvmDevel
-      ];
-    };
-
-    zigradExternalSdkRuntimeNoTvmDevel = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-runtime-no-tvm-devel";
-      paths = [
-        xlaPjrtPluginsCudaDevel
-        cudaRedist
-      ];
-    };
-
-    # Dev: ccache + devel (save more build artifacts + NVIDIA headers)
-    zigradExternalSdkDevel = pkgs.symlinkJoin {
-      name = "zigrad-external-sdk-devel";
-      paths = [
-        zigradExternalSdkBuildDevel
-        zigradExternalSdkRuntimeFullDevel
-      ];
-    };
-
-    zigrad = pkgs.callPackage ../zigrad.nix {
-      inherit zigradSrc;
-      version = zigradVersion;
-      sdk = zigradExternalSdkBuild;
-      optimize = "ReleaseFast";
-    };
-
-    zigradDevel = pkgs.callPackage ../zigrad.nix {
-      inherit zigradSrc;
-      version = zigradVersion;
-      sdk = zigradExternalSdkBuildDevel;
-      optimize = "ReleaseSafe";
-    };
-
-    hostCheckTvmRuntimeFullCompiler = pkgs.writeShellScriptBin "zigrad-check-tvm-runtime-full-compiler" ''
-      set -euo pipefail
-
-      runtime_root="${zigradExternalSdkRuntimeFullDevel}"
-      export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib:/run/opengl-driver/lib:''${LD_LIBRARY_PATH:-}"
-
-      exec ${zigrad}/bin/zigrad tvm-check-compiler-load "$@"
-    '';
 
     mlirExtSrc = let
-      fs = pkgs.lib.fileset;
+      fs = lib.fileset;
     in
       fs.toSource {
         root = ../../shim;
@@ -206,18 +88,9 @@ in {
     zigradMlirExt = pkgs.callPackage ../zigrad-mlir-ext.nix {
       inherit xlaMlirStablehloCapiSdk llvm;
       src = mlirExtSrc;
-      devel = false;
     };
 
-    zigradMlirExtDevel = pkgs.callPackage ../zigrad-mlir-ext.nix {
-      inherit xlaMlirStablehloCapiSdk llvm;
-      stdenv = pkgs.ccacheStdenv;
-      src = mlirExtSrc;
-      devel = true;
-    };
-
-    # ------------------------------------------------------------------
-    # Production PJRT C API plugins from XLA.
+    # PJRT C API plugins from XLA (Bazel).
     xlaPjrtPlugins = pkgs.callPackage ../xla-pjrt-runtime-bazel.nix {
       inherit xlaSrc;
       cudaSupport = false;
@@ -236,45 +109,20 @@ in {
     };
 
     # CUDA redistributable bundle (pre-built NVIDIA DSOs from CDN).
-    # Decoupled from the Bazel build for faster iteration and independent caching.
     cudaRedist = pkgs.callPackage ../cuda-redist.nix {
       inherit (cudaCfg) cudaVersion;
     };
 
-    # Devel aliases currently use the same Bazel artifacts.
-    xlaPjrtPluginsDevel = xlaPjrtPlugins;
-    xlaPjrtPluginsCudaDevel = xlaPjrtPluginsCuda;
-
     # TVM with LLVM 22 (built from XLA-pinned sources).
     # Uses shared LLVM to match SDK, avoiding pass registry conflicts.
-    tvm = pkgs.callPackage ../tvm.nix {
-      inherit
-        cudaPackages
-        gccHost
-        llvm
-        ;
+    tvmPkg = pkgs.callPackage ../tvm.nix {
+      inherit cudaPackages gccHost llvm;
       inherit (cudaCfg) cudaArchitectures;
       cudaSupport = true;
-      devel = false;
-    };
-
-    tvmDevel = pkgs.callPackage ../tvm.nix {
-      inherit
-        cudaPackages
-        gccHost
-        llvm
-        ;
-      inherit (cudaCfg) cudaArchitectures;
-      cudaSupport = true;
-      devel = true;
     };
 
     tvmCpu = pkgs.callPackage ../tvm.nix {
-      inherit
-        cudaPackages
-        gccHost
-        llvm
-        ;
+      inherit cudaPackages gccHost llvm;
       inherit (cudaCfg) cudaArchitectures;
       cudaSupport = false;
     };
@@ -288,79 +136,145 @@ in {
     ireeCompiler = pkgs.callPackage ../iree-compiler.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
     };
-    ireeCompilerDevel = pkgs.callPackage ../iree-compiler.nix {
-      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
-      devel = true;
-    };
 
     # IREE runtime: combined libIREERuntime.so with CPU HAL drivers.
-    # Uses the same IREE fork and LLVM as the compiler derivation.
     ireeRuntime = pkgs.callPackage ../iree-runtime.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
     };
+
+    # -- mkSdk compositor -----------------------------------------------
+    # Composites leaf derivations into { compile, runtime, full } bundles
+    # driven by feature flags. Replaces the old manual symlinkJoin profiles.
+    mkSdk = {
+      mlir ? true,
+      iree ? false,
+      tvm ? true,
+      gpu ? true,
+      mirage ? false,
+      mkl ? true,
+    }: let
+      hasMirage = mirage && mirageRuntime != null;
+    in rec {
+      compile = pkgs.symlinkJoin {
+        name = "zigrad-sdk-compile";
+        paths =
+          [pjrtHeaders]
+          ++ lib.optional mlir xlaMlirStablehloCapiSdk
+          ++ lib.optional mlir zigradMlirExt
+          ++ lib.optional tvm tvmPkg.dev
+          ++ lib.optional gpu cudaCompileHeaders
+          ++ lib.optional iree ireeCompiler
+          ++ lib.optional iree ireeRuntime
+          ++ lib.optional hasMirage mirageRuntime
+          ++ lib.optional mkl pkgs.mkl;
+      };
+
+      runtime = pkgs.symlinkJoin {
+        name = "zigrad-sdk-runtime";
+        paths =
+          [
+            (
+              if gpu
+              then xlaPjrtPluginsCuda
+              else xlaPjrtPlugins
+            )
+          ]
+          ++ lib.optional gpu cudaRedist
+          ++ lib.optional tvm tvmPkg
+          ++ lib.optional hasMirage mirageRuntime;
+      };
+
+      full = pkgs.symlinkJoin {
+        name = "zigrad-sdk";
+        paths = [compile runtime];
+      };
+    };
+
+    # -- Named presets ---------------------------------------------------
+    sdkProfiles = {
+      full-gpu = mkSdk {
+        mlir = true;
+        tvm = true;
+        gpu = true;
+      };
+      mlir-cpu = mkSdk {
+        mlir = true;
+        tvm = false;
+        gpu = false;
+      };
+      iree-cpu = mkSdk {
+        mlir = false;
+        iree = true;
+        tvm = false;
+        gpu = false;
+      };
+      tvm-gpu = mkSdk {
+        mlir = false;
+        tvm = true;
+        gpu = true;
+      };
+      minimal = mkSdk {
+        mlir = false;
+        tvm = false;
+        gpu = false;
+      };
+    };
+
+    # -- Binary derivation -----------------------------------------------
+    zigrad = pkgs.callPackage ../zigrad.nix {
+      inherit zigradSrc;
+      version = zigradVersion;
+      sdk = sdkProfiles.full-gpu.compile;
+      optimize = "ReleaseFast";
+    };
+
+    hostCheckTvmRuntimeFullCompiler = pkgs.writeShellScriptBin "zigrad-check-tvm-runtime-full-compiler" ''
+      set -euo pipefail
+
+      runtime_root="${sdkProfiles.full-gpu.runtime}"
+      export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib:/run/opengl-driver/lib:''${LD_LIBRARY_PATH:-}"
+
+      exec ${zigrad}/bin/zigrad tvm-check-compiler-load "$@"
+    '';
   in {
-    # secondary deliverable are hermetic packages + explicit run wrappers (secondary bc we dont rly have a finished thing rn)
     packages =
       {
         zigrad = zigrad;
-        zigrad-devel = zigradDevel;
         zigrad-check-tvm-runtime-full-compiler = hostCheckTvmRuntimeFullCompiler;
       }
-      // (pkgs.lib.optionalAttrs (mirageRuntime != null) {
+      // (lib.optionalAttrs (mirageRuntime != null) {
         mirage-runtime = mirageRuntime;
       })
+      # SDK presets (generated from sdkProfiles)
+      // lib.concatMapAttrs (name: profile: {
+        "zigrad-sdk-${name}-compile" = profile.compile;
+        "zigrad-sdk-${name}-runtime" = profile.runtime;
+        "zigrad-sdk-${name}" = profile.full;
+      })
+      sdkProfiles
       // {
-        # Convenience aggregate and primary target.
-        #   others are individually targetable mostly for development reasons
-        zigrad-external-sdk = zigradExternalSdk;
-        zigrad-external-sdk-build = zigradExternalSdkBuild;
-        zigrad-external-sdk-runtime-full = zigradExternalSdkRuntimeFull;
-        zigrad-external-sdk-runtime-no-tvm = zigradExternalSdkRuntimeNoTvm;
-
-        # Dev target: ccache + devel
-        zigrad-external-sdk-devel = zigradExternalSdkDevel;
-        zigrad-external-sdk-build-devel = zigradExternalSdkBuildDevel;
-        zigrad-external-sdk-runtime-full-devel = zigradExternalSdkRuntimeFullDevel;
-        zigrad-external-sdk-runtime-no-tvm-devel = zigradExternalSdkRuntimeNoTvmDevel;
-
-        # PJRT C API plugins (buildBazelPackage)
-        xla-pjrt-plugins = xlaPjrtPlugins;
-        xla-pjrt-plugins-devel = xlaPjrtPluginsDevel;
-        xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
-        xla-pjrt-plugins-cuda-devel = xlaPjrtPluginsCudaDevel;
-
-        # Compile-time SDK (PJRT headers + MLIR + StableHLO)
-        xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
-
-        # Compile-time SDK - Dev target: ccache + devel
-        xla-mlir-stablehlo-capi-sdk-devel = xlaMlirStablehloCapiDevel;
-
-        tvm = tvm;
-        tvm-dev = tvm.dev;
-        tvm-cpu = tvmCpu;
-        tvm-devel = tvmDevel;
-
-        # CUDA redistributable bundle (pre-built NVIDIA DSOs)
-        cuda-redist = cudaRedist;
-
-        # LLVM 22 built from XLA-pinned sources
+        # Individual components (for targeted builds / debugging)
         llvm = llvm;
-
-        # IREE compiler + runtime (BYO-LLVM using iree-org/llvm-project fork).
+        tvm = tvmPkg;
+        tvm-dev = tvmPkg.dev;
+        tvm-cpu = tvmCpu;
+        cuda-redist = cudaRedist;
+        xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
+        xla-pjrt-plugins = xlaPjrtPlugins;
+        xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
         iree-llvm = ireeLlvm;
         iree-compiler = ireeCompiler;
-        iree-compiler-devel = ireeCompilerDevel;
         iree-runtime = ireeRuntime;
+        pjrt-headers = pjrtHeaders;
 
+        # Editor / tooling
         gen-clangd = targets.editor.clangd;
         gen-nvim = targets.editor.nvim;
-        # TODO: hermetic zig build/run targets
-        # m1 = targets.m1.build;
         m4 = targets.zigrad-m4.build;
       };
 
     apps =
-      (pkgs.lib.optionalAttrs (targets ? example-cuda) {
+      (lib.optionalAttrs (targets ? example-cuda) {
         example-cuda-target = {
           type = "app";
           program = "${targets.example-cuda.run}/bin/example-cuda";

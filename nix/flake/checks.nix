@@ -19,7 +19,7 @@ in {
     zigradTests = pkgs.callPackage ../zigrad.nix {
       inherit zigradSrc;
       version = zigradVersion;
-      sdk = config.packages.zigrad-external-sdk-build-devel;
+      sdk = config.packages.zigrad-sdk-full-gpu-compile;
       optimize = "ReleaseSafe";
       runTests = true;
     };
@@ -32,7 +32,7 @@ in {
       } ''
         set -euo pipefail
         export HOME="$TMPDIR"
-        runtime_root="${config.packages.zigrad-external-sdk-runtime-full-devel}"
+        runtime_root="${config.packages.zigrad-sdk-full-gpu-runtime}"
         export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
 
         ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/tvm-symbols.txt"
@@ -50,7 +50,7 @@ in {
       } ''
         set -euo pipefail
         export HOME="$TMPDIR"
-        runtime_root="${config.packages.zigrad-external-sdk-runtime-no-tvm-devel}"
+        runtime_root="${config.packages.zigrad-sdk-minimal-runtime}"
         export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
 
         if ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/stdout.txt" 2> "$TMPDIR/stderr.txt"; then
