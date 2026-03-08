@@ -20,12 +20,32 @@ pub fn build(b: *std.Build) void {
     const sdk_lib = b.fmt("{s}/lib", .{sdk_root});
     const sdk_runtime = b.fmt("{s}/runtime", .{sdk_root});
 
-    const mkl_available = sdk_has_mkl(b, sdk_root);
-    const iree_backend = b.option(bool, "iree-backend", "Enable IREE backend (requires ireeCompiler + ireeRuntime in SDK)") orelse false;
+    // Feature detection: sdk_has_* probes for headers in the SDK.
+    // Feature flags: -Dx=true forces on (skips detection; @cImport fails if headers missing),
+    //                -Dx=false forces off, omitted = auto-detect via sdk_has_*.
+    const enable_mlir = b.option(bool, "mlir", "Force MLIR/StableHLO lowering on or off");
+    const enable_tvm = b.option(bool, "tvm", "Force TVM kernel provider on or off");
+    const enable_mirage = b.option(bool, "mirage", "Force Mirage kernel provider on or off");
+    const enable_mkl = b.option(bool, "mkl", "Force Intel MKL on or off");
+    const enable_iree = b.option(bool, "iree-backend", "Force IREE backend on or off");
+
+    const has_mlir = sdk_has_mlir(b, sdk_root);
+    const has_tvm = sdk_has_tvm(b, sdk_root);
+    const has_mirage = sdk_has_mirage(b, sdk_root);
+    const has_mkl = sdk_has_mkl(b, sdk_root);
+
+    const use_mlir = enable_mlir orelse has_mlir;
+    const use_tvm = enable_tvm orelse has_tvm;
+    const use_mirage = enable_mirage orelse has_mirage;
+    const use_mkl = enable_mkl orelse has_mkl;
+    const use_iree = enable_iree orelse false;
 
     const build_options = b.addOptions();
-    build_options.addOption(bool, "enable_mkl", mkl_available);
-    build_options.addOption(bool, "iree_backend", iree_backend);
+    build_options.addOption(bool, "has_mlir", use_mlir);
+    build_options.addOption(bool, "has_tvm", use_tvm);
+    build_options.addOption(bool, "has_mirage", use_mirage);
+    build_options.addOption(bool, "has_mkl", use_mkl);
+    build_options.addOption(bool, "has_iree", use_iree);
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const cova_dep = b.dependency("cova", .{});
@@ -38,7 +58,7 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addOptions("build_options", build_options);
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
-    if (mkl_available) {
+    if (use_mkl) {
         zigrad_mod.linkSystemLibrary("mkl_rt", .{});
     }
 
@@ -64,8 +84,8 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addIncludePath(b.path("src"));
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
-    link_mlir_stablehlo_capi(exe, sdk_lib);
-    if (iree_backend) link_iree(zigrad_mod, sdk_lib);
+    if (use_mlir) link_mlir_stablehlo_capi(exe, sdk_lib);
+    if (use_iree) link_iree(zigrad_mod, sdk_lib);
     add_runtime_bundle(b, exe, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     b.installArtifact(exe);
@@ -76,7 +96,7 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the v0 demo executable").dependOn(&run_cmd.step);
 
     const lib_tests = b.addTest(.{ .root_module = zigrad_mod });
-    link_mlir_stablehlo_capi(lib_tests, sdk_lib);
+    if (use_mlir) link_mlir_stablehlo_capi(lib_tests, sdk_lib);
     add_runtime_bundle(b, lib_tests, runtime_root_opt orelse sdk_runtime, install_runtime_link);
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
@@ -120,7 +140,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&gen_completions.step);
 
     // Minimal IREE VMFB runner (no zigrad, no MLIR/PJRT).
-    if (iree_backend) {
+    if (use_iree) {
         const iree_runner = b.addExecutable(.{
             .name = "iree-runner",
             .root_module = b.createModule(.{
@@ -287,6 +307,18 @@ fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8) void {
     });
 }
 
+fn sdk_has_mlir(b: *std.Build, sdk_root: []const u8) bool {
+    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
+        break :blk sdk_root;
+    } else blk: {
+        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
+        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
+    };
+    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mlir-c", "IR.h" });
+    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    return true;
+}
+
 fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
     const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
         break :blk sdk_root;
@@ -295,6 +327,30 @@ fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
         break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
     };
     const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mkl_cblas.h" });
+    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    return true;
+}
+
+fn sdk_has_tvm(b: *std.Build, sdk_root: []const u8) bool {
+    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
+        break :blk sdk_root;
+    } else blk: {
+        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
+        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
+    };
+    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "tvm", "ffi", "c_api.h" });
+    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    return true;
+}
+
+fn sdk_has_mirage(b: *std.Build, sdk_root: []const u8) bool {
+    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
+        break :blk sdk_root;
+    } else blk: {
+        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
+        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
+    };
+    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mirage", "c", "types.h" });
     if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
     return true;
 }

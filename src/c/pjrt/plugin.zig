@@ -63,7 +63,9 @@ fn log_dladdr(label: []const u8, addr: *const anyopaque) void {
 }
 
 fn canonicalize_path(path: []const u8) ![]const u8 {
-    return std.fs.cwd().realpathAlloc(std.heap.page_allocator, path);
+    // Keep caller-provided path semantics (including symlinks) so plugin
+    // RUNPATH relative lookups resolve against the assembled SDK layout.
+    return std.heap.page_allocator.dupe(u8, path);
 }
 
 /// Load PJRT plugin from explicit path

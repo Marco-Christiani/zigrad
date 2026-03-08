@@ -72,7 +72,7 @@ pub const Harness = struct {
 
     /// Run all benchmarks according to the configuration.
     pub fn run(self: *Harness) !void {
-        log.info("starting benchmark suite: {d} shapes × {d} implementations", .{
+        log.info("starting benchmark suite: {d} shapes x {d} implementations", .{
             self.config.shapes.len,
             self.config.implementations.len,
         });
@@ -125,7 +125,7 @@ pub const Harness = struct {
             try self.results.append(self.allocator, result);
 
             if (result.passed) {
-                log.info("  {s}: {d:.2} GFLOP/s (median {d:.2} µs, error {any})", .{
+                log.info("  {s}: {d:.2} GFLOP/s (median {d:.2} us, error {any})", .{
                     impl.display_name(),
                     result.gflops,
                     result.median_us,
@@ -220,8 +220,14 @@ pub const Harness = struct {
             },
             .tvm_cpu => try self.run_tvm(shape, a, b, c, .cpu),
             .tvm_gpu => try self.run_tvm(shape, a, b, c, .gpu),
-            .xla_cpu => try self.run_xla(shape, a, b, c, .cpu),
-            .xla_gpu => try self.run_xla(shape, a, b, c, .gpu),
+            .xla_cpu => if (comptime zg.build_options.has_mlir)
+                try self.run_xla(shape, a, b, c, .cpu)
+            else
+                return error.MlirDisabled,
+            .xla_gpu => if (comptime zg.build_options.has_mlir)
+                try self.run_xla(shape, a, b, c, .gpu)
+            else
+                return error.MlirDisabled,
         }
     }
 
@@ -323,8 +329,8 @@ pub const Harness = struct {
             try writer.writeAll("\n");
             try writer.print("Shape: {any}\n", .{shape});
             try writer.writeAll("\n");
-            try writer.writeAll("Implementation            Median (µs)    GFLOP/s    vs Naive\n");
-            try writer.writeAll("─────────────────────────────────────────────────────────\n");
+            try writer.writeAll("Implementation            Median (us)    GFLOP/s    vs Naive\n");
+            try writer.writeAll("---------------------------------------------------------\n");
 
             // Find naive baseline for this shape
             var naive_gflops: f64 = 1.0;

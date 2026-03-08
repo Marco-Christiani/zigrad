@@ -154,6 +154,6 @@ test "pjrt backend conforms" {
 
 test "iree backend conforms" {
     const build_options = @import("build_options");
-    if (comptime !build_options.iree_backend) return error.SkipZigTest;
+    if (comptime !build_options.has_iree) return error.SkipZigTest;
     _ = AsBackend(@import("iree.zig"));
 }

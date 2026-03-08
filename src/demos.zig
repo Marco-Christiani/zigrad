@@ -1,6 +1,8 @@
 const std = @import("std");
 const zg = @import("zigrad");
 
+const log = std.log.scoped(.@"zg/demos");
+
 
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
@@ -535,12 +537,16 @@ pub fn run_kernel_provider_demo(
     defer package.deinit();
     try backend.register_kernel_dispatcher();
 
-    // --- TVM setup ---
-    var tvm_dispatch: zg.tvm.dispatch.TvmDispatchState = undefined;
-    var tvm_impl: zg.tvm.provider.TvmProvider = undefined;
+    // --- TVM setup (requires TVM headers in SDK) ---
+    var tvm_dispatch: if (zg.build_options.has_tvm) zg.tvm.dispatch.TvmDispatchState else void = undefined;
+    var tvm_impl: if (zg.build_options.has_tvm) zg.tvm.provider.TvmProvider else void = undefined;
     var has_tvm = false;
 
     if (kind_requested(provider_kinds, .tvm)) {
+        if (comptime !zg.build_options.has_tvm) {
+            log.err("tvm provider requested but binary was built without TVM support (headers not found in SDK)", .{});
+            return error.TvmUnavailable;
+        }
         try zg.tvm.ffi.ensure_loaded(allocator, .{});
         try backend.require_typed_ffi();
         const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
@@ -555,14 +561,18 @@ pub fn run_kernel_provider_demo(
         };
         has_tvm = true;
     }
-    defer if (has_tvm) tvm_dispatch.deinit();
+    defer if (zg.build_options.has_tvm and has_tvm) tvm_dispatch.deinit();
 
-    // --- Mirage setup ---
-    var mirage_dispatch: zg.mirage.dispatch.MirageDispatchState = undefined;
-    var mirage_impl: zg.mirage.provider.MirageProvider = undefined;
+    // --- Mirage setup (requires mirage headers in SDK) ---
+    var mirage_dispatch: if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void = undefined;
+    var mirage_impl: if (zg.build_options.has_mirage) zg.mirage.provider.MirageProvider else void = undefined;
     var has_mirage = false;
 
     if (kind_requested(provider_kinds, .mirage)) {
+        if (comptime !zg.build_options.has_mirage) {
+            log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
+            return error.MirageUnavailable;
+        }
         mirage_dispatch = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
         mirage_impl = .{
             .allocator = allocator,
@@ -570,17 +580,17 @@ pub fn run_kernel_provider_demo(
         };
         has_mirage = true;
     }
-    defer if (has_mirage) mirage_dispatch.deinit();
+    defer if (zg.build_options.has_mirage and has_mirage) mirage_dispatch.deinit();
 
     // Collect providers in requested order.
     var providers_buf: [2]zg.kernel.KernelProvider = undefined;
     var n_providers: usize = 0;
     for (provider_kinds) |kind| switch (kind) {
-        .tvm => if (has_tvm) {
+        .tvm => if (zg.build_options.has_tvm and has_tvm) {
             providers_buf[n_providers] = tvm_impl.kernel_provider();
             n_providers += 1;
         },
-        .mirage => if (has_mirage) {
+        .mirage => if (zg.build_options.has_mirage and has_mirage) {
             providers_buf[n_providers] = mirage_impl.kernel_provider();
             n_providers += 1;
         },
@@ -718,7 +728,7 @@ pub fn compile_program(
     }
 
     var kernelize_state: ?zg.pipeline.KernelizePass = null;
-    var mlir_materialize_state: ?zg.pipeline.MlirKernelMaterializePass = null;
+    var mlir_materialize_state: ?zg.lower.mlir.MlirKernelMaterializePass = null;
     if (kernelize_cfg) |cfg| {
         lower_cfg_mut.kernelization_lane = cfg.lane;
 
@@ -757,13 +767,13 @@ pub fn compile_program(
     // MLIR-stage passes: explicit pipeline ordering.
     if (kernelize_cfg) |cfg| {
         if (cfg.lane == .mlir) {
-            try passes.append(allocator, zg.pipeline.MlirSelectPass.pass());
+            try passes.append(allocator, zg.lower.mlir.MlirSelectPass.pass());
             if (mlir_materialize_state) |*state| {
                 try passes.append(allocator, state.pass());
             }
         }
     }
-    try passes.append(allocator, zg.pipeline.MlirLegalizePass.pass());
+    try passes.append(allocator, zg.lower.mlir.stablehlo.MlirLegalizePass.pass());
 
     var dump_mlir_local: ?zg.pipeline.DumpConfig = null;
     if (dump_mlir) |cfg| {
@@ -836,6 +846,10 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
 /// Enumerate TVM FFI global functions.
 /// Writes available operations to stdout.
 pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
+    if (comptime !zg.build_options.has_tvm) {
+        log.err("TVM FFI symbol dump requires TVM support (headers not found in SDK)", .{});
+        return error.TvmUnavailable;
+    }
     const tvm_api = zg.tvm.ffi;
 
     try tvm_api.ensure_loaded(allocator, .{ .load_compiler = false });

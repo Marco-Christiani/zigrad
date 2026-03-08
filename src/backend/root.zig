@@ -5,10 +5,10 @@ pub const pjrt = @import("pjrt.zig");
 pub const PjrtBackend = interface.AsBackend(pjrt);
 
 /// IREE backend module.  Only compiled when `-Diree-backend=true`.
-pub const iree = if (build_options.iree_backend) @import("iree.zig") else struct {};
+pub const iree = if (build_options.has_iree) @import("iree.zig") else struct {};
 
 /// Concrete IREE backend type.  `void` when the backend is disabled.
-pub const IreeBackend = if (build_options.iree_backend)
+pub const IreeBackend = if (build_options.has_iree)
     interface.AsBackend(@import("iree.zig"))
 else
     void;

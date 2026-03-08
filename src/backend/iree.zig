@@ -213,7 +213,7 @@ pub const Backend = struct {
         shape: []const i64,
     ) !Buffer {
         _ = self;
-        const elem_type = rt.dtype_to_element_type(dtype);
+        const elem_type = dtype_to_element_type(dtype);
 
         comptime std.debug.assert(@sizeOf(rt.HalDim) == @sizeOf(i64));
         const hal_shape: []const rt.HalDim = @ptrCast(shape);
@@ -361,6 +361,20 @@ pub const Backend = struct {
 // ---------------------------------------------------------------------------
 // Internal helpers.
 // ---------------------------------------------------------------------------
+
+/// Map a PR DType to the IREE HAL element type constant.
+fn dtype_to_element_type(dtype: pr.DType) rt.HalElementType {
+    return switch (dtype) {
+        .f32 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+        .f64 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64,
+        .bf16 => rt.c.IREE_HAL_ELEMENT_TYPE_BFLOAT_16,
+        .i32 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32,
+        .i64 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64,
+        .u32 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_32,
+        .u64 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_64,
+        .bool => rt.c.IREE_HAL_ELEMENT_TYPE_BOOL_8,
+    };
+}
 
 /// Copy the contents of `src` buffer view into `dst` buffer view via host memory.
 fn copy_buffer_view(

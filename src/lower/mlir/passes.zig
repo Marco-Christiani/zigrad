@@ -1,27 +1,21 @@
-/// Explicit MLIR-stage passes for the pipeline.
+/// Shared MLIR-stage passes for the pipeline.
 ///
 /// These passes operate on serialized MLIR artifacts: they parse the current
 /// artifact bytes, run an MLIR pass pipeline, verify the result, and
 /// re-serialize back into the artifact. Each pass is a standalone
 /// `.mlir -> .mlir` transformation in the pipeline.
 ///
-/// Pipeline ordering:
-/// - Lower (PR -> MLIR, baseline only)
-/// - MlirSelectPass: `canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse`
-/// - MlirMaterializePass: (separate module, walks selected kernel_call ops)
-/// - MlirLegalizePass: `func.func(zg-kernel-legalize),canonicalize,cse`
-///
-/// Both text and bytecode encodings are supported. The MLIR C API
-/// auto-detects format via magic bytes in `mlirModuleCreateParse`.
+/// This module contains dialect-agnostic passes that work on zigrad dialect
+/// ops regardless of the target MLIR dialect. StableHLO-specific passes
+/// (e.g. legalize) live in `stablehlo/legalize.zig`.
 const std = @import("std");
 
-const mlir = @import("../c/mlir/mlir.zig");
-const pass_mod = @import("pass.zig");
+const mlir = @import("../../c/mlir/mlir.zig");
+const pass_mod = @import("../../pipeline/pass.zig");
 
 const log = std.log.scoped(.@"zg/mlir_passes");
 
 pub const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse";
-const zigrad_kernel_legalize_pipeline: [:0]const u8 = "func.func(zg-kernel-legalize),canonicalize,cse";
 
 /// Run an MLIR pass pipeline on the current artifact bytes.
 ///
@@ -128,37 +122,5 @@ pub const MlirSelectPass = struct {
     ) pass_mod.PassError!void {
         if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
         try run_pipeline_on_artifact(ctx.allocator, &artifact.mlir, zigrad_kernel_select_pipeline);
-    }
-};
-
-// ============================================================================
-// Legalize Pass
-// ============================================================================
-
-/// MLIR -> MLIR pass: legalize `zigrad.kernel_call` to `stablehlo.custom_call`.
-///
-/// Converts all `zigrad.kernel_call` operations to `stablehlo.custom_call`,
-/// which the XLA/PJRT backend understands. This pass must run after selection
-/// (MLIR lane) or lowering (PR lane) and before backend compilation.
-///
-/// For programs with no `zigrad.kernel_call` ops, this pass is a no-op.
-pub const MlirLegalizePass = struct {
-    pub fn pass() pass_mod.Pass {
-        return .{
-            .ptr = undefined,
-            .run_fn = run_impl,
-            .name = "mlir_kernel_legalize",
-            .input_kind = .mlir,
-            .output_kind = .mlir,
-        };
-    }
-
-    fn run_impl(
-        _: *anyopaque,
-        artifact: *pass_mod.Artifact,
-        ctx: *pass_mod.PassContext,
-    ) pass_mod.PassError!void {
-        if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
-        try run_pipeline_on_artifact(ctx.allocator, &artifact.mlir, zigrad_kernel_legalize_pipeline);
     }
 };

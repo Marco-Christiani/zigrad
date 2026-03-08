@@ -149,8 +149,8 @@ pub fn run_llama_ft_demo(
     const execute_only = cfg.execute_only;
 
     // Mirage kernel provider uses the MLIR lane for pattern-driven kernel
-    // selection — annotations are not needed when the MLIR pass discovers
-    // fuseable patterns post-lowering.
+    //  selection - annotations are not needed when the MLIR pass discovers
+    //  fuseable patterns post-lowering.
     const effective_pipeline_kind: LlamaDemoPipeline = if (cfg.kernel_provider == .mirage)
         .mlir
     else
@@ -244,15 +244,24 @@ pub fn run_llama_ft_demo(
     var kernel_package: ?zg.kernel.KernelPackage = null;
     defer if (kernel_package) |*p| p.deinit();
 
-    var mirage_dispatch_state: ?zg.mirage.dispatch.MirageDispatchState = null;
-    defer if (mirage_dispatch_state) |*s| s.deinit();
+    const MirageDispatch = if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void;
+    const MirageProviderT = if (zg.build_options.has_mirage) zg.mirage.provider.MirageProvider else void;
 
-    var mirage_provider_impl: ?zg.mirage.provider.MirageProvider = null;
+    var mirage_dispatch_state: ?MirageDispatch = null;
+    defer if (zg.build_options.has_mirage) {
+        if (mirage_dispatch_state) |*s| s.deinit();
+    };
+
+    var mirage_provider_impl: ?MirageProviderT = null;
     var mirage_providers: [1]zg.kernel.KernelProvider = undefined;
 
     if (cfg.kernel_provider) |provider| {
         switch (provider) {
             .mirage => {
+                if (comptime !zg.build_options.has_mirage) {
+                    std.log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
+                    return error.MirageUnavailable;
+                }
                 kernel_registry = zg.kernel.KernelRegistry.init(allocator);
                 kernel_package = zg.kernel.KernelPackage.init(allocator);
                 mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);

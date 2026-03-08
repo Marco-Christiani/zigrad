@@ -1,10 +1,10 @@
 const std = @import("std");
 
-const kernel = @import("../kernel.zig");
-const pr = @import("../pr/pr.zig");
-const mlir = @import("../c/mlir/mlir.zig");
-const pass_mod = @import("pass.zig");
-const mlir_passes = @import("mlir_passes.zig");
+const kernel = @import("../../kernel.zig");
+const pr = @import("../../pr/pr.zig");
+const mlir = @import("../../c/mlir/mlir.zig");
+const pass_mod = @import("../../pipeline/pass.zig");
+const mlir_passes = @import("passes.zig");
 
 const log = std.log.scoped(.@"zg/mlir_materialize");
 

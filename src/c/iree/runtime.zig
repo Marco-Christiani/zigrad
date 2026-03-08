@@ -287,26 +287,6 @@ pub fn buffer_view_from_host(view: *HalBufferView, src: []const u8) !void {
     try check(zg_iree_hal_buffer_write(buf.?, src.ptr, src.len));
 }
 
-// ---------------------------------------------------------------------------
-// DType -> HAL element type mapping.
-// ---------------------------------------------------------------------------
-
-const pr = @import("../../pr/pr.zig");
-
-/// Map a PR DType to the IREE HAL element type constant.
-pub fn dtype_to_element_type(dtype: pr.DType) HalElementType {
-    return switch (dtype) {
-        .f32 => c.IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-        .f64 => c.IREE_HAL_ELEMENT_TYPE_FLOAT_64,
-        .bf16 => c.IREE_HAL_ELEMENT_TYPE_BFLOAT_16,
-        .i32 => c.IREE_HAL_ELEMENT_TYPE_SINT_32,
-        .i64 => c.IREE_HAL_ELEMENT_TYPE_SINT_64,
-        .u32 => c.IREE_HAL_ELEMENT_TYPE_UINT_32,
-        .u64 => c.IREE_HAL_ELEMENT_TYPE_UINT_64,
-        .bool => c.IREE_HAL_ELEMENT_TYPE_BOOL_8,
-    };
-}
-
 /// Return byte width for a HAL element type (integer division of bit_count / 8).
 pub fn element_byte_width(etype: HalElementType) usize {
     return zg_iree_hal_element_bit_count(etype) / 8;

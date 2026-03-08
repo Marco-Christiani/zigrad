@@ -478,7 +478,7 @@ pub fn compile_program(
     }
 
     var kernelize_state: ?pipeline.KernelizePass = null;
-    var mlir_materialize_state: ?pipeline.MlirKernelMaterializePass = null;
+    var mlir_materialize_state: ?lower.mlir.MlirKernelMaterializePass = null;
     if (config.kernelize) |cfg| {
         lower_cfg.kernelization_lane = cfg.lane;
 
@@ -519,13 +519,13 @@ pub fn compile_program(
     // PR lane (or no kernelization): legalize only
     if (config.kernelize) |cfg| {
         if (cfg.lane == .mlir) {
-            try passes.append(allocator, pipeline.MlirSelectPass.pass());
+            try passes.append(allocator, lower.mlir.MlirSelectPass.pass());
             if (mlir_materialize_state) |*state| {
                 try passes.append(allocator, state.pass());
             }
         }
     }
-    try passes.append(allocator, pipeline.MlirLegalizePass.pass());
+    try passes.append(allocator, lower.mlir.stablehlo.MlirLegalizePass.pass());
 
     var dump_mlir_local: ?pipeline.DumpConfig = null;
     if (config.dump_mlir) |cfg| {

@@ -11,10 +11,10 @@
 /// 3. `lower_pass` / `lower_pass_with_config`: Pass-based pipeline integration
 const std = @import("std");
 
-const pr = @import("../pr/pr.zig");
-const mlir = @import("../c/mlir/mlir.zig");
-const stablehlo = @import("../c/mlir/dialects/stablehlo.zig");
-const pass = @import("../pipeline/pass.zig");
+const pr = @import("../../../pr/pr.zig");
+const mlir = @import("../../../c/mlir/mlir.zig");
+const stablehlo = @import("../../../c/mlir/dialects/stablehlo.zig");
+const pass = @import("../../../pipeline/pass.zig");
 const log = std.log.scoped(.@"zg/lower_stablehlo");
 
 /// Maximum tensor rank supported by the lowering pass (matches PR validation).
@@ -24,15 +24,9 @@ pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
 
 const zigrad_kernel_call_op_name = "zigrad.kernel_call";
 
-pub const OutputFormat = enum {
-    mlir_text,
-    mlir_bytecode,
-};
-
-pub const KernelizationLane = enum {
-    pr,
-    mlir,
-};
+const lower_types = @import("../../types.zig");
+pub const OutputFormat = lower_types.OutputFormat;
+pub const KernelizationLane = lower_types.KernelizationLane;
 
 // ============================================================================
 // Lowering Context
@@ -959,16 +953,7 @@ fn f32_to_bf16_bits(val: f32) u16 {
 // Pass Integration
 // ============================================================================
 
-/// Lower pass: PR artifact -> MLIR artifact.
-pub const LowerPassConfig = struct {
-    encoding: pass.MlirEncoding = .bytecode,
-
-    /// Selects which PR function is the compilation entry point.
-    /// The selected function is always renamed to "@main" in MLIR output (XLA requirement).
-    entry_name: ?[]const u8 = null,
-
-    kernelization_lane: KernelizationLane = .pr,
-};
+pub const LowerPassConfig = lower_types.LowerPassConfig;
 
 pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
@@ -1104,7 +1089,7 @@ fn is_symbol_name_used(program: *const pr.Program, entry_index: usize, name: []c
 // ============================================================================
 
 test "lowering produces verified bytecode" {
-    var program = try @import("../frontend/frontend.zig").build_demo_program(std.testing.allocator);
+    var program = try @import("../../../frontend/frontend.zig").build_demo_program(std.testing.allocator);
     defer program.deinit();
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
@@ -1220,8 +1205,8 @@ test "lowering supports multi-output custom_call boundary" {
     const func = try b.finish(&.{ ex, lg });
     try program.add_function(func);
 
-    const kernel = @import("../kernel.zig");
-    const kernelize = @import("../pipeline/kernelize.zig");
+    const kernel = @import("../../../kernel.zig");
+    const kernelize = @import("../../../pipeline/kernelize.zig");
 
     const MockProvider = struct {
         fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
@@ -1283,8 +1268,8 @@ test "lowering emits kernel_id and carrier_hint in custom_call backend_config" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const kernel = @import("../kernel.zig");
-    const kernelize = @import("../pipeline/kernelize.zig");
+    const kernel = @import("../../../kernel.zig");
+    const kernelize = @import("../../../pipeline/kernelize.zig");
 
     const MockProvider = struct {
         fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
@@ -1322,11 +1307,11 @@ test "lowering emits kernel_id and carrier_hint in custom_call backend_config" {
 }
 
 test "lowering supports vjp matmul demo" {
-    var program = try @import("../frontend/frontend.zig").build_demo_program(std.testing.allocator);
+    var program = try @import("../../../frontend/frontend.zig").build_demo_program(std.testing.allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
-    const vjp_func = try @import("../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
+    const vjp_func = try @import("../../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
 
     try program.add_function(vjp_func);
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, "vjp", .mlir_bytecode);

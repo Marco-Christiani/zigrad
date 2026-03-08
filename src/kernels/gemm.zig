@@ -43,7 +43,7 @@ test "gemm: naive 2x2 matmul" {
     }
 }
 
-const blas = if (build_options.enable_mkl) @cImport({
+const blas = if (build_options.has_mkl) @cImport({
     @cInclude("mkl_cblas.h");
 }) else @compileError("MKL not available -- rebuild with MKL in SDK");
 

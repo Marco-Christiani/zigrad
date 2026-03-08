@@ -15,6 +15,7 @@ pub const setup_cmd = cli.setup_cmd;
 
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
+    std.debug.print("Symbol: {s}\n", .{"\u{2713}"});
 
     // Parse args
     var cmd = cli.parse(gpa) catch |err| {
@@ -48,11 +49,13 @@ pub fn main() !void {
         return demos.dump_tvm_ffi_symbols(gpa);
     }
     if (cmd.matchSubCmd("tvm-check-compiler-load")) |_| {
+        if (comptime !build_options.has_tvm) return requireTvm();
         try zg.tvm.ffi.ensure_loaded(gpa, .{});
         std.log.info("tvm compiler load check passed", .{});
         return;
     }
     if (cmd.matchSubCmd("tvm-tune")) |sub_cmd| {
+        if (comptime !build_options.has_tvm) return requireTvm();
         const opts = try sub_cmd.to(cli.TvmTuneOpts, .{});
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
@@ -98,6 +101,7 @@ pub fn main() !void {
         return;
     }
     if (cmd.matchSubCmd("tvm-run")) |sub_cmd| {
+        if (comptime !build_options.has_tvm) return requireTvm();
         const opts = try sub_cmd.to(cli.TvmRunOpts, .{});
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
@@ -140,18 +144,18 @@ pub fn main() !void {
 
     // IREE backend commands.
     if (cmd.matchSubCmd("iree-aot-demo")) |_| {
-        if (comptime build_options.iree_backend) {
+        if (comptime build_options.has_iree and build_options.has_mlir) {
             return run_iree_demo(gpa, dump_pr_ptr, dump_mlir_ptr);
         }
-        std.log.err("iree-aot-demo requires building with -Diree-backend=true", .{});
+        std.log.err("iree-aot-demo requires building with -Diree-backend=true -Dmlir=true", .{});
         return error.IreeBackendDisabled;
     }
     if (cmd.matchSubCmd("iree-aot-compile")) |sub_cmd| {
-        if (comptime build_options.iree_backend) {
+        if (comptime build_options.has_iree and build_options.has_mlir) {
             const opts = try sub_cmd.to(cli.IreeAotCompileOpts, .{});
             return run_iree_aot_compile(gpa, opts, dump_mlir_ptr);
         }
-        std.log.err("iree-aot-compile requires building with -Diree-backend=true", .{});
+        std.log.err("iree-aot-compile requires building with -Diree-backend=true -Dmlir=true", .{});
         return error.IreeBackendDisabled;
     }
 
@@ -174,88 +178,99 @@ pub fn main() !void {
     const device = &devs[0];
 
     if (cmd.matchSubCmd("aot-demo")) |_| {
+        if (comptime !build_options.has_mlir) {
+            log.err("aot-demo requires MLIR (build with -Dmlir=true)", .{});
+            return error.MlirDisabled;
+        }
         return main_aot.run(gpa, &backend, device);
     }
-    if (cmd.matchSubCmd("custom-call-neg")) |_| {
-        return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
-    }
-    if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
-        const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .pr);
-    }
-    if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
-        const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-        return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .mlir);
-    }
-    if (cmd.matchSubCmd("vjp-demo")) |_| {
-        return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
-    }
-    if (cmd.matchSubCmd("train-demo")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
-        const warmup_steps = opts.warmup orelse 0;
-        const steps = opts.steps orelse 8;
-        return demos.run_train_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
-    }
-    if (cmd.matchSubCmd("llm-ft-demo")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
-        const warmup_steps = opts.warmup orelse 0;
-        const steps = opts.steps orelse 8;
-        return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
-    }
-    const llama_ft_sub = cmd.matchSubCmd("llama-ft-demo-pr") orelse cmd.matchSubCmd("llama-ft-demo-mlir");
-    if (llama_ft_sub) |sub_cmd| {
-        const lane: llama_demo.LlamaDemoPipeline = if (std.mem.eql(u8, sub_cmd.name, "llama-ft-demo-pr")) .pr else .mlir;
-        const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
-        const dtype = if (opts.dtype) |d|
-            std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
-        else
-            zg.pr.DType.bf16;
+    // Commands that require MLIR lowering
+    if (comptime build_options.has_mlir) {
+        if (cmd.matchSubCmd("custom-call-neg")) |_| {
+            return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
+        }
+        if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
+            const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
+            const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
+            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .pr);
+        }
+        if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
+            const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
+            const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
+            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .mlir);
+        }
+        if (cmd.matchSubCmd("vjp-demo")) |_| {
+            return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
+        }
+        if (cmd.matchSubCmd("train-demo")) |sub_cmd| {
+            const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
+            const warmup_steps = opts.warmup orelse 0;
+            const steps = opts.steps orelse 8;
+            return demos.run_train_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
+        }
+        if (cmd.matchSubCmd("llm-ft-demo")) |sub_cmd| {
+            const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
+            const warmup_steps = opts.warmup orelse 0;
+            const steps = opts.steps orelse 8;
+            return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
+        }
+        const llama_ft_sub = cmd.matchSubCmd("llama-ft-demo-pr") orelse cmd.matchSubCmd("llama-ft-demo-mlir");
+        if (llama_ft_sub) |sub_cmd| {
+            const lane: llama_demo.LlamaDemoPipeline = if (std.mem.eql(u8, sub_cmd.name, "llama-ft-demo-pr")) .pr else .mlir;
+            const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
+            const dtype = if (opts.dtype) |d|
+                std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
+            else
+                zg.pr.DType.bf16;
 
-        const kernel_provider = if (opts.kernel_provider) |provider_name|
-            std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
-        else
-            null;
+            const kernel_provider = if (opts.kernel_provider) |provider_name|
+                std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
+            else
+                null;
 
-        const cfg = llama_demo.LlamaDemoConfig{
-            .train = opts.train,
-            .dtype = dtype,
-            .seq = opts.seq orelse 4,
-            .batch = opts.batch orelse 1,
-            .canonical_shapes = opts.canonical_shapes,
-            .execute_only = opts.execute_only,
-            .kernel_provider = kernel_provider,
-        };
+            const cfg = llama_demo.LlamaDemoConfig{
+                .train = opts.train,
+                .dtype = dtype,
+                .seq = opts.seq orelse 4,
+                .batch = opts.batch orelse 1,
+                .canonical_shapes = opts.canonical_shapes,
+                .execute_only = opts.execute_only,
+                .kernel_provider = kernel_provider,
+            };
 
-        return llama_demo.run_llama_ft_demo(
-            gpa,
-            plugin_path,
-            dump_pr_ptr,
-            dump_mlir_ptr,
-            opts.warmup orelse 1,
-            opts.steps orelse 4,
-            quiet,
-            lane,
-            cfg,
-            dump_kernels,
-        );
+            return llama_demo.run_llama_ft_demo(
+                gpa,
+                plugin_path,
+                dump_pr_ptr,
+                dump_mlir_ptr,
+                opts.warmup orelse 1,
+                opts.steps orelse 4,
+                quiet,
+                lane,
+                cfg,
+                dump_kernels,
+            );
+        }
     }
     if (cmd.matchSubCmd("jit-cache-save")) |sub_cmd| {
-        const opts = try sub_cmd.to(cli.JitCacheOpts, .{});
+        if (comptime build_options.has_mlir) {
+            const opts = try sub_cmd.to(cli.JitCacheOpts, .{});
 
-        var program = try zg.frontend.build_demo_program(gpa);
-        defer program.deinit();
+            var program = try zg.frontend.build_demo_program(gpa);
+            defer program.deinit();
 
-        const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
-        defer gpa.free(mlir_bytes);
+            const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
+            defer gpa.free(mlir_bytes);
 
-        const serialized = try backend.compile_serialized(device, mlir_bytes, true, .{});
-        defer gpa.free(serialized);
+            const serialized = try backend.compile_serialized(device, mlir_bytes, true, .{});
+            defer gpa.free(serialized);
 
-        try demos.write_bytes_to_path(opts.path, serialized);
-        std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, opts.path });
-        return;
+            try demos.write_bytes_to_path(opts.path, serialized);
+            std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, opts.path });
+            return;
+        }
+        log.err("jit-cache-save requires MLIR (build with -Dmlir=true)", .{});
+        return error.MlirDisabled;
     }
     if (cmd.matchSubCmd("jit-cache-run")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.JitCacheOpts, .{});
@@ -278,12 +293,17 @@ pub fn main() !void {
     return error.NoSubcommand;
 }
 
+fn requireTvm() error{TvmUnavailable} {
+    log.err("this command requires TVM support (headers not found in SDK)", .{});
+    return error.TvmUnavailable;
+}
+
 fn run_tvm_demo(
     gpa: std.mem.Allocator,
     M: usize,
     N: usize,
     K: usize,
-    target_kind: zg.tvm.tir.TargetKind,
+    target_kind: if (build_options.has_tvm) zg.tvm.tir.TargetKind else void,
     base_work_dir: []const u8,
 ) !void {
     const tvm_runtime = zg.tvm.runtime;
@@ -502,7 +522,7 @@ fn lower_demo_to_mlir(
     program: *const zg.pr.Program,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !LowerResult {
-    const out_fmt: zg.lower.stablehlo.OutputFormat = if (dump_mlir != null) .mlir_text else .mlir_bytecode;
+    const out_fmt: zg.lower.OutputFormat = if (dump_mlir != null) .mlir_text else .mlir_bytecode;
     const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, program, "main", out_fmt);
     if (dump_mlir != null and out_fmt == .mlir_text) {
         std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
