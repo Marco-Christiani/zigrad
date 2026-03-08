@@ -1,6 +1,6 @@
 import { defineConfig } from '@nuxtjs/mdc/config'
 
-import mlir_grammar from '../shiki-grammars/grammar.json'
+import mlir_grammar from '../shiki-grammars/mlir-grammar.json'
 import pdll_grammar from '../shiki-grammars/pdll-grammar.json'
 import tablegen_grammar from '../shiki-grammars/tablegen-grammar.json'
 import zxpr_grammar from '../shiki-grammars/zxpr-grammar.json'
