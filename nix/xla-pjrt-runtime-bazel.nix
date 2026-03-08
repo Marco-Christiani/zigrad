@@ -12,6 +12,9 @@
   # CUDA (optional)
   cudaSupport ? false,
   cudaVersion ? null,
+  # Optional explicit PJRT CUDA track selector. If null, inferred from cudaVersion.
+  # Valid values: "cuda12" | "cuda13"
+  pjrtCudaTrack ? null,
   cudaArchitectures ? null,
   # XLA source (flake input).
   xlaSrc,
@@ -33,6 +36,25 @@
     if cudaSupport && cudaVersion == null
     then throw "cudaVersion required when cudaSupport is true"
     else cudaVersion;
+
+  pjrtCudaTrackResolved =
+    if !cudaSupport
+    then null
+    else if pjrtCudaTrack != null
+    then pjrtCudaTrack
+    else if lib.hasPrefix "13" cudaVersionChecked
+    then "cuda13"
+    else "cuda12";
+
+  expectedCudaMajor =
+    if pjrtCudaTrackResolved == "cuda13"
+    then "13"
+    else "12";
+
+  pjrtCudaConfig =
+    if pjrtCudaTrackResolved == "cuda13"
+    then "pjrt_cuda13"
+    else "pjrt_cuda12";
 
   # Runtime dir names for CUDA DSOs. Used only for GPU plugin RPATH computation.
   # The actual CUDA DSOs are provided by cuda-redist.nix, not extracted from Bazel.
@@ -156,7 +178,7 @@
       common --verbose_failures
     ''
     + lib.optionalString cudaSupport ''
-      build --config=pjrt_cuda12
+      build --config=${pjrtCudaConfig}
       build --action_env TF_CUDA_VERSION="${cudaVersionChecked}"
       ${lib.optionalString (cudaComputeCapabilities != null)
         "build --action_env TF_CUDA_COMPUTE_CAPABILITIES=\"${cudaComputeCapabilities}\""}
@@ -200,6 +222,83 @@
     cat > ./.bazelrc <<'CFG'
     ${xlaBazelrc}
     CFG
+  '';
+
+  validateHermeticCudaSupport = lib.optionalString cudaSupport ''
+    export ZG_RULES_ML_TOOLCHAIN_CUDA_REDIST_VERSIONS="$bazelOut/external/rules_ml_toolchain/third_party/gpus/cuda/hermetic/cuda_redist_versions.bzl"
+    python3 - <<'PY'
+    import os
+    import pathlib
+    import re
+    import sys
+
+    cuda_version = "${cudaVersionChecked}"
+    pjrt_track = "${pjrtCudaTrackResolved}"
+    expected_major = "${expectedCudaMajor}"
+    rules_file = pathlib.Path(os.environ["ZG_RULES_ML_TOOLCHAIN_CUDA_REDIST_VERSIONS"])
+
+    if not rules_file.exists():
+        print(
+            f"xla-pjrt-runtime-bazel: expected rules_ml_toolchain metadata at {rules_file}, but it does not exist",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not cuda_version.startswith(expected_major + "."):
+        print(
+            f"xla-pjrt-runtime-bazel: {pjrt_track} requires CUDA {expected_major}.x, got {cuda_version}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    text = rules_file.read_text()
+
+    cuda_redist_match = re.search(r"CUDA_REDIST_JSON_DICT\s*=\s*\{(.*?)\n\}", text, re.DOTALL)
+    if not cuda_redist_match:
+        print(
+            f"xla-pjrt-runtime-bazel: failed to parse CUDA_REDIST_JSON_DICT from {rules_file}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    supported_versions = sorted(set(re.findall(r'"([0-9]+\.[0-9]+(?:\.[0-9]+)?)"\s*:', cuda_redist_match.group(1))))
+    if cuda_version not in supported_versions:
+        major_versions = [v for v in supported_versions if v.startswith(expected_major + ".")]
+        print(
+            "xla-pjrt-runtime-bazel: requested cudaVersion="
+            f"{cuda_version} is not supported by pinned rules_ml_toolchain for {pjrt_track}. "
+            f"Supported {expected_major}.x versions: {', '.join(major_versions)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    nccl_map_match = re.search(r"CUDA_NCCL_WHEELS\s*=\s*(\{.*?)(?:\n\n|# Ensures)", text, re.DOTALL)
+    if not nccl_map_match:
+        print(
+            f"xla-pjrt-runtime-bazel: failed to parse CUDA_NCCL_WHEELS from {rules_file}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    nccl_expr = nccl_map_match.group(1).strip()
+    if re.search(rf'"{re.escape(cuda_version)}"\s*:', nccl_expr):
+        sys.exit(0)
+
+    generated_dict = f"CUDA_{expected_major}_NCCL_WHEEL_DICT"
+    generated_pattern = (
+        rf'v:\s*{re.escape(generated_dict)}\s+for\s+v\s+in\s+CUDA_REDIST_JSON_DICT\.keys\(\)\s+'
+        rf'if\s+v\.startswith\("{re.escape(expected_major)}"\)'
+    )
+    if generated_dict in text and re.search(generated_pattern, nccl_expr):
+        sys.exit(0)
+
+    print(
+        "xla-pjrt-runtime-bazel: requested cudaVersion="
+        f"{cuda_version} has no NCCL wheel mapping in pinned rules_ml_toolchain metadata ({rules_file})",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+    PY
   '';
 
   fetchPreInstall = ''
@@ -269,177 +368,182 @@
     patch_elf_tree "$bazelOut/execroot"
   '';
 in
-  buildBazelPackage {
-    name =
-      "xla-pjrt-plugins"
-      + lib.optionalString cudaSupport "-cuda";
+  assert lib.assertMsg
+  (!cudaSupport || lib.elem pjrtCudaTrackResolved ["cuda12" "cuda13"])
+  "xla-pjrt-runtime-bazel: invalid pjrtCudaTrack=${pjrtCudaTrackResolved}; expected cuda12 or cuda13";
+    buildBazelPackage {
+      name =
+        "xla-pjrt-plugins"
+        + lib.optionalString cudaSupport "-cuda";
 
-    removeRulesCC = false;
+      removeRulesCC = false;
 
-    bazel = bazel_7;
-    dontAddBazelOpts = true;
+      bazel = bazel_7;
+      dontAddBazelOpts = true;
 
-    bazelFlags = [
-      "--enable_bzlmod=false"
-    ];
-
-    bazelBuildFlags = [
-      "-c"
-      "opt"
-      "--nofetch"
-    ];
-
-    inherit bazelTargets;
-
-    buildAttrs = {
-      pname = "xla-pjrt-plugins";
-      version = "xla-${xlaSrc.shortRev or "unknown"}";
-      src = xlaSrc;
-
-      nativeBuildInputs = [
-        python3
-        patchelf
-        file
+      bazelFlags = [
+        "--enable_bzlmod=false"
       ];
 
-      postPatch = postPatchScript;
+      bazelBuildFlags = [
+        "-c"
+        "opt"
+        "--nofetch"
+      ];
 
-      preBuild = ''
-        ${writeBazelrc}
+      inherit bazelTargets;
 
-        python3 ${./parse_bazelrc.py} --output ./bazel-config.json
+      buildAttrs = {
+        pname = "xla-pjrt-plugins";
+        version = "xla-${xlaSrc.shortRev or "unknown"}";
+        src = xlaSrc;
 
-        install_base="$(bazel --batch --output_base="$bazelOut" --output_user_root="$bazelUserRoot" info install_base)"
-        rm -rf "$bazelOut/external/bazel_tools"
-        ln -s "$install_base/embedded_tools" "$bazelOut/external/bazel_tools"
-        rm -rf "$bazelOut/external/rules_java_builtin"
-        ln -s "$install_base/rules_java" "$bazelOut/external/rules_java_builtin"
-        rm -rf "$bazelOut/external/internal_platforms_do_not_use"
-        ln -s "$install_base/platforms" "$bazelOut/external/internal_platforms_do_not_use"
+        nativeBuildInputs = [
+          python3
+          patchelf
+          file
+        ];
 
-        while IFS= read -r f; do
-          sed -i "s|/usr/bin/env python3|${python3}/bin/python|g" "$f" || true
-          sed -i "s|/usr/bin/env python|${python3}/bin/python|g" "$f" || true
-        done < <(grep -rl "/usr/bin/env python" "$install_base" 2>/dev/null || true)
+        postPatch = postPatchScript;
 
-        # Re-patch shebangs in the unpacked deps with current nixpkgs tools.
-        # The deps tarball may contain stale shebangs from a previous fetch
-        # (e.g. /nix/store/<old-hash>-bash that no longer exists).
-        if [ -d "$bazelOut/external/rules_ml_toolchain" ]; then
-          patchShebangs "$bazelOut/external/rules_ml_toolchain" || true
-        fi
+        preBuild = ''
+          ${writeBazelrc}
 
-        if [ -d "$bazelOut/external/XNNPACK" ]; then
-          patchShebangs "$bazelOut/external/XNNPACK" || true
-          substituteInPlace "$bazelOut/external/XNNPACK/ynnpack/build_defs.bzl" \
-            --replace 'cmd = "$(location ' 'cmd = "$${PYTHON_BIN_PATH} $(location '
-        fi
+          python3 ${./parse_bazelrc.py} --output ./bazel-config.json
 
-        if [ -f "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt" ]; then
-          sed -i "s|%shebang%|#!${python3}/bin/python|g" \
-            "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt"
-          sed -i "s|/usr/bin/env python3|${python3}/bin/python|g" \
-            "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt"
-          sed -i "s|/usr/bin/env python|${python3}/bin/python|g" \
-            "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt"
-        fi
+          install_base="$(bazel --batch --output_base="$bazelOut" --output_user_root="$bazelUserRoot" info install_base)"
+          rm -rf "$bazelOut/external/bazel_tools"
+          ln -s "$install_base/embedded_tools" "$bazelOut/external/bazel_tools"
+          rm -rf "$bazelOut/external/rules_java_builtin"
+          ln -s "$install_base/rules_java" "$bazelOut/external/rules_java_builtin"
+          rm -rf "$bazelOut/external/internal_platforms_do_not_use"
+          ln -s "$install_base/platforms" "$bazelOut/external/internal_platforms_do_not_use"
 
-      '';
+          ${validateHermeticCudaSupport}
 
-      installPhase = ''
-        set -euo pipefail
-        mkdir -p "$out/runtime/xla/pjrt/c"
+          while IFS= read -r f; do
+            sed -i "s|/usr/bin/env python3|${python3}/bin/python|g" "$f" || true
+            sed -i "s|/usr/bin/env python|${python3}/bin/python|g" "$f" || true
+          done < <(grep -rl "/usr/bin/env python" "$install_base" 2>/dev/null || true)
 
-        for f in ${lib.concatStringsSep " " builtOutputs}; do
-          if [[ ! -f "$f" ]]; then
-            echo "ERROR: missing expected Bazel output: $f" >&2
-            find bazel-bin -type f -name '*.so*' -maxdepth 8 -print >&2 || true
-            exit 1
+          # Re-patch shebangs in the unpacked deps with current nixpkgs tools.
+          # The deps tarball may contain stale shebangs from a previous fetch
+          # (e.g. /nix/store/<old-hash>-bash that no longer exists).
+          if [ -d "$bazelOut/external/rules_ml_toolchain" ]; then
+            patchShebangs "$bazelOut/external/rules_ml_toolchain" || true
           fi
-        done
 
-        # Copy plugin .so files
-        cpu_out="bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
-        cp -v --no-preserve=mode "$cpu_out" "$out/runtime/xla/pjrt/c/"
+          if [ -d "$bazelOut/external/XNNPACK" ]; then
+            patchShebangs "$bazelOut/external/XNNPACK" || true
+            substituteInPlace "$bazelOut/external/XNNPACK/ynnpack/build_defs.bzl" \
+              --replace 'cmd = "$(location ' 'cmd = "$${PYTHON_BIN_PATH} $(location '
+          fi
 
-        ${lib.optionalString cudaSupport ''
-          gpu_out="bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-          cp -v --no-preserve=mode "$gpu_out" "$out/runtime/xla/pjrt/c/"
-        ''}
+          if [ -f "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt" ]; then
+            sed -i "s|%shebang%|#!${python3}/bin/python|g" \
+              "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt"
+            sed -i "s|/usr/bin/env python3|${python3}/bin/python|g" \
+              "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt"
+            sed -i "s|/usr/bin/env python|${python3}/bin/python|g" \
+              "$bazelOut/external/rules_python/python/private/python_bootstrap_template.txt"
+          fi
 
-        # Patch plugin rpaths to the bundled runtime lib dirs.
-        # CUDA DSOs and sys libs are provided by cuda-redist.nix (merged via symlinkJoin).
-        chmod u+w "$out/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
-        patchelf --set-rpath '$ORIGIN/../../../sys/lib' "$out/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
-        ${lib.optionalString cudaSupport ''
-          cuda_rpath='${cudaPluginRpath}'
-          chmod u+w "$out/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-          patchelf --set-rpath "$cuda_rpath" "$out/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-        ''}
-
-        # Provenance
-        cat > "$out/runtime/PROVENANCE.json" <<EOF
-        ${builtins.toJSON {xla-rev = xlaSrc.rev or xlaSrc.shortRev or "unknown";}}
-        EOF
-        mkdir -p "$out/runtime/logs"
-        cp -v ./bazel-config.json "$out/runtime/BAZEL_CONFIG.json"
-        cp -v ./bazel-config.json "$out/runtime/logs/bazel-config.json"
-        if [ -f tensorflow.bazelrc ]; then
-          head -n 120 tensorflow.bazelrc > "$out/runtime/logs/bazelrc-head.txt" || true
-          grep -nE '^(common|build):' tensorflow.bazelrc > "$out/runtime/logs/bazelrc-configs.txt" || true
-        fi
-      '';
-
-      meta = {
-        description = "XLA PJRT C API runtime plugins (CPU + GPU .so only)";
-        longDescription = ''
-          Builds XLA PJRT CPU/GPU plugin .so files via Bazel. CUDA runtime DSOs
-          are provided separately by cuda-redist.nix and merged at the SDK level.
         '';
-        platforms = lib.platforms.linux;
+
+        installPhase = ''
+          set -euo pipefail
+          mkdir -p "$out/runtime/xla/pjrt/c"
+
+          for f in ${lib.concatStringsSep " " builtOutputs}; do
+            if [[ ! -f "$f" ]]; then
+              echo "ERROR: missing expected Bazel output: $f" >&2
+              find bazel-bin -type f -name '*.so*' -maxdepth 8 -print >&2 || true
+              exit 1
+            fi
+          done
+
+          # Copy plugin .so files
+          cpu_out="bazel-bin/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
+          cp -v --no-preserve=mode "$cpu_out" "$out/runtime/xla/pjrt/c/"
+
+          ${lib.optionalString cudaSupport ''
+            gpu_out="bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+            cp -v --no-preserve=mode "$gpu_out" "$out/runtime/xla/pjrt/c/"
+          ''}
+
+          # Patch plugin rpaths to the bundled runtime lib dirs.
+          # CUDA DSOs and sys libs are provided by cuda-redist.nix (merged via symlinkJoin).
+          chmod u+w "$out/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
+          patchelf --set-rpath '$ORIGIN/../../../sys/lib' "$out/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
+          ${lib.optionalString cudaSupport ''
+            cuda_rpath='${cudaPluginRpath}'
+            chmod u+w "$out/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+            patchelf --set-rpath "$cuda_rpath" "$out/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+          ''}
+
+          # Provenance
+          cat > "$out/runtime/PROVENANCE.json" <<EOF
+          ${builtins.toJSON {xla-rev = xlaSrc.rev or xlaSrc.shortRev or "unknown";}}
+          EOF
+          mkdir -p "$out/runtime/logs"
+          cp -v ./bazel-config.json "$out/runtime/BAZEL_CONFIG.json"
+          cp -v ./bazel-config.json "$out/runtime/logs/bazel-config.json"
+          if [ -f tensorflow.bazelrc ]; then
+            head -n 120 tensorflow.bazelrc > "$out/runtime/logs/bazelrc-head.txt" || true
+            grep -nE '^(common|build):' tensorflow.bazelrc > "$out/runtime/logs/bazelrc-configs.txt" || true
+          fi
+        '';
+
+        meta = {
+          description = "XLA PJRT C API runtime plugins (CPU + GPU .so only)";
+          longDescription = ''
+            Builds XLA PJRT CPU/GPU plugin .so files via Bazel. CUDA runtime DSOs
+            are provided separately by cuda-redist.nix and merged at the SDK level.
+          '';
+          platforms = lib.platforms.linux;
+        };
+
+        dontStrip = true;
       };
 
-      dontStrip = true;
-    };
+      fetchAttrs = {
+        hash = depsHash;
+        src = xlaSrc;
+        nativeBuildInputs = [
+          patchelf
+          file
+        ];
+        postPatch = postPatchScript;
+        preBuild = writeBazelrc;
+        preInstall = fetchPreInstall;
+        installPhase = ''
+          runHook preInstall
 
-    fetchAttrs = {
-      hash = depsHash;
-      src = xlaSrc;
-      nativeBuildInputs = [
-        patchelf
-        file
-      ];
-      postPatch = postPatchScript;
-      preBuild = writeBazelrc;
-      preInstall = fetchPreInstall;
-      installPhase = ''
-        runHook preInstall
+          # Remove all vcs files
+          rm -rf $(find $bazelOut/external -type d -name .git)
+          rm -rf $(find $bazelOut/external -type d -name .svn)
+          rm -rf $(find $bazelOut/external -type d -name .hg)
 
-        # Remove all vcs files
-        rm -rf $(find $bazelOut/external -type d -name .git)
-        rm -rf $(find $bazelOut/external -type d -name .svn)
-        rm -rf $(find $bazelOut/external -type d -name .hg)
+          if [ -e "$bazelOut/external/bazel_tools" ]; then
+            echo "[deps] bazel_tools already present at $bazelOut/external/bazel_tools"
+          else
+            install_base="$(bazel info install_base)"
+            echo "[deps] creating bazel_tools symlink to $install_base/embedded_tools"
+            ln -s "$install_base/embedded_tools" "$bazelOut/external/bazel_tools"
+          fi
 
-        if [ -e "$bazelOut/external/bazel_tools" ]; then
-          echo "[deps] bazel_tools already present at $bazelOut/external/bazel_tools"
-        else
-          install_base="$(bazel info install_base)"
-          echo "[deps] creating bazel_tools symlink to $install_base/embedded_tools"
-          ln -s "$install_base/embedded_tools" "$bazelOut/external/bazel_tools"
-        fi
+          # Patching symlinks to remove build directory reference
+          find $bazelOut/external -type l | while read symlink; do
+            new_target="$(readlink "$symlink" | sed "s,$NIX_BUILD_TOP,NIX_BUILD_TOP,")"
+            rm "$symlink"
+            ln -sf "$new_target" "$symlink"
+          done
 
-        # Patching symlinks to remove build directory reference
-        find $bazelOut/external -type l | while read symlink; do
-          new_target="$(readlink "$symlink" | sed "s,$NIX_BUILD_TOP,NIX_BUILD_TOP,")"
-          rm "$symlink"
-          ln -sf "$new_target" "$symlink"
-        done
+          echo '${bazel_7.name}' > $bazelOut/external/.nix-bazel-version
 
-        echo '${bazel_7.name}' > $bazelOut/external/.nix-bazel-version
+          (cd $bazelOut/ && tar czf $out --sort=name --mtime='@1' --owner=0 --group=0 --numeric-owner external/)
 
-        (cd $bazelOut/ && tar czf $out --sort=name --mtime='@1' --owner=0 --group=0 --numeric-owner external/)
-
-        runHook postInstall
-      '';
-    };
-  }
+          runHook postInstall
+        '';
+      };
+    }

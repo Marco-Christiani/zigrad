@@ -92,8 +92,8 @@
     cudaCfg = {
       cudaArchitectures = ["86"];
       gccHostAttr = "gcc14";
-      cudaPackagesAttr = "cudaPackages_12";
-      cudaVersion = "12.8";
+      cudaPackagesAttr = "cudaPackages_12_9";
+      cudaVersion = "12.9.1";
     };
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
