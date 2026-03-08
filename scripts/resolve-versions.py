@@ -140,6 +140,13 @@ def _http_get_json(url: str, *, timeout_s: float = 30.0) -> dict:
         return json.loads(r.read())
 
 
+def _http_get_text(url: str, *, timeout_s: float = 30.0) -> str:
+    """Fetch UTF-8 text from a URL."""
+    req = urllib.request.Request(url, headers={"User-Agent": "zigrad-resolve/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        return r.read().decode("utf-8")
+
+
 def _parse_bzl_assign(text: str, var: str) -> str:
     """Parse a simple VAR = "value" assignment from .bzl text."""
     pat = rf'^{re.escape(var)}\s*=\s*"([^"]+)"\s*$'
@@ -227,32 +234,28 @@ class XlaResolver:
             cuda_defaults=self._resolve_cuda_defaults(),
         )
 
-    def resolve_nccl_wheel(self, *, cuda_version: str) -> CudaComponent | None:
-        """Parse NCCL wheel info from cuda_redist_versions.bzl.
+    def resolve_nccl_wheel(self, *, cuda_version: str) -> CudaComponent:
+        """Resolve NCCL wheel from XLA's pinned rules_ml_toolchain source.
 
-        The .bzl file contains a Starlark dict keyed by CUDA generation
-        (CUDA_12_NCCL_WHEEL_DICT, CUDA_11_NCCL_WHEEL_DICT) with per-arch entries.
-        We extract the x86_64 entry for the requested CUDA generation.
+        XLA's WORKSPACE delegates NCCL setup to @rules_ml_toolchain. That repo's
+        cuda_redist_versions.bzl is the actual source of truth for hermetic NCCL
+        resolution used by Bazel, so the resolver must follow that pin rather
+        than XLA's stale in-tree copy.
         """
-        bzl_path = self.xla_src / "third_party/gpus/cuda/hermetic/cuda_redist_versions.bzl"
-        if not bzl_path.exists():
-            return None
+        bzl, source = self._resolve_rules_ml_toolchain_cuda_redist_versions()
+        dict_name = self._resolve_nccl_dict_name(
+            bzl,
+            cuda_version=cuda_version,
+            source=source,
+        )
 
-        bzl = bzl_path.read_text()
-        major = cuda_version.split(".")[0]
-
-        # Find the CUDA_<N>_NCCL_WHEEL_DICT block for x86_64
-        # The block we want is referenced by CUDA_NCCL_WHEELS[<ver>], which
-        # points at CUDA_<major>_NCCL_WHEEL_DICT. Parse the dict directly.
-        dict_name = f"CUDA_{major}_NCCL_WHEEL_DICT"
         dict_match = re.search(
             rf'{re.escape(dict_name)}\s*=\s*\{{(.*?)\n\}}',
             bzl,
             re.DOTALL,
         )
         if not dict_match:
-            logger.warning("NCCL wheel dict %s not found in %s", dict_name, bzl_path)
-            return None
+            raise ValueError(f"NCCL wheel dict {dict_name} not found in {source}")
 
         # Within that dict, find the x86_64 entry
         x86_block = re.search(
@@ -261,7 +264,9 @@ class XlaResolver:
             re.DOTALL,
         )
         if not x86_block:
-            return None
+            raise ValueError(
+                f"NCCL wheel dict {dict_name} has no x86_64-unknown-linux-gnu entry in {source}",
+            )
 
         block = x86_block.group(1)
         version_m = re.search(r'"version"\s*:\s*"([^"]+)"', block)
@@ -269,7 +274,9 @@ class XlaResolver:
         sha256_m = re.search(r'"sha256"\s*:\s*"([^"]+)"', block)
 
         if not (version_m and url_m and sha256_m):
-            return None
+            raise ValueError(
+                f"NCCL wheel dict {dict_name} has incomplete x86_64 fields in {source}",
+            )
 
         sha256_hex = sha256_m.group(1).lower()
         return CudaComponent(
@@ -280,6 +287,77 @@ class XlaResolver:
             hash_sri=_hex_sha256_to_sri(sha256_hex),
             runtime_dir="nccl",
             kind=ComponentKind.wheel,
+        )
+
+    def _resolve_rules_ml_toolchain_cuda_redist_versions(self) -> tuple[str, str]:
+        workspace_path = self.xla_src / "WORKSPACE"
+        workspace = workspace_path.read_text()
+
+        strip_prefix_m = re.search(
+            r'strip_prefix\s*=\s*"rules_ml_toolchain-([0-9a-f]{40})"',
+            workspace,
+        )
+        if strip_prefix_m:
+            rev = strip_prefix_m.group(1)
+        else:
+            url_m = re.search(
+                r'https://github\.com/google-ml-infra/rules_ml_toolchain/archive/([0-9a-f]{40})\.tar\.gz',
+                workspace,
+            )
+            if not url_m:
+                raise ValueError(
+                    f"Failed to resolve rules_ml_toolchain revision from {workspace_path}",
+                )
+            rev = url_m.group(1)
+
+        url = (
+            "https://raw.githubusercontent.com/google-ml-infra/"
+            f"rules_ml_toolchain/{rev}/third_party/gpus/cuda/hermetic/cuda_redist_versions.bzl"
+        )
+        return _http_get_text(url), url
+
+    def _resolve_nccl_dict_name(self, bzl: str, *, cuda_version: str, source: str) -> str:
+        map_match = re.search(
+            r"CUDA_NCCL_WHEELS\s*=\s*(\{.*?)(?:\n\n|# Ensures)",
+            bzl,
+            re.DOTALL,
+        )
+        if not map_match:
+            raise ValueError(f"CUDA_NCCL_WHEELS map not found in {source}")
+        mapping_expr = map_match.group(1).strip()
+
+        explicit_map_entry = re.search(
+            rf'"{re.escape(cuda_version)}"\s*:\s*([A-Za-z0-9_]+)\s*,?',
+            mapping_expr,
+        )
+        if explicit_map_entry:
+            return explicit_map_entry.group(1)
+
+        cuda_redist_json_match = re.search(
+            r"CUDA_REDIST_JSON_DICT\s*=\s*\{(.*?)\n\}",
+            bzl,
+            re.DOTALL,
+        )
+        if not cuda_redist_json_match:
+            raise ValueError(f"CUDA_REDIST_JSON_DICT not found in {source}")
+        if not re.search(
+            rf'"{re.escape(cuda_version)}"\s*:',
+            cuda_redist_json_match.group(1),
+        ):
+            raise ValueError(
+                f"rules_ml_toolchain has no CUDA redist entry for CUDA {cuda_version} in {source}",
+            )
+
+        major = cuda_version.split(".")[0]
+        generated_dict_name = f"CUDA_{major}_NCCL_WHEEL_DICT"
+        if generated_dict_name in bzl and re.search(
+            rf'v:\s*{re.escape(generated_dict_name)}\s+for\s+v\s+in\s+CUDA_REDIST_JSON_DICT\.keys\(\)\s+if\s+v\.startswith\("{re.escape(major)}"\)',
+            mapping_expr,
+        ):
+            return generated_dict_name
+
+        raise ValueError(
+            f"rules_ml_toolchain has no NCCL wheel mapping for CUDA {cuda_version} in {source}",
         )
 
     def _resolve_llvm(self) -> SourcePin:
