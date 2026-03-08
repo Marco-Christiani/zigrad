@@ -28,6 +28,7 @@ outputs*
 drafts
 data
 *ignore
+!.gitignore
 .direnv
 .env
 !.envrc
@@ -47,7 +48,9 @@ artifacts/
 .task/
 
 *.wasm
+!website/nuxt-content/shiki-grammars/*.json
 shim/build
 shim/build-mlir
 *.mlir
+!shim/test/*.mlir
 *.ll
