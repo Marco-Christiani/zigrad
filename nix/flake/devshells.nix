@@ -18,7 +18,7 @@
 
     baseDevShellPkgs = with pkgs; [
       zig
-      # zls
+      zls
       go-task
       nodejs_22
       binutils
