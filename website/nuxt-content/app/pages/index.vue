@@ -28,7 +28,7 @@ const title = 'Zigrad'
 const description = 'Zigrad is a programmable deep learning framework and compiler that bridges research workflows and production execution.'
 
 const hero_links: ButtonLink[] = [
-  { label: 'Get started', to: '/getting-started', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
+  { label: 'Explore the pipeline', to: '/pipeline', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
   { label: 'View on GitHub', to: 'https://github.com/Marco-Christiani/Zigrad', target: '_blank', color: 'neutral', variant: 'outline', size: 'xl', icon: 'i-simple-icons-github' }
 ]
 
@@ -68,7 +68,7 @@ const sections: Section[] = [
     title: 'Retarget the same program and specialize only the regions that matter.',
     description:
       'The same program can target different compiler backends while selectively replacing regions with specialized kernels when profitability warrants it.',
-    link: { label: 'See the pipeline', to: '/getting-started', color: 'neutral', variant: 'subtle', size: 'lg', trailingIcon: 'i-lucide-arrow-right' },
+    link: { label: 'Open explorer', to: '/pipeline', color: 'neutral', variant: 'subtle', size: 'lg', trailingIcon: 'i-lucide-arrow-right' },
     features: [
       {
         icon: 'i-lucide-cpu',
@@ -134,7 +134,7 @@ useSeoMeta({
         </div>
       </template>
 
-      <HeroCodeViewer />
+      <HeroPipelineDiagram />
     </UPageHero>
 
     <UPageSection
@@ -162,11 +162,11 @@ useSeoMeta({
 
     <UPageSection class="dark:bg-gradient-to-b from-neutral-950 to-neutral-900">
       <UPageCTA
-        title="Start with the pipeline, not the marketing layer."
-        description="Read the terminology, run a demo, dump the artifacts, and inspect how the program changes across lowering and execution boundaries."
+        title="Inspect the pipeline end to end."
+        description="Read the terminology, run a demo, dump the artifacts, and inspect how programs change across lowering and execution boundaries."
         :links="[
           { label: 'Start building', to: '/getting-started', trailingIcon: 'i-lucide-arrow-right' },
-          { label: 'Read the design vocabulary', to: '/getting-started', variant: 'subtle', trailingIcon: 'i-lucide-arrow-right' },
+          { label: 'Explore the pipeline', to: '/pipeline', variant: 'subtle', trailingIcon: 'i-lucide-arrow-right' },
           { label: 'View on GitHub', to: 'https://github.com/Marco-Christiani/Zigrad', target: '_blank', variant: 'subtle', icon: 'i-simple-icons-github' }
         ]"
         class="dark:bg-neutral-950"
