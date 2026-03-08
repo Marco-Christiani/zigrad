@@ -14,7 +14,7 @@ export default defineNuxtConfig({
     enabled: true
   },
 
-  css: ['~/assets/css/main.css'],
+  css: ['~/assets/css/main.css', 'shiki-magic-move/style.css'],
 
   content: {
     build: {
@@ -28,7 +28,8 @@ export default defineNuxtConfig({
 
   mdc: {
     highlight: {
-      langs: ['js', 'jsx', 'json', 'ts', 'tsx', 'vue', 'css', 'html', 'bash', 'md', 'mdc', 'yaml', 'zig']
+      noApiRoute: true,
+      langs: ['js', 'jsx', 'json', 'ts', 'tsx', 'vue', 'css', 'html', 'bash', 'md', 'mdc', 'yaml', 'zig', 'llvm']
     }
   },
 
