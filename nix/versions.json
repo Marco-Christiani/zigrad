@@ -83,16 +83,16 @@
           "version": "3.2.5"
         },
         "nccl": {
-          "hash_sri": "sha256-6l7T4FPHNfFoCb7nER3qxirDWxASiowQKWCgRizhbL4=",
+          "hash_sri": "sha256-3lulVi8IApoZyxzWWUBLGEEe0NbJCsX1LzC/ma1YCao=",
           "kind": "wheel",
           "runtime_dir": "nccl",
-          "sha256_hex": "ea5ed3e053c735f16809bee7111deac62ac35b10128a8c102960a0462ce16cbe",
-          "url": "https://files.pythonhosted.org/packages/48/fb/ec4ac065d9b0d56f72eaf1d9b0df601e33da28197b32ca351dc05b342611/nvidia_nccl_cu12-2.26.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
-          "version": "2.26.5"
+          "sha256_hex": "de5ba5562f08029a19cb1cd659404b18411ed0d6c90ac5f52f30bf99ad5809aa",
+          "url": "https://files.pythonhosted.org/packages/c4/cb/2cf5b8e6a669c90ac6410c3a9d86881308492765b6744de5d0ce75089999/nvidia_nccl_cu12-2.27.7-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "version": "2.27.7"
         }
       },
       "cudnn_version": "9.8.0",
-      "nccl_version": "2.26.5",
+      "nccl_version": "2.27.7",
       "nvshmem_version": "3.2.5"
     },
     "12.9.1": {
@@ -178,20 +178,20 @@
           "version": "3.2.5"
         },
         "nccl": {
-          "hash_sri": "sha256-6l7T4FPHNfFoCb7nER3qxirDWxASiowQKWCgRizhbL4=",
+          "hash_sri": "sha256-3lulVi8IApoZyxzWWUBLGEEe0NbJCsX1LzC/ma1YCao=",
           "kind": "wheel",
           "runtime_dir": "nccl",
-          "sha256_hex": "ea5ed3e053c735f16809bee7111deac62ac35b10128a8c102960a0462ce16cbe",
-          "url": "https://files.pythonhosted.org/packages/48/fb/ec4ac065d9b0d56f72eaf1d9b0df601e33da28197b32ca351dc05b342611/nvidia_nccl_cu12-2.26.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
-          "version": "2.26.5"
+          "sha256_hex": "de5ba5562f08029a19cb1cd659404b18411ed0d6c90ac5f52f30bf99ad5809aa",
+          "url": "https://files.pythonhosted.org/packages/c4/cb/2cf5b8e6a669c90ac6410c3a9d86881308492765b6744de5d0ce75089999/nvidia_nccl_cu12-2.27.7-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "version": "2.27.7"
         }
       },
       "cudnn_version": "9.8.0",
-      "nccl_version": "2.26.5",
+      "nccl_version": "2.27.7",
       "nvshmem_version": "3.2.5"
     }
   },
-  "generated_at_utc": "2026-03-06T07:50:41.424733+00:00",
+  "generated_at_utc": "2026-03-08T01:09:16.037196+00:00",
   "iree": {
     "commit": "776210bd36896f8ca14288637592a9d5cebfcea1",
     "llvm": {
