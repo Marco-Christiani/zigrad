@@ -28,7 +28,8 @@ const title = 'Zigrad'
 const description = 'Zigrad is a programmable deep learning framework and compiler that bridges research workflows and production execution.'
 
 const hero_links: ButtonLink[] = [
-  { label: 'Explore the pipeline', to: '/pipeline', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
+  { label: 'Get started', to: '/getting-started', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
+  // { label: 'Explore the pipeline', to: '/pipeline', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
   { label: 'View on GitHub', to: 'https://github.com/Marco-Christiani/Zigrad', target: '_blank', color: 'neutral', variant: 'outline', size: 'xl', icon: 'i-simple-icons-github' }
 ]
 
@@ -108,34 +109,35 @@ useSeoMeta({
 
 <template>
   <div class="dark:bg-gradient-to-b from-neutral-900 to-neutral-950">
-    <UPageHero
-      orientation="horizontal"
-      class="dark:bg-gradient-to-b from-neutral-900 via-neutral-950 to-neutral-950"
-    >
-      <template #top>
+    <section class="relative isolate overflow-hidden dark:bg-gradient-to-b from-neutral-900 via-neutral-950 to-neutral-950">
+      <div class="absolute inset-x-0 top-0">
         <HeroBackground />
-      </template>
+      </div>
 
-      <template #title>
-        {{ title }}
-      </template>
+      <UContainer class="relative grid gap-12 py-24 sm:py-32 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] lg:items-center lg:gap-16 lg:py-40">
+        <div class="min-w-0 max-w-2xl">
+          <h1 class="text-5xl font-bold tracking-tight text-highlighted sm:text-7xl">
+            {{ title }}
+          </h1>
 
-      <template #description>
-        {{ description }}
-      </template>
+          <p class="mt-6 text-lg text-muted sm:text-xl/8">
+            {{ description }}
+          </p>
 
-      <template #links>
-        <div class="flex flex-wrap gap-3">
-          <UButton
-            v-for="(link, index) in hero_links"
-            :key="index"
-            v-bind="link"
-          />
+          <div class="mt-10 flex flex-wrap gap-3">
+            <UButton
+              v-for="(link, index) in hero_links"
+              :key="index"
+              v-bind="link"
+            />
+          </div>
         </div>
-      </template>
 
-      <HeroPipelineDiagram />
-    </UPageHero>
+        <div class="w-full lg:justify-self-end">
+          <HeroPipelineDiagram class="w-full max-w-3xl" />
+        </div>
+      </UContainer>
+    </section>
 
     <UPageSection
       v-for="(section, index) in sections"

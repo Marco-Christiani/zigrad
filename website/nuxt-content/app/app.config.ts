@@ -15,13 +15,13 @@ export default defineAppConfig({
     siteName: 'Zigrad Docs'
   },
   header: {
-    title: '',
+    title: 'Zigrad',
     to: '/',
-    logo: {
-      alt: 'Zigrad logo',
-      light: '/api/zg-logo.svg',
-      dark: '/api/zg-logo.svg'
-    },
+    // logo: {
+    //   alt: 'Zigrad logo',
+    //   light: '/api/zg-logo.svg',
+    //   dark: '/api/zg-logo.svg'
+    // },
     search: true,
     colorMode: true,
     links: [
