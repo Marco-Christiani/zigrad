@@ -16,6 +16,7 @@
 ///
 /// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
+const log = std.log.scoped(.@"zg/pipeline");
 
 const pr_mod = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
@@ -38,9 +39,9 @@ pub const MlirEncoding = enum {
 /// Artifact: The "IR at some point" in the pipeline.
 ///
 /// This is a tagged union representing the various forms that a program
-/// takes as it flows through pipeline passes. The pipeline operates on
-/// PR and MLIR only — compilation to executable artifacts is handled
-/// by the backend after the pipeline completes.
+///  takes as it flows through pipeline passes. The pipeline operates on
+///  PR and MLIR only - compilation to executable artifacts is handled
+///  by the backend after the pipeline completes.
 pub const Artifact = union(ArtifactKind) {
     /// PR program (Zigrad-owned)
     pr: *pr_mod.Program,
@@ -70,8 +71,8 @@ pub const Artifact = union(ArtifactKind) {
 /// MLIR artifact with encoding metadata.
 ///
 /// Represents serialized MLIR at some pipeline stage. Passes that transform
-/// MLIR (select, materialize, legalize) operate on `bytes` directly — there
-/// is no separate snapshot field.
+///  MLIR (select, materialize, legalize) operate on `bytes` directly - there
+///  is no separate snapshot field.
 pub const MlirArtifact = struct {
     bytes: []u8,
     encoding: MlirEncoding,
@@ -193,17 +194,37 @@ pub const Pipeline = struct {
             return error.ArtifactKindMismatch;
         }
 
+        var pipeline_timer = std.time.Timer.start() catch null;
+
         var current = initial;
         errdefer current.deinit(ctx.allocator);
         for (self.passes) |p| {
             if (current.kind() != p.input_kind) return error.ArtifactKindMismatch;
+
+            var pass_timer = std.time.Timer.start() catch null;
             try p.run(&current, ctx);
+            if (pass_timer) |*t| {
+                log.info("pass '{s}' completed in {d:.2}ms", .{
+                    p.name, ns_to_ms(t.read()),
+                });
+            }
+
             if (current.kind() != p.output_kind) return error.ArtifactKindMismatch;
+        }
+
+        if (pipeline_timer) |*t| {
+            log.info("pipeline completed: {d} passes in {d:.2}ms", .{
+                self.passes.len, ns_to_ms(t.read()),
+            });
         }
 
         return current;
     }
 };
+
+fn ns_to_ms(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
+}
 
 // ============================================================================
 // Tests

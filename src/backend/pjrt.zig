@@ -102,13 +102,19 @@ pub const Backend = struct {
         } else try pjrt_types.Client.create(api_ptr);
         errdefer client.deinit();
 
-        return .{
+        const self = Backend{
             .api = api_ptr,
             .client = client,
             .allocator = allocator,
             .platform = platform,
             .kernel_dispatch_registered = false,
         };
+        log.info("plugin loaded: {s}", .{plugin_path});
+        log.info("platform: {s}, typed-ffi: {s}", .{
+            @tagName(self.platform),
+            if (self.api.ffi_extension() != null) "available" else "unavailable",
+        });
+        return self;
     }
 
     pub fn deinit(self: *Backend) void {
@@ -146,6 +152,15 @@ pub const Backend = struct {
         is_bytecode: bool,
         options: CompileOptions,
     ) !LoadedExecutable {
+        const format_tag: []const u8 = if (is_bytecode) "bytecode" else "text";
+        log.info("compile: {d:.1}KB {s}, platform={s}", .{
+            @as(f64, @floatFromInt(mlir_bytes.len)) / 1024.0,
+            format_tag,
+            @tagName(self.platform),
+        });
+
+        var timer = std.time.Timer.start() catch null;
+
         const compile_opts_pb = try build_compile_options_proto(self.allocator, options);
         defer self.allocator.free(compile_opts_pb);
 
@@ -153,6 +168,14 @@ pub const Backend = struct {
         var executable = try self.client.compile(device, format, mlir_bytes, compile_opts_pb);
         executable.dispatch_sidecar = if (options.kernel_package) |package| @ptrCast(package) else null;
         executable.dispatch_registry_sidecar = if (options.kernel_registry) |registry| @ptrCast(registry) else null;
+
+        if (timer) |*t| {
+            const elapsed_ns = t.read();
+            log.info("compile completed in {d:.2}ms", .{
+                @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms)),
+            });
+        }
+
         return executable;
     }
 
