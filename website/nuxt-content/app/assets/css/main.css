@@ -22,4 +22,12 @@
 
 :root {
   --ui-container: var(--container-8xl);
+
+  --autodoc-token-keyword: var(--ui-text-highlighted);
+  --autodoc-token-string: color-mix(in srgb, var(--ui-primary) 62%, white 38%);
+  --autodoc-token-builtin: color-mix(in srgb, var(--ui-warning, var(--ui-primary)) 72%, white 28%);
+  --autodoc-token-comment: var(--ui-text-dimmed);
+  --autodoc-token-function: color-mix(in srgb, var(--ui-primary) 55%, #a78bfa 45%);
+  --autodoc-token-number: color-mix(in srgb, var(--ui-error) 68%, white 32%);
+  --autodoc-token-type: color-mix(in srgb, var(--ui-primary) 58%, #60a5fa 42%);
 }

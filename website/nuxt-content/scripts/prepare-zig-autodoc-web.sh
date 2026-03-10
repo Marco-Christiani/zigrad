@@ -16,7 +16,4 @@ zig build -Dsdk="$ZG_EXTERNAL_SDK_ROOT" docs
 echo "syncing autodoc bundle..."
 "$script_dir/sync-zig-autodoc.sh" "$autodoc_dir"
 
-echo "applying autodoc branding..."
-"$script_dir/brand-zig-autodoc.sh"
-
 echo "prepared autodoc bundle for website at $repo_root/website/nuxt-content/public/api"

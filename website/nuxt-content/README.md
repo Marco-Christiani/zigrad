@@ -20,8 +20,8 @@ task site:build
 
 `task docs:web` does three things:
 
-1. Runs `zig build ... docs-web` to emit docs and sync into `public/api`.
-2. Applies branding patch from `scripts/brand-zig-autodoc.sh`.
-3. Keeps generated artifacts out of git via `.gitignore`.
+1. Runs `zig build ... docs` to emit the Zig autodoc bundle.
+2. Syncs the runtime autodoc assets into `public/api`.
+3. Leaves the Nuxt-side presentation and styling to `app/components/ZigAutodoc.vue`.
 
-The `/autodoc` route embeds `public/api/index.html` in an iframe.
+The `/autodoc` route mounts the autodoc viewer in-page and loads `public/api/main.js`, `main.wasm`, and `sources.tar` directly.
