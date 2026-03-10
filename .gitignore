@@ -49,6 +49,7 @@ artifacts/
 
 *.wasm
 !website/nuxt-content/shiki-grammars/*.json
+!website/**/*.svg
 shim/build
 shim/build-mlir
 *.mlir
