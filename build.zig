@@ -49,6 +49,14 @@ pub fn build(b: *std.Build) void {
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const cova_dep = b.dependency("cova", .{});
+    const protobuf_dep = b.dependency("protobuf", .{});
+    const protobuf_mod = protobuf_dep.module("protobuf");
+    const xla_pb_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/xla/proto/xla.pb.zig"),
+        .imports = &.{
+            .{ .name = "protobuf", .module = protobuf_mod },
+        },
+    });
     const zigrad_mod = b.addModule("zigrad", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -56,6 +64,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     zigrad_mod.addOptions("build_options", build_options);
+    zigrad_mod.addImport("protobuf", protobuf_mod);
+    zigrad_mod.addImport("xla_pb", xla_pb_mod);
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
     if (use_mkl) {
@@ -138,6 +148,35 @@ pub fn build(b: *std.Build) void {
     const gen_completions = add_cli_gen_step(b, cova_dep, exe);
     gen_completions.step.dependOn(&exe.step);
     b.getInstallStep().dependOn(&gen_completions.step);
+
+    // HLO protobuf decode tool (standalone, no SDK dependencies).
+    // Reuses protobuf_mod, xla_pb_mod hoisted above.
+    {
+        const hlo_decode_mod = b.createModule(.{
+            .root_source_file = b.path("src/c/xla/hlo_decode.zig"),
+            .imports = &.{
+                .{ .name = "protobuf", .module = protobuf_mod },
+                .{ .name = "xla_pb", .module = xla_pb_mod },
+            },
+        });
+
+        const decode_hlo = b.addExecutable(.{
+            .name = "decode_hlo",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/decode_hlo.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "protobuf", .module = protobuf_mod },
+                    .{ .name = "xla_pb", .module = xla_pb_mod },
+                    .{ .name = "hlo_decode", .module = hlo_decode_mod },
+                },
+            }),
+        });
+        const install = b.addInstallArtifact(decode_hlo, .{});
+        b.getInstallStep().dependOn(&install.step);
+        b.step("decode-hlo", "Build HLO protobuf decoder tool").dependOn(&install.step);
+    }
 
     // Minimal IREE VMFB runner (no zigrad, no MLIR/PJRT).
     if (use_iree) {

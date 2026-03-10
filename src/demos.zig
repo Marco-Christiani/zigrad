@@ -100,7 +100,7 @@ pub fn run_demo_executable(
     std.log.info("OK: demo output matches expected", .{});
 }
 
-pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -116,7 +116,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
     var exe = compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main",
-    }, dump_pr, dump_mlir, null) catch |err| {
+    }, dump_pr, dump_mlir, dump_optimized, null) catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -126,7 +126,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
     return error.UnexpectedSuccess;
 }
 
-pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
     var program = try zg.frontend.build_demo_program(allocator);
     defer program.deinit();
 
@@ -138,7 +138,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     var exe = try compile_program(backend, allocator, &program, device, .{
         .encoding = lower_encoding,
         .entry_name = "main_vjp",
-    }, dump_pr, dump_mlir, null);
+    }, dump_pr, dump_mlir, dump_optimized, null);
     defer backend.deinit_executable(&exe);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
@@ -246,6 +246,7 @@ pub fn run_train_demo(
     plugin_path: []const u8,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    dump_optimized: ?*zg.pipeline.DumpConfig,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
@@ -315,6 +316,7 @@ pub fn run_train_demo(
         .plugin_path = plugin_path,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
     };
     if (compile_cfg.dump_mlir != null) {
         compile_cfg.lower.encoding = .text;
@@ -523,6 +525,7 @@ pub fn run_kernel_provider_demo(
     device: *const zg.backend.pjrt.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    dump_optimized: ?*zg.pipeline.DumpConfig,
     provider_kinds: []const KernelProviderDemoKind,
     pipeline_kind: KernelProviderDemoPipeline,
 ) !void {
@@ -610,7 +613,7 @@ pub fn run_kernel_provider_demo(
         .encoding = lower_encoding,
         .entry_name = "main",
         .kernelization_lane = lane,
-    }, dump_pr, dump_mlir, .{
+    }, dump_pr, dump_mlir, dump_optimized, .{
         .registry = &registry,
         .package = &package,
         .providers = providers,
@@ -712,6 +715,7 @@ pub fn compile_program(
     lower_cfg: zg.lower.LowerPassConfig,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    dump_optimized: ?*zg.pipeline.DumpConfig,
     kernelize_cfg: ?KernelizeConfig,
 ) !zg.backend.pjrt.LoadedExecutable {
     var lower_cfg_mut = lower_cfg;
@@ -808,7 +812,23 @@ pub fn compile_program(
     if (compile_opts.kernel_registry == null) {
         compile_opts.kernel_registry = if (kernelize_cfg) |cfg| cfg.registry else null;
     }
-    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
+    var exe = try backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
+
+    if (dump_optimized) |cfg| {
+        const maybe_opt = exe.get_optimized_program(backend_handle.api, allocator) catch |err| {
+            log.err("get_optimized_program failed: {s}", .{@errorName(err)});
+            return exe;
+        };
+        if (maybe_opt) |opt_const| {
+            var opt = opt_const;
+            defer opt.deinit(allocator);
+            zg.pipeline.dump_optimized_program(cfg, opt.code, opt.format, allocator) catch |err| {
+                log.err("dump-optimized failed: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
+    return exe;
 }
 
 pub const KernelizeConfig = struct {

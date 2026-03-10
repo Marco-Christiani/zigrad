@@ -3,6 +3,7 @@ const std = @import("std");
 const pass = @import("pass.zig");
 const pr = @import("../pr/pr.zig");
 const pr_dump = @import("../pr/dump.zig");
+const hlo_decode = @import("../c/xla/hlo_decode.zig");
 
 pub const DumpTarget = pr_dump.OutputTarget;
 pub const DumpSpec = pr_dump.DumpSpec;
@@ -79,6 +80,39 @@ fn emit_mlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
 
     try out.writeAll(bytes);
     if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') try out.writeAll("\n");
+}
+
+/// Dump backend-optimized program output (post-compilation, not a pipeline pass).
+///
+/// Attempts to decode the protobuf bytes into human-readable HLO text first.
+/// On decode failure, falls back to a size summary (stdout) or raw bytes (file).
+pub fn dump_optimized_program(config: *const DumpConfig, code: []const u8, format: []const u8, allocator: std.mem.Allocator) !void {
+    const task = struct {
+        code: []const u8,
+        format: []const u8,
+        is_stdout: bool,
+        allocator: std.mem.Allocator,
+
+        fn run(self: @This(), out: *std.Io.Writer) !void {
+            // Try decoding protobuf into human-readable HLO text.
+            if (hlo_decode.decode_and_print(self.code, self.allocator, out)) return;
+
+            // Decode failed -- fall back to raw output.
+            if (self.is_stdout) {
+                try out.print("optimized program format: {s}\n", .{self.format});
+                try out.print("optimized program size: {d} bytes\n", .{self.code.len});
+            } else {
+                try out.writeAll(self.code);
+            }
+        }
+    }{
+        .code = code,
+        .format = format,
+        .is_stdout = config.target == .stdout,
+        .allocator = allocator,
+    };
+
+    try with_writer(config, task);
 }
 
 fn with_writer(config: *const DumpConfig, task: anytype) !void {

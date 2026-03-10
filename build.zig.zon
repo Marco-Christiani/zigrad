@@ -40,6 +40,9 @@
             .url = "git+https://github.com/Marco-Christiani/cova#dd159f1ce6d1ee45a39e2999b0944894ed02ec2a",
             .hash = "cova-0.10.1-_OE4R_fhBABRyLixvgKSbSh6G3JUVSA3MYqYwUGVuaxH",
         },
+        .protobuf = .{
+            .path = "reference/zig-protobuf",
+        },
     },
     .paths = .{
         "build.zig",

@@ -361,6 +361,7 @@ pub const CompileConfig = struct {
     kernelize: ?KernelizeConfig = null,
     dump_pr: ?pipeline.DumpConfig = null,
     dump_mlir: ?pipeline.DumpConfig = null,
+    dump_optimized: ?pipeline.DumpConfig = null,
     compile: backend.pjrt.CompileOptions = .{},
 };
 
@@ -564,7 +565,24 @@ pub fn compile_program(
         compile_opts.kernel_registry = if (config.kernelize) |cfg| cfg.registry else null;
     }
 
-    return backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
+    var exe = try backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
+
+    if (config.dump_optimized) |cfg| {
+        const maybe_opt = exe.get_optimized_program(backend_handle.api, allocator) catch |err| {
+            log.err("get_optimized_program failed: {s}", .{@errorName(err)});
+            return exe;
+        };
+        if (maybe_opt) |opt_const| {
+            var opt = opt_const;
+            defer opt.deinit(allocator);
+            var dump_cfg = cfg;
+            pipeline.dump_optimized_program(&dump_cfg, opt.code, opt.format, allocator) catch |err| {
+                log.err("dump-optimized failed: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
+    return exe;
 }
 
 pub fn init_backend(allocator: std.mem.Allocator, plugin_path: ?[]const u8) !backend.PjrtBackend {
