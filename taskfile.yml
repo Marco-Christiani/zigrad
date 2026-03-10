@@ -344,26 +344,6 @@ tasks:
     deps: [iree:runner:build]
     cmd: ./zig-out/bin/iree-runner {{.CLI_ARGS | default "demo.vmfb"}}
 
-  exp:build:
-    deps: [check-env-bt]
-    cmd: zig build --build-file build-experimental.zig -Dsdk=$ZG_EXTERNAL_SDK_ROOT
-
-  exp:m2:
-    deps: [exp:build, check-env-rt]
-    cmd: ./zig-out/bin/zigrad-pjrt-m2
-
-  exp:m2-fusion:
-    deps: [exp:build, check-env-rt]
-    cmd: ./zig-out/bin/zigrad-pjrt-m2-fusion
-
-  exp:m4:
-    deps: [exp:build, check-env-rt]
-    cmd: ./zig-out/bin/zigrad-pjrt-m4
-
-  exp:m4-custom:
-    deps: [exp:build, check-env-rt]
-    cmd: ./zig-out/bin/zigrad-pjrt-m4-custom {{.CLI_ARGS}}
-
   # Shim (MLIR dialect/pass development) ======================================
   shim:build:
     desc: Rebuild the MLIR extension shim locally (auto-configures on first run)
