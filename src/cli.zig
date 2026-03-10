@@ -123,6 +123,16 @@ pub const setup_cmd: CommandT = .{
             }),
         },
         .{
+            .name = "dump_optimized",
+            .long_name = "dump-optimized",
+            .description = "Dump backend-optimized program (binary protobuf for XLA); no value=stdout summary, PATH=raw bytes to file",
+            .val = ValueT.ofType([]const u8, .{
+                .name = "dump_optimized_val",
+                .description = "Optional path to write optimized program output",
+                .default_val = "",
+            }),
+        },
+        .{
             .name = "dump_kernels",
             .long_name = "dump-kernels",
             .description = "Print kernelization summary table after pass (requires --kernel-provider)",
@@ -338,6 +348,7 @@ pub fn parse(allocator: std.mem.Allocator) !CommandT {
 const GlobalOptsResult = struct {
     dump_pr: ?zg.pipeline.DumpConfig = null,
     dump_mlir: ?zg.pipeline.DumpConfig = null,
+    dump_optimized: ?zg.pipeline.DumpConfig = null,
     dump_kernels: bool = false,
     quiet: bool = false,
 };
@@ -360,6 +371,13 @@ pub fn get_global_opts(cmd: *const CommandT, allocator: std.mem.Allocator) !Glob
         if (opt.val.isSet()) {
             const val = try opt.val.getAs([]const u8);
             result.dump_mlir = if (val.len > 0) .{ .target = .{ .file = val } } else .{ .target = .stdout };
+        }
+    }
+
+    if (opts.get("dump_optimized")) |opt| {
+        if (opt.val.isSet()) {
+            const val = try opt.val.getAs([]const u8);
+            result.dump_optimized = if (val.len > 0) .{ .target = .{ .file = val } } else .{ .target = .stdout };
         }
     }
 

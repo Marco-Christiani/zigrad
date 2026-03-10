@@ -482,6 +482,74 @@ pub const LoadedExecutable = struct {
         };
     }
 
+    pub const OptimizedProgram = struct {
+        code: []u8,
+        format: []const u8,
+
+        pub fn deinit(self: *OptimizedProgram, allocator: std.mem.Allocator) void {
+            allocator.free(self.code);
+            allocator.free(self.format);
+        }
+    };
+
+    /// Retrieve the optimized program (e.g. HLO) from the backend after compilation.
+    ///
+    /// Uses the two-call PJRT pattern: first call queries size, second fills buffer.
+    /// Returns null if the plugin does not implement this API.
+    /// Format is backend-dependent (XLA: serialized HloModuleProtoWithConfig).
+    pub fn get_optimized_program(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator) !?OptimizedProgram {
+        // Get underlying PJRT_Executable
+        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        get_exec_args.loaded_executable = self.pjrt_executable;
+        get_exec_args.executable = null;
+        try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
+
+        const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
+        defer {
+            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            destroy_args.executable = pjrt_exec;
+            api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
+        }
+
+        // First call: query size (code = null)
+        var program = api_mod.init_args(c.PJRT_Program);
+        program.code = null;
+        program.code_size = 0;
+        program.format = null;
+        program.format_size = 0;
+
+        var args = api_mod.init_args(c.PJRT_Executable_OptimizedProgram_Args);
+        args.executable = pjrt_exec;
+        args.program = &program;
+
+        api.call("PJRT_Executable_OptimizedProgram", &args) catch |err| {
+            if (err == error.FunctionNotAvailable) return null;
+            return err;
+        };
+
+        if (program.code_size == 0) return null;
+
+        // Second call: fill buffer
+        const code_buf = try allocator.alloc(u8, program.code_size);
+        errdefer allocator.free(code_buf);
+        program.code = @ptrCast(code_buf.ptr);
+
+        api.call("PJRT_Executable_OptimizedProgram", &args) catch |err| {
+            if (err == error.FunctionNotAvailable) return null;
+            return err;
+        };
+
+        const format = if (program.format != null and program.format_size > 0)
+            try allocator.dupe(u8, program.format[0..program.format_size])
+        else
+            try allocator.dupe(u8, "unknown");
+
+        return .{
+            .code = code_buf,
+            .format = format,
+        };
+    }
+
     pub fn execute(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator, inputs: []const Buffer) !ExecuteResult {
         return self.execute_with_context(api, allocator, inputs, null);
     }

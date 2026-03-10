@@ -13,8 +13,6 @@
 /// - Passes declare input/output artifact kinds for validation
 /// - Artifact kinds are runtime-validated at pass composition
 /// - PassContext is backend-agnostic; pass-specific state lives behind Pass.ptr
-///
-/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 const log = std.log.scoped(.@"zg/pipeline");
 

@@ -29,6 +29,7 @@ pub fn main() !void {
     var global_opts = try cli.get_global_opts(&cmd, gpa);
     const dump_pr_ptr = if (global_opts.dump_pr) |*cfg| cfg else null;
     const dump_mlir_ptr = if (global_opts.dump_mlir) |*cfg| cfg else null;
+    const dump_optimized_ptr = if (global_opts.dump_optimized) |*cfg| cfg else null;
     const dump_kernels = global_opts.dump_kernels;
     const quiet = global_opts.quiet;
 
@@ -189,32 +190,32 @@ pub fn main() !void {
     // Commands that require MLIR lowering
     if (comptime build_options.has_mlir) {
         if (cmd.matchSubCmd("custom-call-neg")) |_| {
-            return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
+            return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
         if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
             const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .pr);
+            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice(), .pr);
         }
         if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
             const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, provider_list.slice(), .mlir);
+            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice(), .mlir);
         }
         if (cmd.matchSubCmd("vjp-demo")) |_| {
-            return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr);
+            return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
         if (cmd.matchSubCmd("train-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return demos.run_train_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
+            return demos.run_train_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llm-ft-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, warmup_steps, steps, quiet);
+            return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         const llama_ft_sub = cmd.matchSubCmd("llama-ft-demo-pr") orelse cmd.matchSubCmd("llama-ft-demo-mlir");
         if (llama_ft_sub) |sub_cmd| {
@@ -245,6 +246,7 @@ pub fn main() !void {
                 plugin_path,
                 dump_pr_ptr,
                 dump_mlir_ptr,
+                dump_optimized_ptr,
                 opts.warmup orelse 1,
                 opts.steps orelse 4,
                 quiet,

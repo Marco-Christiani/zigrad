@@ -134,6 +134,7 @@ pub fn run_llama_ft_demo(
     plugin_path: []const u8,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    dump_optimized: ?*zg.pipeline.DumpConfig,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
@@ -226,6 +227,7 @@ pub fn run_llama_ft_demo(
         .plugin_path = plugin_path,
         .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
         .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
+        .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,
     };
 
     const kernel_lane: zg.lower.KernelizationLane = switch (effective_pipeline_kind) {

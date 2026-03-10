@@ -7,6 +7,7 @@ pub fn run_llm_ft_demo(
     plugin_path: []const u8,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
+    dump_optimized: ?*zg.pipeline.DumpConfig,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
@@ -70,6 +71,7 @@ pub fn run_llm_ft_demo(
         .plugin_path = plugin_path,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
     };
     if (compile_cfg.dump_mlir != null) {
         compile_cfg.lower.encoding = .text;

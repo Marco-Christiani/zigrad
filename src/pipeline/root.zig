@@ -28,6 +28,7 @@ pub const DumpTarget = dump.DumpTarget;
 pub const DumpSpec = dump.DumpSpec;
 pub const dump_pr_pass_with_config = dump.dump_pr_pass_with_config;
 pub const dump_mlir_pass_with_config = dump.dump_mlir_pass_with_config;
+pub const dump_optimized_program = dump.dump_optimized_program;
 
 pub const kernelize = @import("kernelize.zig");
 pub const KernelizePass = kernelize.KernelizePass;

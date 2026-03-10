@@ -132,8 +132,8 @@ pub fn compile_train_step(
 /// Execute-swap-deinit loop for training steps.
 ///
 /// Owns the parameter buffers (deinits old ones on swap). Batch buffers are
-/// borrowed — the caller manages their lifetime and replaces them via
-/// `set_batch`.
+///  borrowed - the caller manages their lifetime and replaces them via
+///  `set_batch`.
 pub const TrainState = struct {
     input_bufs: []backend.pjrt.RawBuffer,
     output_bufs: []?backend.pjrt.RawBuffer,
@@ -187,7 +187,7 @@ pub const TrainState = struct {
     /// Execute one training step. Swaps parameter buffers in-place.
     ///
     /// Returns `StepResult` with the loss buffer and optional completion event.
-    /// The caller is responsible for reading and deiniting the loss buffer.
+    /// Caller owns loss buffer.
     pub fn step(self: *TrainState) !StepResult {
         @memset(self.output_bufs, null);
         const event = try self.backend_handle.execute_into(
@@ -215,7 +215,7 @@ pub const TrainState = struct {
     }
 
     /// Replace batch input buffers. Old batch buffers are NOT deinited
-    /// (caller owns their lifetime).
+    ///  (owned by caller).
     pub fn set_batch(self: *TrainState, batch_bufs: []const backend.pjrt.RawBuffer) void {
         @memcpy(self.input_bufs[self.param_count..], batch_bufs);
     }
