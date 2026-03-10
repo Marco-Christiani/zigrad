@@ -1,0 +1,333 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 756 280" fill="none">
+
+  <!--
+  ================================================================
+  ZIGRAD PIPELINE DIAGRAM
+  ================================================================
+
+  MOVING A NODE: edit transform="translate(x,y)" on the node <g>,
+  then update any edge <g> translates that reference its anchors.
+
+  EDGE COORDINATE SYSTEM:
+    Each edge <g> translates to its source anchor's ABSOLUTE position.
+    The path inside uses RELATIVE coords from that origin.
+    dest relative = dest_anchor_abs - src_anchor_abs
+
+  ANCHOR NAMING: {node-id}-anc-{side}  (zero-size <g>, no render cost)
+    Absolute = node.translate + anchor.translate
+
+  NODE DIMENSIONS:
+    Column nodes:  w=144  h=104  mid-x=72   mid-y=52
+    Backend nodes: w=158  h=74   mid-x=79   mid-y=37
+    Kernel tuning: w=324  h=80   mid-x=162  mid-y=40
+
+  NODE POSITIONS:
+    node-frontend:      translate(16,  40)
+    node-transform:     translate(200, 40)   anc-right=(344,92)  anc-bottom-cx=(272,144)
+    node-lower:         translate(384, 40)   anc-right=(528,92)  anc-bottom-cx=(456,144)
+    node-xla:           translate(598, 40)   anc-left=(598,77)
+    node-iree:          translate(598, 130)  anc-left=(598,167)
+    node-kernel-tuning: translate(202, 184)  anc-top-transform=(272,184)  anc-top-lower=(456,184)
+
+  EDGE REFERENCE TABLE (src abs => dst abs):
+    edge-frontend-transform : (160,92)  => (200,92)    horiz delta=40
+    edge-transform-lower    : (344,92)  => (384,92)    horiz delta=40
+    edge-lower-xla          : (528,92)  => (598,77)    elbow x=35
+    edge-lower-iree         : (528,92)  => (598,167)   elbow x=35
+    edge-kt-transform       : (272,184) => (272,144)   vert delta=-40
+    edge-kt-lower           : (456,184) => (456,144)   vert delta=-40
+  ================================================================
+  -->
+
+  <!-- ============================================================
+       DEFS
+       ============================================================ -->
+  <defs>
+    <radialGradient id="grad-bg-glow" cx="50%" cy="30%" r="60%">
+      <stop offset="0%"   stop-color="var(--diagram-glow)" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="var(--diagram-glow-fade)" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="grad-green" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="var(--diagram-green)" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="var(--diagram-green)" stop-opacity="0.04"/>
+    </linearGradient>
+    <linearGradient id="grad-blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="var(--diagram-blue)" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="var(--diagram-blue)" stop-opacity="0.04"/>
+    </linearGradient>
+    <linearGradient id="grad-amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="var(--diagram-amber)" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="var(--diagram-amber)" stop-opacity="0.04"/>
+    </linearGradient>
+    <linearGradient id="grad-purple" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="var(--diagram-purple)" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="var(--diagram-purple)" stop-opacity="0.04"/>
+    </linearGradient>
+
+    <marker id="arrow-green"  viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="var(--diagram-green-accent)"/>
+    </marker>
+    <marker id="arrow-blue"   viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="var(--diagram-blue-accent)"/>
+    </marker>
+    <marker id="arrow-amber"  viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="var(--diagram-amber-accent)"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="var(--diagram-purple-accent)"/>
+    </marker>
+  </defs>
+
+  <!-- ============================================================
+       STYLES
+       ============================================================ -->
+  <style>
+    /* Section label: monospace all-caps, colored per node family */
+    .node-label {
+      font-family: monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      text-anchor: middle;
+      opacity: 0.85;
+    }
+    /* Body text: all nodes */
+    .node-body {
+      font-family: system-ui, sans-serif;
+      font-size: 10.5px;
+      fill: var(--diagram-text-muted);
+      text-anchor: middle;
+    }
+    /* Column header above each section */
+    .col-header {
+      font-family: monospace;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      fill: var(--diagram-text-header);
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    /* Kernel tuning section label */
+    .kt-label {
+      font-family: monospace;
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      fill: var(--diagram-purple-accent);
+      text-anchor: middle;
+      opacity: 0.85;
+    }
+    /* Kernel tuning body */
+    .kt-body {
+      font-family: system-ui, sans-serif;
+      font-size: 11px;
+      fill: var(--diagram-text-muted);
+      text-anchor: middle;
+    }
+    /* Pill labels */
+    .kt-pill-text {
+      font-family: monospace;
+      font-size: 10px;
+      font-weight: bold;
+      fill: var(--diagram-purple-accent);
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    /* Edges */
+    .edge        { stroke-width: 1.5; fill: none; }
+    .edge-green  { stroke: var(--diagram-green-accent); stroke-opacity: 0.45; }
+    .edge-blue   { stroke: var(--diagram-blue-accent); stroke-opacity: 0.45; }
+    .edge-amber  { stroke: var(--diagram-amber-accent); stroke-opacity: 0.40; }
+    .edge-purple { stroke: var(--diagram-purple-accent); stroke-opacity: 0.35; stroke-dasharray: 5 4; }
+  </style>
+
+  <!-- ============================================================
+       BACKGROUND
+       ============================================================ -->
+  <rect width="756" height="280" fill="var(--diagram-bg)" rx="16"/>
+  <rect width="756" height="280" fill="url(#grad-bg-glow)" rx="16"/>
+  <rect x="0.5" y="0.5" width="755" height="279" rx="15.5" stroke="var(--diagram-border)" fill="none"/>
+
+  <!-- ============================================================
+       COLUMN HEADERS
+       x = node.tx + node.width/2
+       ============================================================ -->
+  <g id="layer-headers">
+    <text class="col-header" transform="translate(88,  28)">FRONTEND</text>
+    <text class="col-header" transform="translate(272, 28)">TRANSFORM</text>
+    <text class="col-header" transform="translate(456, 28)">LOWER</text>
+    <text class="col-header" transform="translate(669, 28)">COMPILE + EXECUTE</text>
+  </g>
+
+  <!-- ============================================================
+       NODES
+       All child coords LOCAL to group origin (top-left of rect).
+
+       Shared column node layout (w=144, h=104):
+         node-label: x=72  y=20
+         node-body:  x=72  y=40, 55, 70, 85  (15px spacing)
+         anc-left:       translate(0,   52)
+         anc-right:      translate(144, 52)
+         anc-bottom-cx:  translate(72,  104)
+
+       Backend node layout (w=158, h=74) — same pattern, 2 body lines:
+         node-label: x=79  y=20
+         node-body:  x=79  y=40, 55
+         anc-left:   translate(0, 37)
+
+       Kernel tuning layout (w=324, h=80):
+         kt-label:   x=162 y=18
+         kt-body:    x=162 y=36
+         pills at    y=46
+         anc-top-transform: translate(70,  0)   [abs-cx=272: 272-202=70]
+         anc-top-lower:     translate(254, 0)   [abs-cx=456: 456-202=254]
+       ============================================================ -->
+  <g id="nodes">
+
+    <!-- node-frontend   translate(16, 40)
+         anc-right abs = (160, 92) -->
+    <g id="node-frontend" transform="translate(16, 40)">
+      <rect width="144" height="104" rx="10" fill="url(#grad-green)" stroke="var(--diagram-green)" stroke-opacity="0.3"/>
+      <text class="node-label" x="72" y="20" fill="var(--diagram-green-accent)">Tensor API</text>
+      <text class="node-body"  x="72" y="40">Define models</text>
+      <text class="node-body"  x="72" y="55">Autodiff</text>
+      <text class="node-body"  x="72" y="70">Annotations</text>
+      <text class="node-body"  x="72" y="85">Region marking</text>
+      <g id="node-frontend-anc-right" transform="translate(144, 52)"/>
+    </g>
+
+    <!-- node-transform   translate(200, 40)
+         anc-right abs=(344,92)  anc-bottom-cx abs=(272,144) -->
+    <g id="node-transform" transform="translate(200, 40)">
+      <rect width="144" height="104" rx="10" fill="url(#grad-blue)" stroke="var(--diagram-blue)" stroke-opacity="0.3"/>
+      <text class="node-label" x="72" y="20" fill="var(--diagram-blue-accent)">Transforms</text>
+      <text class="node-body"  x="72" y="40">Graph rewrites</text>
+      <text class="node-body"  x="72" y="55">Pattern matching</text>
+      <text class="node-body"  x="72" y="70">Fusion decisions</text>
+      <text class="node-body"  x="72" y="85">Kernelization</text>
+      <g id="node-transform-anc-left"      transform="translate(0,   52)"/>
+      <g id="node-transform-anc-right"     transform="translate(144, 52)"/>
+      <g id="node-transform-anc-bottom-cx" transform="translate(72,  104)"/>
+    </g>
+
+    <!-- node-lower   translate(384, 40)
+         anc-right abs=(528,92)  anc-bottom-cx abs=(456,144) -->
+    <g id="node-lower" transform="translate(384, 40)">
+      <rect width="144" height="104" rx="10" fill="url(#grad-blue)" stroke="var(--diagram-blue)" stroke-opacity="0.3"/>
+      <text class="node-label" x="72" y="20" fill="var(--diagram-blue-accent)">Lower</text>
+      <text class="node-body"  x="72" y="40">DRR rewrites</text>
+      <text class="node-body"  x="72" y="55">Transform Dialect</text>
+      <text class="node-body"  x="72" y="70">MLIR passes</text>
+      <text class="node-body"  x="72" y="85">Optimization</text>
+      <g id="node-lower-anc-left"         transform="translate(0,   52)"/>
+      <g id="node-lower-anc-right"        transform="translate(144, 52)"/>
+      <g id="node-lower-anc-bottom-cx"    transform="translate(72,  104)"/>
+      <g id="node-lower-anc-bottom-right" transform="translate(144, 104)"/>
+    </g>
+
+    <!-- node-xla   translate(598, 40)   w=142 h=74
+         anc-left abs=(598,77) -->
+    <g id="node-xla" transform="translate(598, 40)">
+      <rect width="142" height="74" rx="10" fill="url(#grad-amber)" stroke="var(--diagram-amber)" stroke-opacity="0.3"/>
+      <text class="node-label" x="71" y="20" fill="var(--diagram-amber-accent)">XLA</text>
+      <text class="node-body"  x="71" y="40">Cloud training</text>
+      <text class="node-body"  x="71" y="55">TPU · GPU</text>
+      <g id="node-xla-anc-left" transform="translate(0, 37)"/>
+    </g>
+
+    <!-- node-iree   translate(598, 130)   w=142 h=74
+         gap from xla bottom (40+74=114) to iree top (130) = 16px
+         anc-left abs=(598,167) -->
+    <g id="node-iree" transform="translate(598, 130)">
+      <rect width="142" height="74" rx="10" fill="url(#grad-amber)" stroke="var(--diagram-amber)" stroke-opacity="0.3"/>
+      <text class="node-label" x="71" y="20" fill="var(--diagram-amber-accent)">IREE</text>
+      <text class="node-body"  x="71" y="40">Edge deployment</text>
+      <text class="node-body"  x="71" y="55">CPU · Mobile</text>
+      <g id="node-iree-anc-left" transform="translate(0, 37)"/>
+    </g>
+
+    <!-- node-kernel-tuning   translate(202, 184)   w=324 h=80
+         centered at x=364 = (202 + 162)
+         anc-top-transform abs=(272,184): local-x = 272-202 = 70
+         anc-top-lower     abs=(456,184): local-x = 456-202 = 254 -->
+    <g id="node-kernel-tuning" transform="translate(202, 184)">
+      <rect width="324" height="80" rx="10" fill="url(#grad-purple)" stroke="var(--diagram-purple)" stroke-opacity="0.3"/>
+      <text class="kt-label" x="162" y="18">KERNEL TUNING</text>
+      <text class="kt-body"  x="162" y="36">Autotuning · Superoptimization · Custom kernels</text>
+      <!-- Pills centered at local x=162. Total pill group width=162.
+           start = 162 - 81 = 81
+           TVM(56): x=81  Mirage(70): x=147  ...(36): x=227         -->
+      <g id="pills">
+        <rect x="71"  y="46" width="56" height="22" rx="5" fill="var(--diagram-purple)" fill-opacity="0.1" stroke="var(--diagram-purple)" stroke-opacity="0.2"/>
+        <text class="kt-pill-text" x="99"  y="57">TVM</text>
+        <rect x="137" y="46" width="70" height="22" rx="5" fill="var(--diagram-purple)" fill-opacity="0.1" stroke="var(--diagram-purple)" stroke-opacity="0.2"/>
+        <text class="kt-pill-text" x="172" y="57">Mirage</text>
+        <rect x="217" y="46" width="36" height="22" rx="5" fill="var(--diagram-purple)" fill-opacity="0.1" stroke="var(--diagram-purple)" stroke-opacity="0.2"/>
+        <text class="kt-pill-text" x="235" y="57">...</text>
+      </g>
+      <g id="node-kt-anc-top-transform" transform="translate(70,  0)"/>
+      <g id="node-kt-anc-top-lower"     transform="translate(254, 0)"/>
+    </g>
+
+  </g><!-- /nodes -->
+
+  <!-- ============================================================
+       EDGES
+       Translate = source anchor absolute. Path = relative to that.
+
+       Straight edges use <line> (horizontal or vertical, no curve needed).
+       Bent edges use cubic bezier C cp1x cp1y, cp2x cp2y, ex ey:
+         cp1 keeps the curve horizontal at the source exit
+         cp2 keeps the curve horizontal at the dest arrival
+         Both control points share x = midpoint of total dx (=35)
+       ============================================================ -->
+  <g id="edges">
+
+    <!-- edge-frontend-transform
+         src=(160,92) dst=(200,92)  delta=(40,0) -->
+    <g id="edge-frontend-transform" transform="translate(160, 92)">
+      <line class="edge edge-green" marker-end="url(#arrow-green)"
+            x1="0" y1="0" x2="38" y2="0"/>
+    </g>
+
+    <!-- edge-transform-lower
+         src=(344,92) dst=(384,92)  delta=(40,0) -->
+    <g id="edge-transform-lower" transform="translate(344, 92)">
+      <line class="edge edge-blue" marker-end="url(#arrow-blue)"
+            x1="0" y1="0" x2="38" y2="0"/>
+    </g>
+
+    <!-- edge-lower-xla
+         src: node-lower-anc-right  abs=(528,92)
+         dst: node-xla-anc-left     abs=(598,77)  delta=(70,-15)
+         cp1 exits right; cp2 pulled left so curve completes early -->
+    <g id="edge-lower-xla" transform="translate(528, 92)">
+      <path class="edge edge-amber" marker-end="url(#arrow-amber)"
+            d="M 0 0 C 35 0, 5 -15, 68 -15"/>
+    </g>
+
+    <!-- edge-lower-iree
+         src: node-lower-anc-right  abs=(528,92)
+         dst: node-iree-anc-left    abs=(598,167)  delta=(70,75)
+         cp1 exits right; cp2 pulled left so curve completes early -->
+    <g id="edge-lower-iree" transform="translate(528, 92)">
+      <path class="edge edge-amber" marker-end="url(#arrow-amber)"
+            d="M 0 0 C 35 0, 5 75, 68 75"/>
+    </g>
+
+    <!-- edge-kt-transform
+         src=(272,184) dst=(272,144)  delta=(0,-40) -->
+    <g id="edge-kt-transform" transform="translate(272, 184)">
+      <path class="edge edge-purple" marker-end="url(#arrow-purple)"
+            d="M 0 0 L 0 -38"/>
+    </g>
+
+    <!-- edge-kt-lower
+         src=(456,184) dst=(456,144)  delta=(0,-40) -->
+    <g id="edge-kt-lower" transform="translate(456, 184)">
+      <path class="edge edge-purple" marker-end="url(#arrow-purple)"
+            d="M 0 0 L 0 -38"/>
+    </g>
+
+  </g><!-- /edges -->
+
+</svg>
