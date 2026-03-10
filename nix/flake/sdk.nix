@@ -122,11 +122,11 @@ in {
       f =
         {
           mlir = true;
-          iree = false;
+          iree = true;
           tvm = true;
           gpu = true;
-          mirage = false;
-          mkl = true;
+          mirage = true;
+          mkl = false;
         }
         // features;
       hasMirage = f.mirage && mirageRuntime != null;
