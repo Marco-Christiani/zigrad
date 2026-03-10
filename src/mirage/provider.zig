@@ -94,19 +94,10 @@ pub const MirageProvider = struct {
             try handles.append(allocator, handle);
         }
 
-        const out_tensor = build_mirage_graph(&graph, desc.pattern, handles.items, desc) catch |err| switch (err) {
-            // Shape rejections from Mirage (e.g. non-canonical batched matmul
-            // layout, rank mismatch) are not fatal — fall back to the expand
-            // pass which reconstructs the original StableHLO for XLA.
-            error.MirageInvalidArgument => {
-                log.warn(
-                    "mirage rejected shapes for '{s}' (pattern={s}); falling back",
-                    .{ desc.name, @tagName(desc.pattern) },
-                );
-                return error.Unsupported;
-            },
-            inline else => return err,
-        };
+        // Shape rejections from Mirage (e.g. non-canonical batched matmul
+        // layout, rank mismatch) now return Unsupported directly from
+        // map_mirage_api_error, so no extra catch needed here.
+        const out_tensor = try build_mirage_graph(&graph, desc.pattern, handles.items, desc);
 
         graph.markOutput(out_tensor) catch |err| return map_mirage_api_error(err);
 
@@ -116,8 +107,8 @@ pub const MirageProvider = struct {
     /// Build the Mirage graph for a given kernel pattern.
     ///
     /// Translates the pattern-specific op sequence into Mirage graph ops.
-    /// Returns `MirageInvalidArgument` if Mirage rejects the tensor shapes
-    /// (e.g. non-canonical matmul layout); the caller maps this to `Unsupported`.
+    /// Returns `Unsupported` if Mirage rejects the tensor shapes (e.g.
+    /// non-canonical matmul layout); callers can fall back to baseline lowering.
     fn build_mirage_graph(
         graph: *mirage_api.Graph,
         pattern: kernel.MlirKernelPattern,
@@ -162,7 +153,7 @@ pub const MirageProvider = struct {
                 return try emit_matmul(graph, attn_probs, input_handles[1]);
             },
             .attention => {
-                // Mirage graph omits scaling — the superoptimizer works on the
+                // Mirage graph omits scaling -- the superoptimizer works on the
                 // structural pattern. If Mirage returns Unsupported, the expand
                 // pass reconstructs the full chain WITH scale correctly.
                 const scores = try emit_matmul(graph, input_handles[0], input_handles[1]);
@@ -200,7 +191,7 @@ pub const MirageProvider = struct {
         defer result.deinit();
 
         // If search found no valid execution strategies, skip transpile.
-        // The raw graph is not directly transpilable — it needs a search-
+        // The raw graph is not directly transpilable -- it needs a search-
         // discovered threadblock decomposition to produce a kernel.
         const num_candidates = result.count();
         if (num_candidates == 0) {
@@ -221,7 +212,7 @@ pub const MirageProvider = struct {
             return error.Unsupported;
         };
 
-        // Transpile in parent — safe because the same deterministic graph
+        // Transpile in parent -- safe because the same deterministic graph
         // passed the fork-canary probe above.
         var source = mirage_api.transpile(transpile_graph, null) catch |err| {
             if (err == error.MirageApiUnsupported) {
@@ -235,7 +226,7 @@ pub const MirageProvider = struct {
         const cuda_code = source.code();
         if (cuda_code.len == 0) {
             log.err("mirage transpile returned empty source for '{s}'", .{target_name});
-            return error.MirageContractError;
+            return error.ProviderCallFailed;
         }
 
         const buf_size = source.bufSize();
@@ -244,7 +235,7 @@ pub const MirageProvider = struct {
         }
 
         // If the transpiled source has no custom kernels (only library ops
-        // like standalone matmul → cuBLAS), we can't launch via NVRTC.
+        // like standalone matmul -> cuBLAS), we can't launch via NVRTC.
         // Return Unsupported so the backend handles this natively.
         const num_kernels = source.numKernels();
         if (num_kernels == 0) {
@@ -255,7 +246,7 @@ pub const MirageProvider = struct {
         // Filter source for NVRTC (strip host code, replace runtime.h).
         const filtered = dispatch_mod.filter_source_for_nvrtc(allocator, cuda_code) catch {
             log.err("failed to filter source for '{s}'", .{target_name});
-            return error.MirageInternalError;
+            return error.ProviderCallFailed;
         };
         defer allocator.free(filtered);
 
@@ -306,7 +297,7 @@ pub const MirageProvider = struct {
             .kernels = kernel_descs.items,
         }) catch {
             log.err("failed to encode artifact for '{s}'", .{target_name});
-            return error.MirageInternalError;
+            return error.ProviderCallFailed;
         };
 
         return .{
@@ -525,10 +516,19 @@ fn dtype_to_mirage(dtype: pr.DType) ?mirage_c.MirageDType {
 
 fn map_mirage_api_error(err: mirage_api.MirageError) kernel.CompileError {
     return switch (err) {
-        error.MirageUnavailable => error.MirageLoadFailed,
-        error.MirageInvalidArgument => error.MirageInvalidArgument,
-        error.MirageInternalError => error.MirageInternalError,
-        error.MirageApiUnsupported => error.MirageApiUnsupported,
+        error.MirageUnavailable => {
+            log.warn("remapping {s} -> ProviderLoadFailed", .{@errorName(err)});
+            return error.ProviderLoadFailed;
+        },
+        error.MirageInvalidArgument => error.Unsupported,
+        error.MirageInternalError => {
+            log.warn("remapping {s} -> ProviderCallFailed", .{@errorName(err)});
+            return error.ProviderCallFailed;
+        },
+        error.MirageApiUnsupported => {
+            log.warn("remapping {s} -> ProviderCallFailed", .{@errorName(err)});
+            return error.ProviderCallFailed;
+        },
         error.MirageNotFound => error.Unsupported,
         error.OutOfMemory => error.OutOfMemory,
     };
@@ -540,22 +540,29 @@ const StatusContext = enum {
 };
 
 fn map_mirage_status(status: mirage_c.MirageStatus, ctx: StatusContext) kernel.CompileError {
-    if (status == mirage_c.status_invalid_argument) return error.MirageInvalidArgument;
-    if (status == mirage_c.status_internal_error) return error.MirageInternalError;
+    if (status == mirage_c.status_invalid_argument) return error.Unsupported;
+    if (status == mirage_c.status_internal_error) {
+        log.warn("status_internal_error -> ProviderCallFailed", .{});
+        return error.ProviderCallFailed;
+    }
     if (status == mirage_c.status_unsupported) return switch (ctx) {
         .region => error.Unsupported,
-        .runtime => error.MirageApiUnsupported,
+        .runtime => {
+            log.warn("status_unsupported (runtime) -> ProviderCallFailed", .{});
+            return error.ProviderCallFailed;
+        },
     };
     if (status == mirage_c.status_not_found) return error.Unsupported;
-    return error.MirageInternalError;
+    log.warn("unknown status {d} -> ProviderCallFailed", .{status});
+    return error.ProviderCallFailed;
 }
 
 test map_mirage_status {
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(mirage_c.status_invalid_argument, .region));
-    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(mirage_c.status_internal_error, .region));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_invalid_argument, .region));
+    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(mirage_c.status_internal_error, .region));
     try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_unsupported, .region));
 
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(mirage_c.status_invalid_argument, .runtime));
-    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(mirage_c.status_internal_error, .runtime));
-    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(mirage_c.status_unsupported, .runtime));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_invalid_argument, .runtime));
+    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(mirage_c.status_internal_error, .runtime));
+    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(mirage_c.status_unsupported, .runtime));
 }

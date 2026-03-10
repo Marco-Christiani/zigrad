@@ -693,18 +693,14 @@ fn dispatch_error_code(err: kernel.DispatchError) c.XLA_FFI_Error_Code {
     return switch (err) {
         error.UnsupportedDType,
         error.ShapeMismatch,
-        error.MirageInvalidArgument,
         => c.XLA_FFI_Error_Code_INVALID_ARGUMENT,
 
-        error.MirageLoadFailed,
-        error.MirageApiUnsupported,
+        error.ProviderLoadFailed,
         error.WorkspaceUnavailable,
         => c.XLA_FFI_Error_Code_FAILED_PRECONDITION,
 
         error.DispatchFailed,
         error.OutOfMemory,
-        error.MirageInternalError,
-        error.MirageContractError,
         => c.XLA_FFI_Error_Code_INTERNAL,
     };
 }
@@ -949,12 +945,12 @@ fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOpt
 
 test "dispatch_error_to_ffi returns null when frame has no API" {
     var frame: c.XLA_FFI_CallFrame = std.mem.zeroes(c.XLA_FFI_CallFrame);
-    try std.testing.expect(dispatch_error_to_ffi(&frame, error.MirageInvalidArgument) == null);
+    try std.testing.expect(dispatch_error_to_ffi(&frame, error.ShapeMismatch) == null);
 }
 
 test "dispatch_error_code maps invalid-argument class" {
     const expected: c.XLA_FFI_Error_Code = @intCast(c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
-    try std.testing.expectEqual(expected, dispatch_error_code(error.MirageInvalidArgument));
+    try std.testing.expectEqual(expected, dispatch_error_code(error.ShapeMismatch));
 }
 
 test "dispatch_error_code maps failed-precondition class" {
@@ -964,7 +960,7 @@ test "dispatch_error_code maps failed-precondition class" {
 
 test "dispatch_error_code maps internal class" {
     const expected: c.XLA_FFI_Error_Code = @intCast(c.XLA_FFI_Error_Code_INTERNAL);
-    try std.testing.expectEqual(expected, dispatch_error_code(error.MirageInternalError));
+    try std.testing.expectEqual(expected, dispatch_error_code(error.DispatchFailed));
 }
 
 test "resolve_dispatch_artifact prefers package entry for kernel id" {

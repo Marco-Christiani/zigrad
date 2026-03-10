@@ -922,7 +922,7 @@ test "kernelize pass propagates provider errors other than Unsupported" {
 
     const StubProvider = struct {
         fn compile(_: *anyopaque, _: kernel.RegionDescriptor, _: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return error.MirageApiUnsupported;
+            return error.ProviderCallFailed;
         }
     };
 
@@ -942,7 +942,7 @@ test "kernelize pass propagates provider errors other than Unsupported" {
 
     var artifact = pass_mod.Artifact{ .pr = &program };
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try testing.expectError(error.MirageApiUnsupported, kp.pass().run(&artifact, &ctx));
+    try testing.expectError(error.ProviderCallFailed, kp.pass().run(&artifact, &ctx));
 
     try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
     try testing.expect(registry.get("broken_region") == null);

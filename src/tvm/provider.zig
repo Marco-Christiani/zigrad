@@ -2,7 +2,7 @@
 //!
 //! Implements the KernelProvider interface (src/kernel.zig) for TVM.
 //! Handles matmul (dot/dot_general) kernels via MetaSchedule autotuning.
-//! No TVM C types cross this boundary — only PR types and KernelArtifact.
+//! No TVM C types cross this boundary -- only PR types and KernelArtifact.
 const std = @import("std");
 const tir = @import("../c/tvm/tir.zig");
 const tvm_api = @import("../c/tvm/api.zig");
@@ -57,14 +57,37 @@ pub const TvmProvider = struct {
         });
 
         // Ensure TVM is loaded
-        try tvm_api.ensure_loaded(allocator, .{});
+        tvm_api.ensure_loaded(allocator, .{}) catch |err| {
+            log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
+            return if (err == error.OutOfMemory) error.OutOfMemory else error.ProviderLoadFailed;
+        };
 
         // Build matmul IRModule
-        var ir_mod = try tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k);
+        var ir_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TvmLoadFailed => {
+                log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
+                return error.ProviderLoadFailed;
+            },
+            error.TvmCallFailed, error.TvmFunctionNotFound, error.UnexpectedTvmType => {
+                log.err("TVM API call failed building IRModule: {s}", .{@errorName(err)});
+                return error.ProviderCallFailed;
+            },
+        };
         defer ir_mod.deinit();
 
         // Create target
-        var target = try tir.Target.create(allocator, self.target_kind);
+        var target = tir.Target.create(allocator, self.target_kind) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TvmLoadFailed => {
+                log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
+                return error.ProviderLoadFailed;
+            },
+            error.TvmCallFailed, error.TvmFunctionNotFound, error.UnexpectedTvmType => {
+                log.err("TVM API call failed creating target: {s}", .{@errorName(err)});
+                return error.ProviderCallFailed;
+            },
+        };
         defer target.deinit();
 
         // Tune
@@ -106,10 +129,14 @@ pub const TvmProvider = struct {
             .trials_per_iter = self.trials_per_iter,
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.TvmLoadFailed => return error.TvmLoadFailed,
-            error.TvmCallFailed => return error.TvmCallFailed,
-            error.TvmFunctionNotFound => return error.TvmFunctionNotFound,
-            error.UnexpectedTvmType => return error.UnexpectedTvmType,
+            error.TvmLoadFailed => {
+                log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
+                return error.ProviderLoadFailed;
+            },
+            error.TvmCallFailed, error.TvmFunctionNotFound, error.UnexpectedTvmType => {
+                log.err("TVM API call failed during tuning: {s}", .{@errorName(err)});
+                return error.ProviderCallFailed;
+            },
             else => {
                 log.err("tuning failed: {s}", .{@errorName(err)});
                 return error.CompileFailed;

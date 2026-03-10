@@ -229,16 +229,14 @@ pub const DispatchContext = struct {
 };
 
 pub const DispatchError = error{
+    /// Dispatch failed; provider logged details.
     DispatchFailed,
     UnsupportedDType,
     ShapeMismatch,
-    OutOfMemory,
-    MirageLoadFailed,
-    MirageInvalidArgument,
-    MirageInternalError,
-    MirageApiUnsupported,
-    MirageContractError,
+    /// Provider runtime not available (library loading failed).
+    ProviderLoadFailed,
     WorkspaceUnavailable,
+    OutOfMemory,
 };
 
 /// Provider dispatch function signature.
@@ -358,28 +356,12 @@ pub const MlirKernelDescriptor = struct {
 pub const CompileError = error{
     /// Provider cannot handle this region (unsupported ops, shapes, etc.)
     Unsupported,
-    /// TVM runtime/compiler library loading failed.
-    TvmLoadFailed,
-    /// TVM function invocation failed.
-    TvmCallFailed,
-    /// Required TVM global function was not found.
-    TvmFunctionNotFound,
-    /// TVM value type did not match the expected representation.
-    UnexpectedTvmType,
-    /// Mirage runtime/API loading failed.
-    MirageLoadFailed,
-    /// Mirage API returned invalid arguments (contract mismatch).
-    MirageInvalidArgument,
-    /// Mirage API reported an internal runtime failure.
-    MirageInternalError,
-    /// Mirage runtime reported unsupported outside region-capability matching.
-    MirageApiUnsupported,
-    /// Mirage compile invocation failed.
-    MirageCompileFailed,
-    /// Mirage execution contract was invalid.
-    MirageContractError,
-    /// Compilation failed for an internal reason not covered above.
+    /// Compilation failed; provider logged details.
     CompileFailed,
+    /// Provider runtime not available (library loading failed).
+    ProviderLoadFailed,
+    /// Provider API call failed or returned unexpected data.
+    ProviderCallFailed,
     OutOfMemory,
 };
 

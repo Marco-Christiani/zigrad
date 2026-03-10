@@ -6,14 +6,12 @@
 const std = @import("std");
 const api = @import("api.zig");
 const c = @import("c.zig");
-const utils = @import("../../utils/root.zig");
 const Value = api.Value;
 const ObjectHandle = api.ObjectHandle;
 const TvmError = api.TvmError;
 
 const helpers = api.helpers;
 const log = std.log.scoped(.@"zg/tvm_tir");
-const syms = utils.Symbols.unicode;
 
 /// Target kind for TVM compilation.
 pub const TargetKind = enum { cpu, cuda };
@@ -54,7 +52,7 @@ pub const IRModule = struct {
             pass.name(),
             if (old_ptr != new_obj) "changed" else "same",
             @as(c_int, if (old_ptr == new_obj) self.type_index else 0),
-            syms.right_arrow,
+            "->",
             result.raw.type_index,
         });
     }

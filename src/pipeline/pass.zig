@@ -106,35 +106,11 @@ pub const PassError = error{
     /// Lowered MLIR failed verification.
     InvalidMlir,
 
-    /// TVM runtime/compiler library loading failed.
-    TvmLoadFailed,
+    /// Provider runtime not available (library loading failed).
+    ProviderLoadFailed,
 
-    /// TVM function invocation failed.
-    TvmCallFailed,
-
-    /// Required TVM global function was not found.
-    TvmFunctionNotFound,
-
-    /// TVM value type did not match the expected representation.
-    UnexpectedTvmType,
-
-    /// Mirage runtime/API loading failed.
-    MirageLoadFailed,
-
-    /// Mirage API returned invalid arguments (contract mismatch).
-    MirageInvalidArgument,
-
-    /// Mirage API reported an internal runtime failure.
-    MirageInternalError,
-
-    /// Mirage runtime reported unsupported outside region-capability matching.
-    MirageApiUnsupported,
-
-    /// Mirage compile invocation failed.
-    MirageCompileFailed,
-
-    /// Mirage execution contract was invalid.
-    MirageContractError,
+    /// Provider API call failed or returned unexpected data.
+    ProviderCallFailed,
 
     /// Provider compilation failed for an internal reason.
     CompileFailed,

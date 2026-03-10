@@ -65,7 +65,7 @@ pub const MirageDispatchState = struct {
         // Decode the artifact.
         const art = artifact_mod.decode(self.allocator, artifact_data) catch {
             log.err("failed to decode mirage artifact for '{s}'", .{kernel_key});
-            return error.MirageInternalError;
+            return error.DispatchFailed;
         };
         defer self.allocator.free(art.kernels);
         defer {
@@ -74,7 +74,7 @@ pub const MirageDispatchState = struct {
 
         if (art.kernels.len == 0) {
             log.err("mirage artifact for '{s}' has no kernels", .{kernel_key});
-            return error.MirageInternalError;
+            return error.DispatchFailed;
         }
 
         // Get or compile the module.
@@ -95,22 +95,22 @@ pub const MirageDispatchState = struct {
             return mod;
         }
 
-        // Compile: source → PTX → CUmodule.
+        // Compile: source -> PTX -> CUmodule.
         const ptx = compile_to_ptx(self.allocator, art.source, "sm_86") catch {
-            return error.MirageInternalError;
+            return error.DispatchFailed;
         };
         defer self.allocator.free(ptx);
 
         cuda.ensure_loaded() catch {
             log.err("CUDA driver not available", .{});
-            return error.MirageInternalError;
+            return error.DispatchFailed;
         };
 
         var cu_module: cuda.CUmodule = undefined;
         var rc = cuda.cuModuleLoadData(&cu_module, ptx.ptr);
         if (rc != cuda.CUDA_SUCCESS) {
             log.err("cuModuleLoadData failed: {d}", .{rc});
-            return error.MirageInternalError;
+            return error.DispatchFailed;
         }
 
         // Extract function handles for each kernel.
@@ -132,7 +132,7 @@ pub const MirageDispatchState = struct {
                 log.err("cuModuleGetFunction('{s}') failed: {d}", .{ kd.func_name, rc });
                 _ = cuda.cuModuleUnload(cu_module);
                 self.allocator.free(funcs);
-                return error.MirageInternalError;
+                return error.DispatchFailed;
             }
 
             // Set max dynamic shared memory if needed.
@@ -147,7 +147,7 @@ pub const MirageDispatchState = struct {
 
         const compiled = CompiledModule{ .cu_module = cu_module, .funcs = funcs };
         self.cache.put(hash, compiled) catch {
-            // Cache failure is non-fatal — just won't cache.
+            // Cache failure is non-fatal -- just won't cache.
         };
         return compiled;
     }
@@ -175,14 +175,14 @@ pub const MirageDispatchState = struct {
                 .input => {
                     if (arg.index_or_offset >= ctx.inputs.len) {
                         log.err("kernel arg input index {d} out of range (have {d} inputs)", .{ arg.index_or_offset, ctx.inputs.len });
-                        return error.MirageInvalidArgument;
+                        return error.DispatchFailed;
                     }
                     ptr_values[i] = ctx.inputs[arg.index_or_offset].data;
                 },
                 .output => {
                     if (arg.index_or_offset >= ctx.outputs.len) {
                         log.err("kernel arg output index {d} out of range (have {d} outputs)", .{ arg.index_or_offset, ctx.outputs.len });
-                        return error.MirageInvalidArgument;
+                        return error.DispatchFailed;
                     }
                     ptr_values[i] = ctx.outputs[arg.index_or_offset].data;
                 },
@@ -216,7 +216,7 @@ pub const MirageDispatchState = struct {
         );
         if (rc != cuda.CUDA_SUCCESS) {
             log.err("cuLaunchKernel failed: {d}", .{rc});
-            return error.MirageInternalError;
+            return error.DispatchFailed;
         }
     }
 };
@@ -377,25 +377,29 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
 
 fn map_mirage_api_error(err: mirage_api.MirageError) kernel.DispatchError {
     return switch (err) {
-        error.MirageUnavailable => error.MirageLoadFailed,
-        error.MirageInvalidArgument => error.MirageInvalidArgument,
-        error.MirageInternalError => error.MirageInternalError,
-        error.MirageApiUnsupported => error.MirageApiUnsupported,
-        error.MirageNotFound => error.MirageInternalError,
+        error.MirageUnavailable => {
+            log.warn("remapping {s} -> ProviderLoadFailed", .{@errorName(err)});
+            return error.ProviderLoadFailed;
+        },
+        error.MirageInvalidArgument,
+        error.MirageInternalError,
+        error.MirageApiUnsupported,
+        error.MirageNotFound,
+        => {
+            log.warn("remapping {s} -> DispatchFailed", .{@errorName(err)});
+            return error.DispatchFailed;
+        },
         error.OutOfMemory => error.OutOfMemory,
     };
 }
 
 fn map_mirage_status(status: mirage_c.MirageStatus) kernel.DispatchError {
-    if (status == mirage_c.status_invalid_argument) return error.MirageInvalidArgument;
-    if (status == mirage_c.status_internal_error) return error.MirageInternalError;
-    if (status == mirage_c.status_unsupported) return error.MirageApiUnsupported;
-    if (status == mirage_c.status_not_found) return error.MirageInternalError;
-    return error.MirageInternalError;
+    log.warn("status code {d} -> DispatchFailed", .{status});
+    return error.DispatchFailed;
 }
 
-test "map_mirage_status preserves runtime detail" {
-    try std.testing.expectEqual(error.MirageInvalidArgument, map_mirage_status(mirage_c.status_invalid_argument));
-    try std.testing.expectEqual(error.MirageInternalError, map_mirage_status(mirage_c.status_internal_error));
-    try std.testing.expectEqual(error.MirageApiUnsupported, map_mirage_status(mirage_c.status_unsupported));
+test "map_mirage_status maps to generic DispatchFailed" {
+    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(mirage_c.status_invalid_argument));
+    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(mirage_c.status_internal_error));
+    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(mirage_c.status_unsupported));
 }
