@@ -75,6 +75,9 @@ pub const compare = struct {
         ctx.set_primal(outputs[0], out);
     }
 
+    /// JVP: compare produces booleans -- no meaningful tangent.
+    pub fn jvp(_: types.AdContext, _: pr.Eqn) types.AdError!void {}
+
     pub const format = struct {
         pub fn call(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
             if (pr.param_compare(ctx.params())) |params| {
@@ -145,5 +148,17 @@ pub const select = struct {
 
         try ctx.add_cot(inputs[1], true_contrib);
         try ctx.add_cot(inputs[2], false_contrib);
+    }
+
+    /// JVP: d(select(c, t, f)) = select(c, dt, df)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 3) return error.UnsupportedEqn;
+
+        const cond = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const dt = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+        const df = ctx.get_tangent(inputs[2]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.select(cond, dt, df));
     }
 };

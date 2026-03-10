@@ -65,6 +65,17 @@ pub const add = struct {
         try ctx.add_cot(inputs[1], out_cot);
     }
 
+    /// JVP: d(x + y) = dx + dy
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const dy = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.add(dx, dy));
+    }
+
     pub const format = format_binary_elementwise;
 };
 
@@ -105,6 +116,17 @@ pub const subtract = struct {
         try ctx.add_cot(inputs[0], out_cot);
         const neg = try negate_like(ctx.builder, rhs_tensor, out_cot);
         try ctx.add_cot(inputs[1], neg);
+    }
+
+    /// JVP: d(x - y) = dx - dy
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const dy = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.subtract(dx, dy));
     }
 
     pub const format = format_binary_elementwise;
@@ -150,6 +172,22 @@ pub const multiply = struct {
 
         try ctx.add_cot(inputs[0], lhs_contrib);
         try ctx.add_cot(inputs[1], rhs_contrib);
+    }
+
+    /// JVP: d(x * y) = dx * y + x * dy (product rule)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const x = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const y = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const dy = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+
+        const term1 = try ctx.builder.multiply(dx, y);
+        const term2 = try ctx.builder.multiply(x, dy);
+        ctx.set_tangent(outputs[0], try ctx.builder.add(term1, term2));
     }
 
     pub const format = format_binary_elementwise;
@@ -200,6 +238,26 @@ pub const divide = struct {
         const rhs_tensor = ctx.tensor_of(inputs[1]);
         const neg = try negate_like(ctx.builder, rhs_tensor, rhs_contrib);
         try ctx.add_cot(inputs[1], neg);
+    }
+
+    /// JVP: d(x/y) = dx/y - x*dy/y^2 (quotient rule)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const x = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const y = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const dy = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+
+        // dx/y
+        const term1 = try ctx.builder.divide(dx, y);
+        // x*dy/y^2
+        const y_sq = try ctx.builder.multiply(y, y);
+        const x_dy = try ctx.builder.multiply(x, dy);
+        const term2 = try ctx.builder.divide(x_dy, y_sq);
+        ctx.set_tangent(outputs[0], try ctx.builder.subtract(term1, term2));
     }
 
     pub const format = format_binary_elementwise;

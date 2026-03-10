@@ -74,6 +74,22 @@ pub const dot = struct {
         try ctx.add_cot(inputs[1], rhs_contrib);
     }
 
+    /// JVP: d(A @ B) = dA @ B + A @ dB
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+
+        const a = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const b = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const da = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const db = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+
+        const term1 = try ctx.builder.dot(da, b);
+        const term2 = try ctx.builder.dot(a, db);
+        ctx.set_tangent(outputs[0], try ctx.builder.add(term1, term2));
+    }
+
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
         const lhs = ctx.input_tensor(0) orelse return;
         const contract_dim = lhs.shape.rank() - 1;
@@ -212,6 +228,24 @@ pub const dot_general = struct {
 
         try ctx.add_cot(inputs[0], lhs_contrib);
         try ctx.add_cot(inputs[1], rhs_contrib);
+    }
+
+    /// JVP: d(dot_general(A, B, p)) = dot_general(dA, B, p) + dot_general(A, dB, p)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+        const dg_params = pr.param_dot_general(params) orelse return error.UnsupportedEqn;
+
+        const a = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const b = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const da = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const db = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+
+        const term1 = try ctx.builder.dot_general(da, b, dg_params);
+        const term2 = try ctx.builder.dot_general(a, db, dg_params);
+        ctx.set_tangent(outputs[0], try ctx.builder.add(term1, term2));
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {

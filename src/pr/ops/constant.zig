@@ -36,6 +36,14 @@ pub const literal = struct {
 
     // No vjp_backward needed - constants have zero gradient
 
+    /// JVP: constants have zero tangent.
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const outputs = ctx.outputs(eqn);
+        const out_tensor = ctx.builder_tensor_of(ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn);
+        const z = try ctx.builder.literal_scalar(types.scalar_literal(out_tensor.dtype, 0.0));
+        ctx.set_tangent(outputs[0], z);
+    }
+
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
         if (pr.param_literal(ctx.params())) |lit| {
             switch (lit) {

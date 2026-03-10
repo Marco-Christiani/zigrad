@@ -82,6 +82,17 @@ pub const reshape = struct {
         try ctx.add_cot(inputs[0], contrib);
     }
 
+    /// JVP: d(reshape(x, s)) = reshape(dx, s)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_tensor = ctx.tensor_of(outputs[0]);
+        ctx.set_tangent(outputs[0], try ctx.builder.reshape(dx, out_tensor.shape.dims));
+    }
+
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
         const src = ctx.input_tensor(0) orelse return;
         try format_shape(writer, src.shape.dims);
@@ -159,6 +170,18 @@ pub const iota = struct {
         const out_tensor = ctx.tensor_of(outputs[0]);
         const out = try ctx.builder.iota(out_tensor.dtype, out_tensor.shape.dims, iota_dim);
         ctx.set_primal(outputs[0], out);
+    }
+
+    /// JVP: iota is a constant -- zero tangent. Iota produces integers so we use i32 zero.
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const outputs = ctx.outputs(eqn);
+        const out_tensor = ctx.tensor_of(outputs[0]);
+        const z = try ctx.builder.literal_scalar(types.scalar_literal(out_tensor.dtype, 0));
+        const z_broad = if (out_tensor.shape.rank() == 0)
+            z
+        else
+            try ctx.builder.broadcast_in_dim(z, out_tensor.shape.dims, &.{});
+        ctx.set_tangent(outputs[0], z_broad);
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
@@ -243,6 +266,18 @@ pub const transpose = struct {
         try ctx.add_cot(inputs[0], contrib);
     }
 
+    /// JVP: d(transpose(x, perm)) = transpose(dx, perm)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const perm = pr.param_permutation(params) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.transpose(dx, perm));
+    }
+
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
         if (pr.param_permutation(ctx.params())) |perm| {
             try writer.writeAll("perm=[");
@@ -292,6 +327,18 @@ pub const slice = struct {
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.slice(operand, sparams);
         ctx.set_primal(outputs[0], out);
+    }
+
+    /// JVP: d(slice(x, p)) = slice(dx, p)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+        const sparams = pr.param_slice(params) orelse return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.slice(dx, sparams));
     }
 
     pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -391,6 +438,22 @@ pub const concatenate = struct {
         ctx.set_primal(outputs[0], out);
     }
 
+    /// JVP: d(concatenate(xs, axis)) = concatenate(dxs, axis)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len == 0) return error.UnsupportedEqn;
+        const axis = pr.param_concat_axis(params) orelse return error.UnsupportedEqn;
+
+        var tangents = try ctx.allocator.alloc(pr.VarId, inputs.len);
+        defer ctx.allocator.free(tangents);
+        for (inputs, 0..) |id, i| {
+            tangents[i] = ctx.get_tangent(id) orelse return error.UnsupportedEqn;
+        }
+        ctx.set_tangent(outputs[0], try ctx.builder.concatenate(tangents, axis));
+    }
+
     pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -477,6 +540,18 @@ pub const reduce_sum = struct {
         ctx.set_primal(outputs[0], out);
     }
 
+    /// JVP: d(reduce_sum(x, axes)) = reduce_sum(dx, axes)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.reduce_sum(dx, axes));
+    }
+
     pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -542,6 +617,33 @@ pub const reduce_max = struct {
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.reduce_max(operand, axes);
         ctx.set_primal(outputs[0], out);
+    }
+
+    /// JVP: d(reduce_max(x, axes)) -- mask-based: select where x==max, pass dx, then sum.
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+        const in_tensor = ctx.tensor_of(inputs[0]);
+
+        const bd = try reduce_sum_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, axes);
+        defer ctx.allocator.free(bd);
+
+        const max_b = try ctx.builder.broadcast_in_dim(out_primal, in_tensor.shape.dims, bd);
+        const cmp_type = compare_type_for_dtype(in_tensor.dtype);
+        const mask = try ctx.builder.compare(operand, max_b, .{
+            .direction = .EQ,
+            .compare_type = cmp_type,
+        });
+        const mask_f = try ctx.builder.convert(mask, in_tensor.dtype);
+        const masked_dx = try ctx.builder.multiply(mask_f, dx);
+        ctx.set_tangent(outputs[0], try ctx.builder.reduce_sum(masked_dx, axes));
     }
 
     pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -652,6 +754,19 @@ pub const gather = struct {
         ctx.set_primal(outputs[0], out);
     }
 
+    /// JVP: d(gather(x, idx, p)) = gather(dx, idx, p)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 2) return error.UnsupportedEqn;
+        const gparams = pr.param_gather(params) orelse return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const indices = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.gather(dx, indices, gparams));
+    }
+
     pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
         const inputs = ctx.inputs(eqn);
         const outputs = ctx.outputs(eqn);
@@ -755,6 +870,19 @@ pub const broadcast_in_dim = struct {
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.broadcast_in_dim(operand, out_shape, bd);
         ctx.set_primal(outputs[0], out);
+    }
+
+    /// JVP: d(broadcast_in_dim(x, s, bd)) = broadcast_in_dim(dx, s, bd)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const out_shape = pr.param_out_shape(params) orelse return error.UnsupportedEqn;
+        const bd = pr.param_broadcast_dims(params) orelse return error.UnsupportedEqn;
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.broadcast_in_dim(dx, out_shape, bd));
     }
 
     pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
@@ -1127,8 +1255,8 @@ fn compare_type_for_dtype(dt: pr.DType) pr.CompareType {
 
 /// Derive scatter params that invert a gather (for the VJP scatter-add).
 ///
-/// The relationship is direct: offset_dims → update_window_dims,
-/// collapsed_slice_dims → inserted_window_dims, start_index_map →
+/// The relationship is direct: offset_dims -> update_window_dims,
+/// collapsed_slice_dims -> inserted_window_dims, start_index_map ->
 /// scatter_dims_to_operand_dims.
 fn scatter_params_for_gather(params: pr.GatherParams) pr.ScatterParams {
     return .{

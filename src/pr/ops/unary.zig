@@ -66,6 +66,17 @@ pub const exp = struct {
         try ctx.add_cot(inputs[0], contrib);
     }
 
+    /// JVP: d(exp(x)) = exp(x) * dx
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.multiply(out_primal, dx));
+    }
+
     pub const format = format_unary_elementwise;
 };
 
@@ -103,6 +114,17 @@ pub const log = struct {
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const contrib = try ctx.builder.divide(out_cot, operand);
         try ctx.add_cot(inputs[0], contrib);
+    }
+
+    /// JVP: d(log(x)) = dx / x
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const x = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(outputs[0], try ctx.builder.divide(dx, x));
     }
 
     pub const format = format_unary_elementwise;
@@ -161,6 +183,20 @@ pub const convert = struct {
             try ctx.builder.convert(out_cot, in_tensor.dtype);
         try ctx.add_cot(inputs[0], cot);
     }
+
+    /// JVP: d(convert(x, T)) = convert(dx, T)
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        const params = ctx.params(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+        const out_dtype = pr.param_out_dtype(params) orelse return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const dx_tensor = ctx.builder_tensor_of(dx);
+        const result = if (dx_tensor.dtype == out_dtype) dx else try ctx.builder.convert(dx, out_dtype);
+        ctx.set_tangent(outputs[0], result);
+    }
 };
 
 // =========================================================================
@@ -205,6 +241,23 @@ pub const rsqrt = struct {
         try ctx.add_cot(inputs[0], contrib);
     }
 
+    /// JVP: d(rsqrt(x)) = -0.5 * rsqrt(x)^3 * dx
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+        const y2 = try ctx.builder.multiply(out_primal, out_primal);
+        const y3 = try ctx.builder.multiply(y2, out_primal);
+
+        const tensor = ctx.tensor_of(inputs[0]);
+        const neg_half = try broadcast_scalar_like(ctx.builder, tensor, -0.5);
+        const scale = try ctx.builder.multiply(y3, neg_half);
+        ctx.set_tangent(outputs[0], try ctx.builder.multiply(scale, dx));
+    }
+
     pub const format = format_unary_elementwise;
 };
 
@@ -247,6 +300,22 @@ pub const logistic = struct {
         const slope = try ctx.builder.multiply(out_primal, one_minus);
         const contrib = try ctx.builder.multiply(out_cot, slope);
         try ctx.add_cot(inputs[0], contrib);
+    }
+
+    /// JVP: d(sigmoid(x)) = sigmoid(x) * (1 - sigmoid(x)) * dx
+    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+        const inputs = ctx.inputs(eqn);
+        const outputs = ctx.outputs(eqn);
+        if (inputs.len != 1) return error.UnsupportedEqn;
+
+        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+
+        const tensor = ctx.tensor_of(inputs[0]);
+        const ones = try broadcast_scalar_like(ctx.builder, tensor, 1.0);
+        const one_minus = try ctx.builder.subtract(ones, out_primal);
+        const slope = try ctx.builder.multiply(out_primal, one_minus);
+        ctx.set_tangent(outputs[0], try ctx.builder.multiply(slope, dx));
     }
 
     pub const format = format_unary_elementwise;

@@ -1,4 +1,4 @@
-/// Op Types — Shared context and types for op implementations.
+/// Op Types -- Shared context and types for op implementations.
 ///
 /// No external dependencies beyond `std` and the PR module.
 const std = @import("std");
@@ -46,10 +46,15 @@ pub const InferContext = struct {
 };
 
 /// Context passed to AD forward/backward functions.
+///
+/// Used for both VJP (reverse-mode) and JVP (forward-mode) transforms.
+/// For VJP: `tangent_map` is null, `cot_map` holds cotangent accumulation.
+/// For JVP: `cot_map` is null, `tangent_map` holds tangent propagation.
 pub const AdContext = struct {
     builder: *pr.FunctionBuilder,
     primal_map: []?pr.VarId,
-    cot_map: []?pr.VarId,
+    cot_map: ?[]?pr.VarId,
+    tangent_map: ?[]?pr.VarId,
     func: pr.Function,
     allocator: std.mem.Allocator,
 
@@ -74,16 +79,27 @@ pub const AdContext = struct {
     }
 
     pub fn get_cot(self: AdContext, id: pr.VarId) ?pr.VarId {
-        return self.cot_map[@intCast(id)];
+        const cmap = self.cot_map orelse return null;
+        return cmap[@intCast(id)];
     }
 
     pub fn add_cot(self: AdContext, var_id: pr.VarId, new_cot: pr.VarId) pr.BuildError!void {
+        const cmap = self.cot_map orelse return;
         const idx: usize = @intCast(var_id);
-        if (self.cot_map[idx]) |existing| {
-            self.cot_map[idx] = try self.builder.add(existing, new_cot);
+        if (cmap[idx]) |existing| {
+            cmap[idx] = try self.builder.add(existing, new_cot);
         } else {
-            self.cot_map[idx] = new_cot;
+            cmap[idx] = new_cot;
         }
+    }
+
+    pub fn get_tangent(self: AdContext, id: pr.VarId) ?pr.VarId {
+        const tmap = self.tangent_map orelse return null;
+        return tmap[@intCast(id)];
+    }
+
+    pub fn set_tangent(self: AdContext, id: pr.VarId, value: pr.VarId) void {
+        self.tangent_map.?[@intCast(id)] = value;
     }
 
     pub fn tensor_of(self: AdContext, id: pr.VarId) pr.Tensor {

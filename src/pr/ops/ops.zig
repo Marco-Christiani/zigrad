@@ -145,6 +145,31 @@ pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
     unreachable;
 }
 
+/// Check if an op supports JVP
+pub fn has_jvp(prim: pr.Prim) bool {
+    inline for (comptime std.enums.values(pr.Prim)) |p| {
+        if (prim == p) {
+            return @hasDecl(OpFor(p), "jvp");
+        }
+    }
+    unreachable;
+}
+
+/// Execute JVP for an equation (forward-mode tangent propagation).
+pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
+    inline for (comptime std.enums.values(pr.Prim)) |prim| {
+        if (eqn.prim == prim) {
+            const Op = OpFor(prim);
+            if (@hasDecl(Op, "jvp")) {
+                return Op.jvp(ctx, eqn);
+            } else {
+                return error.UnsupportedEqn;
+            }
+        }
+    }
+    unreachable;
+}
+
 /// Format op-specific attributes for an equation
 pub fn format(writer: *types.Writer, func: pr.Function, eqn: pr.Eqn) types.FormatError!void {
     const ctx = types.FormatContext{ .func = func, .eqn = eqn };
@@ -209,4 +234,47 @@ test "vjp support detection" {
     try std.testing.expect(!has_vjp(.compare));
     try std.testing.expect(!has_vjp(.call));
     try std.testing.expect(!has_vjp(.custom_call));
+}
+
+test "jvp support detection" {
+    // Elementwise ops
+    try std.testing.expect(has_jvp(.add));
+    try std.testing.expect(has_jvp(.subtract));
+    try std.testing.expect(has_jvp(.multiply));
+    try std.testing.expect(has_jvp(.divide));
+
+    // Unary ops
+    try std.testing.expect(has_jvp(.exp));
+    try std.testing.expect(has_jvp(.log));
+    try std.testing.expect(has_jvp(.rsqrt));
+    try std.testing.expect(has_jvp(.logistic));
+    try std.testing.expect(has_jvp(.convert));
+
+    // Shape ops
+    try std.testing.expect(has_jvp(.reshape));
+    try std.testing.expect(has_jvp(.transpose));
+    try std.testing.expect(has_jvp(.broadcast_in_dim));
+    try std.testing.expect(has_jvp(.reduce_sum));
+    try std.testing.expect(has_jvp(.reduce_max));
+    try std.testing.expect(has_jvp(.slice));
+    try std.testing.expect(has_jvp(.concatenate));
+    try std.testing.expect(has_jvp(.gather));
+    try std.testing.expect(has_jvp(.iota));
+
+    // Contraction ops
+    try std.testing.expect(has_jvp(.dot));
+    try std.testing.expect(has_jvp(.dot_general));
+
+    // Constants
+    try std.testing.expect(has_jvp(.literal));
+
+    // Compare/select
+    try std.testing.expect(has_jvp(.compare));
+    try std.testing.expect(has_jvp(.select));
+
+    // Unsupported
+    try std.testing.expect(!has_jvp(.maximum));
+    try std.testing.expect(!has_jvp(.scatter));
+    try std.testing.expect(!has_jvp(.call));
+    try std.testing.expect(!has_jvp(.custom_call));
 }
