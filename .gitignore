@@ -56,3 +56,4 @@ shim/build-mlir
 *.mlir
 !shim/test/*.mlir
 *.ll
+tools/decode_hlo
