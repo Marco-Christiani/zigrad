@@ -47,6 +47,15 @@ in {
       cp ${xlaSrc}/xla/ffi/api/*.h $out/include/xla/ffi/api/
     '';
 
+    # XLA proto schemas (for protobuf decode tooling, zero build cost).
+    xlaProtos = pkgs.runCommand "xla-protos" {} ''
+      mkdir -p $out/proto/xla/service
+      cp ${xlaSrc}/xla/xla.proto $out/proto/xla/
+      cp ${xlaSrc}/xla/xla_data.proto $out/proto/xla/
+      cp ${xlaSrc}/xla/service/hlo.proto $out/proto/xla/service/
+      cp ${xlaSrc}/xla/service/metrics.proto $out/proto/xla/service/
+    '';
+
     cudaCompileHeaders = pkgs.runCommand "cuda-compile-headers" {} ''
       mkdir -p "$out/include"
       cp -as ${cudaPackages.cudatoolkit}/include/. "$out/include/"
@@ -134,7 +143,7 @@ in {
       compile = pkgs.symlinkJoin {
         name = "zigrad-sdk-compile";
         paths =
-          [pjrtHeaders]
+          [pjrtHeaders xlaProtos]
           ++ lib.optional f.mlir xlaMlirStablehloCapiSdk
           ++ lib.optional f.mlir zigradMlirExt
           ++ lib.optional f.tvm tvm.dev
