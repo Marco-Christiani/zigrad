@@ -1,17 +1,19 @@
 //! TVM IR, TIR, and Target wrappers.
 //!
-//! Covers `tvm/ir/`, `tvm/tir/`, `tvm/target/`, and `tvm/te/` — types that
-//! are tightly coupled in TIR lowering but individually too small to warrant
-//! separate files at our current usage level.
+//! Covers `tvm/ir/`, `tvm/tir/`, `tvm/target/`, and `tvm/te/` -- types that
+//!  are tightly coupled in TIR lowering but individually too small to warrant
+//!  separate files at our current usage level.
 const std = @import("std");
 const api = @import("api.zig");
 const c = @import("c.zig");
+const utils = @import("../../utils/root.zig");
 const Value = api.Value;
 const ObjectHandle = api.ObjectHandle;
 const TvmError = api.TvmError;
 
 const helpers = api.helpers;
 const log = std.log.scoped(.@"zg/tvm_tir");
+const syms = utils.Symbols.unicode;
 
 /// Target kind for TVM compilation.
 pub const TargetKind = enum { cpu, cuda };
@@ -48,10 +50,11 @@ pub const IRModule = struct {
         }
         self.handle.ptr = new_obj;
         self.type_index = result.raw.type_index;
-        log.debug("applied {s} (ptr {s}, type_index {d}→{d})", .{
+        log.debug("applied {s} (ptr {s}, type_index {d}{s}{d})", .{
             pass.name(),
             if (old_ptr != new_obj) "changed" else "same",
             @as(c_int, if (old_ptr == new_obj) self.type_index else 0),
+            syms.right_arrow,
             result.raw.type_index,
         });
     }
@@ -108,7 +111,7 @@ pub const Target = struct {
 };
 
 // ============================================================================
-// TirPass — compile-time checked TIR pass names
+// TirPass - compile-time checked TIR pass names
 // ============================================================================
 
 /// TIR transform passes as a tagged union. Compile-time checked names

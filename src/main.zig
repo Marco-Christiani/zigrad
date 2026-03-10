@@ -49,13 +49,13 @@ pub fn main() !void {
         return demos.dump_tvm_ffi_symbols(gpa);
     }
     if (cmd.matchSubCmd("tvm-check-compiler-load")) |_| {
-        if (comptime !build_options.has_tvm) return requireTvm();
+        if (comptime !build_options.has_tvm) return require_tvm();
         try zg.tvm.ffi.ensure_loaded(gpa, .{});
         std.log.info("tvm compiler load check passed", .{});
         return;
     }
     if (cmd.matchSubCmd("tvm-tune")) |sub_cmd| {
-        if (comptime !build_options.has_tvm) return requireTvm();
+        if (comptime !build_options.has_tvm) return require_tvm();
         const opts = try sub_cmd.to(cli.TvmTuneOpts, .{});
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
@@ -101,7 +101,7 @@ pub fn main() !void {
         return;
     }
     if (cmd.matchSubCmd("tvm-run")) |sub_cmd| {
-        if (comptime !build_options.has_tvm) return requireTvm();
+        if (comptime !build_options.has_tvm) return require_tvm();
         const opts = try sub_cmd.to(cli.TvmRunOpts, .{});
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
@@ -111,6 +111,8 @@ pub fn main() !void {
         return run_tvm_demo(gpa, shape.m, shape.n, shape.k, target_kind, work_dir);
     }
     if (cmd.matchSubCmd("benchmark")) |sub_cmd| {
+        if (comptime !build_options.has_tvm) return require_tvm();
+        if (comptime !build_options.has_mkl) return require_mkl();
         const opts = try sub_cmd.to(cli.BenchmarkOpts, .{});
 
         // struct to args array for run_benchmark_mode
@@ -293,9 +295,14 @@ pub fn main() !void {
     return error.NoSubcommand;
 }
 
-fn requireTvm() error{TvmUnavailable} {
-    log.err("this command requires TVM support (headers not found in SDK)", .{});
+fn require_tvm() error{TvmUnavailable} {
+    log.err("this command requires building with TVM (headers must be in SDK)", .{});
     return error.TvmUnavailable;
+}
+
+fn require_mkl() error{MklUnavailable} {
+    log.err("this command requires building with MKL (headers must be in SDK)", .{});
+    return error.MklUnavailable;
 }
 
 fn run_tvm_demo(

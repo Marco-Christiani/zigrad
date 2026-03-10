@@ -18,6 +18,7 @@ const log = std.log.scoped(.@"zg/benchmark");
 
 /// Tolerance for correctness verification (matches TVM convention).
 const TOLERANCE: f64 = 1e-4;
+const syms = zg.utils.Symbols.unicode;
 
 /// Benchmark harness for matmul implementations.
 pub const Harness = struct {
@@ -348,14 +349,15 @@ pub const Harness = struct {
                 if (result.shape.m != shape.m or result.shape.n != shape.n or result.shape.k != shape.k) continue;
 
                 const speedup = result.gflops / naive_gflops;
-                const status = if (result.passed) "✓" else "✗";
+                const status = if (result.passed) syms.check else syms.x;
 
-                try writer.print("{s} {s:<23} {d:>10.2} {d:>10.2} {d:>8.2}×\n", .{
+                try writer.print("{s} {s:<23} {d:>10.2} {d:>10.2} {d:>8.2}{s}\n", .{
                     status,
                     result.impl.display_name(),
                     result.median_us,
                     result.gflops,
                     speedup,
+                    syms.mul,
                 });
             }
         }

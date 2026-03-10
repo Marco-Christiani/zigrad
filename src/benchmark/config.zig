@@ -1,7 +1,10 @@
 /// Configuration types for the matmul benchmark harness.
 const std = @import("std");
+const utils = @import("../utils/root.zig");
 
-/// Matmul shape specification (M×K @ K×N = M×N).
+const syms = utils.Symbols.unicode;
+
+/// Matmul shape specification (MxK @ KxN = MxN).
 pub const Shape = struct {
     m: usize,
     n: usize,
@@ -15,7 +18,7 @@ pub const Shape = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        try writer.print("{d}×{d}×{d}", .{ self.m, self.n, self.k });
+        try writer.print("{d}{s}{d}{s}{d}", .{ self.m, syms.mul, self.n, syms.mul, self.k });
     }
 };
 

@@ -2,20 +2,20 @@
 const std = @import("std");
 
 /// Naive triple-loop matmul: C = A @ B.
-/// A is M×K, B is K×N, C is M×N (row-major layout).
+/// A is MxK, B is KxN, C is MxN (row-major layout).
 pub fn gemm_f32(
     m: usize,
     n: usize,
     k: usize,
-    /// Input matrix A (M×K).
+    /// Input matrix A (MxK).
     a: []const f32,
     /// Leading dimension of A (stride).
     lda: usize,
-    /// Input matrix B (K×N).
+    /// Input matrix B (KxN).
     b: []const f32,
     /// Leading dimension of B (stride).
     ldb: usize,
-    /// Output matrix C (M×N), assumed pre-zeroed.
+    /// Output matrix C (MxN), assumed pre-zeroed.
     c: []f32,
     /// Leading dimension of C (stride).
     ldc: usize,

@@ -9,8 +9,6 @@
 /// - pipeline: Pass-based pipeline infrastructure
 /// - frontend: User-facing program construction
 /// - utils: Utility types (HostBuffer, etc.)
-///
-/// See KB: "Pass-Based Pipeline Direction (Design Update)"
 const std = @import("std");
 
 pub const build_options = @import("build_options");

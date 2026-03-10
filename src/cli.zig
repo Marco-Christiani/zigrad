@@ -1,6 +1,7 @@
 const std = @import("std");
 const cova = @import("cova");
 const zg = @import("zigrad");
+const build_options = zg.build_options;
 
 pub const CommandT = cova.Command.Custom(.{
     .global_help_prefix = "zigrad",
@@ -90,7 +91,7 @@ pub const JitCacheOpts = struct {
 /// Root command setup with all subcommands
 pub const setup_cmd: CommandT = .{
     .name = "zigrad",
-    .description = "Zigrad: Zig-based automatic differentiation and compilation framework",
+    .description = "Zigrad: Automatic differentiation and compiler framework",
     .opts = &.{
         .{
             .name = "dump_pr",
@@ -137,11 +138,11 @@ pub const setup_cmd: CommandT = .{
             .description = "Print the PR for the demo program",
         },
         .{
-            .name = "tvm-dump-symbols",
+            .name = "tvm-dump-symbols" ++ if (!build_options.has_tvm) " (not enabled)" else "",
             .description = "Enumerate all available TVM FFI functions (requires TVM runtime libraries)",
         },
         .{
-            .name = "tvm-check-compiler-load",
+            .name = "tvm-check-compiler-load" ++ if (!build_options.has_tvm) " (not enabled)" else "",
             .description = "Check that libtvm.so compiler can be loaded (host integration check)",
         },
         .{
@@ -149,11 +150,11 @@ pub const setup_cmd: CommandT = .{
             .description = "Run the AOT compile+load demo",
         },
         .{
-            .name = "iree-aot-demo",
+            .name = "iree-aot-demo" ++ if (!build_options.has_iree) " (not enabled)" else "",
             .description = "Run the IREE AOT compile+execute demo (requires -Diree-backend=true and IREE_COMPILE_EXE env var)",
         },
         CommandT.from(IreeAotCompileOpts, .{
-            .cmd_name = "iree-aot-compile",
+            .cmd_name = "iree-aot-compile" ++ if (!build_options.has_iree) " (not enabled)" else "",
             .cmd_description = "Compile demo program to IREE VMFB (offline, no runtime needed)",
             .default_val_opts = true,
             .sub_descriptions = &.{
@@ -186,7 +187,7 @@ pub const setup_cmd: CommandT = .{
             .description = "Run the reverse-mode AD demo",
         },
         CommandT.from(TvmTuneOpts, .{
-            .cmd_name = "tvm-tune",
+            .cmd_name = "tvm-tune" ++ if (!build_options.has_tvm) " (not enabled)" else "",
             .cmd_description = "Run TVM MetaSchedule autotuning on matmul (requires TVM runtime libraries)",
             .default_val_opts = true,
             .sub_descriptions = &.{
@@ -200,7 +201,7 @@ pub const setup_cmd: CommandT = .{
             },
         }),
         CommandT.from(TvmRunOpts, .{
-            .cmd_name = "tvm-run",
+            .cmd_name = "tvm-run" ++ if (!build_options.has_tvm) " (not enabled)" else "",
             .cmd_description = "Load and run a tuned TVM matmul (requires TVM runtime libraries + prior tuning)",
             .default_val_opts = true,
             .sub_descriptions = &.{
@@ -296,7 +297,7 @@ pub const setup_cmd: CommandT = .{
             },
         }),
         CommandT.from(BenchmarkOpts, .{
-            .cmd_name = "benchmark",
+            .cmd_name = "benchmark" ++ if (!build_options.has_tvm) " (not enabled)" else "",
             .cmd_description = "Run matmul performance benchmarks",
             .default_val_opts = true,
             .sub_descriptions = &.{
