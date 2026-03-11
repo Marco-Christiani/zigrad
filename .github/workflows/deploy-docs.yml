@@ -1,0 +1,49 @@
+name: Deploy Docs Site
+
+on:
+  push:
+    branches: [main]
+    paths: ['website/nuxt-content/**']
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build docs from (defaults to the branch the workflow runs on)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-docs
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: website/nuxt-content/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website/nuxt-content
+        run: npm ci
+
+      - name: Generate static site
+        working-directory: website/nuxt-content
+        run: npx nuxt generate
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: website/nuxt-content/.output/public
+          cname: zigrad.datatician.io
+          force_orphan: true
