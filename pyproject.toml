@@ -10,79 +10,77 @@ dependencies = [
     "polars>=1.37.1",
     "ruff>=0.14.14",
     "transformers<5.0.0",
-    "torch>=2.9.1",
+    # torch: excluded from devshell - CUDA version conflicts with JAX.
     "connectorx>=0.4.5",
     "pyarrow>=23.0.0",
     # TVM MetaSchedule dependencies
     "cloudpickle>=3.0.0",
     "xgboost>=2.0.0",
     "psutil>=5.9.0",
+    "scikit-learn>=1.8.0",
+    "flatbuffers>=25.12.19",
 ]
 
-[tool.uv]
-exclude-dependencies = [
-  "nvidia-cufile-cu12",
-  "nvidia-nvshmem-cu12",
-###
-  "nvidia-cublas-cu12",
-  "nvidia-cuda-cupti-cu12",
-  "nvidia-cuda-nvrtc-cu12",
-  "nvidia-cuda-runtime-cu12",
-  "nvidia-cudnn-cu12",
-  "nvidia-cufft-cu12",
-  "nvidia-curand-cu12",
-###
-  "nvidia-cusolver-cu12",
-  "nvidia-cusparse-cu12",
-  "nvidia-cusparselt-cu12",
-###
-  "nvidia-nccl-cu12",
-  "nvidia-nvjitlink-cu12",
-  "nvidia-nvtx-cu12",
-###############################
-  "nvidia-cufile-cu13",
-  "nvidia-nvshmem-cu13",
-###
-  "nvidia-cublas-cu13",
-  "nvidia-cuda-cupti-cu13",
-  "nvidia-cuda-nvrtc-cu13",
-  "nvidia-cuda-runtime-cu13",
-  "nvidia-cudnn-cu13",
-  "nvidia-cufft-cu13",
-  "nvidia-curand-cu13",
-###
-  "nvidia-cusolver-cu13",
-  "nvidia-cusparse-cu13",
-  "nvidia-cusparselt-cu13",
-###
-  "nvidia-nccl-cu13",
-  "nvidia-nvjitlink-cu13",
-  "nvidia-nvtx-cu13",
-
-###############################
-  "nvidia-cufile",
-  "nvidia-nvshmem",
-###
-  "nvidia-cublas",
-  "nvidia-cuda-cupti",
-  "nvidia-cuda-nvrtc",
-  "nvidia-cuda-runtime",
-  "nvidia-cudnn",
-  "nvidia-cufft",
-  "nvidia-curand",
-  "nvidia-cusolver",
-  "nvidia-cusparse",
-  "nvidia-cusparselt",
-  "nvidia-nccl",
-  "nvidia-nvjitlink",
-  "nvidia-nvtx"
-]
+# [tool.uv]
+# exclude-dependencies = [
+#   "nvidia-cufile-cu12",
+#   "nvidia-nvshmem-cu12",
+# ###
+#   "nvidia-cublas-cu12",
+#   "nvidia-cuda-cupti-cu12",
+#   "nvidia-cuda-nvrtc-cu12",
+#   "nvidia-cuda-runtime-cu12",
+#   "nvidia-cudnn-cu12",
+#   "nvidia-cufft-cu12",
+#   "nvidia-curand-cu12",
+# ###
+#   "nvidia-cusolver-cu12",
+#   "nvidia-cusparse-cu12",
+#   "nvidia-cusparselt-cu12",
+# ###
+#   "nvidia-nccl-cu12",
+#   "nvidia-nvjitlink-cu12",
+#   "nvidia-nvtx-cu12",
+# ###############################
+#   "nvidia-cufile-cu13",
+#   "nvidia-nvshmem-cu13",
+# ###
+#   "nvidia-cublas-cu13",
+#   "nvidia-cuda-cupti-cu13",
+#   "nvidia-cuda-nvrtc-cu13",
+#   "nvidia-cuda-runtime-cu13",
+#   "nvidia-cudnn-cu13",
+#   "nvidia-cufft-cu13",
+#   "nvidia-curand-cu13",
+# ###
+#   "nvidia-cusolver-cu13",
+#   "nvidia-cusparse-cu13",
+#   "nvidia-cusparselt-cu13",
+# ###
+#   "nvidia-nccl-cu13",
+#   "nvidia-nvjitlink-cu13",
+#   "nvidia-nvtx-cu13",
+#
+# ###############################
+#   "nvidia-cufile",
+#   "nvidia-nvshmem",
+# ###
+#   "nvidia-cublas",
+#   "nvidia-cuda-cupti",
+#   "nvidia-cuda-nvrtc",
+#   "nvidia-cuda-runtime",
+#   "nvidia-cudnn",
+#   "nvidia-cufft",
+#   "nvidia-curand",
+#   "nvidia-cusolver",
+#   "nvidia-cusparse",
+#   "nvidia-cusparselt",
+#   "nvidia-nccl",
+#   "nvidia-nvjitlink",
+#   "nvidia-nvtx"
+# ]
 
 [tool.uv.sources]
-torch = [
-  # { index = "pytorch-cu130" },
-  { index = "pytorch-cu129" },
-]
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
