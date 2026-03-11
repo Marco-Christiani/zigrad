@@ -26,6 +26,7 @@ export default defineAppConfig({
     colorMode: true,
     links: [
       { label: 'API Reference', to: '/autodoc' },
+      { label: 'IR Viewer', to: '/ir-viewer' },
       {
         icon: 'i-simple-icons-github',
         to: 'https://github.com/Marco-Christiani/Zigrad',

@@ -6,7 +6,7 @@ export default defineContentConfig({
       type: 'page',
       source: {
         include: '**',
-        exclude: ['index.md']
+        exclude: ['index.md', '_drafts/**']
       },
       schema: z.object({
         links: z.array(z.object({
