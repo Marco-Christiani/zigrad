@@ -25,6 +25,7 @@ useSeoMeta({
           <UButton
             to="/getting-started"
             trailing-icon="i-lucide-arrow-right"
+            disabled
           >
             Read the docs
           </UButton>

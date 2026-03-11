@@ -8,6 +8,7 @@ type ButtonLink = {
   variant?: 'solid' | 'outline' | 'soft' | 'subtle' | 'ghost' | 'link'
   icon?: string
   trailingIcon?: string
+  disabled?: boolean
 }
 
 type Feature = {
@@ -28,7 +29,7 @@ const title = 'Zigrad'
 const description = 'Zigrad is a programmable deep learning framework and compiler that bridges research workflows and production execution.'
 
 const hero_links: ButtonLink[] = [
-  { label: 'Get started', to: '/getting-started', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
+  { label: 'Get started', to: '/getting-started', size: 'xl', trailingIcon: 'i-lucide-arrow-right', disabled: true },
   // { label: 'Explore the pipeline', to: '/pipeline', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
   { label: 'View on GitHub', to: 'https://github.com/Marco-Christiani/Zigrad', target: '_blank', color: 'neutral', variant: 'outline', size: 'xl', icon: 'i-simple-icons-github' }
 ]
@@ -39,7 +40,7 @@ const sections: Section[] = [
     title: 'One program representation, multiple compilation paths.',
     description:
       'Models are represented in a structured program representation that can be inspected, transformed, and lowered to different compiler backends without rewriting model code.',
-    link: { label: 'Explore Architecture', to: '/getting-started', color: 'neutral', variant: 'subtle', size: 'lg', trailingIcon: 'i-lucide-arrow-right' },
+    link: { label: 'Explore Architecture', to: '/getting-started', color: 'neutral', variant: 'subtle', size: 'lg', trailingIcon: 'i-lucide-arrow-right', disabled: true },
     features: [
       // {
       //   icon: 'i-lucide-spline',
@@ -167,7 +168,7 @@ useSeoMeta({
         title="Inspect the pipeline end to end."
         description="Read the terminology, run a demo, dump the artifacts, and inspect how programs change across lowering and execution boundaries."
         :links="[
-          { label: 'Start building', to: '/getting-started', trailingIcon: 'i-lucide-arrow-right' },
+          { label: 'Start building', to: '/getting-started', trailingIcon: 'i-lucide-arrow-right', disabled: true },
           { label: 'Explore the pipeline', to: '/pipeline', variant: 'subtle', trailingIcon: 'i-lucide-arrow-right' },
           { label: 'View on GitHub', to: 'https://github.com/Marco-Christiani/Zigrad', target: '_blank', variant: 'subtle', icon: 'i-simple-icons-github' }
         ]"
