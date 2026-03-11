@@ -82,6 +82,26 @@
        STYLES
        ============================================================ -->
   <style>
+    /* Fallback values for standalone rendering (e.g. GitHub README).
+       svg:root only matches when the SVG is the document root, so these
+       do not interfere when the SVG is rendered inline via vite-svg-loader. */
+    svg:root {
+      --diagram-bg: #f1f5f9;
+      --diagram-glow: #bfdbfe;
+      --diagram-glow-fade: #ffffff;
+      --diagram-border: rgba(0, 0, 0, 0.10);
+      --diagram-text-muted: #475569;
+      --diagram-text-header: #94a3b8;
+      --diagram-green: #059669;
+      --diagram-green-accent: #047857;
+      --diagram-blue: #0284c7;
+      --diagram-blue-accent: #0369a1;
+      --diagram-amber: #d97706;
+      --diagram-amber-accent: #b45309;
+      --diagram-purple: #a855f7;
+      --diagram-purple-accent: #9333ea;
+    }
+
     /* Section label: monospace all-caps, colored per node family */
     .node-label {
       font-family: monospace;
