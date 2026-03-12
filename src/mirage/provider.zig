@@ -25,7 +25,13 @@ pub const MirageProvider = struct {
         };
     }
 
-    fn finalize_impl(_: *anyopaque) void {}
+    fn finalize_impl(ptr: *anyopaque) void {
+        if (device_memory_info_impl(ptr)) |info| {
+            log.debug("finalize: mirage device memory still visible -- free={d} total={d}", .{ info.free_bytes, info.total_bytes });
+        } else {
+            log.debug("finalize: mirage device memory info unavailable (singleton released)", .{});
+        }
+    }
 
     fn device_memory_info_impl(_: *anyopaque) ?kernel.DeviceMemoryInfo {
         const info = mirage_c.mirage_device_mem_info() orelse return null;

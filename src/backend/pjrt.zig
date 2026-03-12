@@ -667,14 +667,31 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
         .host, .unknown => .host,
     };
 
+    // Allocate workspace from XLA's BFC pool when the kernel requires it.
+    const workspace_bytes = artifact.workspace_bytes;
+    const workspace_alignment: usize = 128; // matches Mirage MemoryPlanner alignment
+    var workspace_ptr: ?*anyopaque = null;
+    if (workspace_bytes > 0) {
+        workspace_ptr = alloc_device_memory(frame, workspace_bytes, workspace_alignment);
+        if (workspace_ptr == null) {
+            log.err("workspace allocation failed: {d} bytes for '{s}'", .{ workspace_bytes, dispatch_key });
+            return make_ffi_error(frame, "zigrad kernel dispatch: workspace allocation failed", c.XLA_FFI_Error_Code_RESOURCE_EXHAUSTED);
+        }
+        log.debug("allocated {d} bytes workspace for '{s}'", .{ workspace_bytes, dispatch_key });
+    }
+    defer if (workspace_ptr) |ptr| {
+        free_device_memory(frame, ptr, workspace_bytes);
+        log.debug("freed {d} bytes workspace for '{s}'", .{ workspace_bytes, dispatch_key });
+    };
+
     const ctx = kernel.DispatchContext{
         .inputs = input_descs[0..num_inputs],
         .outputs = output_descs[0..num_outputs],
         .device_ordinal = get_device_ordinal(frame),
         .platform = platform,
         .stream = get_stream(frame),
-        .workspace = null,
-        .workspace_bytes_required = artifact.workspace_bytes,
+        .workspace = workspace_ptr,
+        .workspace_bytes_required = workspace_bytes,
         .allocator = std.heap.c_allocator,
     };
 
@@ -790,6 +807,51 @@ fn get_device_ordinal(frame: *c.XLA_FFI_CallFrame) i32 {
     const err = get_ordinal(&args);
     if (err != null) return 0;
     return args.device_ordinal;
+}
+
+/// Allocate device memory from XLA's BFC pool via the FFI execution context.
+///
+/// Returns null if the API is unavailable or allocation fails. The returned
+/// pointer is device memory owned by the BFC pool -- callers must pair each
+/// successful allocation with `free_device_memory`.
+fn alloc_device_memory(frame: *c.XLA_FFI_CallFrame, size: usize, alignment: usize) ?*anyopaque {
+    const ffi_api = frame.api orelse return null;
+    const alloc_fn = ffi_api.*.XLA_FFI_DeviceMemory_Allocate orelse return null;
+    var args: c.XLA_FFI_DeviceMemory_Allocate_Args = std.mem.zeroes(c.XLA_FFI_DeviceMemory_Allocate_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_DeviceMemory_Allocate_Args);
+    args.ctx = frame.ctx;
+    args.size = size;
+    args.alignment = alignment;
+    const ffi_err = alloc_fn(&args);
+    if (ffi_err != null) {
+        log.warn("XLA_FFI_DeviceMemory_Allocate failed for {d} bytes", .{size});
+        return null;
+    }
+    return args.data;
+}
+
+/// Free device memory previously allocated via `alloc_device_memory`.
+///
+/// Returns memory to XLA's BFC pool (not `cudaFree`). Logs a warning on
+/// failure but does not propagate errors -- workspace cleanup is best-effort.
+fn free_device_memory(frame: *c.XLA_FFI_CallFrame, data: *anyopaque, size: usize) void {
+    const ffi_api = frame.api orelse {
+        log.warn("free_device_memory: FFI API unavailable", .{});
+        return;
+    };
+    const free_fn = ffi_api.*.XLA_FFI_DeviceMemory_Free orelse {
+        log.warn("free_device_memory: XLA_FFI_DeviceMemory_Free unavailable", .{});
+        return;
+    };
+    var args: c.XLA_FFI_DeviceMemory_Free_Args = std.mem.zeroes(c.XLA_FFI_DeviceMemory_Free_Args);
+    args.struct_size = @sizeOf(c.XLA_FFI_DeviceMemory_Free_Args);
+    args.ctx = frame.ctx;
+    args.size = size;
+    args.data = data;
+    const ffi_err = free_fn(&args);
+    if (ffi_err != null) {
+        log.warn("XLA_FFI_DeviceMemory_Free failed for {d} bytes", .{size});
+    }
 }
 
 fn handle_metadata_registration_hook(frame: *c.XLA_FFI_CallFrame) bool {
