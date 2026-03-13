@@ -12,6 +12,80 @@ pub const MirageError = error{
     OutOfMemory,
 };
 
+// ---------------------------------------------------------------------------
+// Zig-level types
+//
+// These re-exports and enums form the public API surface. Consumers outside
+//  src/c/ should use these exclusively and never import c.zig directly as is
+//  the standard pattern.
+// ---------------------------------------------------------------------------
+
+/// Opaque tensor handle (uint32_t in C).
+pub const Tensor = c.MirageTensor;
+
+/// Opaque graph pointer. Consumers pass these around but never dereference.
+pub const RawGraph = c.MirageGraph;
+
+/// Tensor shape/dtype descriptor.
+pub const TensorSpec = c.TensorSpec;
+
+/// Search configuration (zero-initialize, then set fields).
+pub const SearchOptions = c.SearchOptions;
+
+/// Transpile configuration.
+pub const TranspileOptions = c.TranspileOptions;
+
+/// Per-kernel launch metadata from transpiled source.
+pub const KernelMeta = c.KernelMeta;
+
+/// Per-argument descriptor from transpiled source.
+pub const KernelArg = c.KernelArg;
+
+/// Bitmask of source capabilities.
+pub const SourceTraits = c.SourceTraits;
+
+pub const max_rank = c.max_rank;
+
+pub const DType = enum(c_uint) {
+    f16 = c.dtype_f16,
+    bf16 = c.dtype_bf16,
+    f32 = c.dtype_f32,
+    f64 = c.dtype_f64,
+};
+
+pub const UnaryOp = enum(c_uint) {
+    exp = c.unary_exp,
+    sqrt = c.unary_sqrt,
+    silu = c.unary_silu,
+    gelu = c.unary_gelu,
+    relu = c.unary_relu,
+    log = c.unary_log,
+};
+
+pub const BinaryOp = enum(c_uint) {
+    add = c.binary_add,
+    mul = c.binary_mul,
+    div = c.binary_div,
+    pow = c.binary_pow,
+};
+
+pub const Status = enum(c_uint) {
+    ok = c.status_ok,
+    invalid_argument = c.status_invalid_argument,
+    internal_error = c.status_internal_error,
+    unsupported = c.status_unsupported,
+    not_found = c.status_not_found,
+    _,
+
+    pub fn name(self: Status) []const u8 {
+        return std.mem.span(c.mirage_status_string(@intFromEnum(self)));
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Runtime loading
+// ---------------------------------------------------------------------------
+
 const RTLD_NOW: c_int = 0x2;
 const RTLD_GLOBAL: c_int = 0x100;
 extern "c" fn dlopen(filename: [*:0]const u8, flags: c_int) ?*anyopaque;
@@ -90,10 +164,6 @@ fn load_runtime_from_sdk_root(
     return null;
 }
 
-pub fn status_name(status: c.MirageStatus) []const u8 {
-    return std.mem.span(c.mirage_status_string(status));
-}
-
 fn check_status(status: c.MirageStatus) MirageError!void {
     if (status == c.status_ok) return;
     if (status == c.status_invalid_argument) return error.MirageInvalidArgument;
@@ -101,6 +171,16 @@ fn check_status(status: c.MirageStatus) MirageError!void {
     if (status == c.status_unsupported) return error.MirageApiUnsupported;
     if (status == c.status_not_found) return error.MirageNotFound;
     return error.MirageInternalError;
+}
+
+// ---------------------------------------------------------------------------
+// Standalone queries
+// ---------------------------------------------------------------------------
+
+/// Query device memory without a Device handle (passes null to C API).
+pub fn deviceMemInfo() ?struct { free: usize, total: usize } {
+    const info = c.mirage_device_mem_info() orelse return null;
+    return .{ .free = info.free, .total = info.total };
 }
 
 // ---------------------------------------------------------------------------
@@ -147,43 +227,43 @@ pub const Graph = struct {
         self.raw = null;
     }
 
-    pub fn newInput(self: *Graph, spec: *const c.TensorSpec) MirageError!c.MirageTensor {
-        var tensor: c.MirageTensor = 0;
+    pub fn newInput(self: *Graph, spec: *const TensorSpec) MirageError!Tensor {
+        var tensor: Tensor = 0;
         try check_status(c.mirage_graph_new_input(self.raw, spec, &tensor));
         return tensor;
     }
 
-    pub fn matmul(self: *Graph, lhs: c.MirageTensor, rhs: c.MirageTensor) MirageError!c.MirageTensor {
-        var out: c.MirageTensor = 0;
+    pub fn matmul(self: *Graph, lhs: Tensor, rhs: Tensor) MirageError!Tensor {
+        var out: Tensor = 0;
         try check_status(c.mirage_graph_matmul(self.raw, lhs, rhs, &out));
         return out;
     }
 
-    pub fn unary(self: *Graph, op: c.MirageUnaryOp, input: c.MirageTensor) MirageError!c.MirageTensor {
-        var out: c.MirageTensor = 0;
-        try check_status(c.mirage_graph_unary(self.raw, op, input, &out));
+    pub fn unary(self: *Graph, op: UnaryOp, input: Tensor) MirageError!Tensor {
+        var out: Tensor = 0;
+        try check_status(c.mirage_graph_unary(self.raw, @intFromEnum(op), input, &out));
         return out;
     }
 
-    pub fn binary(self: *Graph, op: c.MirageBinaryOp, lhs: c.MirageTensor, rhs: c.MirageTensor) MirageError!c.MirageTensor {
-        var out: c.MirageTensor = 0;
-        try check_status(c.mirage_graph_binary(self.raw, op, lhs, rhs, &out));
+    pub fn binary(self: *Graph, op: BinaryOp, lhs: Tensor, rhs: Tensor) MirageError!Tensor {
+        var out: Tensor = 0;
+        try check_status(c.mirage_graph_binary(self.raw, @intFromEnum(op), lhs, rhs, &out));
         return out;
     }
 
-    pub fn reduction(self: *Graph, input: c.MirageTensor, dim: i32, factor: i32) MirageError!c.MirageTensor {
-        var out: c.MirageTensor = 0;
+    pub fn reduction(self: *Graph, input: Tensor, dim: i32, factor: i32) MirageError!Tensor {
+        var out: Tensor = 0;
         try check_status(c.mirage_graph_reduction(self.raw, input, dim, factor, &out));
         return out;
     }
 
-    pub fn rmsNorm(self: *Graph, input: c.MirageTensor, normalized_size: i32) MirageError!c.MirageTensor {
-        var out: c.MirageTensor = 0;
+    pub fn rmsNorm(self: *Graph, input: Tensor, normalized_size: i32) MirageError!Tensor {
+        var out: Tensor = 0;
         try check_status(c.mirage_graph_rms_norm(self.raw, input, normalized_size, &out));
         return out;
     }
 
-    pub fn markOutput(self: *Graph, tensor: c.MirageTensor) MirageError!void {
+    pub fn markOutput(self: *Graph, tensor: Tensor) MirageError!void {
         try check_status(c.mirage_graph_mark_output(self.raw, tensor));
     }
 };
@@ -204,12 +284,13 @@ pub const SearchResult = struct {
         return c.mirage_search_result_count(self.raw);
     }
 
-    pub fn get(self: SearchResult, index: usize) ?*const c.MirageGraph {
+    /// Returned pointer is valid until the SearchResult is destroyed.
+    pub fn get(self: SearchResult, index: usize) ?*const RawGraph {
         return c.mirage_search_result_get(self.raw, index);
     }
 };
 
-pub fn search(device: *Device, graph: *const Graph, options: ?*const c.SearchOptions) MirageError!SearchResult {
+pub fn search(device: *Device, graph: *const Graph, options: *const SearchOptions) MirageError!SearchResult {
     try ensure_loaded();
     var raw: ?*c.MirageSearchResult = null;
     try check_status(c.mirage_search(device.raw, graph.raw, options, &raw));
@@ -228,7 +309,7 @@ pub const Source = struct {
         self.raw = null;
     }
 
-    pub fn traits(self: Source) c.SourceTraits {
+    pub fn traits(self: Source) SourceTraits {
         return c.mirage_source_traits(self.raw);
     }
 
@@ -250,8 +331,8 @@ pub const Source = struct {
         return c.mirage_source_num_outputs(self.raw);
     }
 
-    pub fn outputSpec(self: Source, index: usize) MirageError!c.TensorSpec {
-        var spec: c.TensorSpec = std.mem.zeroes(c.TensorSpec);
+    pub fn outputSpec(self: Source, index: usize) MirageError!TensorSpec {
+        var spec: TensorSpec = std.mem.zeroes(TensorSpec);
         try check_status(c.mirage_source_output_spec(self.raw, index, &spec));
         return spec;
     }
@@ -260,8 +341,8 @@ pub const Source = struct {
         return c.mirage_source_num_kernels(self.raw);
     }
 
-    pub fn kernelMeta(self: Source, index: usize) MirageError!c.KernelMeta {
-        var meta: c.KernelMeta = std.mem.zeroes(c.KernelMeta);
+    pub fn kernelMeta(self: Source, index: usize) MirageError!KernelMeta {
+        var meta: KernelMeta = std.mem.zeroes(KernelMeta);
         try check_status(c.mirage_source_kernel_meta(self.raw, index, &meta));
         return meta;
     }
@@ -270,14 +351,14 @@ pub const Source = struct {
         return c.mirage_source_kernel_num_args(self.raw, kernel_index);
     }
 
-    pub fn kernelArg(self: Source, kernel_index: usize, arg_index: usize) MirageError!c.KernelArg {
-        var arg: c.KernelArg = std.mem.zeroes(c.KernelArg);
+    pub fn kernelArg(self: Source, kernel_index: usize, arg_index: usize) MirageError!KernelArg {
+        var arg: KernelArg = std.mem.zeroes(KernelArg);
         try check_status(c.mirage_source_kernel_arg(self.raw, kernel_index, arg_index, &arg));
         return arg;
     }
 };
 
-pub fn transpile(graph: ?*const c.MirageGraph, options: ?*const c.TranspileOptions) MirageError!Source {
+pub fn transpile(graph: ?*const RawGraph, options: ?*const TranspileOptions) MirageError!Source {
     try ensure_loaded();
     var raw: ?*c.MirageSource = null;
     try check_status(c.mirage_transpile(graph, options, &raw));

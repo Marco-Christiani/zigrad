@@ -10,7 +10,6 @@
 //!   kernel descriptors (variable)
 
 const std = @import("std");
-const mirage_c = @import("../c/mirage/c.zig");
 
 const log = std.log.scoped(.@"zg/mirage_artifact");
 

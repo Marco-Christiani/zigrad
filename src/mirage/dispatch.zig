@@ -1,7 +1,6 @@
 const std = @import("std");
 const kernel = @import("../kernel.zig");
-const mirage_api = @import("../c/mirage/api.zig");
-const mirage_c = @import("../c/mirage/c.zig");
+const mirage = @import("../c/mirage/api.zig");
 const nvrtc = @import("../c/nvrtc.zig");
 const cuda = @import("../c/cuda_driver.zig");
 const artifact_mod = @import("artifact.zig");
@@ -28,7 +27,7 @@ pub const MirageDispatchState = struct {
     cache: std.AutoHashMap(u64, CompiledModule),
     cache_mutex: std.Thread.Mutex = .{},
 
-    pub fn init(allocator: std.mem.Allocator) mirage_api.MirageError!MirageDispatchState {
+    pub fn init(allocator: std.mem.Allocator) mirage.MirageError!MirageDispatchState {
         return .{
             .allocator = allocator,
             .cache = std.AutoHashMap(u64, CompiledModule).init(allocator),
@@ -258,6 +257,7 @@ pub fn compile_to_ptx(
     try options.append(tmp, "-default-device");
     try options.append(tmp, "-DMIRAGE_BACKEND_USE_CUDA");
 
+    // TODO: proper init or .empty-style pattern
     var prog: nvrtc.nvrtcProgram = std.mem.zeroes(nvrtc.nvrtcProgram);
     const source_z = try tmp.dupeZ(u8, source);
     const create_rc = nvrtc.nvrtcCreateProgram(&prog, source_z.ptr, "mirage_kernel.cu", 0, null, null);
@@ -375,7 +375,7 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
     return out.items;
 }
 
-fn map_mirage_api_error(err: mirage_api.MirageError) kernel.DispatchError {
+fn map_mirage_api_error(err: mirage.MirageError) kernel.DispatchError {
     return switch (err) {
         error.MirageUnavailable => {
             log.warn("remapping {s} -> ProviderLoadFailed", .{@errorName(err)});
@@ -393,13 +393,13 @@ fn map_mirage_api_error(err: mirage_api.MirageError) kernel.DispatchError {
     };
 }
 
-fn map_mirage_status(status: mirage_c.MirageStatus) kernel.DispatchError {
-    log.warn("status code {d} -> DispatchFailed", .{status});
+fn map_mirage_status(status: mirage.Status) kernel.DispatchError {
+    log.warn("status code {d} -> DispatchFailed", .{@intFromEnum(status)});
     return error.DispatchFailed;
 }
 
 test "map_mirage_status maps to generic DispatchFailed" {
-    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(mirage_c.status_invalid_argument));
-    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(mirage_c.status_internal_error));
-    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(mirage_c.status_unsupported));
+    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(.invalid_argument));
+    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(.internal_error));
+    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(.unsupported));
 }

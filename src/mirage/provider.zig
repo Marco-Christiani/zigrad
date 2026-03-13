@@ -3,8 +3,7 @@ const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
 const dispatch_mod = @import("dispatch.zig");
 const artifact_mod = @import("artifact.zig");
-const mirage_api = @import("../c/mirage/api.zig");
-const mirage_c = @import("../c/mirage/c.zig");
+const mirage = @import("../c/mirage/api.zig");
 
 const log = std.log.scoped(.@"zg/mirage_provider");
 const superopt_max_candidates: u32 = 1024;
@@ -20,21 +19,12 @@ pub const MirageProvider = struct {
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
             .compile_mlir_fn = compile_mlir_impl,
-            .finalize_fn = finalize_impl,
             .device_memory_info_fn = device_memory_info_impl,
         };
     }
 
-    fn finalize_impl(ptr: *anyopaque) void {
-        if (device_memory_info_impl(ptr)) |info| {
-            log.debug("finalize: mirage device memory still visible -- free={d} total={d}", .{ info.free_bytes, info.total_bytes });
-        } else {
-            log.debug("finalize: mirage device memory info unavailable (singleton released)", .{});
-        }
-    }
-
     fn device_memory_info_impl(_: *anyopaque) ?kernel.DeviceMemoryInfo {
-        const info = mirage_c.mirage_device_mem_info() orelse return null;
+        const info = mirage.deviceMemInfo() orelse return null;
         return .{ .free_bytes = info.free, .total_bytes = info.total };
     }
 
@@ -61,10 +51,10 @@ pub const MirageProvider = struct {
             return error.Unsupported;
         }
 
-        var graph = mirage_api.Graph.init() catch |err| return map_mirage_api_error(err);
+        var graph = mirage.Graph.init() catch |err| return map_mirage_api_error(err);
         defer graph.deinit();
 
-        var tensor_map = std.AutoHashMap(pr.VarId, mirage_c.MirageTensor).init(allocator);
+        var tensor_map = std.AutoHashMap(pr.VarId, mirage.Tensor).init(allocator);
         defer tensor_map.deinit();
 
         try lower_region_graph(desc, &graph, &tensor_map, allocator);
@@ -89,10 +79,15 @@ pub const MirageProvider = struct {
         };
         if (desc.inputs.len != required_inputs) return error.Unsupported;
 
-        var graph = mirage_api.Graph.init() catch |err| return map_mirage_api_error(err);
+        log.debug("compile_mlir '{s}' pattern={s} inputs:", .{ desc.name, @tagName(desc.pattern) });
+        for (desc.inputs, 0..) |input_desc, i| {
+            log.debug("  in{d}: {s}{any}", .{ i, @tagName(input_desc.dtype), input_desc.dims });
+        }
+
+        var graph = mirage.Graph.init() catch |err| return map_mirage_api_error(err);
         defer graph.deinit();
 
-        var handles = try std.ArrayList(mirage_c.MirageTensor).initCapacity(allocator, desc.inputs.len);
+        var handles = try std.ArrayList(mirage.Tensor).initCapacity(allocator, desc.inputs.len);
         defer handles.deinit(allocator);
 
         for (desc.inputs) |input_desc| {
@@ -100,10 +95,12 @@ pub const MirageProvider = struct {
             try handles.append(allocator, handle);
         }
 
-        // Shape rejections from Mirage (e.g. non-canonical batched matmul
-        // layout, rank mismatch) now return Unsupported directly from
-        // map_mirage_api_error, so no extra catch needed here.
-        const out_tensor = try build_mirage_graph(&graph, desc.pattern, handles.items, desc);
+        const out_tensor = build_mirage_graph(&graph, desc.pattern, handles.items, desc) catch |err| {
+            log.debug("graph construction failed for '{s}' (pattern={s}): {s}", .{
+                desc.name, @tagName(desc.pattern), @errorName(err),
+            });
+            return err;
+        };
 
         graph.markOutput(out_tensor) catch |err| return map_mirage_api_error(err);
 
@@ -116,31 +113,31 @@ pub const MirageProvider = struct {
     /// Returns `Unsupported` if Mirage rejects the tensor shapes (e.g.
     /// non-canonical matmul layout); callers can fall back to baseline lowering.
     fn build_mirage_graph(
-        graph: *mirage_api.Graph,
+        graph: *mirage.Graph,
         pattern: kernel.MlirKernelPattern,
-        input_handles: []const mirage_c.MirageTensor,
+        input_handles: []const mirage.Tensor,
         desc: kernel.MlirKernelDescriptor,
-    ) kernel.CompileError!mirage_c.MirageTensor {
+    ) kernel.CompileError!mirage.Tensor {
         switch (pattern) {
             .dot, .dot_general => {
                 return try emit_matmul(graph, input_handles[0], input_handles[1]);
             },
             .dot_add => {
                 const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                return try emit_binary(graph, mirage_c.binary_add, dot, input_handles[2]);
+                return try emit_binary(graph, .add, dot, input_handles[2]);
             },
             .dot_add_mul => {
                 const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                const sum = try emit_binary(graph, mirage_c.binary_add, dot, input_handles[2]);
-                return try emit_binary(graph, mirage_c.binary_mul, sum, input_handles[2]);
+                const sum = try emit_binary(graph, .add, dot, input_handles[2]);
+                return try emit_binary(graph, .mul, sum, input_handles[2]);
             },
             .dot_log => {
                 const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                return try emit_unary(graph, mirage_c.unary_log, dot);
+                return try emit_unary(graph, .log, dot);
             },
             .dot_exp => {
                 const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                return try emit_unary(graph, mirage_c.unary_exp, dot);
+                return try emit_unary(graph, .exp, dot);
             },
             .rms_norm => {
                 return graph.rmsNorm(input_handles[0], desc.normalized_size) catch |err|
@@ -152,10 +149,10 @@ pub const MirageProvider = struct {
                 return try emit_matmul(graph, rms_result, input_handles[1]);
             },
             .softmax_matmul => {
-                const exp_result = try emit_unary(graph, mirage_c.unary_exp, input_handles[0]);
+                const exp_result = try emit_unary(graph, .exp, input_handles[0]);
                 const sum_result = graph.reduction(exp_result, desc.reduction_dim, desc.reduction_factor) catch |err|
                     return map_mirage_api_error(err);
-                const attn_probs = try emit_binary(graph, mirage_c.binary_div, exp_result, sum_result);
+                const attn_probs = try emit_binary(graph, .div, exp_result, sum_result);
                 return try emit_matmul(graph, attn_probs, input_handles[1]);
             },
             .attention => {
@@ -163,10 +160,10 @@ pub const MirageProvider = struct {
                 // structural pattern. If Mirage returns Unsupported, the expand
                 // pass reconstructs the full chain WITH scale correctly.
                 const scores = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                const exp_result = try emit_unary(graph, mirage_c.unary_exp, scores);
+                const exp_result = try emit_unary(graph, .exp, scores);
                 const sum_result = graph.reduction(exp_result, desc.reduction_dim, desc.reduction_factor) catch |err|
                     return map_mirage_api_error(err);
-                const attn_probs = try emit_binary(graph, mirage_c.binary_div, exp_result, sum_result);
+                const attn_probs = try emit_binary(graph, .div, exp_result, sum_result);
                 return try emit_matmul(graph, attn_probs, input_handles[2]);
             },
         }
@@ -177,17 +174,17 @@ pub const MirageProvider = struct {
         self: *MirageProvider,
         target_name: []const u8,
         allocator: std.mem.Allocator,
-        graph: *mirage_api.Graph,
+        graph: *mirage.Graph,
     ) kernel.CompileError!kernel.KernelArtifact {
         // Search for optimized candidates.
-        var device = mirage_api.Device.init(0) catch |err| return map_mirage_api_error(err);
+        var device = mirage.Device.init(0) catch |err| return map_mirage_api_error(err);
         defer device.deinit();
 
-        const search_opts = mirage_c.SearchOptions{
-            .max_candidates = superopt_max_candidates,
-        };
+        // TODO: proper init or .empty-style pattern
+        var search_opts: mirage.SearchOptions = std.mem.zeroes(mirage.SearchOptions);
+        search_opts.max_candidates = superopt_max_candidates;
 
-        var result = mirage_api.search(&device, graph, &search_opts) catch |err| {
+        var result = mirage.search(&device, graph, &search_opts) catch |err| {
             if (err == error.MirageApiUnsupported) {
                 log.debug("mirage search unsupported for region '{s}'", .{target_name});
                 return error.Unsupported;
@@ -220,7 +217,7 @@ pub const MirageProvider = struct {
 
         // Transpile in parent -- safe because the same deterministic graph
         // passed the fork-canary probe above.
-        var source = mirage_api.transpile(transpile_graph, null) catch |err| {
+        var source = mirage.transpile(transpile_graph, null) catch |err| {
             if (err == error.MirageApiUnsupported) {
                 log.debug("mirage transpile unsupported for region '{s}'", .{target_name});
                 return error.Unsupported;
@@ -326,7 +323,7 @@ pub const MirageProvider = struct {
 /// (SIGABRT from the assert), the parent detects this via `waitpid` and
 /// returns false. The parent then re-transpiles the same deterministic graph
 /// when it is confirmed safe.
-fn probe_transpile_safe(graph: ?*const mirage_c.MirageGraph) bool {
+fn probe_transpile_safe(graph: ?*const mirage.RawGraph) bool {
     const pid = std.posix.fork() catch |err| {
         log.warn("fork failed for transpile probe: {}", .{err});
         return false;
@@ -340,7 +337,7 @@ fn probe_transpile_safe(graph: ?*const mirage_c.MirageGraph) bool {
             std.posix.close(devnull);
         } else |_| {}
 
-        var source = mirage_api.transpile(graph, null) catch {
+        var source = mirage.transpile(graph, null) catch {
             std.os.linux.exit_group(1);
         };
         source.deinit();
@@ -353,37 +350,40 @@ fn probe_transpile_safe(graph: ?*const mirage_c.MirageGraph) bool {
     return W.IFEXITED(wait.status) and W.EXITSTATUS(wait.status) == 0;
 }
 
-/// Release Mirage device memory. With the new API this destroys the
-/// device handle; currently a no-op since device handles are scoped to
-/// search_and_transpile calls.
-pub fn release_device_memory() void {}
-
 fn emit_graph_input(
-    graph: *mirage_api.Graph,
+    graph: *mirage.Graph,
     input_desc: kernel.MlirTensorDesc,
-) kernel.CompileError!mirage_c.MirageTensor {
-    const dtype = dtype_to_mirage(input_desc.dtype) orelse return error.Unsupported;
+) kernel.CompileError!mirage.Tensor {
+    const dtype = dtype_to_mirage(input_desc.dtype) orelse {
+        log.debug("unsupported dtype for mirage input: {s}", .{@tagName(input_desc.dtype)});
+        return error.Unsupported;
+    };
 
-    var dims: [mirage_c.max_rank]i64 = .{ 0, 0, 0, 0 };
+    var dims: [mirage.max_rank]i64 = .{ 0, 0, 0, 0 };
     for (input_desc.dims, 0..) |dim, idx| {
         if (dim == 0 or dim > std.math.maxInt(i64)) return error.Unsupported;
         dims[idx] = @intCast(dim);
     }
 
-    const spec = mirage_c.TensorSpec{
-        .dtype = dtype,
+    const spec = mirage.TensorSpec{
+        .dtype = @intFromEnum(dtype),
         .rank = @intCast(input_desc.dims.len),
         .dims = dims,
         .strides = .{ 0, 0, 0, 0 },
     };
 
-    return graph.newInput(&spec) catch |err| return map_mirage_api_error(err);
+    return graph.newInput(&spec) catch |err| {
+        log.debug("mirage graph.newInput rejected ({s} rank={d}): {s}", .{
+            @tagName(dtype), input_desc.dims.len, @errorName(err),
+        });
+        return map_mirage_api_error(err);
+    };
 }
 
 fn lower_region_graph(
     desc: kernel.RegionDescriptor,
-    graph: *mirage_api.Graph,
-    tensor_map: *std.AutoHashMap(pr.VarId, mirage_c.MirageTensor),
+    graph: *mirage.Graph,
+    tensor_map: *std.AutoHashMap(pr.VarId, mirage.Tensor),
     allocator: std.mem.Allocator,
 ) kernel.CompileError!void {
     for (desc.inputs) |in_id| {
@@ -392,14 +392,14 @@ fn lower_region_graph(
 
         const dtype = dtype_to_mirage(tensor.dtype) orelse return error.Unsupported;
 
-        var dims: [mirage_c.max_rank]i64 = .{ 0, 0, 0, 0 };
+        var dims: [mirage.max_rank]i64 = .{ 0, 0, 0, 0 };
         for (tensor.shape.dims, 0..) |dim, idx| {
             if (dim == 0 or dim > std.math.maxInt(i64)) return error.Unsupported;
             dims[idx] = @intCast(dim);
         }
 
-        const spec = mirage_c.TensorSpec{
-            .dtype = dtype,
+        const spec = mirage.TensorSpec{
+            .dtype = @intFromEnum(dtype),
             .rank = @intCast(tensor.shape.dims.len),
             .dims = dims,
             .strides = .{ 0, 0, 0, 0 },
@@ -427,12 +427,12 @@ fn lower_region_graph(
 }
 
 fn lower_eqn(
-    graph: *mirage_api.Graph,
+    graph: *mirage.Graph,
     desc: kernel.RegionDescriptor,
     eqn: pr.Eqn,
     inputs: []const pr.VarId,
-    tensor_map: *const std.AutoHashMap(pr.VarId, mirage_c.MirageTensor),
-) kernel.CompileError!mirage_c.MirageTensor {
+    tensor_map: *const std.AutoHashMap(pr.VarId, mirage.Tensor),
+) kernel.CompileError!mirage.Tensor {
     switch (eqn.prim) {
         .dot => {
             if (inputs.len != 2) return error.Unsupported;
@@ -461,66 +461,75 @@ fn lower_eqn(
         .exp => {
             if (inputs.len != 1) return error.Unsupported;
             const input = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            return try emit_unary(graph, mirage_c.unary_exp, input);
+            return try emit_unary(graph, .exp, input);
         },
         .log => {
             if (inputs.len != 1) return error.Unsupported;
             const input = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            return try emit_unary(graph, mirage_c.unary_log, input);
+            return try emit_unary(graph, .log, input);
         },
         .add => {
             if (inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
-            return try emit_binary(graph, mirage_c.binary_add, lhs, rhs);
+            return try emit_binary(graph, .add, lhs, rhs);
         },
         .multiply => {
             if (inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
-            return try emit_binary(graph, mirage_c.binary_mul, lhs, rhs);
+            return try emit_binary(graph, .mul, lhs, rhs);
         },
         .divide => {
             if (inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
             const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
-            return try emit_binary(graph, mirage_c.binary_div, lhs, rhs);
+            return try emit_binary(graph, .div, lhs, rhs);
         },
         else => return error.Unsupported,
     }
 }
 
-fn emit_matmul(graph: *mirage_api.Graph, lhs: mirage_c.MirageTensor, rhs: mirage_c.MirageTensor) kernel.CompileError!mirage_c.MirageTensor {
-    return graph.matmul(lhs, rhs) catch |err| return map_mirage_api_error(err);
+fn emit_matmul(graph: *mirage.Graph, lhs: mirage.Tensor, rhs: mirage.Tensor) kernel.CompileError!mirage.Tensor {
+    return graph.matmul(lhs, rhs) catch |err| {
+        log.debug("mirage graph.matmul rejected (lhs={d}, rhs={d}): {s}", .{ lhs, rhs, @errorName(err) });
+        return map_mirage_api_error(err);
+    };
 }
 
 fn emit_unary(
-    graph: *mirage_api.Graph,
-    op: mirage_c.MirageUnaryOp,
-    input: mirage_c.MirageTensor,
-) kernel.CompileError!mirage_c.MirageTensor {
-    return graph.unary(op, input) catch |err| return map_mirage_api_error(err);
+    graph: *mirage.Graph,
+    op: mirage.UnaryOp,
+    input: mirage.Tensor,
+) kernel.CompileError!mirage.Tensor {
+    return graph.unary(op, input) catch |err| {
+        log.debug("mirage graph.unary({s}) rejected (input={d}): {s}", .{ @tagName(op), input, @errorName(err) });
+        return map_mirage_api_error(err);
+    };
 }
 
 fn emit_binary(
-    graph: *mirage_api.Graph,
-    op: mirage_c.MirageBinaryOp,
-    lhs: mirage_c.MirageTensor,
-    rhs: mirage_c.MirageTensor,
-) kernel.CompileError!mirage_c.MirageTensor {
-    return graph.binary(op, lhs, rhs) catch |err| return map_mirage_api_error(err);
+    graph: *mirage.Graph,
+    op: mirage.BinaryOp,
+    lhs: mirage.Tensor,
+    rhs: mirage.Tensor,
+) kernel.CompileError!mirage.Tensor {
+    return graph.binary(op, lhs, rhs) catch |err| {
+        log.debug("mirage graph.binary({s}) rejected (lhs={d}, rhs={d}): {s}", .{ @tagName(op), lhs, rhs, @errorName(err) });
+        return map_mirage_api_error(err);
+    };
 }
 
-fn dtype_to_mirage(dtype: pr.DType) ?mirage_c.MirageDType {
+fn dtype_to_mirage(dtype: pr.DType) ?mirage.DType {
     return switch (dtype) {
-        .bf16 => mirage_c.dtype_bf16,
-        .f32 => mirage_c.dtype_f32,
-        .f64 => mirage_c.dtype_f64,
+        .bf16 => .bf16,
+        .f32 => .f32,
+        .f64 => .f64,
         else => null,
     };
 }
 
-fn map_mirage_api_error(err: mirage_api.MirageError) kernel.CompileError {
+fn map_mirage_api_error(err: mirage.MirageError) kernel.CompileError {
     return switch (err) {
         error.MirageUnavailable => {
             log.warn("remapping {s} -> ProviderLoadFailed", .{@errorName(err)});
@@ -540,35 +549,39 @@ fn map_mirage_api_error(err: mirage_api.MirageError) kernel.CompileError {
     };
 }
 
+fn map_mirage_status(status: mirage.Status, ctx: StatusContext) kernel.CompileError {
+    return switch (status) {
+        .invalid_argument => error.Unsupported,
+        .internal_error => {
+            log.warn("status_internal_error -> ProviderCallFailed", .{});
+            return error.ProviderCallFailed;
+        },
+        .unsupported => switch (ctx) {
+            .region => error.Unsupported,
+            .runtime => {
+                log.warn("status_unsupported (runtime) -> ProviderCallFailed", .{});
+                return error.ProviderCallFailed;
+            },
+        },
+        .not_found => error.Unsupported,
+        else => {
+            log.warn("unknown status {d} -> ProviderCallFailed", .{@intFromEnum(status)});
+            return error.ProviderCallFailed;
+        },
+    };
+}
+
 const StatusContext = enum {
     region,
     runtime,
 };
 
-fn map_mirage_status(status: mirage_c.MirageStatus, ctx: StatusContext) kernel.CompileError {
-    if (status == mirage_c.status_invalid_argument) return error.Unsupported;
-    if (status == mirage_c.status_internal_error) {
-        log.warn("status_internal_error -> ProviderCallFailed", .{});
-        return error.ProviderCallFailed;
-    }
-    if (status == mirage_c.status_unsupported) return switch (ctx) {
-        .region => error.Unsupported,
-        .runtime => {
-            log.warn("status_unsupported (runtime) -> ProviderCallFailed", .{});
-            return error.ProviderCallFailed;
-        },
-    };
-    if (status == mirage_c.status_not_found) return error.Unsupported;
-    log.warn("unknown status {d} -> ProviderCallFailed", .{status});
-    return error.ProviderCallFailed;
-}
-
 test map_mirage_status {
-    try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_invalid_argument, .region));
-    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(mirage_c.status_internal_error, .region));
-    try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_unsupported, .region));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(.invalid_argument, .region));
+    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(.internal_error, .region));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(.unsupported, .region));
 
-    try std.testing.expectEqual(error.Unsupported, map_mirage_status(mirage_c.status_invalid_argument, .runtime));
-    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(mirage_c.status_internal_error, .runtime));
-    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(mirage_c.status_unsupported, .runtime));
+    try std.testing.expectEqual(error.Unsupported, map_mirage_status(.invalid_argument, .runtime));
+    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(.internal_error, .runtime));
+    try std.testing.expectEqual(error.ProviderCallFailed, map_mirage_status(.unsupported, .runtime));
 }
