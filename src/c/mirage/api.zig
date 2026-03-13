@@ -178,7 +178,7 @@ fn check_status(status: c.MirageStatus) MirageError!void {
 // ---------------------------------------------------------------------------
 
 /// Query device memory without a Device handle (passes null to C API).
-pub fn deviceMemInfo() ?struct { free: usize, total: usize } {
+pub fn device_mem_info() ?struct { free: usize, total: usize } {
     const info = c.mirage_device_mem_info() orelse return null;
     return .{ .free = info.free, .total = info.total };
 }
@@ -202,7 +202,7 @@ pub const Device = struct {
         self.raw = null;
     }
 
-    pub fn memInfo(self: Device) ?struct { free: usize, total: usize } {
+    pub fn mem_info(self: Device) ?struct { free: usize, total: usize } {
         _ = self;
         return c.mirage_device_mem_info();
     }
@@ -227,7 +227,7 @@ pub const Graph = struct {
         self.raw = null;
     }
 
-    pub fn newInput(self: *Graph, spec: *const TensorSpec) MirageError!Tensor {
+    pub fn new_input(self: *Graph, spec: *const TensorSpec) MirageError!Tensor {
         var tensor: Tensor = 0;
         try check_status(c.mirage_graph_new_input(self.raw, spec, &tensor));
         return tensor;
@@ -257,13 +257,13 @@ pub const Graph = struct {
         return out;
     }
 
-    pub fn rmsNorm(self: *Graph, input: Tensor, normalized_size: i32) MirageError!Tensor {
+    pub fn rms_norm(self: *Graph, input: Tensor, normalized_size: i32) MirageError!Tensor {
         var out: Tensor = 0;
         try check_status(c.mirage_graph_rms_norm(self.raw, input, normalized_size, &out));
         return out;
     }
 
-    pub fn markOutput(self: *Graph, tensor: Tensor) MirageError!void {
+    pub fn mark_output(self: *Graph, tensor: Tensor) MirageError!void {
         try check_status(c.mirage_graph_mark_output(self.raw, tensor));
     }
 };
@@ -319,39 +319,39 @@ pub const Source = struct {
         return ptr[0..len];
     }
 
-    pub fn bufSize(self: Source) usize {
+    pub fn buf_size(self: Source) usize {
         return c.mirage_source_buf_size(self.raw);
     }
 
-    pub fn maxSmem(self: Source) usize {
+    pub fn max_smem(self: Source) usize {
         return c.mirage_source_max_smem(self.raw);
     }
 
-    pub fn numOutputs(self: Source) usize {
+    pub fn num_outputs(self: Source) usize {
         return c.mirage_source_num_outputs(self.raw);
     }
 
-    pub fn outputSpec(self: Source, index: usize) MirageError!TensorSpec {
+    pub fn output_spec(self: Source, index: usize) MirageError!TensorSpec {
         var spec: TensorSpec = std.mem.zeroes(TensorSpec);
         try check_status(c.mirage_source_output_spec(self.raw, index, &spec));
         return spec;
     }
 
-    pub fn numKernels(self: Source) usize {
+    pub fn num_kernels(self: Source) usize {
         return c.mirage_source_num_kernels(self.raw);
     }
 
-    pub fn kernelMeta(self: Source, index: usize) MirageError!KernelMeta {
+    pub fn kernel_meta(self: Source, index: usize) MirageError!KernelMeta {
         var meta: KernelMeta = std.mem.zeroes(KernelMeta);
         try check_status(c.mirage_source_kernel_meta(self.raw, index, &meta));
         return meta;
     }
 
-    pub fn kernelNumArgs(self: Source, kernel_index: usize) usize {
+    pub fn kernel_num_args(self: Source, kernel_index: usize) usize {
         return c.mirage_source_kernel_num_args(self.raw, kernel_index);
     }
 
-    pub fn kernelArg(self: Source, kernel_index: usize, arg_index: usize) MirageError!KernelArg {
+    pub fn kernel_arg(self: Source, kernel_index: usize, arg_index: usize) MirageError!KernelArg {
         var arg: KernelArg = std.mem.zeroes(KernelArg);
         try check_status(c.mirage_source_kernel_arg(self.raw, kernel_index, arg_index, &arg));
         return arg;

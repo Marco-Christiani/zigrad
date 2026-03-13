@@ -24,7 +24,7 @@ pub const MirageProvider = struct {
     }
 
     fn device_memory_info_impl(_: *anyopaque) ?kernel.DeviceMemoryInfo {
-        const info = mirage.deviceMemInfo() orelse return null;
+        const info = mirage.device_mem_info() orelse return null;
         return .{ .free_bytes = info.free, .total_bytes = info.total };
     }
 
@@ -102,7 +102,7 @@ pub const MirageProvider = struct {
             return err;
         };
 
-        graph.markOutput(out_tensor) catch |err| return map_mirage_api_error(err);
+        graph.mark_output(out_tensor) catch |err| return map_mirage_api_error(err);
 
         return self.search_and_transpile(desc.name, allocator, &graph);
     }
@@ -140,11 +140,11 @@ pub const MirageProvider = struct {
                 return try emit_unary(graph, .exp, dot);
             },
             .rms_norm => {
-                return graph.rmsNorm(input_handles[0], desc.normalized_size) catch |err|
+                return graph.rms_norm(input_handles[0], desc.normalized_size) catch |err|
                     return map_mirage_api_error(err);
             },
             .rms_norm_matmul => {
-                const rms_result = graph.rmsNorm(input_handles[0], desc.normalized_size) catch |err|
+                const rms_result = graph.rms_norm(input_handles[0], desc.normalized_size) catch |err|
                     return map_mirage_api_error(err);
                 return try emit_matmul(graph, rms_result, input_handles[1]);
             },
@@ -232,7 +232,7 @@ pub const MirageProvider = struct {
             return error.ProviderCallFailed;
         }
 
-        const buf_size = source.bufSize();
+        const buf_size = source.buf_size();
         if (buf_size != 0) {
             log.debug("mirage workspace for '{s}': {d} bytes", .{ target_name, buf_size });
         }
@@ -240,7 +240,7 @@ pub const MirageProvider = struct {
         // If the transpiled source has no custom kernels (only library ops
         // like standalone matmul -> cuBLAS), we can't launch via NVRTC.
         // Return Unsupported so the backend handles this natively.
-        const num_kernels = source.numKernels();
+        const num_kernels = source.num_kernels();
         if (num_kernels == 0) {
             log.debug("mirage transpile produced 0 custom kernels for '{s}'; falling back to backend", .{target_name});
             return error.Unsupported;
@@ -264,12 +264,12 @@ pub const MirageProvider = struct {
         }
 
         for (0..num_kernels) |ki| {
-            const meta = source.kernelMeta(ki) catch |err| return map_mirage_api_error(err);
-            const num_args = source.kernelNumArgs(ki);
+            const meta = source.kernel_meta(ki) catch |err| return map_mirage_api_error(err);
+            const num_args = source.kernel_num_args(ki);
 
             var args = try allocator.alloc(artifact_mod.KernelArg, num_args);
             for (0..num_args) |ai| {
-                const arg = source.kernelArg(ki, ai) catch |err| {
+                const arg = source.kernel_arg(ki, ai) catch |err| {
                     allocator.free(args);
                     return map_mirage_api_error(err);
                 };
@@ -372,8 +372,8 @@ fn emit_graph_input(
         .strides = .{ 0, 0, 0, 0 },
     };
 
-    return graph.newInput(&spec) catch |err| {
-        log.debug("mirage graph.newInput rejected ({s} rank={d}): {s}", .{
+    return graph.new_input(&spec) catch |err| {
+        log.debug("mirage graph.new_input rejected ({s} rank={d}): {s}", .{
             @tagName(dtype), input_desc.dims.len, @errorName(err),
         });
         return map_mirage_api_error(err);
@@ -405,7 +405,7 @@ fn lower_region_graph(
             .strides = .{ 0, 0, 0, 0 },
         };
 
-        const handle = graph.newInput(&spec) catch |err| return map_mirage_api_error(err);
+        const handle = graph.new_input(&spec) catch |err| return map_mirage_api_error(err);
         try tensor_map.put(in_id, handle);
     }
 
@@ -420,7 +420,7 @@ fn lower_region_graph(
 
     for (desc.outputs) |out_id| {
         const out_tensor = tensor_map.get(out_id) orelse return error.Unsupported;
-        graph.markOutput(out_tensor) catch |err| return map_mirage_api_error(err);
+        graph.mark_output(out_tensor) catch |err| return map_mirage_api_error(err);
     }
 
     _ = allocator;
