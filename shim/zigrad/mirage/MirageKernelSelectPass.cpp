@@ -73,6 +73,7 @@ struct DotAddMulPattern final : RewritePattern {
     if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse())
       return failure();
     if (dot_op->getNumOperands() != 2) return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
 
     SmallVector<Value, 3> call_operands = {
         dot_op->getOperand(0),
@@ -127,6 +128,7 @@ struct DotAddPattern final : RewritePattern {
     if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse())
       return failure();
     if (dot_op->getNumOperands() != 2) return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
 
     SmallVector<Value, 3> call_operands = {
         dot_op->getOperand(0),
@@ -167,6 +169,7 @@ struct DotUnaryPattern final : RewritePattern {
     if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse())
       return failure();
     if (dot_op->getNumOperands() != 2) return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
 
     SmallVector<Value, 2> call_operands = {
         dot_op->getOperand(0),
@@ -336,10 +339,10 @@ struct RmsNormPattern final : RewritePattern {
 //
 // Anchored on stablehlo.dot_general, walks backward through:
 //   dot_general(lhs, W)
-//     lhs = [reshape] -> [convert f32→bf16] -> multiply(normed, gamma_bc) -> ...
+//     lhs = [reshape] -> [convert f32->bf16] -> multiply(normed, gamma_bc) -> ...
 //     normed = multiply(x, broadcast(rsqrt(add(multiply(reduce_sum(multiply(x,x)), scale), eps))))
 //
-// Pre-multiplies gamma into W (rms_norm(X)*γ)@W = rms_norm(X)@(γ*W)) to avoid
+// Pre-multiplies gamma into W (rms_norm(X)*gamma)@W = rms_norm(X)@(gamma*W)) to avoid
 // passing a rank-1 gamma through Mirage (which can't broadcast rank-1 vs rank-2).
 // ============================================================================
 
@@ -353,6 +356,7 @@ struct RmsNormMatmulPattern final : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (dot_op->getNumOperands() != 2 || dot_op->getNumResults() != 1)
       return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
 
     Value dot_lhs = dot_op->getOperand(0);
     Value w = dot_op->getOperand(1);
@@ -626,6 +630,7 @@ struct SoftmaxMatmulPattern final : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (dot_op->getNumOperands() != 2 || dot_op->getNumResults() != 1)
       return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
 
     // Step 1: dot LHS -> divide (attn_probs = exp / sum)
     // Allow an optional stablehlo.convert between divide and dot_general
@@ -768,6 +773,7 @@ struct AttentionPattern final : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (v_dot_op->getNumOperands() != 2 || v_dot_op->getNumResults() != 1)
       return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(v_dot_op)) return failure();
 
     // Step 1: V dot LHS -> optional convert -> divide (probs = exp / sum)
     Value dot_lhs = v_dot_op->getOperand(0);
@@ -866,6 +872,7 @@ struct AttentionPattern final : RewritePattern {
     }
     if (!score_dot || !scale_broadcast) return failure();
     if (score_dot->getNumOperands() != 2) return failure();
+    if (!kernel_utils::has_canonical_matmul_dims(score_dot)) return failure();
 
     // Extract scale constant value.
     if (scale_broadcast->getNumOperands() != 1) return failure();

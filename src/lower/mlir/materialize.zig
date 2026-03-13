@@ -820,15 +820,17 @@ test "select pass matches softmax_matmul pattern" {
     const testing = std.testing;
 
     // Hand-crafted softmax(scores) @ V pattern in f32.
+    // V uses canonical Mirage-compatible dims: batch=[0,1], LHS contract at
+    // rank-1, RHS contract at rank-2.
     const input =
         \\module {
-        \\  func.func @main(%scores: tensor<1x32x4x4xf32>, %v: tensor<1x4x32x64xf32>) -> tensor<1x32x4x64xf32> {
+        \\  func.func @main(%scores: tensor<1x32x4x4xf32>, %v: tensor<1x32x4x64xf32>) -> tensor<1x32x4x64xf32> {
         \\    %cst = stablehlo.constant dense<0.0> : tensor<f32>
         \\    %exp = stablehlo.exponential %scores : tensor<1x32x4x4xf32>
         \\    %sum = stablehlo.reduce(%exp init: %cst) applies stablehlo.add across dimensions = [3] : (tensor<1x32x4x4xf32>, tensor<f32>) -> tensor<1x32x4xf32>
         \\    %bcast = stablehlo.broadcast_in_dim %sum, dims = [0, 1, 2] : (tensor<1x32x4xf32>) -> tensor<1x32x4x4xf32>
         \\    %div = stablehlo.divide %exp, %bcast : tensor<1x32x4x4xf32>
-        \\    %out = stablehlo.dot_general %div, %v, batching_dims = [0, 1] x [0, 2], contracting_dims = [3] x [1], precision = [DEFAULT, DEFAULT] : (tensor<1x32x4x4xf32>, tensor<1x4x32x64xf32>) -> tensor<1x32x4x64xf32>
+        \\    %out = stablehlo.dot_general %div, %v, batching_dims = [0, 1] x [0, 1], contracting_dims = [3] x [2], precision = [DEFAULT, DEFAULT] : (tensor<1x32x4x4xf32>, tensor<1x32x4x64xf32>) -> tensor<1x32x4x64xf32>
         \\    return %out : tensor<1x32x4x64xf32>
         \\  }
         \\}
