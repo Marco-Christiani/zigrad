@@ -209,13 +209,13 @@ pub fn main() !void {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return demos.run_train_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return demos.run_train_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llm-ft-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return llm_demo.run_llm_ft_demo(gpa, plugin_path, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return llm_demo.run_llm_ft_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         const llama_ft_sub = cmd.matchSubCmd("llama-ft-demo-pr") orelse cmd.matchSubCmd("llama-ft-demo-mlir");
         if (llama_ft_sub) |sub_cmd| {
@@ -243,7 +243,8 @@ pub fn main() !void {
 
             return llama_demo.run_llama_ft_demo(
                 gpa,
-                plugin_path,
+                &backend,
+                device,
                 dump_pr_ptr,
                 dump_mlir_ptr,
                 dump_optimized_ptr,

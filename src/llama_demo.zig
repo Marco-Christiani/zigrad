@@ -131,7 +131,8 @@ fn loss_fn_with_options(
 
 pub fn run_llama_ft_demo(
     allocator: std.mem.Allocator,
-    plugin_path: []const u8,
+    backend_handle: *zg.backend.PjrtBackend,
+    device: *const zg.backend.pjrt.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
@@ -224,7 +225,6 @@ pub fn run_llama_ft_demo(
 
     var compile_cfg = zg.frontend.CompileConfig{
         .entry_name = "llama_ft_step",
-        .plugin_path = plugin_path,
         .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
         .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
         .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,
@@ -284,15 +284,6 @@ pub fn run_llama_ft_demo(
         }
     }
 
-    var backend_handle = try zg.frontend.init_backend(allocator, compile_cfg.plugin_path);
-    defer backend_handle.deinit();
-
-    const devices = try backend_handle.get_devices(allocator);
-    defer allocator.free(devices);
-
-    if (compile_cfg.device_index >= devices.len) return error.InvalidDeviceIndex;
-    const device = &devices[compile_cfg.device_index];
-
     const param_count = 3 + num_layers * 7;
 
     const train = zg.frontend.train;
@@ -301,21 +292,21 @@ pub fn run_llama_ft_demo(
     var compiled_fwd: ?zg.frontend.CompiledForward = null;
     if (train_mode) {
         if (use_mirage_loss) {
-            compiled_train = try train.compile_train_step(allocator, &backend_handle, device, loss_fn_mirage, inputs_spec, param_count, .{
+            compiled_train = try train.compile_train_step(allocator, backend_handle, device, loss_fn_mirage, inputs_spec, param_count, .{
                 .optimizer = .{ .lr = 1e-4 },
                 .compile = compile_cfg,
             });
         } else {
-            compiled_train = try train.compile_train_step(allocator, &backend_handle, device, loss_fn, inputs_spec, param_count, .{
+            compiled_train = try train.compile_train_step(allocator, backend_handle, device, loss_fn, inputs_spec, param_count, .{
                 .optimizer = .{ .lr = 1e-4 },
                 .compile = compile_cfg,
             });
         }
     } else {
         if (use_mirage_loss) {
-            compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn_mirage, inputs_spec, compile_cfg);
+            compiled_fwd = try zg.frontend.compile_forward(allocator, backend_handle, device, loss_fn_mirage, inputs_spec, compile_cfg);
         } else {
-            compiled_fwd = try zg.frontend.compile_forward(allocator, &backend_handle, device, loss_fn, inputs_spec, compile_cfg);
+            compiled_fwd = try zg.frontend.compile_forward(allocator, backend_handle, device, loss_fn, inputs_spec, compile_cfg);
         }
     }
     defer {
@@ -324,8 +315,8 @@ pub fn run_llama_ft_demo(
     }
 
     if (!quiet) {
-        if (compiled_train) |*ct| log_compiled_memory_stats(&backend_handle, &ct.exe);
-        if (compiled_fwd) |*cf| log_compiled_memory_stats(&backend_handle, &cf.exe);
+        if (compiled_train) |*ct| log_compiled_memory_stats(backend_handle, &ct.exe);
+        if (compiled_fwd) |*cf| log_compiled_memory_stats(backend_handle, &cf.exe);
     }
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
@@ -496,9 +487,9 @@ pub fn run_llama_ft_demo(
     var total_ns: u64 = 0;
 
     const upload = zg.frontend.upload_host_buffer;
-    const tmp_w_emb = try upload(allocator, &backend_handle, device, &host_w_emb);
-    const tmp_w_out = try upload(allocator, &backend_handle, device, &host_w_out);
-    const tmp_norm = try upload(allocator, &backend_handle, device, &host_norm);
+    const tmp_w_emb = try upload(allocator, backend_handle, device, &host_w_emb);
+    const tmp_w_out = try upload(allocator, backend_handle, device, &host_w_out);
+    const tmp_norm = try upload(allocator, backend_handle, device, &host_norm);
     var tmp_layer_input_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_layer_post_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
     var tmp_qkv_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
@@ -509,20 +500,20 @@ pub fn run_llama_ft_demo(
 
     var m: usize = 0;
     while (m < num_layers) : (m += 1) {
-        tmp_layer_input_norm[m] = try upload(allocator, &backend_handle, device, &host_layer_input_norm[m]);
-        tmp_layer_post_norm[m] = try upload(allocator, &backend_handle, device, &host_layer_post_norm[m]);
-        tmp_qkv_proj[m] = try upload(allocator, &backend_handle, device, &host_qkv_proj[m]);
-        tmp_o_proj[m] = try upload(allocator, &backend_handle, device, &host_o_proj[m]);
-        tmp_gate_proj[m] = try upload(allocator, &backend_handle, device, &host_gate_proj[m]);
-        tmp_up_proj[m] = try upload(allocator, &backend_handle, device, &host_up_proj[m]);
-        tmp_down_proj[m] = try upload(allocator, &backend_handle, device, &host_down_proj[m]);
+        tmp_layer_input_norm[m] = try upload(allocator, backend_handle, device, &host_layer_input_norm[m]);
+        tmp_layer_post_norm[m] = try upload(allocator, backend_handle, device, &host_layer_post_norm[m]);
+        tmp_qkv_proj[m] = try upload(allocator, backend_handle, device, &host_qkv_proj[m]);
+        tmp_o_proj[m] = try upload(allocator, backend_handle, device, &host_o_proj[m]);
+        tmp_gate_proj[m] = try upload(allocator, backend_handle, device, &host_gate_proj[m]);
+        tmp_up_proj[m] = try upload(allocator, backend_handle, device, &host_up_proj[m]);
+        tmp_down_proj[m] = try upload(allocator, backend_handle, device, &host_down_proj[m]);
     }
-    const tmp_x = try upload(allocator, &backend_handle, device, &host_x);
-    const tmp_target_ids = try upload(allocator, &backend_handle, device, &host_target_ids);
-    const tmp_attention_mask = try upload(allocator, &backend_handle, device, &host_attention_mask);
-    const tmp_mask = try upload(allocator, &backend_handle, device, &host_mask);
-    const tmp_sin = try upload(allocator, &backend_handle, device, &host_sin);
-    const tmp_cos = try upload(allocator, &backend_handle, device, &host_cos);
+    const tmp_x = try upload(allocator, backend_handle, device, &host_x);
+    const tmp_target_ids = try upload(allocator, backend_handle, device, &host_target_ids);
+    const tmp_attention_mask = try upload(allocator, backend_handle, device, &host_attention_mask);
+    const tmp_mask = try upload(allocator, backend_handle, device, &host_mask);
+    const tmp_sin = try upload(allocator, backend_handle, device, &host_sin);
+    const tmp_cos = try upload(allocator, backend_handle, device, &host_cos);
 
     const loss_dtype: zg.utils.DType = if (upcast_loss) .f32 else host_dtype;
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
@@ -561,7 +552,7 @@ pub fn run_llama_ft_demo(
         var state = try train.TrainState.init(
             allocator,
             &compiled_train.?,
-            &backend_handle,
+            backend_handle,
             param_bufs.items,
             &batch_bufs,
         );
@@ -756,7 +747,7 @@ pub fn run_llama_ft_demo(
 
     const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
     if (!quiet) {
-        log_device_memory_stats(&backend_handle, device);
+        log_device_memory_stats(backend_handle, device);
     }
     std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ avg_ms, warmup_steps, steps, seq });
     std.log.info("OK: llama-ft-demo executed", .{});

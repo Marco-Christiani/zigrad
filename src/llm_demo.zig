@@ -4,7 +4,8 @@ const stz = @import("safetensors_zg");
 
 pub fn run_llm_ft_demo(
     allocator: std.mem.Allocator,
-    plugin_path: []const u8,
+    backend_handle: *zg.backend.PjrtBackend,
+    device: *const zg.backend.pjrt.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
@@ -68,7 +69,6 @@ pub fn run_llm_ft_demo(
 
     var compile_cfg = zg.frontend.CompileConfig{
         .entry_name = "llm_ft_step",
-        .plugin_path = plugin_path,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
@@ -77,17 +77,8 @@ pub fn run_llm_ft_demo(
         compile_cfg.lower.encoding = .text;
     }
 
-    var backend_handle = try zg.frontend.init_backend(allocator, compile_cfg.plugin_path);
-    defer backend_handle.deinit();
-
-    const devices = try backend_handle.get_devices(allocator);
-    defer allocator.free(devices);
-
-    if (compile_cfg.device_index >= devices.len) return error.InvalidDeviceIndex;
-    const device = &devices[compile_cfg.device_index];
-
     const train = zg.frontend.train;
-    var compiled = try train.compile_train_step(allocator, &backend_handle, device, LossFn.call, inputs_spec, 3, .{
+    var compiled = try train.compile_train_step(allocator, backend_handle, device, LossFn.call, inputs_spec, 3, .{
         .optimizer = .{ .lr = 1e-2 },
         .compile = compile_cfg,
     });
@@ -142,11 +133,11 @@ pub fn run_llm_ft_demo(
     var total_ns: u64 = 0;
 
     const upload = zg.frontend.upload_host_buffer;
-    const tmp_w_emb = try upload(allocator, &backend_handle, device, &host_w_emb);
-    const tmp_w_out = try upload(allocator, &backend_handle, device, &host_w_out);
-    const tmp_b = try upload(allocator, &backend_handle, device, &host_b);
-    const tmp_x = try upload(allocator, &backend_handle, device, &host_x);
-    const tmp_y = try upload(allocator, &backend_handle, device, &host_y);
+    const tmp_w_emb = try upload(allocator, backend_handle, device, &host_w_emb);
+    const tmp_w_out = try upload(allocator, backend_handle, device, &host_w_out);
+    const tmp_b = try upload(allocator, backend_handle, device, &host_b);
+    const tmp_x = try upload(allocator, backend_handle, device, &host_x);
+    const tmp_y = try upload(allocator, backend_handle, device, &host_y);
 
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
     defer loss_host.deinit();
@@ -154,7 +145,7 @@ pub fn run_llm_ft_demo(
     var state = try train.TrainState.init(
         allocator,
         &compiled,
-        &backend_handle,
+        backend_handle,
         &.{ tmp_w_emb.pjrt_buffer, tmp_w_out.pjrt_buffer, tmp_b.pjrt_buffer },
         &.{ tmp_x.pjrt_buffer, tmp_y.pjrt_buffer },
     );

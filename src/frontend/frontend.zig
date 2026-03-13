@@ -355,8 +355,6 @@ pub const Builder = struct {
 
 pub const CompileConfig = struct {
     entry_name: []const u8 = "main",
-    plugin_path: ?[]const u8 = null,
-    device_index: usize = 0,
     lower: lower.LowerPassConfig = .{},
     kernelize: ?KernelizeConfig = null,
     dump_pr: ?pipeline.DumpConfig = null,
@@ -585,14 +583,6 @@ pub fn compile_program(
     return exe;
 }
 
-pub fn init_backend(allocator: std.mem.Allocator, plugin_path: ?[]const u8) !backend.PjrtBackend {
-    if (plugin_path) |path| {
-        return backend.PjrtBackend.init(allocator, path);
-    }
-    const path = try std.process.getEnvVarOwned(allocator, "PJRT_PLUGIN_PATH");
-    defer allocator.free(path);
-    return backend.PjrtBackend.init(allocator, path);
-}
 
 pub fn build_inputs(builder: *Builder, spec: anytype) !SpecToTensorType(@TypeOf(spec)) {
     const T = @TypeOf(spec);
@@ -758,11 +748,11 @@ pub fn upload_host_buffer(
 
 fn log_provider_device_memory(label: []const u8, provider: kernel.KernelProvider) void {
     const info = provider.device_memory_info() orelse return;
-    const mb = 1024.0 * 1024.0;
-    log.info("{s} [{s}]: free={d:.1}MB total={d:.1}MB", .{
+    const mib = 1024.0 * 1024.0;
+    log.info("{s} [{s}]: free={d:.1}MiB total={d:.1}MiB", .{
         label,
         provider.name,
-        @as(f64, @floatFromInt(info.free_bytes)) / mb,
-        @as(f64, @floatFromInt(info.total_bytes)) / mb,
+        @as(f64, @floatFromInt(info.free_bytes)) / mib,
+        @as(f64, @floatFromInt(info.total_bytes)) / mib,
     });
 }
