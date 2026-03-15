@@ -124,7 +124,9 @@ tasks:
 
   build:
     deps: [check-env-bt]
-    cmd: zig build -Doptimize={{ .CLI_ARGS | default "ReleaseFast" }} -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Dinstall-runtime-link=true
+    vars:
+      optimize: ReleaseFast
+    cmd: zig build -Doptimize={{ .optimize }} -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Dinstall-runtime-link=true
 
   test:
     cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
