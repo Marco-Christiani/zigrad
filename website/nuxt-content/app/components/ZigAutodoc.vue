@@ -16,7 +16,7 @@ function set_status(message: string): void {
 function rewrite_autodoc_request(input: RequestInfo | URL): RequestInfo | URL {
   if (typeof input === 'string') {
     if (input === 'main.wasm' || input === 'sources.tar') {
-      return `/api/${input}`
+      return `/autodoc/${input}`
     }
   }
 
@@ -44,7 +44,7 @@ onMounted(() => {
   }) as typeof window.fetch
 
   script_element = document.createElement('script')
-  script_element.src = '/api/main.js'
+  script_element.src = '/autodoc/main.js'
   script_element.async = true
 
   script_element.onload = () => {

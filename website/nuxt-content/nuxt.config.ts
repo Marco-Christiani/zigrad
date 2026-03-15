@@ -12,7 +12,8 @@ export default defineNuxtConfig({
     '@nuxt/content',
     'nuxt-og-image',
     'nuxt-llms',
-    '@nuxtjs/mcp-toolkit'
+    '@nuxtjs/mcp-toolkit',
+    'nuxt-studio'
   ],
 
   devtools: {
@@ -91,6 +92,15 @@ export default defineNuxtConfig({
         ]
       }
     ]
+  },
+
+  studio: {
+    repository: {
+      provider: 'github',
+      owner: 'Marco-Christiani',
+      repo: 'zigrad',
+      branch: 'modular'
+    }
   },
 
   mcp: {
