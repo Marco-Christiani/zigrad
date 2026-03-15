@@ -8,7 +8,7 @@
     };
 
     mirage-src = {
-      url = "path:/home/marco/Github/mirage";
+      url = "path:/home/marco/Github/mirage-c-api";
       flake = false;
     };
 
