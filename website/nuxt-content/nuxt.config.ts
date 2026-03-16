@@ -45,13 +45,18 @@ export default defineNuxtConfig({
 
   compatibilityDate: '2024-07-11',
 
+  routeRules: {
+    '/autodoc': { ssr: false }
+  },
+
   nitro: {
     prerender: {
       routes: [
         '/'
       ],
       crawlLinks: true,
-      autoSubfolderIndex: false
+      autoSubfolderIndex: false,
+      ignore: ['/autodoc']
     }
   },
 
