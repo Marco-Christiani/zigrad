@@ -885,25 +885,49 @@ onUnmounted(() => {
 <style>
 /* IR Viewer theming
    Op colors are domain-specific (semantic graph meaning) so they don't map
-   to UI theme tokens. UI chrome uses --ui-* via Tailwind semantic classes. */
+   to UI theme tokens. UI chrome uses --ui-* via Tailwind semantic classes.
+   Light-mode defaults below; dark overrides follow. */
 .irv {
   /* Accent color used for headings, stat values, shape annotations */
-  --irv-accent: #4cc9f0;
+  --irv-accent: #0e7490;
   /* Dtype highlight in edge detail */
-  --irv-dtype: #d3869b;
+  --irv-dtype: #9d174d;
   /* ZXPR code block text */
-  --irv-zxpr: color-mix(in srgb, var(--ui-warning, #d8a657) 80%, white 20%);
+  --irv-zxpr: #92400e;
   /* Graph canvas */
-  --irv-canvas-bg: color-mix(in srgb, var(--ui-bg, #000) 92%, black 8%);
+  --irv-canvas-bg: color-mix(in srgb, var(--ui-bg, #fff) 96%, black 4%);
   /* Cytoscape edge styling */
-  --irv-edge: color-mix(in srgb, var(--ui-border, #555) 100%, transparent);
-  --irv-edge-arrow: color-mix(in srgb, var(--ui-border, #777) 80%, white 20%);
+  --irv-edge: var(--ui-border, #d1d5db);
+  --irv-edge-arrow: color-mix(in srgb, var(--ui-border, #9ca3af) 80%, black 20%);
   /* Selection highlight */
-  --irv-selection: #ff6b6b;
+  --irv-selection: #dc2626;
   /* Drop zone overlay */
+  --irv-drop-bg: color-mix(in srgb, var(--irv-accent) 10%, transparent 90%);
+
+  /* Op category colors — light-friendly (darkened for white backgrounds) */
+  --irv-op-param: #0369a1;
+  --irv-op-elementwise: #4d7c0f;
+  --irv-op-unary: #15803d;
+  --irv-op-contraction: #b45309;
+  --irv-op-shape: #9d174d;
+  --irv-op-reduction: #c2410c;
+  --irv-op-comparison: #0f766e;
+  --irv-op-literal: #57534e;
+  --irv-op-data: #a16207;
+  --irv-op-call: #dc2626;
+}
+
+:where(.dark, html.dark) .irv {
+  --irv-accent: #4cc9f0;
+  --irv-dtype: #d3869b;
+  --irv-zxpr: color-mix(in srgb, var(--ui-warning, #d8a657) 80%, white 20%);
+  --irv-canvas-bg: color-mix(in srgb, var(--ui-bg, #000) 92%, black 8%);
+  --irv-edge: var(--ui-border, #555);
+  --irv-edge-arrow: color-mix(in srgb, var(--ui-border, #777) 80%, white 20%);
+  --irv-selection: #ff6b6b;
   --irv-drop-bg: color-mix(in srgb, var(--irv-accent) 15%, transparent 85%);
 
-  /* Op category colors (a bit gruvbox-inspired) */
+  /* Op category colors — gruvbox-inspired for dark backgrounds */
   --irv-op-param: #7dcfff;
   --irv-op-elementwise: #a9b665;
   --irv-op-unary: #89b482;
@@ -920,7 +944,7 @@ onUnmounted(() => {
 .irv-fullscreen {
   height: calc(100vh - 4rem);
   overflow: hidden;
-  background: var(--ui-bg-elevated, #0a0a0a);
+  background: var(--ui-bg-elevated);
 }
 
 .irv-accent {
@@ -946,14 +970,14 @@ onUnmounted(() => {
 }
 
 .irv-zxpr-block {
-  background: color-mix(in srgb, var(--ui-bg, #000) 88%, black 12%);
+  background: color-mix(in srgb, var(--ui-bg) 92%, var(--ui-border) 8%);
   color: var(--irv-zxpr);
 }
 
 .irv-resize-handle {
   width: 4px;
   cursor: col-resize;
-  background: var(--ui-border, #333);
+  background: var(--ui-border);
   transition: background 0.15s;
 }
 
@@ -967,7 +991,7 @@ onUnmounted(() => {
   appearance: none;
   height: 3px;
   border-radius: 2px;
-  background: var(--ui-border, #444);
+  background: var(--ui-border);
   outline: none;
 }
 

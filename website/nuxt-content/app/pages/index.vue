@@ -29,7 +29,7 @@ const title = 'Zigrad'
 const description = 'Zigrad is a programmable deep learning framework and compiler that bridges research workflows and production execution.'
 
 const hero_links: ButtonLink[] = [
-  { label: 'Get started', to: '/getting-started', size: 'xl', trailingIcon: 'i-lucide-arrow-right', disabled: true },
+  { label: 'Get started', to: '/getting-started', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
   // { label: 'Explore the pipeline', to: '/pipeline', size: 'xl', trailingIcon: 'i-lucide-arrow-right' },
   { label: 'View on GitHub', to: 'https://github.com/Marco-Christiani/Zigrad', target: '_blank', color: 'neutral', variant: 'outline', size: 'xl', icon: 'i-simple-icons-github' }
 ]

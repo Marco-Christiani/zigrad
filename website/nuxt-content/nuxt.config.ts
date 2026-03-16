@@ -43,6 +43,14 @@ export default defineNuxtConfig({
     asyncContext: true
   },
 
+  app: {
+    head: {
+      link: [
+        { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }
+      ]
+    }
+  },
+
   compatibilityDate: '2024-07-11',
 
   routeRules: {
