@@ -9,7 +9,6 @@
 #include "zigrad/ZigradDialect.h"
 #include "zigrad/ZigradKernelLegalizePass.h"
 #include "zigrad/mirage/MirageKernelSelectPass.h"
-#include "zigrad/PdllKernelSelectPass.h"
 
 // dialect registration header, should come from our sdk derivation
 #include "stablehlo/integrations/c/StablehloDialect.h"
@@ -39,7 +38,6 @@ extern "C" void zg_register_passes() {
   mlirRegisterAllStablehloPasses();
   mlir::zigrad::registerZigradKernelLegalizePasses();
   mlir::zigrad::mirage::registerMirageKernelSelectPass();
-  mlir::zigrad::registerPdllKernelSelectPass();
 }
 
 // ============================================================================
@@ -66,6 +64,5 @@ mlirGetPassPluginInfo() {
             mlirRegisterAllStablehloPasses();
             mlir::zigrad::registerZigradKernelLegalizePasses();
             mlir::zigrad::mirage::registerMirageKernelSelectPass();
-            mlir::zigrad::registerPdllKernelSelectPass();
           }};
 }
