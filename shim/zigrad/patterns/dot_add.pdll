@@ -1,0 +1,117 @@
+/// DotAdd PDLL patterns: add(dot_general(a, b), bias) -> zigrad.kernel_call
+///
+/// Declarative DAG structure with value binding. Native constraints handle
+/// only what PDLL can't express: dimension validation and profitability.
+/// Two pattern variants handle add commutativity.
+
+// --- Shared constraints ---
+
+/// Value has exactly one use (prevents matching ops feeding multiple consumers).
+Constraint HasOneUse(value: Value) [{
+  return success(value.hasOneUse());
+}];
+
+/// Validate canonical matmul dimension numbers on a dot_general op:
+/// 1. Equal rank for both operands
+/// 2. Exactly one contracting dim: LHS at rank-1, RHS at rank-2
+/// 3. Batch dims are the leading prefix [0, 1, ..., rank-3]
+Constraint HasCanonicalMatmulDims(dot: Op<stablehlo.dot_general>) [{
+  Attribute dims_attr = dot->getAttr("dot_dimension_numbers");
+  if (!dims_attr) return failure();
+
+  MlirAttribute capi_attr = wrap(dims_attr);
+  if (!stablehloAttributeIsADotDimensionNumbers(capi_attr)) return failure();
+
+  auto lhs_type = dyn_cast<RankedTensorType>(dot->getOperand(0).getType());
+  auto rhs_type = dyn_cast<RankedTensorType>(dot->getOperand(1).getType());
+  if (!lhs_type || !rhs_type) return failure();
+
+  int64_t lhs_rank = lhs_type.getRank();
+  int64_t rhs_rank = rhs_type.getRank();
+  if (lhs_rank != rhs_rank) return failure();
+
+  intptr_t n_lhs_c = stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(capi_attr);
+  intptr_t n_rhs_c = stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(capi_attr);
+  if (n_lhs_c != 1 || n_rhs_c != 1) return failure();
+
+  int64_t lhs_c = stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(capi_attr, 0);
+  int64_t rhs_c = stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(capi_attr, 0);
+  if (lhs_c != lhs_rank - 1 || rhs_c != rhs_rank - 2) return failure();
+
+  int64_t expected_batch = lhs_rank - 2;
+  intptr_t n_lhs_b = stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(capi_attr);
+  intptr_t n_rhs_b = stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(capi_attr);
+  if (n_lhs_b != expected_batch || n_rhs_b != expected_batch) return failure();
+
+  for (int64_t i = 0; i < expected_batch; ++i) {
+    if (stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(capi_attr, i) != i)
+      return failure();
+    if (stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(capi_attr, i) != i)
+      return failure();
+  }
+  return success();
+}];
+
+/// Profitability gate. Production: calls Zig store via C callback.
+Constraint CheckProfitability(op: Op) [{
+  // TODO: Wire to Zig store callback.
+  return success();
+}];
+
+// --- Shared rewrites ---
+
+/// Emit zigrad.kernel_call from pre-bound values.
+Rewrite EmitDotAddKernelCall(anchor: Op, lhs: Value, rhs: Value, bias: Value) [{
+  SmallVector<Value, 3> operands = {lhs, rhs, bias};
+
+  NamedAttrList cfg;
+  cfg.append("zigrad.kernel_key", rewriter.getStringAttr("mk_0"));
+  cfg.append("zigrad.provider", rewriter.getStringAttr("mirage"));
+  cfg.append("zigrad.pattern", rewriter.getStringAttr("dot_add"));
+
+  OperationState state(anchor->getLoc(), "zigrad.kernel_call");
+  state.addOperands(operands);
+  state.addTypes(anchor->getResultTypes());
+  state.addAttribute("api_version", rewriter.getI32IntegerAttr(4));
+  state.addAttribute("call_target_name",
+                      rewriter.getStringAttr("zigrad.kernel.dispatch"));
+  state.addAttribute("has_side_effect", rewriter.getBoolAttr(false));
+  state.addAttribute("backend_config", rewriter.getDictionaryAttr(cfg));
+
+  Operation *kernel_call = rewriter.create(state);
+  rewriter.replaceOp(anchor, kernel_call->getResults());
+}];
+
+// --- Patterns ---
+
+/// add(dot_general(lhs, rhs), bias) -> kernel_call
+Pattern DotAdd with benefit(2) {
+  let lhs: Value;
+  let rhs: Value;
+  let bias: Value;
+  let dot = op<stablehlo.dot_general>(lhs, rhs);
+  let dot_result = dot.0;
+  let result = op<stablehlo.add>(dot_result, bias);
+  HasOneUse(dot_result);
+  HasCanonicalMatmulDims(dot);
+  CheckProfitability(result);
+  rewrite result with {
+    EmitDotAddKernelCall(result, lhs, rhs, bias);
+  };
+}
+
+/// add(bias, dot_general(lhs, rhs)) -> kernel_call  (commuted add)
+Pattern DotAddCommuted with benefit(2) {
+  let lhs: Value;
+  let rhs: Value;
+  let bias: Value;
+  let dot = op<stablehlo.dot_general>(lhs, rhs);
+  let dot_result = dot.0;
+  let result = op<stablehlo.add>(bias, dot_result);
+  HasOneUse(dot_result);
+  HasCanonicalMatmulDims(dot);
+  CheckProfitability(result);
+  rewrite result with {
+    EmitDotAddKernelCall(result, lhs, rhs, bias);
+  };
+}

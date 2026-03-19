@@ -29,6 +29,7 @@ if(ZG_LLVM_ROOT STREQUAL "" OR NOT EXISTS "${ZG_LLVM_ROOT}/bin/mlir-tblgen")
 endif()
 
 set(MLIR_TBLGEN "${ZG_LLVM_ROOT}/bin/mlir-tblgen")
+set(MLIR_PDLL "${ZG_LLVM_ROOT}/bin/mlir-pdll")
 
 function(find_versioned_library out_var base_name)
   set(candidates)
@@ -85,6 +86,24 @@ add_custom_target(zigrad_tblgen
     "${GEN_DIR}/ZigradOps.cpp.inc"
 )
 
+# --- PDLL pattern compilation ---
+set(PDLL_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/zigrad/patterns")
+file(MAKE_DIRECTORY "${PDLL_GEN_DIR}")
+
+set(DOT_ADD_PDLL "${CMAKE_CURRENT_SOURCE_DIR}/zigrad/patterns/dot_add.pdll")
+
+add_custom_command(
+  OUTPUT "${PDLL_GEN_DIR}/dot_add.pdll.cpp.inc"
+  COMMAND "${MLIR_PDLL}" "${DOT_ADD_PDLL}" -x=cpp
+          -o "${PDLL_GEN_DIR}/dot_add.pdll.cpp.inc"
+  DEPENDS "${DOT_ADD_PDLL}"
+  COMMENT "Compiling dot_add.pdll -> C++"
+)
+
+add_custom_target(zigrad_pdll
+  DEPENDS "${PDLL_GEN_DIR}/dot_add.pdll.cpp.inc"
+)
+
 find_versioned_library(MLIR_C_LIB "MLIR-C")
 find_versioned_library(STABLEHLO_CAPI_LIB "StablehloCAPI")
 find_versioned_library(MLIR_IR_LIB "MLIRIR")
@@ -92,14 +111,18 @@ find_versioned_library(MLIR_PASS_LIB "MLIRPass")
 find_versioned_library(MLIR_REWRITE_LIB "MLIRRewrite")
 find_versioned_library(MLIR_TRANSFORMS_LIB "MLIRTransforms")
 find_versioned_library(MLIR_FUNC_LIB "MLIRFuncDialect")
+find_versioned_library(MLIR_PDL_LIB "MLIRPDLDialect")
+find_versioned_library(MLIR_PDL_INTERP_LIB "MLIRPDLInterpDialect")
+find_versioned_library(MLIR_PDL_TO_PDL_INTERP_LIB "MLIRPDLToPDLInterp")
 
 add_library(zigrad_mlir_ext SHARED
   mlir_ext.cc
   zigrad/ZigradDialect.cpp
   zigrad/ZigradKernelLegalizePass.cpp
   zigrad/mirage/MirageKernelSelectPass.cpp
+  zigrad/PdllKernelSelectPass.cpp
 )
-add_dependencies(zigrad_mlir_ext zigrad_tblgen)
+add_dependencies(zigrad_mlir_ext zigrad_tblgen zigrad_pdll)
 target_compile_options(zigrad_mlir_ext PRIVATE -fno-rtti)
 
 target_include_directories(zigrad_mlir_ext PRIVATE
@@ -117,6 +140,9 @@ target_link_libraries(zigrad_mlir_ext PRIVATE
   "${MLIR_REWRITE_LIB}"
   "${MLIR_TRANSFORMS_LIB}"
   "${MLIR_FUNC_LIB}"
+  "${MLIR_PDL_LIB}"
+  "${MLIR_PDL_INTERP_LIB}"
+  "${MLIR_PDL_TO_PDL_INTERP_LIB}"
   stdc++
   dl
 )
