@@ -148,11 +148,11 @@ pub const setup_cmd: CommandT = .{
             .description = "Print the PR for the demo program",
         },
         .{
-            .name = "tvm-dump-symbols" ++ if (!build_options.has_tvm) " (not enabled)" else "",
+            .name = "tvm-dump-symbols" ++ if (!build_options.has_tvm) "-disabled" else "",
             .description = "Enumerate all available TVM FFI functions (requires TVM runtime libraries)",
         },
         .{
-            .name = "tvm-check-compiler-load" ++ if (!build_options.has_tvm) " (not enabled)" else "",
+            .name = "tvm-check-compiler-load" ++ if (!build_options.has_tvm) "-disabled" else "",
             .description = "Check that libtvm.so compiler can be loaded (host integration check)",
         },
         .{
@@ -160,11 +160,11 @@ pub const setup_cmd: CommandT = .{
             .description = "Run the AOT compile+load demo",
         },
         .{
-            .name = "iree-aot-demo" ++ if (!build_options.has_iree) " (not enabled)" else "",
+            .name = "iree-aot-demo" ++ if (!build_options.has_iree) "-disabled" else "",
             .description = "Run the IREE AOT compile+execute demo (requires -Diree-backend=true and IREE_COMPILE_EXE env var)",
         },
         CommandT.from(IreeAotCompileOpts, .{
-            .cmd_name = "iree-aot-compile" ++ if (!build_options.has_iree) " (not enabled)" else "",
+            .cmd_name = "iree-aot-compile" ++ if (!build_options.has_iree) "-disabled" else "",
             .cmd_description = "Compile demo program to IREE VMFB (offline, no runtime needed)",
             .default_val_opts = true,
             .sub_descriptions = &.{
@@ -189,7 +189,7 @@ pub const setup_cmd: CommandT = .{
             .description = "Run the reverse-mode AD demo",
         },
         CommandT.from(TvmTuneOpts, .{
-            .cmd_name = "tvm-tune" ++ if (!build_options.has_tvm) " (not enabled)" else "",
+            .cmd_name = "tvm-tune" ++ if (!build_options.has_tvm) "-disabled" else "",
             .cmd_description = "Run TVM MetaSchedule autotuning on matmul (requires TVM runtime libraries)",
             .default_val_opts = true,
             .sub_descriptions = &.{
@@ -203,7 +203,7 @@ pub const setup_cmd: CommandT = .{
             },
         }),
         CommandT.from(TvmRunOpts, .{
-            .cmd_name = "tvm-run" ++ if (!build_options.has_tvm) " (not enabled)" else "",
+            .cmd_name = "tvm-run" ++ if (!build_options.has_tvm) "-disabled" else "",
             .cmd_description = "Load and run a tuned TVM matmul (requires TVM runtime libraries + prior tuning)",
             .default_val_opts = true,
             .sub_descriptions = &.{
@@ -283,7 +283,7 @@ pub const setup_cmd: CommandT = .{
             },
         }),
         CommandT.from(BenchmarkOpts, .{
-            .cmd_name = "benchmark" ++ if (!build_options.has_tvm) " (not enabled)" else "",
+            .cmd_name = "benchmark" ++ if (!build_options.has_tvm) "-disabled" else "",
             .cmd_description = "Run matmul performance benchmarks",
             .default_val_opts = true,
             .sub_descriptions = &.{

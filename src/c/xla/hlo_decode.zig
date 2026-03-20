@@ -18,8 +18,8 @@ pub fn decode_and_print(bytes: []const u8, allocator: std.mem.Allocator, out: *s
     // Try HloModuleProtoWithConfig first.
     blk: {
         var reader: std.Io.Reader = .fixed(bytes);
-        const with_config = HloModuleProtoWithConfig.decode(&reader, allocator) catch break :blk;
-        defer @constCast(&with_config).deinit(allocator);
+        var with_config = HloModuleProtoWithConfig.decode(&reader, allocator) catch break :blk;
+        defer with_config.deinit(allocator);
 
         if (with_config.hlo_module) |*module| {
             print_module(module, out) catch return false;
@@ -30,8 +30,8 @@ pub fn decode_and_print(bytes: []const u8, allocator: std.mem.Allocator, out: *s
 
     // Fall back to plain HloModuleProto.
     var reader: std.Io.Reader = .fixed(bytes);
-    const module = HloModuleProto.decode(&reader, allocator) catch return false;
-    defer @constCast(&module).deinit(allocator);
+    var module = HloModuleProto.decode(&reader, allocator) catch return false;
+    defer module.deinit(allocator);
 
     print_module(&module, out) catch return false;
     out.flush() catch return false;

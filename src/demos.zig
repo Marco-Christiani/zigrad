@@ -3,7 +3,6 @@ const zg = @import("zigrad");
 
 const log = std.log.scoped(.@"zg/demos");
 
-
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.createFileAbsolute(path, .{ .truncate = true })
@@ -512,7 +511,7 @@ pub fn run_train_demo(
 ///  region in the program.
 ///
 /// TVM requires `ZG_EXTERNAL_SDK_ROOT` and XLA typed-FFI support, Mirage
-///  requires the Mirage shared library. Both can be enabled individually 
+///  requires the Mirage shared library. Both can be enabled individually
 ///  or simultaneously.
 /// Run the kernel provider demo: tune -> store -> compile -> execute.
 ///
@@ -824,7 +823,7 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
 
 /// Builds a program for kernel provider demo.
 ///
-/// Inputs: 
+/// Inputs:
 ///   a (2x3), b (3x2), c (2x2).
 ///   One `dot(a,b)` kernelized region per provider, fold-summed into `sum`.
 /// Output:
@@ -843,15 +842,13 @@ fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: [
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
     // Stack-allocate name buffers, names must outlive the builder (used within this function).
-    var region_name_bufs: [2][64]u8 = undefined;
-
-    const first_name = try std.fmt.bufPrint(&region_name_bufs[0], "{s}_region_0", .{provider_names[0]});
+    const first_name = try std.fmt.allocPrint(allocator, "{s}_region_0", .{provider_names[0]});
     try b.push_region(first_name, .{ .kernelize = provider_names[0] });
     var acc_id = try b.dot(a_id, b_id);
     try b.pop_region();
 
     for (provider_names[1..], 1..) |pname, i| {
-        const rn = try std.fmt.bufPrint(&region_name_bufs[i], "{s}_region_{d}", .{ pname, i });
+        const rn = try std.fmt.allocPrint(allocator, "{s}_region_{d}", .{ pname, i });
         try b.push_region(rn, .{ .kernelize = pname });
         const dot_id = try b.dot(a_id, b_id);
         try b.pop_region();

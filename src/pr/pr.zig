@@ -256,7 +256,7 @@ pub const RegionIterator = struct {
 
 pub const Program = struct {
     arena: std.heap.ArenaAllocator,
-    functions: []const Function,
+    functions: []Function,
 
     pub fn init(backing_allocator: std.mem.Allocator) Program {
         return .{

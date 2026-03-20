@@ -85,7 +85,6 @@ pub const KernelizePass = struct {
         var entries = std.ArrayList(KernelEntry).empty;
 
         const program = artifact.pr;
-        const functions: []pr.Function = @constCast(program.functions);
         for (program.functions, 0..) |func, idx| {
             const rewritten = self.kernelize_function(
                 program,
@@ -98,7 +97,7 @@ pub const KernelizePass = struct {
                     log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
                 return err;
             };
-            functions[idx] = rewritten;
+            program.functions[idx] = rewritten;
         }
 
         if (self.dump_kernels and entries.items.len > 0) {
