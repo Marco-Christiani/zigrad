@@ -192,15 +192,10 @@ pub fn main() !void {
         if (cmd.matchSubCmd("custom-call-neg")) |_| {
             return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
-        if (cmd.matchSubCmd("kernel-provider-demo-pr")) |sub_cmd| {
+        if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
             const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice(), .pr);
-        }
-        if (cmd.matchSubCmd("kernel-provider-demo-mlir")) |sub_cmd| {
-            const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
-            const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice(), .mlir);
+            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice());
         }
         if (cmd.matchSubCmd("vjp-demo")) |_| {
             return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
@@ -217,9 +212,7 @@ pub fn main() !void {
             const steps = opts.steps orelse 8;
             return llm_demo.run_llm_ft_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
-        const llama_ft_sub = cmd.matchSubCmd("llama-ft-demo-pr") orelse cmd.matchSubCmd("llama-ft-demo-mlir");
-        if (llama_ft_sub) |sub_cmd| {
-            const lane: llama_demo.LlamaDemoPipeline = if (std.mem.eql(u8, sub_cmd.name, "llama-ft-demo-pr")) .pr else .mlir;
+        if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
             const dtype = if (opts.dtype) |d|
                 std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
@@ -251,7 +244,6 @@ pub fn main() !void {
                 opts.warmup orelse 1,
                 opts.steps orelse 4,
                 quiet,
-                lane,
                 cfg,
                 dump_kernels,
             );
@@ -602,7 +594,7 @@ fn run_iree_demo(
     defer backend.deinit_buffer(&buf_c);
 
     const inputs = [_]iree_mod.Buffer{ buf_a, buf_b, buf_c };
-    var result = try backend.execute(&exe, gpa, &inputs);
+    var result = try backend.execute(&exe, gpa, &inputs, .{});
     defer {
         for (result.outputs) |*b| backend.deinit_buffer(b);
         gpa.free(result.outputs);

@@ -26,7 +26,6 @@ const zigrad_kernel_call_op_name = "zigrad.kernel_call";
 
 const lower_types = @import("../../types.zig");
 pub const OutputFormat = lower_types.OutputFormat;
-pub const KernelizationLane = lower_types.KernelizationLane;
 
 // ============================================================================
 // Lowering Context
@@ -98,7 +97,7 @@ pub fn lower_program_to_mlir(
     entry_name: ?[]const u8,
     out: OutputFormat,
 ) LowerError![]u8 {
-    return lower_program_impl(allocator, program, entry_name, out, .pr);
+    return lower_program_impl(allocator, program, entry_name, out);
 }
 
 fn lower_program_impl(
@@ -106,7 +105,6 @@ fn lower_program_impl(
     program: *const pr.Program,
     entry_name: ?[]const u8,
     out: OutputFormat,
-    kernelization_lane: KernelizationLane,
 ) LowerError![]u8 {
     pr.validate_program(program) catch return error.InvalidProgram;
 
@@ -141,7 +139,7 @@ fn lower_program_impl(
 
     for (program.functions, 0..) |func, idx| {
         const sym_name = choose_symbol_name(arena, program, idx, entry_index, entry_name) catch return error.OutOfMemory;
-        try lower_function_into_module(arena, ctx, module, func, sym_name, kernelization_lane);
+        try lower_function_into_module(arena, ctx, module, func, sym_name);
     }
 
     if (!module.op().verify()) return error.InvalidMlir;
@@ -169,13 +167,18 @@ pub fn lower_function_to_mlir(allocator: std.mem.Allocator, func: pr.Function, o
     return lower_program_to_mlir(allocator, &program, func.name, out);
 }
 
+/// Lower a single PR function into the MLIR module.
+///
+/// Regions with an `outline` or `kernelize` annotation are outlined into
+/// separate MLIR functions (func.call). Outlining is unconditional -- it
+/// doesn't prevent MLIR-level patterns from matching on remaining inline
+/// ops. PR-level and MLIR-level kernelization are additive.
 fn lower_function_into_module(
     arena: std.mem.Allocator,
     ctx: mlir.Context,
     module: mlir.Module,
     func: pr.Function,
     sym_name: []const u8,
-    kernelization_lane: KernelizationLane,
 ) LowerError!void {
     const loc = mlir.Location.unknown(ctx);
 
@@ -219,18 +222,10 @@ fn lower_function_into_module(
     const outlined_prefix = if (sym_name.len == 0) "func" else sym_name;
     for (func.eqns, 0..) |eqn, eqn_idx| {
         if (region_map[eqn_idx]) |region| {
-            const outline_for_kernelize = region.annotation.kernelize != null and kernelization_lane == .pr;
-            if (region.annotation.outline or outline_for_kernelize) {
+            if (region.annotation.outline or region.annotation.kernelize != null) {
                 try lower_outlined_eqn(arena, &outlined_index, outlined_prefix, ctx, module, lower_ctx, eqn, region);
                 continue;
             }
-
-            try lower_eqn(lower_ctx, eqn);
-
-            if (kernelization_lane == .mlir and region.annotation.kernelize != null) {
-                try tag_kernelize_marker_attrs(lower_ctx, eqn, region);
-            }
-            continue;
         }
         try lower_eqn(lower_ctx, eqn);
     }
@@ -258,19 +253,6 @@ fn lower_function_into_module(
         .location = loc,
     });
     module.get_body().append_operation(func_op);
-}
-
-fn tag_kernelize_marker_attrs(ctx: LowerContext, eqn: pr.Eqn, region: pr.Region) LowerError!void {
-    const provider = region.annotation.kernelize orelse return;
-    const outs = ctx.outputs(eqn);
-    if (outs.len == 0) return;
-
-    const out_value = ctx.get_value(outs[0]) orelse return error.InvalidProgram;
-    if (!out_value.is_a_op_result()) return;
-
-    const owner = out_value.owner();
-    owner.set_attribute_by_name("zigrad.kernelize.provider", mlir.Attribute.string(ctx.mlir_ctx, provider));
-    owner.set_attribute_by_name("zigrad.kernelize.region", mlir.Attribute.string(ctx.mlir_ctx, region.name));
 }
 
 /// Build per-eqn region lookup. Returns a slice indexed by eqn position;
@@ -819,7 +801,6 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const target = pr.param_call_target_name(eqn_params) orelse return error.InvalidProgram;
     const has_side_effect = pr.param_has_side_effect(eqn_params) orelse return error.InvalidProgram;
     const kernel_key = pr.param_call_kernel_key(eqn_params);
-    const kernel_id = pr.param_call_kernel_id(eqn_params);
     const provider_name = pr.param_call_provider_name(eqn_params);
     const carrier_hint = pr.param_call_carrier_hint(eqn_params);
 
@@ -840,10 +821,6 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     var backend_field_count: usize = 0;
     if (kernel_key) |value| {
         backend_fields[backend_field_count] = .{ "zigrad.kernel_key", mlir.Attribute.string(ctx.mlir_ctx, value) };
-        backend_field_count += 1;
-    }
-    if (kernel_id) |value| {
-        backend_fields[backend_field_count] = .{ "zigrad.kernel_id", mlir.Attribute.int(ctx.mlir_ctx, .i64, @intCast(value)) };
         backend_field_count += 1;
     }
     if (provider_name) |value| {
@@ -971,7 +948,6 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         program,
         cfg.entry_name,
         format,
-        cfg.kernelization_lane,
     );
 
     artifact.replace(ctx.allocator, .{
@@ -1205,31 +1181,19 @@ test "lowering supports multi-output custom_call boundary" {
     const func = try b.finish(&.{ ex, lg });
     try program.add_function(func);
 
-    const kernel = @import("../../../kernel.zig");
+    const kernel_mod = @import("../../../kernel.zig");
     const kernelize = @import("../../../pipeline/kernelize.zig");
 
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    var store = kernel_mod.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable("exp,f32[2]>f32[2];log,f32[2]>f32[2]", .{
+        .provider_name = "mock",
+        .data = "mock",
+        .target_name = "mock_multi",
+    });
 
     var kp = kernelize.KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass.Artifact{ .pr = &program };
@@ -1243,7 +1207,7 @@ test "lowering supports multi-output custom_call boundary" {
     try testing.expect(std.mem.indexOf(u8, text, "tensor<2xf32>, tensor<2xf32>") != null);
 }
 
-test "lowering emits kernel_id and carrier_hint in custom_call backend_config" {
+test "lowering emits carrier_hint in custom_call backend_config" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1268,31 +1232,22 @@ test "lowering emits kernel_id and carrier_hint in custom_call backend_config" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const kernel = @import("../../../kernel.zig");
+    const kernel_mod = @import("../../../kernel.zig");
     const kernelize = @import("../../../pipeline/kernelize.zig");
 
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    var store = kernel_mod.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable(
+        "dot,f32[2,3],f32[3,2]>f32[2,2];add,f32[2,2],f32[2,2]>f32[2,2];exp,f32[2,2]>f32[2,2];multiply,f32[2,2],f32[2,2]>f32[2,2];log,f32[2,2]>f32[2,2]",
+        .{
+            .provider_name = "mock",
+            .data = "mock",
+            .target_name = "attention_like",
+        },
+    );
 
     var kp = kernelize.KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass.Artifact{ .pr = &program };
@@ -1302,7 +1257,6 @@ test "lowering emits kernel_id and carrier_hint in custom_call backend_config" {
     const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
     defer testing.allocator.free(text);
 
-    try testing.expect(std.mem.indexOf(u8, text, "zigrad.kernel_id") != null);
     try testing.expect(std.mem.indexOf(u8, text, "zigrad.carrier_hint") != null);
 }
 
@@ -1362,7 +1316,7 @@ test "lowering tags kernelize provider on outlined functions" {
     try std.testing.expect(std.mem.indexOf(u8, text, "tvm") != null);
 }
 
-test "lower pass mlir lane tags markers without outlining" {
+test "lower pass outlines kernelize-annotated region" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1384,29 +1338,19 @@ test "lower pass mlir lane tags markers without outlining" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    // Lower pass is baseline only - no select/legalize.
-    var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
+    var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    // Marker attributes present on ops (for select pass to consume later).
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.region") != null);
-
-    // No outlining (MLIR lane keeps ops inline).
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") == null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") == null);
-
-    // Original ops preserved - select/legalize are separate passes.
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") != null);
+    // Kernelize-annotated regions are unconditionally outlined.
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") != null);
 }
 
-test "lower pass mlir lane tags dot-add chain markers" {
+test "lower pass outlines dot-add kernelize region" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1427,21 +1371,19 @@ test "lower pass mlir lane tags dot-add chain markers" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
+    var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    // Markers present; original ops preserved (select/legalize are separate).
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.region") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.add") != null);
+    // Kernelize-annotated region is outlined; ops move to outlined function.
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") != null);
 }
 
-test "lower pass mlir lane tags dot-log chain markers" {
+test "lower pass outlines dot-log kernelize region" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1461,20 +1403,21 @@ test "lower pass mlir lane tags dot-log chain markers" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
+    var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    // Markers present; original ops preserved.
+    // Kernelize-annotated region is outlined; provider attribute set on callee.
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.log") != null);
 }
 
-test "lower pass mlir lane tags near-miss region markers" {
+test "lower pass outlines near-miss kernelize region" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1496,19 +1439,16 @@ test "lower pass mlir lane tags near-miss region markers" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    var cfg = LowerPassConfig{ .encoding = .text, .kernelization_lane = .mlir };
+    var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
     var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    // Markers present; all original ops preserved (near-miss won't match select).
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.region") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.subtract") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.multiply") != null);
+    // Kernelize-annotated region is outlined even for non-standard patterns.
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") != null);
 }
 
 test "lower pass produces MLIR artifact" {

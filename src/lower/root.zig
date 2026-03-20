@@ -12,7 +12,6 @@ pub const types = @import("types.zig");
 /// Pure data types - always available regardless of MLIR enablement.
 pub const LowerPassConfig = types.LowerPassConfig;
 pub const OutputFormat = types.OutputFormat;
-pub const KernelizationLane = types.KernelizationLane;
 
 /// MLIR lowering infrastructure (gated by -Dmlir build option).
 pub const mlir = if (build_options.has_mlir) @import("mlir/root.zig") else struct {};

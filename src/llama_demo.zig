@@ -20,11 +20,6 @@ pub const LlamaDemoConfig = struct {
     kernel_provider: ?LlamaKernelProvider = null,
 };
 
-pub const LlamaDemoPipeline = enum {
-    pr,
-    mlir,
-};
-
 const upcast_loss = true; // bf16 logits over 128k vocab overflow bf16 range without this
 
 fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
@@ -139,7 +134,6 @@ pub fn run_llama_ft_demo(
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
-    pipeline_kind: LlamaDemoPipeline,
     cfg: LlamaDemoConfig,
     dump_kernels: bool,
 ) !void {
@@ -149,14 +143,6 @@ pub fn run_llama_ft_demo(
     const host_dtype: zg.utils.DType = host_dtype_for(model_dtype);
     const batch_size: usize = cfg.batch;
     const execute_only = cfg.execute_only;
-
-    // Mirage kernel provider uses the MLIR lane for pattern-driven kernel
-    //  selection - annotations are not needed when the MLIR pass discovers
-    //  fuseable patterns post-lowering.
-    const effective_pipeline_kind: LlamaDemoPipeline = if (cfg.kernel_provider == .mirage)
-        .mlir
-    else
-        pipeline_kind;
 
     const LayerSpec = struct {
         input_norm: TensorSpec,
@@ -228,24 +214,14 @@ pub fn run_llama_ft_demo(
         .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
         .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
         .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,
+        .dump_kernels = dump_kernels,
     };
 
-    const kernel_lane: zg.lower.KernelizationLane = switch (effective_pipeline_kind) {
-        .pr => .pr,
-        .mlir => .mlir,
-    };
-
-    compile_cfg.lower.kernelization_lane = kernel_lane;
     if (compile_cfg.dump_mlir != null) {
         compile_cfg.lower.encoding = .text;
     }
 
-    var kernel_registry: ?zg.kernel.KernelRegistry = null;
-    defer if (kernel_registry) |*r| r.deinit();
-
-    var kernel_package: ?zg.kernel.KernelPackage = null;
-    defer if (kernel_package) |*p| p.deinit();
-
+    // Mirage kernel provider: tune -> store -> pass to compile_cfg.
     const MirageDispatch = if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void;
     const MirageProviderT = if (zg.build_options.has_mirage) zg.mirage.provider.MirageProvider else void;
 
@@ -257,6 +233,11 @@ pub fn run_llama_ft_demo(
     var mirage_provider_impl: ?MirageProviderT = null;
     var mirage_providers: [1]zg.kernel.KernelProvider = undefined;
 
+    // TODO: Mirage currently only works via MLIR-level patterns (select pass),
+    // which is not wired into compile_program. Store-based PR-level Mirage
+    // kernelization requires region annotations in the frontend model.
+    // For now, the mirage provider path is disabled until MLIR pipeline
+    // assembly is supported or PR-level annotations are added.
     if (cfg.kernel_provider) |provider| {
         switch (provider) {
             .mirage => {
@@ -264,8 +245,6 @@ pub fn run_llama_ft_demo(
                     std.log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
                     return error.MirageUnavailable;
                 }
-                kernel_registry = zg.kernel.KernelRegistry.init(allocator);
-                kernel_package = zg.kernel.KernelPackage.init(allocator);
                 mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
                 mirage_provider_impl = .{
                     .allocator = allocator,
@@ -273,13 +252,10 @@ pub fn run_llama_ft_demo(
                 };
                 mirage_providers = .{mirage_provider_impl.?.kernel_provider()};
 
-                compile_cfg.kernelize = .{
-                    .registry = &kernel_registry.?,
-                    .package = &kernel_package.?,
-                    .providers = mirage_providers[0..],
-                    .lane = kernel_lane,
-                    .dump_kernels = dump_kernels,
-                };
+                // Mirage uses MLIR-level pattern matching, not PR-level store.
+                // This path is a placeholder -- full MLIR pipeline assembly
+                // will be added in a future phase.
+                std.log.warn("mirage kernel provider not yet supported via store-based path; ignoring", .{});
             },
         }
     }
@@ -664,7 +640,7 @@ pub fn run_llama_ft_demo(
         var warmup: usize = 0;
         while (warmup < warmup_steps) : (warmup += 1) {
             @memset(output_ptrs[0..], null);
-            const ev = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null);
+            const ev = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
             const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
             var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
             if (ev) |e| {
@@ -689,7 +665,7 @@ pub fn run_llama_ft_demo(
         while (step < steps) : (step += 1) {
             var timer = try std.time.Timer.start();
             @memset(output_ptrs[0..], null);
-            const event = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null);
+            const event = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
             const dispatch_ns = timer.lap();
 
             if (event) |ev| {

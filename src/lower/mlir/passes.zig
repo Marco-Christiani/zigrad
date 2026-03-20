@@ -101,9 +101,8 @@ pub fn run_pipeline_on_artifact(
 /// Canonicalize and CSE run before and after selection.
 ///
 /// After this pass, the artifact contains `zigrad.kernel_call` ops that
-/// represent selected kernel candidates. These must be materialized
-/// (compiled) by the materialize pass and then legalized before backend
-/// compilation.
+/// represent selected kernel candidates. These must be legalized (converted
+/// to `stablehlo.custom_call`) before backend compilation.
 pub const MlirSelectPass = struct {
     pub fn pass() pass_mod.Pass {
         return .{

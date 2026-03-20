@@ -105,6 +105,7 @@ pub fn main() !void {
     // Execute.
     var call = try rt.call_init(session, function);
     defer rt.call_deinit(&call);
+    log.info("executed", .{});
 
     for (input_views.items) |view| {
         try rt.list_push_buffer_view(rt.call_inputs(&call), view);
@@ -119,6 +120,7 @@ pub fn main() !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch @panic("Flush failed");
 
     for (0..n_out) |i| {
         const out_view = try rt.list_get_buffer_view(out_list, i);

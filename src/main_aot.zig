@@ -17,7 +17,7 @@ pub fn run(
     );
     defer allocator.free(mlir_bytes);
 
-    // Compile, serialize, then reload — exercises the AOT round-trip.
+    // Compile, serialize, then reload -- exercises the AOT round-trip.
     const serialized = try backend.compile_serialized(device, mlir_bytes, true, .{});
     defer allocator.free(serialized);
 
@@ -72,7 +72,7 @@ fn run_demo_executable(
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
     defer backend.deinit_buffer(&dev_c);
 
-    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;

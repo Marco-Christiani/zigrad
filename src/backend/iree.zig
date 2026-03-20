@@ -73,6 +73,9 @@ pub const CompileOptions = struct {
     entry_name: []const u8 = "main",
 };
 
+/// Execute-time options (unused by IREE backend, present for interface conformance).
+pub const ExecuteOptions = struct {};
+
 
 // ---------------------------------------------------------------------------
 // Backend struct.
@@ -240,6 +243,7 @@ pub const Backend = struct {
         exe: *LoadedExecutable,
         allocator: std.mem.Allocator,
         inputs: []const Buffer,
+        _: ExecuteOptions,
     ) !ExecuteResult {
         var call = try rt.call_init(exe.session, exe.function);
         defer rt.call_deinit(&call);
@@ -286,6 +290,7 @@ pub const Backend = struct {
         inputs: []const RawBuffer,
         outputs: []?RawBuffer,
         non_donatable: ?[]const i64,
+        _: ExecuteOptions,
     ) !?Event {
         _ = non_donatable;
 

@@ -13,13 +13,6 @@ pub const train = @import("train.zig");
 
 const log = std.log.scoped(.@"zg/frontend");
 
-fn providers_support_mlir_compile(providers: []const kernel.KernelProvider) bool {
-    for (providers) |provider| {
-        if (provider.compile_mlir_fn == null) return false;
-    }
-    return true;
-}
-
 pub const TensorSpec = struct {
     dtype: pr.DType,
     dims: []const usize,
@@ -353,23 +346,30 @@ pub const Builder = struct {
     }
 };
 
+/// Full configuration for the `compile_program` pipeline.
+///
+/// Controls kernelization, lowering, dump points, and backend compile options.
+/// The pipeline is a pass chain: `[dump_pr] -> [kernelize] -> validate -> lower
+/// -> legalize -> [dump_mlir]`. When `kernel_store` is null, the kernelize
+/// step is skipped entirely.
+///
+/// MLIR-stage passes (select) are NOT added here. If MLIR-level
+/// kernelization is needed, assemble the pipeline manually. `compile_program`
+/// is a convenience for the common PR-level path.
 pub const CompileConfig = struct {
     entry_name: []const u8 = "main",
     lower: lower.LowerPassConfig = .{},
-    kernelize: ?KernelizeConfig = null,
+    /// Pre-computed tuning decisions. When set, the pipeline adds a
+    /// `KernelizePass` that rewrites annotated regions matching profitable
+    /// store entries into `custom_call` ops.
+    kernel_store: ?*const kernel.KernelStore = null,
     dump_pr: ?pipeline.DumpConfig = null,
     dump_mlir: ?pipeline.DumpConfig = null,
+    /// Dump the backend-optimized program (requires backend support).
     dump_optimized: ?pipeline.DumpConfig = null,
-    compile: backend.pjrt.CompileOptions = .{},
-};
-
-pub const KernelizeConfig = struct {
-    registry: *kernel.KernelRegistry,
-    package: ?*kernel.KernelPackage = null,
-    providers: []const kernel.KernelProvider,
-    lane: lower.KernelizationLane = .pr,
     /// Print a summary table of kernelized regions after the pass.
     dump_kernels: bool = false,
+    compile: backend.pjrt.CompileOptions = .{},
 };
 
 /// Compiled executable with arity metadata.
@@ -454,6 +454,17 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
     return program;
 }
 
+/// Assemble and run the compilation pipeline: kernelize -> lower -> compile.
+///
+/// Builds a pass chain from `config`, runs it over `program`, and hands the
+/// resulting MLIR to the PJRT backend for compilation. Returns a loaded
+/// executable ready for `backend.execute()`.
+///
+/// Pipeline: `[dump_pr] -> [kernelize(store)] -> validate -> lower -> legalize -> [dump_mlir]`
+///
+/// This is a convenience for the common PR-level kernelization path. MLIR-stage
+/// passes (select) are not added here -- for MLIR-level kernelization,
+/// assemble the pipeline manually.
 pub fn compile_program(
     backend_handle: *backend.PjrtBackend,
     allocator: std.mem.Allocator,
@@ -477,53 +488,16 @@ pub fn compile_program(
     }
 
     var kernelize_state: ?pipeline.KernelizePass = null;
-    var mlir_materialize_state: ?lower.mlir.MlirKernelMaterializePass = null;
-    if (config.kernelize) |cfg| {
-        lower_cfg.kernelization_lane = cfg.lane;
-
-        if (cfg.lane == .mlir) {
-            if (cfg.package == null) return error.ValidationFailed;
-            if (!providers_support_mlir_compile(cfg.providers)) return error.Unsupported;
-        }
-
-        if (cfg.lane == .pr) {
-            kernelize_state = .{
-                .registry = cfg.registry,
-                .package = cfg.package,
-                .providers = cfg.providers,
-                .rewrite_regions = true,
-                .target_name_mode = .region_name,
-                .dump_kernels = cfg.dump_kernels,
-            };
-            try passes.append(allocator, kernelize_state.?.pass());
-        }
-
-        if (cfg.lane == .mlir) {
-            if (cfg.package) |pkg| {
-                mlir_materialize_state = .{
-                    .registry = cfg.registry,
-                    .package = pkg,
-                    .providers = cfg.providers,
-                    .dump_kernels = cfg.dump_kernels,
-                };
-            }
-        }
+    if (config.kernel_store) |store| {
+        kernelize_state = .{
+            .store = store,
+            .dump_kernels = config.dump_kernels,
+        };
+        try passes.append(allocator, kernelize_state.?.pass());
     }
 
     try passes.append(allocator, lower.validate_pass);
     try passes.append(allocator, lower.lower_pass_with_config(&lower_cfg));
-
-    // MLIR-stage passes: explicit pipeline ordering.
-    // MLIR lane: select -> materialize -> legalize
-    // PR lane (or no kernelization): legalize only
-    if (config.kernelize) |cfg| {
-        if (cfg.lane == .mlir) {
-            try passes.append(allocator, lower.mlir.MlirSelectPass.pass());
-            if (mlir_materialize_state) |*state| {
-                try passes.append(allocator, state.pass());
-            }
-        }
-    }
     try passes.append(allocator, lower.mlir.stablehlo.MlirLegalizePass.pass());
 
     var dump_mlir_local: ?pipeline.DumpConfig = null;
@@ -539,30 +513,12 @@ pub fn compile_program(
     var artifact = try pipeline_run.run(.{ .pr = program }, &ctx);
     defer artifact.deinit(allocator);
 
-    if (config.kernelize) |cfg| {
-        for (cfg.providers) |provider| {
-            log_provider_device_memory("pre-finalize", provider);
-            provider.finalize();
-            log_provider_device_memory("post-finalize", provider);
-        }
-    }
-
     const mlir = switch (artifact) {
         .mlir => |m| m,
         else => return error.UnexpectedArtifact,
     };
 
-    var compile_opts = config.compile;
-    if (compile_opts.kernel_package == null) {
-        compile_opts.kernel_package = if (config.kernelize) |cfg|
-            cfg.package orelse mlir.kernel_package
-        else
-            mlir.kernel_package;
-    }
-    if (compile_opts.kernel_registry == null) {
-        compile_opts.kernel_registry = if (config.kernelize) |cfg| cfg.registry else null;
-    }
-
+    const compile_opts = config.compile;
     var exe = try backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
 
     if (config.dump_optimized) |cfg| {
@@ -746,13 +702,4 @@ pub fn upload_host_buffer(
     return backend_handle.buffer_from_host(device, buf.data, dtype, shape_i64);
 }
 
-fn log_provider_device_memory(label: []const u8, provider: kernel.KernelProvider) void {
-    const info = provider.device_memory_info() orelse return;
-    const mib = 1024.0 * 1024.0;
-    log.info("{s} [{s}]: free={d:.1}MiB total={d:.1}MiB", .{
-        label,
-        provider.name,
-        @as(f64, @floatFromInt(info.free_bytes)) / mib,
-        @as(f64, @floatFromInt(info.total_bytes)) / mib,
-    });
-}
+

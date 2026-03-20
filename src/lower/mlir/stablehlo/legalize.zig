@@ -1,8 +1,8 @@
 /// StableHLO Legalize Pass
 ///
 /// Converts `zigrad.kernel_call` operations to `stablehlo.custom_call`,
-/// which the XLA/PJRT backend understands. This pass must run after selection
-/// (MLIR lane) or lowering (PR lane) and before backend compilation.
+/// which the XLA/PJRT backend understands. This pass must run after
+/// MLIR-level selection or PR-level lowering and before backend compilation.
 const std = @import("std");
 
 const pass_mod = @import("../../../pipeline/pass.zig");

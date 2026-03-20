@@ -69,12 +69,11 @@ pub const Artifact = union(ArtifactKind) {
 /// MLIR artifact with encoding metadata.
 ///
 /// Represents serialized MLIR at some pipeline stage. Passes that transform
-///  MLIR (select, materialize, legalize) operate on `bytes` directly - there
+///  MLIR (select, legalize) operate on `bytes` directly - there
 ///  is no separate snapshot field.
 pub const MlirArtifact = struct {
     bytes: []u8,
     encoding: MlirEncoding,
-    kernel_package: ?*const kernel.KernelPackage = null,
 
     pub fn deinit(self: *MlirArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);

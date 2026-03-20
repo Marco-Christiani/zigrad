@@ -32,10 +32,12 @@ pub const TvmProvider = struct {
             .name = "tvm",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
+            .dispatch_fn = &dispatch_mod.TvmDispatchState.dispatch,
+            .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
     }
 
-    fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+    fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, _: kernel.CompileContext, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         const self: *TvmProvider = @ptrCast(@alignCast(ptr));
         return self.compile(desc, allocator);
     }
@@ -114,8 +116,6 @@ pub const TvmProvider = struct {
                 .provider_name = "tvm",
                 .data = cached,
                 .target_name = try allocator.dupe(u8, key),
-                .dispatch_fn = &dispatch_mod.TvmDispatchState.dispatch,
-                .dispatch_ctx = @ptrCast(self.dispatch_state),
             };
         }
 
@@ -174,8 +174,6 @@ pub const TvmProvider = struct {
             .provider_name = "tvm",
             .data = so_bytes,
             .target_name = try allocator.dupe(u8, key),
-            .dispatch_fn = &dispatch_mod.TvmDispatchState.dispatch,
-            .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
     }
 };

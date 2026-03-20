@@ -32,6 +32,7 @@ pub fn AsBackend(comptime Module: type) type {
     require_type(Module, "LoadedExecutable");
     require_type(Module, "ExecuteResult");
     require_type(Module, "CompileOptions");
+    require_type(Module, "ExecuteOptions");
 
     const Buffer = @field(Module, "Buffer");
     const RawBuffer = @field(Module, "RawBuffer");
@@ -40,6 +41,7 @@ pub fn AsBackend(comptime Module: type) type {
     const LoadedExecutable = @field(Module, "LoadedExecutable");
     const ExecuteResult = @field(Module, "ExecuteResult");
     const CompileOptions = @field(Module, "CompileOptions");
+    const ExecuteOptions = @field(Module, "ExecuteOptions");
 
     // -- Lifecycle ---------------------------------------------------------
     check_method(T, "deinit", &.{*T}, void);
@@ -52,8 +54,8 @@ pub fn AsBackend(comptime Module: type) type {
     check_method(T, "buffer_from_host", &.{ *T, *const Device, []const u8, pr.DType, []const i64 }, Buffer);
 
     // -- Execution ---------------------------------------------------------
-    check_method(T, "execute", &.{ *T, *LoadedExecutable, std.mem.Allocator, []const Buffer }, ExecuteResult);
-    check_method(T, "execute_into", &.{ *T, *LoadedExecutable, []const RawBuffer, []?RawBuffer, ?[]const i64 }, ?Event);
+    check_method(T, "execute", &.{ *T, *LoadedExecutable, std.mem.Allocator, []const Buffer, ExecuteOptions }, ExecuteResult);
+    check_method(T, "execute_into", &.{ *T, *LoadedExecutable, []const RawBuffer, []?RawBuffer, ?[]const i64, ExecuteOptions }, ?Event);
 
     // -- Handle lifecycle --------------------------------------------------
     check_method(T, "deinit_buffer", &.{ *T, *Buffer }, void);

@@ -65,7 +65,7 @@ pub fn run_demo_executable(
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
     defer backend.deinit_buffer(&dev_c);
 
-    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
@@ -113,10 +113,12 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
     try program.add_function(func);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    var exe = compile_program(backend, allocator, &program, device, .{
-        .encoding = lower_encoding,
-        .entry_name = "main",
-    }, dump_pr, dump_mlir, dump_optimized, null) catch |err| {
+    var exe = zg.frontend.compile_program(backend, allocator, &program, device, .{
+        .lower = .{ .encoding = lower_encoding },
+        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
+        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
+    }, "main") catch |err| {
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -135,10 +137,12 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     try program.add_function(vjp);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    var exe = try compile_program(backend, allocator, &program, device, .{
-        .encoding = lower_encoding,
-        .entry_name = "main_vjp",
-    }, dump_pr, dump_mlir, dump_optimized, null);
+    var exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
+        .lower = .{ .encoding = lower_encoding },
+        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
+        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
+    }, "main_vjp");
     defer backend.deinit_executable(&exe);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
@@ -186,7 +190,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     var dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
     defer backend.deinit_buffer(&dev_ct);
 
-    const result = try backend.execute(&exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct });
+    const result = try backend.execute(&exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct }, .{});
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
@@ -510,6 +514,11 @@ pub fn run_train_demo(
 /// TVM requires `ZG_EXTERNAL_SDK_ROOT` and XLA typed-FFI support, Mirage
 ///  requires the Mirage shared library. Both can be enabled individually 
 ///  or simultaneously.
+/// Run the kernel provider demo: tune -> store -> compile -> execute.
+///
+/// Always uses the store-based (PR-level) path: `tune()` populates a
+/// `KernelStore`, `KernelizePass` rewrites annotated regions, and the
+/// backend dispatches via `DispatchRegistry` at execute time.
 pub fn run_kernel_provider_demo(
     allocator: std.mem.Allocator,
     backend: *zg.backend.PjrtBackend,
@@ -518,17 +527,7 @@ pub fn run_kernel_provider_demo(
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
     provider_kinds: []const KernelProviderDemoKind,
-    pipeline_kind: KernelProviderDemoPipeline,
 ) !void {
-    const lane: zg.lower.KernelizationLane = switch (pipeline_kind) {
-        .pr => .pr,
-        .mlir => .mlir,
-    };
-
-    var registry = zg.kernel.KernelRegistry.init(allocator);
-    defer registry.deinit();
-    var package = zg.kernel.KernelPackage.init(allocator);
-    defer package.deinit();
     try backend.register_kernel_dispatcher();
 
     // --- TVM setup (requires TVM headers in SDK) ---
@@ -600,19 +599,26 @@ pub fn run_kernel_provider_demo(
     defer program.deinit();
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    var exe = try compile_program(backend, allocator, &program, device, .{
-        .encoding = lower_encoding,
-        .entry_name = "main",
-        .kernelization_lane = lane,
-    }, dump_pr, dump_mlir, dump_optimized, .{
-        .registry = &registry,
-        .package = &package,
-        .providers = providers,
-        .lane = lane,
-    });
+
+    // tune -> store -> compile
+    var tune_result = try zg.tune.tune(allocator, &program, providers, .{});
+    defer tune_result.deinit();
+
+    var exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
+        .lower = .{ .encoding = lower_encoding },
+        .kernel_store = &tune_result.store,
+        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
+        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
+        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
+    }, "main");
     defer backend.deinit_executable(&exe);
 
-    return run_kernel_provider_demo_executable(allocator, backend, device, &exe, provider_kinds.len);
+    const exec_opts: zg.backend.pjrt.ExecuteOptions = .{
+        .store = &tune_result.store,
+        .dispatch_registry = &tune_result.dispatch_registry,
+    };
+
+    return run_kernel_provider_demo_executable(allocator, backend, device, &exe, provider_kinds.len, exec_opts);
 }
 
 fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderDemoKind) bool {
@@ -627,6 +633,7 @@ fn run_kernel_provider_demo_executable(
     device: *const zg.backend.pjrt.Device,
     exe: *zg.backend.pjrt.LoadedExecutable,
     n_providers: usize,
+    exec_opts: zg.backend.pjrt.ExecuteOptions,
 ) !void {
     const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
     const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
@@ -652,7 +659,7 @@ fn run_kernel_provider_demo_executable(
     var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
     defer backend.deinit_buffer(&dev_c);
 
-    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c });
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, exec_opts);
     defer {
         if (result.device_complete_event) |ev| {
             var tmp = ev;
@@ -691,149 +698,6 @@ fn run_kernel_provider_demo_executable(
 pub const KernelProviderDemoKind = enum {
     tvm,
     mirage,
-};
-
-pub const KernelProviderDemoPipeline = enum {
-    pr,
-    mlir,
-};
-
-pub fn compile_program(
-    backend_handle: *zg.backend.PjrtBackend,
-    allocator: std.mem.Allocator,
-    program: *zg.pr.Program,
-    device: *const zg.backend.pjrt.Device,
-    lower_cfg: zg.lower.LowerPassConfig,
-    dump_pr: ?*zg.pipeline.DumpConfig,
-    dump_mlir: ?*zg.pipeline.DumpConfig,
-    dump_optimized: ?*zg.pipeline.DumpConfig,
-    kernelize_cfg: ?KernelizeConfig,
-) !zg.backend.pjrt.LoadedExecutable {
-    var lower_cfg_mut = lower_cfg;
-
-    var passes = std.ArrayList(zg.pipeline.Pass).initCapacity(allocator, 6) catch
-        return error.OutOfMemory;
-    defer passes.deinit(allocator);
-
-    var dump_pr_local: ?zg.pipeline.DumpConfig = null;
-    if (dump_pr) |cfg| {
-        dump_pr_local = cfg.*;
-        dump_pr_local.?.entry_name = dump_pr_local.?.entry_name orelse lower_cfg.entry_name;
-        try passes.append(allocator, zg.pipeline.dump_pr_pass_with_config(&dump_pr_local.?));
-    }
-
-    var kernelize_state: ?zg.pipeline.KernelizePass = null;
-    var mlir_materialize_state: ?zg.lower.mlir.MlirKernelMaterializePass = null;
-    if (kernelize_cfg) |cfg| {
-        lower_cfg_mut.kernelization_lane = cfg.lane;
-
-        if (cfg.lane == .mlir) {
-            if (cfg.package == null) return error.ValidationFailed;
-        }
-
-        if (cfg.lane == .pr) {
-            const package_for_kernelize = if (cfg.lane == .pr) cfg.package else null;
-            kernelize_state = .{
-                .registry = cfg.registry,
-                .package = package_for_kernelize,
-                .providers = cfg.providers,
-                .rewrite_regions = cfg.lane == .pr,
-                .target_name_mode = .region_name,
-                .dump_kernels = cfg.dump_kernels,
-            };
-            try passes.append(allocator, kernelize_state.?.pass());
-        }
-
-        if (cfg.lane == .mlir) {
-            if (cfg.package) |pkg| {
-                mlir_materialize_state = .{
-                    .registry = cfg.registry,
-                    .package = pkg,
-                    .providers = cfg.providers,
-                    .dump_kernels = cfg.dump_kernels,
-                };
-            }
-        }
-    }
-
-    try passes.append(allocator, zg.lower.validate_pass);
-    try passes.append(allocator, zg.lower.lower_pass_with_config(&lower_cfg_mut));
-
-    // MLIR-stage passes: explicit pipeline ordering.
-    if (kernelize_cfg) |cfg| {
-        if (cfg.lane == .mlir) {
-            try passes.append(allocator, zg.lower.mlir.MlirSelectPass.pass());
-            if (mlir_materialize_state) |*state| {
-                try passes.append(allocator, state.pass());
-            }
-        }
-    }
-    try passes.append(allocator, zg.lower.mlir.stablehlo.MlirLegalizePass.pass());
-
-    var dump_mlir_local: ?zg.pipeline.DumpConfig = null;
-    if (dump_mlir) |cfg| {
-        dump_mlir_local = cfg.*;
-        dump_mlir_local.?.entry_name = dump_mlir_local.?.entry_name orelse lower_cfg.entry_name;
-        try passes.append(allocator, zg.pipeline.dump_mlir_pass_with_config(&dump_mlir_local.?));
-    }
-
-    const pipeline = zg.pipeline.Pipeline{ .passes = passes.items };
-
-    var ctx = zg.pipeline.PassContext{ .allocator = allocator };
-
-    var artifact = try pipeline.run(.{ .pr = program }, &ctx);
-    defer artifact.deinit(allocator);
-
-    if (kernelize_cfg) |cfg| {
-        for (cfg.providers) |provider| provider.finalize();
-    }
-
-    const mlir = switch (artifact) {
-        .mlir => |m| m,
-        else => return error.UnexpectedArtifact,
-    };
-
-    var compile_opts: zg.backend.pjrt.CompileOptions = .{};
-    if (compile_opts.kernel_package == null) {
-        compile_opts.kernel_package = if (kernelize_cfg) |cfg|
-            cfg.package orelse mlir.kernel_package
-        else
-            mlir.kernel_package;
-    }
-    if (compile_opts.kernel_registry == null) {
-        compile_opts.kernel_registry = if (kernelize_cfg) |cfg| cfg.registry else null;
-    }
-    var exe = try backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
-
-    if (dump_optimized) |cfg| {
-        const maybe_opt = exe.get_optimized_program(backend_handle.api, allocator) catch |err| {
-            log.err("get_optimized_program failed: {s}", .{@errorName(err)});
-            return exe;
-        };
-        if (maybe_opt) |opt_const| {
-            var opt = opt_const;
-            defer opt.deinit(allocator);
-            zg.pipeline.dump_optimized_program(cfg, opt.code, opt.format, allocator) catch |err| {
-                log.err("dump-optimized failed: {s}", .{@errorName(err)});
-            };
-        }
-    }
-
-    return exe;
-}
-
-pub const KernelizeConfig = struct {
-    /// Destination registry where kernel artifacts are stored by kernelize pass.
-    registry: *zg.kernel.KernelRegistry,
-    /// Optional executable-scoped package populated by kernel id.
-    package: ?*zg.kernel.KernelPackage = null,
-    /// Kernel providers available to kernelize pass (e.g. TVM).
-    providers: []const zg.kernel.KernelProvider,
-
-    /// Select the kernelization lane for this compile.
-    lane: zg.lower.KernelizationLane = .pr,
-    /// Print a summary table of kernelized regions after the pass.
-    dump_kernels: bool = false,
 };
 
 pub fn print_pr(allocator: std.mem.Allocator) !void {

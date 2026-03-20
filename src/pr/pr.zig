@@ -120,8 +120,6 @@ pub const Param = union(enum) {
     call_target_name: []const u8,
     /// Kernel registry lookup key for single-dispatch custom calls.
     call_kernel_key: []const u8,
-    /// Deterministic numeric kernel id for executable-scoped package lookup.
-    call_kernel_id: u32,
     /// Provider identity used by runtime dispatch.
     call_provider_name: []const u8,
     /// Optional carrier classification hint for MLIR-side kernelization passes.
@@ -195,7 +193,7 @@ pub const DotGeneralParams = struct {
 // ============================================================================
 
 /// Steering annotation attached to a region of equations.
-/// Does not change semantics — only compilation strategy hints.
+/// Does not change semantics -- only compilation strategy hints.
 pub const Annotation = struct {
     /// Request that equations be outlined into a separate call boundary.
     outline: bool = false,
@@ -856,14 +854,6 @@ pub fn param_call_kernel_key(params: []const Param) ?[]const u8 {
 pub fn param_call_provider_name(params: []const Param) ?[]const u8 {
     for (params) |p| switch (p) {
         .call_provider_name => |v| return v,
-        else => {},
-    };
-    return null;
-}
-
-pub fn param_call_kernel_id(params: []const Param) ?u32 {
-    for (params) |p| switch (p) {
-        .call_kernel_id => |v| return v,
         else => {},
     };
     return null;

@@ -20,6 +20,7 @@ pub const pipeline = @import("pipeline/root.zig");
 pub const backend = @import("backend/root.zig");
 pub const lower = @import("lower/root.zig");
 pub const kernel = @import("kernel.zig");
+pub const tune = @import("tune.zig");
 pub const utils = @import("utils/root.zig");
 pub const kernels = @import("kernels/root.zig");
 pub const benchmark = @import("benchmark/root.zig");

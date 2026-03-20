@@ -177,16 +177,8 @@ pub const setup_cmd: CommandT = .{
             .description = "Expects missing custom call handler (should fail)",
         },
         CommandT.from(KernelProviderDemoOpts, .{
-            .cmd_name = "kernel-provider-demo-pr",
-            .cmd_description = "Run kernelized region demo on PR lane",
-            .default_val_opts = true,
-            .sub_descriptions = &.{
-                .{ "provider", "Kernel provider(s): tvm, mirage, or comma-separated (e.g. tvm,mirage). Default: tvm" },
-            },
-        }),
-        CommandT.from(KernelProviderDemoOpts, .{
-            .cmd_name = "kernel-provider-demo-mlir",
-            .cmd_description = "Run kernelized region demo on MLIR lane",
+            .cmd_name = "kernel-provider-demo",
+            .cmd_description = "Run kernelized region demo",
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "provider", "Kernel provider(s): tvm, mirage, or comma-separated (e.g. tvm,mirage). Default: tvm" },
@@ -259,24 +251,8 @@ pub const setup_cmd: CommandT = .{
             },
         }),
         CommandT.from(LlamaFtDemoOpts, .{
-            .cmd_name = "llama-ft-demo-pr",
-            .cmd_description = "Run a tiny Llama fine-tune demo on PR lane",
-            .default_val_opts = true,
-            .sub_descriptions = &.{
-                .{ "warmup", "Number of warmup iterations" },
-                .{ "steps", "Number of training steps" },
-                .{ "train", "Enable training mode" },
-                .{ "dtype", "Data type: bf16 or f32" },
-                .{ "seq", "Sequence length" },
-                .{ "batch", "Batch size" },
-                .{ "canonical_shapes", "Use canonical shapes" },
-                .{ "execute_only", "Execute only, skip compilation" },
-                .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
-            },
-        }),
-        CommandT.from(LlamaFtDemoOpts, .{
-            .cmd_name = "llama-ft-demo-mlir",
-            .cmd_description = "Run a tiny Llama fine-tune demo on MLIR lane",
+            .cmd_name = "llama-ft-demo",
+            .cmd_description = "Run a tiny Llama fine-tune demo",
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "warmup", "Number of warmup iterations" },

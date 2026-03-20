@@ -366,10 +366,6 @@ pub const Executable = struct {
 pub const LoadedExecutable = struct {
     pjrt_executable: *c.PJRT_LoadedExecutable,
     num_outputs: usize,
-    /// Optional backend-managed execution sidecar pointer.
-    dispatch_sidecar: ?*const anyopaque = null,
-    /// Optional backend-managed registry sidecar pointer.
-    dispatch_registry_sidecar: ?*const anyopaque = null,
 
     pub const CompiledMemoryStats = struct {
         generated_code_size_in_bytes: i64,
@@ -408,8 +404,6 @@ pub const LoadedExecutable = struct {
         return .{
             .pjrt_executable = pjrt_executable,
             .num_outputs = num_outputs,
-            .dispatch_sidecar = null,
-            .dispatch_registry_sidecar = null,
         };
     }
 

@@ -1,24 +1,17 @@
 /// Kernelization Pass
 ///
-/// PR -> PR pass that replaces annotated regions with custom_call ops,
-/// compiling kernel artifacts via registered providers.
+/// PR -> PR pass that consults a pre-computed `KernelStore` to replace annotated
+/// regions with `custom_call` ops. Never invokes providers or performs compilation.
 ///
 /// For each region with a `kernelize` annotation, the pass:
-/// 1. Builds a RegionDescriptor from the function and region
-/// 2. Finds the named provider
-/// 3. Calls provider.compile() to produce a KernelArtifact
-/// 4. Registers the KA in the registry under a target name
-/// 5. Replaces the region's equations with a custom_call op
+/// 1. Computes a kernel signature from the region's equation signature.
+/// 2. Looks up the signature in the store for a tuning decision.
+/// 3. Profitable decisions: rewrites the region's equations into a single
+///    `custom_call` op carrying kernel_key, provider_name, and carrier metadata.
+/// 4. Negative or absent decisions: leaves the region unchanged for baseline lowering.
 ///
-/// Current temporary execution strategy uses one dispatcher target
-/// (`zigrad.kernel.dispatch`) for all kernelized regions. Per-region
-/// dispatch identity is carried via custom_call params and lowering emits
-/// typed-FFI backend_config attributes:
-/// - `zigrad.kernel_key`
-/// - `zigrad.provider`
-///
-/// If a provider cannot handle a region (returns Unsupported), the
-/// region's equations are left unchanged -- baseline lowering handles them.
+/// The store is populated externally by `tune()` (src/tune.zig). This pass is a
+/// pure consumer -- it never modifies the store.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
@@ -30,14 +23,12 @@ const dispatcher_target_name = "zigrad.kernel.dispatch";
 
 const KernelCandidate = struct {
     region: pr.Region,
-    provider: kernel.KernelProvider,
     provider_name: []const u8,
 
-    // Populated after successful compilation (used for PR rewriting).
+    // Populated after successful store lookup (used for PR rewriting).
     inputs: []const pr.VarId = &.{},
     outputs: []const pr.VarId = &.{},
     kernel_key: []const u8 = &.{},
-    kernel_id: ?u32 = null,
     carrier_hint: ?[]const u8 = null,
 };
 
@@ -55,36 +46,21 @@ const KernelEntry = struct {
     outcome: KernelEntryOutcome,
 };
 
-/// Cached artifact template keyed by region shape signature.
+/// Kernelization pass state.
 ///
-/// Stores enough information to clone a `KernelArtifact` for a new region
-/// that has the same structural shape as a previously compiled one, avoiding
-/// a redundant superoptimization + compile cycle.
-const ShapeCacheEntry = struct {
-    /// Copy of the compiled artifact bytes; owned by the cache.
-    data: []const u8,
-    workspace_bytes: usize,
-    dispatch_fn: ?kernel.DispatchFn,
-    /// Non-owning; points into the provider's own name storage.
-    dispatch_ctx: ?*anyopaque,
-    provider_name: []const u8,
-};
-
-pub const TargetNameMode = enum {
-    region_name,
-    outlined_eqn,
-};
-
-/// Kernelization pass state. Holds the registry and providers.
+/// Consults a pre-computed `KernelStore` to decide which annotated regions
+/// to replace with `custom_call` ops. The store is the sole data source --
+/// this pass never invokes providers or performs any compilation.
 ///
 /// Create this struct, then call `pass()` to get a pipeline-compatible
 /// `pass_mod.Pass` value.
 pub const KernelizePass = struct {
-    registry: *kernel.KernelRegistry,
-    package: ?*kernel.KernelPackage = null,
-    providers: []const kernel.KernelProvider,
+    /// Pre-computed tuning decisions. Populated by `tune()` before the pipeline runs.
+    /// The pass borrows this; caller retains ownership.
+    store: *const kernel.KernelStore,
+    /// When false, the pass performs store lookup and diagnostics but does not
+    /// rewrite regions into custom_call ops. Useful for dry-run / audit mode.
     rewrite_regions: bool = true,
-    target_name_mode: TargetNameMode = .region_name,
     /// Print a summary table of compiled/dedup/fallback regions after the pass.
     dump_kernels: bool = false,
 
@@ -102,18 +78,6 @@ pub const KernelizePass = struct {
         const self: *KernelizePass = @ptrCast(@alignCast(ptr));
         if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
-        // Shape cache spans all functions so that identical regions across
-        // function boundaries also share a single compiled artifact.
-        var shape_cache = std.StringHashMap(ShapeCacheEntry).init(ctx.allocator);
-        defer {
-            var it = shape_cache.iterator();
-            while (it.next()) |entry| {
-                ctx.allocator.free(entry.key_ptr.*);
-                ctx.allocator.free(entry.value_ptr.data);
-            }
-            shape_cache.deinit();
-        }
-
         // Arena backing all diagnostic entries; freed after the table is printed.
         var entries_arena = std.heap.ArenaAllocator.init(ctx.allocator);
         defer entries_arena.deinit();
@@ -127,7 +91,6 @@ pub const KernelizePass = struct {
                 program,
                 func,
                 ctx.allocator,
-                &shape_cache,
                 if (self.dump_kernels) &entries else null,
                 entries_alloc,
             ) catch |err| {
@@ -152,24 +115,21 @@ pub const KernelizePass = struct {
         program: *pr.Program,
         func: pr.Function,
         temp_allocator: std.mem.Allocator,
-        shape_cache: *std.StringHashMap(ShapeCacheEntry),
         entries: ?*std.ArrayList(KernelEntry),
         entries_alloc: std.mem.Allocator,
     ) !pr.Function {
         if (func.regions.len == 0) return func;
+        if (!self.rewrite_regions) return func;
 
+        const store = self.store;
+
+        // Collect all candidates with kernelize annotations.
         var candidates = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
         defer candidates.deinit(temp_allocator);
-
         for (func.regions) |region| {
             const provider_name = region.annotation.kernelize orelse continue;
-            const provider = self.find_provider(provider_name) orelse {
-                log.debug("no provider named '{s}' for region '{s}', skipping", .{ provider_name, region.name });
-                continue;
-            };
             try candidates.append(temp_allocator, .{
                 .region = region,
-                .provider = provider,
                 .provider_name = provider_name,
             });
         }
@@ -179,144 +139,83 @@ pub const KernelizePass = struct {
             for (rewrites.items) |rewrite| {
                 temp_allocator.free(rewrite.inputs);
                 temp_allocator.free(rewrite.outputs);
+                if (rewrite.kernel_key.len > 0) temp_allocator.free(rewrite.kernel_key);
             }
             rewrites.deinit(temp_allocator);
         }
 
         for (candidates.items) |candidate| {
-            if (is_region_nested(candidate.region, candidates.items)) {
-                log.debug("region '{s}' is nested inside a larger kernelized region, skipping", .{candidate.region.name});
-                continue;
-            }
+            if (is_region_nested(candidate.region, candidates.items)) continue;
 
             const desc = try kernel.describe_region(temp_allocator, func, candidate.region);
             defer temp_allocator.free(desc.inputs);
             defer temp_allocator.free(desc.outputs);
 
-            if (desc.outputs.len == 0) {
-                log.debug("region '{s}' has no externally used outputs; skipping kernelization", .{candidate.region.name});
+            if (desc.outputs.len == 0) continue;
+
+            const kernel_signature = try compute_kernel_signature(temp_allocator, desc);
+            defer temp_allocator.free(kernel_signature);
+
+            const decision = store.get(kernel_signature) orelse {
+                log.debug("store: no decision for region '{s}' (shape '{s}'), skipping", .{ candidate.region.name, kernel_signature });
+                if (entries) |e| {
+                    const ops = build_ops_str(entries_alloc, desc) catch "";
+                    const shape = build_shape_str(entries_alloc, desc) catch "";
+                    e.append(entries_alloc, .{
+                        .name = candidate.region.name,
+                        .provider = candidate.provider_name,
+                        .ops = ops,
+                        .shape = shape,
+                        .outcome = .fallback,
+                    }) catch {};
+                }
                 continue;
-            }
-
-            // Check the shape cache before invoking the provider. Regions with
-            // identical op sequences and tensor shapes (e.g. the same projection
-            // in different LLaMA layers) share one compiled artifact, avoiding
-            // redundant superoptimization passes and reducing unique .so files.
-            const shape_key = try compute_shape_key(temp_allocator, desc);
-            defer temp_allocator.free(shape_key);
-
-            var was_dedup = false;
-            var ka: kernel.KernelArtifact = if (shape_cache.get(shape_key)) |cached| hit: {
-                was_dedup = true;
-                log.debug("dedup cache hit: region '{s}' reuses compiled artifact", .{candidate.region.name});
-                const reg_alloc = self.registry.allocator();
-                const target_name = try reg_alloc.dupe(u8, candidate.region.name);
-                errdefer reg_alloc.free(target_name);
-                break :hit .{
-                    .provider_name = cached.provider_name,
-                    .data = try reg_alloc.dupe(u8, cached.data),
-                    .target_name = target_name,
-                    .workspace_bytes = cached.workspace_bytes,
-                    .dispatch_fn = cached.dispatch_fn,
-                    .dispatch_ctx = cached.dispatch_ctx,
-                };
-            } else miss: {
-                const compiled = candidate.provider.compile(desc, self.registry.allocator()) catch |err| switch (err) {
-                    error.Unsupported => {
-                        log.debug("provider '{s}' cannot handle region '{s}', falling back to baseline", .{ candidate.provider_name, candidate.region.name });
-                        if (entries) |e| {
-                            const ops = build_ops_str(entries_alloc, desc) catch "";
-                            const shape = build_shape_str(entries_alloc, desc) catch "";
-                            e.append(entries_alloc, .{
-                                .name = candidate.region.name,
-                                .provider = candidate.provider_name,
-                                .ops = ops,
-                                .shape = shape,
-                                .outcome = .fallback,
-                            }) catch {};
-                        }
-                        continue;
-                    },
-                    else => {
-                        if (!@import("builtin").is_test)
-                            log.err("provider '{s}' failed to compile region '{s}': {s}", .{ candidate.provider_name, candidate.region.name, @errorName(err) });
-                        return err;
-                    },
-                };
-                // Populate cache so subsequent same-shape regions skip compilation.
-                const cache_key = try temp_allocator.dupe(u8, shape_key);
-                errdefer temp_allocator.free(cache_key);
-                const cache_data = try temp_allocator.dupe(u8, compiled.data);
-                errdefer temp_allocator.free(cache_data);
-                try shape_cache.put(cache_key, .{
-                    .data = cache_data,
-                    .workspace_bytes = compiled.workspace_bytes,
-                    .dispatch_fn = compiled.dispatch_fn,
-                    .dispatch_ctx = compiled.dispatch_ctx,
-                    .provider_name = compiled.provider_name,
-                });
-                break :miss compiled;
             };
 
-            try self.retarget_kernel_artifact(func, candidate.region, &ka);
+            switch (decision) {
+                .profitable => |art| {
+                    const carrier_hint: ?[]const u8 = if (is_attention_5op_region(func, candidate.region)) "attention_5op_v1" else null;
 
-            if (entries) |e| {
-                const outcome: KernelEntryOutcome = if (was_dedup) .dedup else .compiled;
-                const ops = build_ops_str(entries_alloc, desc) catch "";
-                const shape = build_shape_str(entries_alloc, desc) catch "";
-                e.append(entries_alloc, .{
-                    .name = candidate.region.name,
-                    .provider = candidate.provider_name,
-                    .ops = ops,
-                    .shape = shape,
-                    .outcome = outcome,
-                }) catch {};
-            }
+                    try rewrites.append(temp_allocator, .{
+                        .region = candidate.region,
+                        .provider_name = art.provider_name,
+                        .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
+                        .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
+                        .kernel_key = try temp_allocator.dupe(u8, kernel_signature),
+                        .carrier_hint = carrier_hint,
+                    });
+                    log.debug("store: profitable decision for region '{s}' -> '{s}'", .{ candidate.region.name, art.target_name });
 
-            self.registry.put(ka.target_name, ka) catch |err| switch (err) {
-                error.DuplicateKey => {
-                    var artifact = ka;
-                    artifact.deinit(self.registry.allocator());
-                    log.err("duplicate kernel key '{s}' for region '{s}'", .{ ka.target_name, candidate.region.name });
-                    return error.DuplicateKey;
+                    if (entries) |e| {
+                        const ops = build_ops_str(entries_alloc, desc) catch "";
+                        const shape = build_shape_str(entries_alloc, desc) catch "";
+                        e.append(entries_alloc, .{
+                            .name = candidate.region.name,
+                            .provider = art.provider_name,
+                            .ops = ops,
+                            .shape = shape,
+                            .outcome = .compiled,
+                        }) catch {};
+                    }
                 },
-                error.OutOfMemory => return error.OutOfMemory,
-            };
-            log.debug("compiled kernel '{s}' for region '{s}' via provider '{s}'", .{ ka.target_name, candidate.region.name, candidate.provider_name });
-
-            const carrier_hint: ?[]const u8 = if (is_attention_5op_region(func, candidate.region)) "attention_5op_v1" else null;
-            const kernel_id = kernel.kernel_id_from_key(ka.target_name);
-
-            if (self.package) |pkg| {
-                const pkg_artifact = try clone_artifact_for_package(pkg.allocator(), ka);
-                pkg.put(kernel_id, pkg_artifact) catch |err| switch (err) {
-                    error.DuplicateKey => {
-                        var artifact = pkg_artifact;
-                        artifact.deinit(pkg.allocator());
-                        log.err("duplicate kernel id {d} for region '{s}'", .{ kernel_id, candidate.region.name });
-                        return error.DuplicateKey;
-                    },
-                    error.OutOfMemory => return error.OutOfMemory,
-                };
+                .negative => |reason| {
+                    log.debug("store: negative decision for region '{s}': {s}", .{ candidate.region.name, reason });
+                    if (entries) |e| {
+                        const ops = build_ops_str(entries_alloc, desc) catch "";
+                        const shape = build_shape_str(entries_alloc, desc) catch "";
+                        e.append(entries_alloc, .{
+                            .name = candidate.region.name,
+                            .provider = candidate.provider_name,
+                            .ops = ops,
+                            .shape = shape,
+                            .outcome = .fallback,
+                        }) catch {};
+                    }
+                },
             }
-
-            if (!self.rewrite_regions) {
-                continue;
-            }
-
-            try rewrites.append(temp_allocator, .{
-                .region = candidate.region,
-                .provider = candidate.provider,
-                .provider_name = ka.provider_name,
-                .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
-                .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
-                .kernel_key = ka.target_name,
-                .kernel_id = kernel_id,
-                .carrier_hint = carrier_hint,
-            });
         }
 
-        if (!self.rewrite_regions or rewrites.items.len == 0) return func;
+        if (rewrites.items.len == 0) return func;
 
         const allocator = program.allocator();
 
@@ -348,27 +247,6 @@ pub const KernelizePass = struct {
             .params_store = try params_store.toOwnedSlice(allocator),
             .regions = &.{},
         };
-    }
-
-    fn find_provider(self: *KernelizePass, name: []const u8) ?kernel.KernelProvider {
-        for (self.providers) |p| {
-            if (std.mem.eql(u8, p.name, name)) return p;
-        }
-        return null;
-    }
-
-    fn retarget_kernel_artifact(self: *KernelizePass, func: pr.Function, region: pr.Region, artifact: *kernel.KernelArtifact) !void {
-        switch (self.target_name_mode) {
-            .region_name => {},
-            .outlined_eqn => {
-                if (region.eqn_len != 1) return error.InvalidRegion;
-
-                const allocator = self.registry.allocator();
-                const renamed = try std.fmt.allocPrint(allocator, "{s}_outlined_{d}", .{ func.name, region.eqn_start });
-                allocator.free(artifact.target_name);
-                artifact.target_name = renamed;
-            },
-        }
     }
 
     fn find_rewrite_starting_at(rewrites: []const KernelCandidate, eqn_start: usize) ?KernelCandidate {
@@ -454,10 +332,6 @@ pub const KernelizePass = struct {
         param_count += 1;
         params[param_count] = .{ .call_kernel_key = kernel_key };
         param_count += 1;
-        if (rewrite.kernel_id) |kernel_id| {
-            params[param_count] = .{ .call_kernel_id = kernel_id };
-            param_count += 1;
-        }
         params[param_count] = .{ .call_provider_name = provider_name };
         param_count += 1;
         if (carrier_hint) |owned_hint| {
@@ -498,20 +372,6 @@ pub const KernelizePass = struct {
             eqns[4].prim == .log;
     }
 
-    fn clone_artifact_for_package(
-        dst_allocator: std.mem.Allocator,
-        artifact: kernel.KernelArtifact,
-    ) !kernel.KernelArtifact {
-        return .{
-            .provider_name = artifact.provider_name,
-            .data = try dst_allocator.dupe(u8, artifact.data),
-            .target_name = try dst_allocator.dupe(u8, artifact.target_name),
-            .workspace_bytes = artifact.workspace_bytes,
-            .dispatch_fn = artifact.dispatch_fn,
-            .dispatch_ctx = artifact.dispatch_ctx,
-        };
-    }
-
     fn append_varids(
         allocator: std.mem.Allocator,
         store: *std.ArrayList(pr.VarId),
@@ -534,18 +394,18 @@ pub const KernelizePass = struct {
 };
 
 // ============================================================================
-// Shape Key
+// Kernel Signature
 // ============================================================================
 
-/// Build a deterministic shape-signature string for a region descriptor.
+/// Build a deterministic kernel signature string for a region descriptor.
 ///
 /// The key encodes the region's equation sequence as:
 ///   `<prim>,<in0_aval><in1_aval>...-><out0_aval>...;<next_eqn>...`
 ///
 /// Two regions produce the same key iff they have identical op sequences with
 /// matching input/output dtypes and dims. This is the criterion for sharing a
-/// compiled artifact via the shape cache in `run_impl`.
-fn compute_shape_key(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
+/// compiled artifact via the shape cache in `tune()`.
+pub fn compute_kernel_signature(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
     var buf = try std.ArrayList(u8).initCapacity(allocator, 128);
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -634,43 +494,7 @@ fn dump_kernel_entries(out: *std.Io.Writer, entries: []const KernelEntry) !void 
 // Tests
 // ============================================================================
 
-test "kernelize pass skips regions with no matching provider" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "test");
-    defer b.deinit();
-
-    const x = try b.param_tensor(.f32, &.{2});
-
-    try b.push_region("r", .{ .kernelize = "nonexistent" });
-    const y = try b.emit(.exp, &.{x}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{y});
-    try program.add_function(func);
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
-
-    var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{}, // no providers registered
-    };
-
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &ctx);
-
-    // Region equations should still be there (fallback).
-    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
-    // Registry should be empty (nothing compiled).
-    try testing.expect(registry.get("anything") == null);
-}
-
-test "kernelize pass calls provider and registers KA" {
+test "kernelize pass rewrites profitable region from store" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -688,51 +512,104 @@ test "kernelize pass calls provider and registers KA" {
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    const MockProvider = struct {
-        compiled: bool = false,
-
-        fn compile(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.compiled = true;
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    var mock = MockProvider{};
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = @ptrCast(&mock),
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    // Pre-populate the store with a profitable decision for the kernel signature.
+    // The kernel signature for a single exp(f32[2]) region is "exp,f32[2]>f32[2]".
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable("exp,f32[2]>f32[2]", .{
+        .provider_name = "mock",
+        .data = "stored_kernel_data",
+        .target_name = "test_region",
+    });
 
     var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try kp.pass().run(&artifact, &ctx);
 
-    try testing.expect(mock.compiled);
-    const ka = registry.get("test_region");
-    try testing.expect(ka != null);
-    try testing.expectEqualStrings("mock_kernel_data", ka.?.data);
-
+    // Region should be rewritten to custom_call.
+    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
     const rewritten = program.functions[0].eqns[0];
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
 
     const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
     try testing.expectEqualStrings(dispatcher_target_name, pr.param_call_target_name(params).?);
-    try testing.expectEqualStrings("test_region", pr.param_call_kernel_key(params).?);
+    // kernel_key is the kernel signature used for store lookup at dispatch time.
+    try testing.expectEqualStrings("exp,f32[2]>f32[2]", pr.param_call_kernel_key(params).?);
     try testing.expectEqualStrings("mock", pr.param_call_provider_name(params).?);
+}
+
+test "kernelize pass skips negative decision" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("test_region", .{ .kernelize = "mock" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_negative("exp,f32[2]>f32[2]", "unsupported");
+
+    var kp = KernelizePass{
+        .store = &store,
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    // Region should be left unchanged (negative decision).
+    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
+    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
+}
+
+test "kernelize pass skips absent key" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "test");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+
+    try b.push_region("test_region", .{ .kernelize = "mock" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    // Empty store -- no decisions at all.
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+
+    var kp = KernelizePass{
+        .store = &store,
+    };
+
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    // Region should be left unchanged (absent key).
+    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
+    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
 }
 
 test "kernelize pass tags attention-like 5-op region with carrier metadata" {
@@ -760,28 +637,23 @@ test "kernelize pass tags attention-like 5-op region with carrier metadata" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
+    // Compute the kernel signature for this 5-op region and put a profitable decision.
+    const desc = try kernel.describe_region(testing.allocator, func, func.regions[0]);
+    defer testing.allocator.free(desc.inputs);
+    defer testing.allocator.free(desc.outputs);
+    const kernel_signature = try compute_kernel_signature(testing.allocator, desc);
+    defer testing.allocator.free(kernel_signature);
 
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable(kernel_signature, .{
+        .provider_name = "mock",
+        .data = "mock_kernel_data",
+        .target_name = "attention_like",
+    });
 
     var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
@@ -793,159 +665,6 @@ test "kernelize pass tags attention-like 5-op region with carrier metadata" {
 
     const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
     try testing.expectEqualStrings("attention_5op_v1", pr.param_call_carrier_hint(params).?);
-    try testing.expect(pr.param_call_kernel_id(params) != null);
-}
-
-test "kernelize pass populates kernel package for rewritten region" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "test");
-    defer b.deinit();
-
-    const x = try b.param_tensor(.f32, &.{2});
-
-    try b.push_region("generic_region", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{y});
-    try program.add_function(func);
-
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
-    var package = kernel.KernelPackage.init(testing.allocator);
-    defer package.deinit();
-
-    var kp = KernelizePass{
-        .registry = &registry,
-        .package = &package,
-        .providers = &.{provider},
-    };
-
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &ctx);
-
-    const rewritten = program.functions[0].eqns[0];
-    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
-    try testing.expect(pr.param_call_kernel_id(params) != null);
-    const kernel_id = pr.param_call_kernel_id(params).?;
-
-    const pkg_artifact = package.get(kernel_id);
-    try testing.expect(pkg_artifact != null);
-    try testing.expectEqualStrings("mock_kernel_data", pkg_artifact.?.data);
-}
-
-test "kernelize pass falls back when provider returns Unsupported" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "test");
-    defer b.deinit();
-
-    const x = try b.param_tensor(.f32, &.{2});
-
-    try b.push_region("unsupported_region", .{ .kernelize = "mirage" });
-    const y = try b.emit(.exp, &.{x}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{y});
-    try program.add_function(func);
-
-    const StubUnsupportedProvider = struct {
-        fn compile(_: *anyopaque, _: kernel.RegionDescriptor, _: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return error.Unsupported;
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mirage",
-        .ptr = undefined,
-        .compile_fn = StubUnsupportedProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
-
-    var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
-    };
-
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &ctx);
-
-    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
-    try testing.expect(registry.get("unsupported_region") == null);
-}
-
-test "kernelize pass propagates provider errors other than Unsupported" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "test");
-    defer b.deinit();
-
-    const x = try b.param_tensor(.f32, &.{2});
-
-    try b.push_region("broken_region", .{ .kernelize = "mirage" });
-    const y = try b.emit(.exp, &.{x}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{y});
-    try program.add_function(func);
-
-    const StubProvider = struct {
-        fn compile(_: *anyopaque, _: kernel.RegionDescriptor, _: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return error.ProviderCallFailed;
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mirage",
-        .ptr = undefined,
-        .compile_fn = StubProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
-
-    var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
-    };
-
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try testing.expectError(error.ProviderCallFailed, kp.pass().run(&artifact, &ctx));
-
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
-    try testing.expect(registry.get("broken_region") == null);
 }
 
 test "kernelize pass rewrites multi-output region to custom_call" {
@@ -968,28 +687,23 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     const func = try b.finish(&.{ a, b_out });
     try program.add_function(func);
 
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
+    // Compute kernel signature and store a profitable decision.
+    const desc = try kernel.describe_region(testing.allocator, func, func.regions[0]);
+    defer testing.allocator.free(desc.inputs);
+    defer testing.allocator.free(desc.outputs);
+    const kernel_signature = try compute_kernel_signature(testing.allocator, desc);
+    defer testing.allocator.free(kernel_signature);
 
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable(kernel_signature, .{
+        .provider_name = "mock",
+        .data = "mock_kernel_data",
+        .target_name = "multi_out",
+    });
 
     var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
@@ -1010,7 +724,7 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     try testing.expectEqual(@as(usize, 2), out_avals.len);
 }
 
-test "kernelize pass can materialize without rewriting PR" {
+test "kernelize pass same-shape regions share store decision" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1019,108 +733,7 @@ test "kernelize pass can materialize without rewriting PR" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    const x = try b.param_tensor(.f32, &.{ 2, 2 });
-    try b.push_region("matmul_region", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{y});
-    try program.add_function(func);
-
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
-
-    var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
-        .rewrite_regions = false,
-    };
-
-    const before_eqn_prim = program.functions[0].eqns[0].prim;
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &ctx);
-
-    try testing.expectEqual(before_eqn_prim, program.functions[0].eqns[0].prim);
-    try testing.expect(registry.get("matmul_region") != null);
-}
-
-test "kernelize pass outlined_eqn target naming mode" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "main");
-    defer b.deinit();
-
-    const x = try b.param_tensor(.f32, &.{2});
-    try b.push_region("region_name_unused", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{y});
-    try program.add_function(func);
-
-    const MockProvider = struct {
-        fn compile(_: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "mock_kernel_data"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = undefined,
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
-
-    var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
-        .rewrite_regions = false,
-        .target_name_mode = .outlined_eqn,
-    };
-
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &ctx);
-
-    try testing.expect(registry.get("main_outlined_0") != null);
-}
-
-test "kernelize pass deduplicates same-shape regions across a function" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "main");
-    defer b.deinit();
-
-    // Two exp regions with identical f32[2] input/output -- same shape signature.
+    // Two exp regions with identical f32[2] input/output -- same kernel signature.
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
@@ -1135,45 +748,22 @@ test "kernelize pass deduplicates same-shape regions across a function" {
     const func = try b.finish(&.{ out_a, out_b });
     try program.add_function(func);
 
-    const MockProvider = struct {
-        compile_count: usize = 0,
-
-        fn compile(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.compile_count += 1;
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "payload"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    var mock = MockProvider{};
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = @ptrCast(&mock),
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    // One store entry covers both regions since they share the same kernel signature.
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable("exp,f32[2]>f32[2]", .{
+        .provider_name = "mock",
+        .data = "payload",
+        .target_name = "region_a",
+    });
 
     var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try kp.pass().run(&artifact, &ctx);
-
-    // Both regions must be registered under their own target names.
-    try testing.expect(registry.get("region_a") != null);
-    try testing.expect(registry.get("region_b") != null);
-
-    // Provider was only called once -- region_b reused the cached artifact.
-    try testing.expectEqual(@as(usize, 1), mock.compile_count);
 
     // Both regions must have been rewritten to custom_call.
     const eqns = program.functions[0].eqns;
@@ -1182,7 +772,7 @@ test "kernelize pass deduplicates same-shape regions across a function" {
     try testing.expectEqual(pr.Prim.custom_call, eqns[1].prim);
 }
 
-test "kernelize pass does not deduplicate regions with different shapes" {
+test "kernelize pass different-shape regions need separate decisions" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -1191,7 +781,7 @@ test "kernelize pass does not deduplicate regions with different shapes" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    // Two exp regions with DIFFERENT shapes -- distinct signatures.
+    // Two exp regions with DIFFERENT shapes -- distinct kernel signatures.
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{4});
 
@@ -1206,39 +796,65 @@ test "kernelize pass does not deduplicate regions with different shapes" {
     const func = try b.finish(&.{ out_small, out_large });
     try program.add_function(func);
 
-    const MockProvider = struct {
-        compile_count: usize = 0,
-
-        fn compile(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.compile_count += 1;
-            return .{
-                .provider_name = "mock",
-                .data = try allocator.dupe(u8, "payload"),
-                .target_name = try allocator.dupe(u8, desc.name),
-            };
-        }
-    };
-
-    var mock = MockProvider{};
-    const provider = kernel.KernelProvider{
-        .name = "mock",
-        .ptr = @ptrCast(&mock),
-        .compile_fn = MockProvider.compile,
-    };
-
-    var registry = kernel.KernelRegistry.init(testing.allocator);
-    defer registry.deinit();
+    // Only put a decision for the small shape.
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable("exp,f32[2]>f32[2]", .{
+        .provider_name = "mock",
+        .data = "payload",
+        .target_name = "region_small",
+    });
 
     var kp = KernelizePass{
-        .registry = &registry,
-        .providers = &.{provider},
+        .store = &store,
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try kp.pass().run(&artifact, &ctx);
 
-    // Different shapes -- provider must be called for each region.
-    try testing.expectEqual(@as(usize, 2), mock.compile_count);
+    // Only region_small should be rewritten; region_large has no store decision.
+    const eqns = program.functions[0].eqns;
+    try testing.expectEqual(@as(usize, 2), eqns.len);
+    try testing.expectEqual(pr.Prim.custom_call, eqns[0].prim);
+    try testing.expectEqual(pr.Prim.exp, eqns[1].prim);
+}
+
+test "kernelize pass skips rewriting when rewrite_regions is false" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    try b.push_region("test_region", .{ .kernelize = "mock" });
+    const y = try b.emit(.exp, &.{x}, &.{});
+    try b.pop_region();
+
+    const func = try b.finish(&.{y});
+    try program.add_function(func);
+
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable("exp,f32[2]>f32[2]", .{
+        .provider_name = "mock",
+        .data = "mock_kernel_data",
+        .target_name = "test_region",
+    });
+
+    var kp = KernelizePass{
+        .store = &store,
+        .rewrite_regions = false,
+    };
+
+    const before_eqn_prim = program.functions[0].eqns[0].prim;
+    var artifact = pass_mod.Artifact{ .pr = &program };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    try kp.pass().run(&artifact, &ctx);
+
+    // Equations should be unchanged when rewrite_regions is false.
+    try testing.expectEqual(before_eqn_prim, program.functions[0].eqns[0].prim);
 }

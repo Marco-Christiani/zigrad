@@ -195,6 +195,7 @@ pub const TrainState = struct {
             self.input_bufs,
             self.output_bufs,
             self.non_donatable,
+            .{},
         );
 
         const loss_raw = self.output_bufs[0] orelse return error.PjrtReturnedNullOutputBuffer;

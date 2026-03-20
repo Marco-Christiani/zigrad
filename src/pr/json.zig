@@ -353,10 +353,6 @@ fn emit_param_attrs(writer: *Writer, params: []const pr.Param) !void {
                 try writer.writeAll("\"kernel_key\":");
                 try write_json_string(writer, k);
             },
-            .call_kernel_id => |id| {
-                try open_attrs(writer, &has_attr);
-                try writer.print("\"kernel_id\":{d}", .{id});
-            },
             .call_provider_name => |p| {
                 try open_attrs(writer, &has_attr);
                 try writer.writeAll("\"provider\":");

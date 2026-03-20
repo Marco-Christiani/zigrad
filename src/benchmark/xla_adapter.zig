@@ -100,7 +100,7 @@ pub const XlaContext = struct {
         defer self.backend_handle.deinit_buffer(&dev_b);
 
         // Execute
-        const result = try self.backend_handle.execute(executable, self.allocator, &.{ dev_a, dev_b });
+        const result = try self.backend_handle.execute(executable, self.allocator, &.{ dev_a, dev_b }, .{});
         defer {
             for (result.outputs) |*buf| self.backend_handle.deinit_buffer(buf);
             self.allocator.free(result.outputs);

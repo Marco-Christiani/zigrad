@@ -12,6 +12,7 @@ const max_region_eqns: usize = 5;
 pub const MirageProvider = struct {
     allocator: std.mem.Allocator,
     dispatch_state: *dispatch_mod.MirageDispatchState,
+    device_ordinal: i32 = 0,
 
     pub fn kernel_provider(self: *MirageProvider) kernel.KernelProvider {
         return .{
@@ -19,16 +20,12 @@ pub const MirageProvider = struct {
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
             .compile_mlir_fn = compile_mlir_impl,
-            .device_memory_info_fn = device_memory_info_impl,
+            .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
+            .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
     }
 
-    fn device_memory_info_impl(_: *anyopaque) ?kernel.DeviceMemoryInfo {
-        const info = mirage.device_mem_info() orelse return null;
-        return .{ .free_bytes = info.free, .total_bytes = info.total };
-    }
-
-    fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+    fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, _: kernel.CompileContext, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         const self: *MirageProvider = @ptrCast(@alignCast(ptr));
         return self.compile(desc, allocator);
     }
@@ -36,6 +33,7 @@ pub const MirageProvider = struct {
     fn compile_mlir_impl(
         ptr: *anyopaque,
         desc: kernel.MlirKernelDescriptor,
+        _: kernel.CompileContext,
         allocator: std.mem.Allocator,
     ) kernel.CompileError!kernel.KernelArtifact {
         const self: *MirageProvider = @ptrCast(@alignCast(ptr));
@@ -177,7 +175,7 @@ pub const MirageProvider = struct {
         graph: *mirage.Graph,
     ) kernel.CompileError!kernel.KernelArtifact {
         // Search for optimized candidates.
-        var device = mirage.Device.init(0) catch |err| return map_mirage_api_error(err);
+        var device = mirage.Device.init(self.device_ordinal) catch |err| return map_mirage_api_error(err);
         defer device.deinit();
 
         // TODO: proper init or .empty-style pattern
@@ -308,8 +306,6 @@ pub const MirageProvider = struct {
             .data = artifact_data,
             .target_name = try allocator.dupe(u8, target_name),
             .workspace_bytes = buf_size,
-            .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
-            .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
     }
 };

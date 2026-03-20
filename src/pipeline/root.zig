@@ -9,7 +9,7 @@
 /// - PassContext: Shared state threaded through passes
 /// - Pass: Pass descriptor (name + input/output kinds + run)
 ///
-/// MLIR-specific passes (select, legalize, materialize) live in `lower/mlir/`.
+/// MLIR-specific passes (select, legalize) live in `lower/mlir/`.
 const pass = @import("pass.zig");
 
 // Re-export pass types
