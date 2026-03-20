@@ -67,17 +67,6 @@ pub fn tune(
     var dispatch_registry = kernel.DispatchRegistry.init(allocator);
     errdefer dispatch_registry.deinit();
 
-    // Shape cache spans all functions for cross-function deduplication.
-    var shape_cache = std.StringHashMap(ShapeCacheEntry).init(allocator);
-    defer {
-        var it = shape_cache.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            allocator.free(entry.value_ptr.data);
-        }
-        shape_cache.deinit();
-    }
-
     var timer = std.time.Timer.start() catch null;
 
     var total_compiled: usize = 0;
@@ -91,7 +80,6 @@ pub fn tune(
             providers,
             &store,
             &dispatch_registry,
-            &shape_cache,
             opts.compile_ctx,
         );
         total_compiled += stats.compiled;
@@ -126,20 +114,12 @@ const TuneStats = struct {
     negative: usize = 0,
 };
 
-/// Cached artifact template keyed by region shape signature.
-const ShapeCacheEntry = struct {
-    data: []const u8,
-    workspace_bytes: usize,
-    provider_name: []const u8,
-};
-
 fn tune_function(
     allocator: std.mem.Allocator,
     func: pr.Function,
     providers: []const kernel.KernelProvider,
     store: *kernel.KernelStore,
     dispatch_registry: *kernel.DispatchRegistry,
-    shape_cache: *std.StringHashMap(ShapeCacheEntry),
     compile_ctx: kernel.CompileContext,
 ) !TuneStats {
     if (func.regions.len == 0) return .{};
@@ -176,27 +156,10 @@ fn tune_function(
         const kernel_signature = try kernelize.compute_kernel_signature(allocator, desc);
         defer allocator.free(kernel_signature);
 
-        // Already tuned (across functions)?
+        // Already tuned (cross-function dedup via store)?
         if (store.get(kernel_signature) != null) {
             stats.dedup += 1;
-            log.debug("dedup: region '{s}' shape already in store", .{candidate.region.name});
-            continue;
-        }
-
-        // Check shape cache (same shape compiled earlier this session).
-        if (shape_cache.get(kernel_signature)) |cached| {
-            stats.dedup += 1;
-            log.debug("dedup cache hit: region '{s}' reuses compiled artifact", .{candidate.region.name});
-
-            try store.put_profitable(kernel_signature, .{
-                .provider_name = cached.provider_name,
-                .data = cached.data,
-                .target_name = candidate.region.name,
-                .workspace_bytes = cached.workspace_bytes,
-            });
-
-            // Register dispatch from provider (idempotent).
-            try register_provider_dispatch(dispatch_registry, candidate.provider);
+            log.debug("dedup: region '{s}' signature already in store", .{candidate.region.name});
             continue;
         }
 
@@ -220,17 +183,6 @@ fn tune_function(
         defer compiled.deinit(allocator);
 
         stats.compiled += 1;
-
-        // Populate shape cache.
-        const cache_key = try allocator.dupe(u8, kernel_signature);
-        errdefer allocator.free(cache_key);
-        const cache_data = try allocator.dupe(u8, compiled.data);
-        errdefer allocator.free(cache_data);
-        try shape_cache.put(cache_key, .{
-            .data = cache_data,
-            .workspace_bytes = compiled.workspace_bytes,
-            .provider_name = compiled.provider_name,
-        });
 
         // Record profitable decision.
         try store.put_profitable(kernel_signature, .{

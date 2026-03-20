@@ -403,8 +403,8 @@ pub const KernelizePass = struct {
 ///   `<prim>,<in0_aval><in1_aval>...-><out0_aval>...;<next_eqn>...`
 ///
 /// Two regions produce the same key iff they have identical op sequences with
-/// matching input/output dtypes and dims. This is the criterion for sharing a
-/// compiled artifact via the shape cache in `tune()`.
+/// matching input/output dtypes and dims. This is the deduplication criterion
+/// used by `tune()` and the lookup key consulted by `KernelizePass`.
 pub fn compute_kernel_signature(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
     var buf = try std.ArrayList(u8).initCapacity(allocator, 128);
     errdefer buf.deinit(allocator);
