@@ -3,12 +3,18 @@
 /// Public API for the Zigrad compiler.
 ///
 /// Module organization:
-/// - pr: Program Representation (Zigrad-owned, toolchain-neutral)
-/// - lower: Lowering passes (PR -> MLIR)
-/// - backend: Unified backend (compile + execute)
-/// - pipeline: Pass-based pipeline infrastructure
-/// - frontend: User-facing program construction
-/// - utils: Utility types (HostBuffer, etc.)
+/// - `pr`: Program Representation (Zigrad-owned, toolchain-neutral).
+///   Includes `pr.ad` for core AD transforms (VJP, JVP).
+/// - `lower`: Lowering passes (PR -> MLIR).
+/// - `backend`: Unified backend (compile + execute).
+/// - `pipeline`: Pass-based pipeline infrastructure.
+/// - `frontend`: User-facing program construction, compilation, and training.
+///   - `frontend.compile`: AOT compilation of traced functions.
+///   - `frontend.transforms`: Trace-time function transforms (e.g. `value_and_grad`).
+///   - `frontend.optim`: Traced-mode optimizer building blocks.
+///   - `frontend.train`: Training loop state management (`TrainState`).
+/// - `Tensor`: Unified tensor type (traced, device, or abstract mode).
+/// - `utils`: Utility types (HostBuffer, Tree, etc.).
 const std = @import("std");
 
 pub const build_options = @import("build_options");
@@ -33,9 +39,11 @@ pub const mirage = if (build_options.has_mirage) @import("mirage/root.zig") else
 
 // Tier 1: commonly used types at top level
 pub const Backend = backend.Backend;
+pub const Tensor = @import("tensor.zig");
 pub const HostBuffer = utils.HostBuffer;
-pub const DType = utils.DType;
-pub const Shape = utils.Shape;
+pub const DType = pr.DType;
+pub const Shape = pr.Shape;
+pub const BoundedShape = pr.BoundedShape;
 
 test {
     std.testing.refAllDecls(@This());

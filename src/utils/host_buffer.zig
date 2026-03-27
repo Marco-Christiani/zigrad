@@ -3,102 +3,131 @@
 /// Host-side buffer management with shape and dtype metadata.
 /// No device buffer operations, those belong to backend.Buffer.
 const std = @import("std");
+const pr = @import("../pr/pr.zig");
 
-pub const DType = enum {
-    bf16,
-    f32,
-    f64,
-    i32,
-    i64,
-    u32,
-    u64,
+const DType = pr.DType;
+const Shape = pr.Shape;
+const BoundedShape = pr.BoundedShape;
 
-    pub fn size_in_bytes(self: DType) usize {
-        return switch (self) {
-            .bf16 => 2,
-            .f32, .i32, .u32 => 4,
-            .f64, .i64, .u64 => 8,
-        };
+/// Format a shape for display.
+pub fn format_shape(shape: BoundedShape, allocator: std.mem.Allocator) ![]const u8 {
+    const dims = shape.const_slice();
+    if (dims.len == 0) return try allocator.dupe(u8, "scalar");
+
+    var result = std.ArrayList(u8).initCapacity(allocator, 32) catch
+        return try allocator.dupe(u8, "[...]");
+    defer result.deinit(allocator);
+
+    const writer = result.writer(allocator);
+    try writer.writeAll("[");
+    for (dims, 0..) |d, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.print("{d}", .{d});
     }
+    try writer.writeAll("]");
 
-    pub fn name(self: DType) []const u8 {
-        return switch (self) {
-            .bf16 => "bf16",
-            .f32 => "f32",
-            .f64 => "f64",
-            .i32 => "i32",
-            .i64 => "i64",
-            .u32 => "u32",
-            .u64 => "u64",
-        };
-    }
-};
-
-pub const Shape = struct {
-    dims: []const usize,
-
-    pub fn num_elements(self: Shape) usize {
-        var count: usize = 1;
-        for (self.dims) |d| count *= d;
-        return count;
-    }
-
-    pub fn rank(self: Shape) usize {
-        return self.dims.len;
-    }
-
-    pub fn format(self: Shape, allocator: std.mem.Allocator) ![]const u8 {
-        if (self.dims.len == 0) return try allocator.dupe(u8, "scalar");
-
-        // Build format string with all dimensions
-        var result = std.ArrayList(u8).initCapacity(allocator, 32) catch
-            return try allocator.dupe(u8, "[...]");
-        defer result.deinit(allocator);
-
-        const writer = result.writer(allocator);
-        try writer.writeAll("[");
-        for (self.dims, 0..) |d, i| {
-            if (i > 0) try writer.writeAll(", ");
-            try writer.print("{d}", .{d});
-        }
-        try writer.writeAll("]");
-
-        return result.toOwnedSlice(allocator);
-    }
-};
+    return result.toOwnedSlice(allocator);
+}
 
 pub const HostBuffer = struct {
-    data: []align(8) u8,
-    shape: Shape,
+    /// Backing memory for the buffer. Tagged by allocation strategy
+    /// to ensure correct deallocation.
+    pub const Backing = union(enum) {
+        /// Standard allocator (`alignedAlloc` / `free`).
+        heap: struct {
+            data: []align(8) u8,
+            allocator: std.mem.Allocator,
+        },
+        /// Memory-mapped file (`mmap` / `munmap`).
+        mmap: []align(std.heap.page_size_min) u8,
+        /// Non-owning view into externally-managed memory.
+        /// `deinit` is a no-op for the data.
+        borrowed: []const u8,
+    };
+
+    backing: Backing,
+    shape: BoundedShape,
     dtype: DType,
-    allocator: std.mem.Allocator,
-    owns_dims: bool,
 
-    pub fn init(allocator: std.mem.Allocator, shape: Shape, dtype: DType) !HostBuffer {
-        const num_bytes = shape.num_elements() * dtype.size_in_bytes();
-        const data = try allocator.alignedAlloc(u8, .@"8", num_bytes);
-
-        // Allocate and copy shape dims
-        const dims = try allocator.dupe(usize, shape.dims);
-
-        return HostBuffer{
-            .data = data,
-            .shape = Shape{ .dims = dims },
-            .dtype = dtype,
-            .allocator = allocator,
-            .owns_dims = true,
+    /// Raw byte slice for passing to backends or byte-level operations.
+    pub fn data(self: HostBuffer) []const u8 {
+        return switch (self.backing) {
+            .heap => |h| h.data,
+            .mmap => |s| s,
+            .borrowed => |s| s,
         };
     }
 
-    pub fn from_slice(allocator: std.mem.Allocator, data: anytype, shape: Shape, dtype: DType) !HostBuffer {
-        const DataType = @TypeOf(data);
+    /// Mutable byte slice. Only valid for heap-backed buffers.
+    pub fn data_mut(self: HostBuffer) []u8 {
+        return switch (self.backing) {
+            .heap => |h| h.data,
+            .mmap => @panic("cannot mutate mmap-backed HostBuffer"),
+            .borrowed => @panic("cannot mutate borrowed HostBuffer"),
+        };
+    }
+
+    pub fn init(allocator: std.mem.Allocator, shape: BoundedShape, dtype: DType) !HostBuffer {
+        const num_bytes = shape.num_elements() * dtype.size_in_bytes();
+        const bytes = try allocator.alignedAlloc(u8, .@"8", num_bytes);
+
+        return .{
+            .backing = .{ .heap = .{ .data = bytes, .allocator = allocator } },
+            .shape = shape,
+            .dtype = dtype,
+        };
+    }
+
+    /// Memory-map a file and wrap it as a HostBuffer.
+    ///
+    /// The returned buffer's data is a read-only view into the mmap'd region.
+    /// On `deinit`, the mapping is released via `munmap`.
+    pub fn from_mmap(path: []const u8, shape: BoundedShape, dtype: DType) !HostBuffer {
+        var file = if (std.fs.path.isAbsolute(path))
+            try std.fs.openFileAbsolute(path, .{})
+        else
+            try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+
+        const stat = try file.stat();
+        const size: usize = @intCast(stat.size);
+
+        const raw = try std.posix.mmap(
+            null,
+            size,
+            std.posix.PROT.READ,
+            .{ .TYPE = .SHARED },
+            file.handle,
+            0,
+        );
+
+        return .{
+            .backing = .{ .mmap = raw },
+            .shape = shape,
+            .dtype = dtype,
+        };
+    }
+
+    /// Wrap an externally-owned byte slice as a non-owning HostBuffer.
+    ///
+    /// The caller is responsible for keeping `bytes` alive for the
+    /// lifetime of this HostBuffer. `deinit` does not free the data.
+    pub fn borrow(bytes: []const u8, shape: BoundedShape, dtype: DType) HostBuffer {
+        return .{
+            .backing = .{ .borrowed = bytes },
+            .shape = shape,
+            .dtype = dtype,
+        };
+    }
+
+    pub fn from_slice(allocator: std.mem.Allocator, src: anytype, shape: BoundedShape, dtype: DType) !HostBuffer {
+        const DataType = @TypeOf(src);
         const data_info = @typeInfo(DataType);
 
         if (data_info != .pointer) {
             @compileError("from_slice requires a pointer or slice type, got: " ++ @typeName(DataType));
         }
 
-        // Accept both slices and pointers to arrays
         if (data_info.pointer.size != .slice and data_info.pointer.size != .one) {
             @compileError("from_slice requires a slice or pointer-to-array, got pointer size: " ++ @tagName(data_info.pointer.size));
         }
@@ -106,47 +135,43 @@ pub const HostBuffer = struct {
         const num_bytes = shape.num_elements() * dtype.size_in_bytes();
         const data_bytes = try allocator.alignedAlloc(u8, .@"8", num_bytes);
 
-        // Copy data as bytes (works for both slices and pointer-to-array)
-        const src_bytes = std.mem.sliceAsBytes(data);
+        const src_bytes = std.mem.sliceAsBytes(src);
         if (src_bytes.len < num_bytes) return error.InsufficientData;
         @memcpy(data_bytes, src_bytes[0..num_bytes]);
 
-        const dims = try allocator.dupe(usize, shape.dims);
-
-        return HostBuffer{
-            .data = data_bytes,
-            .shape = Shape{ .dims = dims },
+        return .{
+            .backing = .{ .heap = .{ .data = data_bytes, .allocator = allocator } },
+            .shape = shape,
             .dtype = dtype,
-            .allocator = allocator,
-            .owns_dims = true,
         };
     }
 
     pub fn deinit(self: *HostBuffer) void {
-        self.allocator.free(self.data);
-        if (self.owns_dims) {
-            self.allocator.free(self.shape.dims);
+        switch (self.backing) {
+            .heap => |h| h.allocator.free(h.data),
+            .mmap => |s| std.posix.munmap(s),
+            .borrowed => {},
         }
     }
 
-    /// Fill buffer with a scalar value
+    /// Fill buffer with a scalar value. Heap-backed only.
     pub fn fill(self: *HostBuffer, comptime T: type, value: T) void {
         const count = self.shape.num_elements();
-        const data_slice: []T = @alignCast(std.mem.bytesAsSlice(T, self.data));
-        for (data_slice[0..count]) |*elem| {
+        const slice: []T = @alignCast(std.mem.bytesAsSlice(T, self.data_mut()));
+        for (slice[0..count]) |*elem| {
             elem.* = value;
         }
     }
 
-    /// View buffer as typed slice
+    /// View buffer as mutable typed slice. Heap-backed only.
     pub fn as_slice(self: *HostBuffer, comptime T: type) []T {
-        return @alignCast(std.mem.bytesAsSlice(T, self.data));
+        return @alignCast(std.mem.bytesAsSlice(T, self.data_mut()));
     }
 
-    /// Print buffer contents (for debugging)
-    pub fn print(self: *HostBuffer, writer: anytype) !void {
-        const shape_str = try self.shape.format(self.allocator);
-        defer self.allocator.free(shape_str);
+    /// Print buffer contents (for debugging).
+    pub fn print(self: *HostBuffer, writer: anytype, allocator: std.mem.Allocator) !void {
+        const shape_str = try format_shape(self.shape, allocator);
+        defer allocator.free(shape_str);
 
         try writer.print("HostBuffer({s}, {s}): ", .{ self.dtype.name(), shape_str });
 
@@ -154,7 +179,7 @@ pub const HostBuffer = struct {
 
         switch (self.dtype) {
             .bf16 => {
-                const slice = self.as_slice(u16);
+                const slice: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, self.data()));
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
@@ -166,7 +191,7 @@ pub const HostBuffer = struct {
                 try writer.writeAll("]");
             },
             .f32 => {
-                const slice = self.as_slice(f32);
+                const slice: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, self.data()));
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
@@ -178,7 +203,7 @@ pub const HostBuffer = struct {
                 try writer.writeAll("]");
             },
             .f64 => {
-                const slice = self.as_slice(f64);
+                const slice: []const f64 = @alignCast(std.mem.bytesAsSlice(f64, self.data()));
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
@@ -190,7 +215,7 @@ pub const HostBuffer = struct {
                 try writer.writeAll("]");
             },
             .i32 => {
-                const slice = self.as_slice(i32);
+                const slice: []const i32 = @alignCast(std.mem.bytesAsSlice(i32, self.data()));
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
@@ -216,11 +241,11 @@ fn bf16_to_f32(val: u16) f32 {
 test "HostBuffer basic operations" {
     const allocator = std.testing.allocator;
 
-    var buf = try HostBuffer.init(allocator, .{ .dims = &[_]usize{ 2, 3 } }, .f32);
+    var buf = try HostBuffer.init(allocator, BoundedShape.from_slice(&[_]i64{ 2, 3 }), .f32);
     defer buf.deinit();
 
     try std.testing.expectEqual(@as(usize, 6), buf.shape.num_elements());
-    try std.testing.expectEqual(@as(usize, 24), buf.data.len);
+    try std.testing.expectEqual(@as(usize, 24), buf.data().len);
 
     buf.fill(f32, 42.0);
     const slice = buf.as_slice(f32);
@@ -231,11 +256,19 @@ test "HostBuffer basic operations" {
 test "HostBuffer from_slice" {
     const allocator = std.testing.allocator;
 
-    const data = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
-    var buf = try HostBuffer.from_slice(allocator, &data, .{ .dims = &[_]usize{4} }, .f32);
+    const src = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    var buf = try HostBuffer.from_slice(allocator, &src, BoundedShape.from_slice(&[_]i64{4}), .f32);
     defer buf.deinit();
 
     const slice = buf.as_slice(f32);
     try std.testing.expectEqual(@as(f32, 1.0), slice[0]);
     try std.testing.expectEqual(@as(f32, 4.0), slice[3]);
+}
+
+test "HostBuffer borrow" {
+    const src = [_]f32{ 1.0, 2.0, 3.0 };
+    var buf = HostBuffer.borrow(std.mem.sliceAsBytes(&src), BoundedShape.from_slice(&[_]i64{3}), .f32);
+    defer buf.deinit(); // no-op for borrowed
+
+    try std.testing.expectEqual(@as(usize, 12), buf.data().len);
 }

@@ -1,10 +1,12 @@
-pub const host_buffer = @import("host_buffer.zig");
+const host_buffer = @import("host_buffer.zig");
+const loop_timer = @import("loop_timer.zig");
+const tree = @import("tree.zig");
 const symbols = @import("symbols.zig");
 
 pub const HostBuffer = host_buffer.HostBuffer;
-pub const DType = host_buffer.DType;
-pub const Shape = host_buffer.Shape;
+pub const LoopTimer = loop_timer.LoopTimer;
 pub const Symbols = symbols.Symbols;
+pub const Tree = tree.Tree;
 
 test {
     @import("std").testing.refAllDecls(@This());

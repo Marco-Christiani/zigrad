@@ -1,3 +1,58 @@
+//! Frontend: user-facing API for building, transforming, and compiling programs.
+//!
+//! The frontend sits between user code and the PR/pipeline/backend layers. It
+//!  provides three main capabilities:
+//!
+//! 1. **`compile`**: AOT compilation of a comptime function into an executable.
+//!    Traces the function against abstract Tensor specs, optionally applies a
+//!    transform (e.g. VJP), then lowers and compiles through the pipeline.
+//!    Returns a `CompiledModel` ready for `TrainState` or manual execution.
+//!
+//! 2. **`transforms`**: Comptime function transforms (e.g. `value_and_grad`)
+//!    that operate *during* tracing. These are called inside a traced function
+//!    to compose AD with user logic (optimizer, regularization, etc.) in a
+//!    single compiled program.
+//!
+//! 3. **`optim`**: Traced-mode optimizer building blocks (e.g. `sgd_update`).
+//!
+//! ## Two paths to value-and-grad
+//!
+//! Both use `pr.ad.vjp_with_value`/`pr.ad.jvp_with_value` under the hood. The
+//!  choice depends on whether the optimizer runs inside or outside the
+//!  compiled program:
+//!
+//! ### Path A: trace-time transform (optimizer in-graph)
+//!
+//! The user writes a `train_step` that calls `transforms.value_and_grad` and
+//! applies optimizer updates inside the trace. The whole step compiles as one
+//! program. This is the common training path.
+//!
+//! ```zig
+//! fn train_step(params: Params, batch: Batch) !struct { loss: Tensor, updated: Params } {
+//!     var vg = try transforms.value_and_grad(loss_fn, .{ params, batch });
+//!     defer vg.deinit();
+//!     // ... apply optimizer to vg.grads, return updated params
+//! }
+//!
+//! var compiled = try frontend.compile(train_step, alloc, backend, device, specs, .{});
+//! ```
+//!
+//! ### Path B: compile-time transform (out-of-graph optimizer)
+//!
+//! Pass `.transform = .value_and_grad` to `compile`. The compiled program returns
+//!  `[loss, grad_0, ..., grad_n]` as raw buffers. The caller applies optimizer
+//!  logic on the host or in a separate compiled program.
+//!
+//! ```zig
+//! var compiled = try frontend.compile(loss_fn, alloc, backend, device, specs, .{
+//!     .transform = .value_and_grad,
+//! });
+//! // execute returns [loss_buf, grad_buf_0, ..., grad_buf_n]
+//! ```
+//!
+//! Path A is preferred for performance (one fused program).
+//! Path B is useful for debugging, gradient inspection, or highly custom scenarios
+//!  (e.g., when the optimizer is not expressible in traced Tensor ops).
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
@@ -8,150 +63,18 @@ const lower = @import("../lower/root.zig");
 const pipeline = @import("../pipeline/root.zig");
 const backend = @import("../backend/root.zig");
 const Backend = backend.Backend;
-const utils = @import("../utils/host_buffer.zig");
+const HostBuffer = @import("../utils/root.zig").HostBuffer;
+const Tree = @import("../utils/tree.zig").Tree;
+const Tensor = @import("../tensor.zig");
 
+/// Training loop state management (buffer swap, donation, execute).
 pub const train = @import("train.zig");
+/// Comptime function transforms for traced Tensor programs (e.g. `value_and_grad`).
+pub const transforms = @import("transforms.zig");
+/// Traced-mode optimizer building blocks (e.g. `sgd_update`).
+pub const optim = @import("optim.zig");
 
 const log = std.log.scoped(.@"zg/frontend");
-
-pub const TensorSpec = struct {
-    dtype: pr.DType,
-    dims: []const usize,
-};
-
-pub const Tensor = struct {
-    id: pr.VarId,
-    tensor: pr.Tensor,
-    builder: *Builder,
-
-    pub fn add(self: Tensor, rhs: Tensor) !Tensor {
-        return self.builder.emit_binary(.add, self, rhs);
-    }
-
-    pub fn sub(self: Tensor, rhs: Tensor) !Tensor {
-        return self.builder.emit_binary(.subtract, self, rhs);
-    }
-
-    pub fn mul(self: Tensor, rhs: Tensor) !Tensor {
-        return self.builder.emit_binary(.multiply, self, rhs);
-    }
-
-    pub fn div(self: Tensor, rhs: Tensor) !Tensor {
-        return self.builder.emit_binary(.divide, self, rhs);
-    }
-
-    pub fn max(self: Tensor, rhs: Tensor) !Tensor {
-        return self.builder.emit_binary(.maximum, self, rhs);
-    }
-
-    pub fn gather_rows(self: Tensor, indices: Tensor) !Tensor {
-        return self.builder.emit_gather_rows(self, indices);
-    }
-
-    pub fn gather(self: Tensor, indices: Tensor, params: pr.GatherParams) !Tensor {
-        return self.builder.emit_gather(self, indices, params);
-    }
-
-    pub fn gather_2d(self: Tensor, indices: Tensor) !Tensor {
-        return self.builder.emit_gather_2d(self, indices);
-    }
-
-    pub fn matmul(self: Tensor, rhs: Tensor) !Tensor {
-        return self.builder.emit_binary(.dot, self, rhs);
-    }
-
-    pub fn dot_general(self: Tensor, rhs: Tensor, params: pr.DotGeneralParams) !Tensor {
-        return self.builder.emit_dot_general(self, rhs, params);
-    }
-
-    pub fn reshape(self: Tensor, dims: []const usize) !Tensor {
-        const dims_copy = try self.builder.program.allocator().dupe(usize, dims);
-        return self.builder.emit_unary(.reshape, self, &.{.{ .out_shape = dims_copy }});
-    }
-
-    pub fn broadcast_in_dim(self: Tensor, out_dims: []const usize, broadcast_dimensions: []const i64) !Tensor {
-        const allocator = self.builder.program.allocator();
-        const out_copy = try allocator.dupe(usize, out_dims);
-        const bd_copy = try allocator.dupe(i64, broadcast_dimensions);
-        return self.builder.emit_unary(
-            .broadcast_in_dim,
-            self,
-            &.{ .{ .out_shape = out_copy }, .{ .broadcast_dimensions = bd_copy } },
-        );
-    }
-
-    pub fn transpose(self: Tensor, permutation: []const i64) !Tensor {
-        const perm_copy = try self.builder.program.allocator().dupe(i64, permutation);
-        return self.builder.emit_unary(.transpose, self, &.{.{ .permutation = perm_copy }});
-    }
-
-    pub fn slice(self: Tensor, start_indices: []const i64, limit_indices: []const i64, strides: []const i64) !Tensor {
-        const allocator = self.builder.program.allocator();
-        const start_copy = try allocator.dupe(i64, start_indices);
-        const limit_copy = try allocator.dupe(i64, limit_indices);
-        const stride_copy = try allocator.dupe(i64, strides);
-        return self.builder.emit_unary(
-            .slice,
-            self,
-            &.{.{ .slice = .{ .start_indices = start_copy, .limit_indices = limit_copy, .strides = stride_copy } }},
-        );
-    }
-
-    pub fn concatenate(self: Tensor, others: []const Tensor, axis: i64) !Tensor {
-        return self.builder.emit_concatenate(self, others, axis);
-    }
-
-    pub fn reduce_sum(self: Tensor, axes: []const i64) !Tensor {
-        const axes_copy = try self.builder.program.allocator().dupe(i64, axes);
-        return self.builder.emit_unary(.reduce_sum, self, &.{.{ .reduce_axes = axes_copy }});
-    }
-
-    pub fn reduce_max(self: Tensor, axes: []const i64) !Tensor {
-        const axes_copy = try self.builder.program.allocator().dupe(i64, axes);
-        return self.builder.emit_unary(.reduce_max, self, &.{.{ .reduce_axes = axes_copy }});
-    }
-
-    pub fn exp(self: Tensor) !Tensor {
-        return self.builder.emit_unary(.exp, self, &.{});
-    }
-
-    pub fn log(self: Tensor) !Tensor {
-        return self.builder.emit_unary(.log, self, &.{});
-    }
-
-    pub fn rsqrt(self: Tensor) !Tensor {
-        return self.builder.emit_unary(.rsqrt, self, &.{});
-    }
-
-    pub fn logistic(self: Tensor) !Tensor {
-        return self.builder.emit_unary(.logistic, self, &.{});
-    }
-
-    pub fn convert(self: Tensor, out_dtype: pr.DType) !Tensor {
-        return self.builder.emit_convert(self, out_dtype);
-    }
-
-    pub fn compare(self: Tensor, rhs: Tensor, params: pr.CompareParams) !Tensor {
-        return self.builder.emit_compare(self, rhs, params);
-    }
-
-    pub fn select(self: Tensor, cond: Tensor, on_false: Tensor) !Tensor {
-        return self.builder.emit_select(cond, self, on_false);
-    }
-
-    pub fn relu(self: Tensor) !Tensor {
-        const zero = try self.builder.scalar_literal(zero_literal(self.tensor.dtype));
-        const broadcast = try self.builder.emit_unary(
-            .broadcast_in_dim,
-            zero,
-            &.{
-                .{ .out_shape = self.tensor.shape.dims },
-                .{ .broadcast_dimensions = &.{} },
-            },
-        );
-        return self.builder.emit_binary(.maximum, self, broadcast);
-    }
-};
 
 pub const Builder = struct {
     program: *pr.Program,
@@ -168,24 +91,24 @@ pub const Builder = struct {
         self.builder.deinit();
     }
 
-    pub fn param(self: *Builder, spec: TensorSpec) !Tensor {
-        const id = try self.builder.param_tensor(spec.dtype, spec.dims);
-        return self.tensor_from_id(id);
+    /// Create a traced parameter tensor from an abstract tensor spec.
+    pub fn param(self: *Builder, spec: Tensor) !Tensor {
+        return Tensor.param(&self.builder, spec.dtype, spec.shape.const_slice());
     }
 
     pub fn scalar_literal(self: *Builder, lit: pr.Literal) !Tensor {
         const id = try self.builder.literal_scalar(lit);
-        return self.tensor_from_id(id);
+        return Tensor.from_id(&self.builder, id);
     }
 
-    pub fn iota(self: *Builder, out_dtype: pr.DType, out_dims: []const usize, iota_dim: i64) !Tensor {
+    pub fn iota(self: *Builder, out_dtype: pr.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
         const id = try self.builder.iota(out_dtype, out_dims, iota_dim);
-        return self.tensor_from_id(id);
+        return Tensor.from_id(&self.builder, id);
     }
 
     pub fn finish(self: *Builder, returns: []const Tensor) !pr.Function {
         const ids = try self.program.allocator().alloc(pr.VarId, returns.len);
-        for (returns, 0..) |t, i| ids[i] = t.id;
+        for (returns, 0..) |t, i| ids[i] = try t.get_id();
         const func = try self.builder.finish(ids);
         try self.program.add_function(func);
         return func;
@@ -201,150 +124,6 @@ pub const Builder = struct {
     pub fn pop_region(self: *Builder) !void {
         try self.builder.pop_region();
     }
-
-    fn emit_binary(self: *Builder, prim: pr.Prim, lhs: Tensor, rhs: Tensor) !Tensor {
-        try self.assert_same_builder(lhs, rhs);
-        const id = try self.builder.emit(prim, &.{ lhs.id, rhs.id }, &.{});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_unary(self: *Builder, prim: pr.Prim, operand: Tensor, params: []const pr.Param) !Tensor {
-        try self.assert_builder(operand);
-        const id = try self.builder.emit(prim, &.{operand.id}, params);
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_dot_general(self: *Builder, lhs: Tensor, rhs: Tensor, params: pr.DotGeneralParams) !Tensor {
-        try self.assert_same_builder(lhs, rhs);
-        const a = self.program.allocator();
-        const lhs_batch_dims = try a.dupe(i64, params.lhs_batch_dims);
-        const rhs_batch_dims = try a.dupe(i64, params.rhs_batch_dims);
-        const lhs_contracting_dims = try a.dupe(i64, params.lhs_contracting_dims);
-        const rhs_contracting_dims = try a.dupe(i64, params.rhs_contracting_dims);
-        const id = try self.builder.emit(.dot_general, &.{ lhs.id, rhs.id }, &.{.{ .dot_general = .{
-            .lhs_batch_dims = lhs_batch_dims,
-            .rhs_batch_dims = rhs_batch_dims,
-            .lhs_contracting_dims = lhs_contracting_dims,
-            .rhs_contracting_dims = rhs_contracting_dims,
-        } }});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_compare(self: *Builder, lhs: Tensor, rhs: Tensor, params: pr.CompareParams) !Tensor {
-        try self.assert_same_builder(lhs, rhs);
-        const id = try self.builder.emit(.compare, &.{ lhs.id, rhs.id }, &.{.{ .compare = params }});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_select(self: *Builder, cond: Tensor, on_true: Tensor, on_false: Tensor) !Tensor {
-        try self.assert_builder(cond);
-        try self.assert_same_builder(on_true, on_false);
-        const id = try self.builder.emit(.select, &.{ cond.id, on_true.id, on_false.id }, &.{});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_concatenate(self: *Builder, first: Tensor, others: []const Tensor, axis: i64) !Tensor {
-        const a = self.program.allocator();
-        const inputs = try a.alloc(pr.VarId, others.len + 1);
-        inputs[0] = first.id;
-        for (others, 0..) |t, i| {
-            try self.assert_same_builder(first, t);
-            inputs[i + 1] = t.id;
-        }
-        const id = try self.builder.emit(.concatenate, inputs, &.{.{ .concat_axis = axis }});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_convert(self: *Builder, operand: Tensor, out_dtype: pr.DType) !Tensor {
-        try self.assert_builder(operand);
-        const id = try self.builder.emit(.convert, &.{operand.id}, &.{.{ .out_dtype = out_dtype }});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_gather_rows(self: *Builder, operand: Tensor, indices: Tensor) !Tensor {
-        try self.assert_same_builder(operand, indices);
-        if (operand.tensor.shape.rank() != 2) return error.InvalidGatherOperand;
-        if (indices.tensor.shape.rank() != 1) return error.InvalidGatherIndices;
-
-        const hidden: i64 = @intCast(operand.tensor.shape.dims[1]);
-        const a = self.program.allocator();
-
-        const slice_sizes = try a.dupe(i64, &.{ 1, hidden });
-        const offset_dims = try a.dupe(i64, &.{1});
-        const collapsed_slice_dims = try a.dupe(i64, &.{0});
-        const start_index_map = try a.dupe(i64, &.{0});
-
-        const params: pr.GatherParams = .{
-            .slice_sizes = slice_sizes,
-            .offset_dims = offset_dims,
-            .collapsed_slice_dims = collapsed_slice_dims,
-            .start_index_map = start_index_map,
-            .index_vector_dim = 1,
-        };
-
-        const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, &.{.{ .gather = params }});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_gather(self: *Builder, operand: Tensor, indices: Tensor, params: pr.GatherParams) !Tensor {
-        try self.assert_same_builder(operand, indices);
-        const a = self.program.allocator();
-
-        const slice_sizes = try a.dupe(i64, params.slice_sizes);
-        const offset_dims = try a.dupe(i64, params.offset_dims);
-        const collapsed_slice_dims = try a.dupe(i64, params.collapsed_slice_dims);
-        const start_index_map = try a.dupe(i64, params.start_index_map);
-
-        const gparams: pr.GatherParams = .{
-            .slice_sizes = slice_sizes,
-            .offset_dims = offset_dims,
-            .collapsed_slice_dims = collapsed_slice_dims,
-            .start_index_map = start_index_map,
-            .index_vector_dim = params.index_vector_dim,
-        };
-
-        const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, &.{.{ .gather = gparams }});
-        return self.tensor_from_id(id);
-    }
-
-    fn emit_gather_2d(self: *Builder, operand: Tensor, indices: Tensor) !Tensor {
-        try self.assert_same_builder(operand, indices);
-        if (operand.tensor.shape.rank() != 2) return error.InvalidGatherOperand;
-        if (indices.tensor.shape.rank() != 2) return error.InvalidGatherIndices;
-        if (indices.tensor.shape.dims[1] != 2) return error.InvalidGatherIndices;
-
-        const a = self.program.allocator();
-        const slice_sizes = try a.dupe(i64, &.{ 1, 1 });
-        const offset_dims = try a.dupe(i64, &.{});
-        const collapsed_slice_dims = try a.dupe(i64, &.{ 0, 1 });
-        const start_index_map = try a.dupe(i64, &.{ 0, 1 });
-
-        const params: pr.GatherParams = .{
-            .slice_sizes = slice_sizes,
-            .offset_dims = offset_dims,
-            .collapsed_slice_dims = collapsed_slice_dims,
-            .start_index_map = start_index_map,
-            .index_vector_dim = 1,
-        };
-
-        const id = try self.builder.emit(.gather, &.{ operand.id, indices.id }, &.{.{ .gather = params }});
-        return self.tensor_from_id(id);
-    }
-
-    fn tensor_from_id(self: *Builder, id: pr.VarId) !Tensor {
-        if (@as(usize, @intCast(id)) >= self.builder.avals.items.len) return error.InvalidVarId;
-        const aval = self.builder.avals.items[@intCast(id)];
-        const tensor = aval.as_tensor() orelse return error.UnsupportedAval;
-        return .{ .id = id, .tensor = tensor, .builder = self };
-    }
-
-    fn assert_builder(self: *Builder, operand: Tensor) !void {
-        if (operand.builder != self) return error.CrossBuilderOp;
-    }
-
-    fn assert_same_builder(self: *Builder, lhs: Tensor, rhs: Tensor) !void {
-        if (lhs.builder != self or rhs.builder != self) return error.CrossBuilderOp;
-    }
 };
 
 /// Full configuration for the `compile_program` pipeline.
@@ -357,12 +136,30 @@ pub const Builder = struct {
 /// MLIR-stage passes (select) are NOT added here. If MLIR-level
 /// kernelization is needed, assemble the pipeline manually. `compile_program`
 /// is a convenience for the common PR-level path.
+/// Which transform to apply during `compile`.
+///
+/// This controls whether VJP is applied as a compilation step. For in-graph
+/// optimizer composition, use `transforms.value_and_grad` inside a traced
+/// function and compile with `.forward` instead. See the module-level docs
+/// for a comparison of the two paths.
+pub const Transform = enum {
+    /// Compile the function as-is (no AD transform).
+    forward,
+    /// TODO: jvp
+    /// Apply VJP at compile time. The compiled program takes the same inputs
+    ///  as the original function and returns `[value, grad_0, ..., grad_n]`.
+    /// The function must return a single scalar Tensor (the loss).
+    /// Gradients are w.r.t. all inputs. Uses `pr.ad.vjp_with_value` internally.
+    value_and_grad,
+};
+
 pub const CompileConfig = struct {
     entry_name: []const u8 = "main",
+    transform: Transform = .forward,
     lower: lower.LowerPassConfig = .{},
     /// Pre-computed tuning decisions. When set, the pipeline adds a
-    /// `KernelizePass` that rewrites annotated regions matching profitable
-    /// store entries into `custom_call` ops.
+    ///  `KernelizePass` that rewrites annotated regions matching profitable
+    ///  store entries into `custom_call` ops.
     kernel_store: ?*const kernel.KernelStore = null,
     dump_pr: ?pipeline.DumpConfig = null,
     dump_mlir: ?pipeline.DumpConfig = null,
@@ -375,63 +172,210 @@ pub const CompileConfig = struct {
 
 /// Compiled executable with arity metadata.
 ///
-/// Callers manage the executable lifetime directly via `exe.deinit(api)`.
-/// Arity fields record the expected flat input/output counts for validation.
-pub const CompiledForward = struct {
+/// Result of `compile`. Pass to `TrainState.init_from_model` for training
+///  loops, or use `backend.execute` directly for inference.
+/// Arity fields record the expected flat input/output counts.
+pub const CompiledModel = struct {
     exe: Backend.Executable,
     input_arity: usize,
     output_arity: usize,
+    /// Per-input donation mask, matching flattened spec order.
+    ///
+    /// Donatable inputs may have their buffers reused by the backend for
+    ///  outputs. In a training loop this distinguishes owned parameters
+    ///  (donatable, swapped each step) from borrowed batch data.
+    donatable: []const bool,
+    allocator: std.mem.Allocator,
+
+    /// Number of donatable inputs.
+    pub fn donatable_count(self: CompiledModel) usize {
+        var count: usize = 0;
+        for (self.donatable) |d| {
+            if (d) count += 1;
+        }
+        return count;
+    }
+
+    /// Indices of non-donatable inputs (for backend execute calls).
+    pub fn non_donatable_indices(self: CompiledModel, allocator: std.mem.Allocator) ![]const i64 {
+        var list = try std.ArrayList(i64).initCapacity(allocator, self.input_arity);
+        errdefer list.deinit(allocator);
+        for (self.donatable, 0..) |d, i| {
+            if (!d) try list.append(allocator, @intCast(i));
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn deinit(self: *CompiledModel) void {
+        self.allocator.free(self.donatable);
+    }
 };
 
-pub fn compile_forward(
+/// Trace a comptime function against abstract specs, optionally transform it,
+///  and compile through the pipeline into a backend executable.
+///
+/// `func` is a comptime-known function whose parameters match the structure
+///  of `specs`. Each Tensor leaf in `specs` becomes a traced parameter.
+///  Struct/tuple nesting in `specs` is preserved — the function receives the
+///  same structure with traced Tensors in place of abstract ones.
+///
+/// `config.transform` controls AD application:
+///  - `.forward`: compile the function as traced (no AD).
+///  - `.value_and_grad`: apply VJP at compile time. `func` must return a
+///     single scalar Tensor. The compiled program returns
+///     `[loss, grad_0, ..., grad_n]` where grads are w.r.t. all spec leaves.
+///
+/// For in-graph optimizer composition (the common training path), use
+///  `transforms.value_and_grad` inside `func` and compile with `.forward`.
+///
+/// The donation mask on each spec Tensor (`donatable` field) flows into the
+///  returned `CompiledModel` and controls buffer reuse during execution.
+/// TODO: jvp
+pub fn compile(
+    comptime func: anytype,
     allocator: std.mem.Allocator,
     backend_handle: *Backend,
     device: Backend.Device,
-    func: anytype,
-    inputs: anytype,
+    specs: anytype,
     config: CompileConfig,
-) !CompiledForward {
+) !CompiledModel {
+    const SpecType = @TypeOf(specs);
+
     var program = pr.Program.init(allocator);
     defer program.deinit();
 
-    var builder = try Builder.init(&program, config.entry_name);
-    defer builder.deinit();
+    // Flatten specs into a tree. Arena-allocated, freed with the program.
+    var spec_tree = try Tree(Tensor).from(program.allocator(), specs);
+    const leaf_count = spec_tree.len();
 
-    const input_tensors = try build_inputs(&builder, inputs);
+    // Build donation mask from spec leaves. Caller-owned (outlives program).
+    const donatable = try allocator.alloc(bool, leaf_count);
+    errdefer allocator.free(donatable);
+    for (spec_tree.leaves, 0..) |spec, i| {
+        donatable[i] = spec.donatable;
+    }
 
-    const result = if (@typeInfo(@TypeOf(input_tensors)) == .@"struct" and @typeInfo(@TypeOf(input_tensors)).@"struct".is_tuple)
-        @call(.auto, func, input_tensors)
+    switch (config.transform) {
+        .forward => {
+            var builder = try pr.FunctionBuilder.init(&program, config.entry_name);
+            defer builder.deinit();
+
+            const output_tensors = try trace_and_call(func, SpecType, &spec_tree, &builder, allocator);
+            defer allocator.free(output_tensors);
+            if (output_tensors.len == 0) return error.NoOutputs;
+
+            const ids = try allocator.alloc(pr.VarId, output_tensors.len);
+            defer allocator.free(ids);
+            for (output_tensors, 0..) |t, i| ids[i] = try t.get_id();
+
+            const func_pr = try builder.finish(ids);
+            try program.add_function(func_pr);
+
+            const exe = try compile_program(backend_handle, allocator, &program, device, config, config.entry_name);
+            return .{
+                .exe = exe,
+                .input_arity = leaf_count,
+                .output_arity = output_tensors.len,
+                .donatable = donatable,
+                .allocator = allocator,
+            };
+        },
+        .value_and_grad => {
+            // Trace the loss function.
+            var loss_builder = try pr.FunctionBuilder.init(&program, "loss");
+            defer loss_builder.deinit();
+
+            const output_tensors = try trace_and_call(func, SpecType, &spec_tree, &loss_builder, allocator);
+            defer allocator.free(output_tensors);
+            if (output_tensors.len != 1) return error.UnexpectedOutputs;
+
+            const loss_id = try output_tensors[0].get_id();
+            const loss_func = try loss_builder.finish(&.{loss_id});
+
+            // Register the loss function for IR debuggability (see transforms.zig).
+            // Never called at runtime, the VJP replays forward equations internally.
+            try program.add_function(loss_func);
+
+            // VJP transform.
+            const vjp_func = try ad.vjp_with_value(program.allocator(), &program, loss_func, "loss_vjp");
+            try program.add_function(vjp_func);
+
+            // Build step function: primals → loss_vjp(primals, cotangent) → [value, grads...].
+            var step_builder = try pr.FunctionBuilder.init(&program, config.entry_name);
+            defer step_builder.deinit();
+
+            const primals = try allocator.alloc(pr.VarId, leaf_count);
+            defer allocator.free(primals);
+            for (spec_tree.leaves, 0..) |spec, i| {
+                primals[i] = try step_builder.param_tensor(spec.dtype, spec.shape.const_slice());
+            }
+
+            // Emit cotangent (ones_like for the scalar loss).
+            const loss_t = output_tensors[0];
+            const cot = try ad.emit_cotangent(&step_builder, .{
+                .dtype = loss_t.dtype,
+                .shape = .{ .dims = loss_t.dims() },
+            });
+
+            const call_inputs = try allocator.alloc(pr.VarId, leaf_count + 1);
+            defer allocator.free(call_inputs);
+            @memcpy(call_inputs[0..leaf_count], primals);
+            call_inputs[leaf_count] = cot;
+
+            const call_outputs = try step_builder.call("loss_vjp", call_inputs);
+            // vjp_with_value returns: [value, grad_0, ..., grad_n]
+            if (call_outputs.len != leaf_count + 1) return error.UnexpectedOutputs;
+
+            const step_func = try step_builder.finish(call_outputs);
+            try program.add_function(step_func);
+
+            const exe = try compile_program(backend_handle, allocator, &program, device, config, config.entry_name);
+            return .{
+                .exe = exe,
+                .input_arity = leaf_count,
+                .output_arity = call_outputs.len,
+                .donatable = donatable,
+                .allocator = allocator,
+            };
+        },
+    }
+}
+
+/// Trace a comptime function against a spec tree.
+///
+/// Creates traced parameters from each spec leaf via the given builder,
+///  reconstructs the structured type, and calls `func`. Returns the
+///  flattened output tensors.
+///
+/// Both `compile` branches use this to avoid duplicating the
+///  "map specs -> trace params -> call func -> collect outputs" sequence.
+fn trace_and_call(
+    comptime func: anytype,
+    comptime SpecType: type,
+    spec_tree: *const Tree(Tensor),
+    builder: *pr.FunctionBuilder,
+    allocator: std.mem.Allocator,
+) ![]Tensor {
+    // Map abstract specs to traced parameters in the builder.
+    // Arena-allocated via spec_tree's allocator (the program arena).
+    var traced = try spec_tree.map(Tensor, builder, struct {
+        fn f(b: *pr.FunctionBuilder, spec: Tensor) anyerror!Tensor {
+            return Tensor.param(b, spec.dtype, spec.shape.const_slice());
+        }
+    }.f);
+    _ = &traced; // arena-managed, no manual deinit needed
+
+    const structured = traced.extract(SpecType);
+    const result_raw = if (@typeInfo(SpecType) == .@"struct" and @typeInfo(SpecType).@"struct".is_tuple)
+        @call(.auto, func, structured)
     else
-        @call(.auto, func, .{input_tensors});
-
-    const outputs = switch (@typeInfo(@TypeOf(result))) {
-        .error_union => try result,
-        else => result,
+        @call(.auto, func, .{structured});
+    const result = switch (@typeInfo(@TypeOf(result_raw))) {
+        .error_union => try result_raw,
+        else => result_raw,
     };
 
-    const output_tensors = try flatten_outputs(allocator, outputs);
-    defer allocator.free(output_tensors);
-    if (output_tensors.len == 0) return error.NoOutputs;
-
-    _ = try builder.finish(output_tensors);
-
-    const flat_input_specs = try flatten_specs(allocator, inputs);
-    defer allocator.free(flat_input_specs);
-
-    const fwd_exe = try compile_program(
-        backend_handle,
-        allocator,
-        &program,
-        device,
-        config,
-        config.entry_name,
-    );
-
-    return .{
-        .exe = fwd_exe,
-        .input_arity = flat_input_specs.len,
-        .output_arity = output_tensors.len,
-    };
+    return flatten_outputs(allocator, result);
 }
 
 pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
@@ -458,14 +402,14 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
 /// Assemble and run the compilation pipeline: kernelize -> lower -> compile.
 ///
 /// Builds a pass chain from `config`, runs it over `program`, and hands the
-/// resulting MLIR to the PJRT backend for compilation. Returns a loaded
-/// executable ready for `backend.execute()`.
+///  resulting MLIR to the PJRT backend for compilation. Returns a loaded
+///  executable ready for `backend.execute()`.
 ///
 /// Pipeline: `[dump_pr] -> [kernelize(store)] -> validate -> lower -> legalize -> [dump_mlir]`
 ///
 /// This is a convenience for the common PR-level kernelization path. MLIR-stage
-/// passes (select) are not added here -- for MLIR-level kernelization,
-/// assemble the pipeline manually.
+///  passes (select) are not added here -- for MLIR-level kernelization,
+///  assemble the pipeline manually.
 pub fn compile_program(
     backend_handle: *Backend,
     allocator: std.mem.Allocator,
@@ -529,38 +473,11 @@ pub fn compile_program(
     return exe;
 }
 
+// ============================================================================
+// Comptime introspection helpers (Tensor-leaf trees)
+// ============================================================================
 
-pub fn build_inputs(builder: *Builder, spec: anytype) !SpecToTensorType(@TypeOf(spec)) {
-    const T = @TypeOf(spec);
-    if (T == TensorSpec) {
-        return try builder.param(spec);
-    }
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| {
-            var out: SpecToTensorType(T) = undefined;
-            inline for (info.fields) |field| {
-                @field(out, field.name) = try build_inputs(builder, @field(spec, field.name));
-            }
-            return out;
-        },
-        .array => |info| {
-            var out: SpecToTensorType(T) = undefined;
-            var i: usize = 0;
-            while (i < info.len) : (i += 1) {
-                out[i] = try build_inputs(builder, spec[i]);
-            }
-            return out;
-        },
-        else => {
-            if (T != TensorSpec) {
-                @compileError("input spec must be TensorSpec or a struct/tuple of TensorSpec");
-            }
-            return try builder.param(spec);
-        },
-    }
-}
-
-pub fn flatten_outputs(allocator: std.mem.Allocator, output: anytype) ![]Tensor {
+fn flatten_outputs(allocator: std.mem.Allocator, output: anytype) ![]Tensor {
     var list = try std.ArrayList(Tensor).initCapacity(allocator, 8);
     errdefer list.deinit(allocator);
     try append_output(allocator, &list, output);
@@ -590,106 +507,3 @@ fn append_output(allocator: std.mem.Allocator, list: *std.ArrayList(Tensor), out
         },
     }
 }
-
-fn SpecToTensorType(comptime T: type) type {
-    if (T == TensorSpec) return Tensor;
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| {
-            var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-            inline for (info.fields, 0..) |field, i| {
-                const field_type = SpecToTensorType(field.type);
-                fields[i] = .{
-                    .name = field.name,
-                    .type = field_type,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(field_type),
-                };
-            }
-            return @Type(.{
-                .@"struct" = .{
-                    .layout = .auto,
-                    .fields = &fields,
-                    .decls = &.{},
-                    .is_tuple = info.is_tuple,
-                },
-            });
-        },
-        .array => |info| {
-            const elem_type = SpecToTensorType(info.child);
-            return @Type(.{ .array = .{ .len = info.len, .child = elem_type, .sentinel_ptr = null } });
-        },
-        else => {
-            if (T == TensorSpec) return Tensor;
-            @compileError("input spec must be TensorSpec or a struct/tuple of TensorSpec");
-        },
-    }
-}
-
-pub fn flatten_specs(allocator: std.mem.Allocator, spec: anytype) ![]TensorSpec {
-    var list = try std.ArrayList(TensorSpec).initCapacity(allocator, 16);
-    errdefer list.deinit(allocator);
-    try append_specs(allocator, &list, spec);
-    return list.toOwnedSlice(allocator);
-}
-
-fn append_specs(allocator: std.mem.Allocator, list: *std.ArrayList(TensorSpec), spec: anytype) !void {
-    const T = @TypeOf(spec);
-    if (T == TensorSpec) {
-        try list.append(allocator, spec);
-        return;
-    }
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                try append_specs(allocator, list, @field(spec, field.name));
-            }
-        },
-        .array => |info| {
-            var i: usize = 0;
-            while (i < info.len) : (i += 1) {
-                try append_specs(allocator, list, spec[i]);
-            }
-        },
-        else => {
-            @compileError("input spec must be TensorSpec or a struct/tuple of TensorSpec");
-        },
-    }
-}
-
-fn zero_literal(dtype: pr.DType) pr.Literal {
-    return switch (dtype) {
-        .bf16 => .{ .bf16 = 0 },
-        .f32 => .{ .f32 = 0.0 },
-        .f64 => .{ .f64 = 0.0 },
-        .i32 => .{ .i32 = 0 },
-        .i64 => .{ .i64 = 0 },
-        .u32 => .{ .u32 = 0 },
-        .u64 => .{ .u64 = 0 },
-        .bool => .{ .bool = false },
-    };
-}
-
-/// Upload a host buffer to a device buffer.
-pub fn upload_host_buffer(
-    allocator: std.mem.Allocator,
-    backend_handle: *Backend,
-    device: Backend.Device,
-    buf: *utils.HostBuffer,
-) !Backend.Buffer {
-    const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
-    defer allocator.free(shape_i64);
-    for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);
-    const dtype: pr.DType = switch (buf.dtype) {
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .i32 => .i32,
-        .i64 => .i64,
-        .u32 => .u32,
-        .u64 => .u64,
-    };
-    return backend_handle.buffer_from_host(device, buf.data, dtype, shape_i64);
-}
-
-
