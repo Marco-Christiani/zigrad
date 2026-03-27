@@ -2,6 +2,7 @@
 /// Ops that produce constant values (no inputs).
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
+const Aval = pr.Aval;
 
 pub const literal = struct {
     pub const arity = .{ .in = 0, .out = 1 };
@@ -13,15 +14,15 @@ pub const literal = struct {
 
         if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const lit = pr.param_literal(params) orelse return error.InvalidParams;
+        const lit = pr.param(.literal,params) orelse return error.InvalidParams;
         const out = try ctx.tensor_of(outputs[0]);
 
         if (out.dtype != lit.dtype()) return error.LiteralTypeMismatch;
         if (out.shape.rank() != 0) return error.LiteralTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
-        const lit = pr.param_literal(ctx.params) orelse return error.InvalidParams;
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
+        const lit = pr.param(.literal,ctx.params) orelse return error.InvalidParams;
         return .{ .tensor = .{ .dtype = lit.dtype(), .shape = .{ .dims = &.{} } } };
     }
 
@@ -29,7 +30,7 @@ pub const literal = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
 
-        const lit = pr.param_literal(params) orelse return error.UnsupportedEqn;
+        const lit = pr.param(.literal,params) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.literal_scalar(lit);
         ctx.set_primal(outputs[0], out);
     }
@@ -45,10 +46,10 @@ pub const literal = struct {
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        if (pr.param_literal(ctx.params())) |lit| {
+        if (pr.param(.literal,ctx.params())) |lit| {
             switch (lit) {
-                .bf16 => |v| try writer.print("{d}", .{bf16_to_f32(v)}),
-                inline .f32, .f64, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
+                .f16, .bf16 => |v| try writer.print("{d}", .{bf16_to_f32(v)}),
+                inline .f32, .f64, .i8, .u8, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
                 .bool => |v| try writer.print("{s}", .{if (v) "true" else "false"}),
             }
         }

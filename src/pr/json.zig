@@ -257,7 +257,7 @@ fn emit_param_attrs(writer: *Writer, params: []const pr.Param) !void {
             .out_shape => |shape| {
                 try open_attrs(writer, &has_attr);
                 try writer.writeAll("\"out_shape\":");
-                try emit_usize_array(writer, shape);
+                try emit_i64_array(writer, shape);
             },
             .broadcast_dimensions => |dims| {
                 try open_attrs(writer, &has_attr);
@@ -358,11 +358,6 @@ fn emit_param_attrs(writer: *Writer, params: []const pr.Param) !void {
                 try writer.writeAll("\"provider\":");
                 try write_json_string(writer, p);
             },
-            .call_carrier_hint => |h| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"carrier\":");
-                try write_json_string(writer, h);
-            },
             .has_side_effect => |eff| {
                 if (eff) {
                     try open_attrs(writer, &has_attr);
@@ -454,22 +449,13 @@ fn emit_i64_array(writer: *Writer, items: []const i64) !void {
     try writer.writeAll("]");
 }
 
-fn emit_usize_array(writer: *Writer, items: []const usize) !void {
-    try writer.writeAll("[");
-    for (items, 0..) |v, i| {
-        if (i > 0) try writer.writeAll(",");
-        try writer.print("{d}", .{v});
-    }
-    try writer.writeAll("]");
-}
-
 /// JSON literal values. bf16 is widened to f32 for JSON compatibility.
 fn emit_literal_json(writer: *Writer, lit: pr.Literal) !void {
     switch (lit) {
-        .bf16 => |v| try writer.print("{d}", .{@as(f32, @bitCast(@as(u32, v) << 16))}),
+        .f16, .bf16 => |v| try writer.print("{d}", .{@as(f32, @bitCast(@as(u32, v) << 16))}),
         .bool => |v| try writer.writeAll(if (v) "true" else "false"),
         inline .f32, .f64 => |v| try writer.print("{d}", .{v}),
-        inline .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
+        inline .i8, .u8, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
     }
 }
 

@@ -92,7 +92,7 @@ pub fn check_gradients(
         const param_id = func.params[input_idx];
         const param_tensor = func.avals[@intCast(param_id)].as_tensor() orelse continue;
         switch (param_tensor.dtype) {
-            .f32, .f64, .bf16 => {},
+            .f16, .bf16, .f32, .f64 => {},
             else => continue,
         }
 

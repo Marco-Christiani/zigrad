@@ -6,185 +6,192 @@ const ops = @import("ops/ops.zig");
 pub const VjpError = ops.types.AdError;
 pub const JvpError = ops.types.AdError;
 
-fn zero_like(bld: *pr.FunctionBuilder, tensor: pr.Tensor) pr.BuildError!pr.VarId {
-    const z = try bld.literal_scalar(ops.types.scalar_literal(tensor.dtype, 0.0));
-    if (tensor.shape.rank() == 0) return z;
-    return try bld.broadcast_in_dim(z, tensor.shape.dims, &.{});
-}
+/// AD mode
+const Mode = enum {
+    /// Reverse-mode AD. Propagates cotangents from outputs to inputs
+    vjp,
+    /// Forward-mode AD. Propagates tangents forward from inputs to outputs.
+    jvp,
+};
 
-fn vjp_impl(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8, include_value: bool) VjpError!pr.Function {
-    try pr.validate_function(func);
-
-    var primal_map = try allocator.alloc(?pr.VarId, func.avals.len);
-    defer allocator.free(primal_map);
-    @memset(primal_map, null);
-
-    var cot_map = try allocator.alloc(?pr.VarId, func.avals.len);
-    defer allocator.free(cot_map);
-    @memset(cot_map, null);
-
-    var b = try pr.FunctionBuilder.init(program, name);
-    defer b.deinit();
-
-    // Create parameters for primals
-    for (func.params) |param_id| {
-        const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
-
-        const new_param = try b.param_tensor(tensor.dtype, tensor.shape.dims);
-        primal_map[@intCast(param_id)] = new_param;
-    }
-
-    // Create parameters for cotangents of outputs
-    for (func.returns) |ret_id| {
-        const tensor = func.avals[@intCast(ret_id)].as_tensor() orelse return error.UnsupportedEqn;
-        if (tensor.dtype != .f32 and tensor.dtype != .f64 and tensor.dtype != .bf16) return error.UnsupportedDType;
-
-        const new_cot = try b.param_tensor(tensor.dtype, tensor.shape.dims);
-        cot_map[@intCast(ret_id)] = new_cot;
-    }
-
-    // Forward pass: compute primals
-    const ad_ctx = ops.types.AdContext{
-        .builder = &b,
-        .primal_map = primal_map,
-        .cot_map = cot_map,
-        .tangent_map = null,
-        .func = func,
-        .allocator = allocator,
-    };
-
-    for (func.eqns) |eqn| {
-        try ops.vjp_forward(ad_ctx, eqn);
-    }
-
-    // Backward pass: propagate cotangents
-    var eqn_index: usize = func.eqns.len;
-    while (eqn_index > 0) {
-        eqn_index -= 1;
-        const eqn = func.eqns[eqn_index];
-        try ops.vjp_backward(ad_ctx, eqn);
-    }
-
-    const extra = if (include_value) func.returns.len else 0;
-    const returns = try allocator.alloc(pr.VarId, func.params.len + extra);
-    defer allocator.free(returns);
-
-    var out_index: usize = 0;
-    if (include_value) {
-        for (func.returns) |ret_id| {
-            const primal = primal_map[@intCast(ret_id)] orelse return error.UnsupportedEqn;
-            returns[out_index] = primal;
-            out_index += 1;
-        }
-    }
-
-    for (func.params) |param_id| {
-        if (cot_map[@intCast(param_id)]) |cot| {
-            returns[out_index] = cot;
-        } else {
-            const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
-            returns[out_index] = try zero_like(&b, tensor);
-        }
-        out_index += 1;
-    }
-
-    return b.finish(returns);
-}
-
-pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
-    return vjp_impl(allocator, program, func, name, false);
-}
-
-pub fn vjp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
-    return vjp_impl(allocator, program, func, name, true);
-}
-
-// ============================================================================
-// JVP (Forward-Mode AD)
-// ============================================================================
-
-/// Forward-mode AD: transforms `f(x) -> y` into `jvp_f(primals, tangents) -> tangent_outputs`.
+/// Unified AD transform, specialized at comptime on `mode`.
 ///
-/// The returned function takes `N` primal inputs followed by `N` tangent inputs (same shapes),
-/// and returns `M` tangent outputs matching the original function's output shapes.
-pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
-    return jvp_impl(allocator, program, func, name, false);
-}
-
-/// Like `jvp`, but the returned function also emits primal outputs before tangent outputs:
-/// `(N primals, N tangents) -> (M primal_outputs, M tangent_outputs)`.
-pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
-    return jvp_impl(allocator, program, func, name, true);
-}
-
-fn jvp_impl(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8, include_value: bool) JvpError!pr.Function {
+/// Both modes share the same skeleton:
+///  1. Validate the source function and create primal parameters.
+///  2. Allocate a dual map and create seed parameters for it.
+///      VJP seeds cotangent vectors at outputs (elements of T*_{f(x)}N).
+///      JVP seeds tangent vectors at inputs (elements of T_xM).
+///  3. Run per-op AD handlers over the equation list.
+///  4. Collect results: optionally primal outputs, then dual values.
+///      VJP harvests cotangent vectors at inputs (elements of T*_xM).
+///      JVP harvests tangent vectors at outputs (elements of T_{f(x)}N).
+///
+/// NOTE: In the Euclidean case (G = I), input cotangents from VJP coincide
+///       numerically with gradients via the trivial musical isomorphism. For
+///       non-Cartesian metrics, converting to gradients requires applying G^{-1}.
+///
+/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+/// TODO: missing AD support might require a better policy, tbd.
+fn ad_impl(
+    comptime mode: Mode,
+    allocator: std.mem.Allocator,
+    program: *pr.Program,
+    func: pr.Function,
+    name: []const u8,
+    include_value: bool,
+) ops.types.AdError!pr.Function {
     try pr.validate_function(func);
 
     var primal_map = try allocator.alloc(?pr.VarId, func.avals.len);
     defer allocator.free(primal_map);
     @memset(primal_map, null);
 
-    var tangent_map = try allocator.alloc(?pr.VarId, func.avals.len);
-    defer allocator.free(tangent_map);
-    @memset(tangent_map, null);
+    var dual_map = try allocator.alloc(?pr.VarId, func.avals.len);
+    defer allocator.free(dual_map);
+    @memset(dual_map, null);
 
     var b = try pr.FunctionBuilder.init(program, name);
     defer b.deinit();
 
-    // Create parameters for primals
+    // Create parameters for primals.
     for (func.params) |param_id| {
         const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
         const new_param = try b.param_tensor(tensor.dtype, tensor.shape.dims);
         primal_map[@intCast(param_id)] = new_param;
     }
 
-    // Create parameters for tangents of inputs
-    for (func.params) |param_id| {
-        const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
-        const new_tangent = try b.param_tensor(tensor.dtype, tensor.shape.dims);
-        tangent_map[@intCast(param_id)] = new_tangent;
+    // Seed the dual map - stores the "other half" of the primal/dual pair.
+    // VJP: cotangent vectors (elements of T*_{f(x)}N) seeded at each output.
+    // JVP: tangent vectors (elements of T_xM) seeded at each input.
+    // Duality is symmetric: cotangents are dual to tangents and vice versa,
+    //  this is not in reference to dual numbers as in some forward-mode impls.
+    const seed_ids = switch (mode) {
+        .vjp => func.returns,
+        .jvp => func.params,
+    };
+    for (seed_ids) |id| {
+        const tensor = func.avals[@intCast(id)].as_tensor() orelse return error.UnsupportedEqn;
+        if (mode == .vjp) {
+            if (tensor.dtype != .f32 and tensor.dtype != .f64 and tensor.dtype != .bf16)
+                return error.UnsupportedDType;
+        }
+        const new_seed = try b.param_tensor(tensor.dtype, tensor.shape.dims);
+        dual_map[@intCast(id)] = new_seed;
     }
 
     const ad_ctx = ops.types.AdContext{
         .builder = &b,
         .primal_map = primal_map,
-        .cot_map = null,
-        .tangent_map = tangent_map,
+        .cot_map = if (mode == .vjp) dual_map else null,
+        .tangent_map = if (mode == .jvp) dual_map else null,
         .func = func,
         .allocator = allocator,
     };
 
-    // Single forward pass: compute primals and tangents together
-    for (func.eqns) |eqn| {
-        try ops.vjp_forward(ad_ctx, eqn);
-        try ops.jvp(ad_ctx, eqn);
+    switch (mode) {
+        .vjp => {
+            for (func.eqns) |eqn| try ops.vjp_forward(ad_ctx, eqn);
+            // Backward: propagate cotangents in reverse equation order.
+            var i: usize = func.eqns.len;
+            while (i > 0) {
+                i -= 1;
+                try ops.vjp_backward(ad_ctx, func.eqns[i]);
+            }
+        },
+        .jvp => {
+            // Single forward pass to compute primals and tangents together
+            for (func.eqns) |eqn| {
+                // NOTE: `vjp_forward` is likely a poor name should consider a rename
+                try ops.vjp_forward(ad_ctx, eqn); // primal computation, shared with VJP forward pass
+                try ops.jvp(ad_ctx, eqn);
+            }
+        },
     }
 
-    // Collect returns
-    const extra = if (include_value) func.returns.len else 0;
-    const returns = try allocator.alloc(pr.VarId, extra + func.returns.len);
+    // VJP harvests cotangents at inputs, JVP harvests tangents at outputs.
+    const harvest_ids = switch (mode) {
+        .vjp => func.params,
+        .jvp => func.returns,
+    };
+    const extra: usize = if (include_value) func.returns.len else 0;
+    const returns = try allocator.alloc(pr.VarId, extra + harvest_ids.len);
     defer allocator.free(returns);
 
-    var out_index: usize = 0;
+    var out_idx: usize = 0;
     if (include_value) {
         for (func.returns) |ret_id| {
-            const primal = primal_map[@intCast(ret_id)] orelse return error.UnsupportedEqn;
-            returns[out_index] = primal;
-            out_index += 1;
+            returns[out_idx] = primal_map[@intCast(ret_id)] orelse return error.UnsupportedEqn;
+            out_idx += 1;
         }
     }
-
-    for (func.returns) |ret_id| {
-        if (tangent_map[@intCast(ret_id)]) |tan| {
-            returns[out_index] = tan;
+    for (harvest_ids) |id| {
+        if (dual_map[@intCast(id)]) |dual| {
+            returns[out_idx] = dual;
         } else {
-            const tensor = func.avals[@intCast(ret_id)].as_tensor() orelse return error.UnsupportedEqn;
-            returns[out_index] = try zero_like(&b, tensor);
+            const tensor = func.avals[@intCast(id)].as_tensor() orelse return error.UnsupportedEqn;
+            returns[out_idx] = try b.scalar_broadcast(tensor.dtype, tensor.shape.dims, 0.0);
         }
-        out_index += 1;
+        out_idx += 1;
     }
 
     return b.finish(returns);
+}
+
+/// Reverse-mode AD (pullback): transforms `f: M -> N` into
+/// `vjp_f: (T_xM, T*_{f(x)}N) -> T*_xM`.
+///
+/// Concretely, computes the transpose-Jacobian product J^T(x) * v for a
+/// cotangent seed `v`, which is the pullback f*: T*_{f(x)}N -> T*_xM
+/// evaluated at `x`.
+///
+/// The returned function takes `N` primal inputs followed by `M` output
+/// cotangent seeds, and returns `N` input cotangent vectors. In the
+/// Euclidean / Cartesian case (G = I) these equal gradients; in general
+/// they are covectors and must be raised with G^{-1} to obtain gradient
+/// tangent vectors.
+///
+/// NOTE: In the Euclidean case (G = I), input cotangents from VJP coincide
+///       numerically with gradients via the trivial musical isomorphism. For
+///       non-Cartesian metrics, converting to gradients requires applying G^{-1}.
+///
+/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
+    return ad_impl(.vjp, allocator, program, func, name, false);
+}
+
+/// Like `vjp`, but the returned function also emits primal outputs before the input cotangents:
+/// `(N primals, M cotangent seeds) -> (M primal outputs, N input cotangents)`.
+///
+/// NOTE: In the Euclidean case (G = I), input cotangents from VJP coincide
+///       numerically with gradients via the trivial musical isomorphism. For
+///       non-Cartesian metrics, converting to gradients requires applying G^{-1}.
+///
+/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+pub fn vjp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
+    return ad_impl(.vjp, allocator, program, func, name, true);
+}
+
+/// Forward-mode AD (pushforward / differential): transforms `f: M -> N` into
+/// `jvp_f: (T_xM, T_xM) -> T_{f(x)}N`.
+///
+/// Concretely, computes the Jacobian-vector product J(x) * v for a tangent
+/// seed `v`, which is the differential df_x: T_xM -> T_{f(x)}N applied to `v`.
+///
+/// The returned function takes `N` primal inputs followed by `N` input tangent
+/// vectors (same shapes), and returns `M` output tangent vectors matching the
+/// original function's output shapes.
+///
+/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
+    return ad_impl(.jvp, allocator, program, func, name, false);
+}
+
+/// Like `jvp`, but the returned function also emits primal outputs before the output tangents:
+/// `(N primals, N tangents) -> (M primal outputs, M output tangents)`.
+///
+/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
+    return ad_impl(.jvp, allocator, program, func, name, true);
 }
 
 test "vjp produces gradients matching input shapes" {
@@ -216,7 +223,7 @@ test "vjp produces gradients matching input shapes" {
         const g_id = vjp_func.returns[i];
         const g_t = vjp_func.avals[@intCast(g_id)].as_tensor().?;
         try std.testing.expectEqual(p_t.dtype, g_t.dtype);
-        try std.testing.expect(std.mem.eql(usize, p_t.shape.dims, g_t.shape.dims));
+        try std.testing.expect(std.mem.eql(i64, p_t.shape.dims, g_t.shape.dims));
     }
 }
 
@@ -268,7 +275,7 @@ test "dot_general vjp supports 2 batch dims" {
         const g_id = vjp_func.returns[i];
         const g_t = vjp_func.avals[@intCast(g_id)].as_tensor().?;
         try std.testing.expectEqual(p_t.dtype, g_t.dtype);
-        try std.testing.expect(std.mem.eql(usize, p_t.shape.dims, g_t.shape.dims));
+        try std.testing.expect(std.mem.eql(i64, p_t.shape.dims, g_t.shape.dims));
     }
 }
 
@@ -380,7 +387,7 @@ test "jvp produces tangent outputs matching function output shapes" {
         const jvp_id = jvp_func.returns[i];
         const jvp_t = jvp_func.avals[@intCast(jvp_id)].as_tensor().?;
         try std.testing.expectEqual(orig_t.dtype, jvp_t.dtype);
-        try std.testing.expect(std.mem.eql(usize, orig_t.shape.dims, jvp_t.shape.dims));
+        try std.testing.expect(std.mem.eql(i64, orig_t.shape.dims, jvp_t.shape.dims));
     }
 }
 
@@ -431,5 +438,5 @@ test "dot_general jvp with batch dims" {
     const orig_t = func.avals[@intCast(func.returns[0])].as_tensor().?;
     const jvp_t = jvp_func.avals[@intCast(jvp_func.returns[0])].as_tensor().?;
     try std.testing.expectEqual(orig_t.dtype, jvp_t.dtype);
-    try std.testing.expect(std.mem.eql(usize, orig_t.shape.dims, jvp_t.shape.dims));
+    try std.testing.expect(std.mem.eql(i64, orig_t.shape.dims, jvp_t.shape.dims));
 }

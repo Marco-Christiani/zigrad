@@ -2,6 +2,9 @@
 /// Binary ops that operate element-by-element on tensors of the same shape.
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
+const Tensor = pr.Tensor;
+const VarId = pr.VarId;
+const Aval = pr.Aval;
 
 fn validate_binary_elementwise(comptime err: pr.ValidationError, ctx: types.ValidateContext) pr.ValidationError!void {
     const inputs = ctx.inputs();
@@ -15,7 +18,7 @@ fn validate_binary_elementwise(comptime err: pr.ValidationError, ctx: types.Vali
     if (!types.same_tensor_type(lhs, rhs) or !types.same_tensor_type(lhs, out)) return err;
 }
 
-fn infer_binary_elementwise(comptime err: pr.ValidationError, ctx: types.InferContext) pr.BuildError!types.Aval {
+fn infer_binary_elementwise(comptime err: pr.ValidationError, ctx: types.InferContext) pr.BuildError!Aval {
     if (ctx.inputs.len != 2) return error.InvalidEqnArity;
     const lhs = try ctx.tensor_of(ctx.inputs[0]);
     const rhs = try ctx.tensor_of(ctx.inputs[1]);
@@ -40,7 +43,7 @@ pub const add = struct {
         return validate_binary_elementwise(error.AddTypeMismatch, ctx);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         return infer_binary_elementwise(error.AddTypeMismatch, ctx);
     }
 
@@ -90,7 +93,7 @@ pub const subtract = struct {
         return validate_binary_elementwise(error.SubtractTypeMismatch, ctx);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         return infer_binary_elementwise(error.SubtractTypeMismatch, ctx);
     }
 
@@ -143,7 +146,7 @@ pub const multiply = struct {
         return validate_binary_elementwise(error.MultiplyTypeMismatch, ctx);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         return infer_binary_elementwise(error.MultiplyTypeMismatch, ctx);
     }
 
@@ -204,7 +207,7 @@ pub const divide = struct {
         return validate_binary_elementwise(error.DivideTypeMismatch, ctx);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         return infer_binary_elementwise(error.DivideTypeMismatch, ctx);
     }
 
@@ -274,7 +277,7 @@ pub const maximum = struct {
         return validate_binary_elementwise(error.MaximumTypeMismatch, ctx);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         return infer_binary_elementwise(error.MaximumTypeMismatch, ctx);
     }
 
@@ -285,7 +288,7 @@ pub const maximum = struct {
 // Helpers
 // ============================================================================
 
-fn negate_like(bld: *pr.FunctionBuilder, tensor: types.Tensor, value: types.VarId) pr.BuildError!types.VarId {
+fn negate_like(bld: *pr.FunctionBuilder, tensor: Tensor, value: VarId) pr.BuildError!VarId {
     const minus_one = try bld.literal_scalar(types.scalar_literal(tensor.dtype, -1.0));
     const minus_one_full = if (tensor.shape.rank() == 0)
         minus_one

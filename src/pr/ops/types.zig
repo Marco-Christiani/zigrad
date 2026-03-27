@@ -1,6 +1,5 @@
-/// Op Types -- Shared context and types for op implementations.
-///
-/// No external dependencies beyond `std` and the PR module.
+/// Context types for op implementations and helpers.
+/// TODO: Reconsider this file, probably not the ideal way to organize.
 const std = @import("std");
 const pr = @import("../pr.zig");
 
@@ -50,10 +49,15 @@ pub const InferContext = struct {
 /// Used for both VJP (reverse-mode) and JVP (forward-mode) transforms.
 /// For VJP: `tangent_map` is null, `cot_map` holds cotangent accumulation.
 /// For JVP: `cot_map` is null, `tangent_map` holds tangent propagation.
+/// TODO: we can likely collapse to a single "dual" field depending on how
+///  this impacts semantics downstream, would want to check this first, but
+///  it seems cleaner from here.
 pub const AdContext = struct {
     builder: *pr.FunctionBuilder,
     primal_map: []?pr.VarId,
+    /// In reverse-mode (VJP) holds cotangents
     cot_map: ?[]?pr.VarId,
+    /// In forward-mode (JVP) holds tangents
     tangent_map: ?[]?pr.VarId,
     func: pr.Function,
     allocator: std.mem.Allocator,
@@ -152,7 +156,7 @@ pub const FormatError = Writer.Error;
 pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.rank() != b.shape.rank()) return false;
-    return std.mem.eql(usize, a.shape.dims, b.shape.dims);
+    return std.mem.eql(i64, a.shape.dims, b.shape.dims);
 }
 
 fn f32_to_bf16_bits(val: f32) u16 {
@@ -162,9 +166,12 @@ fn f32_to_bf16_bits(val: f32) u16 {
 
 pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
     return switch (value_dtype) {
+        .f16 => .{ .f16 = f32_to_f16_bits(@floatCast(value)) },
         .bf16 => .{ .bf16 = f32_to_bf16_bits(@floatCast(value)) },
         .f32 => .{ .f32 = @floatCast(value) },
         .f64 => .{ .f64 = value },
+        .i8 => .{ .i8 = @intFromFloat(value) },
+        .u8 => .{ .u8 = @intFromFloat(value) },
         .i32 => .{ .i32 = @intFromFloat(value) },
         .i64 => .{ .i64 = @intFromFloat(value) },
         .u32 => .{ .u32 = @intFromFloat(value) },
@@ -173,11 +180,17 @@ pub fn scalar_literal(value_dtype: pr.DType, value: f64) pr.Literal {
     };
 }
 
-// Re-export for convenience
-pub const Tensor = pr.Tensor;
-pub const Aval = pr.Aval;
-pub const VarId = pr.VarId;
-pub const Param = pr.Param;
-pub const ValidationError = pr.ValidationError;
-pub const BuildError = pr.BuildError;
+fn f32_to_f16_bits(val: f32) u16 {
+    const bits: u32 = @bitCast(val);
+    const sign: u16 = @intCast((bits >> 16) & 0x8000);
+    const exp_f32: i32 = @intCast((bits >> 23) & 0xFF);
+    const mant: u32 = bits & 0x7FFFFF;
+    if (exp_f32 == 0xFF) return sign | 0x7C00 | if (mant != 0) @as(u16, 1) else 0;
+    const exp_f16 = exp_f32 - 127 + 15;
+    if (exp_f16 >= 31) return sign | 0x7C00;
+    if (exp_f16 <= 0) return sign;
+    return sign | @as(u16, @intCast(exp_f16)) << 10 | @as(u16, @intCast(mant >> 13));
+}
+
+// TODO: flagging this for when we reconsider this file
 pub const AdError = pr.BuildError || error{ UnsupportedEqn, UnsupportedDType };

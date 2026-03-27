@@ -13,22 +13,22 @@ const log = std.log.scoped(.@"zg/eval");
 /// Dense f32 tensor with owned shape and data.
 pub const HostTensor = struct {
     data: []f32,
-    shape: []const usize,
+    shape: []const i64,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, shape: []const usize) !HostTensor {
+    pub fn init(allocator: std.mem.Allocator, shape: []const i64) !HostTensor {
         const n = num_elements(shape);
         const data = try allocator.alloc(f32, n);
         @memset(data, 0);
-        const owned_shape = try allocator.dupe(usize, shape);
+        const owned_shape = try allocator.dupe(i64, shape);
         return .{ .data = data, .shape = owned_shape, .allocator = allocator };
     }
 
-    pub fn init_with_data(allocator: std.mem.Allocator, shape: []const usize, src: []const f32) !HostTensor {
+    pub fn init_with_data(allocator: std.mem.Allocator, shape: []const i64, src: []const f32) !HostTensor {
         const n = num_elements(shape);
         if (src.len != n) return error.ShapeMismatch;
         const data = try allocator.dupe(f32, src);
-        const owned_shape = try allocator.dupe(usize, shape);
+        const owned_shape = try allocator.dupe(i64, shape);
         return .{ .data = data, .shape = owned_shape, .allocator = allocator };
     }
 
@@ -50,9 +50,9 @@ pub const HostTensor = struct {
         return self.shape.len;
     }
 
-    pub fn num_elements(shape: []const usize) usize {
+    pub fn num_elements(shape: []const i64) usize {
         var n: usize = 1;
-        for (shape) |d| n *= d;
+        for (shape) |d| n *= @intCast(d);
         return n;
     }
 };
@@ -217,17 +217,19 @@ fn logistic_fn(x: f32) f32 {
 }
 
 fn eval_literal(allocator: std.mem.Allocator, params: []const pr.Param) EvalError!HostTensor {
-    const lit = pr.param_literal(params) orelse return error.MissingParam;
+    const lit = pr.param(.literal,params) orelse return error.MissingParam;
     var t = try HostTensor.init(allocator, &.{});
     t.data[0] = switch (lit) {
         .f32 => |v| v,
         .f64 => |v| @floatCast(v),
+        .i8 => |v| @floatFromInt(v),
+        .u8 => |v| @floatFromInt(v),
         .i32 => |v| @floatFromInt(v),
         .i64 => |v| @floatFromInt(v),
         .u32 => |v| @floatFromInt(v),
         .u64 => |v| @floatFromInt(v),
         .bool => |v| if (v) @as(f32, 1.0) else 0.0,
-        .bf16 => |v| blk: {
+        .f16, .bf16 => |v| blk: {
             const bits: u32 = @as(u32, v) << 16;
             break :blk @bitCast(bits);
         },
@@ -272,7 +274,7 @@ fn eval_compare(
 ) EvalError!HostTensor {
     const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
     const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const cparams = pr.param_compare(params) orelse return error.MissingParam;
+    const cparams = pr.param(.compare,params) orelse return error.MissingParam;
     const result = try HostTensor.init(allocator, lhs.shape);
     for (result.data, 0..) |*out, i| {
         const a = lhs.data[i];
@@ -327,7 +329,7 @@ fn eval_reshape(
     params: []const pr.Param,
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const out_shape = pr.param_out_shape(params) orelse return error.MissingParam;
+    const out_shape = pr.param(.out_shape,params) orelse return error.MissingParam;
     const result = try HostTensor.init(allocator, out_shape);
     @memcpy(result.data, operand.data);
     return result;
@@ -340,11 +342,11 @@ fn eval_transpose(
     params: []const pr.Param,
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const perm = pr.param_permutation(params) orelse return error.MissingParam;
+    const perm = pr.param(.permutation,params) orelse return error.MissingParam;
     const in_shape = operand.shape;
     const ndim = in_shape.len;
 
-    var out_shape_buf: [64]usize = undefined;
+    var out_shape_buf: [64]i64 = undefined;
     for (perm, 0..) |p, i| {
         out_shape_buf[i] = in_shape[@intCast(p)];
     }
@@ -378,8 +380,8 @@ fn eval_broadcast_in_dim(
     params: []const pr.Param,
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const out_shape = pr.param_out_shape(params) orelse return error.MissingParam;
-    const broadcast_dims = pr.param_broadcast_dims(params) orelse return error.MissingParam;
+    const out_shape = pr.param(.out_shape,params) orelse return error.MissingParam;
+    const broadcast_dims = pr.param(.broadcast_dimensions,params) orelse return error.MissingParam;
 
     var result = try HostTensor.init(allocator, out_shape);
     const out_ndim = out_shape.len;
@@ -412,7 +414,7 @@ fn eval_reduce_sum(
     outputs: []const pr.VarId,
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const axes = pr.param_reduce_axes(params) orelse return error.MissingParam;
+    const axes = pr.param(.reduce_axes,params) orelse return error.MissingParam;
     const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
     const out_shape = out_tensor.shape.dims;
 
@@ -454,7 +456,7 @@ fn eval_reduce_max(
     outputs: []const pr.VarId,
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const axes = pr.param_reduce_axes(params) orelse return error.MissingParam;
+    const axes = pr.param(.reduce_axes,params) orelse return error.MissingParam;
     const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
     const out_shape = out_tensor.shape.dims;
 
@@ -492,11 +494,11 @@ fn eval_dot(
 ) EvalError!HostTensor {
     const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
     const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const m = lhs.shape[0];
-    const k = lhs.shape[1];
-    const n = rhs.shape[1];
+    const m: usize = @intCast(lhs.shape[0]);
+    const k: usize = @intCast(lhs.shape[1]);
+    const n: usize = @intCast(rhs.shape[1]);
 
-    var result = try HostTensor.init(allocator, &.{ m, n });
+    var result = try HostTensor.init(allocator, &.{ lhs.shape[0], rhs.shape[1] });
     for (0..m) |i| {
         for (0..n) |j| {
             var sum: f32 = 0;
@@ -519,7 +521,7 @@ fn eval_dot_general(
 ) EvalError!HostTensor {
     const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
     const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const dg = pr.param_dot_general(params) orelse return error.MissingParam;
+    const dg = pr.param(.dot_general,params) orelse return error.MissingParam;
     const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
     const out_shape = out_tensor.shape.dims;
 
@@ -562,14 +564,14 @@ fn eval_dot_general(
     const n_out = result.data.len;
 
     // Contract dim sizes
-    var contract_shape: [64]usize = undefined;
+    var contract_shape: [64]i64 = undefined;
     const contract_len = dg.lhs_contracting_dims.len;
     for (dg.lhs_contracting_dims, 0..) |d, i| {
         contract_shape[i] = lhs_shape[@intCast(d)];
     }
 
     var contract_size: usize = 1;
-    for (contract_shape[0..contract_len]) |s| contract_size *= s;
+    for (contract_shape[0..contract_len]) |s| contract_size *= @as(usize, @intCast(s));
 
     for (0..n_out) |out_flat| {
         var out_idx: [64]usize = undefined;
@@ -625,7 +627,7 @@ fn eval_gather(
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
     const indices = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const gp = pr.param_gather(params) orelse return error.MissingParam;
+    const gp = pr.param(.gather,params) orelse return error.MissingParam;
     const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
     const out_shape = out_tensor.shape.dims;
 
@@ -729,7 +731,7 @@ fn eval_scatter(
     const input = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
     const scatter_indices = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
     const updates = env[@intCast(inputs[2])] orelse return error.InvalidVarId;
-    const sp = pr.param_scatter(params) orelse return error.MissingParam;
+    const sp = pr.param(.scatter,params) orelse return error.MissingParam;
     const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
     const out_shape = out_tensor.shape.dims;
     const out_rank = out_shape.len;
@@ -813,8 +815,8 @@ fn eval_iota(
     func: pr.Function,
     outputs: []const pr.VarId,
 ) EvalError!HostTensor {
-    const out_shape = pr.param_out_shape(params) orelse return error.MissingParam;
-    const iota_dim = pr.param_iota_dimension(params) orelse return error.MissingParam;
+    const out_shape = pr.param(.out_shape,params) orelse return error.MissingParam;
+    const iota_dim = pr.param(.iota_dimension,params) orelse return error.MissingParam;
     _ = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
 
     var result = try HostTensor.init(allocator, out_shape);
@@ -836,17 +838,17 @@ fn eval_slice(
     params: []const pr.Param,
 ) EvalError!HostTensor {
     const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const sp = pr.param_slice(params) orelse return error.MissingParam;
+    const sp = pr.param(.slice,params) orelse return error.MissingParam;
     const in_shape = operand.shape;
     const ndim = in_shape.len;
 
     // Compute output shape
-    var out_shape_buf: [64]usize = undefined;
+    var out_shape_buf: [64]i64 = undefined;
     for (0..ndim) |d| {
-        const start: usize = @intCast(sp.start_indices[d]);
-        const limit: usize = @intCast(sp.limit_indices[d]);
-        const stride: usize = @intCast(sp.strides[d]);
-        out_shape_buf[d] = (limit - start + stride - 1) / stride;
+        const start: i64 = sp.start_indices[d];
+        const limit: i64 = sp.limit_indices[d];
+        const stride: i64 = sp.strides[d];
+        out_shape_buf[d] = @divTrunc(limit - start + stride - 1, stride);
     }
     const out_shape = out_shape_buf[0..ndim];
 
@@ -874,15 +876,15 @@ fn eval_concatenate(
     params: []const pr.Param,
     func: pr.Function,
 ) EvalError!HostTensor {
-    const axis: usize = @intCast(pr.param_concat_axis(params) orelse return error.MissingParam);
+    const axis: usize = @intCast(pr.param(.concat_axis,params) orelse return error.MissingParam);
 
     // Compute output shape
     const first = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
     const ndim = first.shape.len;
-    var out_shape_buf: [64]usize = undefined;
+    var out_shape_buf: [64]i64 = undefined;
     @memcpy(out_shape_buf[0..ndim], first.shape);
 
-    var total_axis: usize = first.shape[axis];
+    var total_axis: i64 = first.shape[axis];
     for (inputs[1..]) |inp_id| {
         const t = env[@intCast(inp_id)] orelse return error.InvalidVarId;
         total_axis += t.shape[axis];
@@ -911,7 +913,7 @@ fn eval_concatenate(
             const out_flat = multi_to_flat(out_idx[0..ndim], out_shape);
             result.data[out_flat] = t.data[in_flat];
         }
-        axis_offset += t_shape[axis];
+        axis_offset += @intCast(t_shape[axis]);
     }
     return result;
 }
@@ -920,28 +922,29 @@ fn eval_concatenate(
 // Indexing Helpers
 // ============================================================================
 
-fn flat_to_multi(flat: usize, shape: []const usize, out: []usize) void {
+fn flat_to_multi(flat: usize, shape: []const i64, out: []usize) void {
     var remaining = flat;
     var d: usize = shape.len;
     while (d > 0) {
         d -= 1;
-        if (shape[d] == 0) {
+        const dim: usize = @intCast(shape[d]);
+        if (dim == 0) {
             out[d] = 0;
         } else {
-            out[d] = remaining % shape[d];
-            remaining /= shape[d];
+            out[d] = remaining % dim;
+            remaining /= dim;
         }
     }
 }
 
-fn multi_to_flat(idx: []const usize, shape: []const usize) usize {
+fn multi_to_flat(idx: []const usize, shape: []const i64) usize {
     var flat: usize = 0;
     var stride: usize = 1;
     var d: usize = shape.len;
     while (d > 0) {
         d -= 1;
         flat += idx[d] * stride;
-        stride *= shape[d];
+        stride *= @as(usize, @intCast(shape[d]));
     }
     return flat;
 }
@@ -1087,9 +1090,9 @@ test "eval: dot_general batched" {
         testing.allocator.free(results);
     }
     try testing.expectEqual(@as(usize, 3), results[0].shape.len);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[0]);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[1]);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[2]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[0]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[1]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[2]);
     // Batch 0: [22, 28, 49, 64]
     try testing.expectApproxEqAbs(@as(f32, 22.0), results[0].data[0], 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 28.0), results[0].data[1], 1e-4);
@@ -1114,8 +1117,8 @@ test "eval: reshape" {
         testing.allocator.free(results);
     }
     try testing.expectEqual(@as(usize, 2), results[0].shape.len);
-    try testing.expectEqual(@as(usize, 3), results[0].shape[0]);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[1]);
+    try testing.expectEqual(@as(i64, 3), results[0].shape[0]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[1]);
     // Data unchanged
     try testing.expectApproxEqAbs(@as(f32, 1.0), results[0].data[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 6.0), results[0].data[5], 1e-6);
@@ -1141,8 +1144,8 @@ test "eval: transpose 2D" {
         testing.allocator.free(results);
     }
     // [[1,4],[2,5],[3,6]]
-    try testing.expectEqual(@as(usize, 3), results[0].shape[0]);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[1]);
+    try testing.expectEqual(@as(i64, 3), results[0].shape[0]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[1]);
     try testing.expectApproxEqAbs(@as(f32, 1.0), results[0].data[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 4.0), results[0].data[1], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 2.0), results[0].data[2], 1e-6);
@@ -1193,7 +1196,7 @@ test "eval: reduce_sum single axis" {
         testing.allocator.free(results);
     }
     try testing.expectEqual(@as(usize, 1), results[0].shape.len);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[0]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[0]);
     try testing.expectApproxEqAbs(@as(f32, 6.0), results[0].data[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 15.0), results[0].data[1], 1e-6);
 }
@@ -1370,8 +1373,8 @@ test "eval: slice" {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
     }
-    try testing.expectEqual(@as(usize, 2), results[0].shape[0]);
-    try testing.expectEqual(@as(usize, 2), results[0].shape[1]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[0]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[1]);
     // [1,1]=5, [1,2]=6, [2,1]=9, [2,2]=10
     try testing.expectApproxEqAbs(@as(f32, 5.0), results[0].data[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 6.0), results[0].data[1], 1e-6);
@@ -1400,8 +1403,8 @@ test "eval: concatenate" {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
     }
-    try testing.expectEqual(@as(usize, 2), results[0].shape[0]);
-    try testing.expectEqual(@as(usize, 5), results[0].shape[1]);
+    try testing.expectEqual(@as(i64, 2), results[0].shape[0]);
+    try testing.expectEqual(@as(i64, 5), results[0].shape[1]);
     // Row 0: [1,2,5,6,7], Row 1: [3,4,8,9,10]
     try testing.expectApproxEqAbs(@as(f32, 1.0), results[0].data[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 2.0), results[0].data[1], 1e-6);

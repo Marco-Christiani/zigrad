@@ -271,7 +271,7 @@ pub const Emitter = struct {
         if (!use_dtype) return null;
         if (inputs.len == 0) return false;
         const dtype = if (prim == .convert) blk: {
-            const out_dtype = pr.param_out_dtype(params) orelse return false;
+            const out_dtype = pr.param(.out_dtype,params) orelse return false;
             break :blk out_dtype;
         } else blk: {
             const tensor = self.func.avals[@intCast(inputs[0])].as_tensor() orelse return false;

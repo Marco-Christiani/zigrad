@@ -4,6 +4,9 @@ const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const log = std.log.scoped(.@"zg/shape");
+const Tensor = pr.Tensor;
+const Aval = pr.Aval;
+const max_rank: usize = 64;
 
 // ============================================================================
 // Reshape
@@ -19,11 +22,11 @@ pub const reshape = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.param_out_shape(params) orelse return error.InvalidParams;
+        const out_shape = pr.param(.out_shape,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
 
-        if (!std.mem.eql(usize, out.shape.dims, out_shape)) {
+        if (!std.mem.eql(i64, out.shape.dims, out_shape)) {
             log.err(
                 "reshape out dims mismatch: operand={any} out={any} param_out={any}",
                 .{ operand.shape.dims, out.shape.dims, out_shape },
@@ -46,10 +49,10 @@ pub const reshape = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.param_out_shape(ctx.params) orelse return error.InvalidParams;
+        const out_shape = pr.param(.out_shape,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
 
         if (num_elements(operand.shape.dims) != num_elements(out_shape)) return error.ReshapeTypeMismatch;
@@ -97,7 +100,7 @@ pub const reshape = struct {
         const src = ctx.input_tensor(0) orelse return;
         try format_shape(writer, src.shape.dims);
         try writer.writeAll(" -> ");
-        if (pr.param_out_shape(ctx.params())) |out_shape| {
+        if (pr.param(.out_shape,ctx.params())) |out_shape| {
             try format_shape(writer, out_shape);
         }
     }
@@ -117,12 +120,12 @@ pub const iota = struct {
 
         if (inputs.len != 0 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.param_out_shape(params) orelse return error.InvalidParams;
-        const out_dtype = pr.param_out_dtype(params) orelse return error.InvalidParams;
-        const iota_dim = pr.param_iota_dimension(params) orelse return error.InvalidParams;
+        const out_shape = pr.param(.out_shape,params) orelse return error.InvalidParams;
+        const out_dtype = pr.param(.out_dtype,params) orelse return error.InvalidParams;
+        const iota_dim = pr.param(.iota_dimension,params) orelse return error.InvalidParams;
         const out = try ctx.tensor_of(outputs[0]);
 
-        if (!std.mem.eql(usize, out.shape.dims, out_shape)) {
+        if (!std.mem.eql(i64, out.shape.dims, out_shape)) {
             log.err(
                 "iota out dims mismatch: out={any} param_out={any}",
                 .{ out.shape.dims, out_shape },
@@ -152,11 +155,11 @@ pub const iota = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 0) return error.InvalidEqnArity;
-        const out_shape = pr.param_out_shape(ctx.params) orelse return error.InvalidParams;
-        const out_dtype = pr.param_out_dtype(ctx.params) orelse return error.InvalidParams;
-        const iota_dim = pr.param_iota_dimension(ctx.params) orelse return error.InvalidParams;
+        const out_shape = pr.param(.out_shape,ctx.params) orelse return error.InvalidParams;
+        const out_dtype = pr.param(.out_dtype,ctx.params) orelse return error.InvalidParams;
+        const iota_dim = pr.param(.iota_dimension,ctx.params) orelse return error.InvalidParams;
         if (out_dtype != .i32 and out_dtype != .i64) return error.IotaTypeMismatch;
         if (iota_dim < 0 or @as(usize, @intCast(iota_dim)) >= out_shape.len) return error.IotaTypeMismatch;
         return .{ .tensor = .{ .dtype = out_dtype, .shape = .{ .dims = out_shape } } };
@@ -166,7 +169,7 @@ pub const iota = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
 
-        const iota_dim = pr.param_iota_dimension(params) orelse return error.UnsupportedEqn;
+        const iota_dim = pr.param(.iota_dimension,params) orelse return error.UnsupportedEqn;
         const out_tensor = ctx.tensor_of(outputs[0]);
         const out = try ctx.builder.iota(out_tensor.dtype, out_tensor.shape.dims, iota_dim);
         ctx.set_primal(outputs[0], out);
@@ -185,9 +188,9 @@ pub const iota = struct {
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const out_shape = pr.param_out_shape(ctx.params()) orelse return;
-        const out_dtype = pr.param_out_dtype(ctx.params()) orelse return;
-        const iota_dim = pr.param_iota_dimension(ctx.params()) orelse return;
+        const out_shape = pr.param(.out_shape,ctx.params()) orelse return;
+        const out_dtype = pr.param(.out_dtype,ctx.params()) orelse return;
+        const iota_dim = pr.param(.iota_dimension,ctx.params()) orelse return;
         try writer.print("dim={d} dtype={s} shape=", .{ iota_dim, @tagName(out_dtype) });
         try format_shape(writer, out_shape);
     }
@@ -207,7 +210,7 @@ pub const transpose = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const perm = pr.param_permutation(params) orelse return error.InvalidParams;
+        const perm = pr.param(.permutation,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
 
@@ -221,15 +224,15 @@ pub const transpose = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
 
-        const perm = pr.param_permutation(ctx.params) orelse return error.InvalidParams;
+        const perm = pr.param(.permutation,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
 
         if (!is_permutation(perm, operand.shape.rank())) return error.TransposeTypeMismatch;
 
-        const out_dims = try ctx.alloc().alloc(usize, operand.shape.rank());
+        const out_dims = try ctx.alloc().alloc(i64, operand.shape.rank());
         for (perm, 0..) |p, i| out_dims[i] = operand.shape.dims[@intCast(p)];
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
@@ -242,7 +245,7 @@ pub const transpose = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const perm = pr.param_permutation(params) orelse return error.UnsupportedEqn;
+        const perm = pr.param(.permutation,params) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.transpose(operand, perm);
         ctx.set_primal(outputs[0], out);
     }
@@ -255,7 +258,7 @@ pub const transpose = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const perm = pr.param_permutation(params) orelse return error.UnsupportedEqn;
+        const perm = pr.param(.permutation,params) orelse return error.UnsupportedEqn;
 
         // Inverse permutation
         const inv = try ctx.allocator.alloc(i64, perm.len);
@@ -274,12 +277,12 @@ pub const transpose = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const perm = pr.param_permutation(params) orelse return error.UnsupportedEqn;
+        const perm = pr.param(.permutation,params) orelse return error.UnsupportedEqn;
         ctx.set_tangent(outputs[0], try ctx.builder.transpose(dx, perm));
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        if (pr.param_permutation(ctx.params())) |perm| {
+        if (pr.param(.permutation,ctx.params())) |perm| {
             try writer.writeAll("perm=[");
             for (perm, 0..) |p, i| {
                 if (i > 0) try writer.writeAll(", ");
@@ -303,17 +306,17 @@ pub const slice = struct {
         const params = ctx.params();
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
-        const sparams = pr.param_slice(params) orelse return error.InvalidParams;
+        const sparams = pr.param(.slice,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
-        if (!slice_matches_local(operand.shape.dims, out.shape.dims, sparams)) return error.SliceTypeMismatch;
+        if (!slice_matches(operand.shape.dims, out.shape.dims, sparams)) return error.SliceTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
-        const sparams = pr.param_slice(ctx.params) orelse return error.InvalidParams;
+        const sparams = pr.param(.slice,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
-        const out_dims = try slice_output_dims_local(ctx.alloc(), operand.shape.dims, sparams);
+        const out_dims = try compute_slice_output_dims(ctx.alloc(), operand.shape.dims, sparams);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
@@ -322,7 +325,7 @@ pub const slice = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
-        const sparams = pr.param_slice(params) orelse return error.UnsupportedEqn;
+        const sparams = pr.param(.slice,params) orelse return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.slice(operand, sparams);
@@ -335,7 +338,7 @@ pub const slice = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
-        const sparams = pr.param_slice(params) orelse return error.UnsupportedEqn;
+        const sparams = pr.param(.slice,params) orelse return error.UnsupportedEqn;
 
         const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
         ctx.set_tangent(outputs[0], try ctx.builder.slice(dx, sparams));
@@ -348,7 +351,7 @@ pub const slice = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const sparams = pr.param_slice(params) orelse return error.UnsupportedEqn;
+        const sparams = pr.param(.slice,params) orelse return error.UnsupportedEqn;
         const in_tensor = ctx.tensor_of(inputs[0]);
 
         for (sparams.strides) |s| {
@@ -363,26 +366,24 @@ pub const slice = struct {
             const start = sparams.start_indices[axis];
             const limit = sparams.limit_indices[axis];
             if (start < 0 or limit < 0) return error.UnsupportedEqn;
-            const start_u: usize = @intCast(start);
-            const limit_u: usize = @intCast(limit);
-            const pre = start_u;
-            const post = in_tensor.shape.dims[axis] - limit_u;
+            const pre: i64 = start;
+            const post: i64 = in_tensor.shape.dims[axis] - limit;
 
             if (pre > 0) {
-                const pre_dims = try ctx.allocator.dupe(usize, cur_dims);
+                const pre_dims = try ctx.allocator.dupe(i64, cur_dims);
                 defer ctx.allocator.free(pre_dims);
                 pre_dims[axis] = pre;
-                const pre_tensor = try zeros_like(ctx.builder, in_tensor.dtype, pre_dims);
+                const pre_tensor = try ctx.builder.scalar_broadcast(in_tensor.dtype, pre_dims, 0.0);
                 const cat = try ctx.builder.concatenate(&.{ pre_tensor, cur }, @intCast(axis));
                 cur = cat;
                 cur_dims = ctx.builder.avals.items[@intCast(cur)].as_tensor().?.shape.dims;
             }
 
             if (post > 0) {
-                const post_dims = try ctx.allocator.dupe(usize, cur_dims);
+                const post_dims = try ctx.allocator.dupe(i64, cur_dims);
                 defer ctx.allocator.free(post_dims);
                 post_dims[axis] = post;
-                const post_tensor = try zeros_like(ctx.builder, in_tensor.dtype, post_dims);
+                const post_tensor = try ctx.builder.scalar_broadcast(in_tensor.dtype, post_dims, 0.0);
                 const cat = try ctx.builder.concatenate(&.{ cur, post_tensor }, @intCast(axis));
                 cur = cat;
                 cur_dims = ctx.builder.avals.items[@intCast(cur)].as_tensor().?.shape.dims;
@@ -406,19 +407,19 @@ pub const concatenate = struct {
         const params = ctx.params();
 
         if (inputs.len == 0 or outputs.len != 1) return error.InvalidEqnArity;
-        const axis = pr.param_concat_axis(params) orelse return error.InvalidParams;
+        const axis = pr.param(.concat_axis,params) orelse return error.InvalidParams;
 
         const first = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
-        if (!concat_matches_local(ctx.func, inputs, out, axis)) return error.ConcatTypeMismatch;
+        if (!concat_matches(ctx.func, inputs, out, axis)) return error.ConcatTypeMismatch;
         if (first.dtype != out.dtype) return error.ConcatTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len == 0) return error.InvalidEqnArity;
-        const axis = pr.param_concat_axis(ctx.params) orelse return error.InvalidParams;
+        const axis = pr.param(.concat_axis,ctx.params) orelse return error.InvalidParams;
         const first = try ctx.tensor_of(ctx.inputs[0]);
-        const out_dims = try concat_output_dims_local(ctx, ctx.inputs, axis);
+        const out_dims = try compute_concat_output_dims(ctx, ctx.inputs, axis);
         return .{ .tensor = .{ .dtype = first.dtype, .shape = .{ .dims = out_dims } } };
     }
 
@@ -427,7 +428,7 @@ pub const concatenate = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len == 0) return error.UnsupportedEqn;
-        const axis = pr.param_concat_axis(params) orelse return error.UnsupportedEqn;
+        const axis = pr.param(.concat_axis,params) orelse return error.UnsupportedEqn;
 
         var primals = try ctx.allocator.alloc(pr.VarId, inputs.len);
         defer ctx.allocator.free(primals);
@@ -444,7 +445,7 @@ pub const concatenate = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len == 0) return error.UnsupportedEqn;
-        const axis = pr.param_concat_axis(params) orelse return error.UnsupportedEqn;
+        const axis = pr.param(.concat_axis,params) orelse return error.UnsupportedEqn;
 
         var tangents = try ctx.allocator.alloc(pr.VarId, inputs.len);
         defer ctx.allocator.free(tangents);
@@ -459,17 +460,17 @@ pub const concatenate = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len == 0) return error.UnsupportedEqn;
-        const axis = pr.param_concat_axis(params) orelse return error.UnsupportedEqn;
+        const axis = pr.param(.concat_axis,params) orelse return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
         const axis_u: usize = @intCast(axis);
 
-        var offset: usize = 0;
+        var offset: i64 = 0;
         for (inputs) |id| {
             const t = ctx.tensor_of(id);
             const len = t.shape.dims[axis_u];
-            const start = @as(i64, @intCast(offset));
-            const limit = @as(i64, @intCast(offset + len));
+            const start = offset;
+            const limit = offset + len;
 
             var start_indices = try ctx.allocator.alloc(i64, t.shape.rank());
             var limit_indices = try ctx.allocator.alloc(i64, t.shape.rank());
@@ -511,7 +512,7 @@ pub const reduce_sum = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const axes = pr.param_reduce_axes(params) orelse return error.InvalidParams;
+        const axes = pr.param(.reduce_axes,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
 
@@ -520,9 +521,9 @@ pub const reduce_sum = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
-        const axes = pr.param_reduce_axes(ctx.params) orelse return error.InvalidParams;
+        const axes = pr.param(.reduce_axes,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
         const out_dims = try reduce_sum_output_dims(ctx.alloc(), operand.shape.dims, axes);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
@@ -534,7 +535,7 @@ pub const reduce_sum = struct {
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const axes = pr.param(.reduce_axes,params) orelse return error.UnsupportedEqn;
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.reduce_sum(operand, axes);
         ctx.set_primal(outputs[0], out);
@@ -547,7 +548,7 @@ pub const reduce_sum = struct {
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const axes = pr.param(.reduce_axes,params) orelse return error.UnsupportedEqn;
         const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
         ctx.set_tangent(outputs[0], try ctx.builder.reduce_sum(dx, axes));
     }
@@ -559,7 +560,7 @@ pub const reduce_sum = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const axes = pr.param(.reduce_axes,params) orelse return error.UnsupportedEqn;
         const in_tensor = ctx.tensor_of(inputs[0]);
 
         const bd = try reduce_sum_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, axes);
@@ -569,7 +570,7 @@ pub const reduce_sum = struct {
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        if (pr.param_reduce_axes(ctx.params())) |axes| {
+        if (pr.param(.reduce_axes,ctx.params())) |axes| {
             try writer.writeAll("axes=[");
             for (axes, 0..) |d, i| {
                 if (i > 0) try writer.writeAll(", ");
@@ -593,15 +594,15 @@ pub const reduce_max = struct {
         const params = ctx.params();
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
-        const axes = pr.param_reduce_axes(params) orelse return error.InvalidParams;
+        const axes = pr.param(.reduce_axes,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
         if (!reduce_sum_matches(operand.shape.dims, out.shape.dims, axes)) return error.ReduceMaxTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
-        const axes = pr.param_reduce_axes(ctx.params) orelse return error.InvalidParams;
+        const axes = pr.param(.reduce_axes,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
         const out_dims = try reduce_sum_output_dims(ctx.alloc(), operand.shape.dims, axes);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
@@ -613,7 +614,7 @@ pub const reduce_max = struct {
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const axes = pr.param(.reduce_axes,params) orelse return error.UnsupportedEqn;
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.reduce_max(operand, axes);
         ctx.set_primal(outputs[0], out);
@@ -626,7 +627,7 @@ pub const reduce_max = struct {
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const axes = pr.param(.reduce_axes,params) orelse return error.UnsupportedEqn;
         const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
@@ -653,7 +654,7 @@ pub const reduce_max = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const axes = pr.param_reduce_axes(params) orelse return error.UnsupportedEqn;
+        const axes = pr.param(.reduce_axes,params) orelse return error.UnsupportedEqn;
         const in_tensor = ctx.tensor_of(inputs[0]);
 
         const bd = try reduce_sum_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, axes);
@@ -688,7 +689,7 @@ pub const gather = struct {
         const params = ctx.params();
 
         if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-        const gparams = pr.param_gather(params) orelse return error.InvalidParams;
+        const gparams = pr.param(.gather,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const indices = try ctx.tensor_of(inputs[1]);
         const out = try ctx.tensor_of(outputs[0]);
@@ -707,7 +708,8 @@ pub const gather = struct {
             );
             return error.GatherTypeMismatch;
         }
-        const expected = gather_output_dims_local(operand.shape.dims, indices.shape.dims, gparams) orelse {
+        var dims_buf: [max_rank]i64 = undefined;
+        const expected = compute_gather_output_dims(operand.shape.dims, indices.shape.dims, gparams, &dims_buf) orelse {
             log.err(
                 "gather output shape invalid: operand={any} indices={any} params(slice={any}, offset={any}, collapsed={any}, map={any}, index_vec_dim={d})",
                 .{
@@ -722,7 +724,7 @@ pub const gather = struct {
             );
             return error.GatherTypeMismatch;
         };
-        if (!std.mem.eql(usize, out.shape.dims, expected)) {
+        if (!std.mem.eql(i64, out.shape.dims, expected)) {
             log.err(
                 "gather out dims mismatch: operand={any} indices={any} out={any} expected={any}",
                 .{ operand.shape.dims, indices.shape.dims, out.shape.dims, expected },
@@ -731,13 +733,16 @@ pub const gather = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 2) return error.InvalidEqnArity;
-        const gparams = pr.param_gather(ctx.params) orelse return error.InvalidParams;
+        const gparams = pr.param(.gather,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
         const indices = try ctx.tensor_of(ctx.inputs[1]);
         if (indices.dtype != .i32 and indices.dtype != .i64) return error.GatherTypeMismatch;
-        const out_dims = try pr.gather_output_dims(ctx.alloc(), operand.shape.dims, indices.shape.dims, gparams);
+        var dims_buf: [max_rank]i64 = undefined;
+        const computed = compute_gather_output_dims(operand.shape.dims, indices.shape.dims, gparams, &dims_buf) orelse
+            return error.GatherTypeMismatch;
+        const out_dims = try ctx.alloc().dupe(i64, computed);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
@@ -746,7 +751,7 @@ pub const gather = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 2) return error.UnsupportedEqn;
-        const gparams = pr.param_gather(params) orelse return error.UnsupportedEqn;
+        const gparams = pr.param(.gather,params) orelse return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const indices = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
@@ -760,7 +765,7 @@ pub const gather = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 2) return error.UnsupportedEqn;
-        const gparams = pr.param_gather(params) orelse return error.UnsupportedEqn;
+        const gparams = pr.param(.gather,params) orelse return error.UnsupportedEqn;
 
         const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
         const indices = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
@@ -772,7 +777,7 @@ pub const gather = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 2) return error.UnsupportedEqn;
-        const gparams = pr.param_gather(params) orelse return error.UnsupportedEqn;
+        const gparams = pr.param(.gather,params) orelse return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
         const indices = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
@@ -800,7 +805,7 @@ pub const scatter = struct {
         const params = ctx.params();
 
         if (inputs.len != 3 or outputs.len != 1) return error.InvalidEqnArity;
-        _ = pr.param_scatter(params) orelse return error.InvalidParams;
+        _ = pr.param(.scatter,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const indices = try ctx.tensor_of(inputs[1]);
         const updates = try ctx.tensor_of(inputs[2]);
@@ -811,9 +816,9 @@ pub const scatter = struct {
         if (updates.dtype != operand.dtype) return error.ScatterTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 3) return error.InvalidEqnArity;
-        _ = pr.param_scatter(ctx.params) orelse return error.InvalidParams;
+        _ = pr.param(.scatter,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
         const indices = try ctx.tensor_of(ctx.inputs[1]);
         if (indices.dtype != .i32 and indices.dtype != .i64) return error.ScatterTypeMismatch;
@@ -821,7 +826,6 @@ pub const scatter = struct {
         if (updates.dtype != operand.dtype) return error.ScatterTypeMismatch;
         return .{ .tensor = operand };
     }
-
 };
 
 // ============================================================================
@@ -838,22 +842,22 @@ pub const broadcast_in_dim = struct {
 
         if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.param_out_shape(params) orelse return error.InvalidParams;
-        const bd = pr.param_broadcast_dims(params) orelse return error.InvalidParams;
+        const out_shape = pr.param(.out_shape,params) orelse return error.InvalidParams;
+        const bd = pr.param(.broadcast_dimensions,params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(inputs[0]);
         const out = try ctx.tensor_of(outputs[0]);
 
-        if (!std.mem.eql(usize, out.shape.dims, out_shape)) return error.BroadcastInDimTypeMismatch;
+        if (!std.mem.eql(i64, out.shape.dims, out_shape)) return error.BroadcastInDimTypeMismatch;
         try validate_broadcast_in_dim_op(operand, out, bd);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 1) return error.InvalidEqnArity;
 
-        const out_shape = pr.param_out_shape(ctx.params) orelse return error.InvalidParams;
-        const bd = pr.param_broadcast_dims(ctx.params) orelse return error.InvalidParams;
+        const out_shape = pr.param(.out_shape,ctx.params) orelse return error.InvalidParams;
+        const bd = pr.param(.broadcast_dimensions,ctx.params) orelse return error.InvalidParams;
         const operand = try ctx.tensor_of(ctx.inputs[0]);
-        const out_tensor = types.Tensor{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } };
+        const out_tensor = Tensor{ .dtype = operand.dtype, .shape = .{ .dims = out_shape } };
 
         try validate_broadcast_in_dim_op(operand, out_tensor, bd);
         return .{ .tensor = out_tensor };
@@ -865,8 +869,8 @@ pub const broadcast_in_dim = struct {
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_shape = pr.param_out_shape(params) orelse return error.UnsupportedEqn;
-        const bd = pr.param_broadcast_dims(params) orelse return error.UnsupportedEqn;
+        const out_shape = pr.param(.out_shape,params) orelse return error.UnsupportedEqn;
+        const bd = pr.param(.broadcast_dimensions,params) orelse return error.UnsupportedEqn;
         const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.broadcast_in_dim(operand, out_shape, bd);
         ctx.set_primal(outputs[0], out);
@@ -879,8 +883,8 @@ pub const broadcast_in_dim = struct {
         const params = ctx.params(eqn);
         if (inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_shape = pr.param_out_shape(params) orelse return error.UnsupportedEqn;
-        const bd = pr.param_broadcast_dims(params) orelse return error.UnsupportedEqn;
+        const out_shape = pr.param(.out_shape,params) orelse return error.UnsupportedEqn;
+        const bd = pr.param(.broadcast_dimensions,params) orelse return error.UnsupportedEqn;
         const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
         ctx.set_tangent(outputs[0], try ctx.builder.broadcast_in_dim(dx, out_shape, bd));
     }
@@ -892,7 +896,7 @@ pub const broadcast_in_dim = struct {
         if (inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const bd = pr.param_broadcast_dims(params) orelse return error.UnsupportedEqn;
+        const bd = pr.param(.broadcast_dimensions,params) orelse return error.UnsupportedEqn;
         const in_tensor = ctx.tensor_of(inputs[0]);
         const out_tensor = ctx.tensor_of(outputs[0]);
 
@@ -906,7 +910,7 @@ pub const broadcast_in_dim = struct {
 
         const reduced_dims = try reduce_sum_output_dims(ctx.allocator, out_tensor.shape.dims, reduce_axes);
         defer ctx.allocator.free(reduced_dims);
-        if (!std.mem.eql(usize, reduced_dims, in_tensor.shape.dims)) {
+        if (!std.mem.eql(i64, reduced_dims, in_tensor.shape.dims)) {
             contrib = try ctx.builder.reshape(contrib, in_tensor.shape.dims);
         }
 
@@ -917,10 +921,10 @@ pub const broadcast_in_dim = struct {
         const src = ctx.input_tensor(0) orelse return;
         try format_shape(writer, src.shape.dims);
         try writer.writeAll(" -> ");
-        if (pr.param_out_shape(ctx.params())) |out_shape| {
+        if (pr.param(.out_shape,ctx.params())) |out_shape| {
             try format_shape(writer, out_shape);
         }
-        if (pr.param_broadcast_dims(ctx.params())) |bd| {
+        if (pr.param(.broadcast_dimensions,ctx.params())) |bd| {
             try writer.writeAll(", dims=[");
             for (bd, 0..) |d, i| {
                 if (i > 0) try writer.writeAll(", ");
@@ -932,12 +936,18 @@ pub const broadcast_in_dim = struct {
 };
 
 // ============================================================================
-// Helpers
+// Shared Helpers
+//
+// Shape computation and matching logic used by both validate (which checks
+// existing output shapes) and infer_output (which computes new ones).
+//
+// Functions that produce variable-length dimension lists take a caller-owned
+// buffer to avoid returning slices into callee stack frames.
 // ============================================================================
 
-fn num_elements(dims: []const usize) usize {
+fn num_elements(dims: []const i64) usize {
     var n: usize = 1;
-    for (dims) |d| n *= d;
+    for (dims) |d| n *= @intCast(d);
     return n;
 }
 
@@ -945,7 +955,7 @@ fn is_permutation(perm: []const i64, rank: usize) bool {
     if (perm.len != rank) return false;
     if (rank == 0) return true;
 
-    const max_rank: usize = 64;
+
     if (rank > max_rank) return false;
     var seen = [_]bool{false} ** max_rank;
 
@@ -959,7 +969,7 @@ fn is_permutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
-fn format_shape(writer: *types.Writer, dims: []const usize) types.FormatError!void {
+fn format_shape(writer: *types.Writer, dims: []const i64) types.FormatError!void {
     try writer.writeByte('[');
     for (dims, 0..) |d, i| {
         if (i > 0) try writer.writeAll(", ");
@@ -968,12 +978,12 @@ fn format_shape(writer: *types.Writer, dims: []const usize) types.FormatError!vo
     try writer.writeByte(']');
 }
 
-fn validate_broadcast_in_dim_op(operand: types.Tensor, out: types.Tensor, broadcast_dimensions: []const i64) pr.ValidationError!void {
+fn validate_broadcast_in_dim_op(operand: Tensor, out: Tensor, broadcast_dimensions: []const i64) pr.ValidationError!void {
     if (operand.dtype != out.dtype) return error.BroadcastInDimTypeMismatch;
     if (broadcast_dimensions.len != operand.shape.rank()) return error.BroadcastInDimTypeMismatch;
     if (out.shape.rank() < operand.shape.rank()) return error.BroadcastInDimTypeMismatch;
 
-    const max_rank: usize = 64;
+
     if (out.shape.rank() > max_rank) return error.BroadcastInDimTypeMismatch;
     var seen = [_]bool{false} ** max_rank;
 
@@ -990,9 +1000,9 @@ fn validate_broadcast_in_dim_op(operand: types.Tensor, out: types.Tensor, broadc
     }
 }
 
-fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const usize, axes: []const i64) pr.BuildError![]const usize {
+fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const i64, axes: []const i64) pr.BuildError![]const i64 {
     const rank = in_dims.len;
-    const max_rank: usize = 64;
+
     if (rank > max_rank) return error.ReduceSumTypeMismatch;
 
     var reduce = [_]bool{false} ** max_rank;
@@ -1008,7 +1018,7 @@ fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const usize, 
     for (0..rank) |i| {
         if (!reduce[i]) out_count += 1;
     }
-    const out_dims = try allocator.alloc(usize, out_count);
+    const out_dims = try allocator.alloc(i64, out_count);
     var out_i: usize = 0;
     for (0..rank) |i| {
         if (reduce[i]) continue;
@@ -1018,9 +1028,9 @@ fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const usize, 
     return out_dims;
 }
 
-fn reduce_sum_matches(in_dims: []const usize, out_dims: []const usize, axes: []const i64) bool {
+fn reduce_sum_matches(in_dims: []const i64, out_dims: []const i64, axes: []const i64) bool {
     const rank = in_dims.len;
-    const max_rank: usize = 64;
+
     if (rank > max_rank) return false;
 
     var reduce = [_]bool{false} ** max_rank;
@@ -1044,7 +1054,7 @@ fn reduce_sum_matches(in_dims: []const usize, out_dims: []const usize, axes: []c
 }
 
 fn reduce_sum_broadcast_dims(allocator: std.mem.Allocator, rank: usize, axes: []const i64) pr.BuildError![]const i64 {
-    const max_rank: usize = 64;
+
     if (rank > max_rank) return error.ReduceSumTypeMismatch;
 
     var reduce = [_]bool{false} ** max_rank;
@@ -1066,11 +1076,11 @@ fn reduce_sum_broadcast_dims(allocator: std.mem.Allocator, rank: usize, axes: []
 
 fn broadcast_reduce_axes(
     allocator: std.mem.Allocator,
-    in_tensor: types.Tensor,
-    out_tensor: types.Tensor,
+    in_tensor: Tensor,
+    out_tensor: Tensor,
     bd: []const i64,
 ) pr.BuildError![]const i64 {
-    const max_rank: usize = 64;
+
     if (out_tensor.shape.rank() > max_rank) return error.ReduceSumTypeMismatch;
 
     var mapped = [_]bool{false} ** max_rank;
@@ -1107,12 +1117,14 @@ fn broadcast_reduce_axes(
     return axes;
 }
 
-fn gather_output_dims_local(
-    operand_dims: []const usize,
-    indices_dims: []const usize,
+/// Compute gather output dimensions. Returns null if parameters are invalid.
+/// Result is a slice into `out_buf`; caller must dupe if the data needs to outlive the buffer.
+fn compute_gather_output_dims(
+    operand_dims: []const i64,
+    indices_dims: []const i64,
     params: pr.GatherParams,
-) ?[]const usize {
-    const max_rank: usize = 64;
+    out_buf: *[max_rank]i64,
+) ?[]const i64 {
     if (operand_dims.len > max_rank) return null;
     if (params.slice_sizes.len != operand_dims.len) return null;
     if (params.index_vector_dim < 0) return null;
@@ -1122,7 +1134,7 @@ fn gather_output_dims_local(
     const index_vector_len: usize = if (index_vector_dim == indices_dims.len)
         1
     else
-        indices_dims[index_vector_dim];
+        @intCast(indices_dims[index_vector_dim]);
     if (params.start_index_map.len != index_vector_len) return null;
 
     var collapsed = [_]bool{false} ** max_rank;
@@ -1135,27 +1147,26 @@ fn gather_output_dims_local(
         if (params.slice_sizes[idx] != 1) return null;
     }
 
-    const out_rank = indices_dims.len - (if (index_vector_dim == indices_dims.len) 0 else 1) +
+    const out_rank = indices_dims.len - (if (index_vector_dim == indices_dims.len) @as(usize, 0) else @as(usize, 1)) +
         (operand_dims.len - params.collapsed_slice_dims.len);
     if (out_rank > max_rank) return null;
 
-    var out_dims_buf: [max_rank]usize = undefined;
     var out_i: usize = 0;
     for (indices_dims, 0..) |d, i| {
         if (i == index_vector_dim) continue;
-        out_dims_buf[out_i] = d;
+        out_buf[out_i] = d;
         out_i += 1;
     }
     for (0..operand_dims.len) |i| {
         if (collapsed[i]) continue;
-        out_dims_buf[out_i] = @intCast(params.slice_sizes[i]);
+        out_buf[out_i] = params.slice_sizes[i];
         out_i += 1;
     }
 
-    return out_dims_buf[0..out_i];
+    return out_buf[0..out_i];
 }
 
-fn slice_matches_local(in_dims: []const usize, out_dims: []const usize, params: pr.SliceParams) bool {
+fn slice_matches(in_dims: []const i64, out_dims: []const i64, params: pr.SliceParams) bool {
     if (params.start_indices.len != in_dims.len) return false;
     if (params.limit_indices.len != in_dims.len) return false;
     if (params.strides.len != in_dims.len) return false;
@@ -1166,44 +1177,40 @@ fn slice_matches_local(in_dims: []const usize, out_dims: []const usize, params: 
         const limit = params.limit_indices[i];
         const stride = params.strides[i];
         if (start < 0 or limit < 0 or stride <= 0) return false;
-        const start_u: usize = @intCast(start);
-        const limit_u: usize = @intCast(limit);
-        const stride_u: usize = @intCast(stride);
-        if (limit_u > dim or start_u >= limit_u) return false;
-        const span = limit_u - start_u;
-        const out = (span + stride_u - 1) / stride_u;
+        if (dim < 0) return false;
+        if (limit > dim or start >= limit) return false;
+        const span: i64 = limit - start;
+        const out: i64 = @divTrunc(span + stride - 1, stride);
         if (out_dims[i] != out) return false;
     }
     return true;
 }
 
-fn slice_output_dims_local(allocator: std.mem.Allocator, in_dims: []const usize, params: pr.SliceParams) pr.BuildError![]const usize {
+fn compute_slice_output_dims(allocator: std.mem.Allocator, in_dims: []const i64, params: pr.SliceParams) pr.BuildError![]const i64 {
     if (params.start_indices.len != in_dims.len) return error.SliceTypeMismatch;
     if (params.limit_indices.len != in_dims.len) return error.SliceTypeMismatch;
     if (params.strides.len != in_dims.len) return error.SliceTypeMismatch;
 
-    const out_dims = try allocator.alloc(usize, in_dims.len);
+    const out_dims = try allocator.alloc(i64, in_dims.len);
     for (in_dims, 0..) |dim, i| {
         const start = params.start_indices[i];
         const limit = params.limit_indices[i];
         const stride = params.strides[i];
         if (start < 0 or limit < 0 or stride <= 0) return error.SliceTypeMismatch;
-        const start_u: usize = @intCast(start);
-        const limit_u: usize = @intCast(limit);
-        const stride_u: usize = @intCast(stride);
-        if (limit_u > dim or start_u >= limit_u) return error.SliceTypeMismatch;
-        const span = limit_u - start_u;
-        out_dims[i] = (span + stride_u - 1) / stride_u;
+        if (dim < 0) return error.SliceTypeMismatch;
+        if (limit > dim or start >= limit) return error.SliceTypeMismatch;
+        const span: i64 = limit - start;
+        out_dims[i] = @divTrunc(span + stride - 1, stride);
     }
     return out_dims;
 }
 
-fn concat_matches_local(func: pr.Function, inputs: []const pr.VarId, out: pr.Tensor, axis: i64) bool {
+fn concat_matches(func: pr.Function, inputs: []const pr.VarId, out: Tensor, axis: i64) bool {
     if (axis < 0) return false;
     const axis_u: usize = @intCast(axis);
     if (out.shape.rank() == 0 or axis_u >= out.shape.rank()) return false;
 
-    var out_sum: usize = 0;
+    var out_sum: i64 = 0;
     for (inputs) |id| {
         const t = func.avals[@intCast(id)].as_tensor() orelse return false;
         if (t.dtype != out.dtype) return false;
@@ -1217,13 +1224,13 @@ fn concat_matches_local(func: pr.Function, inputs: []const pr.VarId, out: pr.Ten
     return out_sum == out.shape.dims[axis_u];
 }
 
-fn concat_output_dims_local(ctx: types.InferContext, inputs: []const pr.VarId, axis: i64) pr.BuildError![]const usize {
+fn compute_concat_output_dims(ctx: types.InferContext, inputs: []const pr.VarId, axis: i64) pr.BuildError![]const i64 {
     if (axis < 0) return error.ConcatTypeMismatch;
     const axis_u: usize = @intCast(axis);
     const first = try ctx.tensor_of(inputs[0]);
     if (first.shape.rank() == 0 or axis_u >= first.shape.rank()) return error.ConcatTypeMismatch;
 
-    var out_dims = try ctx.alloc().dupe(usize, first.shape.dims);
+    var out_dims = try ctx.alloc().dupe(i64, first.shape.dims);
     var total = out_dims[axis_u];
     for (inputs[1..]) |id| {
         const t = try ctx.tensor_of(id);
@@ -1239,17 +1246,11 @@ fn concat_output_dims_local(ctx: types.InferContext, inputs: []const pr.VarId, a
     return out_dims;
 }
 
-fn zeros_like(bld: *pr.FunctionBuilder, dtype: pr.DType, dims: []const usize) pr.BuildError!pr.VarId {
-    const lit = try bld.literal_scalar(types.scalar_literal(dtype, 0.0));
-    if (dims.len == 0) return lit;
-    return bld.broadcast_in_dim(lit, dims, &.{});
-}
-
 fn compare_type_for_dtype(dt: pr.DType) pr.CompareType {
     return switch (dt) {
-        .bf16, .f32, .f64 => .FLOAT,
-        .i32, .i64 => .SIGNED,
-        .u32, .u64, .bool => .UNSIGNED,
+        .f16, .bf16, .f32, .f64 => .FLOAT,
+        .i8, .i32, .i64 => .SIGNED,
+        .u8, .u32, .u64, .bool => .UNSIGNED,
     };
 }
 

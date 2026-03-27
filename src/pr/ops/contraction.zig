@@ -3,6 +3,8 @@
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
+const Aval = pr.Aval;
+
 const log = std.log.scoped(.@"zg/contraction");
 
 // ============================================================================
@@ -28,7 +30,7 @@ pub const dot = struct {
         if (out.shape.dims[0] != lhs.shape.dims[0] or out.shape.dims[1] != rhs.shape.dims[1]) return error.DotTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 2) return error.InvalidEqnArity;
 
         const lhs = try ctx.tensor_of(ctx.inputs[0]);
@@ -38,7 +40,7 @@ pub const dot = struct {
         if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2) return error.DotTypeMismatch;
         if (lhs.shape.dims[1] != rhs.shape.dims[0]) return error.DotTypeMismatch;
 
-        const out_dims = try ctx.alloc().dupe(usize, &[_]usize{ lhs.shape.dims[0], rhs.shape.dims[1] });
+        const out_dims = try ctx.alloc().dupe(i64, &[_]i64{ lhs.shape.dims[0], rhs.shape.dims[1] });
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
     }
 
@@ -113,14 +115,15 @@ pub const dot_general = struct {
         const params = ctx.params();
 
         if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-        const dg_params = pr.param_dot_general(params) orelse return error.InvalidParams;
+        const dg_params = pr.param(.dot_general,params) orelse return error.InvalidParams;
 
         const lhs = try ctx.tensor_of(inputs[0]);
         const rhs = try ctx.tensor_of(inputs[1]);
         const out = try ctx.tensor_of(outputs[0]);
         if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotGeneralTypeMismatch;
 
-        if (!pr.dot_general_matches(lhs, rhs, out.shape.dims, dg_params)) {
+        var dims_buf: [max_rank]i64 = undefined;
+        const expected = compute_dot_general_output_dims(lhs, rhs, dg_params, &dims_buf) orelse {
             log.err(
                 "dot_general shape mismatch: lhs={any} rhs={any} out={any} batch(lhs={any}, rhs={any}) contract(lhs={any}, rhs={any})",
                 .{
@@ -134,16 +137,26 @@ pub const dot_general = struct {
                 },
             );
             return error.DotGeneralTypeMismatch;
+        };
+        if (!std.mem.eql(i64, out.shape.dims, expected)) {
+            log.err(
+                "dot_general out dims mismatch: expected={any} actual={any}",
+                .{ expected, out.shape.dims },
+            );
+            return error.DotGeneralTypeMismatch;
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!types.Aval {
+    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
         if (ctx.inputs.len != 2) return error.InvalidEqnArity;
-        const dg_params = pr.param_dot_general(ctx.params) orelse return error.InvalidParams;
+        const dg_params = pr.param(.dot_general,ctx.params) orelse return error.InvalidParams;
         const lhs = try ctx.tensor_of(ctx.inputs[0]);
         const rhs = try ctx.tensor_of(ctx.inputs[1]);
         if (lhs.dtype != rhs.dtype) return error.DotGeneralTypeMismatch;
-        const out_dims = try pr.dot_general_output_dims(ctx.alloc(), lhs, rhs, dg_params);
+        var dims_buf: [max_rank]i64 = undefined;
+        const computed = compute_dot_general_output_dims(lhs, rhs, dg_params, &dims_buf) orelse
+            return error.DotGeneralTypeMismatch;
+        const out_dims = try ctx.alloc().dupe(i64, computed);
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
     }
 
@@ -152,7 +165,7 @@ pub const dot_general = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 2) return error.UnsupportedEqn;
-        const dg_params = pr.param_dot_general(params) orelse return error.UnsupportedEqn;
+        const dg_params = pr.param(.dot_general,params) orelse return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const rhs = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
@@ -165,7 +178,7 @@ pub const dot_general = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 2) return error.UnsupportedEqn;
-        const dg_params = pr.param_dot_general(params) orelse return error.UnsupportedEqn;
+        const dg_params = pr.param(.dot_general,params) orelse return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(outputs[0]) orelse return;
         const lhs_primal = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
@@ -236,7 +249,7 @@ pub const dot_general = struct {
         const outputs = ctx.outputs(eqn);
         const params = ctx.params(eqn);
         if (inputs.len != 2) return error.UnsupportedEqn;
-        const dg_params = pr.param_dot_general(params) orelse return error.UnsupportedEqn;
+        const dg_params = pr.param(.dot_general,params) orelse return error.UnsupportedEqn;
 
         const a = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
         const b = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
@@ -249,7 +262,7 @@ pub const dot_general = struct {
     }
 
     pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const dg_params = pr.param_dot_general(ctx.params()) orelse return;
+        const dg_params = pr.param(.dot_general,ctx.params()) orelse return;
         try writer.writeAll("batch=(lhs=");
         try write_dims(writer, dg_params.lhs_batch_dims);
         try writer.writeAll(", rhs=");
@@ -501,6 +514,76 @@ fn transpose_to_match_multi(
 
     if (is_identity) return canon;
     return try ctx.builder.transpose(canon, perm);
+}
+
+const max_rank: usize = 64;
+
+/// Compute dot_general output dimensions. Returns null if parameters are invalid.
+/// Result is a slice into `out_buf`; caller must dupe if the data needs to outlive the buffer.
+fn compute_dot_general_output_dims(
+    lhs: pr.Tensor,
+    rhs: pr.Tensor,
+    params: pr.DotGeneralParams,
+    out_buf: *[max_rank]i64,
+) ?[]const i64 {
+    const lhs_rank = lhs.shape.rank();
+    const rhs_rank = rhs.shape.rank();
+    if (lhs_rank > max_rank or rhs_rank > max_rank) return null;
+
+    if (params.lhs_batch_dims.len != params.rhs_batch_dims.len) return null;
+    if (params.lhs_contracting_dims.len != params.rhs_contracting_dims.len) return null;
+
+    var lhs_batch = [_]bool{false} ** max_rank;
+    var rhs_batch = [_]bool{false} ** max_rank;
+    for (params.lhs_batch_dims, 0..) |d, i| {
+        if (d < 0) return null;
+        const lhs_idx: usize = @intCast(d);
+        if (lhs_idx >= lhs_rank or lhs_batch[lhs_idx]) return null;
+        const rhs_d = params.rhs_batch_dims[i];
+        if (rhs_d < 0) return null;
+        const rhs_idx: usize = @intCast(rhs_d);
+        if (rhs_idx >= rhs_rank or rhs_batch[rhs_idx]) return null;
+        if (lhs.shape.dims[lhs_idx] != rhs.shape.dims[rhs_idx]) return null;
+        lhs_batch[lhs_idx] = true;
+        rhs_batch[rhs_idx] = true;
+    }
+
+    var lhs_contract = [_]bool{false} ** max_rank;
+    var rhs_contract = [_]bool{false} ** max_rank;
+    for (params.lhs_contracting_dims, 0..) |d, i| {
+        if (d < 0) return null;
+        const lhs_idx: usize = @intCast(d);
+        if (lhs_idx >= lhs_rank or lhs_contract[lhs_idx] or lhs_batch[lhs_idx]) return null;
+        const rhs_d = params.rhs_contracting_dims[i];
+        if (rhs_d < 0) return null;
+        const rhs_idx: usize = @intCast(rhs_d);
+        if (rhs_idx >= rhs_rank or rhs_contract[rhs_idx] or rhs_batch[rhs_idx]) return null;
+        if (lhs.shape.dims[lhs_idx] != rhs.shape.dims[rhs_idx]) return null;
+        lhs_contract[lhs_idx] = true;
+        rhs_contract[rhs_idx] = true;
+    }
+
+    const out_rank = params.lhs_batch_dims.len +
+        (lhs_rank - params.lhs_batch_dims.len - params.lhs_contracting_dims.len) +
+        (rhs_rank - params.rhs_batch_dims.len - params.rhs_contracting_dims.len);
+    if (out_rank > max_rank) return null;
+
+    var out_i: usize = 0;
+    for (params.lhs_batch_dims) |d| {
+        out_buf[out_i] = lhs.shape.dims[@intCast(d)];
+        out_i += 1;
+    }
+    for (0..lhs_rank) |i| {
+        if (lhs_batch[i] or lhs_contract[i]) continue;
+        out_buf[out_i] = lhs.shape.dims[i];
+        out_i += 1;
+    }
+    for (0..rhs_rank) |i| {
+        if (rhs_batch[i] or rhs_contract[i]) continue;
+        out_buf[out_i] = rhs.shape.dims[i];
+        out_i += 1;
+    }
+    return out_buf[0..out_i];
 }
 
 fn write_dims(writer: *types.Writer, dims: []const i64) types.FormatError!void {
