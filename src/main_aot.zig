@@ -3,7 +3,7 @@ const zg = @import("zigrad");
 
 pub fn run(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
+    backend: *zg.backend.pjrt.Backend,
     device: *const zg.backend.pjrt.Device,
 ) !void {
     var program = try zg.frontend.build_demo_program(allocator);
@@ -31,7 +31,7 @@ pub fn run(
 
 fn run_demo_executable(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
+    backend: *zg.backend.pjrt.Backend,
     device: *const zg.backend.pjrt.Device,
     exe: *zg.backend.pjrt.LoadedExecutable,
 ) !void {

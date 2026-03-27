@@ -32,7 +32,7 @@ pub const tvm = if (build_options.has_tvm) @import("tvm/root.zig") else struct {
 pub const mirage = if (build_options.has_mirage) @import("mirage/root.zig") else struct {};
 
 // Tier 1: commonly used types at top level
-pub const Backend = backend.PjrtBackend;
+pub const Backend = backend.Backend;
 pub const HostBuffer = utils.HostBuffer;
 pub const DType = utils.DType;
 pub const Shape = utils.Shape;

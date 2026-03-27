@@ -8,7 +8,7 @@ const backend = zg.backend;
 /// XLA execution context (cached backend, device, and compiled executables).
 pub const XlaContext = struct {
     allocator: std.mem.Allocator,
-    backend_handle: *backend.PjrtBackend,
+    backend_handle: *backend.pjrt.Backend,
     device: *const backend.pjrt.Device,
     compiled_cache: std.StringHashMap(*backend.pjrt.LoadedExecutable),
 
@@ -29,10 +29,10 @@ pub const XlaContext = struct {
             return error.PjrtCpuPluginPathNotSet;
         };
 
-        const backend_handle = try allocator.create(backend.PjrtBackend);
+        const backend_handle = try allocator.create(backend.pjrt.Backend);
         errdefer allocator.destroy(backend_handle);
 
-        backend_handle.* = try backend.PjrtBackend.init(allocator, plugin_path);
+        backend_handle.* = try backend.pjrt.Backend.init(allocator, plugin_path);
 
         const devices = try backend_handle.get_devices(allocator);
         if (devices.len == 0) return error.NoDevicesFound;

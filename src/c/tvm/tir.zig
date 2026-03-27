@@ -260,15 +260,12 @@ pub fn register_tensor_intrin(allocator: std.mem.Allocator, name: [:0]const u8, 
 ///
 /// Creates A[M,K] @ B[K,N] = C[M,N] via te.Placeholder + topi.matmul,
 /// wraps in CreatePrimFunc + IRModule with global_symbol="main".
-pub fn build_matmul_tir(allocator: std.mem.Allocator, m: usize, n: usize, k: usize) !IRModule {
-    const m_i: i64 = @intCast(m);
-    const n_i: i64 = @intCast(n);
-    const k_i: i64 = @intCast(k);
-
+/// TODO: this is questionable in a few ways, need to revisit the TVM KP.
+pub fn build_matmul_tir(allocator: std.mem.Allocator, m: i64, n: i64, k: i64) !IRModule {
     // Shapes
-    const shape_a = try api.call_global(allocator, "ffi.Array", &.{ Value.int(m_i), Value.int(k_i) });
+    const shape_a = try api.call_global(allocator, "ffi.Array", &.{ Value.int(m), Value.int(k) });
     defer shape_a.decref();
-    const shape_b = try api.call_global(allocator, "ffi.Array", &.{ Value.int(k_i), Value.int(n_i) });
+    const shape_b = try api.call_global(allocator, "ffi.Array", &.{ Value.int(k), Value.int(n) });
     defer shape_b.decref();
 
     // Placeholder tensors

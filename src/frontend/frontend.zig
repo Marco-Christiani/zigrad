@@ -7,6 +7,7 @@ const kernel = @import("../kernel.zig");
 const lower = @import("../lower/root.zig");
 const pipeline = @import("../pipeline/root.zig");
 const backend = @import("../backend/root.zig");
+const Backend = backend.Backend;
 const utils = @import("../utils/host_buffer.zig");
 
 pub const train = @import("train.zig");
@@ -369,7 +370,7 @@ pub const CompileConfig = struct {
     dump_optimized: ?pipeline.DumpConfig = null,
     /// Print a summary table of kernelized regions after the pass.
     dump_kernels: bool = false,
-    compile: backend.pjrt.CompileOptions = .{},
+    compile: Backend.CompileOptions = .{},
 };
 
 /// Compiled executable with arity metadata.
@@ -377,15 +378,15 @@ pub const CompileConfig = struct {
 /// Callers manage the executable lifetime directly via `exe.deinit(api)`.
 /// Arity fields record the expected flat input/output counts for validation.
 pub const CompiledForward = struct {
-    exe: backend.pjrt.LoadedExecutable,
+    exe: Backend.Executable,
     input_arity: usize,
     output_arity: usize,
 };
 
 pub fn compile_forward(
     allocator: std.mem.Allocator,
-    backend_handle: *backend.PjrtBackend,
-    device: *const backend.pjrt.Device,
+    backend_handle: *Backend,
+    device: Backend.Device,
     func: anytype,
     inputs: anytype,
     config: CompileConfig,
@@ -466,13 +467,13 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
 /// passes (select) are not added here -- for MLIR-level kernelization,
 /// assemble the pipeline manually.
 pub fn compile_program(
-    backend_handle: *backend.PjrtBackend,
+    backend_handle: *Backend,
     allocator: std.mem.Allocator,
     program: *pr.Program,
-    device: *const backend.pjrt.Device,
+    device: Backend.Device,
     config: CompileConfig,
     entry_name: []const u8,
-) !backend.pjrt.LoadedExecutable {
+) !Backend.Executable {
     var lower_cfg = config.lower;
     if (lower_cfg.entry_name == null) lower_cfg.entry_name = entry_name;
 
@@ -519,21 +520,10 @@ pub fn compile_program(
     };
 
     const compile_opts = config.compile;
-    var exe = try backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
+    const exe = try backend_handle.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
 
-    if (config.dump_optimized) |cfg| {
-        const maybe_opt = exe.get_optimized_program(backend_handle.api, allocator) catch |err| {
-            log.err("get_optimized_program failed: {s}", .{@errorName(err)});
-            return exe;
-        };
-        if (maybe_opt) |opt_const| {
-            var opt = opt_const;
-            defer opt.deinit(allocator);
-            var dump_cfg = cfg;
-            pipeline.dump_optimized_program(&dump_cfg, opt.code, opt.format, allocator) catch |err| {
-                log.err("dump-optimized failed: {s}", .{@errorName(err)});
-            };
-        }
+    if (config.dump_optimized != null) {
+        log.warn("dump-optimized requires PJRT-specific API; skipped through generic backend", .{});
     }
 
     return exe;
@@ -683,10 +673,10 @@ fn zero_literal(dtype: pr.DType) pr.Literal {
 /// Upload a host buffer to a device buffer.
 pub fn upload_host_buffer(
     allocator: std.mem.Allocator,
-    backend_handle: *backend.PjrtBackend,
-    device: *const backend.pjrt.Device,
+    backend_handle: *Backend,
+    device: Backend.Device,
     buf: *utils.HostBuffer,
-) !backend.pjrt.Buffer {
+) !Backend.Buffer {
     const shape_i64 = try allocator.alloc(i64, buf.shape.dims.len);
     defer allocator.free(shape_i64);
     for (buf.shape.dims, 0..) |d, i| shape_i64[i] = @intCast(d);

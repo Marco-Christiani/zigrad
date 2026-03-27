@@ -802,7 +802,6 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const has_side_effect = pr.param_has_side_effect(eqn_params) orelse return error.InvalidProgram;
     const kernel_key = pr.param_call_kernel_key(eqn_params);
     const provider_name = pr.param_call_provider_name(eqn_params);
-    const carrier_hint = pr.param_call_carrier_hint(eqn_params);
 
     const result_types = ctx.arena.alloc(mlir.Type, outs.len) catch return error.OutOfMemory;
     for (outs, 0..) |out_id, i| {
@@ -817,7 +816,7 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
 
     // typed_ffi custom calls expect dictionary backend_config. Keep keys stable
     // to match backend dispatcher parsing.
-    var backend_fields: [4]mlir.AttrTuple = undefined;
+    var backend_fields: [3]mlir.AttrTuple = undefined;
     var backend_field_count: usize = 0;
     if (kernel_key) |value| {
         backend_fields[backend_field_count] = .{ "zigrad.kernel_key", mlir.Attribute.string(ctx.mlir_ctx, value) };
@@ -825,10 +824,6 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     }
     if (provider_name) |value| {
         backend_fields[backend_field_count] = .{ "zigrad.provider", mlir.Attribute.string(ctx.mlir_ctx, value) };
-        backend_field_count += 1;
-    }
-    if (carrier_hint) |value| {
-        backend_fields[backend_field_count] = .{ "zigrad.carrier_hint", mlir.Attribute.string(ctx.mlir_ctx, value) };
         backend_field_count += 1;
     }
     const backend_config = mlir.Attribute.dict(ctx.mlir_ctx, backend_fields[0..backend_field_count]);
@@ -1205,59 +1200,6 @@ test "lowering supports multi-output custom_call boundary" {
 
     try testing.expect(std.mem.indexOf(u8, text, zigrad_kernel_call_op_name) != null);
     try testing.expect(std.mem.indexOf(u8, text, "tensor<2xf32>, tensor<2xf32>") != null);
-}
-
-test "lowering emits carrier_hint in custom_call backend_config" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "main");
-    defer b.deinit();
-
-    const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
-    const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
-    const bias = try b.param_tensor(.f32, &.{ 2, 2 });
-    const scale = try b.param_tensor(.f32, &.{ 2, 2 });
-
-    try b.push_region("attention_like", .{ .kernelize = "mock" });
-    const dot = try b.emit(.dot, &.{ lhs, rhs }, &.{});
-    const sum = try b.emit(.add, &.{ dot, bias }, &.{});
-    const ex = try b.emit(.exp, &.{sum}, &.{});
-    const mul = try b.emit(.multiply, &.{ ex, scale }, &.{});
-    const out = try b.emit(.log, &.{mul}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{out});
-    try program.add_function(func);
-
-    const kernel_mod = @import("../../../kernel.zig");
-    const kernelize = @import("../../../pipeline/kernelize.zig");
-
-    var store = kernel_mod.KernelStore.init(testing.allocator);
-    defer store.deinit();
-    try store.put_profitable(
-        "dot,f32[2,3],f32[3,2]>f32[2,2];add,f32[2,2],f32[2,2]>f32[2,2];exp,f32[2,2]>f32[2,2];multiply,f32[2,2],f32[2,2]>f32[2,2];log,f32[2,2]>f32[2,2]",
-        .{
-            .provider_name = "mock",
-            .data = "mock",
-            .target_name = "attention_like",
-        },
-    );
-
-    var kp = kernelize.KernelizePass{
-        .store = &store,
-    };
-
-    var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &pass_ctx);
-
-    const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
-    defer testing.allocator.free(text);
-
-    try testing.expect(std.mem.indexOf(u8, text, "zigrad.carrier_hint") != null);
 }
 
 test "lowering supports vjp matmul demo" {

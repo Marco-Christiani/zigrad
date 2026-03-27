@@ -1,22 +1,23 @@
-/// Unified PJRT Backend
-///
-/// Merges the Toolchain (compilation) and Runtime (execution) into a single
-/// Backend abstraction that owns the PJRT plugin/client/device lifecycle.
-///
-/// This design reflects PJRT's natural model where compilation is runtime-hosted:
-/// the Client does both compile and execute. Separating them into Toolchain/Runtime
-/// created artificial boundaries that don't fit JIT compilation well.
-///
-/// The Backend provides:
-/// - Plugin loading and client creation (lifecycle)
-/// - Device enumeration and selection
-/// - Compilation (MLIR -> LoadedExecutable)
-/// - Execution (LoadedExecutable + buffers -> outputs)
-/// - Buffer management (host <-> device transfers)
+//! Unified PJRT Backend
+//!
+//! Merges the Toolchain (compilation) and Runtime (execution) into a single
+//!  Backend abstraction that owns the PJRT plugin/client/device lifecycle.
+//!
+//! This design reflects PJRT's natural model where compilation is runtime-hosted:
+//!  the Client does both compile and execute. Separating them into Toolchain/Runtime
+//!  created artificial boundaries that don't fit JIT compilation well.
+//!
+//! The Backend provides:
+//!  - Plugin loading and client creation (lifecycle)
+//!  - Device enumeration and selection
+//!  - Compilation (MLIR -> LoadedExecutable)
+//!  - Execution (LoadedExecutable + buffers -> outputs)
+//!  - Buffer management (host <-> device transfers)
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
+const BackendInterface = @import("Backend.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const pjrt_types = @import("../c/pjrt/types.zig");
@@ -54,22 +55,8 @@ pub const Device = pjrt_types.Device;
 pub const Event = pjrt_types.Event;
 pub const ExecuteResult = pjrt_types.ExecuteResult;
 
-/// Compile options for the PJRT backend.
-pub const CompileOptions = struct {
-    num_replicas: u32 = 1,
-    num_partitions: u32 = 1,
-};
-
-/// Execute-time options for kernel dispatch.
-///
-/// Provides the kernel store and dispatch registry at execute time.
-/// The store holds pre-computed tuning decisions; the dispatch registry
-/// maps provider names to dispatch function pointers. Platform is
-/// derived from the backend automatically.
-pub const ExecuteOptions = struct {
-    store: ?*const kernel.KernelStore = null,
-    dispatch_registry: ?*const kernel.DispatchRegistry = null,
-};
+pub const CompileOptions = BackendInterface.CompileOptions;
+pub const ExecuteOptions = BackendInterface.ExecuteOptions;
 
 /// Unified PJRT Backend.
 ///
@@ -85,6 +72,7 @@ pub const Backend = struct {
     /// outlive individual execute calls).
     dispatch_platform: kernel.DispatchPlatform,
     kernel_dispatch_registered: bool,
+    interface: BackendInterface,
 
     /// Initialize the backend by loading a PJRT plugin.
     ///
@@ -117,6 +105,7 @@ pub const Backend = struct {
                 .host, .unknown => .host,
             },
             .kernel_dispatch_registered = false,
+            .interface = .{ .vtable = &iface_vtable },
         };
         log.info("plugin loaded: {s}", .{plugin_path});
         log.info("platform: {s}, typed-ffi: {s}", .{
@@ -323,6 +312,132 @@ pub const Backend = struct {
 
     pub fn device_memory_stats(self: *Backend, device: *const Device) !Device.MemoryStats {
         return device.get_memory_stats(self.api);
+    }
+
+    // ========================================================================
+    // Type-erased interface (vtable impl)
+    // ========================================================================
+
+    const iface_vtable = BackendInterface.VTable{
+        .compile = iface_compile,
+        .buffer_from_host = iface_buffer_from_host,
+        .buffer_to_host = iface_buffer_to_host,
+        .execute = iface_execute,
+        .execute_into = iface_execute_into,
+        .await_event = iface_await_event,
+        .deinit_buffer = iface_deinit_buffer,
+        .deinit_event = iface_deinit_event,
+        .deinit_executable = iface_deinit_executable,
+        .get_devices = iface_get_devices,
+    };
+
+    fn promote(iface: *BackendInterface) *Backend {
+        return @fieldParentPtr("interface", iface);
+    }
+
+    fn iface_compile(iface: *BackendInterface, device: BackendInterface.Device, mlir: []const u8, is_bytecode: bool, opts: BackendInterface.CompileOptions) BackendInterface.Error!BackendInterface.Executable {
+        const self = promote(iface);
+        const pjrt_device = unwrap_device(device);
+        const exe = self.compile(pjrt_device, mlir, is_bytecode, opts) catch return error.BackendError;
+        return wrap_executable(self, exe);
+    }
+
+    fn iface_buffer_from_host(iface: *BackendInterface, device: BackendInterface.Device, data: []const u8, dtype: pr.DType, shape: []const i64) BackendInterface.Error!BackendInterface.Buffer {
+        const self = promote(iface);
+        const pjrt_device = unwrap_device(device);
+        const buf = self.buffer_from_host(pjrt_device, data, dtype, shape) catch return error.BackendError;
+        return wrap_buffer(buf);
+    }
+
+    fn iface_buffer_to_host(iface: *BackendInterface, buf: BackendInterface.Buffer, dst: []u8) BackendInterface.Error!BackendInterface.Event {
+        const self = promote(iface);
+        var pjrt_buf = unwrap_buffer(buf);
+        const ev = self.buffer_to_host(&pjrt_buf, dst) catch return error.BackendError;
+        return wrap_event(ev);
+    }
+
+    fn iface_execute(iface: *BackendInterface, exe: BackendInterface.Executable, allocator: std.mem.Allocator, inputs: []const BackendInterface.Buffer, opts: BackendInterface.ExecuteOptions) BackendInterface.Error!BackendInterface.ExecuteResult {
+        const self = promote(iface);
+        const pjrt_exe = unwrap_executable_ptr(exe);
+        const pjrt_inputs = @as([*]const Buffer, @ptrCast(inputs.ptr))[0..inputs.len];
+        const result = self.execute(pjrt_exe, allocator, pjrt_inputs, opts) catch return error.BackendError;
+        const wrapped_outputs = @as([*]BackendInterface.Buffer, @ptrCast(result.outputs.ptr))[0..result.outputs.len];
+        return .{
+            .outputs = wrapped_outputs,
+            .event = if (result.device_complete_event) |ev| wrap_event(ev) else null,
+        };
+    }
+
+    fn iface_execute_into(iface: *BackendInterface, exe: BackendInterface.Executable, inputs: []const BackendInterface.RawBuffer, outputs: []?BackendInterface.RawBuffer, non_donatable: ?[]const i64, opts: BackendInterface.ExecuteOptions) BackendInterface.Error!?BackendInterface.Event {
+        const self = promote(iface);
+        const pjrt_exe = unwrap_executable_ptr(exe);
+        const pjrt_inputs = @as([*]const RawBuffer, @ptrCast(inputs.ptr))[0..inputs.len];
+        const pjrt_outputs = @as([*]?RawBuffer, @ptrCast(outputs.ptr))[0..outputs.len];
+        const ev = self.execute_into(pjrt_exe, pjrt_inputs, pjrt_outputs, non_donatable, opts) catch return error.BackendError;
+        return if (ev) |e| wrap_event(e) else null;
+    }
+
+    fn iface_await_event(iface: *BackendInterface, ev: BackendInterface.Event) BackendInterface.Error!void {
+        const self = promote(iface);
+        var pjrt_ev = unwrap_event(ev);
+        self.await_event(&pjrt_ev) catch return error.BackendError;
+    }
+
+    fn iface_deinit_buffer(iface: *BackendInterface, buf: BackendInterface.Buffer) void {
+        const self = promote(iface);
+        var pjrt_buf = unwrap_buffer(buf);
+        self.deinit_buffer(&pjrt_buf);
+    }
+
+    fn iface_deinit_event(iface: *BackendInterface, ev: BackendInterface.Event) void {
+        const self = promote(iface);
+        var pjrt_ev = unwrap_event(ev);
+        self.deinit_event(&pjrt_ev);
+    }
+
+    fn iface_deinit_executable(iface: *BackendInterface, exe: BackendInterface.Executable) void {
+        const self = promote(iface);
+        const pjrt_exe = unwrap_executable_ptr(exe);
+        pjrt_exe.deinit(self.api);
+        self.allocator.destroy(pjrt_exe);
+    }
+
+    fn iface_get_devices(iface: *BackendInterface, allocator: std.mem.Allocator) BackendInterface.Error![]BackendInterface.Device {
+        const self = promote(iface);
+        const pjrt_devices = self.get_devices(allocator) catch return error.BackendError;
+        return @as([*]BackendInterface.Device, @ptrCast(pjrt_devices.ptr))[0..pjrt_devices.len];
+    }
+
+    // Handle wrapping/unwrapping helpers
+
+    fn wrap_buffer(buf: Buffer) BackendInterface.Buffer {
+        return .{ .handle = @ptrCast(buf.pjrt_buffer) };
+    }
+
+    fn unwrap_buffer(buf: BackendInterface.Buffer) Buffer {
+        return .{ .pjrt_buffer = @ptrCast(@alignCast(buf.handle)) };
+    }
+
+    fn wrap_event(ev: Event) BackendInterface.Event {
+        return .{ .handle = @ptrCast(ev.pjrt_event) };
+    }
+
+    fn unwrap_event(ev: BackendInterface.Event) Event {
+        return .{ .pjrt_event = @ptrCast(@alignCast(ev.handle)) };
+    }
+
+    pub fn wrap_executable(self_backend: *Backend, exe: LoadedExecutable) BackendInterface.Error!BackendInterface.Executable {
+        const heap = self_backend.allocator.create(LoadedExecutable) catch return error.OutOfMemory;
+        heap.* = exe;
+        return .{ .handle = @ptrCast(heap) };
+    }
+
+    fn unwrap_executable_ptr(exe: BackendInterface.Executable) *LoadedExecutable {
+        return @ptrCast(@alignCast(exe.handle));
+    }
+
+    fn unwrap_device(device: BackendInterface.Device) *const Device {
+        return @ptrCast(@alignCast(device.handle));
     }
 };
 

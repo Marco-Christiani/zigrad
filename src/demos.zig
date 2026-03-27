@@ -23,9 +23,9 @@ pub fn read_bytes_from_path(allocator: std.mem.Allocator, path: []const u8) ![]u
 
 pub fn run_demo_executable(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
-    device: *const zg.backend.pjrt.Device,
-    exe: *zg.backend.pjrt.LoadedExecutable,
+    b: *zg.Backend,
+    device: zg.Backend.Device,
+    exe: zg.Backend.Executable,
 ) !void {
     // Inputs (A: 2x3, B: 3x2, C: 2x2)
     const A = [_]f32{
@@ -57,20 +57,17 @@ pub fn run_demo_executable(
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer backend.deinit_buffer(&dev_a);
-    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer backend.deinit_buffer(&dev_b);
-    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer backend.deinit_buffer(&dev_c);
+    const dev_a = try b.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    defer b.deinit_buffer(dev_a);
+    const dev_b = try b.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    defer b.deinit_buffer(dev_b);
+    const dev_c = try b.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    defer b.deinit_buffer(dev_c);
 
-    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
+    const result = try b.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
     defer {
-        if (result.device_complete_event) |ev| {
-            var tmp = ev;
-            backend.deinit_event(&tmp);
-        }
-        for (result.outputs) |*buf| backend.deinit_buffer(buf);
+        if (result.event) |ev| b.deinit_event(ev);
+        for (result.outputs) |buf| b.deinit_buffer(buf);
         allocator.free(result.outputs);
     }
 
@@ -78,9 +75,9 @@ pub fn run_demo_executable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data);
-    defer backend.deinit_event(&ev);
-    try backend.await_event(&ev);
+    const ev = try b.buffer_to_host(result.outputs[0], out_host.data);
+    defer b.deinit_event(ev);
+    try b.await_event(ev);
 
     const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{
@@ -99,7 +96,7 @@ pub fn run_demo_executable(
     std.log.info("OK: demo output matches expected", .{});
 }
 
-pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -112,7 +109,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
     try program.add_function(func);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    var exe = zg.frontend.compile_program(backend, allocator, &program, device, .{
+    const exe = zg.frontend.compile_program(backend, allocator, &program, device, .{
         .lower = .{ .encoding = lower_encoding },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
@@ -121,13 +118,13 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.backe
         std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
-    defer backend.deinit_executable(&exe);
+    defer backend.deinit_executable(exe);
 
     std.log.err("unexpected: custom_call compiled without a handler", .{});
     return error.UnexpectedSuccess;
 }
 
-pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBackend, device: anytype, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
     var program = try zg.frontend.build_demo_program(allocator);
     defer program.deinit();
 
@@ -136,13 +133,13 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     try program.add_function(vjp);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    var exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
+    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
         .lower = .{ .encoding = lower_encoding },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
     }, "main_vjp");
-    defer backend.deinit_executable(&exe);
+    defer backend.deinit_executable(exe);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
     const A = [_]f32{
@@ -180,22 +177,19 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer backend.deinit_buffer(&dev_a);
-    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer backend.deinit_buffer(&dev_b);
-    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer backend.deinit_buffer(&dev_c);
-    var dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
-    defer backend.deinit_buffer(&dev_ct);
+    const dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    defer backend.deinit_buffer(dev_a);
+    const dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    defer backend.deinit_buffer(dev_b);
+    const dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    defer backend.deinit_buffer(dev_c);
+    const dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
+    defer backend.deinit_buffer(dev_ct);
 
-    const result = try backend.execute(&exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct }, .{});
+    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct }, .{});
     defer {
-        if (result.device_complete_event) |ev| {
-            var tmp = ev;
-            backend.deinit_event(&tmp);
-        }
-        for (result.outputs) |*buf| backend.deinit_buffer(buf);
+        if (result.event) |ev| backend.deinit_event(ev);
+        for (result.outputs) |buf| backend.deinit_buffer(buf);
         allocator.free(result.outputs);
     }
 
@@ -208,16 +202,16 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
     var out_c = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
-    var ev_a = try backend.buffer_to_host(&result.outputs[0], out_a.data);
-    defer backend.deinit_event(&ev_a);
-    var ev_b = try backend.buffer_to_host(&result.outputs[1], out_b.data);
-    defer backend.deinit_event(&ev_b);
-    var ev_c = try backend.buffer_to_host(&result.outputs[2], out_c.data);
-    defer backend.deinit_event(&ev_c);
+    const ev_a = try backend.buffer_to_host(result.outputs[0], out_a.data);
+    defer backend.deinit_event(ev_a);
+    const ev_b = try backend.buffer_to_host(result.outputs[1], out_b.data);
+    defer backend.deinit_event(ev_b);
+    const ev_c = try backend.buffer_to_host(result.outputs[2], out_c.data);
+    defer backend.deinit_event(ev_c);
 
-    try backend.await_event(&ev_a);
-    try backend.await_event(&ev_b);
-    try backend.await_event(&ev_c);
+    try backend.await_event(ev_a);
+    try backend.await_event(ev_b);
+    try backend.await_event(ev_c);
 
     const got_a = out_a.as_slice(f32)[0..6];
     const got_b = out_b.as_slice(f32)[0..6];
@@ -246,8 +240,8 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.backend.PjrtBacke
 
 pub fn run_train_demo(
     allocator: std.mem.Allocator,
-    backend_handle: *zg.backend.PjrtBackend,
-    device: *const zg.backend.pjrt.Device,
+    backend_handle: *zg.Backend,
+    device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
@@ -330,7 +324,7 @@ pub fn run_train_demo(
         .optimizer = .{ .lr = 1e-2 },
         .compile = compile_cfg,
     });
-    defer backend_handle.deinit_executable(&compiled.exe);
+    defer backend_handle.deinit_executable(compiled.exe);
 
     const true_w1 = try allocator.alloc(f32, in_dim * h1);
     defer allocator.free(true_w1);
@@ -428,61 +422,52 @@ pub fn run_train_demo(
         allocator,
         &compiled,
         backend_handle,
-        &.{ tmp_w1.pjrt_buffer, tmp_b1.pjrt_buffer, tmp_w2.pjrt_buffer, tmp_b2.pjrt_buffer, tmp_w3.pjrt_buffer, tmp_b3.pjrt_buffer },
-        &.{ tmp_x.pjrt_buffer, tmp_y.pjrt_buffer },
+        &.{ tmp_w1.handle, tmp_b1.handle, tmp_w2.handle, tmp_b2.handle, tmp_w3.handle, tmp_b3.handle },
+        &.{ tmp_x.handle, tmp_y.handle },
     );
     defer state.deinit();
     // Batch buffers are not owned by TrainState, deinit them separately
     defer {
-        var bx = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_x.pjrt_buffer };
-        backend_handle.deinit_buffer(&bx);
-        var by = zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_y.pjrt_buffer };
-        backend_handle.deinit_buffer(&by);
+        backend_handle.deinit_buffer(tmp_x);
+        backend_handle.deinit_buffer(tmp_y);
     }
-
-    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w1.pjrt_buffer }));
 
     var warmup: usize = 0;
     while (warmup < warmup_steps) : (warmup += 1) {
-        var result = try state.step();
-        if (result.event) |e| {
-            var ev = e;
-            try backend_handle.await_event(&ev);
-            backend_handle.deinit_event(&ev);
+        const result = try state.step();
+        if (result.event) |ev| {
+            try backend_handle.await_event(ev);
+            backend_handle.deinit_event(ev);
         }
-        if (!is_cpu and !quiet) {
-            var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
-            try backend_handle.await_event(&loss_ev);
-            backend_handle.deinit_event(&loss_ev);
+        if (!quiet) {
+            const loss_ev = try backend_handle.buffer_to_host(result.loss_buf, loss_host.data);
+            try backend_handle.await_event(loss_ev);
+            backend_handle.deinit_event(loss_ev);
         }
-        backend_handle.deinit_buffer(&result.loss_buf);
+        backend_handle.deinit_buffer(result.loss_buf);
     }
 
-    var step: usize = 0;
-    while (step < steps) : (step += 1) {
+    var step_i: usize = 0;
+    while (step_i < steps) : (step_i += 1) {
         var timer = try std.time.Timer.start();
-        var result = try state.step();
+        const result = try state.step();
         const dispatch_ns = timer.lap();
 
-        if (result.event) |e| {
-            var ev = e;
-            try backend_handle.await_event(&ev);
-            backend_handle.deinit_event(&ev);
+        if (result.event) |ev| {
+            try backend_handle.await_event(ev);
+            backend_handle.deinit_event(ev);
         }
         const wait_ns = timer.lap();
 
-        const loss: ?f32 = if (quiet) null else if (is_cpu) blk: {
-            const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
-            break :blk ptr[0];
-        } else blk: {
-            var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
-            try backend_handle.await_event(&loss_ev);
-            backend_handle.deinit_event(&loss_ev);
+        const loss: ?f32 = if (quiet) null else blk: {
+            const loss_ev = try backend_handle.buffer_to_host(result.loss_buf, loss_host.data);
+            try backend_handle.await_event(loss_ev);
+            backend_handle.deinit_event(loss_ev);
             break :blk loss_host.as_slice(f32)[0];
         };
         const loss_read_ns = timer.lap();
 
-        backend_handle.deinit_buffer(&result.loss_buf);
+        backend_handle.deinit_buffer(result.loss_buf);
 
         const cleanup_ns = timer.lap();
         const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;
@@ -494,7 +479,7 @@ pub fn run_train_demo(
         const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
         if (!quiet) {
             std.log.info("train-demo step {d}: loss={d:.6} dispatch={d:.3}ms wait={d:.3}ms loss={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                step, loss.?, dispatch_ms, wait_ms, loss_ms, cleanup_ms, step_ms,
+                step_i, loss.?, dispatch_ms, wait_ms, loss_ms, cleanup_ms, step_ms,
             });
         }
     }
@@ -520,14 +505,15 @@ pub fn run_train_demo(
 /// backend dispatches via `DispatchRegistry` at execute time.
 pub fn run_kernel_provider_demo(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
-    device: *const zg.backend.pjrt.Device,
+    pjrt_backend: *zg.backend.pjrt.Backend,
+    device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
     provider_kinds: []const KernelProviderDemoKind,
 ) !void {
-    try backend.register_kernel_dispatcher();
+    const backend = &pjrt_backend.interface;
+    try pjrt_backend.register_kernel_dispatcher();
 
     // --- TVM setup (requires TVM headers in SDK) ---
     var tvm_dispatch: if (zg.build_options.has_tvm) zg.tvm.dispatch.TvmDispatchState else void = undefined;
@@ -540,8 +526,8 @@ pub fn run_kernel_provider_demo(
             return error.TvmUnavailable;
         }
         try zg.tvm.ffi.ensure_loaded(allocator, .{});
-        try backend.require_typed_ffi();
-        const target_kind: zg.tvm.tir.TargetKind = if (backend.is_cuda()) .cuda else .cpu;
+        try pjrt_backend.require_typed_ffi();
+        const target_kind: zg.tvm.tir.TargetKind = if (pjrt_backend.is_cuda()) .cuda else .cpu;
         tvm_dispatch = zg.tvm.dispatch.TvmDispatchState.init(allocator);
         tvm_impl = .{
             .allocator = allocator,
@@ -603,21 +589,21 @@ pub fn run_kernel_provider_demo(
     var tune_result = try zg.tune.tune(allocator, &program, providers, .{});
     defer tune_result.deinit();
 
-    var exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
+    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
         .lower = .{ .encoding = lower_encoding },
         .kernel_store = &tune_result.store,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
     }, "main");
-    defer backend.deinit_executable(&exe);
+    defer backend.deinit_executable(exe);
 
-    const exec_opts: zg.backend.pjrt.ExecuteOptions = .{
+    const exec_opts: zg.Backend.ExecuteOptions = .{
         .store = &tune_result.store,
         .dispatch_registry = &tune_result.dispatch_registry,
     };
 
-    return run_kernel_provider_demo_executable(allocator, backend, device, &exe, provider_kinds.len, exec_opts);
+    return run_kernel_provider_demo_executable(allocator, backend, device, exe, provider_kinds.len, exec_opts);
 }
 
 fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderDemoKind) bool {
@@ -628,11 +614,11 @@ fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderD
 /// Execute the kernel provider demo program and verify results.
 fn run_kernel_provider_demo_executable(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.PjrtBackend,
-    device: *const zg.backend.pjrt.Device,
-    exe: *zg.backend.pjrt.LoadedExecutable,
+    backend: *zg.Backend,
+    device: zg.Backend.Device,
+    exe: zg.Backend.Executable,
     n_providers: usize,
-    exec_opts: zg.backend.pjrt.ExecuteOptions,
+    exec_opts: zg.Backend.ExecuteOptions,
 ) !void {
     const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
     const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
@@ -651,20 +637,17 @@ fn run_kernel_provider_demo_executable(
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
-    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
-    defer backend.deinit_buffer(&dev_a);
-    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
-    defer backend.deinit_buffer(&dev_b);
-    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
-    defer backend.deinit_buffer(&dev_c);
+    const dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    defer backend.deinit_buffer(dev_a);
+    const dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    defer backend.deinit_buffer(dev_b);
+    const dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    defer backend.deinit_buffer(dev_c);
 
     const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, exec_opts);
     defer {
-        if (result.device_complete_event) |ev| {
-            var tmp = ev;
-            backend.deinit_event(&tmp);
-        }
-        for (result.outputs) |*buf| backend.deinit_buffer(buf);
+        if (result.event) |ev| backend.deinit_event(ev);
+        for (result.outputs) |buf| backend.deinit_buffer(buf);
         allocator.free(result.outputs);
     }
 
@@ -672,9 +655,9 @@ fn run_kernel_provider_demo_executable(
 
     var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data);
-    defer backend.deinit_event(&ev);
-    try backend.await_event(&ev);
+    const ev = try backend.buffer_to_host(result.outputs[0], out_host.data);
+    defer backend.deinit_event(ev);
+    try backend.await_event(ev);
 
     // dot(A, B) = [[58, 64], [139, 154]]
     // (n*dot + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]

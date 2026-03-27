@@ -126,7 +126,7 @@ fn loss_fn_with_options(
 
 pub fn run_llama_ft_demo(
     allocator: std.mem.Allocator,
-    backend_handle: *zg.backend.PjrtBackend,
+    backend_handle: *zg.backend.pjrt.Backend,
     device: *const zg.backend.pjrt.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
@@ -137,6 +137,9 @@ pub fn run_llama_ft_demo(
     cfg: LlamaDemoConfig,
     dump_kernels: bool,
 ) !void {
+    const b = &backend_handle.interface;
+    const iface_device = zg.Backend.Device{ .handle = @ptrCast(@constCast(device)) };
+
     const TensorSpec = zg.frontend.TensorSpec;
     const train_mode = cfg.train;
     const model_dtype: zg.pr.DType = cfg.dtype;
@@ -268,31 +271,31 @@ pub fn run_llama_ft_demo(
     var compiled_fwd: ?zg.frontend.CompiledForward = null;
     if (train_mode) {
         if (use_mirage_loss) {
-            compiled_train = try train.compile_train_step(allocator, backend_handle, device, loss_fn_mirage, inputs_spec, param_count, .{
+            compiled_train = try train.compile_train_step(allocator, b, iface_device, loss_fn_mirage, inputs_spec, param_count, .{
                 .optimizer = .{ .lr = 1e-4 },
                 .compile = compile_cfg,
             });
         } else {
-            compiled_train = try train.compile_train_step(allocator, backend_handle, device, loss_fn, inputs_spec, param_count, .{
+            compiled_train = try train.compile_train_step(allocator, b, iface_device, loss_fn, inputs_spec, param_count, .{
                 .optimizer = .{ .lr = 1e-4 },
                 .compile = compile_cfg,
             });
         }
     } else {
         if (use_mirage_loss) {
-            compiled_fwd = try zg.frontend.compile_forward(allocator, backend_handle, device, loss_fn_mirage, inputs_spec, compile_cfg);
+            compiled_fwd = try zg.frontend.compile_forward(allocator, b, iface_device, loss_fn_mirage, inputs_spec, compile_cfg);
         } else {
-            compiled_fwd = try zg.frontend.compile_forward(allocator, backend_handle, device, loss_fn, inputs_spec, compile_cfg);
+            compiled_fwd = try zg.frontend.compile_forward(allocator, b, iface_device, loss_fn, inputs_spec, compile_cfg);
         }
     }
     defer {
-        if (compiled_train) |*ct| backend_handle.deinit_executable(&ct.exe);
-        if (compiled_fwd) |*cf| backend_handle.deinit_executable(&cf.exe);
+        if (compiled_train) |ct| b.deinit_executable(ct.exe);
+        if (compiled_fwd) |cf| b.deinit_executable(cf.exe);
     }
 
     if (!quiet) {
-        if (compiled_train) |*ct| log_compiled_memory_stats(backend_handle, &ct.exe);
-        if (compiled_fwd) |*cf| log_compiled_memory_stats(backend_handle, &cf.exe);
+        if (compiled_train) |ct| log_compiled_memory_stats(backend_handle, @ptrCast(@alignCast(ct.exe.handle)));
+        if (compiled_fwd) |cf| log_compiled_memory_stats(backend_handle, @ptrCast(@alignCast(cf.exe.handle)));
     }
 
     const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
@@ -463,98 +466,96 @@ pub fn run_llama_ft_demo(
     var total_ns: u64 = 0;
 
     const upload = zg.frontend.upload_host_buffer;
-    const tmp_w_emb = try upload(allocator, backend_handle, device, &host_w_emb);
-    const tmp_w_out = try upload(allocator, backend_handle, device, &host_w_out);
-    const tmp_norm = try upload(allocator, backend_handle, device, &host_norm);
-    var tmp_layer_input_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_layer_post_norm: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_qkv_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_o_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_gate_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_up_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
-    var tmp_down_proj: [num_layers]zg.backend.pjrt.Buffer = undefined;
+    const tmp_w_emb = try upload(allocator, b, iface_device, &host_w_emb);
+    const tmp_w_out = try upload(allocator, b, iface_device, &host_w_out);
+    const tmp_norm = try upload(allocator, b, iface_device, &host_norm);
+    var tmp_layer_input_norm: [num_layers]zg.Backend.Buffer = undefined;
+    var tmp_layer_post_norm: [num_layers]zg.Backend.Buffer = undefined;
+    var tmp_qkv_proj: [num_layers]zg.Backend.Buffer = undefined;
+    var tmp_o_proj: [num_layers]zg.Backend.Buffer = undefined;
+    var tmp_gate_proj: [num_layers]zg.Backend.Buffer = undefined;
+    var tmp_up_proj: [num_layers]zg.Backend.Buffer = undefined;
+    var tmp_down_proj: [num_layers]zg.Backend.Buffer = undefined;
 
     var m: usize = 0;
     while (m < num_layers) : (m += 1) {
-        tmp_layer_input_norm[m] = try upload(allocator, backend_handle, device, &host_layer_input_norm[m]);
-        tmp_layer_post_norm[m] = try upload(allocator, backend_handle, device, &host_layer_post_norm[m]);
-        tmp_qkv_proj[m] = try upload(allocator, backend_handle, device, &host_qkv_proj[m]);
-        tmp_o_proj[m] = try upload(allocator, backend_handle, device, &host_o_proj[m]);
-        tmp_gate_proj[m] = try upload(allocator, backend_handle, device, &host_gate_proj[m]);
-        tmp_up_proj[m] = try upload(allocator, backend_handle, device, &host_up_proj[m]);
-        tmp_down_proj[m] = try upload(allocator, backend_handle, device, &host_down_proj[m]);
+        tmp_layer_input_norm[m] = try upload(allocator, b, iface_device, &host_layer_input_norm[m]);
+        tmp_layer_post_norm[m] = try upload(allocator, b, iface_device, &host_layer_post_norm[m]);
+        tmp_qkv_proj[m] = try upload(allocator, b, iface_device, &host_qkv_proj[m]);
+        tmp_o_proj[m] = try upload(allocator, b, iface_device, &host_o_proj[m]);
+        tmp_gate_proj[m] = try upload(allocator, b, iface_device, &host_gate_proj[m]);
+        tmp_up_proj[m] = try upload(allocator, b, iface_device, &host_up_proj[m]);
+        tmp_down_proj[m] = try upload(allocator, b, iface_device, &host_down_proj[m]);
     }
-    const tmp_x = try upload(allocator, backend_handle, device, &host_x);
-    const tmp_target_ids = try upload(allocator, backend_handle, device, &host_target_ids);
-    const tmp_attention_mask = try upload(allocator, backend_handle, device, &host_attention_mask);
-    const tmp_mask = try upload(allocator, backend_handle, device, &host_mask);
-    const tmp_sin = try upload(allocator, backend_handle, device, &host_sin);
-    const tmp_cos = try upload(allocator, backend_handle, device, &host_cos);
+    const tmp_x = try upload(allocator, b, iface_device, &host_x);
+    const tmp_target_ids = try upload(allocator, b, iface_device, &host_target_ids);
+    const tmp_attention_mask = try upload(allocator, b, iface_device, &host_attention_mask);
+    const tmp_mask = try upload(allocator, b, iface_device, &host_mask);
+    const tmp_sin = try upload(allocator, b, iface_device, &host_sin);
+    const tmp_cos = try upload(allocator, b, iface_device, &host_cos);
 
     const loss_dtype: zg.utils.DType = if (upcast_loss) .f32 else host_dtype;
     var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
     defer loss_host.deinit();
 
     // Build param and batch buffer arrays.
-    var param_bufs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
+    var param_bufs = std.ArrayList(zg.Backend.RawBuffer).empty;
     defer param_bufs.deinit(allocator);
-    try param_bufs.append(allocator, tmp_w_emb.pjrt_buffer);
-    try param_bufs.append(allocator, tmp_w_out.pjrt_buffer);
-    try param_bufs.append(allocator, tmp_norm.pjrt_buffer);
+    try param_bufs.append(allocator, tmp_w_emb.handle);
+    try param_bufs.append(allocator, tmp_w_out.handle);
+    try param_bufs.append(allocator, tmp_norm.handle);
     var p: usize = 0;
     while (p < num_layers) : (p += 1) {
-        try param_bufs.append(allocator, tmp_layer_input_norm[p].pjrt_buffer);
-        try param_bufs.append(allocator, tmp_layer_post_norm[p].pjrt_buffer);
-        try param_bufs.append(allocator, tmp_qkv_proj[p].pjrt_buffer);
-        try param_bufs.append(allocator, tmp_o_proj[p].pjrt_buffer);
-        try param_bufs.append(allocator, tmp_gate_proj[p].pjrt_buffer);
-        try param_bufs.append(allocator, tmp_up_proj[p].pjrt_buffer);
-        try param_bufs.append(allocator, tmp_down_proj[p].pjrt_buffer);
+        try param_bufs.append(allocator, tmp_layer_input_norm[p].handle);
+        try param_bufs.append(allocator, tmp_layer_post_norm[p].handle);
+        try param_bufs.append(allocator, tmp_qkv_proj[p].handle);
+        try param_bufs.append(allocator, tmp_o_proj[p].handle);
+        try param_bufs.append(allocator, tmp_gate_proj[p].handle);
+        try param_bufs.append(allocator, tmp_up_proj[p].handle);
+        try param_bufs.append(allocator, tmp_down_proj[p].handle);
     }
 
-    const batch_bufs = [_]zg.backend.pjrt.RawBuffer{
-        tmp_x.pjrt_buffer,
-        tmp_target_ids.pjrt_buffer,
-        tmp_attention_mask.pjrt_buffer,
-        tmp_mask.pjrt_buffer,
-        tmp_sin.pjrt_buffer,
-        tmp_cos.pjrt_buffer,
+    const batch_bufs = [_]zg.Backend.RawBuffer{
+        tmp_x.handle,
+        tmp_target_ids.handle,
+        tmp_attention_mask.handle,
+        tmp_mask.handle,
+        tmp_sin.handle,
+        tmp_cos.handle,
     };
 
-    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = tmp_w_emb.pjrt_buffer }));
+    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(tmp_w_emb.handle)) }));
 
     if (train_mode) {
         // Use TrainState for the training path.
         var state = try train.TrainState.init(
             allocator,
             &compiled_train.?,
-            backend_handle,
+            b,
             param_bufs.items,
             &batch_bufs,
         );
         defer state.deinit();
         // Batch buffers are not owned by TrainState.
         defer for (batch_bufs) |raw| {
-            var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
-            backend_handle.deinit_buffer(&buf);
+            b.deinit_buffer(.{ .handle = raw });
         };
         // param_bufs ownership transferred to TrainState; clear to avoid double-free.
         param_bufs.clearRetainingCapacity();
 
         var warmup: usize = 0;
         while (warmup < warmup_steps) : (warmup += 1) {
-            var result = try state.step();
-            if (result.event) |e| {
-                var ev = e;
-                try backend_handle.await_event(&ev);
-                backend_handle.deinit_event(&ev);
+            const result = try state.step();
+            if (result.event) |ev| {
+                try b.await_event(ev);
+                b.deinit_event(ev);
             }
             if (!execute_only and !is_cpu and !quiet) {
-                var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
-                try backend_handle.await_event(&loss_ev);
-                backend_handle.deinit_event(&loss_ev);
+                const loss_ev = try b.buffer_to_host(result.loss_buf, loss_host.data);
+                try b.await_event(loss_ev);
+                b.deinit_event(loss_ev);
             }
-            backend_handle.deinit_buffer(&result.loss_buf);
+            b.deinit_buffer(result.loss_buf);
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -565,27 +566,28 @@ pub fn run_llama_ft_demo(
         var step: usize = 0;
         while (step < steps) : (step += 1) {
             var timer = try std.time.Timer.start();
-            var result = try state.step();
+            const result = try state.step();
             const dispatch_ns = timer.lap();
 
-            if (result.event) |e| {
-                var ev = e;
-                try backend_handle.await_event(&ev);
-                backend_handle.deinit_event(&ev);
+            if (result.event) |ev| {
+                try b.await_event(ev);
+                b.deinit_event(ev);
             }
             const exec_ns = timer.lap();
 
             const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
                 if (loss_dtype == .bf16) {
-                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
+                    const pjrt_loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(result.loss_buf.handle)) };
+                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
                     break :blk bf16_to_f32(ptr[0]);
                 }
-                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&result.loss_buf));
+                const pjrt_loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(result.loss_buf.handle)) };
+                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
                 break :blk ptr[0];
             } else blk: {
-                var loss_ev = try backend_handle.buffer_to_host(&result.loss_buf, loss_host.data);
-                try backend_handle.await_event(&loss_ev);
-                backend_handle.deinit_event(&loss_ev);
+                const loss_ev = try b.buffer_to_host(result.loss_buf, loss_host.data);
+                try b.await_event(loss_ev);
+                b.deinit_event(loss_ev);
                 break :blk if (loss_dtype == .bf16)
                     bf16_to_f32(loss_host.as_slice(u16)[0])
                 else
@@ -593,7 +595,7 @@ pub fn run_llama_ft_demo(
             };
             const loss_read_ns = timer.lap();
 
-            backend_handle.deinit_buffer(&result.loss_buf);
+            b.deinit_buffer(result.loss_buf);
 
             const cleanup_ns = timer.lap();
             const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
@@ -619,41 +621,39 @@ pub fn run_llama_ft_demo(
         if (nvtx_range) |*range| range.pop() catch {};
     } else {
         // Forward-only mode: simple execute loop, no parameter swapping.
-        var fwd_exe = compiled_fwd.?.exe;
+        const fwd_exe = compiled_fwd.?.exe;
 
-        var input_ptrs = std.ArrayList(zg.backend.pjrt.RawBuffer).empty;
+        var input_ptrs = std.ArrayList(zg.Backend.RawBuffer).empty;
         defer input_ptrs.deinit(allocator);
         try input_ptrs.appendSlice(allocator, param_bufs.items);
-        for (batch_bufs) |b| try input_ptrs.append(allocator, b);
+        for (batch_bufs) |buf| try input_ptrs.append(allocator, buf);
 
         defer {
             for (input_ptrs.items) |raw| {
-                var buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = raw };
-                backend_handle.deinit_buffer(&buf);
+                b.deinit_buffer(.{ .handle = raw });
             }
         }
         // param_bufs ownership transferred to input_ptrs; clear to avoid double-free.
         param_bufs.clearRetainingCapacity();
 
-        var output_ptrs = [1]?zg.backend.pjrt.RawBuffer{null};
+        var output_ptrs = [1]?zg.Backend.RawBuffer{null};
 
         var warmup: usize = 0;
         while (warmup < warmup_steps) : (warmup += 1) {
             @memset(output_ptrs[0..], null);
-            const ev = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
-            const loss_raw = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-            var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw };
+            const ev = try b.execute_into(fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
+            const loss_raw = output_ptrs[0] orelse return error.NullOutputBuffer;
+            const loss_buf = zg.Backend.Buffer{ .handle = loss_raw };
             if (ev) |e| {
-                var evv = e;
-                try backend_handle.await_event(&evv);
-                backend_handle.deinit_event(&evv);
+                try b.await_event(e);
+                b.deinit_event(e);
             }
             if (!execute_only and !is_cpu and !quiet) {
-                var loss_ev = try backend_handle.buffer_to_host(&loss_buf, loss_host.data);
-                try backend_handle.await_event(&loss_ev);
-                backend_handle.deinit_event(&loss_ev);
+                const loss_ev = try b.buffer_to_host(loss_buf, loss_host.data);
+                try b.await_event(loss_ev);
+                b.deinit_event(loss_ev);
             }
-            backend_handle.deinit_buffer(&loss_buf);
+            b.deinit_buffer(loss_buf);
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -665,29 +665,29 @@ pub fn run_llama_ft_demo(
         while (step < steps) : (step += 1) {
             var timer = try std.time.Timer.start();
             @memset(output_ptrs[0..], null);
-            const event = try backend_handle.execute_into(&fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
+            const event = try b.execute_into(fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
             const dispatch_ns = timer.lap();
 
             if (event) |ev| {
-                var evv = ev;
-                try backend_handle.await_event(&evv);
-                backend_handle.deinit_event(&evv);
+                try b.await_event(ev);
+                b.deinit_event(ev);
             }
             const exec_ns = timer.lap();
 
-            const loss_raw2 = output_ptrs[0] orelse return error.PjrtReturnedNullOutputBuffer;
-            var loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = loss_raw2 };
+            const loss_raw2 = output_ptrs[0] orelse return error.NullOutputBuffer;
+            const loss_buf = zg.Backend.Buffer{ .handle = loss_raw2 };
             const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
+                const pjrt_loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(loss_raw2)) };
                 if (loss_dtype == .bf16) {
-                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&loss_buf));
+                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
                     break :blk bf16_to_f32(ptr[0]);
                 }
-                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&loss_buf));
+                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
                 break :blk ptr[0];
             } else blk: {
-                var loss_ev = try backend_handle.buffer_to_host(&loss_buf, loss_host.data);
-                try backend_handle.await_event(&loss_ev);
-                backend_handle.deinit_event(&loss_ev);
+                const loss_ev = try b.buffer_to_host(loss_buf, loss_host.data);
+                try b.await_event(loss_ev);
+                b.deinit_event(loss_ev);
                 break :blk if (loss_dtype == .bf16)
                     bf16_to_f32(loss_host.as_slice(u16)[0])
                 else
@@ -695,7 +695,7 @@ pub fn run_llama_ft_demo(
             };
             const loss_read_ns = timer.lap();
 
-            backend_handle.deinit_buffer(&loss_buf);
+            b.deinit_buffer(loss_buf);
 
             const cleanup_ns = timer.lap();
             const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;

@@ -169,48 +169,52 @@ pub fn main() !void {
     };
     defer gpa.free(plugin_path);
 
-    var backend = try zg.backend.PjrtBackend.init(gpa, plugin_path);
-    defer backend.deinit();
+    var pjrt_backend = try zg.backend.pjrt.Backend.init(gpa, plugin_path);
+    defer pjrt_backend.deinit();
+    const b = &pjrt_backend.interface;
 
-    const devs = try backend.get_devices(gpa);
+    const devs = try b.get_devices(gpa);
     defer gpa.free(devs);
     if (devs.len == 0) {
         log.err("no devices available from backend", .{});
         return error.NoDevices;
     }
-    const device = &devs[0];
+    const device = devs[0];
+
+    // Unwrap opaque device handle for PJRT-specific commands.
+    const pjrt_device: *const zg.backend.pjrt.Device = @ptrCast(@alignCast(device.handle));
 
     if (cmd.matchSubCmd("aot-demo")) |_| {
         if (comptime !build_options.has_mlir) {
             log.err("aot-demo requires MLIR (build with -Dmlir=true)", .{});
             return error.MlirDisabled;
         }
-        return main_aot.run(gpa, &backend, device);
+        return main_aot.run(gpa, &pjrt_backend, pjrt_device);
     }
     // Commands that require MLIR lowering
     if (comptime build_options.has_mlir) {
         if (cmd.matchSubCmd("custom-call-neg")) |_| {
-            return demos.run_custom_call_negative(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
+            return demos.run_custom_call_negative(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
         if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
             const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-            return demos.run_kernel_provider_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice());
+            return demos.run_kernel_provider_demo(gpa, &pjrt_backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice());
         }
         if (cmd.matchSubCmd("vjp-demo")) |_| {
-            return demos.run_vjp_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
+            return demos.run_vjp_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
         if (cmd.matchSubCmd("train-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return demos.run_train_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return demos.run_train_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llm-ft-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return llm_demo.run_llm_ft_demo(gpa, &backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return llm_demo.run_llm_ft_demo(gpa, &pjrt_backend, pjrt_device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
@@ -236,8 +240,8 @@ pub fn main() !void {
 
             return llama_demo.run_llama_ft_demo(
                 gpa,
-                &backend,
-                device,
+                &pjrt_backend,
+                pjrt_device,
                 dump_pr_ptr,
                 dump_mlir_ptr,
                 dump_optimized_ptr,
@@ -259,7 +263,7 @@ pub fn main() !void {
             const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
             defer gpa.free(mlir_bytes);
 
-            const serialized = try backend.compile_serialized(device, mlir_bytes, true, .{});
+            const serialized = try pjrt_backend.compile_serialized(pjrt_device, mlir_bytes, true, .{});
             defer gpa.free(serialized);
 
             try demos.write_bytes_to_path(opts.path, serialized);
@@ -275,10 +279,13 @@ pub fn main() !void {
         const serialized = try demos.read_bytes_from_path(gpa, opts.path);
         defer gpa.free(serialized);
 
-        var exe = try backend.load_serialized_executable(serialized, null);
-        defer backend.deinit_executable(&exe);
+        var exe = try pjrt_backend.load_serialized_executable(serialized, null);
+        defer pjrt_backend.deinit_executable(&exe);
 
-        return demos.run_demo_executable(gpa, &backend, device, &exe);
+        // Wrap PJRT executable as opaque handle for the demo
+        const iface_exe = zg.backend.pjrt.Backend.wrap_executable(&pjrt_backend, exe) catch return error.OutOfMemory;
+        defer b.deinit_executable(iface_exe);
+        return demos.run_demo_executable(gpa, b, device, iface_exe);
     }
 
     if (cmd.sub_cmd) |sub| {

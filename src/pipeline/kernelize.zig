@@ -29,7 +29,6 @@ const KernelCandidate = struct {
     inputs: []const pr.VarId = &.{},
     outputs: []const pr.VarId = &.{},
     kernel_key: []const u8 = &.{},
-    carrier_hint: ?[]const u8 = null,
 };
 
 const KernelEntryOutcome = enum { compiled, dedup, fallback };
@@ -173,15 +172,12 @@ pub const KernelizePass = struct {
 
             switch (decision) {
                 .profitable => |art| {
-                    const carrier_hint: ?[]const u8 = if (is_attention_5op_region(func, candidate.region)) "attention_5op_v1" else null;
-
                     try rewrites.append(temp_allocator, .{
                         .region = candidate.region,
                         .provider_name = art.provider_name,
                         .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
                         .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
                         .kernel_key = try temp_allocator.dupe(u8, kernel_signature),
-                        .carrier_hint = carrier_hint,
                     });
                     log.debug("store: profitable decision for region '{s}' -> '{s}'", .{ candidate.region.name, art.target_name });
 
@@ -220,7 +216,7 @@ pub const KernelizePass = struct {
 
         var eqns = try std.ArrayList(pr.Eqn).initCapacity(allocator, func.eqns.len);
         var varids_store = try std.ArrayList(pr.VarId).initCapacity(allocator, func.varids_store.len);
-        var params_store = try std.ArrayList(pr.Param).initCapacity(allocator, func.params_store.len + rewrites.items.len * 7);
+        var params_store = try std.ArrayList(pr.Param).initCapacity(allocator, func.params_store.len + rewrites.items.len * 5);
 
         var eqn_index: usize = 0;
         while (eqn_index < func.eqns.len) {
@@ -318,33 +314,17 @@ pub const KernelizePass = struct {
         const target_name = try allocator.dupe(u8, dispatcher_target_name);
         errdefer allocator.free(target_name);
 
-        const carrier_hint = if (rewrite.carrier_hint) |hint|
-            try allocator.dupe(u8, hint)
-        else
-            null;
-        errdefer if (carrier_hint) |owned_hint| allocator.free(owned_hint);
-
-        var params: [7]pr.Param = undefined;
-        var param_count: usize = 0;
-
-        params[param_count] = .{ .call_target_name = target_name };
-        param_count += 1;
-        params[param_count] = .{ .call_kernel_key = kernel_key };
-        param_count += 1;
-        params[param_count] = .{ .call_provider_name = provider_name };
-        param_count += 1;
-        if (carrier_hint) |owned_hint| {
-            params[param_count] = .{ .call_carrier_hint = owned_hint };
-            param_count += 1;
-        }
-        params[param_count] = .{ .has_side_effect = false };
-        param_count += 1;
-        params[param_count] = .{ .out_avals = out_avals };
-        param_count += 1;
+        const params = [_]pr.Param{
+            .{ .call_target_name = target_name },
+            .{ .call_kernel_key = kernel_key },
+            .{ .call_provider_name = provider_name },
+            .{ .has_side_effect = false },
+            .{ .out_avals = out_avals },
+        };
 
         const in_span = try append_varids(allocator, varids_store, rewrite.inputs);
         const out_span = try append_varids(allocator, varids_store, rewrite.outputs);
-        const param_span = try append_params(allocator, params_store, params[0..param_count]);
+        const param_span = try append_params(allocator, params_store, &params);
 
         try eqns.append(allocator, .{
             .prim = .custom_call,
@@ -352,23 +332,6 @@ pub const KernelizePass = struct {
             .outputs = out_span,
             .params = param_span,
         });
-    }
-
-    fn is_attention_5op_region(func: pr.Function, region: pr.Region) bool {
-        if (region.eqn_len != 5) return false;
-
-        const start: usize = @intCast(region.eqn_start);
-        const end = start + @as(usize, @intCast(region.eqn_len));
-        if (end > func.eqns.len) return false;
-
-        const eqns = func.eqns[start..end];
-        const first = eqns[0].prim;
-        if (first != .dot and first != .dot_general) return false;
-
-        return eqns[1].prim == .add and
-            eqns[2].prim == .exp and
-            eqns[3].prim == .multiply and
-            eqns[4].prim == .log;
     }
 
     fn append_varids(
@@ -609,61 +572,6 @@ test "kernelize pass skips absent key" {
     // Region should be left unchanged (absent key).
     try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
     try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
-}
-
-test "kernelize pass tags attention-like 5-op region with carrier metadata" {
-    const testing = std.testing;
-
-    var program = pr.Program.init(testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "test");
-    defer b.deinit();
-
-    const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
-    const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
-    const bias = try b.param_tensor(.f32, &.{ 2, 2 });
-    const scale = try b.param_tensor(.f32, &.{ 2, 2 });
-
-    try b.push_region("attention_like", .{ .kernelize = "mock" });
-    const dot = try b.emit(.dot, &.{ lhs, rhs }, &.{});
-    const sum = try b.emit(.add, &.{ dot, bias }, &.{});
-    const exp = try b.emit(.exp, &.{sum}, &.{});
-    const mul = try b.emit(.multiply, &.{ exp, scale }, &.{});
-    const out = try b.emit(.log, &.{mul}, &.{});
-    try b.pop_region();
-
-    const func = try b.finish(&.{out});
-    try program.add_function(func);
-
-    // Compute the kernel signature for this 5-op region and put a profitable decision.
-    const desc = try kernel.describe_region(testing.allocator, func, func.regions[0]);
-    defer testing.allocator.free(desc.inputs);
-    defer testing.allocator.free(desc.outputs);
-    const kernel_signature = try compute_kernel_signature(testing.allocator, desc);
-    defer testing.allocator.free(kernel_signature);
-
-    var store = kernel.KernelStore.init(testing.allocator);
-    defer store.deinit();
-    try store.put_profitable(kernel_signature, .{
-        .provider_name = "mock",
-        .data = "mock_kernel_data",
-        .target_name = "attention_like",
-    });
-
-    var kp = KernelizePass{
-        .store = &store,
-    };
-
-    var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
-    try kp.pass().run(&artifact, &ctx);
-
-    const rewritten = program.functions[0].eqns[0];
-    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
-
-    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
-    try testing.expectEqualStrings("attention_5op_v1", pr.param_call_carrier_hint(params).?);
 }
 
 test "kernelize pass rewrites multi-output region to custom_call" {

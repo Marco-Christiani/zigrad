@@ -738,6 +738,37 @@ pub const Buffer = struct {
         return dims;
     }
 
+    /// Returns the buffer's dimensions as a borrowed slice.
+    ///
+    /// The returned slice is not allocated and has the lifetime of the buffer.
+    pub fn get_dimensions_borrowed(self: *const Buffer, api: *Api) ![]const i64 {
+        var args = api_mod.init_args(c.PJRT_Buffer_Dimensions_Args);
+        args.buffer = self.pjrt_buffer;
+        args.dims = null;
+        args.num_dims = 0;
+        try api.call("PJRT_Buffer_Dimensions", &args);
+        const dims = args.dims orelse return error.PjrtReturnedNullDimensions;
+        return dims[0..args.num_dims];
+    }
+
+    /// Returns the element type of the buffer.
+    pub fn get_element_type(self: *const Buffer, api: *Api) !BufferType {
+        var args = api_mod.init_args(c.PJRT_Buffer_ElementType_Args);
+        args.buffer = self.pjrt_buffer;
+        try api.call("PJRT_Buffer_ElementType", &args);
+        return BufferType.from_c_enum(args.type);
+    }
+
+    /// Returns the device that owns this buffer.
+    pub fn get_device(self: *const Buffer, api: *Api) !Device {
+        var args = api_mod.init_args(c.PJRT_Buffer_Device_Args);
+        args.buffer = self.pjrt_buffer;
+        args.device = null;
+        try api.call("PJRT_Buffer_Device", &args);
+        const device_ptr = args.device orelse return error.PjrtReturnedNullDevice;
+        return Device{ .pjrt_device = device_ptr };
+    }
+
     pub fn to_host(self: *Buffer, api: *Api, dst: []u8) !Event {
         var args = api_mod.init_args(c.PJRT_Buffer_ToHostBuffer_Args);
 
@@ -837,6 +868,19 @@ pub const BufferType = enum {
     i64,
     u32,
     u64,
+
+    pub fn from_c_enum(t: c.PJRT_Buffer_Type) !BufferType {
+        return switch (t) {
+            c.PJRT_Buffer_Type_BF16 => .bf16,
+            c.PJRT_Buffer_Type_F32 => .f32,
+            c.PJRT_Buffer_Type_F64 => .f64,
+            c.PJRT_Buffer_Type_S32 => .i32,
+            c.PJRT_Buffer_Type_S64 => .i64,
+            c.PJRT_Buffer_Type_U32 => .u32,
+            c.PJRT_Buffer_Type_U64 => .u64,
+            else => error.UnsupportedBufferType,
+        };
+    }
 
     pub fn to_c_enum(self: BufferType) c.PJRT_Buffer_Type {
         return switch (self) {

@@ -4,6 +4,7 @@ const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
 const ops = @import("../pr/ops/ops.zig");
 const backend = @import("../backend/root.zig");
+const Backend = backend.Backend;
 const frontend = @import("frontend.zig");
 
 const Builder = frontend.Builder;
@@ -28,7 +29,7 @@ pub const TrainConfig = struct {
 /// trainable parameters vs. batch data. This lets `TrainState` split the
 /// input buffer array correctly.
 pub const CompiledTrainStep = struct {
-    exe: backend.pjrt.LoadedExecutable,
+    exe: Backend.Executable,
     input_arity: usize,
     output_arity: usize,
     param_count: usize,
@@ -37,8 +38,8 @@ pub const CompiledTrainStep = struct {
 
 pub fn compile_train_step(
     allocator: std.mem.Allocator,
-    backend_handle: *backend.PjrtBackend,
-    device: *const backend.pjrt.Device,
+    backend_handle: *Backend,
+    device: Backend.Device,
     func: anytype,
     inputs: anytype,
     param_count: usize,
@@ -135,37 +136,35 @@ pub fn compile_train_step(
 ///  borrowed - the caller manages their lifetime and replaces them via
 ///  `set_batch`.
 pub const TrainState = struct {
-    input_bufs: []backend.pjrt.RawBuffer,
-    output_bufs: []?backend.pjrt.RawBuffer,
-    exe: *backend.pjrt.LoadedExecutable,
-    backend_handle: *backend.PjrtBackend,
+    input_bufs: []Backend.RawBuffer,
+    output_bufs: []?Backend.RawBuffer,
+    exe: Backend.Executable,
+    backend_handle: *Backend,
     param_count: usize,
     non_donatable: []const i64,
     allocator: std.mem.Allocator,
 
     pub const StepResult = struct {
-        loss_buf: backend.pjrt.Buffer,
-        event: ?backend.pjrt.Event,
+        loss_buf: Backend.Buffer,
+        event: ?Backend.Event,
     };
 
-    /// Caller must keep `compiled` alive for the lifetime of `TrainState`
-    /// (`exe` is a pointer into it).
     pub fn init(
         allocator: std.mem.Allocator,
         compiled: *CompiledTrainStep,
-        backend_handle: *backend.PjrtBackend,
-        initial_param_bufs: []const backend.pjrt.RawBuffer,
-        initial_batch_bufs: []const backend.pjrt.RawBuffer,
+        backend_handle: *Backend,
+        initial_param_bufs: []const Backend.RawBuffer,
+        initial_batch_bufs: []const Backend.RawBuffer,
     ) !TrainState {
         if (initial_param_bufs.len != compiled.param_count) return error.InvalidParams;
         if (initial_batch_bufs.len != compiled.batch_count) return error.InvalidBatchCount;
 
         const total = compiled.input_arity;
-        const input_bufs = try allocator.alloc(backend.pjrt.RawBuffer, total);
+        const input_bufs = try allocator.alloc(Backend.RawBuffer, total);
         @memcpy(input_bufs[0..compiled.param_count], initial_param_bufs);
         @memcpy(input_bufs[compiled.param_count..], initial_batch_bufs);
 
-        const output_bufs = try allocator.alloc(?backend.pjrt.RawBuffer, compiled.output_arity);
+        const output_bufs = try allocator.alloc(?Backend.RawBuffer, compiled.output_arity);
         @memset(output_bufs, null);
 
         const non_donatable = try allocator.alloc(i64, compiled.batch_count);
@@ -176,7 +175,7 @@ pub const TrainState = struct {
         return .{
             .input_bufs = input_bufs,
             .output_bufs = output_bufs,
-            .exe = &compiled.exe,
+            .exe = compiled.exe,
             .backend_handle = backend_handle,
             .param_count = compiled.param_count,
             .non_donatable = non_donatable,
@@ -198,34 +197,32 @@ pub const TrainState = struct {
             .{},
         );
 
-        const loss_raw = self.output_bufs[0] orelse return error.PjrtReturnedNullOutputBuffer;
+        const loss_raw = self.output_bufs[0] orelse return error.NullOutputBuffer;
         self.output_bufs[0] = null;
 
         for (self.input_bufs[0..self.param_count], self.output_bufs[1 .. 1 + self.param_count]) |*old, new| {
-            const new_raw = new orelse return error.PjrtReturnedNullOutputBuffer;
+            const new_raw = new orelse return error.NullOutputBuffer;
             if (new_raw == old.*) continue;
-            var buf = backend.pjrt.Buffer{ .pjrt_buffer = old.* };
+            self.backend_handle.deinit_buffer(.{ .handle = old.* });
             old.* = new_raw;
-            self.backend_handle.deinit_buffer(&buf);
         }
 
         return .{
-            .loss_buf = backend.pjrt.Buffer{ .pjrt_buffer = loss_raw },
+            .loss_buf = .{ .handle = loss_raw },
             .event = event,
         };
     }
 
     /// Replace batch input buffers. Old batch buffers are NOT deinited
     ///  (owned by caller).
-    pub fn set_batch(self: *TrainState, batch_bufs: []const backend.pjrt.RawBuffer) void {
+    pub fn set_batch(self: *TrainState, batch_bufs: []const Backend.RawBuffer) void {
         @memcpy(self.input_bufs[self.param_count..], batch_bufs);
     }
 
     /// Deinit all owned buffers (params only, not batch).
     pub fn deinit(self: *TrainState) void {
         for (self.input_bufs[0..self.param_count]) |raw| {
-            var buf = backend.pjrt.Buffer{ .pjrt_buffer = raw };
-            self.backend_handle.deinit_buffer(&buf);
+            self.backend_handle.deinit_buffer(.{ .handle = raw });
         }
         self.allocator.free(self.input_bufs);
         self.allocator.free(self.output_bufs);
