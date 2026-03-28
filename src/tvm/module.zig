@@ -202,9 +202,9 @@ pub fn load_cached(
 pub fn matmul_cache_key(
     allocator: std.mem.Allocator,
     target_kind: TargetKind,
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
 ) ![]u8 {
     const target_suffix = switch (target_kind) {
         .cpu => "cpu",
@@ -327,7 +327,7 @@ fn parse_run_secs(line: []const u8) ?f64 {
     while (i > 4) {
         i -= 1;
         if (line[i] == '{' and line[i - 1] == ',' and line[i - 2] == ']') {
-            // Found ],{ — now find the opening [ of the run_secs array
+            // Found ],{ now find the opening [ of the run_secs array
             var j = i - 3;
             while (j > 0 and line[j] != '[') j -= 1;
             if (j > 0 and line[j] == '[') {

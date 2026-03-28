@@ -223,7 +223,7 @@ pub const Backend = struct {
         return exe.execute_with_context(self.api, allocator, inputs, execute_context);
     }
 
-    pub fn execute_into(self: *Backend, exe: *LoadedExecutable, input_ptrs: []const RawBuffer, output_ptrs: []?RawBuffer, non_donatable: ?[]const i64, options: ExecuteOptions) !?Event {
+    pub fn execute_into(self: *Backend, exe: *LoadedExecutable, input_ptrs: []const RawBuffer, output_ptrs: []RawBuffer, non_donatable: ?[]const i64, options: ExecuteOptions) !?Event {
         const execute_context = try create_dispatch_execute_context(self, options);
         defer if (execute_context) |ctx| destroy_execute_context(self.api, ctx);
         return exe.execute_into_opts_with_context(self.api, input_ptrs, output_ptrs, non_donatable, execute_context);
@@ -325,6 +325,8 @@ pub const Backend = struct {
         .execute = iface_execute,
         .execute_into = iface_execute_into,
         .await_event = iface_await_event,
+        .serialize_executable = iface_serialize_executable,
+        .load_serialized = iface_load_serialized,
         .deinit_buffer = iface_deinit_buffer,
         .deinit_event = iface_deinit_event,
         .deinit_executable = iface_deinit_executable,
@@ -338,20 +340,36 @@ pub const Backend = struct {
     fn iface_compile(iface: *BackendInterface, device: BackendInterface.Device, mlir: []const u8, is_bytecode: bool, opts: BackendInterface.CompileOptions) BackendInterface.Error!BackendInterface.Executable {
         const self = promote(iface);
         const pjrt_device = unwrap_device(device);
-        const exe = self.compile(pjrt_device, mlir, is_bytecode, opts) catch return error.BackendError;
+        const exe = self.compile(&pjrt_device, mlir, is_bytecode, opts) catch return error.BackendError;
         return wrap_executable(self, exe);
     }
 
     fn iface_buffer_from_host(iface: *BackendInterface, device: BackendInterface.Device, data: []const u8, dtype: pr.DType, shape: []const i64) BackendInterface.Error!BackendInterface.Buffer {
         const self = promote(iface);
         const pjrt_device = unwrap_device(device);
-        const buf = self.buffer_from_host(pjrt_device, data, dtype, shape) catch return error.BackendError;
+        const buf = self.buffer_from_host(&pjrt_device, data, dtype, shape) catch return error.BackendError;
         return wrap_buffer(buf);
     }
 
-    fn iface_buffer_to_host(iface: *BackendInterface, buf: BackendInterface.Buffer, dst: []u8) BackendInterface.Error!BackendInterface.Event {
+    fn iface_buffer_to_host(iface: *BackendInterface, buf: BackendInterface.Buffer, dst: []u8) BackendInterface.Error!?BackendInterface.Event {
         const self = promote(iface);
         var pjrt_buf = unwrap_buffer(buf);
+
+        // Fast path: host-resident buffer so direct memcpy is potentially viable, skipping PJRT API.
+        // No-op when dst already points to the buffer's own memory.
+        if (pjrt_buf.is_on_cpu(self.api) catch false) {
+            const src_addr = pjrt_buf.unsafe_pointer(self.api) catch {
+                // Fall through to normal PJRT path.
+                const ev = self.buffer_to_host(&pjrt_buf, dst) catch return error.BackendError;
+                return wrap_event(ev);
+            };
+            const src: [*]const u8 = @ptrFromInt(src_addr);
+            if (src != dst.ptr) {
+                @memcpy(dst, src[0..dst.len]);
+            }
+            return null;
+        }
+
         const ev = self.buffer_to_host(&pjrt_buf, dst) catch return error.BackendError;
         return wrap_event(ev);
     }
@@ -368,11 +386,14 @@ pub const Backend = struct {
         };
     }
 
-    fn iface_execute_into(iface: *BackendInterface, exe: BackendInterface.Executable, inputs: []const BackendInterface.RawBuffer, outputs: []?BackendInterface.RawBuffer, non_donatable: ?[]const i64, opts: BackendInterface.ExecuteOptions) BackendInterface.Error!?BackendInterface.Event {
+    /// Vtable shim for `execute_into`.
+    fn iface_execute_into(iface: *BackendInterface, exe: BackendInterface.Executable, inputs: []const BackendInterface.Buffer, outputs: []BackendInterface.Buffer, non_donatable: ?[]const i64, opts: BackendInterface.ExecuteOptions) BackendInterface.Error!?BackendInterface.Event {
+        // Both `BackendInterface.Buffer` (struct wrapping `*anyopaque`) and `RawBuffer` (`*c.PJRT_Buffer`)
+        //  are single-pointer types with identical layout - slices can be reinterpreted directly via `@ptrCast`.
         const self = promote(iface);
         const pjrt_exe = unwrap_executable_ptr(exe);
         const pjrt_inputs = @as([*]const RawBuffer, @ptrCast(inputs.ptr))[0..inputs.len];
-        const pjrt_outputs = @as([*]?RawBuffer, @ptrCast(outputs.ptr))[0..outputs.len];
+        const pjrt_outputs = @as([*]RawBuffer, @ptrCast(outputs.ptr))[0..outputs.len];
         const ev = self.execute_into(pjrt_exe, pjrt_inputs, pjrt_outputs, non_donatable, opts) catch return error.BackendError;
         return if (ev) |e| wrap_event(e) else null;
     }
@@ -402,6 +423,18 @@ pub const Backend = struct {
         self.allocator.destroy(pjrt_exe);
     }
 
+    fn iface_serialize_executable(iface: *BackendInterface, exe: BackendInterface.Executable, allocator: std.mem.Allocator) BackendInterface.Error![]u8 {
+        const self = promote(iface);
+        const pjrt_exe = unwrap_executable_ptr(exe);
+        return pjrt_exe.serialize(self.api, allocator) catch return error.BackendError;
+    }
+
+    fn iface_load_serialized(iface: *BackendInterface, data: []const u8) BackendInterface.Error!BackendInterface.Executable {
+        const self = promote(iface);
+        const exe = self.client.deserialize_and_load(data, null) catch return error.BackendError;
+        return self.wrap_executable(exe);
+    }
+
     fn iface_get_devices(iface: *BackendInterface, allocator: std.mem.Allocator) BackendInterface.Error![]BackendInterface.Device {
         const self = promote(iface);
         const pjrt_devices = self.get_devices(allocator) catch return error.BackendError;
@@ -426,7 +459,7 @@ pub const Backend = struct {
         return .{ .pjrt_event = @ptrCast(@alignCast(ev.handle)) };
     }
 
-    pub fn wrap_executable(self_backend: *Backend, exe: LoadedExecutable) BackendInterface.Error!BackendInterface.Executable {
+    fn wrap_executable(self_backend: *Backend, exe: LoadedExecutable) BackendInterface.Error!BackendInterface.Executable {
         const heap = self_backend.allocator.create(LoadedExecutable) catch return error.OutOfMemory;
         heap.* = exe;
         return .{ .handle = @ptrCast(heap) };
@@ -436,8 +469,8 @@ pub const Backend = struct {
         return @ptrCast(@alignCast(exe.handle));
     }
 
-    fn unwrap_device(device: BackendInterface.Device) *const Device {
-        return @ptrCast(@alignCast(device.handle));
+    fn unwrap_device(device: BackendInterface.Device) Device {
+        return .{ .pjrt_device = @ptrCast(@alignCast(device.handle)) };
     }
 };
 
@@ -543,8 +576,8 @@ fn register_dispatch_handler_for_platform(api: *pjrt_api.Api, ffi_ext: *c.PJRT_F
     };
     err.deinit();
 
-    log.debug(
-        "typed-ffi register_handler failed target='{s}' platform='{s}' code={d} msg={s}",
+    log.warn(
+        "typed-ffi register_dispatch_handler_for_platform failed target='{s}' platform='{s}' code={d} msg={s}",
         .{ dispatch_target_name, platform_name orelse "<any>", code, msg },
     );
 
@@ -615,9 +648,9 @@ fn add_dispatch_user_data(
 /// Build a PJRT execute context carrying kernel dispatch user data.
 ///
 /// Returns `null` when no kernel dispatch is configured (both `store` and
-/// `dispatch_registry` are null), signaling callers to skip the context.
+///  `dispatch_registry` are null), signaling callers to skip the context.
 /// Otherwise wires the store, registry, and platform into typed FFI user-data
-/// slots on the context.
+///  slots on the context.
 fn create_dispatch_execute_context(self: *Backend, options: ExecuteOptions) !?*c.PJRT_ExecuteContext {
     if (options.store == null and options.dispatch_registry == null) return null;
 
@@ -640,8 +673,8 @@ fn create_dispatch_execute_context(self: *Backend, options: ExecuteOptions) !?*c
         try add_dispatch_user_data(self.api, ffi_ext, context, type_id, @ptrCast(dreg));
     }
 
-    // Thread platform into execute context so the dispatch handler doesn't
-    // rely on a process global for multi-backend coexistence.
+    // Thread platform into execute context so the dispatch handler doesn't rely on a process
+    //  global for multi-backend coexistence.
     // Uses the backend's stored dispatch_platform (stable address, outlives context).
     {
         const type_id = try ensure_dispatch_type_id(self.api, ffi_ext, dispatch_platform_type_name, &dispatch_platform_type);
@@ -707,8 +740,8 @@ fn detect_platform(plugin_path: []const u8) Platform {
 /// Generic kernel dispatch handler invoked by the XLA FFI framework.
 ///
 /// Extracts kernel_key from custom_call attributes, looks up the artifact
-/// in the registry, builds a provider-agnostic DispatchContext from the
-/// FFI frame, and delegates to `artifact.dispatch()`.
+///  in the registry, builds a provider-agnostic DispatchContext from the
+///  FFI frame, and delegates to `artifact.dispatch()`.
 fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
     if (handle_metadata_registration_hook(frame)) return null;
 
@@ -895,6 +928,7 @@ fn ffi_dtype_to_kernel_dtype(xla_dtype: c.XLA_FFI_DataType) ?kernel.DType {
     if (xla_dtype == c.XLA_FFI_DataType_F32) return .f32;
     if (xla_dtype == c.XLA_FFI_DataType_F64) return .f64;
     if (xla_dtype == c.XLA_FFI_DataType_S8) return .i8;
+    if (xla_dtype == c.XLA_FFI_DataType_U8) return .u8;
     if (xla_dtype == c.XLA_FFI_DataType_S32) return .i32;
     if (xla_dtype == c.XLA_FFI_DataType_S64) return .i64;
     if (xla_dtype == c.XLA_FFI_DataType_U32) return .u32;
@@ -928,8 +962,8 @@ fn get_device_ordinal(frame: *c.XLA_FFI_CallFrame) i32 {
 /// Allocate device memory from XLA's BFC pool via the FFI execution context.
 ///
 /// Returns null if the API is unavailable or allocation fails. The returned
-/// pointer is device memory owned by the BFC pool -- callers must pair each
-/// successful allocation with `free_device_memory`.
+///  pointer is device memory owned by the BFC pool -- callers must pair each
+///  successful allocation with `free_device_memory`.
 fn alloc_device_memory(frame: *c.XLA_FFI_CallFrame, size: usize, alignment: usize) ?*anyopaque {
     const ffi_api = frame.api orelse return null;
     const alloc_fn = ffi_api.*.XLA_FFI_DeviceMemory_Allocate orelse return null;
@@ -949,7 +983,7 @@ fn alloc_device_memory(frame: *c.XLA_FFI_CallFrame, size: usize, alignment: usiz
 /// Free device memory previously allocated via `alloc_device_memory`.
 ///
 /// Returns memory to XLA's BFC pool (not `cudaFree`). Logs a warning on
-/// failure but does not propagate errors -- workspace cleanup is best-effort.
+///  failure but does not propagate errors -- workspace cleanup is best-effort.
 fn free_device_memory(frame: *c.XLA_FFI_CallFrame, data: *anyopaque, size: usize) void {
     const ffi_api = frame.api orelse {
         log.warn("free_device_memory: FFI API unavailable", .{});
@@ -1083,9 +1117,12 @@ fn write_varint(writer: anytype, value: u64) !void {
 
 fn dtype_to_buffer_type(dtype: pr.DType) pjrt_types.BufferType {
     return switch (dtype) {
+        .f16 => .f16,
         .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
+        .i8 => .i8,
+        .u8 => .u8,
         .i32 => .i32,
         .i64 => .i64,
         .u32 => .u32,

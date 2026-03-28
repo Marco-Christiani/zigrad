@@ -4,6 +4,7 @@ const pr = @import("../pr/pr.zig");
 const dispatch_mod = @import("dispatch.zig");
 const artifact_mod = @import("artifact.zig");
 const mirage = @import("../c/mirage/api.zig");
+const mlir_types = @import("mlir.zig");
 
 const log = std.log.scoped(.@"zg/mirage_provider");
 const superopt_max_candidates: u32 = 1024;
@@ -19,7 +20,6 @@ pub const MirageProvider = struct {
             .name = "mirage",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
-            .compile_mlir_fn = compile_mlir_impl,
             .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
             .dispatch_ctx = @ptrCast(self.dispatch_state),
         };
@@ -28,16 +28,6 @@ pub const MirageProvider = struct {
     fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, _: kernel.CompileContext, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         const self: *MirageProvider = @ptrCast(@alignCast(ptr));
         return self.compile(desc, allocator);
-    }
-
-    fn compile_mlir_impl(
-        ptr: *anyopaque,
-        desc: kernel.MlirKernelDescriptor,
-        _: kernel.CompileContext,
-        allocator: std.mem.Allocator,
-    ) kernel.CompileError!kernel.KernelArtifact {
-        const self: *MirageProvider = @ptrCast(@alignCast(ptr));
-        return self.compile_mlir(desc, allocator);
     }
 
     fn compile(self: *MirageProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
@@ -60,9 +50,9 @@ pub const MirageProvider = struct {
         return self.search_and_transpile(desc.name, allocator, &graph);
     }
 
-    fn compile_mlir(
+    pub fn compile_mlir(
         self: *MirageProvider,
-        desc: kernel.MlirKernelDescriptor,
+        desc: mlir_types.MlirKernelDescriptor,
         allocator: std.mem.Allocator,
     ) kernel.CompileError!kernel.KernelArtifact {
         if (desc.outputs.len != 1) return error.Unsupported;
@@ -112,9 +102,9 @@ pub const MirageProvider = struct {
     /// non-canonical matmul layout); callers can fall back to baseline lowering.
     fn build_mirage_graph(
         graph: *mirage.Graph,
-        pattern: kernel.MlirKernelPattern,
+        pattern: mlir_types.MlirKernelPattern,
         input_handles: []const mirage.Tensor,
-        desc: kernel.MlirKernelDescriptor,
+        desc: mlir_types.MlirKernelDescriptor,
     ) kernel.CompileError!mirage.Tensor {
         switch (pattern) {
             .dot, .dot_general => {
@@ -348,7 +338,7 @@ fn probe_transpile_safe(graph: ?*const mirage.RawGraph) bool {
 
 fn emit_graph_input(
     graph: *mirage.Graph,
-    input_desc: kernel.MlirTensorDesc,
+    input_desc: mlir_types.MlirTensorDesc,
 ) kernel.CompileError!mirage.Tensor {
     const dtype = dtype_to_mirage(input_desc.dtype) orelse {
         log.debug("unsupported dtype for mirage input: {s}", .{@tagName(input_desc.dtype)});

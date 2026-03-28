@@ -498,10 +498,10 @@ test "kernelize pass rewrites profitable region from store" {
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
 
     const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
-    try testing.expectEqualStrings(dispatcher_target_name, pr.param_call_target_name(params).?);
+    try testing.expectEqualStrings(dispatcher_target_name, pr.param(.call_target_name,params).?);
     // kernel_key is the kernel signature used for store lookup at dispatch time.
-    try testing.expectEqualStrings("exp,f32[2]>f32[2]", pr.param_call_kernel_key(params).?);
-    try testing.expectEqualStrings("mock", pr.param_call_provider_name(params).?);
+    try testing.expectEqualStrings("exp,f32[2]>f32[2]", pr.param(.call_kernel_key,params).?);
+    try testing.expectEqualStrings("mock", pr.param(.call_provider_name,params).?);
 }
 
 test "kernelize pass skips negative decision" {
@@ -625,7 +625,7 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     try testing.expectEqual(@as(usize, 2), outputs.len);
 
     const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
-    const maybe_out_avals = pr.param_out_avals(params);
+    const maybe_out_avals = pr.param(.out_avals,params);
     try testing.expect(maybe_out_avals != null);
     const out_avals = maybe_out_avals.?;
     try testing.expectEqual(@as(usize, 2), out_avals.len);

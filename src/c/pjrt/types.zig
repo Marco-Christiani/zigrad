@@ -1,12 +1,13 @@
-/// PJRT Type Wrappers
-///
-/// Higher-level Zig wrappers around PJRT C types with explicit lifetimes.
-/// These types are thin wrappers--no logic beyond calling through to api.zig.
+//! Zig API for PJRT
+//!
+//! These are thin wrappers calling through to api.zig.
 const std = @import("std");
 const api_mod = @import("api.zig");
 const Api = api_mod.Api;
-const c_mod = @import("c.zig");
-const c = c_mod.c;
+const c = @import("c.zig").c;
+
+// TODO: now that we have proto bindings we can go deeper, not justified now since
+//  we currently do not need much in the way of compilation options.
 
 // Hand-crafted minimal CompileOptionsProto
 // Based on proto/xla/pjrt/proto/compile_options.proto
@@ -88,6 +89,7 @@ pub const Client = struct {
         self.api.call("PJRT_Client_Destroy", &args) catch {};
     }
 
+    /// Returned slice is owned by caller.
     pub fn get_devices(self: *Client, allocator: std.mem.Allocator) ![]Device {
         var args = api_mod.init_args(c.PJRT_Client_Devices_Args);
         args.client = self.pjrt_client;
@@ -116,11 +118,12 @@ pub const Client = struct {
     ) !LoadedExecutable {
         _ = device; // TODO: use device for target-specific compilation options
 
-        // Create PJRT_Program
+        // create PJRT_Program
         var program = api_mod.init_args(c.PJRT_Program);
         program.code = @constCast(bytecode.ptr);
         program.code_size = bytecode.len;
 
+        // TODO: audit and document this
         const format_str = switch (format) {
             .mlir_text => "mlir",
             .mlir_bytecode => "mlir",
@@ -129,6 +132,7 @@ pub const Client = struct {
         program.format = format_str.ptr;
         program.format_size = format_str.len;
 
+        // build args and compile
         var args = api_mod.init_args(c.PJRT_Client_Compile_Args);
         args.client = self.pjrt_client;
         args.program = &program;
@@ -164,7 +168,7 @@ pub const Client = struct {
         bytecode: []const u8,
         options: ?[]const u8,
     ) !Executable {
-        // Create PJRT_Program
+        // create PJRT_Program
         var program = api_mod.init_args(c.PJRT_Program);
         program.code = @constCast(bytecode.ptr);
         program.code_size = bytecode.len;
@@ -177,6 +181,7 @@ pub const Client = struct {
         program.format = format_str.ptr;
         program.format_size = format_str.len;
 
+        // build args and compile
         var args = api_mod.init_args(c.PJRT_Compile_Args);
         args.topology = topology.pjrt_topology;
         args.program = &program;
@@ -249,6 +254,7 @@ pub const Client = struct {
     }
 };
 
+/// Used in the AOT path.
 pub const TopologyDescription = struct {
     api: *Api,
     pjrt_topology: *c.PJRT_TopologyDescription,
@@ -640,7 +646,7 @@ pub const LoadedExecutable = struct {
         self: *LoadedExecutable,
         api: *Api,
         input_ptrs: []const *c.PJRT_Buffer,
-        output_ptrs: []?*c.PJRT_Buffer,
+        output_ptrs: []*c.PJRT_Buffer,
     ) !?Event {
         return self.execute_into_opts_with_context(api, input_ptrs, output_ptrs, null, null);
     }
@@ -649,17 +655,40 @@ pub const LoadedExecutable = struct {
         self: *LoadedExecutable,
         api: *Api,
         input_ptrs: []const *c.PJRT_Buffer,
-        output_ptrs: []?*c.PJRT_Buffer,
+        output_ptrs: []*c.PJRT_Buffer,
         non_donatable_input_indices: ?[]const i64,
     ) !?Event {
         return self.execute_into_opts_with_context(api, input_ptrs, output_ptrs, non_donatable_input_indices, null);
     }
 
+    /// Execute and write output buffer pointers into caller-provided slots.
+    ///
+    /// ## C binding nullability
+    ///
+    /// The C API declares `output_lists` as `PJRT_Buffer** const*`, non-nullable on all levels.
+    /// PJRT always writes valid buffer pointers into the caller's array.
+    ///
+    /// However, Zig's translate-c generates the field as `[*c]const [*c]?*PJRT_Buffer`.
+    /// This happens because:
+    ///
+    ///  1. `PJRT_Buffer` is `opaque {}` (C struct with hidden layout).
+    ///  2. `[*c]T` ("C pointer") is inherently nullable -- it allows address 0 -- and is a
+    ///      compromise type for auto-generated code.
+    ///  3. translate-c cannot distinguish nullable from non-nullable C pointers, so all
+    ///      `PJRT_Buffer*` become `?*PJRT_Buffer`.
+    ///
+    /// The recommended practice is to replace `[*c]T` with proper Zig pointer types (`*T`, `[*]T`)
+    ///  in wrapper code. We do exactly that, but instead of editing the generated code this function
+    ///  takes `[]*c.PJRT_Buffer` (non-nullable slice) and `@ptrCast`s to the generated `[*c]?*` type
+    ///  at the FFI boundary. This cast is sound because for bare pointer types, `*T` and `?*T` have
+    ///  identical layout (both pointer-sized, null sentinel).
+    /// This would NOT hold for struct-wrapped pointers: `?struct{*T}` is 16 bytes (separate bool tag).
+    /// Thus, this must be kept in sync with `Backend.Buffer`.
     pub fn execute_into_opts_with_context(
         self: *LoadedExecutable,
         api: *Api,
         input_ptrs: []const *c.PJRT_Buffer,
-        output_ptrs: []?*c.PJRT_Buffer,
+        output_ptrs: []*c.PJRT_Buffer,
         non_donatable_input_indices: ?[]const i64,
         execute_context: ?*c.PJRT_ExecuteContext,
     ) !?Event {
@@ -668,8 +697,8 @@ pub const LoadedExecutable = struct {
         const input_list: [*c]*c.PJRT_Buffer = @constCast(input_ptrs.ptr);
         var input_lists = [_][*c]*c.PJRT_Buffer{input_list};
 
-        const output_list: [*c]?*c.PJRT_Buffer = output_ptrs.ptr;
-        var output_lists = [_][*c]?*c.PJRT_Buffer{output_list};
+        const output_list: [*c]*c.PJRT_Buffer = output_ptrs.ptr;
+        var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
 
         var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
         execute_opts.send_callbacks = null;
@@ -691,6 +720,8 @@ pub const LoadedExecutable = struct {
         var args = api_mod.init_args(c.PJRT_LoadedExecutable_Execute_Args);
         args.executable = self.pjrt_executable;
         args.options = &execute_opts;
+        // Cast non-nullable zig pointers to the generated [*c]?* types.
+        // See doc comment above for why this is sound.
         args.argument_lists = @ptrCast(&input_lists);
         args.num_devices = 1;
         args.num_args = input_ptrs.len;
@@ -718,6 +749,7 @@ pub const Buffer = struct {
         api.call("PJRT_Buffer_Destroy", &args) catch {};
     }
 
+    // Returned slice is owned by caller.
     pub fn get_dimensions(self: *const Buffer, api: *Api, allocator: std.mem.Allocator) ![]usize {
         var args = api_mod.init_args(c.PJRT_Buffer_Dimensions_Args);
         args.buffer = self.pjrt_buffer;
@@ -855,15 +887,19 @@ pub const ProgramFormat = enum {
         return switch (self) {
             .mlir_text => c.PJRT_Program_Format_MLIR,
             .mlir_bytecode => c.PJRT_Program_Format_MLIR_BYTECODE,
-            .stablehlo_portable => c.PJRT_Program_Format_MLIR_BYTECODE, // Treat as bytecode
+            // TODO: Treating this as bytecode for now, should revisit this
+            .stablehlo_portable => c.PJRT_Program_Format_MLIR_BYTECODE,
         };
     }
 };
 
 pub const BufferType = enum {
+    f16,
     bf16,
     f32,
     f64,
+    i8,
+    u8,
     i32,
     i64,
     u32,
@@ -871,9 +907,12 @@ pub const BufferType = enum {
 
     pub fn from_c_enum(t: c.PJRT_Buffer_Type) !BufferType {
         return switch (t) {
+            c.PJRT_Buffer_Type_F16 => .f16,
             c.PJRT_Buffer_Type_BF16 => .bf16,
             c.PJRT_Buffer_Type_F32 => .f32,
             c.PJRT_Buffer_Type_F64 => .f64,
+            c.PJRT_Buffer_Type_S8 => .i8,
+            c.PJRT_Buffer_Type_U8 => .u8,
             c.PJRT_Buffer_Type_S32 => .i32,
             c.PJRT_Buffer_Type_S64 => .i64,
             c.PJRT_Buffer_Type_U32 => .u32,
@@ -884,9 +923,12 @@ pub const BufferType = enum {
 
     pub fn to_c_enum(self: BufferType) c.PJRT_Buffer_Type {
         return switch (self) {
+            .f16 => c.PJRT_Buffer_Type_F16,
             .bf16 => c.PJRT_Buffer_Type_BF16,
             .f32 => c.PJRT_Buffer_Type_F32,
             .f64 => c.PJRT_Buffer_Type_F64,
+            .i8 => c.PJRT_Buffer_Type_S8,
+            .u8 => c.PJRT_Buffer_Type_U8,
             .i32 => c.PJRT_Buffer_Type_S32,
             .i64 => c.PJRT_Buffer_Type_S64,
             .u32 => c.PJRT_Buffer_Type_U32,
@@ -896,7 +938,8 @@ pub const BufferType = enum {
 
     pub fn size_in_bytes(self: BufferType) usize {
         return switch (self) {
-            .bf16 => 2,
+            .f16, .bf16 => 2,
+            .i8, .u8 => 1,
             .f32, .i32, .u32 => 4,
             .f64, .i64, .u64 => 8,
         };

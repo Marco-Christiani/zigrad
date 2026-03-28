@@ -93,9 +93,9 @@ pub const TvmProvider = struct {
         defer target.deinit();
 
         // Tune
-        const shape_a = [_]i64{ @intCast(matmul.m), @intCast(matmul.k) };
-        const shape_b = [_]i64{ @intCast(matmul.k), @intCast(matmul.n) };
-        const shape_c = [_]i64{ @intCast(matmul.m), @intCast(matmul.n) };
+        const shape_a = [_]i64{ matmul.m, matmul.k };
+        const shape_b = [_]i64{ matmul.k, matmul.n };
+        const shape_c = [_]i64{ matmul.m, matmul.n };
         const shapes: [3][]const i64 = .{ &shape_a, &shape_b, &shape_c };
 
         // Per-target base dir for cache index and per-kernel subdirectories.
@@ -183,9 +183,9 @@ pub const TvmProvider = struct {
 // ============================================================================
 
 const MatmulShape = struct {
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
 };
 
 /// Validate that a region describes a single matmul (dot or dot_general).

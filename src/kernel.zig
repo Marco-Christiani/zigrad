@@ -72,13 +72,13 @@ pub fn dot_general_is_matrix_matmul(params: []const pr.Param) bool {
     return dot_general_is_canonical_batched_matmul(params, 2, 2);
 }
 
-/// Returns whether dot_general matches Mirage's canonical batched matmul form.
+/// Returns whether dot_general matches canonical batched matmul form.
 ///
 /// Canonical form requires both operands to have rank `batch_len + 2` with
 /// batch dims as `0..batch_len-1`, lhs contracting dim at `rank-1`, and rhs
 /// contracting dim at `rank-2`.
 pub fn dot_general_is_canonical_batched_matmul(params: []const pr.Param, lhs_rank: usize, rhs_rank: usize) bool {
-    const dg = pr.param_dot_general(params) orelse return false;
+    const dg = pr.param(.dot_general, params) orelse return false;
     const batch_len = dg.lhs_batch_dims.len;
 
     if (batch_len != dg.rhs_batch_dims.len) return false;
@@ -185,19 +185,8 @@ pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: 
 
 /// Element data type for dispatch buffers.
 ///
-/// Subset of types relevant to kernel dispatch. Providers validate
-/// dtype support internally; the backend maps from FFI-layer types.
-pub const DType = enum {
-    f16,
-    bf16,
-    f32,
-    f64,
-    i8,
-    i32,
-    i64,
-    u32,
-    u64,
-};
+/// TODO: Fix this re-export pattern
+pub const DType = pr.DType;
 
 /// Execution platform for dispatch.
 pub const DispatchPlatform = enum { host, cuda };
@@ -291,51 +280,6 @@ pub const KernelArtifact = struct {
 };
 
 // ============================================================================
-// MLIR Kernel Descriptors
-// ============================================================================
-
-/// Ranked tensor descriptor extracted from an MLIR operation signature.
-pub const MlirTensorDesc = struct {
-    dtype: pr.DType,
-    dims: []const usize,
-};
-
-/// Stable operation-pattern identity selected by MLIR kernel passes.
-pub const MlirKernelPattern = enum {
-    dot,
-    dot_general,
-    dot_add,
-    dot_add_mul,
-    dot_log,
-    dot_exp,
-    rms_norm,
-    rms_norm_matmul,
-    softmax_matmul,
-    attention,
-};
-
-/// Provider-neutral descriptor for one selected MLIR kernel call.
-///
-/// This descriptor is intentionally small and stable: it captures only the
-/// information needed to compile known selected carrier patterns without
-/// depending on PR region descriptors.
-pub const MlirKernelDescriptor = struct {
-    name: []const u8,
-    provider_name: []const u8,
-    pattern: MlirKernelPattern,
-    inputs: []const MlirTensorDesc,
-    outputs: []const MlirTensorDesc,
-    /// rms_norm: size of the last dimension (normalized axis).
-    normalized_size: i32 = 0,
-    /// softmax_matmul, attention: dimension index for the reduce-sum.
-    reduction_dim: i32 = 0,
-    /// softmax_matmul, attention: size of the reduction dimension.
-    reduction_factor: i32 = 0,
-    /// attention: scale factor applied to raw scores (1/sqrt(d)).
-    scale: f32 = 0.0,
-};
-
-// ============================================================================
 // Kernel Provider
 // ============================================================================
 
@@ -371,8 +315,8 @@ pub const CompileError = error{
 
 /// Extension component that claims PR regions and produces compiled kernel artifacts.
 ///
-/// Providers implement `compile_fn` (and optionally `compile_mlir_fn` and `finalize_fn`).
-/// Both compile functions receive a `CompileContext` for device targeting.
+/// Providers implement `compile_fn` (and optionally `finalize_fn`).
+/// The compile function receives a `CompileContext` for device targeting.
 ///
 /// Dispatch fields (`dispatch_fn`, `dispatch_ctx`) identify how to execute compiled
 /// artifacts at runtime. They are per-provider (not per-artifact) because all artifacts
@@ -381,7 +325,6 @@ pub const KernelProvider = struct {
     name: []const u8,
     ptr: *anyopaque,
     compile_fn: *const fn (ptr: *anyopaque, desc: RegionDescriptor, ctx: CompileContext, allocator: std.mem.Allocator) CompileError!KernelArtifact,
-    compile_mlir_fn: ?*const fn (ptr: *anyopaque, desc: MlirKernelDescriptor, ctx: CompileContext, allocator: std.mem.Allocator) CompileError!KernelArtifact = null,
     finalize_fn: ?*const fn (ptr: *anyopaque) void = null,
     /// Provider's dispatch function. Called by the backend's FFI handler at execute time.
     /// Must be set for providers whose artifacts require runtime dispatch.
@@ -402,15 +345,6 @@ pub const KernelProvider = struct {
     pub fn finalize(self: KernelProvider) void {
         const f = self.finalize_fn orelse return;
         f(self.ptr);
-    }
-
-    /// Compile from a selected MLIR kernel call descriptor.
-    ///
-    /// Providers may leave this unimplemented (`null`) to signal that MLIR-side
-    /// materialization must use alternate paths.
-    pub fn compile_mlir(self: KernelProvider, desc: MlirKernelDescriptor, ctx: CompileContext, allocator: std.mem.Allocator) CompileError!KernelArtifact {
-        const compile_mlir_fn = self.compile_mlir_fn orelse return error.Unsupported;
-        return compile_mlir_fn(self.ptr, desc, ctx, allocator);
     }
 };
 

@@ -460,7 +460,7 @@ fn lower_literal(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const eqn_params = ctx.params(eqn);
     const out_id = outs[0];
     const out_tensor = try ctx.tensor_of(out_id);
-    const lit = pr.param_literal(eqn_params) orelse return error.InvalidProgram;
+    const lit = pr.param(.literal,eqn_params) orelse return error.InvalidProgram;
     const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
     const raw_bytes = switch (lit) {
         inline else => |v| std.mem.asBytes(&v),
@@ -487,7 +487,7 @@ fn lower_transpose(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const perm = pr.param_permutation(eqn_params) orelse return error.InvalidProgram;
+    const perm = pr.param(.permutation,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
     const out_type = try ctx.tensor_to_mlir_type(out_tensor);
@@ -500,7 +500,7 @@ fn lower_broadcast_in_dim(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const bd = pr.param_broadcast_dims(eqn_params) orelse return error.InvalidProgram;
+    const bd = pr.param(.broadcast_dimensions,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
     const out_type = try ctx.tensor_to_mlir_type(out_tensor);
@@ -512,7 +512,7 @@ fn lower_broadcast_in_dim(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
 fn lower_iota(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const iota_dim = pr.param_iota_dimension(eqn_params) orelse return error.InvalidProgram;
+    const iota_dim = pr.param(.iota_dimension,eqn_params) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
     const out_type = try ctx.tensor_to_mlir_type(out_tensor);
     const op = stablehlo.iota(ctx.mlir_ctx, iota_dim, out_type, ctx.loc);
@@ -524,7 +524,7 @@ fn lower_slice(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const sparams = pr.param_slice(eqn_params) orelse return error.InvalidProgram;
+    const sparams = pr.param(.slice,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
     const out_type = try ctx.tensor_to_mlir_type(out_tensor);
@@ -545,7 +545,7 @@ fn lower_concatenate(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const axis = pr.param_concat_axis(eqn_params) orelse return error.InvalidProgram;
+    const axis = pr.param(.concat_axis,eqn_params) orelse return error.InvalidProgram;
     const values = ctx.arena.alloc(mlir.Value, ins.len) catch return error.OutOfMemory;
     for (ins, 0..) |id, i| {
         values[i] = ctx.get_value(id) orelse return error.InvalidProgram;
@@ -561,7 +561,7 @@ fn lower_reduce_sum(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const axes = pr.param_reduce_axes(eqn_params) orelse return error.InvalidProgram;
+    const axes = pr.param(.reduce_axes,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
     const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
@@ -577,7 +577,7 @@ fn lower_reduce_max(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const axes = pr.param_reduce_axes(eqn_params) orelse return error.InvalidProgram;
+    const axes = pr.param(.reduce_axes,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
     const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
@@ -621,7 +621,7 @@ fn lower_dot_general(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const dg = pr.param_dot_general(eqn_params) orelse return error.InvalidProgram;
+    const dg = pr.param(.dot_general,eqn_params) orelse return error.InvalidProgram;
     const lhs = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const rhs = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
     const out_tensor = try ctx.tensor_of(outs[0]);
@@ -643,7 +643,7 @@ fn lower_compare(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const cparams = pr.param_compare(eqn_params) orelse return error.InvalidProgram;
+    const cparams = pr.param(.compare,eqn_params) orelse return error.InvalidProgram;
     const lhs = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const rhs = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
     const op = stablehlo.compare(
@@ -695,7 +695,7 @@ fn lower_gather(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const gparams = pr.param_gather(eqn_params) orelse return error.InvalidProgram;
+    const gparams = pr.param(.gather,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const indices = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
     const op = stablehlo.gather(ctx.mlir_ctx, operand, indices, gparams.slice_sizes, ctx.loc, .{
@@ -714,7 +714,7 @@ fn lower_scatter(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const sparams = pr.param_scatter(eqn_params) orelse return error.InvalidProgram;
+    const sparams = pr.param(.scatter,eqn_params) orelse return error.InvalidProgram;
     const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
     const indices = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
     const updates = ctx.get_value(ins[2]) orelse return error.InvalidProgram;
@@ -761,7 +761,7 @@ fn lower_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const ins = ctx.inputs(eqn);
     const outs = ctx.outputs(eqn);
     const eqn_params = ctx.params(eqn);
-    const callee = pr.param_call_callee(eqn_params) orelse return error.InvalidProgram;
+    const callee = pr.param(.call_callee,eqn_params) orelse return error.InvalidProgram;
 
     const operand_values = ctx.arena.alloc(mlir.Value, ins.len) catch return error.OutOfMemory;
     for (ins, 0..) |id, i| {
@@ -798,10 +798,10 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
     const eqn_params = ctx.params(eqn);
     if (outs.len == 0) return error.InvalidProgram;
 
-    const target = pr.param_call_target_name(eqn_params) orelse return error.InvalidProgram;
-    const has_side_effect = pr.param_has_side_effect(eqn_params) orelse return error.InvalidProgram;
-    const kernel_key = pr.param_call_kernel_key(eqn_params);
-    const provider_name = pr.param_call_provider_name(eqn_params);
+    const target = pr.param(.call_target_name,eqn_params) orelse return error.InvalidProgram;
+    const has_side_effect = pr.param(.has_side_effect,eqn_params) orelse return error.InvalidProgram;
+    const kernel_key = pr.param(.call_kernel_key,eqn_params);
+    const provider_name = pr.param(.call_provider_name,eqn_params);
 
     const result_types = ctx.arena.alloc(mlir.Type, outs.len) catch return error.OutOfMemory;
     for (outs, 0..) |out_id, i| {
@@ -853,9 +853,12 @@ fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
 
 fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
     return switch (dt) {
+        .f16 => mlir.Type.float(ctx, .f16),
         .bf16 => mlir.Type.float(ctx, .bf16),
         .f32 => mlir.Type.float(ctx, .f32),
         .f64 => mlir.Type.float(ctx, .f64),
+        .i8 => mlir.Type.int(ctx, .i8),
+        .u8 => mlir.Type.int(ctx, .i8),
         .i32 => mlir.Type.int(ctx, .i32),
         .i64 => mlir.Type.int(ctx, .i64),
         .u32 => mlir.Type.int(ctx, .i32),
@@ -866,9 +869,12 @@ fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
 
 fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     return switch (dt) {
+        .f16 => .f16,
         .bf16 => .bf16,
         .f32 => .f32,
         .f64 => .f64,
+        .i8 => .i8,
+        .u8 => .i8,
         .i32 => .i32,
         .i64 => .i64,
         .u32 => .i32,
@@ -892,9 +898,11 @@ fn tensor_to_mlir_type_standalone(ctx: mlir.Context, t: pr.Tensor) LowerError!ml
 
 fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
     return switch (dtype) {
-        .bf16 => std.mem.asBytes(&@as(u16, 0)),
+        .f16, .bf16 => std.mem.asBytes(&@as(u16, 0)),
         .f32 => std.mem.asBytes(&@as(f32, 0.0)),
         .f64 => std.mem.asBytes(&@as(f64, 0.0)),
+        .i8 => std.mem.asBytes(&@as(i8, 0)),
+        .u8 => std.mem.asBytes(&@as(u8, 0)),
         .i32 => std.mem.asBytes(&@as(i32, 0)),
         .i64 => std.mem.asBytes(&@as(i64, 0)),
         .u32 => std.mem.asBytes(&@as(u32, 0)),
@@ -905,9 +913,12 @@ fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
 
 fn scalar_min_bytes(dtype: pr.DType) []const u8 {
     return switch (dtype) {
+        .f16 => std.mem.asBytes(&@as(u16, 0xFC00)), // -inf in f16
         .bf16 => std.mem.asBytes(&f32_to_bf16_bits(-std.math.inf(f32))),
         .f32 => std.mem.asBytes(&@as(f32, -std.math.inf(f32))),
         .f64 => std.mem.asBytes(&@as(f64, -std.math.inf(f64))),
+        .i8 => std.mem.asBytes(&std.math.minInt(i8)),
+        .u8 => std.mem.asBytes(&@as(u8, 0)),
         .i32 => std.mem.asBytes(&std.math.minInt(i32)),
         .i64 => std.mem.asBytes(&std.math.minInt(i64)),
         .u32 => std.mem.asBytes(&@as(u32, 0)),

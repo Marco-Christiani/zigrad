@@ -9,9 +9,19 @@
 //!  `Backend` field, wire up a static `VTable`, and should expose an
 //!  `interface` field. Similar relationship between `std.Io.Reader` and
 //!  implementations like `std.Io.File.Reader`.
+//!
+//! All handle types are opaque wrappers around `*anyopaque`, erasing the
+//!  concrete C pointer types at the interface boundary. Details about this
+//!  can be nuanced as they depend on compiler internals, specifically
+//!  zig translate-c. We try to document this when it comes up.
+//!
+//! Provides concrete implementations only for ubiquitous patterns,
+//!  currently only `.transfer()`.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
+const host_buffer = @import("../utils/host_buffer.zig");
+const Tree = @import("../utils/tree.zig").Tree;
 
 const Backend = @This();
 
@@ -19,18 +29,23 @@ vtable: *const VTable,
 
 pub const VTable = struct {
     // Compilation
+    // TODO: this signature is leaking across abs boundary
     compile: *const fn (b: *Backend, device: Device, mlir: []const u8, is_bytecode: bool, opts: CompileOptions) Error!Executable,
 
     // Buffer management
     buffer_from_host: *const fn (b: *Backend, device: Device, data: []const u8, dtype: pr.DType, shape: []const i64) Error!Buffer,
-    buffer_to_host: *const fn (b: *Backend, buf: Buffer, dst: []u8) Error!Event,
+    buffer_to_host: *const fn (b: *Backend, buf: Buffer, dst: []u8) Error!?Event,
 
     // Execution
     execute: *const fn (b: *Backend, exe: Executable, allocator: std.mem.Allocator, inputs: []const Buffer, opts: ExecuteOptions) Error!ExecuteResult,
-    execute_into: *const fn (b: *Backend, exe: Executable, inputs: []const RawBuffer, outputs: []?RawBuffer, non_donatable: ?[]const i64, opts: ExecuteOptions) Error!?Event,
+    execute_into: *const fn (b: *Backend, exe: Executable, inputs: []const Buffer, outputs: []Buffer, non_donatable: ?[]const i64, opts: ExecuteOptions) Error!?Event,
 
     // Synchronization
     await_event: *const fn (b: *Backend, ev: Event) Error!void,
+
+    // Serialization
+    serialize_executable: *const fn (b: *Backend, exe: Executable, allocator: std.mem.Allocator) Error![]u8,
+    load_serialized: *const fn (b: *Backend, data: []const u8) Error!Executable,
 
     // Lifecycle
     deinit_buffer: *const fn (b: *Backend, buf: Buffer) void,
@@ -43,7 +58,6 @@ pub const VTable = struct {
 
 /// Opaque handle to a buffer as defined by the backend implementation
 pub const Buffer = struct { handle: *anyopaque };
-pub const RawBuffer = *anyopaque;
 
 /// Opaque handle to a device as defined by the backend implementation
 pub const Device = struct { handle: *anyopaque };
@@ -92,7 +106,12 @@ pub fn buffer_from_host(self: *Backend, device: Device, data: []const u8, dtype:
     return self.vtable.buffer_from_host(self, device, data, dtype, shape);
 }
 
-pub fn buffer_to_host(self: *Backend, buf: Buffer, dst: []u8) Error!Event {
+/// Copy buffer contents to host memory.
+///
+/// Returns null when the buffer is already host-resident and the transfer
+///  completed synchronously (no event to await or deinit). Callers must
+///  handle the null case -- identical to the `execute_into` event contract.
+pub fn buffer_to_host(self: *Backend, buf: Buffer, dst: []u8) Error!?Event {
     return self.vtable.buffer_to_host(self, buf, dst);
 }
 
@@ -100,12 +119,29 @@ pub fn execute(self: *Backend, exe: Executable, allocator: std.mem.Allocator, in
     return self.vtable.execute(self, exe, allocator, inputs, opts);
 }
 
-pub fn execute_into(self: *Backend, exe: Executable, inputs: []const RawBuffer, outputs: []?RawBuffer, non_donatable: ?[]const i64, opts: ExecuteOptions) Error!?Event {
+/// Execute into caller-provided output slots.
+///
+/// All output slots are populated on success. The output slice must have
+///  exactly the right arity.
+///
+/// Slot contents before the call are undefined (the backend overwrites
+///  them unconditionally).
+/// NOTE: the above statement has questionable phrasing we should improve
+///  this docstring as things stabilize
+pub fn execute_into(self: *Backend, exe: Executable, inputs: []const Buffer, outputs: []Buffer, non_donatable: ?[]const i64, opts: ExecuteOptions) Error!?Event {
     return self.vtable.execute_into(self, exe, inputs, outputs, non_donatable, opts);
 }
 
 pub fn await_event(self: *Backend, ev: Event) Error!void {
     return self.vtable.await_event(self, ev);
+}
+
+pub fn serialize_executable(self: *Backend, exe: Executable, allocator: std.mem.Allocator) Error![]u8 {
+    return self.vtable.serialize_executable(self, exe, allocator);
+}
+
+pub fn load_serialized(self: *Backend, data: []const u8) Error!Executable {
+    return self.vtable.load_serialized(self, data);
 }
 
 pub fn deinit_buffer(self: *Backend, buf: Buffer) void {
@@ -122,4 +158,60 @@ pub fn deinit_executable(self: *Backend, exe: Executable) void {
 
 pub fn get_devices(self: *Backend, allocator: std.mem.Allocator) Error![]Device {
     return self.vtable.get_devices(self, allocator);
+}
+
+/// Direction to transfer data (e.g., H2D, D2H)
+pub const TransferDirection = enum {
+    /// Transfer host data to device memory. Returns owned `Buffer`(s).
+    to_device,
+    /// Transfer device data to host memory. TODO: Not yet implemented.
+    to_host,
+};
+
+/// Transfer data between host and device.
+///
+/// For `.to_device`, accepts a single `HostBuffer` (returns `Buffer`) or
+///  `*[const] Tree(HostBuffer)` (returns `Tree(Buffer)`). Host data is
+///  copied -- caller retains ownership of the source. The returned device
+///  buffer(s) are owned by the caller.
+///
+/// For the `Tree` overload, the returned tree's internal allocations use
+///  the source tree's allocator. Caller must `deinit` the returned tree.
+///
+/// NOTE: `.to_host` is not yet implemented -- produces a compile error.
+pub fn transfer(
+    self: *Backend,
+    device: Device,
+    source: anytype,
+    comptime direction: TransferDirection,
+) TransferError(@TypeOf(source), direction) {
+    const S = @TypeOf(source);
+    switch (direction) {
+        .to_device => {
+            if (S == host_buffer.HostBuffer) {
+                // single buffer transfer
+                return self.buffer_from_host(device, source.data(), source.dtype, source.shape.const_slice());
+            } else if (S == *const Tree(host_buffer.HostBuffer) or S == *Tree(host_buffer.HostBuffer)) {
+                // tree of buffers
+                const Ctx = struct { b: *Backend, d: Device };
+                return source.map(Buffer, Ctx{ .b = self, .d = device }, struct {
+                    fn f(ctx: Ctx, buf: host_buffer.HostBuffer) anyerror!Buffer {
+                        return ctx.b.buffer_from_host(ctx.d, buf.data(), buf.dtype, buf.shape.const_slice());
+                    }
+                }.f);
+            } else {
+                @compileError("transfer: source must be HostBuffer or *[const] Tree(HostBuffer), got " ++ @typeName(S));
+            }
+        },
+        .to_host => @compileError("transfer(.to_host) not yet implemented"),
+    }
+}
+
+fn TransferError(comptime S: type, comptime direction: TransferDirection) type {
+    const HostBuffer = host_buffer.HostBuffer;
+    const TreeHB = Tree(HostBuffer);
+    return switch (direction) {
+        .to_device => if (S == HostBuffer) Error!Buffer else if (S == *const TreeHB or S == *TreeHB) anyerror!Tree(Buffer) else @compileError("unsupported source type for to_device"),
+        .to_host => @compileError("to_host not yet implemented"),
+    };
 }

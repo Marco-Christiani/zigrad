@@ -1,20 +1,20 @@
-/// IREE Backend
-///
-/// Implements the backend interface using IREE's two-phase model:
-///   1. Compile: StableHLO MLIR -> VMFB (VM FlatBuffer) via `iree-compile`
-///      (subprocess, default) or `libIREECompiler.so` (dlopen, when LLVM
-///      versions align).
-///   2. Execute: load VMFB into a runtime session and invoke via the IREE
-///      runtime (statically linked).
-///
-/// CPU-only in the initial version (local-sync HAL driver).
-///
-/// ## Lifetime model
-///
-/// `Backend` owns the IREE runtime instance and the single HAL device.
-/// `LoadedExecutable` owns the VMFB bytes and the session.
-/// `Buffer` holds a retained `iree_hal_buffer_view_t*`; release via `deinit_buffer`.
-/// `Event` is a no-op sentinel (local-sync is fully synchronous).
+//! IREE Backend
+//!
+//! Implements the backend interface using IREE's two-phase model:
+//!   1. Compile: StableHLO MLIR -> VMFB (VM FlatBuffer) via `iree-compile`
+//!      (subprocess, default) or `libIREECompiler.so` (dlopen, when LLVM
+//!      versions align).
+//!   2. Execute: load VMFB into a runtime session and invoke via the IREE
+//!      runtime (statically linked).
+//!
+//! CPU-only in the initial version (local-sync HAL driver).
+//!
+//! ## Lifetime model
+//!
+//! `Backend` owns the IREE runtime instance and the single HAL device.
+//! `LoadedExecutable` owns the VMFB bytes and the session.
+//! `Buffer` holds a retained `iree_hal_buffer_view_t*`; release via `deinit_buffer`.
+//! `Event` is a no-op sentinel (local-sync is fully synchronous).
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const iree_compiler = @import("../c/iree/compiler.zig");
@@ -22,11 +22,8 @@ const rt = @import("../c/iree/runtime.zig");
 const log = std.log.scoped(.@"zg/iree_backend");
 
 /// Re-exported so callers can construct a Compiler without reaching into `c/iree/`.
+/// TODO: generally a smell (antipattern) think about this
 pub const Compiler = iree_compiler.Compiler;
-
-// ---------------------------------------------------------------------------
-// Module-level associated types (required by interface.zig).
-// ---------------------------------------------------------------------------
 
 /// Wraps a retained `iree_hal_buffer_view_t*`.
 pub const Buffer = struct {
@@ -67,6 +64,7 @@ pub const ExecuteResult = struct {
     allocator: std.mem.Allocator,
 };
 
+/// TODO: this does not conform to the interface
 pub const CompileOptions = struct {
     /// Entry function name as it appears in the MLIR module (e.g. "main").
     /// IREE requires fully-qualified lookup ("module.<entry_name>").
@@ -74,12 +72,8 @@ pub const CompileOptions = struct {
 };
 
 /// Execute-time options (unused by IREE backend, present for interface conformance).
+/// TODO: this is no longer correct
 pub const ExecuteOptions = struct {};
-
-
-// ---------------------------------------------------------------------------
-// Backend struct.
-// ---------------------------------------------------------------------------
 
 /// IREE Backend owning the runtime instance and HAL device.
 ///
@@ -288,7 +282,7 @@ pub const Backend = struct {
         self: *Backend,
         exe: *LoadedExecutable,
         inputs: []const RawBuffer,
-        outputs: []?RawBuffer,
+        outputs: []RawBuffer,
         non_donatable: ?[]const i64,
         _: ExecuteOptions,
     ) !?Event {
@@ -303,15 +297,12 @@ pub const Backend = struct {
 
         try rt.call_invoke(&call);
 
-        // Copy each output into the pre-allocated destination buffer.
+        // Copy each output into the caller-provided destination buffer.
         const out_list = rt.call_outputs(&call);
-        for (outputs, 0..) |maybe_dst, i| {
+        for (outputs, 0..) |dst, i| {
             const src_view = try rt.list_get_buffer_view(out_list, i);
             defer rt.buffer_view_release(src_view);
-
-            if (maybe_dst) |dst| {
-                try copy_buffer_view(self.allocator, src_view, dst.view);
-            }
+            try copy_buffer_view(self.allocator, src_view, dst.view);
         }
 
         return null;
@@ -370,9 +361,12 @@ pub const Backend = struct {
 /// Map a PR DType to the IREE HAL element type constant.
 fn dtype_to_element_type(dtype: pr.DType) rt.HalElementType {
     return switch (dtype) {
+        .f16 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_16,
+        .bf16 => rt.c.IREE_HAL_ELEMENT_TYPE_BFLOAT_16,
         .f32 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32,
         .f64 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64,
-        .bf16 => rt.c.IREE_HAL_ELEMENT_TYPE_BFLOAT_16,
+        .i8 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_8,
+        .u8 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_8,
         .i32 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32,
         .i64 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64,
         .u32 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_32,
@@ -397,4 +391,3 @@ fn copy_buffer_view(
     try rt.buffer_view_to_host(src, tmp);
     try rt.buffer_view_from_host(dst, tmp);
 }
-

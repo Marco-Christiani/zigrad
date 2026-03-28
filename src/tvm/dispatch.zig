@@ -137,10 +137,12 @@ fn kernel_dtype_to_dlpack(dtype: kernel.DType) dlpack.DataType {
         .f32 => .{ .code = .float, .bits = 32, .lanes = 1 },
         .f64 => .{ .code = .float, .bits = 64, .lanes = 1 },
         .i8 => .{ .code = .int, .bits = 8, .lanes = 1 },
+        .u8 => .{ .code = .uint, .bits = 8, .lanes = 1 },
         .i32 => .{ .code = .int, .bits = 32, .lanes = 1 },
         .i64 => .{ .code = .int, .bits = 64, .lanes = 1 },
         .u32 => .{ .code = .uint, .bits = 32, .lanes = 1 },
         .u64 => .{ .code = .uint, .bits = 64, .lanes = 1 },
+        .bool => .{ .code = .uint, .bits = 8, .lanes = 1 },
     };
 }
 
