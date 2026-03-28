@@ -283,8 +283,9 @@ def main():
         for w in range(args.warmup):
             out = step_fn(weights, tokens, segment_ids, target_ids, mask)
             out = jax.block_until_ready(out)
+            _ = float(out[0])
             if args.train:
-                _, weights = out
+                weights = out[1]
             if not args.quiet:
                 eprint(f"  warmup {w + 1}/{args.warmup}")
 
@@ -298,22 +299,23 @@ def main():
         for step in range(args.steps):
             t0 = time.perf_counter()
             out = step_fn(weights, tokens, segment_ids, target_ids, mask)
+            t01 = time.perf_counter()
             out = jax.block_until_ready(out)
+            loss_value = float(out[0])
             t1 = time.perf_counter()
 
             if args.train:
-                loss, weights = out
-            else:
-                loss = out
+                weights = out[1]
 
-            loss_value = float(loss)
+            dispatch_ms = (t01 - t0) * 1e3
+            sync_read_ms = (t1 - t01) * 1e3
             step_ms = (t1 - t0) * 1e3
             total_ms += step_ms
 
             log_jsonl("step", step=step, loss=round(loss_value, 6), step_ms=round(step_ms, 3))
             if not args.quiet:
                 mode = "train" if args.train else "eval"
-                eprint(f"  step {step}: loss={loss_value:.6f} step={step_ms:.3f}ms [{mode}]")
+                eprint(f"  step {step}: loss={loss_value:.6f} dispatch={dispatch_ms:.3f}ms sync+read={sync_read_ms:.3f}ms step={step_ms:.3f}ms [{mode}]")
 
     avg_ms = total_ms / max(args.steps, 1)
     log_jsonl(
