@@ -199,6 +199,7 @@ test "all prims have op implementations" {
     }
 }
 
+// TODO: generate these tests at comptime
 test "vjp support detection" {
     // Ops with full VJP support
     try std.testing.expect(has_vjp(.add));

@@ -1,9 +1,9 @@
 //! Tensor
 //!
 //! A unified tensor type that plays two roles depending on mode:
-//! - `traced`: used at compile-time, bound to a FunctionBuilder (for program construction),
-//!     emit PR equations.
-//! - `device`: runtime tensor backed by a device buffer (for execution).
+//!  - `traced`: used at compile-time, bound to a FunctionBuilder (for program construction),
+//!      emit PR equations.
+//!  - `device`: runtime tensor backed by a device buffer (for execution).
 //!
 //! Both modes carry dtype and shape metadata.
 const std = @import("std");
@@ -16,12 +16,13 @@ const Tensor = @This();
 dtype: pr.DType,
 shape: BoundedShape,
 mode: Mode,
-/// When true, the backend may reuse this input buffer for an output.
+
+/// When `true`, the backend may reuse this input buffer for an output.
 ///
 /// Mark abstract tensors as donatable when the compiled function is expected
-/// to produce an updated version of the input (e.g. trainable parameters).
-/// Non-donatable inputs (e.g. batch data) are borrowed — the caller manages
-/// their lifetime.
+///  to produce an updated version of the input (e.g. trainable parameters).
+/// Non-donatable inputs (e.g. batch data) are borrowed, the caller manages
+///  their lifetime.
 donatable: bool = false,
 
 pub const max_rank = pr.max_rank;
@@ -87,8 +88,8 @@ pub const AbstractOpts = struct {
 /// Create an abstract tensor for specification purposes (shape/dtype only, no data).
 ///
 /// Use `opts.donatable = true` for inputs the compiled function will update
-/// (e.g. trainable parameters). The donation flag flows through compilation
-/// into the execute loop, controlling buffer reuse and ownership.
+///  (e.g. trainable parameters). The donation flag flows through compilation
+///  into the execute loop, controlling buffer reuse and ownership.
 pub fn abstract(dtype: pr.DType, shape: []const i64, opts: AbstractOpts) Tensor {
     return .{ .dtype = dtype, .shape = bounded_from_slice(shape), .mode = .abstract, .donatable = opts.donatable };
 }

@@ -4,8 +4,8 @@ const stz = @import("safetensors_zg");
 
 pub fn run_llm_ft_demo(
     allocator: std.mem.Allocator,
-    backend_handle: *zg.backend.pjrt.Backend,
-    device: *const zg.backend.pjrt.Device,
+    b: *zg.Backend,
+    device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
@@ -13,57 +13,76 @@ pub fn run_llm_ft_demo(
     steps: usize,
     quiet: bool,
 ) !void {
-    const TensorSpec = zg.frontend.TensorSpec;
+    const Tensor = zg.Tensor;
 
     const ParamsSpec = struct {
-        w_emb: TensorSpec,
-        w_out: TensorSpec,
-        b: TensorSpec,
+        w_emb: Tensor,
+        w_out: Tensor,
+        b: Tensor,
     };
 
     const BatchSpec = struct {
-        x: TensorSpec,
-        y: TensorSpec,
+        x: Tensor,
+        y: Tensor,
     };
 
-    const LossFn = struct {
-        fn call(params: anytype, batch: anytype) !zg.frontend.Tensor {
-            const bs: usize = 16;
-            const vocab: usize = 128;
+    const Fns = struct {
+        fn loss(params: ParamsSpec, batch: BatchSpec) !Tensor {
+            const bs_: i64 = 16;
+            const vocab_: i64 = 128;
 
             const hidden_act = try batch.x.matmul(params.w_emb);
             const logits = try hidden_act.matmul(params.w_out);
-            const bcast_b = try params.b.broadcast_in_dim(&.{ bs, vocab }, &.{1});
+            const bcast_b = try params.b.broadcast_in_dim(&.{ bs_, vocab_ }, &.{1});
             const logits_b = try logits.add(bcast_b);
 
             const exp_logits = try logits_b.exp();
             const sum_exp = try exp_logits.reduce_sum(&.{1});
             const log_sum = try sum_exp.log();
-            const log_sum_b = try log_sum.broadcast_in_dim(&.{ bs, vocab }, &.{0});
+            const log_sum_b = try log_sum.broadcast_in_dim(&.{ bs_, vocab_ }, &.{0});
             const log_softmax = try logits_b.sub(log_sum_b);
 
             const y_log = try batch.y.mul(log_softmax);
             const loss_per = try y_log.reduce_sum(&.{1});
 
-            const neg = try log_softmax.builder.scalar_literal(.{ .f32 = -1.0 });
-            const neg_b = try neg.broadcast_in_dim(&.{bs}, &.{});
+            const builder = log_softmax.mode.traced.builder;
+            const neg = try Tensor.from_id(builder, try builder.literal_scalar(.{ .f32 = -1.0 }));
+            const neg_b = try neg.broadcast_in_dim(&.{bs_}, &.{});
             const neg_loss = try loss_per.mul(neg_b);
             return try neg_loss.reduce_sum(&.{0});
         }
+
+        fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {
+            var vg = try zg.frontend.transforms.value_and_grad(loss, .{ params, batch });
+            defer vg.deinit();
+            var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
+            defer params_tree.deinit();
+            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, @as(f32, 1e-2), struct {
+                fn f(lr: f32, param: Tensor, grad: Tensor) anyerror!Tensor {
+                    return zg.frontend.optim.sgd_update(param, grad, lr);
+                }
+            }.f);
+            defer updated.deinit();
+            return .{
+                .loss_val = vg.value,
+                .updated = updated.extract(ParamsSpec),
+            };
+        }
     };
 
-    const bs: usize = 16;
-    const vocab: usize = 128;
-    const hidden: usize = 64;
+    const bs: i64 = 16;
+    const vocab: i64 = 128;
+    const hidden: i64 = 64;
 
+    const donatable: Tensor.AbstractOpts = .{ .donatable = true };
     const params_spec = ParamsSpec{
-        .w_emb = .{ .dtype = .f32, .dims = &.{ vocab, hidden } },
-        .w_out = .{ .dtype = .f32, .dims = &.{ hidden, vocab } },
-        .b = .{ .dtype = .f32, .dims = &.{vocab} },
+        .w_emb = Tensor.abstract(.f32, &.{ vocab, hidden }, donatable),
+        .w_out = Tensor.abstract(.f32, &.{ hidden, vocab }, donatable),
+        .b = Tensor.abstract(.f32, &.{vocab}, donatable),
     };
     const batch_spec = BatchSpec{
-        .x = .{ .dtype = .f32, .dims = &.{ bs, vocab } },
-        .y = .{ .dtype = .f32, .dims = &.{ bs, vocab } },
+        .x = Tensor.abstract(.f32, &.{ bs, vocab }, .{}),
+        .y = Tensor.abstract(.f32, &.{ bs, vocab }, .{}),
     };
     const inputs_spec = .{ params_spec, batch_spec };
 
@@ -77,31 +96,26 @@ pub fn run_llm_ft_demo(
         compile_cfg.lower.encoding = .text;
     }
 
-    const b = &backend_handle.interface;
-    const iface_device = zg.Backend.Device{ .handle = @ptrCast(@constCast(device)) };
-
     const train = zg.frontend.train;
-    var compiled = try train.compile_train_step(allocator, b, iface_device, LossFn.call, inputs_spec, 3, .{
-        .optimizer = .{ .lr = 1e-2 },
-        .compile = compile_cfg,
-    });
+    var compiled = try zg.frontend.compile(Fns.train_step, allocator, b, device, inputs_spec, compile_cfg);
     defer b.deinit_executable(compiled.exe);
+    defer compiled.deinit();
 
-    const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
-    const shape_w_out = zg.utils.Shape{ .dims = &.{ hidden, vocab } };
-    const shape_b = zg.utils.Shape{ .dims = &.{vocab} };
-    const shape_x = zg.utils.Shape{ .dims = &.{ bs, vocab } };
-    const shape_y = zg.utils.Shape{ .dims = &.{ bs, vocab } };
+    const shape_w_emb = zg.BoundedShape.from_slice(&.{ vocab, hidden });
+    const shape_w_out = zg.BoundedShape.from_slice(&.{ hidden, vocab });
+    const shape_b = zg.BoundedShape.from_slice(&.{vocab});
+    const shape_x = zg.BoundedShape.from_slice(&.{ bs, vocab });
+    const shape_y = zg.BoundedShape.from_slice(&.{ bs, vocab });
 
-    var host_w_emb = try zg.utils.HostBuffer.init(allocator, shape_w_emb, .f32);
+    var host_w_emb = try zg.HostBuffer.init(allocator, shape_w_emb, .f32);
     defer host_w_emb.deinit();
-    var host_w_out = try zg.utils.HostBuffer.init(allocator, shape_w_out, .f32);
+    var host_w_out = try zg.HostBuffer.init(allocator, shape_w_out, .f32);
     defer host_w_out.deinit();
-    var host_b = try zg.utils.HostBuffer.init(allocator, shape_b, .f32);
+    var host_b = try zg.HostBuffer.init(allocator, shape_b, .f32);
     defer host_b.deinit();
-    var host_x = try zg.utils.HostBuffer.init(allocator, shape_x, .f32);
+    var host_x = try zg.HostBuffer.init(allocator, shape_x, .f32);
     defer host_x.deinit();
-    var host_y = try zg.utils.HostBuffer.init(allocator, shape_y, .f32);
+    var host_y = try zg.HostBuffer.init(allocator, shape_y, .f32);
     defer host_y.deinit();
 
     if (std.process.getEnvVarOwned(allocator, "ZG_LLM_SAFETENSORS_PATH")) |path| {
@@ -112,9 +126,9 @@ pub fn run_llm_ft_demo(
             host_w_emb.as_slice(f32),
             host_w_out.as_slice(f32),
             host_b.as_slice(f32),
-            shape_w_emb.dims,
-            shape_w_out.dims,
-            shape_b.dims,
+            shape_w_emb.const_slice(),
+            shape_w_out.const_slice(),
+            shape_b.const_slice(),
         );
         if (!quiet) {
             std.log.info("llm-ft-demo: loaded weights from {s}", .{path});
@@ -133,87 +147,60 @@ pub fn run_llm_ft_demo(
     fill_one_hot(host_x.as_slice(f32), tokens, vocab);
     fill_one_hot(host_y.as_slice(f32), targets, vocab);
 
-    var total_ns: u64 = 0;
+    const tmp_w_emb = try b.buffer_from_host(device, host_w_emb.data(), host_w_emb.dtype, host_w_emb.shape.const_slice());
+    const tmp_w_out = try b.buffer_from_host(device, host_w_out.data(), host_w_out.dtype, host_w_out.shape.const_slice());
+    const tmp_b = try b.buffer_from_host(device, host_b.data(), host_b.dtype, host_b.shape.const_slice());
+    const tmp_x = try b.buffer_from_host(device, host_x.data(), host_x.dtype, host_x.shape.const_slice());
+    const tmp_y = try b.buffer_from_host(device, host_y.data(), host_y.dtype, host_y.shape.const_slice());
 
-    const upload = zg.frontend.upload_host_buffer;
-    const tmp_w_emb = try upload(allocator, b, iface_device, &host_w_emb);
-    const tmp_w_out = try upload(allocator, b, iface_device, &host_w_out);
-    const tmp_b = try upload(allocator, b, iface_device, &host_b);
-    const tmp_x = try upload(allocator, b, iface_device, &host_x);
-    const tmp_y = try upload(allocator, b, iface_device, &host_y);
-
-    var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
+    var loss_host = try zg.HostBuffer.init(allocator, .{}, .f32);
     defer loss_host.deinit();
 
-    var state = try train.TrainState.init(
+    var state = try train.TrainState.init_from_model(
         allocator,
         &compiled,
         b,
-        &.{ tmp_w_emb.handle, tmp_w_out.handle, tmp_b.handle },
-        &.{ tmp_x.handle, tmp_y.handle },
+        &.{ tmp_w_emb, tmp_w_out, tmp_b, tmp_x, tmp_y },
     );
-    defer state.deinit();
-    defer {
-        b.deinit_buffer(tmp_x);
-        b.deinit_buffer(tmp_y);
-    }
+    defer state.deinit(.all);
 
-    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(tmp_w_emb.handle)) }));
-
-    var warmup: usize = 0;
-    while (warmup < warmup_steps) : (warmup += 1) {
+    for (0..warmup_steps) |_| {
         const result = try state.step();
         if (result.event) |ev| {
             try b.await_event(ev);
             b.deinit_event(ev);
-        }
-        if (!is_cpu and !quiet) {
-            const loss_ev = try b.buffer_to_host(result.loss_buf, loss_host.data);
-            try b.await_event(loss_ev);
-            b.deinit_event(loss_ev);
         }
         b.deinit_buffer(result.loss_buf);
     }
 
-    var step: usize = 0;
-    while (step < steps) : (step += 1) {
-        var timer = try std.time.Timer.start();
+    var loop_timer = zg.utils.LoopTimer{ .label = "llm-ft-demo", .quiet = quiet };
+    for (0..steps) |_| {
+        try loop_timer.start_step();
         const result = try state.step();
-        const dispatch_ns = timer.lap();
+        loop_timer.mark("dispatch");
 
         if (result.event) |ev| {
             try b.await_event(ev);
             b.deinit_event(ev);
         }
-        const wait_ns = timer.lap();
+        loop_timer.mark("exec");
 
         const loss: ?f32 = if (quiet) null else blk: {
-            const loss_ev = try b.buffer_to_host(result.loss_buf, loss_host.data);
-            try b.await_event(loss_ev);
-            b.deinit_event(loss_ev);
+            if (try b.buffer_to_host(result.loss_buf, loss_host.data_mut())) |loss_ev| {
+                try b.await_event(loss_ev);
+                b.deinit_event(loss_ev);
+            }
             break :blk loss_host.as_slice(f32)[0];
         };
-        const loss_read_ns = timer.lap();
+        loop_timer.mark("loss_read");
 
         b.deinit_buffer(result.loss_buf);
+        loop_timer.mark("cleanup");
 
-        const cleanup_ns = timer.lap();
-        const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;
-        total_ns += step_ns;
-        const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
-        const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-        const wait_ms = @as(f64, @floatFromInt(wait_ns)) / std.time.ns_per_ms;
-        const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
-        const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
-        if (!quiet) {
-            std.log.info("llm-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms wait={d:.3}ms loss={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                step, loss.?, dispatch_ms, wait_ms, loss_ms, cleanup_ms, step_ms,
-            });
-        }
+        loop_timer.end_step(loss);
     }
 
-    const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
-    std.log.info("llm-ft-demo avg_step_ms={d:.3}", .{avg_ms});
+    std.log.info("llm-ft-demo avg_step_ms={d:.3}", .{loop_timer.avg_ms()});
     std.log.info("OK: llm-ft-demo executed", .{});
 }
 
@@ -248,12 +235,12 @@ fn load_safetensors_weights(
     w_emb: []f32,
     w_out: []f32,
     b: []f32,
-    shape_w_emb: []const usize,
-    shape_w_out: []const usize,
-    shape_b: []const usize,
+    shape_w_emb: []const i64,
+    shape_w_out: []const i64,
+    shape_b: []const i64,
 ) !void {
-    const data = try read_file_aligned(allocator, path);
-    defer allocator.free(data);
+    const data = try mmap_file(path);
+    defer std.posix.munmap(data);
 
     var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
     defer st_file.deinit();
@@ -267,7 +254,11 @@ fn load_safetensors_weights(
     try copy_tensor_f32(b_view, b, shape_b);
 }
 
-fn read_file_aligned(allocator: std.mem.Allocator, path: []const u8) ![]align(8) u8 {
+/// Memory-map a file read-only.
+///
+/// Returns a page-aligned slice backed by the kernel page cache.
+/// Caller must `std.posix.munmap` when done.
+fn mmap_file(path: []const u8) ![]align(std.heap.page_size_min) u8 {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.openFileAbsolute(path, .{})
     else
@@ -276,15 +267,24 @@ fn read_file_aligned(allocator: std.mem.Allocator, path: []const u8) ![]align(8)
 
     const stat = try file.stat();
     const size: usize = @intCast(stat.size);
-    const buf = try allocator.alignedAlloc(u8, .@"8", size);
-    const read_len = try file.readAll(buf);
-    if (read_len != size) return error.UnexpectedEof;
-    return buf;
+
+    return std.posix.mmap(
+        null,
+        size,
+        std.posix.PROT.READ,
+        .{ .TYPE = .SHARED },
+        file.handle,
+        0,
+    );
 }
 
-fn copy_tensor_f32(view: stz.TensorView, out: []f32, expected_shape: []const usize) !void {
+fn copy_tensor_f32(view: stz.TensorView, out: []f32, expected_shape: []const i64) !void {
     if (view.info.dtype != .f32) return error.TensorDtypeMismatch;
-    if (!std.mem.eql(usize, view.info.shape, expected_shape)) return error.TensorShapeMismatch;
+    // Compare shapes across type boundary (safetensors uses usize, PR uses i64)
+    if (view.info.shape.len != expected_shape.len) return error.TensorShapeMismatch;
+    for (view.info.shape, expected_shape) |a, b| {
+        if (a != @as(usize, @intCast(b))) return error.TensorShapeMismatch;
+    }
 
     var count: usize = 1;
     for (view.info.shape) |d| count *= d;

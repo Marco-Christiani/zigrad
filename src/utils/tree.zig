@@ -29,8 +29,8 @@ pub fn Tree(comptime Leaf: type) type {
         /// Build a Tree by flattening a typed struct value.
         ///
         /// Walks `value`'s fields at comptime, collecting leaves and their
-        /// dot-separated paths into parallel flat arrays. Paths are comptime
-        /// string literals (no allocation needed for them).
+        ///  dot-separated paths into parallel flat arrays. Paths are comptime
+        ///  string literals (no allocation needed for them).
         pub fn from(allocator: std.mem.Allocator, value: anytype) !Self {
             const T = @TypeOf(value);
             const count = comptime leaf_count(T);
@@ -39,7 +39,7 @@ pub fn Tree(comptime Leaf: type) type {
             const paths = try allocator.alloc([]const u8, count);
             errdefer allocator.free(paths);
 
-            // Paths are comptime literals — just copy the pointers.
+            // paths are comptime literals, just copy the pointers.
             const comptime_paths = comptime tree_paths(Leaf, T);
             @memcpy(paths, &comptime_paths);
 
@@ -75,8 +75,8 @@ pub fn Tree(comptime Leaf: type) type {
         /// Reconstruct a typed value from the flat leaves.
         ///
         /// Inverse of `from`. Accepts any type that `from` can flatten:
-        /// named structs, tuples, arrays, or a bare `Leaf`. Paths are
-        /// not consulted — leaf order (DFS) determines field assignment.
+        ///  named structs, tuples, arrays, or a bare `Leaf`. Paths are
+        ///  not consulted -- leaf order (DFS) determines field assignment.
         pub fn extract(self: *const Self, comptime T: type) T {
             const expected = comptime leaf_count(T);
             std.debug.assert(self.leaves.len == expected);
@@ -89,10 +89,10 @@ pub fn Tree(comptime Leaf: type) type {
         // ================================================================
 
         /// Apply a function to every leaf, producing a new tree with a
-        /// (possibly different) leaf type. Structure (paths) is preserved.
+        ///  (possibly different) leaf type. Structure (paths) is preserved.
         ///
         /// The map function receives a context value and a leaf, returning
-        /// the transformed leaf. Use `{}` (void) for context-free transforms.
+        ///  the transformed leaf. Use `{}` (void) for context-free transforms.
         pub fn map(
             self: *const Self,
             comptime NewLeaf: type,
@@ -133,7 +133,7 @@ pub fn Tree(comptime Leaf: type) type {
         // ================================================================
 
         /// Visit every leaf with its path. Visitor receives context,
-        /// path string, and a mutable pointer to the leaf.
+        ///  path string, and a mutable pointer to the leaf.
         pub fn for_each(
             self: *Self,
             context: anytype,
@@ -195,7 +195,7 @@ pub fn Tree(comptime Leaf: type) type {
                     break :blk total;
                 },
                 .array => |info| info.len * leaf_count(info.child),
-                else => @compileError("Tree(" ++ @typeName(Leaf) ++ "): unsupported type " ++ @typeName(T) ++ " — leaf types must be " ++ @typeName(Leaf) ++ ", structs, or arrays"),
+                else => @compileError("Tree(" ++ @typeName(Leaf) ++ "): unsupported type " ++ @typeName(T) ++ " - leaf types must be " ++ @typeName(Leaf) ++ ", structs, or arrays"),
             };
         }
 
@@ -248,7 +248,7 @@ pub fn Tree(comptime Leaf: type) type {
 }
 
 // ============================================================================
-// Path generation — comptime dot-separated paths for any struct type.
+// Path generation - comptime dot-separated paths for any struct type.
 // ============================================================================
 
 /// Generate all dot-separated paths for a struct type with a given leaf type.

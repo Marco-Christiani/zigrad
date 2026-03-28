@@ -50,26 +50,26 @@ fn run_demo_executable(
         2.0, 2.0,
     };
 
-    const shape_a = zg.utils.Shape{ .dims = &.{ 2, 3 } };
-    const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
-    const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
+    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
+    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
+    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
 
-    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    var dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    var dev_a = try backend.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
     defer backend.deinit_buffer(&dev_a);
-    var dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    var dev_b = try backend.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
     defer backend.deinit_buffer(&dev_b);
-    var dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    var dev_c = try backend.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
     defer backend.deinit_buffer(&dev_c);
 
     const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
@@ -84,9 +84,9 @@ fn run_demo_executable(
 
     if (result.outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
+    var out_host = try zg.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data);
+    var ev = try backend.buffer_to_host(&result.outputs[0], out_host.data_mut());
     defer backend.deinit_event(&ev);
     try backend.await_event(&ev);
 

@@ -1,20 +1,63 @@
+const std = @import("std");
 const zg = @import("zigrad");
 const stz = @import("safetensors_zg");
+
 const llama_model = @import("llama_model.zig");
 const ops = zg.pr.ops;
-const std = @import("std");
+const Tensor = zg.Tensor;
+
+/// Create a scalar literal tensor from a traced tensor's builder.
+/// TODO: this is a smell, dont we have this in core or this a missing method?
+fn scalar_literal_from(t: Tensor, lit: zg.pr.Literal) !Tensor {
+    const b = t.mode.traced.builder;
+    return Tensor.from_id(b, try b.literal_scalar(lit));
+}
+
+/// Create an iota tensor from a traced tensor's builder.
+/// TODO: missing method?
+fn iota_from(t: Tensor, out_dtype: zg.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
+    const b = t.mode.traced.builder;
+    return Tensor.from_id(b, try b.iota(out_dtype, out_dims, iota_dim));
+}
 
 const num_layers: usize = 16;
 
+const LayerSpec = struct {
+    input_norm: Tensor,
+    post_norm: Tensor,
+    qkv_proj: Tensor,
+    o_proj: Tensor,
+    gate_proj: Tensor,
+    up_proj: Tensor,
+    down_proj: Tensor,
+};
+
+const ParamsSpec = struct {
+    w_emb: Tensor,
+    w_out: Tensor,
+    norm: Tensor,
+    layers: [num_layers]LayerSpec,
+};
+
+const BatchSpec = struct {
+    x: Tensor,
+    target_ids: Tensor,
+    attention_mask: Tensor,
+    mask: Tensor,
+    sin: Tensor,
+    cos: Tensor,
+};
+
 pub const LlamaKernelProvider = enum {
+    // TODO: add tvm kp
     mirage,
 };
 
 pub const LlamaDemoConfig = struct {
     train: bool,
-    dtype: zg.pr.DType,
-    seq: usize,
-    batch: usize = 1,
+    dtype: zg.DType,
+    seq: i64,
+    batch: i64 = 1,
     canonical_shapes: bool = false,
     execute_only: bool = false,
     kernel_provider: ?LlamaKernelProvider = null,
@@ -22,21 +65,51 @@ pub const LlamaDemoConfig = struct {
 
 const upcast_loss = true; // bf16 logits over 128k vocab overflow bf16 range without this
 
-fn loss_fn(params: anytype, batch: anytype) !zg.frontend.Tensor {
+fn loss_fn(params: ParamsSpec, batch: BatchSpec) !Tensor {
     return loss_fn_with_options(params, batch, .{});
 }
 
-fn loss_fn_mirage(params: anytype, batch: anytype) !zg.frontend.Tensor {
+fn loss_fn_mirage(params: ParamsSpec, batch: BatchSpec) !Tensor {
     return loss_fn_with_options(params, batch, .{ .kernelize_provider = "mirage" });
 }
 
+const TrainStepResult = struct { loss_val: Tensor, updated: ParamsSpec };
+
+fn train_step_fn(params: ParamsSpec, batch: BatchSpec) !TrainStepResult {
+    var vg = try zg.frontend.transforms.value_and_grad(loss_fn, .{ params, batch });
+    defer vg.deinit();
+    return sgd_step(params, &vg, 1e-4);
+}
+
+fn train_step_fn_mirage(params: ParamsSpec, batch: BatchSpec) !TrainStepResult {
+    var vg = try zg.frontend.transforms.value_and_grad(loss_fn_mirage, .{ params, batch });
+    defer vg.deinit();
+    return sgd_step(params, &vg, 1e-4);
+}
+
+fn sgd_step(params: ParamsSpec, vg: *zg.frontend.transforms.ValueAndGrad, lr: f32) !TrainStepResult {
+    var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
+    defer params_tree.deinit();
+    const SgdCtx = struct { lr: f32 };
+    var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, SgdCtx{ .lr = lr }, struct {
+        fn f(ctx: SgdCtx, param: Tensor, grad: Tensor) anyerror!Tensor {
+            return zg.frontend.optim.sgd_update(param, grad, ctx.lr);
+        }
+    }.f);
+    defer updated.deinit();
+    return .{
+        .loss_val = vg.value,
+        .updated = updated.extract(ParamsSpec),
+    };
+}
+
 fn loss_fn_with_options(
-    params: anytype,
-    batch: anytype,
+    params: ParamsSpec,
+    batch: BatchSpec,
     forward_opts: llama_model.ForwardOptions,
-) !zg.frontend.Tensor {
-    const batch_size: usize = batch.x.tensor.shape.dims[0];
-    const seq: usize = batch.x.tensor.shape.dims[1];
+) !Tensor {
+    const batch_size: i64 = batch.x.dims()[0];
+    const seq: i64 = batch.x.dims()[1];
     var layers: [num_layers]llama_model.LayerWeights = undefined;
     inline for (0..num_layers) |idx| {
         const p = params.layers[idx];
@@ -50,25 +123,24 @@ fn loss_fn_with_options(
             .down_proj = p.down_proj,
         };
     }
-    const logits = try llama_model.forward_with_options(batch.x, batch.mask, batch.attention_mask, batch.sin, batch.cos, .{
+    const logits = try llama_model.forward(batch.x, batch.mask, batch.attention_mask, batch.sin, batch.cos, .{
         .w_emb = params.w_emb,
         .w_out = params.w_out,
         .norm = params.norm,
         .layers = layers[0..],
     }, 1e-6, forward_opts);
-    const logits_f0 = if (upcast_loss and logits.tensor.dtype == .bf16) try logits.convert(.f32) else logits;
+    const logits_f0 = if (upcast_loss and logits.dtype == .bf16) try logits.convert(.f32) else logits;
     const logits_f = logits_f0;
-    const b = logits_f.builder;
-    const attn_mask0 = if (batch.attention_mask.tensor.dtype == logits_f.tensor.dtype)
+    const attn_mask0 = if (batch.attention_mask.dtype == logits_f.dtype)
         batch.attention_mask
     else
-        try batch.attention_mask.convert(logits_f.tensor.dtype);
+        try batch.attention_mask.convert(logits_f.dtype);
     const attn_mask = attn_mask0;
 
     // Gather one vocab entry per (batch, seq) row without flattening.
-    const row_b = try b.iota(.i32, &.{ batch_size, seq }, 0);
-    const row_s = try b.iota(.i32, &.{ batch_size, seq }, 1);
-    const tgt_ids = if (batch.target_ids.tensor.dtype == .i32)
+    const row_b = try iota_from(logits_f, .i32, &.{ batch_size, seq }, 0);
+    const row_s = try iota_from(logits_f, .i32, &.{ batch_size, seq }, 1);
+    const tgt_ids = if (batch.target_ids.dtype == .i32)
         batch.target_ids
     else
         try batch.target_ids.convert(.i32);
@@ -86,48 +158,48 @@ fn loss_fn_with_options(
     const target_logits_2d = try logits_f.gather(gather_idx, gather_params);
 
     const max_logits = try logits_f.reduce_max(&.{2});
-    const max_b = try max_logits.broadcast_in_dim(logits_f.tensor.shape.dims, &.{ 0, 1 });
+    const max_b = try max_logits.broadcast_in_dim(logits_f.dims(), &.{ 0, 1 });
     const shifted = try logits_f.sub(max_b);
 
     // Match JAX-style logsumexp lowering: subtract in f32, exp in bf16 (when model dtype is bf16),
     // then accumulate reductions in f32.
-    const shifted_f32 = if (shifted.tensor.dtype == .f32) shifted else try shifted.convert(.f32);
-    const exp_in = if (logits.tensor.dtype == .bf16) try shifted_f32.convert(.bf16) else shifted_f32;
+    const shifted_f32 = if (shifted.dtype == .f32) shifted else try shifted.convert(.f32);
+    const exp_in = if (logits.dtype == .bf16) try shifted_f32.convert(.bf16) else shifted_f32;
     const exp_logits = try exp_in.exp();
-    const exp_logits_f32 = if (exp_logits.tensor.dtype == .f32) exp_logits else try exp_logits.convert(.f32);
+    const exp_logits_f32 = if (exp_logits.dtype == .f32) exp_logits else try exp_logits.convert(.f32);
     const sum_exp = try exp_logits_f32.reduce_sum(&.{2});
     const log_sum = try sum_exp.log();
-    const max_f = if (max_logits.tensor.dtype == log_sum.tensor.dtype)
+    const max_f = if (max_logits.dtype == log_sum.dtype)
         max_logits
     else
-        try max_logits.convert(log_sum.tensor.dtype);
+        try max_logits.convert(log_sum.dtype);
     const logsumexp = try log_sum.add(max_f);
 
-    const target_f = if (target_logits_2d.tensor.dtype == logsumexp.tensor.dtype)
+    const target_f = if (target_logits_2d.dtype == logsumexp.dtype)
         target_logits_2d
     else
-        try target_logits_2d.convert(logsumexp.tensor.dtype);
+        try target_logits_2d.convert(logsumexp.dtype);
     const loss_per = try logsumexp.sub(target_f);
-    const loss_per_out = if (loss_per.tensor.dtype == logits_f.tensor.dtype)
+    const loss_per_out = if (loss_per.dtype == logits_f.dtype)
         loss_per
     else
-        try loss_per.convert(logits_f.tensor.dtype);
+        try loss_per.convert(logits_f.dtype);
 
-    const zero_lit = ops.types.scalar_literal(logits_f.tensor.dtype, 0.0);
-    const zero = try logits_f.builder.scalar_literal(zero_lit);
+    const zero_lit = ops.types.scalar_literal(logits_f.dtype, 0.0);
+    const zero = try scalar_literal_from(logits_f, zero_lit);
     const zero_b = try zero.broadcast_in_dim(&.{ batch_size, seq }, &.{});
     const attn_zero = try attn_mask.compare(zero_b, .{ .direction = .GT, .compare_type = .FLOAT });
     const masked = try loss_per_out.select(attn_zero, zero_b);
-    const masked_f = if (masked.tensor.dtype == .f32) masked else try masked.convert(.f32);
+    const masked_f = if (masked.dtype == .f32) masked else try masked.convert(.f32);
     const loss_sum = try masked_f.reduce_sum(&.{ 0, 1 });
-    if (loss_sum.tensor.dtype == logits_f.tensor.dtype) return loss_sum;
-    return loss_sum.convert(logits_f.tensor.dtype);
+    if (loss_sum.dtype == logits_f.dtype) return loss_sum;
+    return loss_sum.convert(logits_f.dtype);
 }
 
 pub fn run_llama_ft_demo(
     allocator: std.mem.Allocator,
-    backend_handle: *zg.backend.pjrt.Backend,
-    device: *const zg.backend.pjrt.Device,
+    b: *zg.Backend,
+    device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
     dump_optimized: ?*zg.pipeline.DumpConfig,
@@ -137,78 +209,49 @@ pub fn run_llama_ft_demo(
     cfg: LlamaDemoConfig,
     dump_kernels: bool,
 ) !void {
-    const b = &backend_handle.interface;
-    const iface_device = zg.Backend.Device{ .handle = @ptrCast(@constCast(device)) };
-
-    const TensorSpec = zg.frontend.TensorSpec;
     const train_mode = cfg.train;
-    const model_dtype: zg.pr.DType = cfg.dtype;
-    const host_dtype: zg.utils.DType = host_dtype_for(model_dtype);
-    const batch_size: usize = cfg.batch;
+    const model_dtype: zg.DType = cfg.dtype;
+    const host_dtype: zg.DType = model_dtype;
+    const batch_size: i64 = cfg.batch;
     const execute_only = cfg.execute_only;
 
-    const LayerSpec = struct {
-        input_norm: TensorSpec,
-        post_norm: TensorSpec,
-        qkv_proj: TensorSpec,
-        o_proj: TensorSpec,
-        gate_proj: TensorSpec,
-        up_proj: TensorSpec,
-        down_proj: TensorSpec,
-    };
+    const seq: i64 = cfg.seq;
+    const vocab: i64 = if (cfg.canonical_shapes) 4096 else 128256;
+    const hidden: i64 = if (cfg.canonical_shapes) 512 else 2048;
+    const kv_out: i64 = 512;
+    const mlp_hidden: i64 = hidden * 4;
+    const qkv_out: i64 = hidden + kv_out + kv_out;
 
-    const ParamsSpec = struct {
-        w_emb: TensorSpec,
-        w_out: TensorSpec,
-        norm: TensorSpec,
-        layers: [num_layers]LayerSpec,
-    };
-
-    const BatchSpec = struct {
-        x: TensorSpec,
-        target_ids: TensorSpec,
-        attention_mask: TensorSpec,
-        mask: TensorSpec,
-        sin: TensorSpec,
-        cos: TensorSpec,
-    };
-
-    const seq: usize = cfg.seq;
-    const vocab: usize = if (cfg.canonical_shapes) 4096 else 128256;
-    const hidden: usize = if (cfg.canonical_shapes) 512 else 2048;
-    const kv_out: usize = 512;
-    const mlp_hidden: usize = hidden * 4;
-    const qkv_out: usize = hidden + kv_out + kv_out;
-
+    const donatable: Tensor.AbstractOpts = .{ .donatable = true };
     var layers_spec: [num_layers]LayerSpec = undefined;
     inline for (0..num_layers) |i| {
         layers_spec[i] = .{
-            .input_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
-            .post_norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
-            .qkv_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, qkv_out } },
-            .o_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, hidden } },
-            .gate_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, mlp_hidden } },
-            .up_proj = .{ .dtype = model_dtype, .dims = &.{ hidden, mlp_hidden } },
-            .down_proj = .{ .dtype = model_dtype, .dims = &.{ mlp_hidden, hidden } },
+            .input_norm = Tensor.abstract(model_dtype, &.{hidden}, donatable),
+            .post_norm = Tensor.abstract(model_dtype, &.{hidden}, donatable),
+            .qkv_proj = Tensor.abstract(model_dtype, &.{ hidden, qkv_out }, donatable),
+            .o_proj = Tensor.abstract(model_dtype, &.{ hidden, hidden }, donatable),
+            .gate_proj = Tensor.abstract(model_dtype, &.{ hidden, mlp_hidden }, donatable),
+            .up_proj = Tensor.abstract(model_dtype, &.{ hidden, mlp_hidden }, donatable),
+            .down_proj = Tensor.abstract(model_dtype, &.{ mlp_hidden, hidden }, donatable),
         };
     }
 
     const params_spec = ParamsSpec{
-        .w_emb = .{ .dtype = model_dtype, .dims = &.{ vocab, hidden } },
-        .w_out = .{ .dtype = model_dtype, .dims = &.{ hidden, vocab } },
-        .norm = .{ .dtype = model_dtype, .dims = &.{hidden} },
+        .w_emb = Tensor.abstract(model_dtype, &.{ vocab, hidden }, donatable),
+        .w_out = Tensor.abstract(model_dtype, &.{ hidden, vocab }, donatable),
+        .norm = Tensor.abstract(model_dtype, &.{hidden}, donatable),
         .layers = layers_spec,
     };
-    var dims_seq_seq: [2]usize = .{ seq, seq };
-    var dims_seq_32: [2]usize = .{ seq, 32 };
-    var dims_b_s: [2]usize = .{ batch_size, seq };
+    var dims_seq_seq: [2]i64 = .{ seq, seq };
+    var dims_seq_32: [2]i64 = .{ seq, 32 };
+    var dims_b_s: [2]i64 = .{ batch_size, seq };
     const batch_spec = BatchSpec{
-        .x = .{ .dtype = .i32, .dims = dims_b_s[0..] },
-        .target_ids = .{ .dtype = .i32, .dims = dims_b_s[0..] },
-        .attention_mask = .{ .dtype = model_dtype, .dims = dims_b_s[0..] },
-        .mask = .{ .dtype = model_dtype, .dims = dims_seq_seq[0..] },
-        .sin = .{ .dtype = model_dtype, .dims = dims_seq_32[0..] },
-        .cos = .{ .dtype = model_dtype, .dims = dims_seq_32[0..] },
+        .x = Tensor.abstract(.i32, dims_b_s[0..], .{}),
+        .target_ids = Tensor.abstract(.i32, dims_b_s[0..], .{}),
+        .attention_mask = Tensor.abstract(model_dtype, dims_b_s[0..], .{}),
+        .mask = Tensor.abstract(model_dtype, dims_seq_seq[0..], .{}),
+        .sin = Tensor.abstract(model_dtype, dims_seq_32[0..], .{}),
+        .cos = Tensor.abstract(model_dtype, dims_seq_32[0..], .{}),
     };
     const inputs_spec = .{ params_spec, batch_spec };
 
@@ -263,298 +306,132 @@ pub fn run_llama_ft_demo(
         }
     }
 
-    const param_count = 3 + num_layers * 7;
-
     const train = zg.frontend.train;
+    // TODO: Fix this later when KP starts stabilizing
     const use_mirage_loss = cfg.kernel_provider != null;
-    var compiled_train: ?train.CompiledTrainStep = null;
-    var compiled_fwd: ?zg.frontend.CompiledForward = null;
+
+    var compiled_train: ?zg.frontend.CompiledModel = null;
+    var compiled_fwd: ?zg.frontend.CompiledModel = null;
     if (train_mode) {
-        if (use_mirage_loss) {
-            compiled_train = try train.compile_train_step(allocator, b, iface_device, loss_fn_mirage, inputs_spec, param_count, .{
-                .optimizer = .{ .lr = 1e-4 },
-                .compile = compile_cfg,
-            });
-        } else {
-            compiled_train = try train.compile_train_step(allocator, b, iface_device, loss_fn, inputs_spec, param_count, .{
-                .optimizer = .{ .lr = 1e-4 },
-                .compile = compile_cfg,
-            });
-        }
+        compiled_train = if (use_mirage_loss)
+            try zg.frontend.compile(train_step_fn_mirage, allocator, b, device, inputs_spec, compile_cfg)
+        else
+            try zg.frontend.compile(train_step_fn, allocator, b, device, inputs_spec, compile_cfg);
     } else {
-        if (use_mirage_loss) {
-            compiled_fwd = try zg.frontend.compile_forward(allocator, b, iface_device, loss_fn_mirage, inputs_spec, compile_cfg);
-        } else {
-            compiled_fwd = try zg.frontend.compile_forward(allocator, b, iface_device, loss_fn, inputs_spec, compile_cfg);
-        }
+        compiled_fwd = if (use_mirage_loss)
+            try zg.frontend.compile(loss_fn_mirage, allocator, b, device, inputs_spec, compile_cfg)
+        else
+            try zg.frontend.compile(loss_fn, allocator, b, device, inputs_spec, compile_cfg);
     }
     defer {
-        if (compiled_train) |ct| b.deinit_executable(ct.exe);
-        if (compiled_fwd) |cf| b.deinit_executable(cf.exe);
-    }
-
-    if (!quiet) {
-        if (compiled_train) |ct| log_compiled_memory_stats(backend_handle, @ptrCast(@alignCast(ct.exe.handle)));
-        if (compiled_fwd) |cf| log_compiled_memory_stats(backend_handle, @ptrCast(@alignCast(cf.exe.handle)));
-    }
-
-    const shape_w_emb = zg.utils.Shape{ .dims = &.{ vocab, hidden } };
-    const shape_w_out = zg.utils.Shape{ .dims = &.{ hidden, vocab } };
-    const shape_norm = zg.utils.Shape{ .dims = &.{hidden} };
-    const shape_layer_norm = zg.utils.Shape{ .dims = &.{hidden} };
-    const shape_q_proj = zg.utils.Shape{ .dims = &.{ hidden, hidden } };
-    const shape_kv_proj = zg.utils.Shape{ .dims = &.{ hidden, kv_out } };
-    const shape_qkv_proj = zg.utils.Shape{ .dims = &.{ hidden, qkv_out } };
-    const shape_o_proj = zg.utils.Shape{ .dims = &.{ hidden, hidden } };
-    const shape_gate_proj = zg.utils.Shape{ .dims = &.{ hidden, mlp_hidden } };
-    const shape_up_proj = zg.utils.Shape{ .dims = &.{ hidden, mlp_hidden } };
-    const shape_down_proj = zg.utils.Shape{ .dims = &.{ mlp_hidden, hidden } };
-    const shape_x = zg.utils.Shape{ .dims = dims_b_s[0..] };
-    const shape_target = zg.utils.Shape{ .dims = dims_b_s[0..] };
-    const shape_mask = zg.utils.Shape{ .dims = dims_seq_seq[0..] };
-    const shape_attn = zg.utils.Shape{ .dims = dims_b_s[0..] };
-    const shape_rot = zg.utils.Shape{ .dims = dims_seq_32[0..] };
-
-    var host_w_emb = try zg.utils.HostBuffer.init(allocator, shape_w_emb, host_dtype);
-    defer host_w_emb.deinit();
-    var host_w_out = try zg.utils.HostBuffer.init(allocator, shape_w_out, host_dtype);
-    defer host_w_out.deinit();
-    var host_norm = try zg.utils.HostBuffer.init(allocator, shape_norm, host_dtype);
-    defer host_norm.deinit();
-    var host_layer_input_norm: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_layer_post_norm: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_qkv_proj: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_o_proj: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_gate_proj: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_up_proj: [num_layers]zg.utils.HostBuffer = undefined;
-    var host_down_proj: [num_layers]zg.utils.HostBuffer = undefined;
-
-    var i: usize = 0;
-    while (i < num_layers) : (i += 1) {
-        host_layer_input_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, host_dtype);
-        host_layer_post_norm[i] = try zg.utils.HostBuffer.init(allocator, shape_layer_norm, host_dtype);
-        host_qkv_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_qkv_proj, host_dtype);
-        host_o_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_o_proj, host_dtype);
-        host_gate_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_gate_proj, host_dtype);
-        host_up_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_up_proj, host_dtype);
-        host_down_proj[i] = try zg.utils.HostBuffer.init(allocator, shape_down_proj, host_dtype);
-    }
-    defer {
-        var j: usize = 0;
-        while (j < num_layers) : (j += 1) {
-            host_layer_input_norm[j].deinit();
-            host_layer_post_norm[j].deinit();
-            host_qkv_proj[j].deinit();
-            host_o_proj[j].deinit();
-            host_gate_proj[j].deinit();
-            host_up_proj[j].deinit();
-            host_down_proj[j].deinit();
+        if (compiled_train) |*ct| {
+            b.deinit_executable(ct.exe);
+            ct.deinit();
+        }
+        if (compiled_fwd) |*cf| {
+            b.deinit_executable(cf.exe);
+            cf.deinit();
         }
     }
-    var host_x = try zg.utils.HostBuffer.init(allocator, shape_x, .i32);
-    defer host_x.deinit();
-    var host_target_ids = try zg.utils.HostBuffer.init(allocator, shape_target, .i32);
-    defer host_target_ids.deinit();
-    var host_attention_mask = try zg.utils.HostBuffer.init(allocator, shape_attn, host_dtype);
-    defer host_attention_mask.deinit();
-    var host_mask = try zg.utils.HostBuffer.init(allocator, shape_mask, host_dtype);
-    defer host_mask.deinit();
-    var host_sin = try zg.utils.HostBuffer.init(allocator, shape_rot, host_dtype);
-    defer host_sin.deinit();
-    var host_cos = try zg.utils.HostBuffer.init(allocator, shape_rot, host_dtype);
-    defer host_cos.deinit();
 
+    // Build host buffers from spec tree - shapes and dtypes derived from specs.
+    var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
+    defer spec_tree.deinit();
+
+    var host_tree = try spec_tree.map(zg.HostBuffer, allocator, struct {
+        fn f(alloc: std.mem.Allocator, spec: Tensor) anyerror!zg.HostBuffer {
+            return zg.HostBuffer.init(alloc, spec.shape, spec.dtype);
+        }
+    }.f);
+    defer host_tree.deinit_with(zg.HostBuffer.deinit);
+
+    // Load or synthesize weights into param (donatable) leaves
     const default_path = "./weights/llama-3.2-1b-instruct/model.safetensors";
     const weights_path = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_SAFETENSORS_PATH") catch default_path;
     defer if (!std.mem.eql(u8, weights_path, default_path)) allocator.free(weights_path);
 
-    const loaded_weights = load_llama_weights(
-        allocator,
-        weights_path,
-        &host_w_emb,
-        &host_w_out,
-        &host_norm,
-        host_layer_input_norm[0..],
-        host_layer_post_norm[0..],
-        host_qkv_proj[0..],
-        host_o_proj[0..],
-        host_gate_proj[0..],
-        host_up_proj[0..],
-        host_down_proj[0..],
-        shape_w_emb.dims,
-        shape_w_out.dims,
-        shape_norm.dims,
-        shape_layer_norm.dims,
-        shape_qkv_proj.dims,
-        shape_q_proj.dims,
-        shape_kv_proj.dims,
-        shape_o_proj.dims,
-        shape_gate_proj.dims,
-        shape_up_proj.dims,
-        shape_down_proj.dims,
-    ) catch |err| switch (err) {
+    const donatable_mask = if (compiled_train) |ct| ct.donatable else compiled_fwd.?.donatable;
+    var load_result = load_llama_weights(allocator, weights_path, &host_tree, .{
+        .hidden = hidden,
+        .kv_out = kv_out,
+    }) catch |err| switch (err) {
         error.TensorShapeMismatch,
-        error.TensorSizeMismatch,
         error.TensorDtypeMismatch,
         stz.Error.TensorNotFound,
-        => false,
+        => null,
         else => return err,
     };
+    // mmap must stay alive until after device upload (borrowed buffers reference it)
+    defer if (load_result) |*lr| lr.deinit();
 
-    if (loaded_weights) {
+    if (load_result != null) {
         if (!quiet) {
             std.log.info("llama-ft-demo: loaded weights from {s}", .{weights_path});
         }
     } else {
-        if (host_dtype == .bf16) {
-            fill_pattern_bf16(host_w_emb.as_slice(u16), 1e-3, 0.0);
-            fill_pattern_bf16(host_w_out.as_slice(u16), 1e-3, 0.0);
-            fill_pattern_bf16(host_norm.as_slice(u16), 1e-3, 0.0);
-            var k: usize = 0;
-            while (k < num_layers) : (k += 1) {
-                fill_pattern_bf16(host_layer_input_norm[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_layer_post_norm[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_qkv_proj[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_o_proj[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_gate_proj[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_up_proj[k].as_slice(u16), 1e-3, 0.0);
-                fill_pattern_bf16(host_down_proj[k].as_slice(u16), 1e-3, 0.0);
-            }
-        } else {
-            fill_pattern(host_w_emb.as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_w_out.as_slice(f32), 1e-3, 0.0);
-            fill_pattern(host_norm.as_slice(f32), 1e-3, 0.0);
-            var k: usize = 0;
-            while (k < num_layers) : (k += 1) {
-                fill_pattern(host_layer_input_norm[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_layer_post_norm[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_qkv_proj[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_o_proj[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_gate_proj[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_up_proj[k].as_slice(f32), 1e-3, 0.0);
-                fill_pattern(host_down_proj[k].as_slice(f32), 1e-3, 0.0);
-            }
+        // Fill param leaves with synthetic pattern
+        for (host_tree.leaves, donatable_mask) |*buf, is_donatable| {
+            if (!is_donatable) continue;
+            fill_pattern(buf, 1e-3, 0.0);
         }
         std.log.warn("llama-ft-demo: using synthetic weights (set ZG_LLAMA_SAFETENSORS_PATH)", .{});
     }
 
+    // Fill batch leaves
     const token_seed = [_]usize{ 128000, 128009, 128001, 128008 };
     const target_seed = [_]usize{ 128009, 128001, 128008, 128001 };
     var tokens: [token_seed.len]usize = undefined;
     var targets: [target_seed.len]usize = undefined;
+    const vocab_usize: usize = @intCast(vocab);
     for (token_seed, 0..) |value, idx| {
-        tokens[idx] = value % vocab;
+        tokens[idx] = value % vocab_usize;
     }
     for (target_seed, 0..) |value, idx| {
-        targets[idx] = value % vocab;
+        targets[idx] = value % vocab_usize;
     }
-    fill_i32_tokens_batched(host_x.as_slice(i32), batch_size, seq, &tokens);
-    fill_i32_tokens_batched(host_target_ids.as_slice(i32), batch_size, seq, &targets);
-    if (host_dtype == .bf16) {
-        fill_attention_mask_bf16_batched(host_attention_mask.as_slice(u16), batch_size, seq, tokens.len);
-        fill_causal_mask_bf16(host_mask.as_slice(u16), seq);
-    } else {
-        fill_attention_mask_batched(host_attention_mask.as_slice(f32), batch_size, seq, tokens.len);
-        fill_causal_mask(host_mask.as_slice(f32), seq);
-    }
-    if (host_dtype == .bf16) {
-        fill_rope_tables_bf16(host_sin.as_slice(u16), host_cos.as_slice(u16), seq, 64);
-    } else {
-        fill_rope_tables(host_sin.as_slice(f32), host_cos.as_slice(f32), seq, 64);
-    }
+    const batch_usize: usize = @intCast(batch_size);
+    const seq_usize: usize = @intCast(seq);
 
-    var total_ns: u64 = 0;
+    const host_x = host_tree.get("1.x") orelse return error.MissingSpec;
+    const host_target_ids = host_tree.get("1.target_ids") orelse return error.MissingSpec;
+    const host_attention_mask = host_tree.get("1.attention_mask") orelse return error.MissingSpec;
+    const host_mask = host_tree.get("1.mask") orelse return error.MissingSpec;
+    const host_sin = host_tree.get("1.sin") orelse return error.MissingSpec;
+    const host_cos = host_tree.get("1.cos") orelse return error.MissingSpec;
 
-    const upload = zg.frontend.upload_host_buffer;
-    const tmp_w_emb = try upload(allocator, b, iface_device, &host_w_emb);
-    const tmp_w_out = try upload(allocator, b, iface_device, &host_w_out);
-    const tmp_norm = try upload(allocator, b, iface_device, &host_norm);
-    var tmp_layer_input_norm: [num_layers]zg.Backend.Buffer = undefined;
-    var tmp_layer_post_norm: [num_layers]zg.Backend.Buffer = undefined;
-    var tmp_qkv_proj: [num_layers]zg.Backend.Buffer = undefined;
-    var tmp_o_proj: [num_layers]zg.Backend.Buffer = undefined;
-    var tmp_gate_proj: [num_layers]zg.Backend.Buffer = undefined;
-    var tmp_up_proj: [num_layers]zg.Backend.Buffer = undefined;
-    var tmp_down_proj: [num_layers]zg.Backend.Buffer = undefined;
+    fill_i32_tokens(host_x.as_slice(i32), batch_usize, seq_usize, &tokens);
+    fill_i32_tokens(host_target_ids.as_slice(i32), batch_usize, seq_usize, &targets);
+    fill_attention_mask(host_attention_mask, batch_usize, seq_usize, tokens.len);
+    fill_causal_mask(host_mask, seq_usize);
+    fill_rope_tables(host_sin, host_cos, seq_usize, 64);
 
-    var m: usize = 0;
-    while (m < num_layers) : (m += 1) {
-        tmp_layer_input_norm[m] = try upload(allocator, b, iface_device, &host_layer_input_norm[m]);
-        tmp_layer_post_norm[m] = try upload(allocator, b, iface_device, &host_layer_post_norm[m]);
-        tmp_qkv_proj[m] = try upload(allocator, b, iface_device, &host_qkv_proj[m]);
-        tmp_o_proj[m] = try upload(allocator, b, iface_device, &host_o_proj[m]);
-        tmp_gate_proj[m] = try upload(allocator, b, iface_device, &host_gate_proj[m]);
-        tmp_up_proj[m] = try upload(allocator, b, iface_device, &host_up_proj[m]);
-        tmp_down_proj[m] = try upload(allocator, b, iface_device, &host_down_proj[m]);
-    }
-    const tmp_x = try upload(allocator, b, iface_device, &host_x);
-    const tmp_target_ids = try upload(allocator, b, iface_device, &host_target_ids);
-    const tmp_attention_mask = try upload(allocator, b, iface_device, &host_attention_mask);
-    const tmp_mask = try upload(allocator, b, iface_device, &host_mask);
-    const tmp_sin = try upload(allocator, b, iface_device, &host_sin);
-    const tmp_cos = try upload(allocator, b, iface_device, &host_cos);
+    // Transfer host -> device.
+    var dev_tree = try b.transfer(device, &host_tree, .to_device);
+    defer dev_tree.deinit(); // array only. buffer ownership managed by TrainState / defer below
 
-    const loss_dtype: zg.utils.DType = if (upcast_loss) .f32 else host_dtype;
-    var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, loss_dtype);
+    const loss_dtype: zg.DType = if (upcast_loss) .f32 else host_dtype;
+    var loss_host = try zg.HostBuffer.init(allocator, .{}, loss_dtype);
     defer loss_host.deinit();
 
-    // Build param and batch buffer arrays.
-    var param_bufs = std.ArrayList(zg.Backend.RawBuffer).empty;
-    defer param_bufs.deinit(allocator);
-    try param_bufs.append(allocator, tmp_w_emb.handle);
-    try param_bufs.append(allocator, tmp_w_out.handle);
-    try param_bufs.append(allocator, tmp_norm.handle);
-    var p: usize = 0;
-    while (p < num_layers) : (p += 1) {
-        try param_bufs.append(allocator, tmp_layer_input_norm[p].handle);
-        try param_bufs.append(allocator, tmp_layer_post_norm[p].handle);
-        try param_bufs.append(allocator, tmp_qkv_proj[p].handle);
-        try param_bufs.append(allocator, tmp_o_proj[p].handle);
-        try param_bufs.append(allocator, tmp_gate_proj[p].handle);
-        try param_bufs.append(allocator, tmp_up_proj[p].handle);
-        try param_bufs.append(allocator, tmp_down_proj[p].handle);
-    }
-
-    const batch_bufs = [_]zg.Backend.RawBuffer{
-        tmp_x.handle,
-        tmp_target_ids.handle,
-        tmp_attention_mask.handle,
-        tmp_mask.handle,
-        tmp_sin.handle,
-        tmp_cos.handle,
-    };
-
-    const is_cpu = try backend_handle.buffer_is_on_cpu(&(zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(tmp_w_emb.handle)) }));
+    var loop_timer = zg.utils.LoopTimer{ .label = "llama-ft-demo", .quiet = quiet };
 
     if (train_mode) {
-        // Use TrainState for the training path.
-        var state = try train.TrainState.init(
+        // Set up state as a convenience for training
+        var state = try train.TrainState.init_from_model(
             allocator,
             &compiled_train.?,
             b,
-            param_bufs.items,
-            &batch_bufs,
+            dev_tree.leaves,
         );
-        defer state.deinit();
-        // Batch buffers are not owned by TrainState.
-        defer for (batch_bufs) |raw| {
-            b.deinit_buffer(.{ .handle = raw });
-        };
-        // param_bufs ownership transferred to TrainState; clear to avoid double-free.
-        param_bufs.clearRetainingCapacity();
+        defer state.deinit(.all);
 
-        var warmup: usize = 0;
-        while (warmup < warmup_steps) : (warmup += 1) {
+        for (0..warmup_steps) |_| {
             const result = try state.step();
-            if (result.event) |ev| {
-                try b.await_event(ev);
-                b.deinit_event(ev);
-            }
-            if (!execute_only and !is_cpu and !quiet) {
-                const loss_ev = try b.buffer_to_host(result.loss_buf, loss_host.data);
-                try b.await_event(loss_ev);
-                b.deinit_event(loss_ev);
-            }
+            // Do not await the execution event as buffer_to_host internally chains behind the execution.
+            // Also, deinit only the event handle.
+            // TODO: this expose a bit of an annoying aspect of the API
+            if (result.event) |ev| b.deinit_event(ev);
+            _ = try read_loss(b, result.loss_buf, &loss_host, loss_dtype);
             b.deinit_buffer(result.loss_buf);
         }
 
@@ -563,59 +440,22 @@ pub fn run_llama_ft_demo(
         defer if (nvtx_range) |*range| range.deinit();
         if (nvtx_range) |*range| range.push(nvtx_label) catch {};
 
-        var step: usize = 0;
-        while (step < steps) : (step += 1) {
-            var timer = try std.time.Timer.start();
+        for (0..steps) |_| {
+            try loop_timer.start_step();
             const result = try state.step();
-            const dispatch_ns = timer.lap();
+            // deinit execution event without awaiting, the transfer event from buffer_to_host
+            //  captures the full dependency.
+            // TODO: this expose a bit of an annoying aspect of the API
+            if (result.event) |ev| b.deinit_event(ev);
+            loop_timer.mark("dispatch");
 
-            if (result.event) |ev| {
-                try b.await_event(ev);
-                b.deinit_event(ev);
-            }
-            const exec_ns = timer.lap();
-
-            const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
-                if (loss_dtype == .bf16) {
-                    const pjrt_loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(result.loss_buf.handle)) };
-                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
-                    break :blk bf16_to_f32(ptr[0]);
-                }
-                const pjrt_loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(result.loss_buf.handle)) };
-                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
-                break :blk ptr[0];
-            } else blk: {
-                const loss_ev = try b.buffer_to_host(result.loss_buf, loss_host.data);
-                try b.await_event(loss_ev);
-                b.deinit_event(loss_ev);
-                break :blk if (loss_dtype == .bf16)
-                    bf16_to_f32(loss_host.as_slice(u16)[0])
-                else
-                    loss_host.as_slice(f32)[0];
-            };
-            const loss_read_ns = timer.lap();
+            const loss: ?f32 = if (quiet or execute_only) null else try read_loss(b, result.loss_buf, &loss_host, loss_dtype);
+            loop_timer.mark("sync+read");
 
             b.deinit_buffer(result.loss_buf);
+            loop_timer.mark("cleanup");
 
-            const cleanup_ns = timer.lap();
-            const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
-            total_ns += step_ns;
-            const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
-            const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-            const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
-            const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
-            const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
-            if (!quiet) {
-                if (loss) |loss_value| {
-                    std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                        step, loss_value, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-                    });
-                } else {
-                    std.log.info("llama-ft-demo step {d}: dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                        step, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-                    });
-                }
-            }
+            loop_timer.end_step(loss);
         }
 
         if (nvtx_range) |*range| range.pop() catch {};
@@ -623,37 +463,16 @@ pub fn run_llama_ft_demo(
         // Forward-only mode: simple execute loop, no parameter swapping.
         const fwd_exe = compiled_fwd.?.exe;
 
-        var input_ptrs = std.ArrayList(zg.Backend.RawBuffer).empty;
-        defer input_ptrs.deinit(allocator);
-        try input_ptrs.appendSlice(allocator, param_bufs.items);
-        for (batch_bufs) |buf| try input_ptrs.append(allocator, buf);
+        defer for (dev_tree.leaves) |buf| b.deinit_buffer(buf);
 
-        defer {
-            for (input_ptrs.items) |raw| {
-                b.deinit_buffer(.{ .handle = raw });
-            }
-        }
-        // param_bufs ownership transferred to input_ptrs; clear to avoid double-free.
-        param_bufs.clearRetainingCapacity();
+        var output_bufs: [1]zg.Backend.Buffer = undefined;
 
-        var output_ptrs = [1]?zg.Backend.RawBuffer{null};
-
-        var warmup: usize = 0;
-        while (warmup < warmup_steps) : (warmup += 1) {
-            @memset(output_ptrs[0..], null);
-            const ev = try b.execute_into(fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
-            const loss_raw = output_ptrs[0] orelse return error.NullOutputBuffer;
-            const loss_buf = zg.Backend.Buffer{ .handle = loss_raw };
-            if (ev) |e| {
-                try b.await_event(e);
-                b.deinit_event(e);
-            }
-            if (!execute_only and !is_cpu and !quiet) {
-                const loss_ev = try b.buffer_to_host(loss_buf, loss_host.data);
-                try b.await_event(loss_ev);
-                b.deinit_event(loss_ev);
-            }
-            b.deinit_buffer(loss_buf);
+        for (0..warmup_steps) |_| {
+            const ev = try b.execute_into(fwd_exe, dev_tree.leaves, &output_bufs, null, .{});
+            if (ev) |e| b.deinit_event(e);
+            // read to warm up the DMA path otherwise first timed step pays a ~65ms lazy-init penalty
+            _ = try read_loss(b, output_bufs[0], &loss_host, loss_dtype);
+            b.deinit_buffer(output_bufs[0]);
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -661,74 +480,29 @@ pub fn run_llama_ft_demo(
         defer if (nvtx_range) |*range| range.deinit();
         if (nvtx_range) |*range| range.push(nvtx_label) catch {};
 
-        var step: usize = 0;
-        while (step < steps) : (step += 1) {
-            var timer = try std.time.Timer.start();
-            @memset(output_ptrs[0..], null);
-            const event = try b.execute_into(fwd_exe, input_ptrs.items, &output_ptrs, null, .{});
-            const dispatch_ns = timer.lap();
+        for (0..steps) |_| {
+            try loop_timer.start_step();
+            const event = try b.execute_into(fwd_exe, dev_tree.leaves, &output_bufs, null, .{});
+            if (event) |ev| b.deinit_event(ev);
+            loop_timer.mark("dispatch");
 
-            if (event) |ev| {
-                try b.await_event(ev);
-                b.deinit_event(ev);
-            }
-            const exec_ns = timer.lap();
+            const loss: ?f32 = if (quiet or execute_only) null else try read_loss(b, output_bufs[0], &loss_host, loss_dtype);
+            loop_timer.mark("sync+read");
 
-            const loss_raw2 = output_ptrs[0] orelse return error.NullOutputBuffer;
-            const loss_buf = zg.Backend.Buffer{ .handle = loss_raw2 };
-            const loss: ?f32 = if (quiet or execute_only) null else if (is_cpu) blk: {
-                const pjrt_loss_buf = zg.backend.pjrt.Buffer{ .pjrt_buffer = @ptrCast(@alignCast(loss_raw2)) };
-                if (loss_dtype == .bf16) {
-                    const ptr: [*]const u16 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
-                    break :blk bf16_to_f32(ptr[0]);
-                }
-                const ptr: [*]const f32 = @ptrFromInt(try backend_handle.buffer_unsafe_pointer(&pjrt_loss_buf));
-                break :blk ptr[0];
-            } else blk: {
-                const loss_ev = try b.buffer_to_host(loss_buf, loss_host.data);
-                try b.await_event(loss_ev);
-                b.deinit_event(loss_ev);
-                break :blk if (loss_dtype == .bf16)
-                    bf16_to_f32(loss_host.as_slice(u16)[0])
-                else
-                    loss_host.as_slice(f32)[0];
-            };
-            const loss_read_ns = timer.lap();
+            b.deinit_buffer(output_bufs[0]);
+            loop_timer.mark("cleanup");
 
-            b.deinit_buffer(loss_buf);
-
-            const cleanup_ns = timer.lap();
-            const step_ns = dispatch_ns + exec_ns + loss_read_ns + cleanup_ns;
-            total_ns += step_ns;
-            const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
-            const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-            const exec_ms = @as(f64, @floatFromInt(exec_ns)) / std.time.ns_per_ms;
-            const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
-            const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
-            if (!quiet) {
-                if (loss) |loss_value| {
-                    std.log.info("llama-ft-demo step {d}: loss={d:.6} dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                        step, loss_value, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-                    });
-                } else {
-                    std.log.info("llama-ft-demo step {d}: dispatch={d:.3}ms exec={d:.3}ms host_read={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                        step, dispatch_ms, exec_ms, loss_ms, cleanup_ms, step_ms,
-                    });
-                }
-            }
+            loop_timer.end_step(loss);
         }
 
         if (nvtx_range) |*range| range.pop() catch {};
     }
 
-    const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
-    if (!quiet) {
-        log_device_memory_stats(backend_handle, device);
-    }
-    std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ avg_ms, warmup_steps, steps, seq });
+    std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ loop_timer.avg_ms(), warmup_steps, steps, seq });
     std.log.info("OK: llama-ft-demo executed", .{});
 }
 
+/// TODO: this doesnt really belong here
 const NvtxRange = struct {
     lib: std.DynLib,
     push_fn: *const fn ([*:0]const u8) callconv(.c) c_int,
@@ -791,149 +565,234 @@ fn open_nvtx(path: []const u8) ?NvtxRange {
     }
 }
 
+/// Load llama weights from safetensors into host buffers via tree path lookup.
+///
+/// Buffers are located by their tree path (e.g. `"0.w_emb"`, `"0.layers.3.qkv_proj"`),
+///  so field ordering in `ParamsSpec` is irrelevant. Shapes are derived from the
+///  buffers. `model_dims` provides extra dimensions for QKV projection splitting.
+const ModelDims = struct {
+    hidden: i64,
+    kv_out: i64,
+};
+
+/// Result of loading weights from a safetensors file.
+///
+/// When zero-copy is used, some host_tree leaves are borrowed views into the
+///  mmap'd file data. The caller must keep `mmap_data` alive until those
+///  buffers are uploaded to device, then munmap.
+const LoadResult = struct {
+    mmap_data: ?[]align(std.heap.page_size_min) u8,
+
+    pub fn deinit(self: *LoadResult) void {
+        if (self.mmap_data) |m| std.posix.munmap(m);
+    }
+};
+
 fn load_llama_weights(
     allocator: std.mem.Allocator,
     path: []const u8,
-    w_emb: *zg.utils.HostBuffer,
-    w_out: *zg.utils.HostBuffer,
-    norm: *zg.utils.HostBuffer,
-    layer_input_norm: []zg.utils.HostBuffer,
-    layer_post_norm: []zg.utils.HostBuffer,
-    qkv_proj: []zg.utils.HostBuffer,
-    o_proj: []zg.utils.HostBuffer,
-    gate_proj: []zg.utils.HostBuffer,
-    up_proj: []zg.utils.HostBuffer,
-    down_proj: []zg.utils.HostBuffer,
-    shape_w_emb: []const usize,
-    shape_w_out: []const usize,
-    shape_norm: []const usize,
-    shape_layer_norm: []const usize,
-    shape_qkv_proj: []const usize,
-    shape_q_proj: []const usize,
-    shape_k_proj: []const usize,
-    shape_o_proj: []const usize,
-    shape_gate_proj: []const usize,
-    shape_up_proj: []const usize,
-    shape_down_proj: []const usize,
-) !bool {
-    const data = read_file_aligned(allocator, path) catch return false;
-    defer allocator.free(data);
+    host_tree: *zg.utils.Tree(zg.HostBuffer),
+    model_dims: ModelDims,
+) !?LoadResult {
+    const data = mmap_file(path) catch return null;
+    errdefer std.posix.munmap(data);
 
     var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
     defer st_file.deinit();
 
-    const emb_view = try st_file.get("model.embed_tokens.weight");
-    if (w_emb.dtype == .bf16) {
-        try copy_tensor_to_bf16(emb_view, w_emb.as_slice(u16), shape_w_emb);
-    } else {
-        try copy_tensor_to_f32(emb_view, w_emb.as_slice(f32), shape_w_emb);
-    }
+    const get_buf = struct {
+        fn f(tree: *zg.utils.Tree(zg.HostBuffer), tree_path: []const u8) !*zg.HostBuffer {
+            return tree.get(tree_path) orelse error.MissingSpec;
+        }
+    }.f;
 
-    const norm_view = try st_file.get("model.norm.weight");
-    if (norm.dtype == .bf16) {
-        try copy_tensor_to_bf16(norm_view, norm.as_slice(u16), shape_norm);
-    } else {
-        try copy_tensor_to_f32(norm_view, norm.as_slice(f32), shape_norm);
-    }
+    // top-level params
+    const w_emb = try get_buf(host_tree, "0.w_emb");
+    try load_weight(try st_file.get("model.embed_tokens.weight"), w_emb, .direct);
 
-    if (layer_input_norm.len != num_layers) return error.InvalidParams;
-    if (layer_post_norm.len != num_layers) return error.InvalidParams;
+    try load_weight(try st_file.get("model.norm.weight"), try get_buf(host_tree, "0.norm"), .direct);
+
+    // per-layer weights
+    const hidden_u: usize = @intCast(model_dims.hidden);
+    const kv_out_u: usize = @intCast(model_dims.kv_out);
 
     inline for (0..num_layers) |i| {
-        const prefix = try std.fmt.allocPrint(allocator, "model.layers.{d}.", .{i});
-        defer allocator.free(prefix);
+        const st_prefix = comptime std.fmt.comptimePrint("model.layers.{d}.", .{i});
+        const tree_prefix = comptime std.fmt.comptimePrint("0.layers.{d}.", .{i});
 
-        const in_name = try std.fmt.allocPrint(allocator, "{s}input_layernorm.weight", .{prefix});
-        defer allocator.free(in_name);
-        const post_name = try std.fmt.allocPrint(allocator, "{s}post_attention_layernorm.weight", .{prefix});
-        defer allocator.free(post_name);
-        const q_name = try std.fmt.allocPrint(allocator, "{s}self_attn.q_proj.weight", .{prefix});
-        defer allocator.free(q_name);
-        const k_name = try std.fmt.allocPrint(allocator, "{s}self_attn.k_proj.weight", .{prefix});
-        defer allocator.free(k_name);
-        const v_name = try std.fmt.allocPrint(allocator, "{s}self_attn.v_proj.weight", .{prefix});
-        defer allocator.free(v_name);
-        const o_name = try std.fmt.allocPrint(allocator, "{s}self_attn.o_proj.weight", .{prefix});
-        defer allocator.free(o_name);
-        const gate_name = try std.fmt.allocPrint(allocator, "{s}mlp.gate_proj.weight", .{prefix});
-        defer allocator.free(gate_name);
-        const up_name = try std.fmt.allocPrint(allocator, "{s}mlp.up_proj.weight", .{prefix});
-        defer allocator.free(up_name);
-        const down_name = try std.fmt.allocPrint(allocator, "{s}mlp.down_proj.weight", .{prefix});
-        defer allocator.free(down_name);
+        try load_weight(try st_file.get(st_prefix ++ "input_layernorm.weight"), try get_buf(host_tree, tree_prefix ++ "input_norm"), .direct);
+        try load_weight(try st_file.get(st_prefix ++ "post_attention_layernorm.weight"), try get_buf(host_tree, tree_prefix ++ "post_norm"), .direct);
 
-        const layer_in = try st_file.get(in_name);
-        if (layer_input_norm[i].dtype == .bf16) {
-            try copy_tensor_to_bf16(layer_in, layer_input_norm[i].as_slice(u16), shape_layer_norm);
-        } else {
-            try copy_tensor_to_f32(layer_in, layer_input_norm[i].as_slice(f32), shape_layer_norm);
-        }
-        const layer_post = try st_file.get(post_name);
-        if (layer_post_norm[i].dtype == .bf16) {
-            try copy_tensor_to_bf16(layer_post, layer_post_norm[i].as_slice(u16), shape_layer_norm);
-        } else {
-            try copy_tensor_to_f32(layer_post, layer_post_norm[i].as_slice(f32), shape_layer_norm);
-        }
+        // qkv_proj: concatenated from q, k, v with transposition
+        const qkv = try get_buf(host_tree, tree_prefix ++ "qkv_proj");
+        try load_weight(try st_file.get(st_prefix ++ "self_attn.q_proj.weight"), qkv, .{ .transposed_into_cols = .{ .col_offset = 0 } });
+        try load_weight(try st_file.get(st_prefix ++ "self_attn.k_proj.weight"), qkv, .{ .transposed_into_cols = .{ .col_offset = hidden_u } });
+        try load_weight(try st_file.get(st_prefix ++ "self_attn.v_proj.weight"), qkv, .{ .transposed_into_cols = .{ .col_offset = hidden_u + kv_out_u } });
 
-        const q_view = try st_file.get(q_name);
-        const k_view = try st_file.get(k_name);
-        const v_view = try st_file.get(v_name);
-        const q_cols = shape_q_proj[1];
-        const k_cols = shape_k_proj[1];
-        if (qkv_proj[i].dtype == .bf16) {
-            const dst = qkv_proj[i].as_slice(u16);
-            try copy_tensor_to_bf16_transposed_into_cols(q_view, dst, shape_qkv_proj, 0, shape_q_proj);
-            try copy_tensor_to_bf16_transposed_into_cols(k_view, dst, shape_qkv_proj, q_cols, shape_k_proj);
-            try copy_tensor_to_bf16_transposed_into_cols(v_view, dst, shape_qkv_proj, q_cols + k_cols, shape_k_proj);
-        } else {
-            const dst = qkv_proj[i].as_slice(f32);
-            try copy_tensor_to_f32_transposed_into_cols(q_view, dst, shape_qkv_proj, 0, shape_q_proj);
-            try copy_tensor_to_f32_transposed_into_cols(k_view, dst, shape_qkv_proj, q_cols, shape_k_proj);
-            try copy_tensor_to_f32_transposed_into_cols(v_view, dst, shape_qkv_proj, q_cols + k_cols, shape_k_proj);
-        }
-        const o_view = try st_file.get(o_name);
-        if (o_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(o_view, o_proj[i].as_slice(u16), shape_o_proj);
-        } else {
-            try copy_tensor_to_f32_transposed(o_view, o_proj[i].as_slice(f32), shape_o_proj);
-        }
-
-        const gate_view = try st_file.get(gate_name);
-        if (gate_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(gate_view, gate_proj[i].as_slice(u16), shape_gate_proj);
-        } else {
-            try copy_tensor_to_f32_transposed(gate_view, gate_proj[i].as_slice(f32), shape_gate_proj);
-        }
-        const up_view = try st_file.get(up_name);
-        if (up_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(up_view, up_proj[i].as_slice(u16), shape_up_proj);
-        } else {
-            try copy_tensor_to_f32_transposed(up_view, up_proj[i].as_slice(f32), shape_up_proj);
-        }
-        const down_view = try st_file.get(down_name);
-        if (down_proj[i].dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(down_view, down_proj[i].as_slice(u16), shape_down_proj);
-        } else {
-            try copy_tensor_to_f32_transposed(down_view, down_proj[i].as_slice(f32), shape_down_proj);
-        }
+        try load_weight(try st_file.get(st_prefix ++ "self_attn.o_proj.weight"), try get_buf(host_tree, tree_prefix ++ "o_proj"), .transposed);
+        try load_weight(try st_file.get(st_prefix ++ "mlp.gate_proj.weight"), try get_buf(host_tree, tree_prefix ++ "gate_proj"), .transposed);
+        try load_weight(try st_file.get(st_prefix ++ "mlp.up_proj.weight"), try get_buf(host_tree, tree_prefix ++ "up_proj"), .transposed);
+        try load_weight(try st_file.get(st_prefix ++ "mlp.down_proj.weight"), try get_buf(host_tree, tree_prefix ++ "down_proj"), .transposed);
     }
 
+    // w_out: use lm_head.weight if present, otherwise transpose w_emb.
+    const w_out = try get_buf(host_tree, "0.w_out");
     const lm_view = get_optional(&st_file, "lm_head.weight") catch |err| return err;
     if (lm_view) |view| {
-        if (w_out.dtype == .bf16) {
-            try copy_tensor_to_bf16_transposed(view, w_out.as_slice(u16), shape_w_out);
-        } else {
-            try copy_tensor_to_f32_transposed(view, w_out.as_slice(f32), shape_w_out);
-        }
+        try load_weight(view, w_out, .transposed);
     } else {
-        if (w_out.dtype == .bf16) {
-            try transpose_vocab_hidden_bf16(w_emb.as_slice(u16), w_out.as_slice(u16), shape_w_emb, shape_w_out);
-        } else {
-            try transpose_vocab_hidden(w_emb.as_slice(f32), w_out.as_slice(f32), shape_w_emb, shape_w_out);
-        }
+        try transpose_buf(w_emb, w_out);
     }
 
-    return true;
+    return .{ .mmap_data = data };
+}
+
+/// Load a single weight tensor from a safetensors view into a host buffer.
+///
+/// For `.direct` layout with matching dtype, replaces the heap-backed buffer
+///  with a zero-copy borrowed view into the mmap'd file data. For transposed
+///  or cross-dtype loads, copies element-by-element into the existing buffer.
+fn load_weight(view: stz.TensorView, buf: *zg.HostBuffer, layout: CopyLayout) !void {
+    switch (layout) {
+        .direct => {
+            if (!shape_eql(view.info.shape, buf.shape.const_slice())) return error.TensorShapeMismatch;
+
+            // zero-copy: replace the heap buffer with a borrowed view
+            if (stz_dtype_matches(view.info.dtype, buf.dtype)) {
+                buf.deinit(); // free the pre-allocated heap buffer
+                buf.* = zg.HostBuffer.borrow(view.data, buf.shape, buf.dtype);
+                return;
+            }
+
+            // cross-dtype: element-wise copy into existing buffer
+            const src_count = buf.shape.num_elements();
+            var i: usize = 0;
+            while (i < src_count) : (i += 1) {
+                write_element(buf, i, read_element(view, i));
+            }
+        },
+        .transposed, .transposed_into_cols => {
+            try copy_view_to_buf(view, buf, layout);
+        },
+    }
+}
+
+/// Check if a safetensors dtype matches a zigrad dtype.
+fn stz_dtype_matches(stz_dt: stz.Dtype, zg_dt: zg.DType) bool {
+    return switch (zg_dt) {
+        .f32 => stz_dt == .f32,
+        .bf16 => stz_dt == .bf16,
+        .f16 => stz_dt == .f16,
+        .f64 => stz_dt == .f64,
+        .i32 => stz_dt == .i32,
+        .i64 => stz_dt == .i64,
+        inline else => |x| @panic("Unsupported dtype " ++ @tagName(x)),
+    };
+}
+
+/// Layout modes for weight loading from safetensors into host buffers.
+///
+/// `.direct` is handled inline by `load_weight` (zero-copy borrow when dtype
+/// matches, or element-wise cross-dtype copy).
+/// `.transposed` and `.transposed_into_cols` are handled by `copy_view_to_buf`.
+const CopyLayout = union(enum) {
+    /// 1:1 copy. No shape transformation. Handled by `load_weight` directly.
+    direct,
+    /// 2D matrix transpose: source [R, C] -> dst [C, R].
+    transposed,
+    /// Transpose a sub-matrix into a column slice of a wider destination.
+    /// Used for concatenating Q/K/V projections into a single buffer.
+    transposed_into_cols: struct { col_offset: usize },
+};
+
+/// Copy a safetensors view into a host buffer with layout transformation.
+///
+/// Reads element-by-element via `read_element`/`write_element`, converting dtype and applying the
+///  requested transpose one pass with no intermediate buffers.
+/// No intermediate buffer is allocated. Only handles `.transposed` and `.transposed_into_cols`,
+///  `.direct` is handled by `load_weight`.
+/// TODO: inline this.
+fn copy_view_to_buf(view: stz.TensorView, dst: *zg.HostBuffer, layout: CopyLayout) !void {
+    const src_rows = view.info.shape[0];
+    const src_cols = if (view.info.shape.len >= 2) view.info.shape[1] else 1;
+
+    switch (layout) {
+        .direct => @panic("should be unreachable. should never copy_view_to_buf on direct tensor"), // handled inline by load_weight
+        .transposed => {
+            if (view.info.shape.len != 2 or dst.shape.const_slice().len != 2) return error.TensorShapeMismatch;
+            const dst_rows: usize = @intCast(dst.shape.const_slice()[0]);
+            const dst_cols: usize = @intCast(dst.shape.const_slice()[1]);
+            if (dst_rows != src_cols or dst_cols != src_rows) return error.TensorShapeMismatch;
+
+            var r: usize = 0;
+            while (r < src_rows) : (r += 1) {
+                var c: usize = 0;
+                while (c < src_cols) : (c += 1) {
+                    write_element(dst, c * dst_cols + r, read_element(view, r * src_cols + c));
+                }
+            }
+        },
+        .transposed_into_cols => |opts| {
+            if (view.info.shape.len != 2 or dst.shape.const_slice().len != 2) return error.TensorShapeMismatch;
+            const dst_stride: usize = @intCast(dst.shape.const_slice()[1]);
+            // source is [out_dim, in_dim] (row-major), dst column slice is [in_dim, out_dim] at col_offset.
+            const in_dim = src_cols;
+            const out_dim = src_rows;
+            if (opts.col_offset + out_dim > dst_stride) return error.TensorShapeMismatch;
+
+            var o: usize = 0;
+            while (o < out_dim) : (o += 1) {
+                var i: usize = 0;
+                while (i < in_dim) : (i += 1) {
+                    write_element(dst, i * dst_stride + (opts.col_offset + o), read_element(view, o * in_dim + i));
+                }
+            }
+        },
+    }
+}
+
+/// Read one element from a safetensors view as f32.
+inline fn read_element(view: stz.TensorView, idx: usize) f32 {
+    return switch (view.info.dtype) {
+        .f32 => std.mem.bytesAsSlice(f32, view.data)[idx],
+        .bf16 => bf16_to_f32(std.mem.bytesAsSlice(u16, view.data)[idx]),
+        else => unreachable,
+    };
+}
+
+/// Write one f32 element into a host buffer, converting to the buffer's dtype.
+inline fn write_element(buf: *zg.HostBuffer, idx: usize, val: f32) void {
+    switch (buf.dtype) {
+        .f32 => buf.as_slice(f32)[idx] = val,
+        .bf16 => buf.as_slice(u16)[idx] = f32_to_bf16(val),
+        else => unreachable,
+    }
+}
+
+/// Transpose src [rows, cols] into dst [cols, rows] through raw byte copies.
+///
+/// Used for the w_emb -> w_out fallback path where both tensors are already in host buffers
+///  (not safetensors views).
+/// Dtype-agnostic: copies `dtype.size_in_bytes()` bytes per element, so works for any dtype without
+///  per-type branches. Both buffers must have the same dtype.
+fn transpose_buf(src: *zg.HostBuffer, dst: *zg.HostBuffer) !void {
+    if (src.shape.const_slice().len != 2 or dst.shape.const_slice().len != 2) return error.TensorShapeMismatch;
+    const src_rows: usize = @intCast(src.shape.const_slice()[0]);
+    const src_cols: usize = @intCast(src.shape.const_slice()[1]);
+    if (@as(usize, @intCast(dst.shape.const_slice()[0])) != src_cols or @as(usize, @intCast(dst.shape.const_slice()[1])) != src_rows)
+        return error.TensorShapeMismatch;
+    if (src.dtype != dst.dtype) return error.TensorDtypeMismatch;
+
+    const elem = src.dtype.size_in_bytes();
+    const s = src.data();
+    const d = dst.data_mut();
+    for (0..src_rows) |r| {
+        for (0..src_cols) |c| {
+            const src_off = (r * src_cols + c) * elem;
+            const dst_off = (c * src_rows + r) * elem;
+            @memcpy(d[dst_off..][0..elem], s[src_off..][0..elem]);
+        }
+    }
 }
 
 fn get_optional(file: *stz.SafeTensorsFile, name: []const u8) !?stz.TensorView {
@@ -944,7 +803,11 @@ fn get_optional(file: *stz.SafeTensorsFile, name: []const u8) !?stz.TensorView {
     return view;
 }
 
-fn read_file_aligned(allocator: std.mem.Allocator, path: []const u8) ![]align(8) u8 {
+/// Memory-map a file read-only.
+///
+/// Returns a page-aligned slice backed by the kernel page cache.
+/// Caller must `std.posix.munmap` when done.
+fn mmap_file(path: []const u8) ![]align(std.heap.page_size_min) u8 {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.openFileAbsolute(path, .{})
     else
@@ -953,408 +816,114 @@ fn read_file_aligned(allocator: std.mem.Allocator, path: []const u8) ![]align(8)
 
     const stat = try file.stat();
     const size: usize = @intCast(stat.size);
-    const buf = try allocator.alignedAlloc(u8, .@"8", size);
-    const read_len = try file.readAll(buf);
-    if (read_len != size) return error.UnexpectedEof;
-    return buf;
+
+    return std.posix.mmap(
+        null,
+        size,
+        std.posix.PROT.READ,
+        .{ .TYPE = .SHARED },
+        file.handle,
+        0,
+    );
 }
 
-fn copy_tensor_to_f32(view: stz.TensorView, out: []f32, expected_shape: []const usize) !void {
-    if (!std.mem.eql(usize, view.info.shape, expected_shape)) return error.TensorShapeMismatch;
-
-    var count: usize = 1;
-    for (view.info.shape) |d| count *= d;
-    if (count != out.len) return error.TensorSizeMismatch;
-
-    switch (view.info.dtype) {
-        .f32 => {
-            const data = std.mem.bytesAsSlice(f32, view.data);
-            if (data.len != out.len) return error.TensorSizeMismatch;
-            @memcpy(out, data);
-        },
-        .bf16 => {
-            const data = std.mem.bytesAsSlice(u16, view.data);
-            if (data.len != out.len) return error.TensorSizeMismatch;
-            for (data, 0..) |v, i| {
-                out[i] = bf16_to_f32(v);
-            }
-        },
-        else => return error.TensorDtypeMismatch,
+/// Compare a safetensors shape (usize) with an expected shape (i64).
+fn shape_eql(stz_shape: []const usize, expected: []const i64) bool {
+    if (stz_shape.len != expected.len) return false;
+    for (stz_shape, expected) |a, b| {
+        if (a != @as(usize, @intCast(b))) return false;
     }
+    return true;
 }
 
-fn copy_tensor_to_bf16(view: stz.TensorView, out: []u16, expected_shape: []const usize) !void {
-    if (!std.mem.eql(usize, view.info.shape, expected_shape)) return error.TensorShapeMismatch;
-
-    var count: usize = 1;
-    for (view.info.shape) |d| count *= d;
-    if (count != out.len) return error.TensorSizeMismatch;
-
-    switch (view.info.dtype) {
-        .bf16 => {
-            const data = std.mem.bytesAsSlice(u16, view.data);
-            if (data.len != out.len) return error.TensorSizeMismatch;
-            @memcpy(out, data);
-        },
-        .f32 => {
-            const data = std.mem.bytesAsSlice(f32, view.data);
-            if (data.len != out.len) return error.TensorSizeMismatch;
-            for (data, 0..) |v, i| {
-                out[i] = f32_to_bf16(v);
-            }
-        },
-        else => return error.TensorDtypeMismatch,
+/// Read the scalar loss value from a device buffer, returning f32.
+///
+/// Copies `loss_buf` into the caller-provided `loss_host` staging buffer, awaits the transfer event,
+///  then decodes the first element from the buffer's dtype to f32.
+///
+/// Does not take ownership of `loss_buf`.
+fn read_loss(b: *zg.Backend, loss_buf: zg.Backend.Buffer, loss_host: *zg.HostBuffer, loss_dtype: zg.DType) !f32 {
+    if (try b.buffer_to_host(loss_buf, loss_host.data_mut())) |ev| {
+        try b.await_event(ev);
+        b.deinit_event(ev);
     }
+    return switch (loss_dtype) {
+        inline .f32, .bf16, .f16, .f64 => |tag| tag.decode_f32(std.mem.bytesAsSlice(tag.StorageType(), loss_host.data())[0]),
+        else => @panic("read_loss: unsupported dtype"),
+    };
 }
 
-fn copy_tensor_to_f32_transposed(view: stz.TensorView, out: []f32, expected_shape: []const usize) !void {
-    if (view.info.shape.len != 2 or expected_shape.len != 2) return error.TensorShapeMismatch;
-    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
-        return error.TensorShapeMismatch;
-    }
-
-    const tmp = try std.heap.raw_c_allocator.alloc(f32, view.info.shape[0] * view.info.shape[1]);
-    defer std.heap.raw_c_allocator.free(tmp);
-    try copy_tensor_to_f32(view, tmp, view.info.shape);
-    try transpose_vocab_hidden(tmp, out, view.info.shape, expected_shape);
-}
-
-fn copy_tensor_to_bf16_transposed(view: stz.TensorView, out: []u16, expected_shape: []const usize) !void {
-    if (view.info.shape.len != 2 or expected_shape.len != 2) return error.TensorShapeMismatch;
-    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
-        return error.TensorShapeMismatch;
-    }
-
-    switch (view.info.dtype) {
-        .bf16 => {
-            const data = std.mem.bytesAsSlice(u16, view.data);
-            if (data.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
-            try transpose_vocab_hidden_bf16(data, out, view.info.shape, expected_shape);
-        },
-        .f32 => {
-            const data = std.mem.bytesAsSlice(f32, view.data);
-            if (data.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
-
-            const vocab = view.info.shape[0];
-            const hidden = view.info.shape[1];
-            if (expected_shape[0] != hidden or expected_shape[1] != vocab) return error.TensorShapeMismatch;
-
-            var v: usize = 0;
-            while (v < vocab) : (v += 1) {
-                var h: usize = 0;
-                while (h < hidden) : (h += 1) {
-                    out[h * vocab + v] = f32_to_bf16(data[v * hidden + h]);
-                }
-            }
-        },
-        else => return error.TensorDtypeMismatch,
-    }
-}
-
-fn copy_tensor_to_bf16_transposed_into_cols(
-    view: stz.TensorView,
-    dst: []u16,
-    dst_shape: []const usize,
-    col_offset: usize,
-    expected_shape: []const usize,
-) !void {
-    if (view.info.shape.len != 2 or expected_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
-    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
-        return error.TensorShapeMismatch;
-    }
-    const in_dim = expected_shape[0];
-    const out_dim = expected_shape[1];
-    if (dst_shape[0] != in_dim) return error.TensorShapeMismatch;
-    if (col_offset + out_dim > dst_shape[1]) return error.TensorShapeMismatch;
-    if (dst.len != dst_shape[0] * dst_shape[1]) return error.TensorSizeMismatch;
-
-    const dst_stride = dst_shape[1];
-    switch (view.info.dtype) {
-        .bf16 => {
-            const src = std.mem.bytesAsSlice(u16, view.data);
-            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
-
-            var o: usize = 0;
-            while (o < out_dim) : (o += 1) {
-                var i: usize = 0;
-                while (i < in_dim) : (i += 1) {
-                    dst[i * dst_stride + (col_offset + o)] = src[o * in_dim + i];
-                }
-            }
-        },
-        .f32 => {
-            const src = std.mem.bytesAsSlice(f32, view.data);
-            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
-
-            var o: usize = 0;
-            while (o < out_dim) : (o += 1) {
-                var i: usize = 0;
-                while (i < in_dim) : (i += 1) {
-                    dst[i * dst_stride + (col_offset + o)] = f32_to_bf16(src[o * in_dim + i]);
-                }
-            }
-        },
-        else => return error.TensorDtypeMismatch,
-    }
-}
-
-fn copy_tensor_to_f32_transposed_into_cols(
-    view: stz.TensorView,
-    dst: []f32,
-    dst_shape: []const usize,
-    col_offset: usize,
-    expected_shape: []const usize,
-) !void {
-    if (view.info.shape.len != 2 or expected_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
-    if (view.info.shape[0] != expected_shape[1] or view.info.shape[1] != expected_shape[0]) {
-        return error.TensorShapeMismatch;
-    }
-    const in_dim = expected_shape[0];
-    const out_dim = expected_shape[1];
-    if (dst_shape[0] != in_dim) return error.TensorShapeMismatch;
-    if (col_offset + out_dim > dst_shape[1]) return error.TensorShapeMismatch;
-    if (dst.len != dst_shape[0] * dst_shape[1]) return error.TensorSizeMismatch;
-
-    const dst_stride = dst_shape[1];
-    switch (view.info.dtype) {
-        .f32 => {
-            const src = std.mem.bytesAsSlice(f32, view.data);
-            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
-
-            var o: usize = 0;
-            while (o < out_dim) : (o += 1) {
-                var i: usize = 0;
-                while (i < in_dim) : (i += 1) {
-                    dst[i * dst_stride + (col_offset + o)] = src[o * in_dim + i];
-                }
-            }
-        },
-        .bf16 => {
-            const src = std.mem.bytesAsSlice(u16, view.data);
-            if (src.len != view.info.shape[0] * view.info.shape[1]) return error.TensorSizeMismatch;
-
-            var o: usize = 0;
-            while (o < out_dim) : (o += 1) {
-                var i: usize = 0;
-                while (i < in_dim) : (i += 1) {
-                    dst[i * dst_stride + (col_offset + o)] = bf16_to_f32(src[o * in_dim + i]);
-                }
-            }
-        },
-        else => return error.TensorDtypeMismatch,
-    }
-}
-
-fn transpose_vocab_hidden(src: []const f32, dst: []f32, src_shape: []const usize, dst_shape: []const usize) !void {
-    if (src_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
-    const vocab = src_shape[0];
-    const hidden = src_shape[1];
-    if (dst_shape[0] != hidden or dst_shape[1] != vocab) return error.TensorShapeMismatch;
-
-    var v: usize = 0;
-    while (v < vocab) : (v += 1) {
-        var h: usize = 0;
-        while (h < hidden) : (h += 1) {
-            dst[h * vocab + v] = src[v * hidden + h];
-        }
-    }
-}
-
-fn transpose_vocab_hidden_bf16(src: []const u16, dst: []u16, src_shape: []const usize, dst_shape: []const usize) !void {
-    if (src_shape.len != 2 or dst_shape.len != 2) return error.TensorShapeMismatch;
-    const vocab = src_shape[0];
-    const hidden = src_shape[1];
-    if (dst_shape[0] != hidden or dst_shape[1] != vocab) return error.TensorShapeMismatch;
-
-    var v: usize = 0;
-    while (v < vocab) : (v += 1) {
-        var h: usize = 0;
-        while (h < hidden) : (h += 1) {
-            dst[h * vocab + v] = src[v * hidden + h];
-        }
-    }
-}
-
-fn bf16_to_f32(val: u16) f32 {
+inline fn bf16_to_f32(val: u16) f32 {
     const bits: u32 = @as(u32, val) << 16;
     return @bitCast(bits);
 }
 
-fn bytes_to_mb(value: i64) f64 {
-    return @as(f64, @floatFromInt(value)) / (1024.0 * 1024.0);
-}
-
-fn log_compiled_memory_stats(backend_handle: anytype, exe: *zg.backend.pjrt.LoadedExecutable) void {
-    const stats = backend_handle.executable_memory_stats(exe) catch |err| switch (err) {
-        error.Unimplemented, error.FunctionNotAvailable => return,
-        else => {
-            std.log.warn("llama-ft-demo: compiled memory stats unavailable ({s})", .{@errorName(err)});
-            return;
-        },
-    };
-
-    std.log.info(
-        "llama-ft-demo compiled memory: peak={d:.1}MB temp={d:.1}MB args={d:.1}MB outputs={d:.1}MB",
-        .{
-            bytes_to_mb(stats.peak_memory_in_bytes),
-            bytes_to_mb(stats.temp_size_in_bytes),
-            bytes_to_mb(stats.argument_size_in_bytes),
-            bytes_to_mb(stats.output_size_in_bytes),
-        },
-    );
-}
-
-fn log_device_memory_stats(backend_handle: anytype, device: *const zg.backend.pjrt.Device) void {
-    const stats = backend_handle.device_memory_stats(device) catch |err| switch (err) {
-        error.Unimplemented, error.FunctionNotAvailable => return,
-        else => {
-            std.log.warn("llama-ft-demo: device memory stats unavailable ({s})", .{@errorName(err)});
-            return;
-        },
-    };
-
-    const peak = stats.peak_bytes_in_use orelse stats.bytes_in_use;
-    const pool_peak = stats.peak_pool_bytes orelse stats.pool_bytes orelse 0;
-    std.log.info(
-        "llama-ft-demo device memory: in_use={d:.1}MB peak={d:.1}MB pool={d:.1}MB pool_peak={d:.1}MB",
-        .{
-            bytes_to_mb(stats.bytes_in_use),
-            bytes_to_mb(peak),
-            bytes_to_mb(stats.pool_bytes orelse 0),
-            bytes_to_mb(pool_peak),
-        },
-    );
-}
-
-fn host_dtype_for(dtype: zg.pr.DType) zg.utils.DType {
-    return switch (dtype) {
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .i32 => .i32,
-        .i64 => .i64,
-        .u32 => .u32,
-        .u64 => .u64,
-        .bool => .i32,
-    };
-}
-
-fn f32_to_bf16(val: f32) u16 {
+inline fn f32_to_bf16(val: f32) u16 {
     const bits: u32 = @bitCast(val);
     return @intCast(bits >> 16);
 }
 
-fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
-    for (slice, 0..) |*v, i| {
-        const base = @as(f32, @floatFromInt(i % 1024));
-        v.* = offset + scale * base;
-    }
-}
-
-fn fill_pattern_bf16(slice: []u16, scale: f32, offset: f32) void {
-    for (slice, 0..) |*v, i| {
-        const base = @as(f32, @floatFromInt(i % 1024));
-        v.* = f32_to_bf16(offset + scale * base);
-    }
-}
-
-fn fill_i32_tokens(out: []i32, tokens: []const usize) void {
-    @memset(out, 0);
-    const count = @min(out.len, tokens.len);
-    for (tokens[0..count], 0..) |t, i| {
-        out[i] = @intCast(t);
-    }
-}
-
-fn fill_i32_tokens_batched(out: []i32, batch: usize, seq: usize, tokens: []const usize) void {
-    @memset(out, 0);
-    if (batch == 0 or seq == 0) return;
-    if (out.len != batch * seq) return;
-
-    var b: usize = 0;
-    while (b < batch) : (b += 1) {
-        const row = out[b * seq .. (b + 1) * seq];
-        const count = @min(row.len, tokens.len);
-        for (tokens[0..count], 0..) |t, i| {
-            row[i] = @intCast(t);
-        }
-    }
-}
-
-fn fill_attention_mask(out: []f32, active_len: usize) void {
-    @memset(out, 0);
-    const count = @min(out.len, active_len);
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        out[i] = 1.0;
-    }
-}
-
-fn fill_attention_mask_batched(out: []f32, batch: usize, seq: usize, active_len: usize) void {
-    @memset(out, 0);
-    if (batch == 0 or seq == 0) return;
-    if (out.len != batch * seq) return;
-
-    const count = @min(seq, active_len);
-    var b: usize = 0;
-    while (b < batch) : (b += 1) {
-        var i: usize = 0;
-        while (i < count) : (i += 1) {
-            out[b * seq + i] = 1.0;
-        }
-    }
-}
-
-fn fill_attention_mask_bf16(out: []u16, active_len: usize) void {
-    @memset(out, 0);
-    const one = f32_to_bf16(1.0);
-    const count = @min(out.len, active_len);
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        out[i] = one;
-    }
-}
-
-fn fill_attention_mask_bf16_batched(out: []u16, batch: usize, seq: usize, active_len: usize) void {
-    @memset(out, 0);
-    if (batch == 0 or seq == 0) return;
-    if (out.len != batch * seq) return;
-
-    const one = f32_to_bf16(1.0);
-    const count = @min(seq, active_len);
-    var b: usize = 0;
-    while (b < batch) : (b += 1) {
-        var i: usize = 0;
-        while (i < count) : (i += 1) {
-            out[b * seq + i] = one;
-        }
-    }
-}
-
-fn fill_causal_mask(out: []f32, seq: usize) void {
-    @memset(out, 0);
-    var i: usize = 0;
-    while (i < seq) : (i += 1) {
-        var j: usize = 0;
-        while (j < seq) : (j += 1) {
-            if (j <= i) {
-                out[i * seq + j] = 1.0;
+/// Fill a host buffer with a deterministic ramp pattern: `offset + scale * (i % 1024)`.
+///
+/// Dtype-generic via `inline switch` + `DType.encode_f32`.
+/// Supports any float dtype (f32, bf16, f16, f64).
+fn fill_pattern(buf: *zg.HostBuffer, scale: f32, offset: f32) void {
+    switch (buf.dtype) {
+        inline .f32, .bf16, .f16, .f64 => |tag| {
+            const slice = buf.as_slice(tag.StorageType());
+            for (slice, 0..) |*v, i| {
+                v.* = tag.encode_f32(offset + scale * @as(f32, @floatFromInt(i % 1024)));
             }
-        }
+        },
+        else => @panic("fill_pattern: unsupported dtype"),
     }
 }
 
-fn fill_causal_mask_bf16(out: []u16, seq: usize) void {
+/// Fill an i32 buffer with token IDs, replicated across batches.
+///
+/// Writes `tokens[0..min(seq, tokens.len)]` into each batch row, padding the remainder with zeros.
+/// Handles batch=1 uniformly, we dont special case.
+fn fill_i32_tokens(out: []i32, batch: usize, seq: usize, tokens: []const usize) void {
     @memset(out, 0);
-    const one = f32_to_bf16(1.0);
-    var i: usize = 0;
-    while (i < seq) : (i += 1) {
-        var j: usize = 0;
-        while (j < seq) : (j += 1) {
-            if (j <= i) {
-                out[i * seq + j] = one;
-            }
-        }
+    if (batch == 0 or seq == 0) return;
+    for (0..batch) |b| {
+        const row = out[b * seq ..][0..seq];
+        for (tokens[0..@min(seq, tokens.len)], 0..) |t, i| row[i] = @intCast(t);
+    }
+}
+
+/// Fill a [batch, seq] attn mask: 1.0 for the first `active_len` positions per row, 0.0 elsewhere.
+/// Dtype-generic.
+fn fill_attention_mask(buf: *zg.HostBuffer, batch: usize, seq: usize, active_len: usize) void {
+    switch (buf.dtype) {
+        inline .f32, .bf16, .f16, .f64 => |tag| {
+            const T = tag.StorageType();
+            const slice = buf.as_slice(T);
+            @memset(slice, tag.encode_f32(0.0));
+            const count = @min(seq, active_len);
+            const one = tag.encode_f32(1.0);
+            for (0..batch) |b| for (0..count) |i| {
+                slice[b * seq + i] = one;
+            };
+        },
+        else => @panic("fill_attention_mask: unsupported dtype"),
+    }
+}
+
+/// Fill a [seq, seq] lower-triangular causal mask: 1.0 where col <= row, 0.0 above the diagonal.
+/// Dtype-generic.
+fn fill_causal_mask(buf: *zg.HostBuffer, seq: usize) void {
+    switch (buf.dtype) {
+        inline .f32, .bf16, .f16, .f64 => |tag| {
+            const T = tag.StorageType();
+            const slice = buf.as_slice(T);
+            @memset(slice, tag.encode_f32(0.0));
+            const one = tag.encode_f32(1.0);
+            for (0..seq) |i| for (0..i + 1) |j| {
+                slice[i * seq + j] = one;
+            };
+        },
+        else => @panic("fill_causal_mask: unsupported dtype"),
     }
 }
 
@@ -1384,9 +953,13 @@ fn llama3_rope_freq_correction(inv_freq: []f32) void {
     }
 }
 
-fn fill_rope_tables(out_sin: []f32, out_cos: []f32, seq: usize, head_dim: usize) void {
+/// Precompute RoPE sin/cos tables for [seq, head_dim/2].
+///
+/// Inverse frequencies are computed in f32 (precision requirement), then encoded into the buffer's
+/// dtype. Applies LLaMA 3 wavelength-based frequency correction via `llama3_rope_freq_correction`.
+/// Base frequency is 500000.0 (LLaMA 3.2-1B config).
+fn fill_rope_tables(sin: *zg.HostBuffer, cos: *zg.HostBuffer, seq: usize, head_dim: usize) void {
     const half = head_dim / 2;
-    if (out_sin.len != seq * half or out_cos.len != seq * half) return;
 
     const base: f32 = 500000.0;
     var inv_freq: [32]f32 = undefined;
@@ -1396,32 +969,17 @@ fn fill_rope_tables(out_sin: []f32, out_cos: []f32, seq: usize, head_dim: usize)
     }
     llama3_rope_freq_correction(inv_freq[0..half]);
 
-    for (0..seq) |i| {
-        for (0..half) |j| {
-            const theta = @as(f32, @floatFromInt(i)) * inv_freq[j];
-            out_sin[i * half + j] = @sin(theta);
-            out_cos[i * half + j] = @cos(theta);
-        }
-    }
-}
-
-fn fill_rope_tables_bf16(out_sin: []u16, out_cos: []u16, seq: usize, head_dim: usize) void {
-    const half = head_dim / 2;
-    if (out_sin.len != seq * half or out_cos.len != seq * half) return;
-
-    const base: f32 = 500000.0;
-    var inv_freq: [32]f32 = undefined;
-    for (0..half) |j| {
-        const exp = @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(head_dim));
-        inv_freq[j] = 1.0 / std.math.pow(f32, base, exp);
-    }
-    llama3_rope_freq_correction(inv_freq[0..half]);
-
-    for (0..seq) |i| {
-        for (0..half) |j| {
-            const theta = @as(f32, @floatFromInt(i)) * inv_freq[j];
-            out_sin[i * half + j] = f32_to_bf16(@sin(theta));
-            out_cos[i * half + j] = f32_to_bf16(@cos(theta));
-        }
+    switch (sin.dtype) {
+        inline .f32, .bf16, .f16, .f64 => |tag| {
+            const T = tag.StorageType();
+            const s = sin.as_slice(T);
+            const c = cos.as_slice(T);
+            for (0..seq) |i| for (0..half) |j| {
+                const theta = @as(f32, @floatFromInt(i)) * inv_freq[j];
+                s[i * half + j] = tag.encode_f32(@sin(theta));
+                c[i * half + j] = tag.encode_f32(@cos(theta));
+            };
+        },
+        else => @panic("fill_rope_tables: unsupported dtype"),
     }
 }

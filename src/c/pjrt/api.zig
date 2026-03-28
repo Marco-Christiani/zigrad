@@ -1,14 +1,13 @@
-/// PJRT C-API Bindings
-///
-/// Low-level wrapper around PJRT C-API with:
-/// - Reflection-based call dispatch
-/// - Struct-size-safe initialization
-/// - Error handling and conversion
-///
-/// This module does NOT manage PJRT objects--see types.zig for that.
+//! PJRT C-API Bindings
+//!
+//! Low-level wrapper around PJRT C-API with some basic necessities:
+//! - Reflection-based call dispatch
+//! - Struct-size-safe initialization
+//! - Error handling and conversion
+//!
+//! This module does NOT manage PJRT objects--see types.zig for that.
 const std = @import("std");
-const c_mod = @import("c.zig");
-const c = c_mod.c;
+const c = @import("c.zig").c;
 
 pub fn pjrt_struct_size(comptime T: type) usize {
     const maybe_struct_name: ?[]const u8 = comptime blk: {
@@ -83,6 +82,7 @@ pub const Api = struct {
     /// Usage:
     ///   try api.call("PJRT_Client_Create", .{ .client = &client_ptr });
     ///
+    /// TODO: making this typed would improve usability, could comptime generate an enum
     pub fn call(
         self: *Api,
         comptime func_name: []const u8,

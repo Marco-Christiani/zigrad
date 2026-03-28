@@ -2,6 +2,7 @@ const core = @import("pr.zig");
 
 pub const DType = core.DType;
 pub const Shape = core.Shape;
+pub const BoundedShape = core.BoundedShape;
 pub const Aval = core.Aval;
 pub const Tensor = core.Tensor;
 pub const VarId = core.VarId;

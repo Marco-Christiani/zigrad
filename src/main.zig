@@ -15,7 +15,6 @@ pub const setup_cmd = cli.setup_cmd;
 
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
-    std.debug.print("Symbol: {s}\n", .{"\u{2713}"});
 
     // Parse args
     var cmd = cli.parse(gpa) catch |err| {
@@ -69,24 +68,25 @@ pub fn main() !void {
         defer gpa.free(base_dir);
 
         try zg.tvm.ffi.ensure_loaded(gpa, .{});
-        var ir_mod = try zg.tvm.tir.build_matmul_tir(gpa, shape.m, shape.n, shape.k);
+        const m: i64 = @intCast(shape.m);
+        const n: i64 = @intCast(shape.n);
+        const k: i64 = @intCast(shape.k);
+
+        var ir_mod = try zg.tvm.tir.build_matmul_tir(gpa, m, n, k);
         defer ir_mod.deinit();
         var target = try zg.tvm.tir.Target.create(gpa, target_kind);
         defer target.deinit();
 
-        const M_i64: i64 = @intCast(shape.m);
-        const N_i64: i64 = @intCast(shape.n);
-        const K_i64: i64 = @intCast(shape.k);
-        const shape_a = try gpa.dupe(i64, &[_]i64{ M_i64, K_i64 });
+        const shape_a = try gpa.dupe(i64, &[_]i64{ m, k });
         defer gpa.free(shape_a);
-        const shape_b = try gpa.dupe(i64, &[_]i64{ K_i64, N_i64 });
+        const shape_b = try gpa.dupe(i64, &[_]i64{ k, n });
         defer gpa.free(shape_b);
-        const shape_c = try gpa.dupe(i64, &[_]i64{ M_i64, N_i64 });
+        const shape_c = try gpa.dupe(i64, &[_]i64{ m, n });
         defer gpa.free(shape_c);
         const tensor_shapes = try gpa.dupe([]const i64, &[_][]const i64{ shape_a, shape_b, shape_c });
         defer gpa.free(tensor_shapes);
 
-        const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, shape.m, shape.n, shape.k);
+        const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, m, n, k);
         defer gpa.free(key);
         const full_work_dir = try zg.tvm.module.ensure_cache_dir(gpa, base_dir, key);
         defer gpa.free(full_work_dir);
@@ -109,7 +109,7 @@ pub fn main() !void {
         const target_kind: zg.tvm.tir.TargetKind = if (opts.cuda or opts.gpu) .cuda else .cpu;
         const work_dir = opts.work_dir orelse "artifacts/tvm_cache";
 
-        return run_tvm_demo(gpa, shape.m, shape.n, shape.k, target_kind, work_dir);
+        return run_tvm_demo(gpa, @intCast(shape.m), @intCast(shape.n), @intCast(shape.k), target_kind, work_dir);
     }
     if (cmd.matchSubCmd("benchmark")) |sub_cmd| {
         if (comptime !build_options.has_tvm) return require_tvm();
@@ -181,14 +181,12 @@ pub fn main() !void {
     }
     const device = devs[0];
 
-    // Unwrap opaque device handle for PJRT-specific commands.
-    const pjrt_device: *const zg.backend.pjrt.Device = @ptrCast(@alignCast(device.handle));
-
     if (cmd.matchSubCmd("aot-demo")) |_| {
         if (comptime !build_options.has_mlir) {
             log.err("aot-demo requires MLIR (build with -Dmlir=true)", .{});
             return error.MlirDisabled;
         }
+        const pjrt_device: *const zg.backend.pjrt.Device = @ptrCast(@alignCast(device.handle));
         return main_aot.run(gpa, &pjrt_backend, pjrt_device);
     }
     // Commands that require MLIR lowering
@@ -214,14 +212,14 @@ pub fn main() !void {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return llm_demo.run_llm_ft_demo(gpa, &pjrt_backend, pjrt_device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return llm_demo.run_llm_ft_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
             const dtype = if (opts.dtype) |d|
-                std.meta.stringToEnum(zg.pr.DType, d) orelse return error.InvalidDType
+                std.meta.stringToEnum(zg.DType, d) orelse return error.InvalidDType
             else
-                zg.pr.DType.bf16;
+                zg.DType.bf16;
 
             const kernel_provider = if (opts.kernel_provider) |provider_name|
                 std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
@@ -240,8 +238,8 @@ pub fn main() !void {
 
             return llama_demo.run_llama_ft_demo(
                 gpa,
-                &pjrt_backend,
-                pjrt_device,
+                b,
+                device,
                 dump_pr_ptr,
                 dump_mlir_ptr,
                 dump_optimized_ptr,
@@ -263,11 +261,13 @@ pub fn main() !void {
             const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
             defer gpa.free(mlir_bytes);
 
-            const serialized = try pjrt_backend.compile_serialized(pjrt_device, mlir_bytes, true, .{});
+            const exe = try b.compile(device, mlir_bytes, true, .{});
+            defer b.deinit_executable(exe);
+            const serialized = try b.serialize_executable(exe, gpa);
             defer gpa.free(serialized);
 
             try demos.write_bytes_to_path(opts.path, serialized);
-            std.log.info("wrote PJRT JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, opts.path });
+            std.log.info("wrote JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, opts.path });
             return;
         }
         log.err("jit-cache-save requires MLIR (build with -Dmlir=true)", .{});
@@ -279,13 +279,9 @@ pub fn main() !void {
         const serialized = try demos.read_bytes_from_path(gpa, opts.path);
         defer gpa.free(serialized);
 
-        var exe = try pjrt_backend.load_serialized_executable(serialized, null);
-        defer pjrt_backend.deinit_executable(&exe);
-
-        // Wrap PJRT executable as opaque handle for the demo
-        const iface_exe = zg.backend.pjrt.Backend.wrap_executable(&pjrt_backend, exe) catch return error.OutOfMemory;
-        defer b.deinit_executable(iface_exe);
-        return demos.run_demo_executable(gpa, b, device, iface_exe);
+        const exe = try b.load_serialized(serialized);
+        defer b.deinit_executable(exe);
+        return demos.run_demo_executable(gpa, b, device, exe);
     }
 
     if (cmd.sub_cmd) |sub| {
@@ -309,9 +305,9 @@ fn require_mkl() error{MklUnavailable} {
 
 fn run_tvm_demo(
     gpa: std.mem.Allocator,
-    M: usize,
-    N: usize,
-    K: usize,
+    M: i64,
+    N: i64,
+    K: i64,
     target_kind: if (build_options.has_tvm) zg.tvm.tir.TargetKind else void,
     base_work_dir: []const u8,
 ) !void {
@@ -329,11 +325,11 @@ fn run_tvm_demo(
     var tuned_mut = tuned;
     defer tuned_mut.deinit();
 
-    const a = try gpa.alloc(f32, M * K);
+    const a = try gpa.alloc(f32, @intCast(M * K));
     defer gpa.free(a);
-    const b = try gpa.alloc(f32, K * N);
+    const b = try gpa.alloc(f32, @intCast(K * N));
     defer gpa.free(b);
-    const result = try gpa.alloc(f32, M * N);
+    const result = try gpa.alloc(f32, @intCast(M * N));
     defer gpa.free(result);
 
     for (a, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.1;
@@ -344,9 +340,9 @@ fn run_tvm_demo(
 
     switch (target_kind) {
         .cpu => {
-            var shape_a = [_]i64{ @intCast(M), @intCast(K) };
-            var shape_b = [_]i64{ @intCast(K), @intCast(N) };
-            var shape_c = [_]i64{ @intCast(M), @intCast(N) };
+            var shape_a = [_]i64{ M, K };
+            var shape_b = [_]i64{ K, N };
+            var shape_c = [_]i64{ M, N };
 
             var dl_a = dlpack_mod.ManagedTensor.borrowing(
                 dlpack_mod.Tensor.init_contiguous(f32, @constCast(a), &shape_a),
@@ -370,9 +366,9 @@ fn run_tvm_demo(
             });
         },
         .cuda => {
-            var shape_a = [_]i64{ @intCast(M), @intCast(K) };
-            var shape_b = [_]i64{ @intCast(K), @intCast(N) };
-            var shape_c = [_]i64{ @intCast(M), @intCast(N) };
+            var shape_a = [_]i64{ M, K };
+            var shape_b = [_]i64{ K, N };
+            var shape_c = [_]i64{ M, N };
 
             const dl_a = try dlpack_mod.ManagedTensor.heap_borrowing(
                 gpa,
@@ -405,7 +401,7 @@ fn run_tvm_demo(
     std.log.info("TVM matmul {d}x{d}x{d} ({s}): {d:.3} ms", .{ M, N, K, @tagName(target_kind), ms });
 
     const expected = @as(f32, @floatFromInt(K - 1)) * @as(f32, @floatFromInt(K - 1)) * 0.01 * @as(f32, @floatFromInt(K)) / 2.0;
-    std.log.info("result[M-1,N-1] = {d:.6} (expected ~{d:.6})", .{ result[M * N - 1], expected });
+    std.log.info("result[M-1,N-1] = {d:.6} (expected ~{d:.6})", .{ result[@as(usize, @intCast(M * N - 1))], expected });
 }
 
 fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {

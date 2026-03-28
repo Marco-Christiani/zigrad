@@ -1,6 +1,6 @@
-/// Centralized C imports for PJRT
-///
-/// Multiple @cImport calls create incompatible types, so we centralize here.
+//! Centralized C imports for PJRT
+//!
+//! Multiple @cImport calls create incompatible types, so we centralize here.
 pub const c = @cImport({
     @cDefine("_GNU_SOURCE", "1");
     @cInclude("dlfcn.h");

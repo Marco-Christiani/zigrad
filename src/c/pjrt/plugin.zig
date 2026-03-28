@@ -1,15 +1,14 @@
-/// PJRT Plugin Loader
-///
-/// Loads PJRT plugins from explicit paths using dlopen.
-///
-/// Usage:
-///   const api = try load_plugin("/path/to/pjrt_cpu_plugin.so");
-///   defer unload_plugin(api);
+//! PJRT Plugin Loader
+//!
+//! Loads PJRT plugins from explicit paths using dlopen.
+//!
+//! Usage:
+//!   const api = try load_plugin("/path/to/pjrt_cpu_plugin.so");
+//!   defer unload_plugin(api);
 const std = @import("std");
 const api_mod = @import("api.zig");
 const Api = api_mod.Api;
-const c_mod = @import("c.zig");
-const c = c_mod.c;
+const c = @import("c.zig").c;
 const DlHandle = ?*anyopaque;
 
 var cached_api: ?Api = null;
@@ -71,11 +70,11 @@ fn canonicalize_path(path: []const u8) ![]const u8 {
 /// Load PJRT plugin from explicit path
 ///
 /// Steps:
-/// 1. dlopen(path, RTLD_NOW | RTLD_LOCAL)
-/// 2. dlsym(handle, "GetPjrtApi")
-/// 3. Call GetPjrtApi() to get PJRT_Api*
-/// 4. Optionally call PJRT_Plugin_Initialize
-///
+///  1. If GPU plugin, preload libs
+///  2. dlopen(path, RTLD_NOW | RTLD_LOCAL)
+///  3. dlsym(handle, "GetPjrtApi")
+///  4. Call GetPjrtApi() to get PJRT_Api*
+///  5. Optionally call PJRT_Plugin_Initialize
 pub fn load_plugin(path: []const u8) !Api {
     const debug = debug_enabled();
 
@@ -180,6 +179,7 @@ pub const PreloadError = error{
 /// This assumes build/install/runtime has arranged for the dynamic loader to
 /// find these (e.g. Docker GPU injection, or on NixOS: /run/opengl-driver/lib
 /// in RUNPATH).
+/// TODO: this is the wrong location now.
 pub fn preload_host_nvidia(verbose: bool) PreloadError!HostNvidiaHandles {
     // RTLD_GLOBAL is often important for driver-side symbol visibility when
     // downstream DSOs expect to resolve CUDA driver symbols.
@@ -221,6 +221,7 @@ fn load_from_handle(handle: *anyopaque, canonical_path: []const u8) !Api {
 
     var api = try Api.init(handle, get_api_fn);
 
+    // TODO: review this dead code
     // if (c.dlsym(handle, "PJRT_Plugin_Initialize")) |init_sym| {
     //     const init_fn: *const fn (*c.PJRT_Plugin_Initialize_Args) callconv(.c) ?*c.PJRT_Error =
     //         @ptrCast(@alignCast(init_sym));

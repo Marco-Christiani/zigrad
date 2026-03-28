@@ -42,26 +42,26 @@ pub fn run_demo_executable(
         2.0, 2.0,
     };
 
-    const shape_a = zg.utils.Shape{ .dims = &.{ 2, 3 } };
-    const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
-    const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
+    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
+    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
+    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
 
-    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    const dev_a = try b.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    const dev_a = try b.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
     defer b.deinit_buffer(dev_a);
-    const dev_b = try b.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    const dev_b = try b.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
     defer b.deinit_buffer(dev_b);
-    const dev_c = try b.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    const dev_c = try b.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
     defer b.deinit_buffer(dev_c);
 
     const result = try b.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
@@ -73,11 +73,12 @@ pub fn run_demo_executable(
 
     if (result.outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
+    var out_host = try zg.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    const ev = try b.buffer_to_host(result.outputs[0], out_host.data);
-    defer b.deinit_event(ev);
-    try b.await_event(ev);
+    if (try b.buffer_to_host(result.outputs[0], out_host.data_mut())) |ev| {
+        defer b.deinit_event(ev);
+        try b.await_event(ev);
+    }
 
     const out = out_host.as_slice(f32)[0..4];
     const expected = [_]f32{
@@ -160,30 +161,30 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
         1.0, 1.0,
     };
 
-    const shape_a = zg.utils.Shape{ .dims = &.{ 2, 3 } };
-    const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
-    const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
+    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
+    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
+    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
 
-    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
-    var host_ct = try zg.utils.HostBuffer.from_slice(allocator, &CtOut, shape_c, .f32);
+    var host_ct = try zg.HostBuffer.from_slice(allocator, &CtOut, shape_c, .f32);
     defer host_ct.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
-    const dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    const dev_a = try backend.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
     defer backend.deinit_buffer(dev_a);
-    const dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    const dev_b = try backend.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
     defer backend.deinit_buffer(dev_b);
-    const dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    const dev_c = try backend.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
     defer backend.deinit_buffer(dev_c);
-    const dev_ct = try backend.buffer_from_host(device, host_ct.data, .f32, dims_c[0..]);
+    const dev_ct = try backend.buffer_from_host(device, host_ct.data(), .f32, dims_c[0..]);
     defer backend.deinit_buffer(dev_ct);
 
     const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct }, .{});
@@ -195,23 +196,23 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
 
     if (result.outputs.len != 3) return error.UnexpectedOutputs;
 
-    var out_a = try zg.utils.HostBuffer.init(allocator, shape_a, .f32);
+    var out_a = try zg.HostBuffer.init(allocator, shape_a, .f32);
     defer out_a.deinit();
-    var out_b = try zg.utils.HostBuffer.init(allocator, shape_b, .f32);
+    var out_b = try zg.HostBuffer.init(allocator, shape_b, .f32);
     defer out_b.deinit();
-    var out_c = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
+    var out_c = try zg.HostBuffer.init(allocator, shape_c, .f32);
     defer out_c.deinit();
 
-    const ev_a = try backend.buffer_to_host(result.outputs[0], out_a.data);
-    defer backend.deinit_event(ev_a);
-    const ev_b = try backend.buffer_to_host(result.outputs[1], out_b.data);
-    defer backend.deinit_event(ev_b);
-    const ev_c = try backend.buffer_to_host(result.outputs[2], out_c.data);
-    defer backend.deinit_event(ev_c);
+    const ev_a = try backend.buffer_to_host(result.outputs[0], out_a.data_mut());
+    defer if (ev_a) |ev| backend.deinit_event(ev);
+    const ev_b = try backend.buffer_to_host(result.outputs[1], out_b.data_mut());
+    defer if (ev_b) |ev| backend.deinit_event(ev);
+    const ev_c = try backend.buffer_to_host(result.outputs[2], out_c.data_mut());
+    defer if (ev_c) |ev| backend.deinit_event(ev);
 
-    try backend.await_event(ev_a);
-    try backend.await_event(ev_b);
-    try backend.await_event(ev_c);
+    if (ev_a) |ev| try backend.await_event(ev);
+    if (ev_b) |ev| try backend.await_event(ev);
+    if (ev_c) |ev| try backend.await_event(ev);
 
     const got_a = out_a.as_slice(f32)[0..6];
     const got_b = out_b.as_slice(f32)[0..6];
@@ -240,7 +241,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
 
 pub fn run_train_demo(
     allocator: std.mem.Allocator,
-    backend_handle: *zg.Backend,
+    backend: *zg.Backend,
     device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
@@ -249,63 +250,81 @@ pub fn run_train_demo(
     steps: usize,
     quiet: bool,
 ) !void {
-    const TensorSpec = zg.frontend.TensorSpec;
+    const Tensor = zg.Tensor;
 
     const ParamsSpec = struct {
-        w1: TensorSpec,
-        b1: TensorSpec,
-        w2: TensorSpec,
-        b2: TensorSpec,
-        w3: TensorSpec,
-        b3: TensorSpec,
+        w1: Tensor,
+        b1: Tensor,
+        w2: Tensor,
+        b2: Tensor,
+        w3: Tensor,
+        b3: Tensor,
     };
 
     const BatchSpec = struct {
-        x: TensorSpec,
-        y: TensorSpec,
+        x: Tensor,
+        y: Tensor,
     };
 
-    const LossFn = struct {
-        fn call(params: anytype, batch: anytype) !zg.frontend.Tensor {
-            const bs: usize = 64;
-            const h1: usize = 128;
-            const h2: usize = 64;
-            const out: usize = 10;
+    const Fns = struct {
+        fn loss(params: ParamsSpec, batch: BatchSpec) !Tensor {
+            const bs_: i64 = 64;
+            const h1_: i64 = 128;
+            const h2_: i64 = 64;
+            const out_: i64 = 10;
 
             const z1 = try batch.x.matmul(params.w1);
-            const b1b = try params.b1.broadcast_in_dim(&.{ bs, h1 }, &.{1});
+            const b1b = try params.b1.broadcast_in_dim(&.{ bs_, h1_ }, &.{1});
             const a1 = try z1.add(b1b);
 
             const z2 = try a1.matmul(params.w2);
-            const b2b = try params.b2.broadcast_in_dim(&.{ bs, h2 }, &.{1});
+            const b2b = try params.b2.broadcast_in_dim(&.{ bs_, h2_ }, &.{1});
             const a2 = try z2.add(b2b);
 
             const z3 = try a2.matmul(params.w3);
-            const b3b = try params.b3.broadcast_in_dim(&.{ bs, out }, &.{1});
+            const b3b = try params.b3.broadcast_in_dim(&.{ bs_, out_ }, &.{1});
             const preds = try z3.add(b3b);
             const diff = try preds.sub(batch.y);
             const sq = try diff.mul(diff);
             return try sq.reduce_sum(&.{ 0, 1 });
         }
+
+        fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {
+            var vg = try zg.frontend.transforms.value_and_grad(loss, .{ params, batch });
+            defer vg.deinit();
+            var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
+            defer params_tree.deinit();
+            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, @as(f32, 1e-2), struct {
+                fn f(lr: f32, param: Tensor, grad: Tensor) anyerror!Tensor {
+                    return zg.frontend.optim.sgd_update(param, grad, lr);
+                }
+            }.f);
+            defer updated.deinit();
+            return .{
+                .loss_val = vg.value,
+                .updated = updated.extract(ParamsSpec),
+            };
+        }
     };
 
-    const bs: usize = 64;
-    const in_dim: usize = 784;
-    const h1: usize = 128;
-    const h2: usize = 64;
-    const out_dim: usize = 10;
+    const bs: i64 = 64;
+    const in_dim: i64 = 784;
+    const h1: i64 = 128;
+    const h2: i64 = 64;
+    const out_dim: i64 = 10;
 
+    const donatable: Tensor.AbstractOpts = .{ .donatable = true };
     const params_spec = ParamsSpec{
-        .w1 = .{ .dtype = .f32, .dims = &.{ in_dim, h1 } },
-        .b1 = .{ .dtype = .f32, .dims = &.{h1} },
-        .w2 = .{ .dtype = .f32, .dims = &.{ h1, h2 } },
-        .b2 = .{ .dtype = .f32, .dims = &.{h2} },
-        .w3 = .{ .dtype = .f32, .dims = &.{ h2, out_dim } },
-        .b3 = .{ .dtype = .f32, .dims = &.{out_dim} },
+        .w1 = Tensor.abstract(.f32, &.{ in_dim, h1 }, donatable),
+        .b1 = Tensor.abstract(.f32, &.{h1}, donatable),
+        .w2 = Tensor.abstract(.f32, &.{ h1, h2 }, donatable),
+        .b2 = Tensor.abstract(.f32, &.{h2}, donatable),
+        .w3 = Tensor.abstract(.f32, &.{ h2, out_dim }, donatable),
+        .b3 = Tensor.abstract(.f32, &.{out_dim}, donatable),
     };
     const batch_spec = BatchSpec{
-        .x = .{ .dtype = .f32, .dims = &.{ bs, in_dim } },
-        .y = .{ .dtype = .f32, .dims = &.{ bs, out_dim } },
+        .x = Tensor.abstract(.f32, &.{ bs, in_dim }, .{}),
+        .y = Tensor.abstract(.f32, &.{ bs, out_dim }, .{}),
     };
     const inputs_spec = .{ params_spec, batch_spec };
 
@@ -320,23 +339,21 @@ pub fn run_train_demo(
     }
 
     const train = zg.frontend.train;
-    var compiled = try train.compile_train_step(allocator, backend_handle, device, LossFn.call, inputs_spec, 6, .{
-        .optimizer = .{ .lr = 1e-2 },
-        .compile = compile_cfg,
-    });
-    defer backend_handle.deinit_executable(compiled.exe);
+    var compiled = try zg.frontend.compile(Fns.train_step, allocator, backend, device, inputs_spec, compile_cfg);
+    defer backend.deinit_executable(compiled.exe);
+    defer compiled.deinit();
 
-    const true_w1 = try allocator.alloc(f32, in_dim * h1);
+    const true_w1 = try allocator.alloc(f32, @intCast(in_dim * h1));
     defer allocator.free(true_w1);
-    const true_b1 = try allocator.alloc(f32, h1);
+    const true_b1 = try allocator.alloc(f32, @intCast(h1));
     defer allocator.free(true_b1);
-    const true_w2 = try allocator.alloc(f32, h1 * h2);
+    const true_w2 = try allocator.alloc(f32, @intCast(h1 * h2));
     defer allocator.free(true_w2);
-    const true_b2 = try allocator.alloc(f32, h2);
+    const true_b2 = try allocator.alloc(f32, @intCast(h2));
     defer allocator.free(true_b2);
-    const true_w3 = try allocator.alloc(f32, h2 * out_dim);
+    const true_w3 = try allocator.alloc(f32, @intCast(h2 * out_dim));
     defer allocator.free(true_w3);
-    const true_b3 = try allocator.alloc(f32, out_dim);
+    const true_b3 = try allocator.alloc(f32, @intCast(out_dim));
     defer allocator.free(true_b3);
 
     fill_pattern(true_w1, 1e-6, 0.0);
@@ -346,48 +363,29 @@ pub fn run_train_demo(
     fill_pattern(true_w3, 1e-6, 0.0);
     fill_pattern(true_b3, 1e-6, 0.0);
 
-    const shape_w1 = zg.utils.Shape{ .dims = &.{ in_dim, h1 } };
-    const shape_b1 = zg.utils.Shape{ .dims = &.{h1} };
-    const shape_w2 = zg.utils.Shape{ .dims = &.{ h1, h2 } };
-    const shape_b2 = zg.utils.Shape{ .dims = &.{h2} };
-    const shape_w3 = zg.utils.Shape{ .dims = &.{ h2, out_dim } };
-    const shape_b3 = zg.utils.Shape{ .dims = &.{out_dim} };
-    const shape_x = zg.utils.Shape{ .dims = &.{ bs, in_dim } };
-    const shape_y = zg.utils.Shape{ .dims = &.{ bs, out_dim } };
+    // Build host buffers from tree
+    var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
+    defer spec_tree.deinit();
 
-    var host_w1 = try zg.utils.HostBuffer.init(allocator, shape_w1, .f32);
-    defer host_w1.deinit();
-    var host_b1 = try zg.utils.HostBuffer.init(allocator, shape_b1, .f32);
-    defer host_b1.deinit();
-    var host_w2 = try zg.utils.HostBuffer.init(allocator, shape_w2, .f32);
-    defer host_w2.deinit();
-    var host_b2 = try zg.utils.HostBuffer.init(allocator, shape_b2, .f32);
-    defer host_b2.deinit();
-    var host_w3 = try zg.utils.HostBuffer.init(allocator, shape_w3, .f32);
-    defer host_w3.deinit();
-    var host_b3 = try zg.utils.HostBuffer.init(allocator, shape_b3, .f32);
-    defer host_b3.deinit();
-    var host_x = try zg.utils.HostBuffer.init(allocator, shape_x, .f32);
-    defer host_x.deinit();
-    var host_y = try zg.utils.HostBuffer.init(allocator, shape_y, .f32);
-    defer host_y.deinit();
+    var host_tree = try spec_tree.map(zg.HostBuffer, allocator, struct {
+        fn f(alloc: std.mem.Allocator, spec: Tensor) anyerror!zg.HostBuffer {
+            return zg.HostBuffer.init(alloc, spec.shape, spec.dtype);
+        }
+    }.f);
+    defer host_tree.deinit_with(zg.HostBuffer.deinit);
 
-    fill_pattern(host_w1.as_slice(f32), 1e-7, 0.0);
-    fill_pattern(host_b1.as_slice(f32), 1e-7, 0.0);
-    fill_pattern(host_w2.as_slice(f32), 1e-7, 0.0);
-    fill_pattern(host_b2.as_slice(f32), 1e-7, 0.0);
-    fill_pattern(host_w3.as_slice(f32), 1e-7, 0.0);
-    fill_pattern(host_b3.as_slice(f32), 1e-7, 0.0);
-    fill_inputs(host_x.as_slice(f32));
+    // Fill param buffers with pattern, batch input with data
+    for (host_tree.leaves[0..6]) |*buf| fill_pattern(buf.as_slice(f32), 1e-7, 0.0);
+    fill_inputs(host_tree.leaves[6].as_slice(f32));
 
-    const scratch1 = try allocator.alloc(f32, bs * h1);
+    // Generate targets from true weights
+    const scratch1 = try allocator.alloc(f32, @intCast(bs * h1));
     defer allocator.free(scratch1);
-    const scratch2 = try allocator.alloc(f32, bs * h2);
+    const scratch2 = try allocator.alloc(f32, @intCast(bs * h2));
     defer allocator.free(scratch2);
-
     try fill_targets(
-        &host_y,
-        &host_x,
+        &host_tree.leaves[7],
+        &host_tree.leaves[6],
         true_w1,
         true_b1,
         true_w2,
@@ -396,96 +394,71 @@ pub fn run_train_demo(
         true_b3,
         scratch1,
         scratch2,
-        bs,
-        in_dim,
-        h1,
-        h2,
-        out_dim,
+        @intCast(bs),
+        @intCast(in_dim),
+        @intCast(h1),
+        @intCast(h2),
+        @intCast(out_dim),
     );
 
-    var total_ns: u64 = 0;
+    // Upload to device
+    var dev_tree = try backend.transfer(device, &host_tree, .to_device);
+    defer dev_tree.deinit(); // array only, buffer ownership managed below
 
-    const upload = zg.frontend.upload_host_buffer;
-    const tmp_w1 = try upload(allocator, backend_handle, device, &host_w1);
-    const tmp_b1 = try upload(allocator, backend_handle, device, &host_b1);
-    const tmp_w2 = try upload(allocator, backend_handle, device, &host_w2);
-    const tmp_b2 = try upload(allocator, backend_handle, device, &host_b2);
-    const tmp_w3 = try upload(allocator, backend_handle, device, &host_w3);
-    const tmp_b3 = try upload(allocator, backend_handle, device, &host_b3);
-    const tmp_x = try upload(allocator, backend_handle, device, &host_x);
-    const tmp_y = try upload(allocator, backend_handle, device, &host_y);
-
-    var loss_host = try zg.utils.HostBuffer.init(allocator, .{ .dims = &.{} }, .f32);
+    var loss_host = try zg.HostBuffer.init(allocator, .{}, .f32);
     defer loss_host.deinit();
 
-    var state = try train.TrainState.init(
+    var state = try train.TrainState.init_from_model(
         allocator,
         &compiled,
-        backend_handle,
-        &.{ tmp_w1.handle, tmp_b1.handle, tmp_w2.handle, tmp_b2.handle, tmp_w3.handle, tmp_b3.handle },
-        &.{ tmp_x.handle, tmp_y.handle },
+        backend,
+        dev_tree.leaves,
     );
-    defer state.deinit();
-    // Batch buffers are not owned by TrainState, deinit them separately
-    defer {
-        backend_handle.deinit_buffer(tmp_x);
-        backend_handle.deinit_buffer(tmp_y);
-    }
+    defer state.deinit(.all);
 
-    var warmup: usize = 0;
-    while (warmup < warmup_steps) : (warmup += 1) {
+    for (0..warmup_steps) |_| {
         const result = try state.step();
         if (result.event) |ev| {
-            try backend_handle.await_event(ev);
-            backend_handle.deinit_event(ev);
+            try backend.await_event(ev);
+            backend.deinit_event(ev);
         }
         if (!quiet) {
-            const loss_ev = try backend_handle.buffer_to_host(result.loss_buf, loss_host.data);
-            try backend_handle.await_event(loss_ev);
-            backend_handle.deinit_event(loss_ev);
+            if (try backend.buffer_to_host(result.loss_buf, loss_host.data_mut())) |loss_ev| {
+                try backend.await_event(loss_ev);
+                backend.deinit_event(loss_ev);
+            }
         }
-        backend_handle.deinit_buffer(result.loss_buf);
+        backend.deinit_buffer(result.loss_buf);
     }
 
-    var step_i: usize = 0;
-    while (step_i < steps) : (step_i += 1) {
-        var timer = try std.time.Timer.start();
+    var loop_timer = zg.utils.LoopTimer{ .label = "train-demo", .quiet = quiet };
+    for (0..steps) |_| {
+        try loop_timer.start_step();
         const result = try state.step();
-        const dispatch_ns = timer.lap();
+        loop_timer.mark("dispatch");
 
         if (result.event) |ev| {
-            try backend_handle.await_event(ev);
-            backend_handle.deinit_event(ev);
+            try backend.await_event(ev);
+            backend.deinit_event(ev);
         }
-        const wait_ns = timer.lap();
+        loop_timer.mark("exec");
 
         const loss: ?f32 = if (quiet) null else blk: {
-            const loss_ev = try backend_handle.buffer_to_host(result.loss_buf, loss_host.data);
-            try backend_handle.await_event(loss_ev);
-            backend_handle.deinit_event(loss_ev);
+            if (try backend.buffer_to_host(result.loss_buf, loss_host.data_mut())) |loss_ev| {
+                try backend.await_event(loss_ev);
+                backend.deinit_event(loss_ev);
+            }
             break :blk loss_host.as_slice(f32)[0];
         };
-        const loss_read_ns = timer.lap();
+        loop_timer.mark("loss_read");
 
-        backend_handle.deinit_buffer(result.loss_buf);
+        backend.deinit_buffer(result.loss_buf);
+        loop_timer.mark("cleanup");
 
-        const cleanup_ns = timer.lap();
-        const step_ns = dispatch_ns + wait_ns + loss_read_ns + cleanup_ns;
-        total_ns += step_ns;
-        const step_ms = @as(f64, @floatFromInt(step_ns)) / std.time.ns_per_ms;
-        const dispatch_ms = @as(f64, @floatFromInt(dispatch_ns)) / std.time.ns_per_ms;
-        const wait_ms = @as(f64, @floatFromInt(wait_ns)) / std.time.ns_per_ms;
-        const loss_ms = @as(f64, @floatFromInt(loss_read_ns)) / std.time.ns_per_ms;
-        const cleanup_ms = @as(f64, @floatFromInt(cleanup_ns)) / std.time.ns_per_ms;
-        if (!quiet) {
-            std.log.info("train-demo step {d}: loss={d:.6} dispatch={d:.3}ms wait={d:.3}ms loss={d:.3}ms cleanup={d:.3}ms total={d:.3}ms", .{
-                step_i, loss.?, dispatch_ms, wait_ms, loss_ms, cleanup_ms, step_ms,
-            });
-        }
+        loop_timer.end_step(loss);
     }
 
-    const avg_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(steps));
-    std.log.info("train-demo avg_step_ms={d:.3}", .{avg_ms});
+    std.log.info("train-demo avg_step_ms={d:.3}", .{loop_timer.avg_ms()});
     std.log.info("OK: train-demo executed", .{});
 }
 
@@ -623,25 +596,25 @@ fn run_kernel_provider_demo_executable(
     const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
     const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
     const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
-    const shape_a = zg.utils.Shape{ .dims = &.{ 2, 3 } };
-    const shape_b = zg.utils.Shape{ .dims = &.{ 3, 2 } };
-    const shape_c = zg.utils.Shape{ .dims = &.{ 2, 2 } };
+    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
+    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
+    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
 
-    var host_a = try zg.utils.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
     defer host_a.deinit();
-    var host_b = try zg.utils.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
     defer host_b.deinit();
-    var host_c = try zg.utils.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
     defer host_c.deinit();
 
     const dims_a = [_]i64{ 2, 3 };
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
-    const dev_a = try backend.buffer_from_host(device, host_a.data, .f32, dims_a[0..]);
+    const dev_a = try backend.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
     defer backend.deinit_buffer(dev_a);
-    const dev_b = try backend.buffer_from_host(device, host_b.data, .f32, dims_b[0..]);
+    const dev_b = try backend.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
     defer backend.deinit_buffer(dev_b);
-    const dev_c = try backend.buffer_from_host(device, host_c.data, .f32, dims_c[0..]);
+    const dev_c = try backend.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
     defer backend.deinit_buffer(dev_c);
 
     const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, exec_opts);
@@ -653,11 +626,12 @@ fn run_kernel_provider_demo_executable(
 
     if (result.outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zg.utils.HostBuffer.init(allocator, shape_c, .f32);
+    var out_host = try zg.HostBuffer.init(allocator, shape_c, .f32);
     defer out_host.deinit();
-    const ev = try backend.buffer_to_host(result.outputs[0], out_host.data);
-    defer backend.deinit_event(ev);
-    try backend.await_event(ev);
+    if (try backend.buffer_to_host(result.outputs[0], out_host.data_mut())) |ev| {
+        defer backend.deinit_event(ev);
+        try backend.await_event(ev);
+    }
 
     // dot(A, B) = [[58, 64], [139, 154]]
     // (n*dot + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]
@@ -747,10 +721,10 @@ pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     var b = try zg.frontend.Builder.init(&program, "main");
     defer b.deinit();
 
-    const a = try b.param(.{ .dtype = .f32, .dims = &.{ 2, 3 } });
-    const b_t = try b.param(.{ .dtype = .f32, .dims = &.{ 3, 2 } });
-    const c = try b.param(.{ .dtype = .f32, .dims = &.{ 2, 2 } });
-    const d = try b.param(.{ .dtype = .f32, .dims = &.{ 2, 2 } });
+    const a = try b.param(zg.Tensor.abstract(.f32, &.{ 2, 3 }, .{}));
+    const b_t = try b.param(zg.Tensor.abstract(.f32, &.{ 3, 2 }, .{}));
+    const c = try b.param(zg.Tensor.abstract(.f32, &.{ 2, 2 }, .{}));
+    const d = try b.param(zg.Tensor.abstract(.f32, &.{ 2, 2 }, .{}));
 
     const pre = try c.add(d);
 
@@ -854,8 +828,8 @@ fn fill_inputs(x: []f32) void {
 }
 
 fn fill_targets(
-    host_y: *zg.utils.HostBuffer,
-    host_x: *zg.utils.HostBuffer,
+    host_y: *zg.HostBuffer,
+    host_x: *zg.HostBuffer,
     w1: []const f32,
     b1: []const f32,
     w2: []const f32,
@@ -871,9 +845,11 @@ fn fill_targets(
     out_dim: usize,
 ) !void {
     if (host_y.dtype != .f32 or host_x.dtype != .f32) return error.UnsupportedDType;
-    if (host_x.shape.dims.len != 2 or host_y.shape.dims.len != 2) return error.ShapeMismatch;
-    if (host_x.shape.dims[0] != bs or host_x.shape.dims[1] != in_dim) return error.ShapeMismatch;
-    if (host_y.shape.dims[0] != bs or host_y.shape.dims[1] != out_dim) return error.ShapeMismatch;
+    if (host_x.shape.len != 2 or host_y.shape.len != 2) return error.ShapeMismatch;
+    const x_dims = host_x.shape.const_slice();
+    const y_dims = host_y.shape.const_slice();
+    if (x_dims[0] != @as(i64, @intCast(bs)) or x_dims[1] != @as(i64, @intCast(in_dim))) return error.ShapeMismatch;
+    if (y_dims[0] != @as(i64, @intCast(bs)) or y_dims[1] != @as(i64, @intCast(out_dim))) return error.ShapeMismatch;
 
     if (w1.len != in_dim * h1 or b1.len != h1) return error.ShapeMismatch;
     if (w2.len != h1 * h2 or b2.len != h2) return error.ShapeMismatch;
@@ -940,9 +916,9 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     const seq: i64 = 4;
     const head_dim: i64 = 64;
 
-    const q = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
-    const k = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
-    const v = try b.param(.{ .dtype = .f32, .dims = &.{ batch, seq, head_dim } });
+    const q = try b.param(zg.Tensor.abstract(.f32, &.{ batch, seq, head_dim }, .{}));
+    const k = try b.param(zg.Tensor.abstract(.f32, &.{ batch, seq, head_dim }, .{}));
+    const v = try b.param(zg.Tensor.abstract(.f32, &.{ batch, seq, head_dim }, .{}));
 
     // entire attention block as a single TVM-kernelizable region
     try b.push_region("attention", .{ .kernelize = "tvm" });
@@ -958,20 +934,20 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     // scale scores
     const scale_val = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
     const scale = try b.scalar_literal(zg.pr.ops.types.scalar_literal(.f32, scale_val));
-    const scale_broadcast = try scale.broadcast_in_dim(scores.tensor.shape.dims, &.{});
+    const scale_broadcast = try scale.broadcast_in_dim(scores.dims(), &.{});
     const scaled = try scores.mul(scale_broadcast);
 
     // softmax over last dim [S]
-    const rank = scaled.tensor.shape.dims.len;
+    const rank = scaled.rank();
     const axis: i64 = @intCast(rank - 1);
     const max_val = try scaled.reduce_max(&.{axis});
 
     // broadcast max back to full shape for stability
-    const max_broadcast = try max_val.broadcast_in_dim(scaled.tensor.shape.dims, &.{ 0, 1 });
+    const max_broadcast = try max_val.broadcast_in_dim(scaled.dims(), &.{ 0, 1 });
     const shifted = try scaled.sub(max_broadcast);
     const exp_vals = try shifted.exp();
     const sum_exp = try exp_vals.reduce_sum(&.{axis});
-    const sum_broadcast = try sum_exp.broadcast_in_dim(exp_vals.tensor.shape.dims, &.{ 0, 1 });
+    const sum_broadcast = try sum_exp.broadcast_in_dim(exp_vals.dims(), &.{ 0, 1 });
     const attn_weights = try exp_vals.div(sum_broadcast);
 
     // output: attn_weights @ V  ->  [B, S, D]

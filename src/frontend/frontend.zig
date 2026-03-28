@@ -215,9 +215,9 @@ pub const CompiledModel = struct {
 ///  and compile through the pipeline into a backend executable.
 ///
 /// `func` is a comptime-known function whose parameters match the structure
-///  of `specs`. Each Tensor leaf in `specs` becomes a traced parameter.
-///  Struct/tuple nesting in `specs` is preserved — the function receives the
-///  same structure with traced Tensors in place of abstract ones.
+///   of `specs`. Each Tensor leaf in `specs` becomes a traced parameter.
+///   Struct/tuple nesting in `specs` is preserved, the function receives the
+///   same structure with traced Tensors in place of abstract ones.
 ///
 /// `config.transform` controls AD application:
 ///  - `.forward`: compile the function as traced (no AD).
@@ -281,7 +281,7 @@ pub fn compile(
             };
         },
         .value_and_grad => {
-            // Trace the loss function.
+            // trace loss function
             var loss_builder = try pr.FunctionBuilder.init(&program, "loss");
             defer loss_builder.deinit();
 
@@ -292,15 +292,16 @@ pub fn compile(
             const loss_id = try output_tensors[0].get_id();
             const loss_func = try loss_builder.finish(&.{loss_id});
 
-            // Register the loss function for IR debuggability (see transforms.zig).
-            // Never called at runtime, the VJP replays forward equations internally.
+            // register loss function for IR debuggability (see transforms.zig).
+            // never called at runtime, the VJP replays forward equations internally.
+            // TODO: open design question, this is literally creating dead+duplicated code in ir dumps.
             try program.add_function(loss_func);
 
-            // VJP transform.
+            // VJP transform
             const vjp_func = try ad.vjp_with_value(program.allocator(), &program, loss_func, "loss_vjp");
             try program.add_function(vjp_func);
 
-            // Build step function: primals → loss_vjp(primals, cotangent) → [value, grads...].
+            // build step function: primals -> loss_vjp(primals, cotangent) -> [value, grads...]
             var step_builder = try pr.FunctionBuilder.init(&program, config.entry_name);
             defer step_builder.deinit();
 
@@ -310,7 +311,7 @@ pub fn compile(
                 primals[i] = try step_builder.param_tensor(spec.dtype, spec.shape.const_slice());
             }
 
-            // Emit cotangent (ones_like for the scalar loss).
+            // emit cotangent (ones_like for the scalar loss)
             const loss_t = output_tensors[0];
             const cot = try ad.emit_cotangent(&step_builder, .{
                 .dtype = loss_t.dtype,
@@ -356,8 +357,8 @@ fn trace_and_call(
     builder: *pr.FunctionBuilder,
     allocator: std.mem.Allocator,
 ) ![]Tensor {
-    // Map abstract specs to traced parameters in the builder.
-    // Arena-allocated via spec_tree's allocator (the program arena).
+    // map abstract specs to traced parameters in the builder
+    // arena-allocated via spec_tree's allocator (the program arena)
     var traced = try spec_tree.map(Tensor, builder, struct {
         fn f(b: *pr.FunctionBuilder, spec: Tensor) anyerror!Tensor {
             return Tensor.param(b, spec.dtype, spec.shape.const_slice());

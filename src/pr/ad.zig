@@ -1,3 +1,10 @@
+/// Automatic differentiation transforms on PR functions.
+///
+/// This module implements the core AD transforms (VJP and JVP) at the PR
+/// level. It operates on `pr.Function` values: given a function, it produces
+/// a new function that computes derivatives.
+///
+/// This a lower layer. Higher-level entry points are in frontend.
 const std = @import("std");
 
 const pr = @import("pr.zig");
@@ -192,6 +199,14 @@ pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
 /// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
 pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
     return ad_impl(.jvp, allocator, program, func, name, true);
+}
+
+/// Emit a ones-like cotangent for VJP seeding.
+pub fn emit_cotangent(builder: *pr.FunctionBuilder, tensor: pr.Tensor) pr.BuildError!pr.VarId {
+    const lit = ops.types.scalar_literal(tensor.dtype, 1.0);
+    const scalar = try builder.literal_scalar(lit);
+    if (tensor.shape.rank() == 0) return scalar;
+    return try builder.broadcast_in_dim(scalar, tensor.shape.dims, &.{});
 }
 
 test "vjp produces gradients matching input shapes" {
