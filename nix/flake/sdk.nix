@@ -120,6 +120,8 @@ in {
     ireeLlvm = pkgs.callPackage ../iree-llvm.nix {inherit ireeLlvmSrc;};
     ireeCompiler = pkgs.callPackage ../iree-compiler.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
+      # include iree binaries
+      devel = true;
     };
     ireeRuntime = pkgs.callPackage ../iree-runtime.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;

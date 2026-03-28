@@ -1,6 +1,4 @@
 # nix/flake/checks.nix
-#
-# Hermetic flake checks (CI-ready, no host GPU required).
 {inputs, ...}: let
   zigradVersion = inputs.self.shortRev or inputs.self.dirtyShortRev or "dev";
 in {
