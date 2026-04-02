@@ -1,5 +1,6 @@
 /// Op Registry
 /// Central registry for all ops with comptime dispatch and validation.
+/// Each handler receives the op and its typed params directly.
 const std = @import("std");
 const pr = @import("../pr.zig");
 
@@ -12,7 +13,7 @@ pub const contraction = @import("contraction.zig");
 pub const shape = @import("shape.zig");
 pub const special = @import("special.zig");
 
-/// Map from Prim enum to op implementation struct
+/// Map from Prim enum to op implementation struct.
 pub fn OpFor(comptime prim: pr.Prim) type {
     return switch (prim) {
         .literal => constant.literal,
@@ -45,24 +46,20 @@ pub fn OpFor(comptime prim: pr.Prim) type {
     };
 }
 
-/// Comptime validation that all ops implement required interface
+// TODO: this should be refactored.
+// TODO: its reasonable to have a comptime flag that logs op interface completeness to make it easier to check coverage
+
+/// Comptime validation that all ops implement required interface.
 fn validate_op_interface() void {
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         const Op = OpFor(prim);
-
-        // Required methods
-        if (!@hasDecl(Op, "validate")) {
+        if (!@hasDecl(Op, "validate"))
             @compileError("Op " ++ @tagName(prim) ++ " missing validate()");
-        }
-        if (!@hasDecl(Op, "infer_output")) {
+        if (!@hasDecl(Op, "infer_output"))
             @compileError("Op " ++ @tagName(prim) ++ " missing infer_output()");
-        }
-        // Optional: vjp_forward/vjp_backward (AD support)
-        // These are checked at runtime when AD is requested
     }
 }
 
-// Run comptime validation
 comptime {
     validate_op_interface();
 }
@@ -71,29 +68,26 @@ comptime {
 // Dispatch Functions
 // ============================================================================
 
-/// Validate an equation using the op's validate function
-pub fn validate(func: pr.Function, eqn: pr.Eqn) pr.ValidationError!void {
-    const ctx = types.ValidateContext{ .func = func, .eqn = eqn };
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        if (eqn.prim == prim) {
-            return OpFor(prim).validate(ctx);
-        }
+/// Validate an op using the handler's validate function.
+pub fn validate(op: *const pr.Op) pr.ValidationError!void {
+    switch (op.params) {
+        inline else => |typed_params, tag| {
+            return OpFor(tag).validate(op, typed_params);
+        },
     }
-    unreachable;
 }
 
-/// Infer output type for an equation
-pub fn infer_output(builder: *pr.FunctionBuilder, prim: pr.Prim, inputs: []const pr.VarId, params: []const pr.Param) pr.BuildError!pr.Aval {
-    const ctx = types.InferContext{ .builder = builder, .inputs = inputs, .params = params };
-    inline for (comptime std.enums.values(pr.Prim)) |p| {
-        if (prim == p) {
-            return OpFor(p).infer_output(ctx);
-        }
+/// Infer output type for a set of params and inputs.
+/// Called by FunctionBuilder before the Op exists.
+pub fn infer_output(alloc: std.mem.Allocator, params: pr.Params, inputs: []const *pr.Var) pr.BuildError!pr.Aval {
+    switch (params) {
+        inline else => |typed_params, tag| {
+            return OpFor(tag).infer_output(alloc, inputs, typed_params);
+        },
     }
-    unreachable;
 }
 
-/// Check if an op supports VJP
+/// Check if an op supports VJP.
 pub fn has_vjp(prim: pr.Prim) bool {
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
@@ -104,7 +98,7 @@ pub fn has_vjp(prim: pr.Prim) bool {
     unreachable;
 }
 
-/// Check if an op has VJP forward (for primals computation)
+/// Check if an op has VJP forward (for primals computation).
 pub fn has_vjp_forward(prim: pr.Prim) bool {
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
@@ -114,38 +108,34 @@ pub fn has_vjp_forward(prim: pr.Prim) bool {
     unreachable;
 }
 
-/// Execute VJP forward pass for an equation
-pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        if (eqn.prim == prim) {
-            const Op = OpFor(prim);
-            if (@hasDecl(Op, "vjp_forward")) {
-                return Op.vjp_forward(ctx, eqn);
-            } else {
-                return error.UnsupportedEqn;
+/// Execute VJP forward pass for an op.
+pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+    switch (op.params) {
+        inline else => |typed_params, tag| {
+            const Handler = OpFor(tag);
+            if (@hasDecl(Handler, "vjp_forward")) {
+                return Handler.vjp_forward(ctx, op, typed_params);
             }
-        }
+            return error.UnsupportedEqn;
+        },
     }
-    unreachable;
 }
 
-/// Execute VJP backward pass for an equation
-pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        if (eqn.prim == prim) {
-            const Op = OpFor(prim);
-            if (@hasDecl(Op, "vjp_backward")) {
-                return Op.vjp_backward(ctx, eqn);
-            } else {
-                // No backward = zero gradient (e.g., literal)
-                return;
+/// Execute VJP backward pass for an op.
+pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+    switch (op.params) {
+        inline else => |typed_params, tag| {
+            const Handler = OpFor(tag);
+            if (@hasDecl(Handler, "vjp_backward")) {
+                return Handler.vjp_backward(ctx, op, typed_params);
             }
-        }
+            // No backward = zero gradient (e.g., literal)
+            return;
+        },
     }
-    unreachable;
 }
 
-/// Check if an op supports JVP
+/// Check if an op supports JVP.
 pub fn has_jvp(prim: pr.Prim) bool {
     inline for (comptime std.enums.values(pr.Prim)) |p| {
         if (prim == p) {
@@ -155,35 +145,30 @@ pub fn has_jvp(prim: pr.Prim) bool {
     unreachable;
 }
 
-/// Execute JVP for an equation (forward-mode tangent propagation).
-pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        if (eqn.prim == prim) {
-            const Op = OpFor(prim);
-            if (@hasDecl(Op, "jvp")) {
-                return Op.jvp(ctx, eqn);
-            } else {
-                return error.UnsupportedEqn;
+/// Execute JVP for an op (forward-mode tangent propagation).
+pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+    switch (op.params) {
+        inline else => |typed_params, tag| {
+            const Handler = OpFor(tag);
+            if (@hasDecl(Handler, "jvp")) {
+                return Handler.jvp(ctx, op, typed_params);
             }
-        }
+            return error.UnsupportedEqn;
+        },
     }
-    unreachable;
 }
 
-/// Format op-specific attributes for an equation
-pub fn format(writer: *types.Writer, func: pr.Function, eqn: pr.Eqn) types.FormatError!void {
-    const ctx = types.FormatContext{ .func = func, .eqn = eqn };
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        if (eqn.prim == prim) {
-            const Op = OpFor(prim);
-            if (@hasDecl(Op, "format")) {
-                return Op.format(writer, ctx);
-            } else {
-                return; // No format = nothing extra to show
+/// Format op-specific attributes.
+pub fn format(writer: *types.Writer, op: *const pr.Op) types.FormatError!void {
+    switch (op.params) {
+        inline else => |typed_params, tag| {
+            const Handler = OpFor(tag);
+            if (@hasDecl(Handler, "format")) {
+                return Handler.format(writer, op, typed_params);
             }
-        }
+            return;
+        },
     }
-    unreachable;
 }
 
 // ============================================================================
@@ -191,7 +176,6 @@ pub fn format(writer: *types.Writer, func: pr.Function, eqn: pr.Eqn) types.Forma
 // ============================================================================
 
 test "all prims have op implementations" {
-    // This is validated at comptime, but let's also verify at runtime
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         const Op = OpFor(prim);
         try std.testing.expect(@hasDecl(Op, "validate"));
@@ -199,9 +183,7 @@ test "all prims have op implementations" {
     }
 }
 
-// TODO: generate these tests at comptime
 test "vjp support detection" {
-    // Ops with full VJP support
     try std.testing.expect(has_vjp(.add));
     try std.testing.expect(has_vjp(.subtract));
     try std.testing.expect(has_vjp(.multiply));
@@ -222,14 +204,11 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp(.slice));
     try std.testing.expect(has_vjp(.concatenate));
 
-    // Ops with forward only (constants)
     try std.testing.expect(has_vjp_forward(.literal));
     try std.testing.expect(!has_vjp(.literal));
 
-    // Ops with VJP (convert has forward + backward)
     try std.testing.expect(has_vjp(.convert));
 
-    // Ops without VJP
     try std.testing.expect(!has_vjp(.maximum));
     try std.testing.expect(!has_vjp(.scatter));
     try std.testing.expect(!has_vjp(.compare));
@@ -238,20 +217,17 @@ test "vjp support detection" {
 }
 
 test "jvp support detection" {
-    // Elementwise ops
     try std.testing.expect(has_jvp(.add));
     try std.testing.expect(has_jvp(.subtract));
     try std.testing.expect(has_jvp(.multiply));
     try std.testing.expect(has_jvp(.divide));
 
-    // Unary ops
     try std.testing.expect(has_jvp(.exp));
     try std.testing.expect(has_jvp(.log));
     try std.testing.expect(has_jvp(.rsqrt));
     try std.testing.expect(has_jvp(.logistic));
     try std.testing.expect(has_jvp(.convert));
 
-    // Shape ops
     try std.testing.expect(has_jvp(.reshape));
     try std.testing.expect(has_jvp(.transpose));
     try std.testing.expect(has_jvp(.broadcast_in_dim));
@@ -262,18 +238,14 @@ test "jvp support detection" {
     try std.testing.expect(has_jvp(.gather));
     try std.testing.expect(has_jvp(.iota));
 
-    // Contraction ops
     try std.testing.expect(has_jvp(.dot));
     try std.testing.expect(has_jvp(.dot_general));
 
-    // Constants
     try std.testing.expect(has_jvp(.literal));
 
-    // Compare/select
     try std.testing.expect(has_jvp(.compare));
     try std.testing.expect(has_jvp(.select));
 
-    // Unsupported
     try std.testing.expect(!has_jvp(.maximum));
     try std.testing.expect(!has_jvp(.scatter));
     try std.testing.expect(!has_jvp(.call));

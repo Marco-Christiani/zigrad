@@ -2,13 +2,10 @@
 ///!
 ///! Graph model: nodes = ops (params + equations), edges = vars (typed data flow).
 ///!
-///! Each equation becomes one node regardless of output count. Each variable
+///! Each op becomes one node regardless of output count. Each variable
 ///! flowing between ops becomes an edge carrying the var's name, dtype, shape,
 ///! and ZXPR snippet. This matches the PR's SSA structure where variables are
 ///! the named, typed connections between operations.
-///!
-///! Param serialization: each emitter (zxpr via ops.format, this file)
-///! necessarily renders the same Param union in a different syntax.
 const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
@@ -20,7 +17,7 @@ const var_name = zxpr.var_name;
 /// Emit a Function as a JSON graph.
 ///
 /// Nodes represent ops (params and equations). Edges represent variables.
-/// A param node has one outgoing var edge per consumer. An equation node
+/// A param node has one outgoing var edge per consumer. An op node
 /// has outgoing var edges for each of its output variables.
 pub fn emit(func: pr.Function, writer: *Writer) !void {
     try writer.writeAll("{");
@@ -29,42 +26,36 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
     try writer.writeAll("\"name\":");
     try write_json_string(writer, func.name);
 
-    // Build producer map: VarId -> node id string
-    // Params get "p0", "p1", ...; equations get "e0", "e1", ...
-    // Also track which VarIds are consumed as inputs (for edge generation).
-
     // "nodes"
     try writer.writeAll(",\"nodes\":[");
     var node_idx: usize = 0;
 
-    for (func.params, 0..) |param_id, pi| {
+    for (func.params, 0..) |param_var, pi| {
         if (node_idx > 0) try writer.writeAll(",");
-        try emit_param_node(writer, func, param_id, pi);
+        try emit_param_node(writer, param_var, pi);
         node_idx += 1;
     }
 
-    for (func.eqns, 0..) |eqn, ei| {
+    for (func.ops, 0..) |op, oi| {
         if (node_idx > 0) try writer.writeAll(",");
-        try emit_eqn_node(writer, func, eqn, ei);
+        try emit_op_node(writer, op, oi);
         node_idx += 1;
     }
     try writer.writeAll("]");
 
-    // Pre-build VarId -> producer lookup (O(1) per edge instead of O(N) scan).
+    // Pre-build var.id -> producer lookup (O(1) per edge instead of O(N) scan).
     var producer_buf: [4096]u32 = undefined;
-    const producer_map = producer_buf[0..@min(func.avals.len, producer_buf.len)];
+    const map_len = @min(func.var_count, producer_buf.len);
+    const producer_map = producer_buf[0..map_len];
     buildProducerMap(func, producer_map);
 
     // "edges" - each variable flowing between ops
-    // For each equation, its inputs are vars produced by earlier ops.
-    // Edge source = producing op, edge target = consuming op.
     try writer.writeAll(",\"edges\":[");
     var edge_idx: usize = 0;
-    for (func.eqns, 0..) |eqn, ei| {
-        const input_ids = eqn.inputs.slice(pr.VarId, func.varids_store);
-        for (input_ids, 0..) |in_id, port| {
+    for (func.ops, 0..) |op, oi| {
+        for (op.inputs, 0..) |operand, port| {
             if (edge_idx > 0) try writer.writeAll(",");
-            try emit_var_edge(writer, func, in_id, ei, port, producer_map);
+            try emit_var_edge(writer, operand.value, oi, port, producer_map);
             edge_idx += 1;
         }
     }
@@ -80,9 +71,9 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
 
     // "returns"
     try writer.writeAll(",\"returns\":[");
-    for (func.returns, 0..) |ret_id, i| {
+    for (func.returns, 0..) |ret_var, i| {
         if (i > 0) try writer.writeAll(",");
-        try write_json_string(writer, var_name(ret_id));
+        try write_json_string(writer, var_name(ret_var.id));
     }
     try writer.writeAll("]");
 
@@ -107,7 +98,7 @@ pub fn emit_program(program: *const pr.Program, writer: *Writer) !void {
 // Node emitters - nodes represent ops
 // ============================================================================
 
-/// Op node id: "p0", "p1", ... for params; "e0", "e1", ... for equations.
+/// Op node id: "p0", "p1", ... for params; "e0", "e1", ... for ops.
 fn op_node_id(writer: *Writer, prefix: []const u8, index: usize) !void {
     try writer.writeAll("\"");
     try writer.writeAll(prefix);
@@ -115,36 +106,35 @@ fn op_node_id(writer: *Writer, prefix: []const u8, index: usize) !void {
     try writer.writeAll("\"");
 }
 
-fn emit_param_node(writer: *Writer, func: pr.Function, id: pr.VarId, param_index: usize) !void {
+fn emit_param_node(writer: *Writer, v: *const pr.Var, param_index: usize) !void {
     try writer.writeAll("{\"id\":");
     try op_node_id(writer, "p", param_index);
     try writer.writeAll(",\"kind\":\"param\"");
-    // Label: var name for readability
     try writer.writeAll(",\"label\":");
-    try write_json_string(writer, var_name(id));
-    try emit_zxpr_field(writer, func, .{ .param = id });
+    try write_json_string(writer, var_name(v.id));
+    try emit_zxpr_field_param(writer, v);
     try writer.writeAll("}");
 }
 
-fn emit_eqn_node(writer: *Writer, func: pr.Function, eqn: pr.Eqn, eqn_index: usize) !void {
+fn emit_op_node(writer: *Writer, op: *const pr.Op, op_index: usize) !void {
+    const prim = op.prim();
     try writer.writeAll("{\"id\":");
-    try op_node_id(writer, "e", eqn_index);
+    try op_node_id(writer, "e", op_index);
     try writer.writeAll(",\"kind\":");
-    try write_json_string(writer, @tagName(eqn.prim));
-    try emit_param_attrs(writer, eqn.params.slice(pr.Param, func.params_store));
-    if (ops.has_vjp(eqn.prim)) {
+    try write_json_string(writer, @tagName(prim));
+    try emit_param_attrs(writer, op);
+    if (ops.has_vjp(prim)) {
         try writer.writeAll(",\"vjp\":true");
     }
     // Label: "out_var = prim" (first output for display)
-    const output_ids = eqn.outputs.slice(pr.VarId, func.varids_store);
-    if (output_ids.len > 0) {
+    if (op.outputs.len > 0) {
         try writer.writeAll(",\"label\":\"");
-        try writer.writeAll(var_name(output_ids[0]));
+        try writer.writeAll(var_name(op.outputs[0].id));
         try writer.writeAll(" = ");
-        try writer.writeAll(@tagName(eqn.prim));
+        try writer.writeAll(@tagName(prim));
         try writer.writeAll("\"");
     }
-    try emit_zxpr_field(writer, func, .{ .eqn = eqn });
+    try emit_zxpr_field_op(writer, op);
     try writer.writeAll("}");
 }
 
@@ -152,47 +142,52 @@ fn emit_eqn_node(writer: *Writer, func: pr.Function, eqn: pr.Eqn, eqn_index: usi
 // Edge emitter - edges represent variables
 // ============================================================================
 
-/// Packed producer reference: bit 31 selects param (0) or eqn (1), bits 0..30 hold the index.
-/// `no_producer` sentinel means the VarId has no known producer.
+/// Packed producer reference: bit 31 selects param (0) or op (1), bits 0..30 hold the index.
+/// `no_producer` sentinel means the var has no known producer.
 const no_producer: u32 = std.math.maxInt(u32);
-const eqn_flag: u32 = 1 << 31;
+const op_flag: u32 = 1 << 31;
 
 fn buildProducerMap(func: pr.Function, map: []u32) void {
     @memset(map, no_producer);
-    for (func.params, 0..) |pid, pi| {
-        map[@intCast(pid)] = @intCast(pi);
+    for (func.params, 0..) |param_var, pi| {
+        if (param_var.id < map.len) {
+            map[param_var.id] = @intCast(pi);
+        }
     }
-    for (func.eqns, 0..) |eqn, ei| {
-        for (eqn.outputs.slice(pr.VarId, func.varids_store)) |out_id| {
-            map[@intCast(out_id)] = eqn_flag | @as(u32, @intCast(ei));
+    for (func.ops, 0..) |op, oi| {
+        for (op.outputs) |out_var| {
+            if (out_var.id < map.len) {
+                map[out_var.id] = op_flag | @as(u32, @intCast(oi));
+            }
         }
     }
 }
 
-fn lookupProducer(map: []const u32, var_id: pr.VarId) ?struct { id_prefix: []const u8, index: usize } {
-    const encoded = map[@intCast(var_id)];
+fn lookupProducer(map: []const u32, var_id: u32) ?struct { id_prefix: []const u8, index: usize } {
+    if (var_id >= map.len) return null;
+    const encoded = map[var_id];
     if (encoded == no_producer) return null;
-    return if (encoded & eqn_flag != 0)
+    return if (encoded & op_flag != 0)
         .{ .id_prefix = "e", .index = @intCast(encoded & 0x7FFF_FFFF) }
     else
         .{ .id_prefix = "p", .index = @intCast(encoded) };
 }
 
-fn emit_var_edge(writer: *Writer, func: pr.Function, var_id: pr.VarId, target_eqn_idx: usize, port: usize, producer_map: []const u32) !void {
-    const producer = lookupProducer(producer_map, var_id) orelse return;
+fn emit_var_edge(writer: *Writer, v: *const pr.Var, target_op_idx: usize, port: usize, producer_map: []const u32) !void {
+    const producer = lookupProducer(producer_map, v.id) orelse return;
 
     try writer.writeAll("{\"source\":");
     try op_node_id(writer, producer.id_prefix, producer.index);
     try writer.writeAll(",\"target\":");
-    try op_node_id(writer, "e", target_eqn_idx);
+    try op_node_id(writer, "e", target_op_idx);
     try writer.print(",\"port\":{d}", .{port});
 
     // Var identity
     try writer.writeAll(",\"var\":");
-    try write_json_string(writer, var_name(var_id));
+    try write_json_string(writer, var_name(v.id));
 
     // Var type
-    try emit_aval_fields(writer, func.avals[@intCast(var_id)]);
+    try emit_aval_fields(writer, v.aval);
 
     try writer.writeAll("}");
 }
@@ -216,20 +211,32 @@ fn emit_aval_fields(writer: *Writer, aval: pr.Aval) !void {
 // ZXPR snippet embedding
 // ============================================================================
 
-const ZxprTarget = union(enum) {
-    param: pr.VarId,
-    eqn: pr.Eqn,
-    region: pr.Region,
-};
-
-fn emit_zxpr_field(writer: *Writer, func: pr.Function, target: ZxprTarget) !void {
+fn emit_zxpr_field_param(writer: *Writer, v: *const pr.Var) !void {
     var buf: [512]u8 = undefined;
     var zw: Writer = .fixed(&buf);
-    switch (target) {
-        .param => |id| zxpr.emit_param_line(func, id, &zw) catch return,
-        .eqn => |eqn| zxpr.emit_eqn_line(func, eqn, &zw) catch return,
-        .region => |region| zxpr.emit_region_block(func, region, &zw) catch return,
+    zxpr.emit_param_line(v, &zw) catch return;
+    const text = zw.buffered();
+    if (text.len > 0) {
+        try writer.writeAll(",\"zxpr\":");
+        try write_json_string(writer, text);
     }
+}
+
+fn emit_zxpr_field_op(writer: *Writer, op: *const pr.Op) !void {
+    var buf: [512]u8 = undefined;
+    var zw: Writer = .fixed(&buf);
+    zxpr.emit_op_line(op, &zw) catch return;
+    const text = zw.buffered();
+    if (text.len > 0) {
+        try writer.writeAll(",\"zxpr\":");
+        try write_json_string(writer, text);
+    }
+}
+
+fn emit_zxpr_field_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
+    var buf: [512]u8 = undefined;
+    var zw: Writer = .fixed(&buf);
+    zxpr.emit_region_block(func, region, &zw) catch return;
     const text = zw.buffered();
     if (text.len > 0) {
         try writer.writeAll(",\"zxpr\":");
@@ -238,135 +245,141 @@ fn emit_zxpr_field(writer: *Writer, func: pr.Function, target: ZxprTarget) !void
 }
 
 // ============================================================================
-// Param -> JSON attrs
+// Params -> JSON attrs
 //
-// Each output format (zxpr via ops.format, this JSON emitter)
-// walks the Param union with format-specific syntax. The exhaustive switch
-// ensures new Param variants cause a compile error here.
+// Walks the typed Params union and emits format-specific JSON attributes.
+// The exhaustive switch ensures new Params variants cause a compile error.
 // ============================================================================
 
-fn emit_param_attrs(writer: *Writer, params: []const pr.Param) !void {
+fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
     var has_attr = false;
-    for (params) |param| {
-        switch (param) {
-            .literal => |lit| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"value\":");
-                try emit_literal_json(writer, lit);
-            },
-            .out_shape => |shape| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"out_shape\":");
-                try emit_i64_array(writer, shape);
-            },
-            .broadcast_dimensions => |dims| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"broadcast_dims\":");
-                try emit_i64_array(writer, dims);
-            },
-            .permutation => |perm| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"permutation\":");
-                try emit_i64_array(writer, perm);
-            },
-            .reduce_axes => |axes| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"reduce_axes\":");
-                try emit_i64_array(writer, axes);
-            },
-            .iota_dimension => |dim| {
-                try open_attrs(writer, &has_attr);
-                try writer.print("\"iota_dim\":{d}", .{dim});
-            },
-            .out_dtype => |dt| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"out_dtype\":");
-                try write_json_string(writer, @tagName(dt));
-            },
-            .compare => |cp| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"direction\":");
-                try write_json_string(writer, @tagName(cp.direction));
-                try writer.writeAll(",\"compare_type\":");
-                try write_json_string(writer, @tagName(cp.compare_type));
-            },
-            .dot_general => |dg| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"lhs_contracting\":");
-                try emit_i64_array(writer, dg.lhs_contracting_dims);
-                try writer.writeAll(",\"rhs_contracting\":");
-                try emit_i64_array(writer, dg.rhs_contracting_dims);
-                try writer.writeAll(",\"lhs_batch\":");
-                try emit_i64_array(writer, dg.lhs_batch_dims);
-                try writer.writeAll(",\"rhs_batch\":");
-                try emit_i64_array(writer, dg.rhs_batch_dims);
-            },
-            .gather => |g| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"slice_sizes\":");
-                try emit_i64_array(writer, g.slice_sizes);
-                try writer.writeAll(",\"offset_dims\":");
-                try emit_i64_array(writer, g.offset_dims);
-                try writer.writeAll(",\"collapsed_slice_dims\":");
-                try emit_i64_array(writer, g.collapsed_slice_dims);
-                try writer.writeAll(",\"start_index_map\":");
-                try emit_i64_array(writer, g.start_index_map);
-                try writer.print(",\"index_vector_dim\":{d}", .{g.index_vector_dim});
-            },
-            .scatter => |s| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"update_window_dims\":");
-                try emit_i64_array(writer, s.update_window_dims);
-                try writer.writeAll(",\"inserted_window_dims\":");
-                try emit_i64_array(writer, s.inserted_window_dims);
-                try writer.writeAll(",\"scatter_dims_to_operand_dims\":");
-                try emit_i64_array(writer, s.scatter_dims_to_operand_dims);
-                try writer.print(",\"index_vector_dim\":{d}", .{s.index_vector_dim});
-                try writer.writeAll(",\"reduction\":");
-                try write_json_string(writer, @tagName(s.reduction));
-            },
-            .slice => |s| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"start\":");
-                try emit_i64_array(writer, s.start_indices);
-                try writer.writeAll(",\"limit\":");
-                try emit_i64_array(writer, s.limit_indices);
-                try writer.writeAll(",\"strides\":");
-                try emit_i64_array(writer, s.strides);
-            },
-            .concat_axis => |axis| {
-                try open_attrs(writer, &has_attr);
-                try writer.print("\"axis\":{d}", .{axis});
-            },
-            .call_callee => |name| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"callee\":");
-                try write_json_string(writer, name);
-            },
-            .call_target_name => |name| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"target\":");
-                try write_json_string(writer, name);
-            },
-            .call_kernel_key => |k| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"kernel_key\":");
+    switch (op.params) {
+        // No-param ops
+        .add, .subtract, .multiply, .divide, .maximum => {},
+        .exp, .log, .rsqrt, .logistic => {},
+        .select, .dot => {},
+
+        .literal => |lit| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"value\":");
+            try emit_literal_json(writer, lit);
+        },
+        .reshape => |rp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"out_shape\":");
+            try emit_i64_array(writer, rp.out_shape);
+        },
+        .broadcast_in_dim => |bp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"out_shape\":");
+            try emit_i64_array(writer, bp.out_shape);
+            try writer.writeAll(",\"broadcast_dims\":");
+            try emit_i64_array(writer, bp.dimensions);
+        },
+        .transpose => |tp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"permutation\":");
+            try emit_i64_array(writer, tp.permutation);
+        },
+        .reduce_sum => |rp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"reduce_axes\":");
+            try emit_i64_array(writer, rp.axes);
+        },
+        .reduce_max => |rp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"reduce_axes\":");
+            try emit_i64_array(writer, rp.axes);
+        },
+        .iota => |ip| {
+            try open_attrs(writer, &has_attr);
+            try writer.print("\"iota_dim\":{d}", .{ip.dimension});
+            try writer.writeAll(",\"out_shape\":");
+            try emit_i64_array(writer, ip.out_shape);
+            try writer.writeAll(",\"out_dtype\":");
+            try write_json_string(writer, @tagName(ip.out_dtype));
+        },
+        .convert => |dt| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"out_dtype\":");
+            try write_json_string(writer, @tagName(dt));
+        },
+        .compare => |cp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"direction\":");
+            try write_json_string(writer, @tagName(cp.direction));
+            try writer.writeAll(",\"compare_type\":");
+            try write_json_string(writer, @tagName(cp.compare_type));
+        },
+        .dot_general => |dg| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"lhs_contracting\":");
+            try emit_i64_array(writer, dg.lhs_contracting_dims);
+            try writer.writeAll(",\"rhs_contracting\":");
+            try emit_i64_array(writer, dg.rhs_contracting_dims);
+            try writer.writeAll(",\"lhs_batch\":");
+            try emit_i64_array(writer, dg.lhs_batch_dims);
+            try writer.writeAll(",\"rhs_batch\":");
+            try emit_i64_array(writer, dg.rhs_batch_dims);
+        },
+        .gather => |g| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"slice_sizes\":");
+            try emit_i64_array(writer, g.slice_sizes);
+            try writer.writeAll(",\"offset_dims\":");
+            try emit_i64_array(writer, g.offset_dims);
+            try writer.writeAll(",\"collapsed_slice_dims\":");
+            try emit_i64_array(writer, g.collapsed_slice_dims);
+            try writer.writeAll(",\"start_index_map\":");
+            try emit_i64_array(writer, g.start_index_map);
+            try writer.print(",\"index_vector_dim\":{d}", .{g.index_vector_dim});
+        },
+        .scatter => |s| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"update_window_dims\":");
+            try emit_i64_array(writer, s.update_window_dims);
+            try writer.writeAll(",\"inserted_window_dims\":");
+            try emit_i64_array(writer, s.inserted_window_dims);
+            try writer.writeAll(",\"scatter_dims_to_operand_dims\":");
+            try emit_i64_array(writer, s.scatter_dims_to_operand_dims);
+            try writer.print(",\"index_vector_dim\":{d}", .{s.index_vector_dim});
+            try writer.writeAll(",\"reduction\":");
+            try write_json_string(writer, @tagName(s.reduction));
+        },
+        .slice => |s| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"start\":");
+            try emit_i64_array(writer, s.start_indices);
+            try writer.writeAll(",\"limit\":");
+            try emit_i64_array(writer, s.limit_indices);
+            try writer.writeAll(",\"strides\":");
+            try emit_i64_array(writer, s.strides);
+        },
+        .concatenate => |cp| {
+            try open_attrs(writer, &has_attr);
+            try writer.print("\"axis\":{d}", .{cp.axis});
+        },
+        .call => |cp| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"callee\":");
+            try write_json_string(writer, cp.callee);
+        },
+        .custom_call => |cc| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"target\":");
+            try write_json_string(writer, cc.target_name);
+            if (cc.kernel_key) |k| {
+                try writer.writeAll(",\"kernel_key\":");
                 try write_json_string(writer, k);
-            },
-            .call_provider_name => |p| {
-                try open_attrs(writer, &has_attr);
-                try writer.writeAll("\"provider\":");
+            }
+            if (cc.provider_name) |p| {
+                try writer.writeAll(",\"provider\":");
                 try write_json_string(writer, p);
-            },
-            .has_side_effect => |eff| {
-                if (eff) {
-                    try open_attrs(writer, &has_attr);
-                    try writer.writeAll("\"side_effect\":true");
-                }
-            },
-            // Type info already captured in shape/dtype fields on the node
-            .out_aval, .out_avals => {},
-        }
+            }
+            if (cc.has_side_effect) {
+                try writer.writeAll(",\"side_effect\":true");
+            }
+        },
     }
     if (has_attr) try writer.writeAll("}");
 }
@@ -398,17 +411,17 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
 
     // node_ids reference op node ids (e0, e1, ...)
     try writer.writeAll(",\"node_ids\":[");
-    const eqn_end = region.eqn_start + region.eqn_len;
+    const op_end = region.op_start + region.op_len;
     var first = true;
-    var eqn_i: u32 = region.eqn_start;
-    while (eqn_i < eqn_end and eqn_i < func.eqns.len) : (eqn_i += 1) {
+    var op_i: u32 = region.op_start;
+    while (op_i < op_end and op_i < func.ops.len) : (op_i += 1) {
         if (!first) try writer.writeAll(",");
-        try writer.print("\"e{d}\"", .{eqn_i});
+        try writer.print("\"e{d}\"", .{op_i});
         first = false;
     }
     try writer.writeAll("]");
 
-    try emit_zxpr_field(writer, func, .{ .region = region });
+    try emit_zxpr_field_region(writer, func, region);
     try writer.writeAll("}");
 }
 
@@ -452,7 +465,8 @@ fn emit_i64_array(writer: *Writer, items: []const i64) !void {
 /// JSON literal values. bf16 is widened to f32 for JSON compatibility.
 fn emit_literal_json(writer: *Writer, lit: pr.Literal) !void {
     switch (lit) {
-        .f16, .bf16 => |v| try writer.print("{d}", .{@as(f32, @bitCast(@as(u32, v) << 16))}),
+        .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode_f32(v)}),
+        .bf16 => |v| try writer.print("{d}", .{pr.DType.bf16.decode_f32(v)}),
         .bool => |v| try writer.writeAll(if (v) "true" else "false"),
         inline .f32, .f64 => |v| try writer.print("{d}", .{v}),
         inline .i8, .u8, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
@@ -488,7 +502,7 @@ test emit {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"edges\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"returns\":[\"c\"]") != null);
 
-    // Nodes are ops: params "p0","p1", equation "e0"
+    // Nodes are ops: params "p0","p1", op "e0"
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"p0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"p1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"e0\"") != null);
@@ -624,7 +638,7 @@ test "json output is valid JSON" {
     const root = parsed.value.object;
     try std.testing.expectEqualStrings("matmul_add", root.get("name").?.string);
 
-    // 3 params + 3 equations = 6 op nodes
+    // 3 params + 3 ops = 6 nodes
     const nodes = root.get("nodes").?.array;
     try std.testing.expectEqual(6, nodes.items.len);
 

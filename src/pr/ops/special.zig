@@ -1,5 +1,6 @@
 /// Special Operations
 /// Ops with unique semantics (custom_call, call).
+const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const Aval = pr.Aval;
@@ -11,64 +12,18 @@ const Aval = pr.Aval;
 pub const custom_call = struct {
     pub const arity = .{ .in = .variadic, .out = .variadic };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
-        const params = ctx.params();
-
-        _ = pr.param(.call_target_name,params) orelse return error.InvalidParams;
-        _ = pr.param(.has_side_effect,params) orelse return error.InvalidParams;
-
-        const single_out = pr.param(.out_aval,params);
-        const multi_outs = pr.param(.out_avals,params);
-        if ((single_out == null) == (multi_outs == null)) return error.InvalidParams;
-
-        if (single_out) |out_aval| {
-            if (outputs.len != 1) return error.InvalidEqnArity;
-            _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
-        } else {
-            const out_avals = multi_outs.?;
-            if (outputs.len == 0 or out_avals.len != outputs.len) return error.InvalidEqnArity;
-            for (out_avals) |out_aval| {
-                _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
-            }
-            for (outputs) |out_id| _ = try ctx.tensor_of(out_id);
-        }
-
-        if (single_out != null) _ = try ctx.tensor_of(outputs[0]);
-        for (inputs) |in_id| _ = try ctx.tensor_of(in_id);
+    pub fn validate(op: *const pr.Op, cc: pr.CustomCallParams) pr.ValidationError!void {
+        if (cc.out_avals.len != op.outputs.len) return error.InvalidOpArity;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        _ = pr.param(.call_target_name,ctx.params) orelse return error.InvalidParams;
-        _ = pr.param(.has_side_effect,ctx.params) orelse return error.InvalidParams;
-
-        const single_out = pr.param(.out_aval,ctx.params);
-        const multi_outs = pr.param(.out_avals,ctx.params);
-        if ((single_out == null) == (multi_outs == null)) return error.InvalidParams;
-
-        for (ctx.inputs) |in_id| _ = try ctx.tensor_of(in_id);
-
-        if (single_out) |out_aval| {
-            _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
-            return out_aval;
-        }
-
-        const out_avals = multi_outs.?;
-        if (out_avals.len != 1) return error.InvalidEqnArity;
-        const out_aval = out_avals[0];
-        _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
-        return out_aval;
+    pub fn infer_output(_: std.mem.Allocator, _: []const *pr.Var, cc: pr.CustomCallParams) pr.BuildError!Aval {
+        if (cc.out_avals.len != 1) return error.InvalidOpArity;
+        return cc.out_avals[0];
     }
 
-    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const params = ctx.params();
-        if (pr.param(.call_target_name,params)) |target| {
-            try writer.print("target=\"{s}\"", .{target});
-        }
-        if (pr.param(.has_side_effect,params)) |se| {
-            if (se) try writer.writeAll(", side_effect=true");
-        }
+    pub fn format(writer: *types.Writer, _: *const pr.Op, cc: pr.CustomCallParams) types.FormatError!void {
+        try writer.print("target=\"{s}\"", .{cc.target_name});
+        if (cc.has_side_effect) try writer.writeAll(", side_effect=true");
     }
 };
 
@@ -79,26 +34,15 @@ pub const custom_call = struct {
 pub const call = struct {
     pub const arity = .{ .in = .variadic, .out = .variadic };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
-        const params = ctx.params();
+    pub fn validate(_: *const pr.Op, _: pr.CallParams) pr.ValidationError!void {}
 
-        _ = pr.param(.call_callee,params) orelse return error.InvalidParams;
-
-        for (inputs) |in_id| _ = try ctx.tensor_of(in_id);
-        for (outputs) |out_id| _ = try ctx.tensor_of(out_id);
+    pub fn infer_output(_: std.mem.Allocator, _: []const *pr.Var, _: pr.CallParams) pr.BuildError!Aval {
+        // Call output types are determined by the callee, not inferred here.
+        // The FunctionBuilder.call method handles this via emit_with_outputs.
+        return error.InvalidOpArity;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        _ = pr.param(.call_callee,ctx.params) orelse return error.InvalidParams;
-        return error.InvalidEqnArity;
-    }
-
-    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const params = ctx.params();
-        if (pr.param(.call_callee,params)) |callee| {
-            try writer.print("callee=\"{s}\"", .{callee});
-        }
+    pub fn format(writer: *types.Writer, _: *const pr.Op, cp: pr.CallParams) types.FormatError!void {
+        try writer.print("callee=\"{s}\"", .{cp.callee});
     }
 };

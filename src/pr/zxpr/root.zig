@@ -63,18 +63,18 @@ pub const Emitter = struct {
             try w.writeAll(ind);
             try self.styler.write_section("; params");
             try w.print(" ({d})\n", .{self.func.params.len});
-            for (self.func.params) |param_id| {
+            for (self.func.params) |param_var| {
                 try w.writeAll(ind);
-                try self.emit_var_with_type(param_id);
+                try self.emit_var_with_type(param_var);
                 try w.writeAll("\n");
             }
         }
 
         // Body section
-        if (self.func.eqns.len > 0) {
+        if (self.func.ops.len > 0) {
             try w.writeAll(ind);
             try self.styler.write_section("; body");
-            try w.print(" ({d} ops)\n", .{self.func.eqns.len});
+            try w.print(" ({d} ops)\n", .{self.func.ops.len});
             try w.writeAll(ind);
             try self.styler.write_keyword("let");
             try w.writeAll("\n");
@@ -83,20 +83,20 @@ pub const Emitter = struct {
             var open_stack: [max_region_stack]usize = undefined;
             var open_len: usize = 0;
 
-            for (self.func.eqns, 0..) |eqn, eqn_idx| {
-                // Close regions that end before this eqn
+            for (self.func.ops, 0..) |op, op_idx| {
+                // Close regions that end before this op
                 while (open_len > 0) {
                     const ri = open_stack[open_len - 1];
                     const region = self.func.regions[ri];
-                    if (eqn_idx >= region.eqn_start + region.eqn_len) {
+                    if (op_idx >= region.op_start + region.op_len) {
                         open_len -= 1;
                         try self.emit_region_end(open_len);
                     } else break;
                 }
 
-                // Open regions that start at this eqn
+                // Open regions that start at this op
                 for (self.func.regions, 0..) |region, ri| {
-                    if (region.eqn_start == eqn_idx) {
+                    if (region.op_start == op_idx) {
                         // Check not already open
                         var already = false;
                         for (open_stack[0..open_len]) |oi| {
@@ -116,7 +116,7 @@ pub const Emitter = struct {
                 try w.writeAll(ind);
                 try w.writeAll(ind);
                 try self.emit_gutters(open_len);
-                try self.emit_binding(eqn);
+                try self.emit_binding(op);
                 try w.writeAll("\n");
             }
 
@@ -129,16 +129,16 @@ pub const Emitter = struct {
 
         // Return section
         if (self.func.returns.len > 0) {
-            if (self.func.eqns.len == 0) {
+            if (self.func.ops.len == 0) {
                 try w.writeAll(ind);
                 try w.writeAll(";\n");
             }
             try w.writeAll(ind);
             try self.styler.write_keyword("in");
             try w.writeAll(" ");
-            for (self.func.returns, 0..) |ret_id, i| {
+            for (self.func.returns, 0..) |ret_var, i| {
                 if (i > 0) try w.writeAll(", ");
-                try self.emit_var_name(ret_id);
+                try self.emit_var_name(ret_var);
             }
             try w.writeAll("\n");
         }
@@ -150,14 +150,14 @@ pub const Emitter = struct {
     // Helpers
     // ====================================================================
 
-    fn emit_var_name(self: *Self, id: pr.VarId) !void {
-        try self.styler.write_var_name(var_name(id));
+    fn emit_var_name(self: *Self, v: *const pr.Var) !void {
+        try self.styler.write_var_name(var_name(v.id));
     }
 
-    fn emit_var_with_type(self: *Self, id: pr.VarId) !void {
-        try self.emit_var_name(id);
+    fn emit_var_with_type(self: *Self, v: *const pr.Var) !void {
+        try self.emit_var_name(v);
         try self.writer.writeAll(": ");
-        try self.emit_type(self.func.avals[@intCast(id)]);
+        try self.emit_type(v.aval);
     }
 
     fn emit_type(self: *Self, aval: pr.Aval) !void {
@@ -182,41 +182,38 @@ pub const Emitter = struct {
         }
     }
 
-    fn emit_binding(self: *Self, eqn: pr.Eqn) !void {
-        const outputs = eqn.outputs.slice(pr.VarId, self.func.varids_store);
-        const inputs = eqn.inputs.slice(pr.VarId, self.func.varids_store);
-        const params = eqn.params.slice(pr.Param, self.func.params_store);
-
+    fn emit_binding(self: *Self, op: *const pr.Op) !void {
         // Output binding(s)
-        for (outputs, 0..) |out_id, i| {
+        for (op.outputs, 0..) |out_var, i| {
             if (i > 0) try self.writer.writeAll(", ");
-            try self.emit_var_with_type(out_id);
+            try self.emit_var_with_type(out_var);
         }
 
+        const prim = op.prim();
         try self.writer.writeAll(" = ");
-        try self.styler.write_op_name(@tagName(eqn.prim));
-        if (is_dtype_only_attr(eqn.prim) and !self.styler.cfg.include_dtype_attrs) {
+        try self.styler.write_op_name(@tagName(prim));
+        if (is_dtype_only_attr(prim) and !self.styler.cfg.include_dtype_attrs) {
             try self.writer.writeAll("(");
         } else {
             try self.writer.writeAll("[");
-            if (is_dtype_only_attr(eqn.prim)) {
-                _ = try self.emit_dtype_attr(eqn.prim, inputs, params);
+            if (is_dtype_only_attr(prim)) {
+                _ = try self.emit_dtype_attr(op);
             } else {
-                try ops.format(self.writer, self.func, eqn);
+                try ops.format(self.writer, op);
             }
             try self.writer.writeAll("](");
         }
 
         // Inputs as function args
-        for (inputs, 0..) |in_id, i| {
+        for (op.inputs, 0..) |operand, i| {
             if (i > 0) try self.writer.writeAll(", ");
-            try self.emit_var_name(in_id);
+            try self.emit_var_name(operand.value);
         }
 
         try self.writer.writeAll(")");
 
         // VJP annotation
-        if (ops.has_vjp(eqn.prim)) {
+        if (ops.has_vjp(prim)) {
             try self.styler.write_comment("  ; vjp");
         }
     }
@@ -262,19 +259,19 @@ pub const Emitter = struct {
         }
     }
 
-    fn emit_dtype_attr(self: *Self, prim: pr.Prim, inputs: []const pr.VarId, params: []const pr.Param) !?bool {
+    fn emit_dtype_attr(self: *Self, op: *const pr.Op) !?bool {
+        const prim = op.prim();
         const use_dtype = switch (prim) {
             .add, .subtract, .multiply, .divide, .maximum => true,
             .exp, .log, .rsqrt, .logistic, .convert => true,
             else => false,
         };
         if (!use_dtype) return null;
-        if (inputs.len == 0) return false;
+        if (op.inputs.len == 0) return false;
         const dtype = if (prim == .convert) blk: {
-            const out_dtype = pr.param(.out_dtype,params) orelse return false;
-            break :blk out_dtype;
+            break :blk op.params.convert;
         } else blk: {
-            const tensor = self.func.avals[@intCast(inputs[0])].as_tensor() orelse return false;
+            const tensor = op.operand(0).aval.as_tensor();
             break :blk tensor.dtype;
         };
         try self.writer.writeAll("dtype=");
@@ -296,7 +293,7 @@ fn is_dtype_only_attr(prim: pr.Prim) bool {
 // ============================================================================
 
 /// Generate readable variable name from ID: 0->a, 1->b, ..., 26->aa, etc.
-pub fn var_name(id: pr.VarId) []const u8 {
+pub fn var_name(id: u32) []const u8 {
     const names = comptime blk: {
         @setEvalBranchQuota(20000);
         const single = 26;
@@ -337,26 +334,43 @@ pub fn emit(func: pr.Function, writer: *Writer, cfg: style.Config) !void {
 }
 
 /// Emit a single param declaration: `a: 2x3<f32>`
-pub fn emit_param_line(func: pr.Function, id: pr.VarId, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
-    try emitter.emit_var_with_type(id);
+pub fn emit_param_line(v: *const pr.Var, writer: *Writer) !void {
+    // Create a minimal emitter just for formatting
+    const dummy_func = pr.Function{
+        .name = "",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+    var emitter = Emitter.init(writer, dummy_func, style.config(.plain, .{}));
+    try emitter.emit_var_with_type(v);
 }
 
-/// Emit a single equation binding: `c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp`
-pub fn emit_eqn_line(func: pr.Function, eqn: pr.Eqn, writer: *Writer) !void {
-    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
-    try emitter.emit_binding(eqn);
+/// Emit a single op binding: `c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp`
+pub fn emit_op_line(op: *const pr.Op, writer: *Writer) !void {
+    const dummy_func = pr.Function{
+        .name = "",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+    var emitter = Emitter.init(writer, dummy_func, style.config(.plain, .{}));
+    try emitter.emit_binding(op);
 }
 
-/// Emit a region block: header + equations + footer.
+/// Emit a region block: header + ops + footer.
 pub fn emit_region_block(func: pr.Function, region: pr.Region, writer: *Writer) !void {
     var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
     try emitter.emit_region_start(0, region);
-    const eqn_end = region.eqn_start + region.eqn_len;
-    var eqn_i: u32 = region.eqn_start;
-    while (eqn_i < eqn_end and eqn_i < func.eqns.len) : (eqn_i += 1) {
+    const op_end = region.op_start + region.op_len;
+    var op_i: u32 = region.op_start;
+    while (op_i < op_end and op_i < func.ops.len) : (op_i += 1) {
         try writer.writeAll("  ");
-        try emitter.emit_binding(func.eqns[eqn_i]);
+        try emitter.emit_binding(func.ops[op_i]);
         try writer.writeAll("\n");
     }
     try emitter.emit_region_end(0);

@@ -89,8 +89,8 @@ pub fn check_gradients(
 
     for (inputs, 0..) |_, input_idx| {
         // Skip non-float inputs (e.g., integer indices for gather/scatter)
-        const param_id = func.params[input_idx];
-        const param_tensor = func.avals[@intCast(param_id)].as_tensor() orelse continue;
+        const param_var = func.params[input_idx];
+        const param_tensor = param_var.aval.as_tensor();
         switch (param_tensor.dtype) {
             .f16, .bf16, .f32, .f64 => {},
             else => continue,
@@ -166,8 +166,8 @@ pub fn make_test_inputs(
         allocator.free(inputs);
     }
 
-    for (func.params, 0..) |param_id, i| {
-        const tensor = func.avals[@intCast(param_id)].as_tensor().?;
+    for (func.params, 0..) |param_var, i| {
+        const tensor = param_var.as_tensor();
         inputs[i] = try HostTensor.init(allocator, tensor.shape.dims);
         const n = inputs[i].data.len;
         for (0..n) |j| {
@@ -183,7 +183,7 @@ pub fn make_test_inputs(
 // Helper to build simple functions for testing
 // ============================================================================
 
-fn build_func(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const pr.VarId) !pr.Function {
+fn build_func(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.Function {
     const func = try b.finish(returns);
     try program.add_function(func);
     return func;

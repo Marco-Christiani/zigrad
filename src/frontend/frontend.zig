@@ -13,7 +13,7 @@
 //!    to compose AD with user logic (optimizer, regularization, etc.) in a
 //!    single compiled program.
 //!
-//! 3. **`optim`**: Traced-mode optimizer building blocks (e.g. `sgd_update`).
+//! 3. **`optim`**: Convenience optimizers for traced-mode (i.e. fusable updates)
 //!
 //! ## Two paths to value-and-grad
 //!
@@ -59,7 +59,7 @@ const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
 const ops = @import("../pr/ops/ops.zig");
 const kernel = @import("../kernel.zig");
-const lower = @import("../lower/root.zig");
+const lower = @import("../lower.zig");
 const pipeline = @import("../pipeline/root.zig");
 const backend = @import("../backend/root.zig");
 const Backend = backend.Backend;
@@ -71,11 +71,12 @@ const Tensor = @import("../tensor.zig");
 pub const train = @import("train.zig");
 /// Comptime function transforms for traced Tensor programs (e.g. `value_and_grad`).
 pub const transforms = @import("transforms.zig");
-/// Traced-mode optimizer building blocks (e.g. `sgd_update`).
+/// Traced-mode optimizer building blocks (e.g. `optim.SGD`).
 pub const optim = @import("optim.zig");
 
 const log = std.log.scoped(.@"zg/frontend");
 
+/// TODO: does this belong here anymore?
 pub const Builder = struct {
     program: *pr.Program,
     builder: pr.FunctionBuilder,
@@ -96,20 +97,21 @@ pub const Builder = struct {
         return Tensor.param(&self.builder, spec.dtype, spec.shape.const_slice());
     }
 
-    pub fn scalar_literal(self: *Builder, lit: pr.Literal) !Tensor {
-        const id = try self.builder.literal_scalar(lit);
-        return Tensor.from_id(&self.builder, id);
+    /// Create a 0-d scalar constant tensor.
+    pub fn scalar(self: *Builder, dtype: pr.DType, val: f64) !Tensor {
+        const v = try self.builder.scalar(dtype, val);
+        return Tensor.from_var(&self.builder, v);
     }
 
     pub fn iota(self: *Builder, out_dtype: pr.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
-        const id = try self.builder.iota(out_dtype, out_dims, iota_dim);
-        return Tensor.from_id(&self.builder, id);
+        const v = try self.builder.iota(out_dtype, out_dims, iota_dim);
+        return Tensor.from_var(&self.builder, v);
     }
 
     pub fn finish(self: *Builder, returns: []const Tensor) !pr.Function {
-        const ids = try self.program.allocator().alloc(pr.VarId, returns.len);
-        for (returns, 0..) |t, i| ids[i] = try t.get_id();
-        const func = try self.builder.finish(ids);
+        const vars = try self.program.allocator().alloc(*pr.Var, returns.len);
+        for (returns, 0..) |t, i| vars[i] = try t.get_var();
+        const func = try self.builder.finish(vars);
         try self.program.add_function(func);
         return func;
     }
@@ -126,16 +128,6 @@ pub const Builder = struct {
     }
 };
 
-/// Full configuration for the `compile_program` pipeline.
-///
-/// Controls kernelization, lowering, dump points, and backend compile options.
-/// The pipeline is a pass chain: `[dump_pr] -> [kernelize] -> validate -> lower
-/// -> legalize -> [dump_mlir]`. When `kernel_store` is null, the kernelize
-/// step is skipped entirely.
-///
-/// MLIR-stage passes (select) are NOT added here. If MLIR-level
-/// kernelization is needed, assemble the pipeline manually. `compile_program`
-/// is a convenience for the common PR-level path.
 /// Which transform to apply during `compile`.
 ///
 /// This controls whether VJP is applied as a compilation step. For in-graph
@@ -153,6 +145,16 @@ pub const Transform = enum {
     value_and_grad,
 };
 
+/// Full configuration for the `compile_program` pipeline.
+///
+/// Controls kernelization, lowering, dump points, and backend compile options.
+/// The pipeline is a pass chain:
+///  `[dump_pr] -> [kernelize] -> validate -> lower -> legalize -> [dump_mlir]`
+/// When `kernel_store` is null, the kernelize step is skipped entirely.
+///
+/// MLIR-stage passes (select) are NOT added here. If MLIR-level kernelization
+///  is needed, assemble the pipeline manually. `compile_program` is a
+///  convenience for the common PR-level path.
 pub const CompileConfig = struct {
     entry_name: []const u8 = "main",
     transform: Transform = .forward,
@@ -179,6 +181,7 @@ pub const CompiledModel = struct {
     exe: Backend.Executable,
     input_arity: usize,
     output_arity: usize,
+
     /// Per-input donation mask, matching flattened spec order.
     ///
     /// Donatable inputs may have their buffers reused by the backend for
@@ -264,11 +267,11 @@ pub fn compile(
             defer allocator.free(output_tensors);
             if (output_tensors.len == 0) return error.NoOutputs;
 
-            const ids = try allocator.alloc(pr.VarId, output_tensors.len);
-            defer allocator.free(ids);
-            for (output_tensors, 0..) |t, i| ids[i] = try t.get_id();
+            const vars = try allocator.alloc(*pr.Var, output_tensors.len);
+            defer allocator.free(vars);
+            for (output_tensors, 0..) |t, i| vars[i] = try t.get_var();
 
-            const func_pr = try builder.finish(ids);
+            const func_pr = try builder.finish(vars);
             try program.add_function(func_pr);
 
             const exe = try compile_program(backend_handle, allocator, &program, device, config, config.entry_name);
@@ -289,8 +292,8 @@ pub fn compile(
             defer allocator.free(output_tensors);
             if (output_tensors.len != 1) return error.UnexpectedOutputs;
 
-            const loss_id = try output_tensors[0].get_id();
-            const loss_func = try loss_builder.finish(&.{loss_id});
+            const loss_var = try output_tensors[0].get_var();
+            const loss_func = try loss_builder.finish(&.{loss_var});
 
             // register loss function for IR debuggability (see transforms.zig).
             // never called at runtime, the VJP replays forward equations internally.
@@ -305,7 +308,7 @@ pub fn compile(
             var step_builder = try pr.FunctionBuilder.init(&program, config.entry_name);
             defer step_builder.deinit();
 
-            const primals = try allocator.alloc(pr.VarId, leaf_count);
+            const primals = try allocator.alloc(*pr.Var, leaf_count);
             defer allocator.free(primals);
             for (spec_tree.leaves, 0..) |spec, i| {
                 primals[i] = try step_builder.param_tensor(spec.dtype, spec.shape.const_slice());
@@ -318,7 +321,7 @@ pub fn compile(
                 .shape = .{ .dims = loss_t.dims() },
             });
 
-            const call_inputs = try allocator.alloc(pr.VarId, leaf_count + 1);
+            const call_inputs = try allocator.alloc(*pr.Var, leaf_count + 1);
             defer allocator.free(call_inputs);
             @memcpy(call_inputs[0..leaf_count], primals);
             call_inputs[leaf_count] = cot;
@@ -379,6 +382,7 @@ fn trace_and_call(
     return flatten_outputs(allocator, result);
 }
 
+/// TODO: this does not belong here
 pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
     var program = pr.Program.init(allocator);
     errdefer program.deinit();
@@ -411,6 +415,9 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
 /// This is a convenience for the common PR-level kernelization path. MLIR-stage
 ///  passes (select) are not added here -- for MLIR-level kernelization,
 ///  assemble the pipeline manually.
+///
+/// NOTE: in reality, this is simply a default pipeline. we should not provide
+///  a default pipeline in this form, this is being staged for removal.
 pub fn compile_program(
     backend_handle: *Backend,
     allocator: std.mem.Allocator,
@@ -442,9 +449,9 @@ pub fn compile_program(
         try passes.append(allocator, kernelize_state.?.pass());
     }
 
-    try passes.append(allocator, lower.validate_pass);
+    try passes.append(allocator, pipeline.validate_pass);
     try passes.append(allocator, lower.lower_pass_with_config(&lower_cfg));
-    try passes.append(allocator, lower.mlir.stablehlo.MlirLegalizePass.pass());
+    try passes.append(allocator, lower.mlir.stablehlo.StablehloLegalizePass.pass());
 
     var dump_mlir_local: ?pipeline.DumpConfig = null;
     if (config.dump_mlir) |cfg| {
@@ -477,7 +484,7 @@ pub fn compile_program(
 // ============================================================================
 // Comptime introspection helpers (Tensor-leaf trees)
 // ============================================================================
-
+// TODO: might want to move Tree or rethink this organization
 fn flatten_outputs(allocator: std.mem.Allocator, output: anytype) ![]Tensor {
     var list = try std.ArrayList(Tensor).initCapacity(allocator, 8);
     errdefer list.deinit(allocator);

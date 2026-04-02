@@ -223,13 +223,13 @@ fn find_provider(providers: []const kernel.KernelProvider, name: []const u8) ?ke
 }
 
 fn is_region_nested(region: pr.Region, candidates: []const TuneCandidate) bool {
-    if (region.eqn_len == 0) return false;
-    const start: usize = @intCast(region.eqn_start);
-    const end = start + @as(usize, @intCast(region.eqn_len));
+    if (region.op_len == 0) return false;
+    const start: usize = @intCast(region.op_start);
+    const end = start + @as(usize, @intCast(region.op_len));
     for (candidates) |other| {
-        if (other.region.eqn_len == 0) continue;
-        const ostart: usize = @intCast(other.region.eqn_start);
-        const oend = ostart + @as(usize, @intCast(other.region.eqn_len));
+        if (other.region.op_len == 0) continue;
+        const ostart: usize = @intCast(other.region.op_start);
+        const oend = ostart + @as(usize, @intCast(other.region.op_len));
         if (ostart <= start and oend >= end and (ostart != start or oend != end)) return true;
     }
     return false;

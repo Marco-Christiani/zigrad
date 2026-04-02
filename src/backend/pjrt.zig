@@ -13,6 +13,12 @@
 //!  - Compilation (MLIR -> LoadedExecutable)
 //!  - Execution (LoadedExecutable + buffers -> outputs)
 //!  - Buffer management (host <-> device transfers)
+// TODO: pjrt async manager apis, also we likely assumed the wrong async contract
+//  throughout. See:
+//   1. https://openxla.org/stablehlo/spec#async_start
+//   2. https://openxla.org/stablehlo/spec#execution
+//   3. https://github.com/openxla/stablehlo/issues/484
+//   4. https://openxla.org/stablehlo/spec#optimization_barrier
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
@@ -637,6 +643,7 @@ fn add_dispatch_user_data(
     add_args.context = context;
     add_args.user_data = .{
         .type_id = type_id,
+        // HACK: errr, safe?..
         .data = @ptrCast(@constCast(data_ptr)),
     };
 

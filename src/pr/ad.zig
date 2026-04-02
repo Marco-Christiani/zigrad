@@ -1,10 +1,10 @@
-/// Automatic differentiation transforms on PR functions.
-///
-/// This module implements the core AD transforms (VJP and JVP) at the PR
-/// level. It operates on `pr.Function` values: given a function, it produces
-/// a new function that computes derivatives.
-///
-/// This a lower layer. Higher-level entry points are in frontend.
+//! Automatic differentiation transforms on PR functions.
+//!
+//! This module implements the core AD transforms (VJP and JVP) at the PR
+//! level. It operates on `pr.Function` values: given a function, it produces
+//! a new function that computes derivatives.
+//!
+//! This a lower layer. Higher-level entry points are in frontend.
 const std = @import("std");
 
 const pr = @import("pr.zig");
@@ -47,13 +47,11 @@ fn ad_impl(
     name: []const u8,
     include_value: bool,
 ) ops.types.AdError!pr.Function {
-    try pr.validate_function(func);
-
-    var primal_map = try allocator.alloc(?pr.VarId, func.avals.len);
+    var primal_map = try allocator.alloc(?*pr.Var, func.var_count);
     defer allocator.free(primal_map);
     @memset(primal_map, null);
 
-    var dual_map = try allocator.alloc(?pr.VarId, func.avals.len);
+    var dual_map = try allocator.alloc(?*pr.Var, func.var_count);
     defer allocator.free(dual_map);
     @memset(dual_map, null);
 
@@ -61,10 +59,10 @@ fn ad_impl(
     defer b.deinit();
 
     // Create parameters for primals.
-    for (func.params) |param_id| {
-        const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.UnsupportedEqn;
+    for (func.params) |param_var| {
+        const tensor = param_var.aval.as_tensor();
         const new_param = try b.param_tensor(tensor.dtype, tensor.shape.dims);
-        primal_map[@intCast(param_id)] = new_param;
+        primal_map[param_var.id] = new_param;
     }
 
     // Seed the dual map - stores the "other half" of the primal/dual pair.
@@ -72,18 +70,18 @@ fn ad_impl(
     // JVP: tangent vectors (elements of T_xM) seeded at each input.
     // Duality is symmetric: cotangents are dual to tangents and vice versa,
     //  this is not in reference to dual numbers as in some forward-mode impls.
-    const seed_ids = switch (mode) {
+    const seed_vars = switch (mode) {
         .vjp => func.returns,
         .jvp => func.params,
     };
-    for (seed_ids) |id| {
-        const tensor = func.avals[@intCast(id)].as_tensor() orelse return error.UnsupportedEqn;
+    for (seed_vars) |v| {
+        const tensor = v.aval.as_tensor();
         if (mode == .vjp) {
             if (tensor.dtype != .f32 and tensor.dtype != .f64 and tensor.dtype != .bf16)
                 return error.UnsupportedDType;
         }
         const new_seed = try b.param_tensor(tensor.dtype, tensor.shape.dims);
-        dual_map[@intCast(id)] = new_seed;
+        dual_map[v.id] = new_seed;
     }
 
     const ad_ctx = ops.types.AdContext{
@@ -91,51 +89,53 @@ fn ad_impl(
         .primal_map = primal_map,
         .cot_map = if (mode == .vjp) dual_map else null,
         .tangent_map = if (mode == .jvp) dual_map else null,
-        .func = func,
         .allocator = allocator,
     };
 
+    // TODO: we inline the forward but we should call the function instead, all backends will inline
+    //  functions early anyways, and we can trivially inline functions in a PR pass as well, so this
+    //  is just confusing and makes the IR unreadable.
     switch (mode) {
         .vjp => {
-            for (func.eqns) |eqn| try ops.vjp_forward(ad_ctx, eqn);
-            // Backward: propagate cotangents in reverse equation order.
-            var i: usize = func.eqns.len;
+            for (func.ops) |op| try ops.vjp_forward(ad_ctx, op);
+            // Backward: propagate cotangents in reverse op order.
+            var i: usize = func.ops.len;
             while (i > 0) {
                 i -= 1;
-                try ops.vjp_backward(ad_ctx, func.eqns[i]);
+                try ops.vjp_backward(ad_ctx, func.ops[i]);
             }
         },
         .jvp => {
             // Single forward pass to compute primals and tangents together
-            for (func.eqns) |eqn| {
+            for (func.ops) |op| {
                 // NOTE: `vjp_forward` is likely a poor name should consider a rename
-                try ops.vjp_forward(ad_ctx, eqn); // primal computation, shared with VJP forward pass
-                try ops.jvp(ad_ctx, eqn);
+                try ops.vjp_forward(ad_ctx, op); // primal computation, shared with VJP forward pass
+                try ops.jvp(ad_ctx, op);
             }
         },
     }
 
     // VJP harvests cotangents at inputs, JVP harvests tangents at outputs.
-    const harvest_ids = switch (mode) {
+    const harvest_vars = switch (mode) {
         .vjp => func.params,
         .jvp => func.returns,
     };
     const extra: usize = if (include_value) func.returns.len else 0;
-    const returns = try allocator.alloc(pr.VarId, extra + harvest_ids.len);
+    const returns = try allocator.alloc(*pr.Var, extra + harvest_vars.len);
     defer allocator.free(returns);
 
     var out_idx: usize = 0;
     if (include_value) {
-        for (func.returns) |ret_id| {
-            returns[out_idx] = primal_map[@intCast(ret_id)] orelse return error.UnsupportedEqn;
+        for (func.returns) |ret_var| {
+            returns[out_idx] = primal_map[ret_var.id] orelse return error.UnsupportedEqn;
             out_idx += 1;
         }
     }
-    for (harvest_ids) |id| {
-        if (dual_map[@intCast(id)]) |dual| {
+    for (harvest_vars) |v| {
+        if (dual_map[v.id]) |dual| {
             returns[out_idx] = dual;
         } else {
-            const tensor = func.avals[@intCast(id)].as_tensor() orelse return error.UnsupportedEqn;
+            const tensor = v.aval.as_tensor();
             returns[out_idx] = try b.scalar_broadcast(tensor.dtype, tensor.shape.dims, 0.0);
         }
         out_idx += 1;
@@ -202,11 +202,10 @@ pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: 
 }
 
 /// Emit a ones-like cotangent for VJP seeding.
-pub fn emit_cotangent(builder: *pr.FunctionBuilder, tensor: pr.Tensor) pr.BuildError!pr.VarId {
-    const lit = ops.types.scalar_literal(tensor.dtype, 1.0);
-    const scalar = try builder.literal_scalar(lit);
-    if (tensor.shape.rank() == 0) return scalar;
-    return try builder.broadcast_in_dim(scalar, tensor.shape.dims, &.{});
+pub fn emit_cotangent(builder: *pr.FunctionBuilder, tensor: pr.Tensor) pr.BuildError!*pr.Var {
+    const s = try builder.scalar(tensor.dtype, 1.0);
+    if (tensor.shape.rank() == 0) return s;
+    return try builder.broadcast_in_dim(s, tensor.shape.dims, &.{});
 }
 
 test "vjp produces gradients matching input shapes" {
@@ -228,15 +227,15 @@ test "vjp produces gradients matching input shapes" {
     try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
-    try pr.validate_function(vjp_func);
+    try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
     try std.testing.expectEqual(@as(usize, func.params.len), vjp_func.returns.len);
 
-    for (func.params, 0..) |param_id, i| {
-        const p_t = func.avals[@intCast(param_id)].as_tensor().?;
-        const g_id = vjp_func.returns[i];
-        const g_t = vjp_func.avals[@intCast(g_id)].as_tensor().?;
+    for (func.params, 0..) |param_var, i| {
+        const p_t = param_var.as_tensor();
+        const g_var = vjp_func.returns[i];
+        const g_t = g_var.as_tensor();
         try std.testing.expectEqual(p_t.dtype, g_t.dtype);
         try std.testing.expect(std.mem.eql(i64, p_t.shape.dims, g_t.shape.dims));
     }
@@ -255,7 +254,7 @@ test "vjp_with_value returns primals plus gradients" {
     try program.add_function(func);
 
     const vjp_func = try vjp_with_value(std.testing.allocator, &program, func, "vjp_with_value");
-    try pr.validate_function(vjp_func);
+    try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.returns.len + func.params.len), vjp_func.returns.len);
 }
@@ -280,15 +279,15 @@ test "dot_general vjp supports 2 batch dims" {
     try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
-    try pr.validate_function(vjp_func);
+    try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
     try std.testing.expectEqual(@as(usize, func.params.len), vjp_func.returns.len);
 
-    for (func.params, 0..) |param_id, i| {
-        const p_t = func.avals[@intCast(param_id)].as_tensor().?;
-        const g_id = vjp_func.returns[i];
-        const g_t = vjp_func.avals[@intCast(g_id)].as_tensor().?;
+    for (func.params, 0..) |param_var, i| {
+        const p_t = param_var.as_tensor();
+        const g_var = vjp_func.returns[i];
+        const g_t = g_var.as_tensor();
         try std.testing.expectEqual(p_t.dtype, g_t.dtype);
         try std.testing.expect(std.mem.eql(i64, p_t.shape.dims, g_t.shape.dims));
     }
@@ -315,7 +314,7 @@ test "dot_general vjp supports non-prefix batch dims" {
     try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
-    try pr.validate_function(vjp_func);
+    try pr.validate_ops_in_func(vjp_func);
 }
 
 test "dot_general vjp supports differing batch dim positions" {
@@ -339,7 +338,7 @@ test "dot_general vjp supports differing batch dim positions" {
     try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
-    try pr.validate_function(vjp_func);
+    try pr.validate_ops_in_func(vjp_func);
 }
 
 test "dot_general vjp supports multi-contract dims" {
@@ -363,7 +362,7 @@ test "dot_general vjp supports multi-contract dims" {
     try program.add_function(func);
 
     const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
-    try pr.validate_function(vjp_func);
+    try pr.validate_ops_in_func(vjp_func);
 }
 
 // ============================================================================
@@ -389,7 +388,7 @@ test "jvp produces tangent outputs matching function output shapes" {
     try program.add_function(func);
 
     const jvp_func = try jvp(std.testing.allocator, &program, func, "jvp");
-    try pr.validate_function(jvp_func);
+    try pr.validate_ops_in_func(jvp_func);
 
     // JVP takes N primals + N tangents as params
     try std.testing.expectEqual(func.params.len * 2, jvp_func.params.len);
@@ -397,10 +396,10 @@ test "jvp produces tangent outputs matching function output shapes" {
     try std.testing.expectEqual(func.returns.len, jvp_func.returns.len);
 
     // Tangent output shapes must match original output shapes
-    for (func.returns, 0..) |ret_id, i| {
-        const orig_t = func.avals[@intCast(ret_id)].as_tensor().?;
-        const jvp_id = jvp_func.returns[i];
-        const jvp_t = jvp_func.avals[@intCast(jvp_id)].as_tensor().?;
+    for (func.returns, 0..) |ret_var, i| {
+        const orig_t = ret_var.as_tensor();
+        const jvp_var = jvp_func.returns[i];
+        const jvp_t = jvp_var.as_tensor();
         try std.testing.expectEqual(orig_t.dtype, jvp_t.dtype);
         try std.testing.expect(std.mem.eql(i64, orig_t.shape.dims, jvp_t.shape.dims));
     }
@@ -419,7 +418,7 @@ test "jvp_with_value returns primals plus tangents" {
     try program.add_function(func);
 
     const jvp_func = try jvp_with_value(std.testing.allocator, &program, func, "jvp_with_value");
-    try pr.validate_function(jvp_func);
+    try pr.validate_ops_in_func(jvp_func);
 
     // Returns M primals + M tangents
     try std.testing.expectEqual(func.returns.len * 2, jvp_func.returns.len);
@@ -447,11 +446,11 @@ test "dot_general jvp with batch dims" {
     try program.add_function(func);
 
     const jvp_func = try jvp(std.testing.allocator, &program, func, "jvp");
-    try pr.validate_function(jvp_func);
+    try pr.validate_ops_in_func(jvp_func);
 
     // Tangent output shape must match original output
-    const orig_t = func.avals[@intCast(func.returns[0])].as_tensor().?;
-    const jvp_t = jvp_func.avals[@intCast(jvp_func.returns[0])].as_tensor().?;
+    const orig_t = func.returns[0].as_tensor();
+    const jvp_t = jvp_func.returns[0].as_tensor();
     try std.testing.expectEqual(orig_t.dtype, jvp_t.dtype);
     try std.testing.expect(std.mem.eql(i64, orig_t.shape.dims, jvp_t.shape.dims));
 }

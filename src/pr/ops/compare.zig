@@ -1,13 +1,12 @@
-/// Compare and Select operations.
+//! Compare and Select operations.
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const Aval = pr.Aval;
 
-fn format_compare(writer: *types.Writer, params: pr.CompareParams) types.FormatError!void {
-    try writer.print("dir={s} type={s}", .{ @tagName(params.direction), @tagName(params.compare_type) });
+fn format_compare_params(writer: *types.Writer, cparams: pr.CompareParams) types.FormatError!void {
+    try writer.print("dir={s} type={s}", .{ @tagName(cparams.direction), @tagName(cparams.compare_type) });
 }
-
 
 // =========================================================================
 // Compare
@@ -16,16 +15,12 @@ fn format_compare(writer: *types.Writer, params: pr.CompareParams) types.FormatE
 pub const compare = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
-        const params = ctx.params();
-        if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
+    pub fn validate(op: *const pr.Op, cparams: pr.CompareParams) pr.ValidationError!void {
+        if (op.inputs.len != 2 or op.outputs.len != 1) return error.InvalidOpArity;
 
-        const cparams = pr.param(.compare,params) orelse return error.InvalidParams;
-        const lhs = try ctx.tensor_of(inputs[0]);
-        const rhs = try ctx.tensor_of(inputs[1]);
-        const out = try ctx.tensor_of(outputs[0]);
+        const lhs = op.operand(0).as_tensor();
+        const rhs = op.operand(1).as_tensor();
+        const out = op.result(0).as_tensor();
 
         if (!types.same_tensor_type(lhs, rhs)) return error.CompareTypeMismatch;
         if (out.dtype != .bool) return error.CompareTypeMismatch;
@@ -41,11 +36,10 @@ pub const compare = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        if (ctx.inputs.len != 2) return error.InvalidEqnArity;
-        const cparams = pr.param(.compare,ctx.params) orelse return error.InvalidParams;
-        const lhs = try ctx.tensor_of(ctx.inputs[0]);
-        const rhs = try ctx.tensor_of(ctx.inputs[1]);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, cparams: pr.CompareParams) pr.BuildError!Aval {
+        if (inputs.len != 2) return error.InvalidOpArity;
+        const lhs = inputs[0].as_tensor();
+        const rhs = inputs[1].as_tensor();
         if (!types.same_tensor_type(lhs, rhs)) return error.CompareTypeMismatch;
 
         switch (lhs.dtype) {
@@ -59,29 +53,21 @@ pub const compare = struct {
         return .{ .tensor = .{ .dtype = .bool, .shape = lhs.shape } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 2) return error.UnsupportedEqn;
-        const cparams = pr.param(.compare,params) orelse return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, cparams: pr.CompareParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const lhs = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.compare(lhs, rhs, cparams);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: compare produces booleans -- no meaningful tangent.
-    pub fn jvp(_: types.AdContext, _: pr.Eqn) types.AdError!void {}
+    /// JVP: compare produces booleans, no meaningful tangent.
+    pub fn jvp(_: types.AdContext, _: *const pr.Op, _: pr.CompareParams) types.AdError!void {}
 
-    pub const format = struct {
-        pub fn call(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-            if (pr.param(.compare,ctx.params())) |params| {
-                try format_compare(writer, params);
-            }
-        }
-    }.call;
+    pub fn format(writer: *types.Writer, _: *const pr.Op, cparams: pr.CompareParams) types.FormatError!void {
+        try format_compare_params(writer, cparams);
+    }
 };
 
 // =========================================================================
@@ -91,15 +77,13 @@ pub const compare = struct {
 pub const select = struct {
     pub const arity = .{ .in = 3, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
-        if (inputs.len != 3 or outputs.len != 1) return error.InvalidEqnArity;
+    pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+        if (op.inputs.len != 3 or op.outputs.len != 1) return error.InvalidOpArity;
 
-        const cond = try ctx.tensor_of(inputs[0]);
-        const on_true = try ctx.tensor_of(inputs[1]);
-        const on_false = try ctx.tensor_of(inputs[2]);
-        const out = try ctx.tensor_of(outputs[0]);
+        const cond = op.operand(0).as_tensor();
+        const on_true = op.operand(1).as_tensor();
+        const on_false = op.operand(2).as_tensor();
+        const out = op.result(0).as_tensor();
 
         if (cond.dtype != .bool) return error.SelectTypeMismatch;
         if (!types.same_tensor_type(on_true, on_false)) return error.SelectTypeMismatch;
@@ -107,55 +91,53 @@ pub const select = struct {
         if (!std.mem.eql(i64, cond.shape.dims, out.shape.dims)) return error.SelectTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        if (ctx.inputs.len != 3) return error.InvalidEqnArity;
-        const cond = try ctx.tensor_of(ctx.inputs[0]);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+        if (inputs.len != 3) return error.InvalidOpArity;
+        const cond = inputs[0].as_tensor();
         if (cond.dtype != .bool) return error.SelectTypeMismatch;
-        const on_true = try ctx.tensor_of(ctx.inputs[1]);
-        const on_false = try ctx.tensor_of(ctx.inputs[2]);
+        const on_true = inputs[1].as_tensor();
+        const on_false = inputs[2].as_tensor();
         if (!types.same_tensor_type(on_true, on_false)) return error.SelectTypeMismatch;
         if (!std.mem.eql(i64, cond.shape.dims, on_true.shape.dims)) return error.SelectTypeMismatch;
         return .{ .tensor = on_true };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 3) return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 3) return error.UnsupportedEqn;
 
-        const cond = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const on_true = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
-        const on_false = ctx.get_primal(inputs[2]) orelse return error.UnsupportedEqn;
+        const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const on_true = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const on_false = ctx.get_primal(op.operand(2)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.select(cond, on_true, on_false);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 3) return error.UnsupportedEqn;
+    /// VJP backward for select. Routes the cotangent to the chosen branch:
+    ///  on_true gets the cotangent where cond is true (zero elsewhere),
+    ///  on_false gets the cotangent where cond is false (zero elsewhere).
+    ///  No cotangent for cond itself (discrete, non-differentiable).
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 3) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const cond = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const on_true_tensor = ctx.tensor_of(inputs[1]);
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const on_true_tensor = op.operand(1).as_tensor();
 
         const zeros = try ctx.builder.scalar_broadcast(on_true_tensor.dtype, on_true_tensor.shape.dims, 0.0);
         const true_contrib = try ctx.builder.select(cond, out_cot, zeros);
         const false_contrib = try ctx.builder.select(cond, zeros, out_cot);
 
-        try ctx.add_cot(inputs[1], true_contrib);
-        try ctx.add_cot(inputs[2], false_contrib);
+        try ctx.add_cot(op.operand(1), true_contrib);
+        try ctx.add_cot(op.operand(2), false_contrib);
     }
 
     /// JVP: d(select(c, t, f)) = select(c, dt, df)
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 3) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 3) return error.UnsupportedEqn;
 
-        const cond = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const dt = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
-        const df = ctx.get_tangent(inputs[2]) orelse return error.UnsupportedEqn;
-        ctx.set_tangent(outputs[0], try ctx.builder.select(cond, dt, df));
+        const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dt = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
+        const df = ctx.get_tangent(op.operand(2)) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(op.result(0), try ctx.builder.select(cond, dt, df));
     }
 };

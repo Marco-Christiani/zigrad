@@ -1,6 +1,7 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const stz = @import("safetensors_zg");
+const log = std.log.scoped(.@"zg/llm_demo");
 
 pub fn run_llm_ft_demo(
     allocator: std.mem.Allocator,
@@ -45,10 +46,7 @@ pub fn run_llm_ft_demo(
             const y_log = try batch.y.mul(log_softmax);
             const loss_per = try y_log.reduce_sum(&.{1});
 
-            const builder = log_softmax.mode.traced.builder;
-            const neg = try Tensor.from_id(builder, try builder.literal_scalar(.{ .f32 = -1.0 }));
-            const neg_b = try neg.broadcast_in_dim(&.{bs_}, &.{});
-            const neg_loss = try loss_per.mul(neg_b);
+            const neg_loss = try loss_per.mul(try Tensor.constant_like(loss_per, -1.0));
             return try neg_loss.reduce_sum(&.{0});
         }
 
@@ -57,11 +55,8 @@ pub fn run_llm_ft_demo(
             defer vg.deinit();
             var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
             defer params_tree.deinit();
-            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, @as(f32, 1e-2), struct {
-                fn f(lr: f32, param: Tensor, grad: Tensor) anyerror!Tensor {
-                    return zg.frontend.optim.sgd_update(param, grad, lr);
-                }
-            }.f);
+            const optim = zg.frontend.optim.SGD{ .lr = 1e-2 };
+            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.frontend.optim.SGD.update);
             defer updated.deinit();
             return .{
                 .loss_val = vg.value,
@@ -131,9 +126,10 @@ pub fn run_llm_ft_demo(
             shape_b.const_slice(),
         );
         if (!quiet) {
-            std.log.info("llm-ft-demo: loaded weights from {s}", .{path});
+            log.info("Loaded weights from {s}", .{path});
         }
     } else |_| {
+        log.warn("Using synthetic weights (set ZG_LLM_SAFETENSORS_PATH to use a specific checkpoint)", .{});
         fill_pattern(host_w_emb.as_slice(f32), 1e-3, 0.0);
         fill_pattern(host_w_out.as_slice(f32), 1e-3, 0.0);
         fill_pattern(host_b.as_slice(f32), 1e-3, 0.0);
@@ -200,8 +196,8 @@ pub fn run_llm_ft_demo(
         loop_timer.end_step(loss);
     }
 
-    std.log.info("llm-ft-demo avg_step_ms={d:.3}", .{loop_timer.avg_ms()});
-    std.log.info("OK: llm-ft-demo executed", .{});
+    log.info("avg_step_ms={d:.3}", .{loop_timer.avg_ms()});
+    log.info("OK", .{});
 }
 
 fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
@@ -258,6 +254,7 @@ fn load_safetensors_weights(
 ///
 /// Returns a page-aligned slice backed by the kernel page cache.
 /// Caller must `std.posix.munmap` when done.
+/// TODO: This is duplicated (eg in llama demo). consider moving into stz or zigrad libs.
 fn mmap_file(path: []const u8) ![]align(std.heap.page_size_min) u8 {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.openFileAbsolute(path, .{})

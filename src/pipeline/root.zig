@@ -33,6 +33,9 @@ pub const dump_optimized_program = dump.dump_optimized_program;
 pub const kernelize = @import("kernelize.zig");
 pub const KernelizePass = kernelize.KernelizePass;
 
+const validate_mod = @import("validate.zig");
+pub const validate_pass = validate_mod.validate_pass;
+
 test {
     @import("std").testing.refAllDecls(@This());
 }

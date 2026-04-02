@@ -1,19 +1,19 @@
-/// IREE Compiler bindings.
-///
-/// Provides two compilation modes:
-///   1. **Subprocess** (default): invokes `iree-compile` as a child process.
-///      Avoids LLVM version conflicts when the host process also links LLVM
-///      (e.g. via the MLIR extension shim).
-///   2. **Dlopen**: loads `libIREECompiler.so` in-process via the embedding API.
-///      Only safe when no other LLVM-linked DSOs are loaded into the process.
-///
-/// ## Usage (subprocess)
-///
-/// ```zig
-/// var cmp = Compiler.init_subprocess("/path/to/iree-compile", &.{"--iree-hal-target-backends=vmvx"});
-/// const vmfb = try cmp.compile(allocator, mlir_bytes, is_bytecode);
-/// defer allocator.free(vmfb);
-/// ```
+//! IREE Compiler bindings.
+//!
+//! Provides two compilation modes:
+//!   1. **Subprocess** (default): invokes `iree-compile` as a child process.
+//!      Avoids LLVM version conflicts when the host process also links LLVM
+//!      (e.g. via the MLIR extension shim).
+//!   2. **Dlopen**: loads `libIREECompiler.so` in-process via the embedding API.
+//!      Only safe when no other LLVM-linked DSOs are loaded into the process.
+//!
+//! ## Usage (subprocess)
+//!
+//! ```zig
+//! var cmp = Compiler.init_subprocess("/path/to/iree-compile", &.{"--iree-hal-target-backends=vmvx"});
+//! const vmfb = try cmp.compile(allocator, mlir_bytes, is_bytecode);
+//! defer allocator.free(vmfb);
+//! ```
 const std = @import("std");
 const log = std.log.scoped(.@"zg/iree_compiler");
 

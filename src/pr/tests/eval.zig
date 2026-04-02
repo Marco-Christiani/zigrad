@@ -63,7 +63,7 @@ pub const EvalError = error{
     MissingParam,
     InvalidParam,
     OutOfMemory,
-    InvalidVarId,
+    InvalidVar,
 };
 
 // ============================================================================
@@ -82,8 +82,8 @@ pub fn eval(
 ) EvalError![]HostTensor {
     if (inputs.len != func.params.len) return error.ShapeMismatch;
 
-    // Environment: one optional HostTensor per VarId
-    var env = try allocator.alloc(?HostTensor, func.avals.len);
+    // Environment: one optional HostTensor per var id
+    var env = try allocator.alloc(?HostTensor, func.var_count);
     defer {
         // Free all intermediates that aren't returned
         for (env) |*slot| {
@@ -94,20 +94,20 @@ pub fn eval(
     @memset(env, null);
 
     // Bind input parameters
-    for (func.params, inputs) |param_id, input| {
-        env[@intCast(param_id)] = try input.clone();
+    for (func.params, inputs) |param_var, input| {
+        env[param_var.id] = try input.clone();
     }
 
-    // Execute equations
-    for (func.eqns) |eqn| {
-        try eval_eqn(allocator, func, eqn, env);
+    // Execute ops
+    for (func.ops) |op| {
+        try eval_op(allocator, op, env);
     }
 
-    // Extract return values. When the same VarId appears multiple times
+    // Extract return values. When the same var appears multiple times
     // in returns, clone on subsequent occurrences.
     const results = try allocator.alloc(HostTensor, func.returns.len);
-    for (func.returns, 0..) |ret_id, i| {
-        const idx: usize = @intCast(ret_id);
+    for (func.returns, 0..) |ret_var, i| {
+        const idx: usize = ret_var.id;
         if (env[idx]) |t| {
             results[i] = t;
             env[idx] = null; // Transfer ownership
@@ -115,11 +115,11 @@ pub fn eval(
             // Already transferred - must be a duplicate return. Find the
             // earlier result that took ownership and clone from it.
             var found = false;
-            for (func.returns[0..i]) |prev_id| {
-                if (prev_id == ret_id) {
+            for (func.returns[0..i]) |prev_var| {
+                if (prev_var.id == ret_var.id) {
                     // Clone from the result that already owns this tensor
-                    for (func.returns[0..i], 0..) |pid, j| {
-                        if (pid == ret_id) {
+                    for (func.returns[0..i], 0..) |pv, j| {
+                        if (pv.id == ret_var.id) {
                             results[i] = try results[j].clone();
                             found = true;
                             break;
@@ -130,7 +130,7 @@ pub fn eval(
             }
             if (!found) {
                 log.err("return var {d} is null in env (func={s})", .{ idx, func.name });
-                return error.InvalidVarId;
+                return error.InvalidVar;
             }
         }
     }
@@ -138,50 +138,49 @@ pub fn eval(
 }
 
 // ============================================================================
-// Equation Dispatch
+// Op Dispatch
 // ============================================================================
 
-fn eval_eqn(
+fn get_input(env: []?HostTensor, op: *const pr.Op, idx: usize) EvalError!HostTensor {
+    return env[op.operand(idx).id] orelse return error.InvalidVar;
+}
+
+fn eval_op(
     allocator: std.mem.Allocator,
-    func: pr.Function,
-    eqn: pr.Eqn,
+    op: *const pr.Op,
     env: []?HostTensor,
 ) EvalError!void {
-    const inputs = eqn.inputs.slice(pr.VarId, func.varids_store);
-    const outputs = eqn.outputs.slice(pr.VarId, func.varids_store);
-    const params = eqn.params.slice(pr.Param, func.params_store);
-
-    const result: HostTensor = switch (eqn.prim) {
-        .literal => try eval_literal(allocator, params),
-        .add => try eval_binary(allocator, env, inputs, add_fn),
-        .subtract => try eval_binary(allocator, env, inputs, sub_fn),
-        .multiply => try eval_binary(allocator, env, inputs, mul_fn),
-        .divide => try eval_binary(allocator, env, inputs, div_fn),
-        .maximum => try eval_binary(allocator, env, inputs, max_fn),
-        .exp => try eval_unary(allocator, env, inputs, exp_fn),
-        .log => try eval_unary(allocator, env, inputs, log_fn),
-        .rsqrt => try eval_unary(allocator, env, inputs, rsqrt_fn),
-        .logistic => try eval_unary(allocator, env, inputs, logistic_fn),
-        .compare => try eval_compare(allocator, env, inputs, params),
-        .select => try eval_select(allocator, env, inputs),
-        .convert => try eval_convert(allocator, env, inputs, func, outputs),
-        .reshape => try eval_reshape(allocator, env, inputs, params),
-        .transpose => try eval_transpose(allocator, env, inputs, params),
-        .broadcast_in_dim => try eval_broadcast_in_dim(allocator, env, inputs, params),
-        .reduce_sum => try eval_reduce_sum(allocator, env, inputs, params, func, outputs),
-        .reduce_max => try eval_reduce_max(allocator, env, inputs, params, func, outputs),
-        .dot => try eval_dot(allocator, env, inputs),
-        .dot_general => try eval_dot_general(allocator, env, inputs, params, func, outputs),
-        .gather => try eval_gather(allocator, env, inputs, params, func, outputs),
-        .scatter => try eval_scatter(allocator, env, inputs, params, func, outputs),
-        .iota => try eval_iota(allocator, params, func, outputs),
-        .slice => try eval_slice(allocator, env, inputs, params),
-        .concatenate => try eval_concatenate(allocator, env, inputs, params, func),
+    const result: HostTensor = switch (op.params) {
+        .literal => |lit| try eval_literal(allocator, lit),
+        .add => try eval_binary(allocator, env, op, add_fn),
+        .subtract => try eval_binary(allocator, env, op, sub_fn),
+        .multiply => try eval_binary(allocator, env, op, mul_fn),
+        .divide => try eval_binary(allocator, env, op, div_fn),
+        .maximum => try eval_binary(allocator, env, op, max_fn),
+        .exp => try eval_unary(allocator, env, op, exp_fn),
+        .log => try eval_unary(allocator, env, op, log_fn),
+        .rsqrt => try eval_unary(allocator, env, op, rsqrt_fn),
+        .logistic => try eval_unary(allocator, env, op, logistic_fn),
+        .compare => |cp| try eval_compare(allocator, env, op, cp),
+        .select => try eval_select(allocator, env, op),
+        .convert => try eval_convert(allocator, env, op),
+        .reshape => |rp| try eval_reshape(allocator, env, op, rp),
+        .transpose => |tp| try eval_transpose(allocator, env, op, tp),
+        .broadcast_in_dim => |bp| try eval_broadcast_in_dim(allocator, env, op, bp),
+        .reduce_sum => |rp| try eval_reduce_sum(allocator, env, op, rp),
+        .reduce_max => |rp| try eval_reduce_max(allocator, env, op, rp),
+        .dot => try eval_dot(allocator, env, op),
+        .dot_general => |dg| try eval_dot_general(allocator, env, op, dg),
+        .gather => |gp| try eval_gather(allocator, env, op, gp),
+        .scatter => |sp| try eval_scatter(allocator, env, op, sp),
+        .iota => |ip| try eval_iota(allocator, ip),
+        .slice => |sp| try eval_slice(allocator, env, op, sp),
+        .concatenate => |cp| try eval_concatenate(allocator, env, op, cp),
         .call, .custom_call => return error.UnsupportedOp,
     };
 
-    if (outputs.len != 1) return error.UnsupportedOp;
-    env[@intCast(outputs[0])] = result;
+    if (op.outputs.len != 1) return error.UnsupportedOp;
+    env[op.result(0).id] = result;
 }
 
 // ============================================================================
@@ -216,8 +215,7 @@ fn logistic_fn(x: f32) f32 {
     return 1.0 / (1.0 + @exp(-x));
 }
 
-fn eval_literal(allocator: std.mem.Allocator, params: []const pr.Param) EvalError!HostTensor {
-    const lit = pr.param(.literal,params) orelse return error.MissingParam;
+fn eval_literal(allocator: std.mem.Allocator, lit: pr.Literal) EvalError!HostTensor {
     var t = try HostTensor.init(allocator, &.{});
     t.data[0] = switch (lit) {
         .f32 => |v| v,
@@ -229,10 +227,8 @@ fn eval_literal(allocator: std.mem.Allocator, params: []const pr.Param) EvalErro
         .u32 => |v| @floatFromInt(v),
         .u64 => |v| @floatFromInt(v),
         .bool => |v| if (v) @as(f32, 1.0) else 0.0,
-        .f16, .bf16 => |v| blk: {
-            const bits: u32 = @as(u32, v) << 16;
-            break :blk @bitCast(bits);
-        },
+        .f16 => |v| pr.DType.f16.decode_f32(v),
+        .bf16 => |v| pr.DType.bf16.decode_f32(v),
     };
     return t;
 }
@@ -240,14 +236,14 @@ fn eval_literal(allocator: std.mem.Allocator, params: []const pr.Param) EvalErro
 fn eval_binary(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    op: *const fn (f32, f32) f32,
+    op: *const pr.Op,
+    f: *const fn (f32, f32) f32,
 ) EvalError!HostTensor {
-    const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
+    const lhs = try get_input(env, op, 0);
+    const rhs = try get_input(env, op, 1);
     const result = try HostTensor.init(allocator, lhs.shape);
     for (result.data, 0..) |*out, i| {
-        out.* = op(lhs.data[i], rhs.data[i]);
+        out.* = f(lhs.data[i], rhs.data[i]);
     }
     return result;
 }
@@ -255,13 +251,13 @@ fn eval_binary(
 fn eval_unary(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    op: *const fn (f32) f32,
+    op: *const pr.Op,
+    f: *const fn (f32) f32,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
+    const operand = try get_input(env, op, 0);
     const result = try HostTensor.init(allocator, operand.shape);
     for (result.data, 0..) |*out, i| {
-        out.* = op(operand.data[i]);
+        out.* = f(operand.data[i]);
     }
     return result;
 }
@@ -269,17 +265,16 @@ fn eval_unary(
 fn eval_compare(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
+    op: *const pr.Op,
+    cp: pr.CompareParams,
 ) EvalError!HostTensor {
-    const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const cparams = pr.param(.compare,params) orelse return error.MissingParam;
+    const lhs = try get_input(env, op, 0);
+    const rhs = try get_input(env, op, 1);
     const result = try HostTensor.init(allocator, lhs.shape);
     for (result.data, 0..) |*out, i| {
         const a = lhs.data[i];
         const b = rhs.data[i];
-        const cmp: bool = switch (cparams.direction) {
+        const cmp: bool = switch (cp.direction) {
             .EQ => a == b,
             .NE => a != b,
             .GE => a >= b,
@@ -295,11 +290,11 @@ fn eval_compare(
 fn eval_select(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
+    op: *const pr.Op,
 ) EvalError!HostTensor {
-    const cond = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const on_true = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const on_false = env[@intCast(inputs[2])] orelse return error.InvalidVarId;
+    const cond = try get_input(env, op, 0);
+    const on_true = try get_input(env, op, 1);
+    const on_false = try get_input(env, op, 2);
     const result = try HostTensor.init(allocator, on_true.shape);
     for (result.data, 0..) |*out, i| {
         out.* = if (cond.data[i] != 0.0) on_true.data[i] else on_false.data[i];
@@ -310,13 +305,11 @@ fn eval_select(
 fn eval_convert(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    op: *const pr.Op,
 ) EvalError!HostTensor {
     // For f32 eval, convert is effectively identity on shape
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const operand = try get_input(env, op, 0);
+    const out_tensor = op.result(0).as_tensor();
     const result = try HostTensor.init(allocator, out_tensor.shape.dims);
     @memcpy(result.data, operand.data);
     return result;
@@ -325,12 +318,11 @@ fn eval_convert(
 fn eval_reshape(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
+    op: *const pr.Op,
+    rp: pr.ReshapeParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const out_shape = pr.param(.out_shape,params) orelse return error.MissingParam;
-    const result = try HostTensor.init(allocator, out_shape);
+    const operand = try get_input(env, op, 0);
+    const result = try HostTensor.init(allocator, rp.out_shape);
     @memcpy(result.data, operand.data);
     return result;
 }
@@ -338,11 +330,11 @@ fn eval_reshape(
 fn eval_transpose(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
+    op: *const pr.Op,
+    tp: pr.TransposeParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const perm = pr.param(.permutation,params) orelse return error.MissingParam;
+    const operand = try get_input(env, op, 0);
+    const perm = tp.permutation;
     const in_shape = operand.shape;
     const ndim = in_shape.len;
 
@@ -376,12 +368,12 @@ fn eval_transpose(
 fn eval_broadcast_in_dim(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
+    op: *const pr.Op,
+    bp: pr.BroadcastInDimParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const out_shape = pr.param(.out_shape,params) orelse return error.MissingParam;
-    const broadcast_dims = pr.param(.broadcast_dimensions,params) orelse return error.MissingParam;
+    const operand = try get_input(env, op, 0);
+    const out_shape = bp.out_shape;
+    const broadcast_dims = bp.dimensions;
 
     var result = try HostTensor.init(allocator, out_shape);
     const out_ndim = out_shape.len;
@@ -408,14 +400,12 @@ fn eval_broadcast_in_dim(
 fn eval_reduce_sum(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    op: *const pr.Op,
+    rp: pr.ReduceParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const axes = pr.param(.reduce_axes,params) orelse return error.MissingParam;
-    const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const operand = try get_input(env, op, 0);
+    const axes = rp.axes;
+    const out_tensor = op.result(0).as_tensor();
     const out_shape = out_tensor.shape.dims;
 
     var result = try HostTensor.init(allocator, out_shape);
@@ -450,14 +440,12 @@ fn eval_reduce_sum(
 fn eval_reduce_max(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    op: *const pr.Op,
+    rp: pr.ReduceParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const axes = pr.param(.reduce_axes,params) orelse return error.MissingParam;
-    const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const operand = try get_input(env, op, 0);
+    const axes = rp.axes;
+    const out_tensor = op.result(0).as_tensor();
     const out_shape = out_tensor.shape.dims;
 
     var result = try HostTensor.init(allocator, out_shape);
@@ -490,10 +478,10 @@ fn eval_reduce_max(
 fn eval_dot(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
+    op: *const pr.Op,
 ) EvalError!HostTensor {
-    const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
+    const lhs = try get_input(env, op, 0);
+    const rhs = try get_input(env, op, 1);
     const m: usize = @intCast(lhs.shape[0]);
     const k: usize = @intCast(lhs.shape[1]);
     const n: usize = @intCast(rhs.shape[1]);
@@ -514,15 +502,12 @@ fn eval_dot(
 fn eval_dot_general(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    op: *const pr.Op,
+    dg: pr.DotGeneralParams,
 ) EvalError!HostTensor {
-    const lhs = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const rhs = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const dg = pr.param(.dot_general,params) orelse return error.MissingParam;
-    const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const lhs = try get_input(env, op, 0);
+    const rhs = try get_input(env, op, 1);
+    const out_tensor = op.result(0).as_tensor();
     const out_shape = out_tensor.shape.dims;
 
     const lhs_shape = lhs.shape;
@@ -620,15 +605,12 @@ fn eval_dot_general(
 fn eval_gather(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    op: *const pr.Op,
+    gp: pr.GatherParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const indices = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const gp = pr.param(.gather,params) orelse return error.MissingParam;
-    const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const operand = try get_input(env, op, 0);
+    const indices = try get_input(env, op, 1);
+    const out_tensor = op.result(0).as_tensor();
     const out_shape = out_tensor.shape.dims;
 
     const operand_shape = operand.shape;
@@ -723,16 +705,13 @@ fn eval_gather(
 fn eval_scatter(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    op: *const pr.Op,
+    sp: pr.ScatterParams,
 ) EvalError!HostTensor {
-    const input = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const scatter_indices = env[@intCast(inputs[1])] orelse return error.InvalidVarId;
-    const updates = env[@intCast(inputs[2])] orelse return error.InvalidVarId;
-    const sp = pr.param(.scatter,params) orelse return error.MissingParam;
-    const out_tensor = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const input = try get_input(env, op, 0);
+    const scatter_indices = try get_input(env, op, 1);
+    const updates = try get_input(env, op, 2);
+    const out_tensor = op.result(0).as_tensor();
     const out_shape = out_tensor.shape.dims;
     const out_rank = out_shape.len;
 
@@ -811,17 +790,13 @@ fn eval_scatter(
 
 fn eval_iota(
     allocator: std.mem.Allocator,
-    params: []const pr.Param,
-    func: pr.Function,
-    outputs: []const pr.VarId,
+    ip: pr.IotaParams,
 ) EvalError!HostTensor {
-    const out_shape = pr.param(.out_shape,params) orelse return error.MissingParam;
-    const iota_dim = pr.param(.iota_dimension,params) orelse return error.MissingParam;
-    _ = func.avals[@intCast(outputs[0])].as_tensor() orelse return error.InvalidVarId;
+    const out_shape = ip.out_shape;
+    const dim_idx: usize = @intCast(ip.dimension);
 
     var result = try HostTensor.init(allocator, out_shape);
     const ndim = out_shape.len;
-    const dim_idx: usize = @intCast(iota_dim);
 
     for (0..result.data.len) |flat| {
         var idx: [64]usize = undefined;
@@ -834,11 +809,10 @@ fn eval_iota(
 fn eval_slice(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
+    op: *const pr.Op,
+    sp: pr.SliceParams,
 ) EvalError!HostTensor {
-    const operand = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
-    const sp = pr.param(.slice,params) orelse return error.MissingParam;
+    const operand = try get_input(env, op, 0);
     const in_shape = operand.shape;
     const ndim = in_shape.len;
 
@@ -872,21 +846,20 @@ fn eval_slice(
 fn eval_concatenate(
     allocator: std.mem.Allocator,
     env: []?HostTensor,
-    inputs: []const pr.VarId,
-    params: []const pr.Param,
-    func: pr.Function,
+    op: *const pr.Op,
+    cp: pr.ConcatenateParams,
 ) EvalError!HostTensor {
-    const axis: usize = @intCast(pr.param(.concat_axis,params) orelse return error.MissingParam);
+    const axis: usize = @intCast(cp.axis);
 
     // Compute output shape
-    const first = env[@intCast(inputs[0])] orelse return error.InvalidVarId;
+    const first = try get_input(env, op, 0);
     const ndim = first.shape.len;
     var out_shape_buf: [64]i64 = undefined;
     @memcpy(out_shape_buf[0..ndim], first.shape);
 
     var total_axis: i64 = first.shape[axis];
-    for (inputs[1..]) |inp_id| {
-        const t = env[@intCast(inp_id)] orelse return error.InvalidVarId;
+    for (1..op.inputs.len) |idx| {
+        const t = try get_input(env, op, idx);
         total_axis += t.shape[axis];
     }
     out_shape_buf[axis] = total_axis;
@@ -895,11 +868,9 @@ fn eval_concatenate(
     var result = try HostTensor.init(allocator, out_shape);
 
     // Copy data from each input
-    const varids = func.varids_store;
-    _ = varids;
     var axis_offset: usize = 0;
-    for (inputs) |inp_id| {
-        const t = env[@intCast(inp_id)] orelse return error.InvalidVarId;
+    for (0..op.inputs.len) |idx| {
+        const t = try get_input(env, op, idx);
         const t_shape = t.shape;
 
         for (0..t.data.len) |in_flat| {
@@ -955,7 +926,7 @@ fn multi_to_flat(idx: []const usize, shape: []const i64) usize {
 
 const testing = std.testing;
 
-fn build_and_finish(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const pr.VarId) !pr.Function {
+fn build_and_finish(program: *pr.Program, b: *pr.FunctionBuilder, returns: []const *pr.Var) !pr.Function {
     const func = try b.finish(returns);
     try program.add_function(func);
     return func;

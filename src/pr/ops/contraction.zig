@@ -1,5 +1,5 @@
-/// Contraction Operations
-/// Ops that contract dimensions (matrix multiply, convolution).
+//! Contraction Operations
+//! Ops that contract dimensions (matrix multiply, convolution).
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
@@ -14,15 +14,12 @@ const log = std.log.scoped(.@"zg/contraction");
 pub const dot = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
+    pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+        if (op.inputs.len != 2 or op.outputs.len != 1) return error.InvalidOpArity;
 
-        if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-
-        const lhs = try ctx.tensor_of(inputs[0]);
-        const rhs = try ctx.tensor_of(inputs[1]);
-        const out = try ctx.tensor_of(outputs[0]);
+        const lhs = op.operand(0).as_tensor();
+        const rhs = op.operand(1).as_tensor();
+        const out = op.result(0).as_tensor();
 
         if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotTypeMismatch;
         if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2 or out.shape.rank() != 2) return error.DotTypeMismatch;
@@ -30,41 +27,35 @@ pub const dot = struct {
         if (out.shape.dims[0] != lhs.shape.dims[0] or out.shape.dims[1] != rhs.shape.dims[1]) return error.DotTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        if (ctx.inputs.len != 2) return error.InvalidEqnArity;
+    pub fn infer_output(alloc: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+        if (inputs.len != 2) return error.InvalidOpArity;
 
-        const lhs = try ctx.tensor_of(ctx.inputs[0]);
-        const rhs = try ctx.tensor_of(ctx.inputs[1]);
+        const lhs = inputs[0].as_tensor();
+        const rhs = inputs[1].as_tensor();
 
         if (lhs.dtype != rhs.dtype) return error.DotTypeMismatch;
         if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2) return error.DotTypeMismatch;
         if (lhs.shape.dims[1] != rhs.shape.dims[0]) return error.DotTypeMismatch;
 
-        const out_dims = try ctx.alloc().dupe(i64, &[_]i64{ lhs.shape.dims[0], rhs.shape.dims[1] });
+        const out_dims = try alloc.dupe(i64, &[_]i64{ lhs.shape.dims[0], rhs.shape.dims[1] });
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        if (inputs.len != 2) return error.UnsupportedEqn;
-
-        const lhs = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.dot(lhs, rhs);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        if (inputs.len != 2) return error.UnsupportedEqn;
-
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const lhs_primal = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
 
         const rhs_t = try ctx.builder.transpose(rhs_primal, &.{ 1, 0 });
         const lhs_t = try ctx.builder.transpose(lhs_primal, &.{ 1, 0 });
@@ -72,28 +63,27 @@ pub const dot = struct {
         const lhs_contrib = try ctx.builder.dot(out_cot, rhs_t);
         const rhs_contrib = try ctx.builder.dot(lhs_t, out_cot);
 
-        try ctx.add_cot(inputs[0], lhs_contrib);
-        try ctx.add_cot(inputs[1], rhs_contrib);
+        try ctx.add_cot(op.operand(0), lhs_contrib);
+        try ctx.add_cot(op.operand(1), rhs_contrib);
     }
 
     /// JVP: d(A @ B) = dA @ B + A @ dB
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 2) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const a = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const b = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
-        const da = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const db = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+        const a = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const b = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const da = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const db = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
 
         const term1 = try ctx.builder.dot(da, b);
         const term2 = try ctx.builder.dot(a, db);
-        ctx.set_tangent(outputs[0], try ctx.builder.add(term1, term2));
+        ctx.set_tangent(op.result(0), try ctx.builder.add(term1, term2));
     }
 
-    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const lhs = ctx.input_tensor(0) orelse return;
+    pub fn format(writer: *types.Writer, op: *const pr.Op, _: void) types.FormatError!void {
+        if (op.inputs.len == 0) return;
+        const lhs = op.operand(0).as_tensor();
         const contract_dim = lhs.shape.rank() - 1;
         try writer.print("contracting=([{d}], [0]), K={d}", .{
             contract_dim,
@@ -109,17 +99,12 @@ pub const dot = struct {
 pub const dot_general = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
-        const params = ctx.params();
+    pub fn validate(op: *const pr.Op, dg_params: pr.DotGeneralParams) pr.ValidationError!void {
+        if (op.inputs.len != 2 or op.outputs.len != 1) return error.InvalidOpArity;
 
-        if (inputs.len != 2 or outputs.len != 1) return error.InvalidEqnArity;
-        const dg_params = pr.param(.dot_general,params) orelse return error.InvalidParams;
-
-        const lhs = try ctx.tensor_of(inputs[0]);
-        const rhs = try ctx.tensor_of(inputs[1]);
-        const out = try ctx.tensor_of(outputs[0]);
+        const lhs = op.operand(0).as_tensor();
+        const rhs = op.operand(1).as_tensor();
+        const out = op.result(0).as_tensor();
         if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotGeneralTypeMismatch;
 
         var dims_buf: [max_rank]i64 = undefined;
@@ -147,60 +132,62 @@ pub const dot_general = struct {
         }
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        if (ctx.inputs.len != 2) return error.InvalidEqnArity;
-        const dg_params = pr.param(.dot_general,ctx.params) orelse return error.InvalidParams;
-        const lhs = try ctx.tensor_of(ctx.inputs[0]);
-        const rhs = try ctx.tensor_of(ctx.inputs[1]);
+    pub fn infer_output(alloc: std.mem.Allocator, inputs: []const *pr.Var, dg_params: pr.DotGeneralParams) pr.BuildError!Aval {
+        if (inputs.len != 2) return error.InvalidOpArity;
+        const lhs = inputs[0].as_tensor();
+        const rhs = inputs[1].as_tensor();
         if (lhs.dtype != rhs.dtype) return error.DotGeneralTypeMismatch;
         var dims_buf: [max_rank]i64 = undefined;
         const computed = compute_dot_general_output_dims(lhs, rhs, dg_params, &dims_buf) orelse
             return error.DotGeneralTypeMismatch;
-        const out_dims = try ctx.alloc().dupe(i64, computed);
+        const out_dims = try alloc.dupe(i64, computed);
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 2) return error.UnsupportedEqn;
-        const dg_params = pr.param(.dot_general,params) orelse return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const lhs = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.dot_general(lhs, rhs, dg_params);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 2) return error.UnsupportedEqn;
-        const dg_params = pr.param(.dot_general,params) orelse return error.UnsupportedEqn;
+    /// VJP backward for dot_general.
+    ///
+    /// Tries three strategies in order:
+    ///  1. `maybe_batched_matmul_vjp` - fast path for single-contracting-dim batched matmul.
+    ///  2. `maybe_general_dot_vjp` - general case with arbitrary batch/contracting dims.
+    ///  3. Inline 3-rank special case: lhs is [B,M,K], rhs is [K,N] or [N,K],
+    ///      no batch dims, single contracting dim at lhs position 2. Flattens
+    ///      the batch+row dims to reduce to 2D dot, then reshapes back.
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const lhs_primal = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const rhs_primal = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
 
         const lhs_contrib, const rhs_contrib = blk: {
-            if (try maybe_batched_matmul_vjp(ctx, inputs[0], inputs[1], out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
+            if (try maybe_batched_matmul_vjp(ctx, op.operand(0), op.operand(1), out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
                 break :blk .{ pair.lhs, pair.rhs };
             }
 
-            if (try maybe_general_dot_vjp(ctx, inputs[0], inputs[1], out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
+            if (try maybe_general_dot_vjp(ctx, op.operand(0), op.operand(1), out_cot, lhs_primal, rhs_primal, dg_params)) |pair| {
                 break :blk .{ pair.lhs, pair.rhs };
             }
 
+            // 3-rank special case: lhs=[B,M,K] @ rhs=[K,N] (or [N,K]) => out=[B,M,N].
+            // No batch dims, single contracting dim at lhs position 2.
+            // Strategy: flatten B*M into a single dim, do 2D matmul, reshape back.
             if (dg_params.lhs_batch_dims.len == 0 and dg_params.rhs_batch_dims.len == 0 and
                 dg_params.lhs_contracting_dims.len == 1 and dg_params.lhs_contracting_dims[0] == 2 and
                 dg_params.rhs_contracting_dims.len == 1 and
                 (dg_params.rhs_contracting_dims[0] == 0 or dg_params.rhs_contracting_dims[0] == 1))
             {
-                const lhs_t = ctx.tensor_of(inputs[0]);
-                const rhs_t = ctx.tensor_of(inputs[1]);
-                const out_t = ctx.tensor_of(outputs[0]);
+                const lhs_t = op.operand(0).as_tensor();
+                const rhs_t = op.operand(1).as_tensor();
+                const out_t = op.result(0).as_tensor();
 
                 if (lhs_t.shape.rank() != 3 or rhs_t.shape.rank() != 2 or out_t.shape.rank() != 3) {
                     return error.UnsupportedEqn;
@@ -213,8 +200,12 @@ pub const dot_general = struct {
                 const n = if (rhs_contract_dim == 0) rhs_t.shape.dims[1] else rhs_t.shape.dims[0];
                 const bm = b * m;
 
+                // Flatten out_cot [B,M,N] to [B*M, N] for 2D matmul.
                 const out2 = try ctx.builder.reshape(out_cot, &.{ bm, n });
 
+                // d_lhs = out2 @ rhs^T => [B*M, K] => reshape back to [B,M,K].
+                // If rhs is [K,N] (contract_dim=0), transpose to [N,K] first.
+                // If rhs is [N,K] (contract_dim=1), it's already in the right layout.
                 const lhs_c = if (rhs_contract_dim == 0) lhs_blk: {
                     const rhs_t2 = try ctx.builder.transpose(rhs_primal, &.{ 1, 0 });
                     const lhs_flat = try ctx.builder.dot(out2, rhs_t2);
@@ -224,8 +215,12 @@ pub const dot_general = struct {
                     break :lhs_blk try ctx.builder.reshape(lhs_flat, &.{ b, m, k });
                 };
 
+                // d_rhs = lhs^T @ out2: flatten lhs [B,M,K] to [B*M, K], transpose to [K, B*M],
+                // then matmul with out2 [B*M, N] => [K, N].
                 const lhs2 = try ctx.builder.reshape(lhs_primal, &.{ bm, k });
                 const lhs2_t = try ctx.builder.transpose(lhs2, &.{ 1, 0 });
+                // If rhs was [K,N] (contract_dim=0), result [K,N] is already correct.
+                // If rhs was [N,K] (contract_dim=1), transpose [K,N] -> [N,K] to match.
                 const rhs_c = if (rhs_contract_dim == 0) rhs_blk: {
                     break :rhs_blk try ctx.builder.dot(lhs2_t, out2);
                 } else rhs_blk: {
@@ -239,30 +234,25 @@ pub const dot_general = struct {
             return error.UnsupportedEqn;
         };
 
-        try ctx.add_cot(inputs[0], lhs_contrib);
-        try ctx.add_cot(inputs[1], rhs_contrib);
+        try ctx.add_cot(op.operand(0), lhs_contrib);
+        try ctx.add_cot(op.operand(1), rhs_contrib);
     }
 
     /// JVP: d(dot_general(A, B, p)) = dot_general(dA, B, p) + dot_general(A, dB, p)
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 2) return error.UnsupportedEqn;
-        const dg_params = pr.param(.dot_general,params) orelse return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
 
-        const a = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        const b = ctx.get_primal(inputs[1]) orelse return error.UnsupportedEqn;
-        const da = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const db = ctx.get_tangent(inputs[1]) orelse return error.UnsupportedEqn;
+        const a = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const b = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const da = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const db = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
 
         const term1 = try ctx.builder.dot_general(da, b, dg_params);
         const term2 = try ctx.builder.dot_general(a, db, dg_params);
-        ctx.set_tangent(outputs[0], try ctx.builder.add(term1, term2));
+        ctx.set_tangent(op.result(0), try ctx.builder.add(term1, term2));
     }
 
-    pub fn format(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-        const dg_params = pr.param(.dot_general,ctx.params()) orelse return;
+    pub fn format(writer: *types.Writer, _: *const pr.Op, dg_params: pr.DotGeneralParams) types.FormatError!void {
         try writer.writeAll("batch=(lhs=");
         try write_dims(writer, dg_params.lhs_batch_dims);
         try writer.writeAll(", rhs=");
@@ -275,29 +265,42 @@ pub const dot_general = struct {
     }
 };
 
-const BatchedMatmulVjpPair = struct { lhs: pr.VarId, rhs: pr.VarId };
+const BatchedMatmulVjpPair = struct { lhs: *pr.Var, rhs: *pr.Var };
 
+/// General-case VJP for dot_general with arbitrary batch/contracting dims.
+///
+/// Classifies each dimension as batch, contracting, or "other" (free), then
+///  computes cotangent contributions for lhs and rhs by contracting the output
+///  cotangent against the opposite primal. The canonical outputs are in
+///  [batch..., other..., contracting...] order, so `transpose_to_match_multi`
+///  permutes them back to the original operand layouts.
+///
+/// Returns null if the dimension configuration is unsupported (e.g. mismatched
+///  batch/contracting counts or zero contracting dims), letting the caller fall
+///  through to more specialized strategies.
 fn maybe_general_dot_vjp(
     ctx: types.AdContext,
-    lhs_id: pr.VarId,
-    rhs_id: pr.VarId,
-    out_cot: pr.VarId,
-    lhs_primal: pr.VarId,
-    rhs_primal: pr.VarId,
+    lhs_var: *const pr.Var,
+    rhs_var: *const pr.Var,
+    out_cot: *pr.Var,
+    lhs_primal: *pr.Var,
+    rhs_primal: *pr.Var,
     params: pr.DotGeneralParams,
 ) types.AdError!?BatchedMatmulVjpPair {
     if (params.lhs_contracting_dims.len != params.rhs_contracting_dims.len) return null;
     if (params.lhs_contracting_dims.len == 0) return null;
     if (params.lhs_batch_dims.len != params.rhs_batch_dims.len) return null;
 
-    const lhs_t = ctx.tensor_of(lhs_id);
-    const rhs_t = ctx.tensor_of(rhs_id);
-    const out_t = ctx.builder_tensor_of(out_cot);
+    const lhs_t = lhs_var.as_tensor();
+    const rhs_t = rhs_var.as_tensor();
+    const out_t = out_cot.as_tensor();
 
     const lhs_rank = lhs_t.shape.rank();
     const rhs_rank = rhs_t.shape.rank();
     const batch_len: usize = params.lhs_batch_dims.len;
 
+    // Classify dims: each dimension of lhs/rhs is batch, contracting, or "other" (free).
+    // Output layout is [batch..., lhs_other..., rhs_other...].
     const lhs_other = try collect_other_dims(ctx.allocator, lhs_rank, params.lhs_batch_dims, params.lhs_contracting_dims);
     defer ctx.allocator.free(lhs_other);
     const rhs_other = try collect_other_dims(ctx.allocator, rhs_rank, params.rhs_batch_dims, params.rhs_contracting_dims);
@@ -306,9 +309,13 @@ fn maybe_general_dot_vjp(
     const expected_out_rank = batch_len + lhs_other.len + rhs_other.len;
     if (out_t.shape.rank() != expected_out_rank) return error.UnsupportedEqn;
 
+    // Output dim ranges: [0..batch_len) are batch, [batch_len..+lhs_other) are lhs free,
+    // [batch_len+lhs_other..end) are rhs free.
     const out_batch = try build_range(ctx.allocator, 0, batch_len);
     defer ctx.allocator.free(out_batch);
 
+    // d_lhs: contract out_cot with rhs_primal. We contract over the rhs "other" dims
+    // (which appear at positions [batch_len+lhs_other.len..] in the output).
     const rhs_contract_from_out = try build_range(ctx.allocator, batch_len + lhs_other.len, rhs_other.len);
     defer ctx.allocator.free(rhs_contract_from_out);
 
@@ -319,6 +326,8 @@ fn maybe_general_dot_vjp(
         .rhs_contracting_dims = rhs_other,
     });
 
+    // Canonical result is [batch..., lhs_other..., lhs_contracting...], permute
+    //  back to the original lhs dim order.
     const d_lhs = try transpose_to_match_multi(
         ctx,
         d_lhs_canon,
@@ -328,6 +337,8 @@ fn maybe_general_dot_vjp(
         params.lhs_contracting_dims,
     );
 
+    // d_rhs: contract lhs_primal with out_cot. We contract over the lhs "other" dims
+    // (which appear at positions [batch_len..batch_len+lhs_other.len) in the output).
     const lhs_contract = lhs_other;
     const out_contract = try build_range(ctx.allocator, batch_len, lhs_other.len);
     defer ctx.allocator.free(out_contract);
@@ -339,10 +350,8 @@ fn maybe_general_dot_vjp(
         .rhs_contracting_dims = out_contract,
     });
 
-    // Canonical layout from dot_general(lhs_primal, out_cot) is
-    // [batch, lhs_remaining, rhs_remaining] = [batch, rhs_contract, rhs_other].
-    // transpose_to_match_multi expects (batch, slot0, slot1) matching canonical
-    // positions, so pass rhs_contracting first, then rhs_other.
+    // Canonical result is [batch..., rhs_contracting..., rhs_other...], permute
+    // back to the original rhs dim order.
     const d_rhs = try transpose_to_match_multi(
         ctx,
         d_rhs_canon,
@@ -355,13 +364,24 @@ fn maybe_general_dot_vjp(
     return .{ .lhs = d_lhs, .rhs = d_rhs };
 }
 
+/// Fast-path VJP for batched matmul: exactly one contracting dim per operand
+///  and at least one batch dim. Each operand has exactly one "other" (free)
+///  dimension beyond batch and contracting.
+///
+/// For lhs cotangent: contracts output cotangent with rhs over the N dim.
+/// For rhs cotangent: contracts lhs^T with output cotangent over the M dim.
+/// Results are transposed from canonical [batch..., free, contracted] order
+///  back to the original operand dim order via `transpose_to_match`.
+///
+/// Returns null if preconditions aren't met (no batch dims, multiple
+///  contracting dims, or more than one free dim per operand).
 fn maybe_batched_matmul_vjp(
     ctx: types.AdContext,
-    lhs_id: pr.VarId,
-    rhs_id: pr.VarId,
-    out_cot: pr.VarId,
-    lhs_primal: pr.VarId,
-    rhs_primal: pr.VarId,
+    lhs_var: *const pr.Var,
+    rhs_var: *const pr.Var,
+    out_cot: *pr.Var,
+    lhs_primal: *pr.Var,
+    rhs_primal: *pr.Var,
     params: pr.DotGeneralParams,
 ) types.AdError!?BatchedMatmulVjpPair {
     const batch_len: usize = params.lhs_batch_dims.len;
@@ -370,17 +390,20 @@ fn maybe_batched_matmul_vjp(
     if (params.lhs_contracting_dims.len != 1) return null;
     if (params.rhs_contracting_dims.len != 1) return null;
 
-    const lhs_t = ctx.tensor_of(lhs_id);
-    const rhs_t = ctx.tensor_of(rhs_id);
+    const lhs_t = lhs_var.as_tensor();
+    const rhs_t = rhs_var.as_tensor();
     const lhs_rank = lhs_t.shape.rank();
     const rhs_rank = rhs_t.shape.rank();
     if (lhs_rank < 2 or rhs_rank < 2) return null;
 
+    // Identify the single free dim per operand: M for lhs, N for rhs.
+    // Each operand is [batch..., M/N, K] (in some permutation).
     const lhs_k_dim: i64 = params.lhs_contracting_dims[0];
     const rhs_k_dim: i64 = params.rhs_contracting_dims[0];
     const lhs_m_dim = find_single_other_dim(lhs_rank, params.lhs_batch_dims, lhs_k_dim) orelse return null;
     const rhs_n_dim = find_single_other_dim(rhs_rank, params.rhs_batch_dims, rhs_k_dim) orelse return null;
 
+    // Output layout is [batch..., M, N]. M is at position batch_len, N at batch_len+1.
     const out_m_dim: i64 = @intCast(batch_len);
     const out_n_dim: i64 = @intCast(batch_len + 1);
 
@@ -389,6 +412,8 @@ fn maybe_batched_matmul_vjp(
     for (0..batch_len) |i| out_batch_buf[i] = @intCast(i);
     const out_batch = out_batch_buf[0..batch_len];
 
+    // d_lhs = out_cot @ rhs^T: contract over N (output's rhs-free dim) with rhs's N dim.
+    // Result is canonical [batch..., M, K]; transpose_to_match permutes to lhs's layout.
     var out_contract_n: [1]i64 = .{out_n_dim};
     var rhs_contract_n: [1]i64 = .{rhs_n_dim};
     const d_lhs_canon = try ctx.builder.dot_general(out_cot, rhs_primal, .{
@@ -400,6 +425,8 @@ fn maybe_batched_matmul_vjp(
 
     const d_lhs = try transpose_to_match(ctx.builder, d_lhs_canon, lhs_rank, params.lhs_batch_dims, lhs_m_dim, lhs_k_dim, batch_len);
 
+    // d_rhs = lhs^T @ out_cot: contract over M (lhs's free dim) with output's M dim.
+    // Result is canonical [batch..., K, N]; transpose_to_match permutes to rhs's layout.
     var lhs_contract_m: [1]i64 = .{lhs_m_dim};
     var out_contract_m: [1]i64 = .{out_m_dim};
     const d_rhs_canon = try ctx.builder.dot_general(lhs_primal, out_cot, .{
@@ -414,6 +441,8 @@ fn maybe_batched_matmul_vjp(
     return .{ .lhs = d_lhs, .rhs = d_rhs };
 }
 
+/// Find the single dimension that is neither a batch dim nor the contracting dim.
+/// Returns null if there isn't exactly one such dimension.
 fn find_single_other_dim(rank: usize, batch_dims: []const i64, contracting_dim: i64) ?i64 {
     var found: ?i64 = null;
     var d: usize = 0;
@@ -427,6 +456,7 @@ fn find_single_other_dim(rank: usize, batch_dims: []const i64, contracting_dim: 
     return found;
 }
 
+/// Collect all dimensions that are neither batch nor contracting ("other"/free dims).
 fn collect_other_dims(
     allocator: std.mem.Allocator,
     rank: usize,
@@ -451,24 +481,29 @@ fn build_range(allocator: std.mem.Allocator, start: usize, len: usize) ![]i64 {
 }
 
 fn index_of_i64(list: []const i64, needle: i64) ?usize {
-    for (list, 0..) |v, i| {
-        if (v == needle) return i;
-    }
+    for (list, 0..) |v, i| if (v == needle) return i;
     return null;
 }
 
+/// Build a permutation that maps canonical VJP output dims back to the original
+///  operand layout. Canonical order is [batch..., a_dim, b_dim], this inverts
+///  that mapping. Skips the transpose if the permutation is identity.
 fn transpose_to_match(
     b: *pr.FunctionBuilder,
-    canon: pr.VarId,
+    canon: *pr.Var,
     rank: usize,
     batch_dims: []const i64,
     a_dim: i64,
     b_dim: i64,
     batch_len: usize,
-) types.AdError!pr.VarId {
+) types.AdError!*pr.Var {
     var perm_buf: [8]i64 = undefined;
     if (rank > perm_buf.len) return error.UnsupportedEqn;
 
+    // For each target dim d, find where it sits in the canonical layout:
+    //   batch dims : positions [0..batch_len)
+    //   a_dim      : position batch_len
+    //   b_dim      : position batch_len+1
     var is_identity = true;
     var d: usize = 0;
     while (d < rank) : (d += 1) {
@@ -484,19 +519,27 @@ fn transpose_to_match(
     return try b.transpose(canon, perm_buf[0..rank]);
 }
 
+/// Multi-dim variant of `transpose_to_match`. Maps canonical
+///  [batch..., other..., contracting...] order back to the original operand
+///  layout by looking up each target dimension in the batch, other, and
+///  contracting sets. Skips the transpose if the permutation is identity.
 fn transpose_to_match_multi(
     ctx: types.AdContext,
-    canon: pr.VarId,
+    canon: *pr.Var,
     rank: usize,
     batch_dims: []const i64,
     other_dims: []const i64,
     contract_dims: []const i64,
-) types.AdError!pr.VarId {
+) types.AdError!*pr.Var {
     if (rank == 0) return canon;
 
     const perm = try ctx.allocator.alloc(i64, rank);
     defer ctx.allocator.free(perm);
 
+    // For each target dim d, find where it sits in the canonical layout:
+    //   batch dims     : positions [0..batch_len)
+    //   other dims     : positions [batch_len..batch_len+other_len)
+    //   contract dims  : positions [batch_len+other_len..)
     var is_identity = true;
     var d: usize = 0;
     while (d < rank) : (d += 1) {
@@ -518,8 +561,13 @@ fn transpose_to_match_multi(
 
 const max_rank: usize = 64;
 
-/// Compute dot_general output dimensions. Returns null if parameters are invalid.
-/// Result is a slice into `out_buf`; caller must dupe if the data needs to outlive the buffer.
+/// Compute dot_general output dimensions following StableHLO semantics:
+/// `output = [batch_dims..., lhs_other_dims..., rhs_other_dims...]`
+///
+/// Validates that batch dims agree in size, contracting dims agree in size, and
+///  no dimension is claimed by both batch and contracting sets.
+/// Returns null if parameters are invalid.
+/// Result is a slice into `out_buf`, caller must dupe if the data needs to outlive the buffer.
 fn compute_dot_general_output_dims(
     lhs: pr.Tensor,
     rhs: pr.Tensor,
@@ -533,6 +581,7 @@ fn compute_dot_general_output_dims(
     if (params.lhs_batch_dims.len != params.rhs_batch_dims.len) return null;
     if (params.lhs_contracting_dims.len != params.rhs_contracting_dims.len) return null;
 
+    // Phase 1: Mark and validate batch dims. Paired dims must have matching sizes.
     var lhs_batch = [_]bool{false} ** max_rank;
     var rhs_batch = [_]bool{false} ** max_rank;
     for (params.lhs_batch_dims, 0..) |d, i| {
@@ -548,6 +597,7 @@ fn compute_dot_general_output_dims(
         rhs_batch[rhs_idx] = true;
     }
 
+    // Phase 2: Mark and validate contracting dims. Must not overlap with batch dims.
     var lhs_contract = [_]bool{false} ** max_rank;
     var rhs_contract = [_]bool{false} ** max_rank;
     for (params.lhs_contracting_dims, 0..) |d, i| {
@@ -563,6 +613,8 @@ fn compute_dot_general_output_dims(
         rhs_contract[rhs_idx] = true;
     }
 
+    // Phase 3: Assemble output dims in StableHLO order:
+    //   [batch sizes, lhs "other" sizes, rhs "other" sizes]
     const out_rank = params.lhs_batch_dims.len +
         (lhs_rank - params.lhs_batch_dims.len - params.lhs_contracting_dims.len) +
         (rhs_rank - params.rhs_batch_dims.len - params.rhs_contracting_dims.len);

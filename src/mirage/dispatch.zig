@@ -374,32 +374,3 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
 
     return out.items;
 }
-
-fn map_mirage_api_error(err: mirage.MirageError) kernel.DispatchError {
-    return switch (err) {
-        error.MirageUnavailable => {
-            log.warn("remapping {s} -> ProviderLoadFailed", .{@errorName(err)});
-            return error.ProviderLoadFailed;
-        },
-        error.MirageInvalidArgument,
-        error.MirageInternalError,
-        error.MirageApiUnsupported,
-        error.MirageNotFound,
-        => {
-            log.warn("remapping {s} -> DispatchFailed", .{@errorName(err)});
-            return error.DispatchFailed;
-        },
-        error.OutOfMemory => error.OutOfMemory,
-    };
-}
-
-fn map_mirage_status(status: mirage.Status) kernel.DispatchError {
-    log.warn("status code {d} -> DispatchFailed", .{@intFromEnum(status)});
-    return error.DispatchFailed;
-}
-
-test "map_mirage_status maps to generic DispatchFailed" {
-    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(.invalid_argument));
-    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(.internal_error));
-    try std.testing.expectEqual(error.DispatchFailed, map_mirage_status(.unsupported));
-}

@@ -6,6 +6,8 @@ const api_mod = @import("api.zig");
 const Api = api_mod.Api;
 const c = @import("c.zig").c;
 
+const log = std.log.scoped(.@"zg/pjrt/types");
+
 // TODO: now that we have proto bindings we can go deeper, not justified now since
 //  we currently do not need much in the way of compilation options.
 
@@ -634,7 +636,7 @@ pub const LoadedExecutable = struct {
             const prep_ms = @as(f64, @floatFromInt(prep_ns)) / ns_per_ms;
             const call_ms = @as(f64, @floatFromInt(call_ns)) / ns_per_ms;
             const wrap_ms = @as(f64, @floatFromInt(wrap_ns)) / ns_per_ms;
-            std.log.info(
+            log.info(
                 "pjrt execute: inputs={d} outputs={d} prep_ms={d:.3} call_ms={d:.3} wrap_ms={d:.3}",
                 .{ inputs.len, num_outputs, prep_ms, call_ms, wrap_ms },
             );

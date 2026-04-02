@@ -13,6 +13,12 @@ const log = std.log.scoped(.@"zg/main");
 pub const CommandT = cli.CommandT;
 pub const setup_cmd = cli.setup_cmd;
 
+pub const std_options = std.Options{
+    .log_scope_levels = &.{
+        .{ .scope = .cova, .level = .warn },
+    },
+};
+
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
 

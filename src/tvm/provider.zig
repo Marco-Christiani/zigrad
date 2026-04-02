@@ -191,34 +191,27 @@ const MatmulShape = struct {
 /// Validate that a region describes a single matmul (dot or dot_general).
 /// Returns the M, N, K dimensions, or null if unsupported.
 fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
-    // Must be exactly one equation
-    if (desc.eqns.len != 1) return null;
+    // Must be exactly one op
+    if (desc.ops.len != 1) return null;
     if (desc.inputs.len != 2 or desc.outputs.len != 1) return null;
-    const eqn = desc.eqns[0];
+    const op = desc.ops[0];
 
     // Must be dot or dot_general
-    switch (eqn.prim) {
+    switch (op.params) {
         .dot => {},
-        .dot_general => {
-            const params = eqn.params.slice(pr.Param, desc.params_store);
-            if (!kernel.dot_general_is_matrix_matmul(params)) return null;
+        .dot_general => |dg| {
+            if (!kernel.dot_general_is_matrix_matmul(dg)) return null;
         },
         else => return null,
     }
 
     // Must have 2 inputs and 1 output
-    const inputs = eqn.inputs.slice(pr.VarId, desc.varids_store);
-    const outputs = eqn.outputs.slice(pr.VarId, desc.varids_store);
-    if (inputs.len != 2 or outputs.len != 1) return null;
+    if (op.inputs.len != 2 or op.outputs.len != 1) return null;
 
     // Get types
-    const a_aval = desc.aval_of(inputs[0]) orelse return null;
-    const b_aval = desc.aval_of(inputs[1]) orelse return null;
-    const c_aval = desc.aval_of(outputs[0]) orelse return null;
-
-    const a = a_aval.as_tensor() orelse return null;
-    const b = b_aval.as_tensor() orelse return null;
-    const c_tensor = c_aval.as_tensor() orelse return null;
+    const a = op.inputs[0].value.as_tensor();
+    const b = op.inputs[1].value.as_tensor();
+    const c_tensor = op.outputs[0].as_tensor();
 
     // Must be rank-2 (matrix)
     if (a.shape.rank() != 2 or b.shape.rank() != 2 or c_tensor.shape.rank() != 2) return null;

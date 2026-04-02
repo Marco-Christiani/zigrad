@@ -4,28 +4,26 @@ const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const Aval = pr.Aval;
 
-fn validate_unary_elementwise(comptime err: pr.ValidationError, ctx: types.ValidateContext) pr.ValidationError!void {
-    const inputs = ctx.inputs();
-    const outputs = ctx.outputs();
-    if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
+fn validate_unary_elementwise(comptime err: pr.ValidationError, op: *const pr.Op) pr.ValidationError!void {
+    if (op.inputs.len != 1 or op.outputs.len != 1) return error.InvalidOpArity;
 
-    const operand = try ctx.tensor_of(inputs[0]);
-    const out = try ctx.tensor_of(outputs[0]);
+    const operand = op.operand(0).as_tensor();
+    const out = op.result(0).as_tensor();
     if (!types.same_tensor_type(operand, out)) return err;
 }
 
-fn infer_unary_elementwise(comptime _: pr.ValidationError, ctx: types.InferContext) pr.BuildError!Aval {
-    if (ctx.inputs.len != 1) return error.InvalidEqnArity;
-    const operand = try ctx.tensor_of(ctx.inputs[0]);
+fn infer_unary_elementwise(comptime _: pr.ValidationError, inputs: []const *pr.Var) pr.BuildError!Aval {
+    if (inputs.len != 1) return error.InvalidOpArity;
+    const operand = inputs[0].as_tensor();
     return .{ .tensor = operand };
 }
 
-fn format_unary_elementwise(writer: *types.Writer, ctx: types.FormatContext) types.FormatError!void {
-    if (ctx.input_tensor(0)) |t| {
+fn format_unary_elementwise(writer: *types.Writer, op: *const pr.Op, _: void) types.FormatError!void {
+    if (op.inputs.len > 0) {
+        const t = op.operand(0).as_tensor();
         try writer.print("dtype={s}", .{@tagName(t.dtype)});
     }
 }
-
 
 // =========================================================================
 // Exp
@@ -34,44 +32,38 @@ fn format_unary_elementwise(writer: *types.Writer, ctx: types.FormatContext) typ
 pub const exp = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        return validate_unary_elementwise(error.ExpTypeMismatch, ctx);
+    pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+        return validate_unary_elementwise(error.ExpTypeMismatch, op);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.ExpTypeMismatch, ctx);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+        return infer_unary_elementwise(error.ExpTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.exp(operand);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
         const contrib = try ctx.builder.multiply(out_cot, out_primal);
-        try ctx.add_cot(inputs[0], contrib);
+        try ctx.add_cot(op.operand(0), contrib);
     }
 
     /// JVP: d(exp(x)) = exp(x) * dx
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
-        ctx.set_tangent(outputs[0], try ctx.builder.multiply(out_primal, dx));
+        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(op.result(0), try ctx.builder.multiply(out_primal, dx));
     }
 
     pub const format = format_unary_elementwise;
@@ -84,44 +76,38 @@ pub const exp = struct {
 pub const log = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        return validate_unary_elementwise(error.LogTypeMismatch, ctx);
+    pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+        return validate_unary_elementwise(error.LogTypeMismatch, op);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.LogTypeMismatch, ctx);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+        return infer_unary_elementwise(error.LogTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.log(operand);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const contrib = try ctx.builder.divide(out_cot, operand);
-        try ctx.add_cot(inputs[0], contrib);
+        try ctx.add_cot(op.operand(0), contrib);
     }
 
     /// JVP: d(log(x)) = dx / x
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const x = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
-        ctx.set_tangent(outputs[0], try ctx.builder.divide(dx, x));
+        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const x = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        ctx.set_tangent(op.result(0), try ctx.builder.divide(dx, x));
     }
 
     pub const format = format_unary_elementwise;
@@ -134,65 +120,50 @@ pub const log = struct {
 pub const convert = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        const inputs = ctx.inputs();
-        const outputs = ctx.outputs();
-        const params = ctx.params();
-        if (inputs.len != 1 or outputs.len != 1) return error.InvalidEqnArity;
-        const out_dtype = pr.param(.out_dtype,params) orelse return error.InvalidParams;
+    pub fn validate(op: *const pr.Op, out_dtype: pr.DType) pr.ValidationError!void {
+        if (op.inputs.len != 1 or op.outputs.len != 1) return error.InvalidOpArity;
 
-        const operand = try ctx.tensor_of(inputs[0]);
-        const out = try ctx.tensor_of(outputs[0]);
+        const operand = op.operand(0).as_tensor();
+        const out = op.result(0).as_tensor();
         if (out.dtype != out_dtype) return error.ConvertTypeMismatch;
         if (!std.mem.eql(i64, operand.shape.dims, out.shape.dims)) return error.ConvertTypeMismatch;
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        if (ctx.inputs.len != 1) return error.InvalidEqnArity;
-        const out_dtype = pr.param(.out_dtype,ctx.params) orelse return error.InvalidParams;
-        const operand = try ctx.tensor_of(ctx.inputs[0]);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, out_dtype: pr.DType) pr.BuildError!Aval {
+        if (inputs.len != 1) return error.InvalidOpArity;
+        const operand = inputs[0].as_tensor();
         return .{ .tensor = .{ .dtype = out_dtype, .shape = operand.shape } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
-        const out_dtype = pr.param(.out_dtype,params) orelse return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.convert(operand, out_dtype);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: pr.DType) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const in_tensor = ctx.tensor_of(inputs[0]);
-        const out_tensor = ctx.tensor_of(outputs[0]);
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const in_tensor = op.operand(0).as_tensor();
+        const out_tensor = op.result(0).as_tensor();
         const cot = if (out_tensor.dtype == in_tensor.dtype)
             out_cot
         else
             try ctx.builder.convert(out_cot, in_tensor.dtype);
-        try ctx.add_cot(inputs[0], cot);
+        try ctx.add_cot(op.operand(0), cot);
     }
 
     /// JVP: d(convert(x, T)) = convert(dx, T)
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        const params = ctx.params(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
-        const out_dtype = pr.param(.out_dtype,params) orelse return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const dx_tensor = ctx.builder_tensor_of(dx);
+        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const dx_tensor = dx.as_tensor();
         const result = if (dx_tensor.dtype == out_dtype) dx else try ctx.builder.convert(dx, out_dtype);
-        ctx.set_tangent(outputs[0], result);
+        ctx.set_tangent(op.result(0), result);
     }
 };
 
@@ -203,56 +174,54 @@ pub const convert = struct {
 pub const rsqrt = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        return validate_unary_elementwise(error.RsqrtTypeMismatch, ctx);
+    pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+        return validate_unary_elementwise(error.RsqrtTypeMismatch, op);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.RsqrtTypeMismatch, ctx);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+        return infer_unary_elementwise(error.RsqrtTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.rsqrt(operand);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    /// VJP: d/dx rsqrt(x) = -0.5 * rsqrt(x)^3.
+    /// Uses the forward output (y = rsqrt(x)) directly: scale = y^3 * (-0.5).
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
-        const y2 = try ctx.builder.multiply(out_primal, out_primal);
-        const y3 = try ctx.builder.multiply(y2, out_primal);
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        // y = rsqrt(x), reuse from forward pass to avoid recomputing sqrt.
+        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const y2 = try ctx.builder.multiply(out_primal, out_primal); // y^2
+        const y3 = try ctx.builder.multiply(y2, out_primal); // y^3
 
-        const tensor = ctx.tensor_of(inputs[0]);
+        // scale = y^3 * (-0.5), then contrib = dout * scale
+        const tensor = op.operand(0).as_tensor();
         const neg_half = try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, -0.5);
         const scale = try ctx.builder.multiply(y3, neg_half);
         const contrib = try ctx.builder.multiply(out_cot, scale);
-        try ctx.add_cot(inputs[0], contrib);
+        try ctx.add_cot(op.operand(0), contrib);
     }
 
     /// JVP: d(rsqrt(x)) = -0.5 * rsqrt(x)^3 * dx
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
-        const y2 = try ctx.builder.multiply(out_primal, out_primal);
-        const y3 = try ctx.builder.multiply(y2, out_primal);
+        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+        const y2 = try ctx.builder.multiply(out_primal, out_primal); // y^2
+        const y3 = try ctx.builder.multiply(y2, out_primal); // y^3
 
-        const tensor = ctx.tensor_of(inputs[0]);
+        const tensor = op.operand(0).as_tensor();
         const neg_half = try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, -0.5);
         const scale = try ctx.builder.multiply(y3, neg_half);
-        ctx.set_tangent(outputs[0], try ctx.builder.multiply(scale, dx));
+        ctx.set_tangent(op.result(0), try ctx.builder.multiply(scale, dx));
     }
 
     pub const format = format_unary_elementwise;
@@ -265,54 +234,52 @@ pub const rsqrt = struct {
 pub const logistic = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
-    pub fn validate(ctx: types.ValidateContext) pr.ValidationError!void {
-        return validate_unary_elementwise(error.LogisticTypeMismatch, ctx);
+    pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+        return validate_unary_elementwise(error.LogisticTypeMismatch, op);
     }
 
-    pub fn infer_output(ctx: types.InferContext) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.LogisticTypeMismatch, ctx);
+    pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+        return infer_unary_elementwise(error.LogisticTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const operand = ctx.get_primal(inputs[0]) orelse return error.UnsupportedEqn;
+        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const out = try ctx.builder.logistic(operand);
-        ctx.set_primal(outputs[0], out);
+        ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    /// VJP: d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x)).
+    /// Uses the forward output directly to avoid recomputing the sigmoid.
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const out_cot = ctx.get_cot(outputs[0]) orelse return;
-        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        // y = sigmoid(x), reuse from forward pass.
+        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
 
-        const tensor = ctx.tensor_of(inputs[0]);
+        // slope = y * (1 - y), the sigmoid derivative.
+        const tensor = op.operand(0).as_tensor();
         const ones = try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, 1.0);
         const one_minus = try ctx.builder.subtract(ones, out_primal);
         const slope = try ctx.builder.multiply(out_primal, one_minus);
         const contrib = try ctx.builder.multiply(out_cot, slope);
-        try ctx.add_cot(inputs[0], contrib);
+        try ctx.add_cot(op.operand(0), contrib);
     }
 
     /// JVP: d(sigmoid(x)) = sigmoid(x) * (1 - sigmoid(x)) * dx
-    pub fn jvp(ctx: types.AdContext, eqn: pr.Eqn) types.AdError!void {
-        const inputs = ctx.inputs(eqn);
-        const outputs = ctx.outputs(eqn);
-        if (inputs.len != 1) return error.UnsupportedEqn;
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 1) return error.UnsupportedEqn;
 
-        const dx = ctx.get_tangent(inputs[0]) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(outputs[0]) orelse return error.UnsupportedEqn;
+        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
 
-        const tensor = ctx.tensor_of(inputs[0]);
+        const tensor = op.operand(0).as_tensor();
         const ones = try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, 1.0);
         const one_minus = try ctx.builder.subtract(ones, out_primal);
         const slope = try ctx.builder.multiply(out_primal, one_minus);
-        ctx.set_tangent(outputs[0], try ctx.builder.multiply(slope, dx));
+        ctx.set_tangent(op.result(0), try ctx.builder.multiply(slope, dx));
     }
 
     pub const format = format_unary_elementwise;

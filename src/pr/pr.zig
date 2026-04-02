@@ -1,6 +1,41 @@
+//! Program Representation (PR)
+//!
+//! PR is the compiler's core intermediate representation: a toolchain-neutral
+//! graph of tensor operations. It sits between user-facing tracing (Tensor /
+//! FunctionBuilder) and target-specific lowering (MLIR / StableHLO).
+//!
+//! ## Key types
+//!
+//! 1. `Program` - top-level container; owns an arena that backs all IR nodes.
+//! 2. `Function` - named function with params, return vars, and a linear op list.
+//! 3. `FunctionBuilder` - mutable builder for constructing a Function:
+//!     `init`, `emit` ops, and `finish` (validates on `finish`).
+//! 4. `Op` - a single operation: typed `Params` union + input `Operand` list +
+//!     output `Var` list.
+//! 5. `Var` - SSA value with an `Aval` (abstract type) and an intrinsic
+//!      doubly-linked use-list.
+//! 6. `Operand` - use-chain node linking a consuming Op to the Var it reads.
+//!
+//! ## Ownership
+//!
+//! All IR nodes (Var, Op, Operand, param slices) are arena-allocated via
+//!  `Program.allocator()`. The arena is freed in bulk by `Program.deinit()`.
+//!  Callers never free individual nodes.
+//!
+//! ## Design invariants
+//!
+//! - PR is toolchain-neutral
+//! - Ops are single-output (except `call` / `custom_call` which use
+//!    `emit_with_outputs`).
+//! - FunctionBuilder validates eagerly on `finish` via the op registry.
+//! - Slice params (dims, axes, etc.) are duped into the arena by builder
+//!    convenience methods so callers can pass stack/temp slices.
 const std = @import("std");
 const ops = @import("ops/ops.zig");
+const pr_log = std.log.scoped(.@"zg/pr");
+const Allocator = std.mem.Allocator;
 
+/// Element data type for tensors.
 pub const DType = enum {
     f16,
     bf16,
@@ -30,11 +65,11 @@ pub const DType = enum {
     /// Zig type used to store one element of this dtype in host memory.
     ///
     /// Float16 variants (bf16, f16) map to `u16` (bit-pattern storage), not
-    /// a native float type. Use `encode_f32`/`decode_f32` for value conversion.
+    ///  a native float type. Use `encode_f32`/`decode_f32` for value conversion.
     ///
     /// Intended for use inside `inline switch` branches where the tag is
-    /// comptime-known, enabling generic dtype-agnostic code without per-dtype
-    /// function duplication.
+    ///  comptime-known, enabling generic dtype-agnostic code without per-dtype
+    ///  function duplication.
     pub fn StorageType(comptime self: DType) type {
         return switch (self) {
             .f32 => f32,
@@ -51,11 +86,7 @@ pub const DType = enum {
     }
 
     /// Convert an f32 value to this dtype's storage representation.
-    ///
-    /// Only supports float and i32 dtypes. Produces a `@compileError` for
-    /// unsupported dtypes (integer-only types, bool) to catch misuse at
-    /// compile time.
-    pub fn encode_f32(comptime self: DType, val: f32) StorageType(self) {
+    pub inline fn encode_f32(comptime self: DType, val: f32) StorageType(self) {
         return switch (self) {
             .f32 => val,
             .f64 => @floatCast(val),
@@ -67,9 +98,7 @@ pub const DType = enum {
     }
 
     /// Decode this dtype's storage representation back to f32.
-    ///
-    /// Inverse of `encode_f32`. Same dtype restrictions apply.
-    pub fn decode_f32(comptime self: DType, raw: StorageType(self)) f32 {
+    pub inline fn decode_f32(comptime self: DType, raw: StorageType(self)) f32 {
         return switch (self) {
             .f32 => raw,
             .f64 => @floatCast(raw),
@@ -81,6 +110,7 @@ pub const DType = enum {
     }
 };
 
+/// Heap-backed shape (slice into arena memory).
 pub const Shape = struct {
     dims: []const i64,
 
@@ -131,39 +161,34 @@ pub const BoundedShape = struct {
     }
 };
 
+/// Abstract value: the type of a Var without its data.
+///
+/// ## ADR
+/// Currently only `tensor` (dtype + shape). The union exists so PR can
+///  support non-tensor types in the future without changing the Var layout.
 pub const Aval = union(enum) {
     tensor: Tensor,
 
-    // TODO: pretty sure all consumers do the same error check on the null case,
-    //  probably centralize that here. Also, we should make sure we keep an eye
-    //  on this as the original idea was to support other aval variants but if
-    //  tensor remains the only one then this shouldnt exist.
-    pub fn as_tensor(self: Aval) ?Tensor {
+    /// Extract the tensor type. Exhaustive over Aval variants.
+    pub fn as_tensor(self: Aval) Tensor {
         return switch (self) {
             .tensor => |t| t,
         };
     }
 };
 
+/// Tensor type descriptor (dtype + shape).
+///
+/// This is PR's notion of a tensor *type*, not a runtime tensor, so it carries
+///  no data, no device, no buffer.
 pub const Tensor = struct {
     dtype: DType,
     shape: Shape,
 };
 
-pub const VarId = u32;
-
-pub const Span = struct {
-    start: u32,
-    len: u32,
-
-    pub fn slice(self: Span, comptime T: type, backing: []const T) []const T {
-        const start: usize = @intCast(self.start);
-        const end: usize = start + @as(usize, @intCast(self.len));
-        return backing[start..end];
-    }
-};
-
-pub const Literal = union(enum) {
+/// Typed scalar constant.
+/// Float16 variants store the raw u16 bit pattern.
+pub const Literal = union(DType) {
     f16: u16,
     bf16: u16,
     f32: f32,
@@ -177,22 +202,32 @@ pub const Literal = union(enum) {
     bool: bool,
 
     pub fn dtype(self: Literal) DType {
-        return switch (self) {
-            .f16 => .f16,
-            .bf16 => .bf16,
-            .f32 => .f32,
-            .f64 => .f64,
-            .i8 => .i8,
-            .u8 => .u8,
-            .i32 => .i32,
-            .i64 => .i64,
-            .u32 => .u32,
-            .u64 => .u64,
-            .bool => .bool,
+        return std.meta.activeTag(self);
+    }
+
+    /// Create a typed scalar literal by converting from f64.
+    pub fn from_f64(value_dtype: DType, value: f64) Literal {
+        return switch (value_dtype) {
+            .f16 => .{ .f16 = DType.f16.encode_f32(@floatCast(value)) },
+            .bf16 => .{ .bf16 = DType.bf16.encode_f32(@floatCast(value)) },
+            .f32 => .{ .f32 = @floatCast(value) },
+            .f64 => .{ .f64 = value },
+            .i8 => .{ .i8 = @intFromFloat(value) },
+            .u8 => .{ .u8 = @intFromFloat(value) },
+            .i32 => .{ .i32 = @intFromFloat(value) },
+            .i64 => .{ .i64 = @intFromFloat(value) },
+            .u32 => .{ .u32 = @intFromFloat(value) },
+            .u64 => .{ .u64 = @intFromFloat(value) },
+            // TODO: what about nan? check on this.
+            .bool => .{ .bool = value != 0.0 },
         };
     }
 };
 
+/// Primitive operation tag.
+///
+/// Each variant corresponds to a Params payload type and an entry in the op
+///  registry (ops/ops.zig) providing at least `validate` and `infer_output`.
 pub const Prim = enum {
     literal,
     add,
@@ -223,39 +258,24 @@ pub const Prim = enum {
     custom_call,
 };
 
-pub const Param = union(enum) {
-    literal: Literal,
-    out_shape: []const i64,
-    broadcast_dimensions: []const i64,
-    permutation: []const i64,
-    reduce_axes: []const i64,
-    out_dtype: DType,
-    iota_dimension: i64,
-    compare: CompareParams,
-    gather: GatherParams,
-    scatter: ScatterParams,
-    slice: SliceParams,
-    concat_axis: i64,
-    dot_general: DotGeneralParams,
-    call_callee: []const u8,
-    /// StableHLO custom_call target name.
-    call_target_name: []const u8,
-    /// Kernel registry lookup key for single-dispatch custom calls.
-    call_kernel_key: []const u8,
-    /// Provider identity used by runtime dispatch.
-    call_provider_name: []const u8,
-    has_side_effect: bool,
-    /// Single-output custom_call output type.
-    out_aval: Aval,
-    /// Multi-output custom_call output types, ordered by output var list.
-    out_avals: []const Aval,
-};
+// ============================================================================
+// Param Structs
+// ============================================================================
 
+/// Parameters for gather (indexed read from a tensor).
+///
+/// Given an operand and an indices tensor, extracts slices from the operand at
+///  positions given by indices.
 pub const GatherParams = struct {
+    /// Size of the slice extracted along each operand dimension.
     slice_sizes: []const i64,
+    /// Dimensions of the output that correspond to the slice window.
     offset_dims: []const i64,
+    /// Slice dimensions that are collapsed (size must be 1).
     collapsed_slice_dims: []const i64,
+    /// Maps each index vector element to an operand dimension.
     start_index_map: []const i64,
+    /// Which dimension of the indices tensor holds the index vector.
     index_vector_dim: i64,
 };
 
@@ -280,11 +300,20 @@ pub const CompareType = enum {
     TOTALORDER,
 };
 
+/// Parameters for scatter (indexed write into a tensor).
+///
+/// Writes `updates` into `operand` at positions given by `indices`, combining
+///  with `reduction`.
 pub const ScatterParams = struct {
+    /// Dimensions of `updates` that correspond to the update window.
     update_window_dims: []const i64,
+    /// Window dimensions that are inserted (size 1) rather than present in updates.
     inserted_window_dims: []const i64,
+    /// Maps each index vector element to an operand dimension.
     scatter_dims_to_operand_dims: []const i64,
+    /// Which dimension of the indices tensor holds the index vector.
     index_vector_dim: i64,
+    /// How overlapping updates are combined.
     reduction: ScatterReduction = .add,
 };
 
@@ -295,12 +324,21 @@ pub const ScatterReduction = enum {
     mul,
 };
 
+/// Parameters for slice (contiguous sub-tensor extraction).
 pub const SliceParams = struct {
+    /// Per-dimension inclusive start offsets.
     start_indices: []const i64,
+    /// Per-dimension exclusive end offsets.
     limit_indices: []const i64,
+    /// Per-dimension step sizes (1 = dense).
     strides: []const i64,
 };
 
+/// Parameters for generalized dot product.
+///
+/// Contracting dims are reduced.
+/// Batch dims are preserved as leading output dimensions.
+/// Remaining dims become the non-contracted output dimensions.
 pub const DotGeneralParams = struct {
     lhs_batch_dims: []const i64,
     rhs_batch_dims: []const i64,
@@ -308,50 +346,275 @@ pub const DotGeneralParams = struct {
     rhs_contracting_dims: []const i64,
 };
 
+pub const ReshapeParams = struct {
+    out_shape: []const i64,
+};
+
+/// Parameters for generating a tensor of incrementing indices.
+pub const IotaParams = struct {
+    out_shape: []const i64,
+    out_dtype: DType,
+    /// Which dimension varies (0-indexed). E.g. for shape [2,3] with
+    /// dimension=1, produces [[0,1,2],[0,1,2]].
+    dimension: i64,
+};
+
+/// Parameters for (symbolically) expanding a tensor to a larger shape.
+pub const BroadcastInDimParams = struct {
+    /// Target shape of the output tensor.
+    out_shape: []const i64,
+    /// Maps each input dimension to its position in the output shape.
+    /// Length must equal the input rank. E.g. for a [3] input broadcast
+    /// to [2,3], dimensions = &.{1} means input dim 0 maps to output dim 1.
+    dimensions: []const i64,
+};
+
+pub const TransposeParams = struct {
+    permutation: []const i64,
+};
+
+pub const ConcatenateParams = struct {
+    axis: i64,
+};
+
+pub const ReduceParams = struct {
+    axes: []const i64,
+};
+
+pub const CallParams = struct {
+    callee: []const u8,
+};
+
+/// Parameters for an opaque backend-dispatched custom_call operation.
+pub const CustomCallParams = struct {
+    /// Backend dispatch key used at runtime (e.g. "zigrad.kernel.matmul_add").
+    target_name: []const u8,
+    has_side_effect: bool,
+    /// Output types must be provided explicitly (not inferrable from inputs).
+    out_avals: []const Aval,
+    /// Optional: identifies a pre-compiled kernel artifact in the kernel store.
+    kernel_key: ?[]const u8 = null,
+    /// Optional: which kernel provider compiled this (e.g. "tvm", "mirage").
+    provider_name: ?[]const u8 = null,
+};
+
+// ============================================================================
+// Params Tagged Union (keyed by Prim)
+// ============================================================================
+
+/// Typed parameter union keyed by Prim. Replaces the heterogeneous `[]const Param`
+/// list and `pr.param(.tag, slice)` linear scan pattern.
+pub const Params = union(Prim) {
+    literal: Literal,
+    add: void,
+    subtract: void,
+    multiply: void,
+    divide: void,
+    maximum: void,
+    exp: void,
+    log: void,
+    rsqrt: void,
+    logistic: void,
+    compare: CompareParams,
+    select: void,
+    convert: DType,
+    gather: GatherParams,
+    scatter: ScatterParams,
+    dot: void,
+    dot_general: DotGeneralParams,
+    reshape: ReshapeParams,
+    iota: IotaParams,
+    broadcast_in_dim: BroadcastInDimParams,
+    transpose: TransposeParams,
+    slice: SliceParams,
+    concatenate: ConcatenateParams,
+    reduce_sum: ReduceParams,
+    reduce_max: ReduceParams,
+    call: CallParams,
+    custom_call: CustomCallParams,
+};
+
+// ============================================================================
+// Core IR Types
+// ============================================================================
+
+/// SSA value with inline type and intrinsic use-list
+///
+/// Analogous to mlir::Value.
+pub const Var = struct {
+    id: u32,
+    aval: Aval,
+    /// The op that produces this var, or null for function parameters.
+    defining_op: ?*const Op = null,
+    /// Head of doubly-linked use-list.
+    first_use: ?*Operand = null,
+
+    pub fn as_tensor(self: *const Var) Tensor {
+        return self.aval.as_tensor();
+    }
+
+    pub fn is_unused(self: *const Var) bool {
+        return self.first_use == null;
+    }
+
+    pub fn has_one_use(self: *const Var) bool {
+        const first = self.first_use orelse return false;
+        return first.next == null;
+    }
+
+    /// Checks if var has *at least* n uses.
+    pub fn has_n_uses(self: *const Var, n: u32) bool {
+        var count: u32 = 0;
+        var cur = self.first_use;
+        while (cur) |use| {
+            count += 1;
+            if (count >= n) return true;
+            cur = use.next;
+        }
+        return false;
+    }
+
+    /// Replace all uses of this var with `new`. Transfers the use-list.
+    pub fn replace_all_uses_with(self: *Var, new: *Var) void {
+        var cur = self.first_use;
+        while (cur) |use| {
+            const next = use.next;
+            use.value = new;
+            // unlink from self
+            use.prev = null;
+            use.next = new.first_use;
+            if (new.first_use) |head| head.prev = use;
+            new.first_use = use;
+            cur = next;
+        }
+        self.first_use = null;
+    }
+};
+
+/// A use-chain node linking a consuming Op to the Var it reads.
+pub const Operand = struct {
+    value: *Var,
+    owner: *const Op,
+    index: u32,
+    prev: ?*Operand = null,
+    next: ?*Operand = null,
+
+    /// Rebind this use-site to `new`, preserving def-use invariants.
+    ///
+    /// This moves one `Operand` node from the old value's use-list to `new`'s use-list
+    ///  (inserted at head). List order is maintenance order, not program execution order,
+    ///  so its not really interpretable.
+    ///
+    /// Before:
+    /// ```
+    /// old.first_use -> A <-> self <-> C
+    /// new.first_use -> N1 <-> N2
+    /// ```
+    ///
+    /// After:
+    /// ```
+    /// old.first_use -> A <-> C
+    /// new.first_use -> self <-> N1 <-> N2
+    /// ```
+    ///
+    /// Special case (self is old head):
+    ///   `old.first_use = self.next`
+    ///
+    /// ## ADR
+    ///
+    /// Another intrusive linking design pattern is to use `prev: ?*?*Operand` which
+    ///  is what llvm does, but I find this less clear and not entirely sure why you
+    ///  would want this.
+    pub fn set(self: *Operand, new: *Var) void {
+        const old = self.value;
+        if (old == new) return;
+
+        // unlink from old var's use-list
+        if (self.prev) |p| {
+            p.next = self.next;
+        } else {
+            old.first_use = self.next;
+        }
+        if (self.next) |n| n.prev = self.prev;
+        // link into new var's use-list
+        self.value = new;
+        self.prev = null;
+        self.next = new.first_use;
+        if (new.first_use) |head| head.prev = self;
+        new.first_use = self;
+    }
+};
+
+/// An operation in the IR.
+pub const Op = struct {
+    inputs: []Operand,
+    outputs: []*Var,
+    params: Params,
+
+    pub fn prim(self: *const Op) Prim {
+        return std.meta.activeTag(self.params);
+    }
+
+    pub fn operand(self: *const Op, i: usize) *Var {
+        return self.inputs[i].value;
+    }
+
+    pub fn result(self: *const Op, i: usize) *Var {
+        return self.outputs[i];
+    }
+
+    /// True if all results are unused.
+    pub fn use_empty(self: *const Op) bool {
+        for (self.outputs) |out| {
+            if (!out.is_unused()) return false;
+        }
+        return true;
+    }
+};
+
 // ============================================================================
 // Annotations & Regions
 // ============================================================================
 
-/// Steering annotation attached to a region of equations.
-/// Does not change semantics -- only compilation strategy hints.
+/// Steering annotation attached to a region of ops.
+/// Does not change semantics -- only compiler hints.
 pub const Annotation = struct {
-    /// Request that equations be outlined into a separate call boundary.
+    /// Request that ops be outlined into a separate call boundary.
     outline: bool = false,
     /// Request kernelization by a named provider (e.g. "tvm").
+    /// TODO: consider a rename
     kernelize: ?[]const u8 = null,
 };
 
-/// A contiguous range of equations sharing an annotation.
-/// Materialized at FunctionBuilder.finish() time from the annotation stack.
+/// A contiguous range of ops sharing an annotation.
+/// Materialized at `FunctionBuilder.finish()` from the annotation stack by default.
 pub const Region = struct {
     name: []const u8,
     annotation: Annotation,
-    /// Index of the first equation in this region.
-    eqn_start: u32,
-    /// Number of equations in this region.
-    eqn_len: u32,
+    /// Index of the first op in this region.
+    op_start: u32,
+    /// Number of ops in this region.
+    op_len: u32,
 };
 
 // ============================================================================
 // Core Data Structures
 // ============================================================================
 
-pub const Eqn = struct {
-    prim: Prim,
-    inputs: Span, // []VarId (Function.varids_store)
-    outputs: Span, // []VarId (Function.varids_store)
-    params: Span, // []Param (Function.params_store)
-};
-
+/// A named function in the program: parameter vars, a linear op sequence,
+///  return vars, and optional annotation regions.
+///
+/// Constructed by `FunctionBuilder.finish()`, which validates all ops.
+/// Functions are immutable once built, modification requires rebuilding.
+/// TODO: do we want to stick to the immutable model? after def-use additions,
+///  we effectively have a hybrid model
 pub const Function = struct {
     name: []const u8,
-    params: []const VarId,
-    returns: []const VarId,
-    avals: []const Aval,
-    eqns: []const Eqn,
-    varids_store: []const VarId,
-    params_store: []const Param,
+    params: []*Var,
+    returns: []*Var,
+    ops: []*Op,
     regions: []const Region,
+    var_count: u32,
 
     /// Return regions whose annotation satisfies a predicate.
     pub fn regions_matching(self: Function, predicate: *const fn (Annotation) bool) RegionIterator {
@@ -374,6 +637,11 @@ pub const RegionIterator = struct {
     }
 };
 
+/// Top-level container for a PR program.
+///
+/// Owns an arena allocator that backs all IR nodes (Vars, Ops, Operands,
+///  param slices, Functions). Call `deinit` to free everything in bulk.
+///  Individual nodes are never freed separately.
 pub const Program = struct {
     arena: std.heap.ArenaAllocator,
     functions: []Function,
@@ -389,7 +657,10 @@ pub const Program = struct {
         return self.arena.allocator();
     }
 
-    pub fn add_function(self: *Program, func: Function) error{OutOfMemory}!void {
+    /// NOTE: this is currently out of any hot path, but not ideal design anymore,
+    ///  many call sites use the `functions` field so an update will trigger a refactor
+    ///  but this is likely to land at some point.
+    pub fn add_function(self: *Program, func: Function) Allocator.Error!void {
         const a = self.allocator();
         const new_items = try a.alloc(Function, self.functions.len + 1);
         @memcpy(new_items[0..self.functions.len], self.functions);
@@ -406,10 +677,13 @@ pub const Program = struct {
 // Errors
 // ============================================================================
 
+/// Errors from post-construction validation (op registry checks, call
+///  signature matching, duplicate function names).
+/// Each op type has its own `*TypeMismatch` variant for targeted diagnostics.
 pub const ValidationError = error{
-    InvalidVarId,
+    InvalidVar,
     UnsupportedAval,
-    InvalidEqnArity,
+    InvalidOpArity,
     InvalidParams,
     LiteralTypeMismatch,
     AddTypeMismatch,
@@ -435,6 +709,8 @@ pub const ValidationError = error{
     ConcatTypeMismatch,
     ReduceSumTypeMismatch,
     ReduceMaxTypeMismatch,
+    CallUnresolvedCallee,
+    CallArityMismatch,
     CallTypeMismatch,
     CustomCallTypeMismatch,
     IotaTypeMismatch,
@@ -442,15 +718,13 @@ pub const ValidationError = error{
     ScatterAddTypeMismatch,
 };
 
-pub const BuildError = ValidationError || error{OutOfMemory};
+/// Errors from FunctionBuilder: validation failures (caught eagerly at
+///  `finish`) plus allocation failures from the program arena.
+pub const BuildError = ValidationError || Allocator.Error;
 
 // ============================================================================
-// Validation Helpers
+// Validation
 // ============================================================================
-
-fn expect_var_in_range(func: Function, id: VarId) ValidationError!void {
-    if (@as(usize, @intCast(id)) >= func.avals.len) return error.InvalidVarId;
-}
 
 fn same_tensor_signature(a: Tensor, b: Tensor) bool {
     if (a.dtype != b.dtype) return false;
@@ -461,43 +735,9 @@ fn same_tensor_signature(a: Tensor, b: Tensor) bool {
     return true;
 }
 
-// ============================================================================
-// Param Extractors
-// ============================================================================
-
-/// Extract a typed parameter from an equation's param list by tag.
-///
-/// Returns the payload of the first `Param` matching `tag`, or `null` if absent.
-/// TODO: rethink this, its a bit odd and reads redundant "pr.param(.literal, params)"
-///  perhaps AoS/SoA pattern would be wiser, also a method like `eqn.param(.literal)`
-///  or params.get(.literal) would be cleaner.
-pub fn param(comptime tag: std.meta.Tag(Param), params: []const Param) ?@FieldType(Param, @tagName(tag)) {
-    for (params) |p| switch (p) {
-        tag => |v| return v,
-        else => {},
-    };
-    return null;
-}
-
-// ============================================================================
-// Validation
-// ============================================================================
-
-/// Validate a single function: var-id range checks, then per-op validation
-/// via the op registry.
-pub fn validate_function(func: Function) ValidationError!void {
-    for (func.params) |p| try expect_var_in_range(func, p);
-    for (func.returns) |r| try expect_var_in_range(func, r);
-
-    for (func.eqns) |eqn| {
-        const inputs = eqn.inputs.slice(VarId, func.varids_store);
-        const outputs = eqn.outputs.slice(VarId, func.varids_store);
-
-        for (inputs) |in_id| try expect_var_in_range(func, in_id);
-        for (outputs) |out_id| try expect_var_in_range(func, out_id);
-
-        try ops.validate(func, eqn);
-    }
+/// Validate a single function: per-op validation via the op registry.
+pub fn validate_ops_in_func(func: Function) ValidationError!void {
+    for (func.ops) |op| try ops.validate(op);
 }
 
 pub fn validate_program(program: *const Program) ValidationError!void {
@@ -512,15 +752,14 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     }
 
     for (program.functions) |func| {
-        try validate_function(func);
-    }
+        // validate each op
+        try validate_ops_in_func(func);
+        // validate calls
+        for (func.ops) |op| {
+            if (op.prim() != .call) continue;
 
-    for (program.functions) |func| {
-        for (func.eqns) |eqn| {
-            if (eqn.prim != .call) continue;
-
-            const params = func.params_store[eqn.params.start..][0..eqn.params.len];
-            const callee_name = param(.call_callee, params) orelse return error.InvalidParams;
+            const call_params = op.params.call;
+            const callee_name = call_params.callee;
 
             var callee: ?Function = null;
             for (program.functions) |candidate| {
@@ -529,22 +768,30 @@ pub fn validate_program(program: *const Program) ValidationError!void {
                     break;
                 }
             }
-            const callee_func = callee orelse return error.CallTypeMismatch;
+            const callee_func = callee orelse {
+                pr_log.err("call references unknown function '{s}' in '{s}'", .{ callee_name, func.name });
+                return error.CallUnresolvedCallee;
+            };
 
-            const call_inputs = func.varids_store[eqn.inputs.start..][0..eqn.inputs.len];
-            const call_outputs = func.varids_store[eqn.outputs.start..][0..eqn.outputs.len];
+            if (op.inputs.len != callee_func.params.len or op.outputs.len != callee_func.returns.len) {
+                pr_log.err("call arity mismatch: '{s}' expects {d} inputs/{d} outputs, got {d}/{d}", .{
+                    callee_name,
+                    callee_func.params.len,
+                    callee_func.returns.len,
+                    op.inputs.len,
+                    op.outputs.len,
+                });
+                return error.CallArityMismatch;
+            }
 
-            if (call_inputs.len != callee_func.params.len) return error.CallTypeMismatch;
-            if (call_outputs.len != callee_func.returns.len) return error.CallTypeMismatch;
-
-            for (call_inputs, 0..) |in_id, idx| {
-                const in_tensor = func.avals[@intCast(in_id)].as_tensor() orelse return error.CallTypeMismatch;
-                const callee_tensor = callee_func.avals[@intCast(callee_func.params[idx])].as_tensor() orelse return error.CallTypeMismatch;
+            for (op.inputs, 0..) |operand, idx| {
+                const in_tensor = operand.value.as_tensor();
+                const callee_tensor = callee_func.params[idx].as_tensor();
                 if (!same_tensor_signature(in_tensor, callee_tensor)) return error.CallTypeMismatch;
             }
-            for (call_outputs, 0..) |out_id, idx| {
-                const out_tensor = func.avals[@intCast(out_id)].as_tensor() orelse return error.CallTypeMismatch;
-                const callee_tensor = callee_func.avals[@intCast(callee_func.returns[idx])].as_tensor() orelse return error.CallTypeMismatch;
+            for (op.outputs, 0..) |out_var, idx| {
+                const out_tensor = out_var.as_tensor();
+                const callee_tensor = callee_func.returns[idx].as_tensor();
                 if (!same_tensor_signature(out_tensor, callee_tensor)) return error.CallTypeMismatch;
             }
         }
@@ -559,17 +806,23 @@ pub fn validate_program(program: *const Program) ValidationError!void {
 const RegionEntry = struct {
     name: []const u8,
     annotation: Annotation,
-    eqn_start: u32,
+    op_start: u32,
 };
 
+/// Mutable builder for constructing a Function.
+///
+/// All allocations go through the program arena.
+/// Slice parameters (dims, axes, permutations) are duped into the arena by
+///  convenience methods, so callers can pass stack-local slices.
+///
+/// Use `push_region` / `pop_region` to annotate op ranges with compilation
+///  hints (outlining, kernelization). Regions are materialized at `finish`.
 pub const FunctionBuilder = struct {
     program: *Program,
     name: []const u8,
-    avals: std.ArrayList(Aval),
-    eqns: std.ArrayList(Eqn),
-    varids_store: std.ArrayList(VarId),
-    params_store: std.ArrayList(Param),
-    params: std.ArrayList(VarId),
+    params_list: std.ArrayList(*Var),
+    ops_list: std.ArrayList(*Op),
+    next_var_id: u32,
     region_stack: std.ArrayList(RegionEntry),
     completed_regions: std.ArrayList(Region),
 
@@ -578,11 +831,9 @@ pub const FunctionBuilder = struct {
         return .{
             .program = program,
             .name = name,
-            .avals = try std.ArrayList(Aval).initCapacity(a, 16),
-            .eqns = try std.ArrayList(Eqn).initCapacity(a, 16),
-            .varids_store = try std.ArrayList(VarId).initCapacity(a, 64),
-            .params_store = try std.ArrayList(Param).initCapacity(a, 64),
-            .params = try std.ArrayList(VarId).initCapacity(a, 8),
+            .params_list = try std.ArrayList(*Var).initCapacity(a, 8),
+            .ops_list = try std.ArrayList(*Op).initCapacity(a, 16),
+            .next_var_id = 0,
             .region_stack = try std.ArrayList(RegionEntry).initCapacity(a, 4),
             .completed_regions = try std.ArrayList(Region).initCapacity(a, 4),
         };
@@ -590,59 +841,55 @@ pub const FunctionBuilder = struct {
 
     pub fn deinit(self: *FunctionBuilder) void {
         const a = self.program.allocator();
-        self.avals.deinit(a);
-        self.eqns.deinit(a);
-        self.varids_store.deinit(a);
-        self.params_store.deinit(a);
-        self.params.deinit(a);
+        self.params_list.deinit(a);
+        self.ops_list.deinit(a);
         self.region_stack.deinit(a);
         self.completed_regions.deinit(a);
     }
 
-    fn alloc(self: *FunctionBuilder) std.mem.Allocator {
+    pub fn alloc(self: *FunctionBuilder) std.mem.Allocator {
         return self.program.allocator();
     }
 
-    fn var_with_aval(self: *FunctionBuilder, aval: Aval) BuildError!VarId {
-        const a = self.alloc();
-        const id: VarId = @intCast(self.avals.items.len);
-        try self.avals.append(a, aval);
+    fn next_id(self: *FunctionBuilder) u32 {
+        const id = self.next_var_id;
+        self.next_var_id += 1;
         return id;
     }
 
-    pub fn tensor_of(self: *FunctionBuilder, id: VarId) ValidationError!Tensor {
-        if (@as(usize, @intCast(id)) >= self.avals.items.len) return error.InvalidVarId;
-        const aval = self.avals.items[@intCast(id)];
-        return aval.as_tensor() orelse error.UnsupportedAval;
+    fn create_var(self: *FunctionBuilder, aval: Aval) BuildError!*Var {
+        const a = self.alloc();
+        const v = try a.create(Var);
+        v.* = .{ .id = self.next_id(), .aval = aval };
+        return v;
     }
 
     // ====================================================================
     // Region API
     // ====================================================================
 
-    /// Push a named annotation region. Equations emitted after this call
-    /// belong to this region until pop_region is called.
+    /// Push a named annotation region.
+    /// Ops emitted after this call belong to this region until pop_region is called.
     pub fn push_region(self: *FunctionBuilder, name: []const u8, annotation: Annotation) BuildError!void {
         const a = self.alloc();
         try self.region_stack.append(a, .{
             .name = name,
             .annotation = annotation,
-            .eqn_start = @intCast(self.eqns.items.len),
+            .op_start = @intCast(self.ops_list.items.len),
         });
     }
 
-    /// Pop the most recent annotation region. The region is recorded with
-    /// its equation span for materialization at finish() time.
+    /// Pop the most recent annotation region.
     pub fn pop_region(self: *FunctionBuilder) BuildError!void {
         const a = self.alloc();
         const entry = self.region_stack.pop() orelse return;
-        const eqn_end: u32 = @intCast(self.eqns.items.len);
-        if (eqn_end > entry.eqn_start) {
+        const op_end: u32 = @intCast(self.ops_list.items.len);
+        if (op_end > entry.op_start) {
             try self.completed_regions.append(a, .{
                 .name = entry.name,
                 .annotation = entry.annotation,
-                .eqn_start = entry.eqn_start,
-                .eqn_len = eqn_end - entry.eqn_start,
+                .op_start = entry.op_start,
+                .op_len = op_end - entry.op_start,
             });
         }
     }
@@ -651,268 +898,263 @@ pub const FunctionBuilder = struct {
     // Core Emit
     // ====================================================================
 
-    /// Emit an equation, inferring the output type via the op registry.
-    pub fn emit(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, pms: []const Param) BuildError!VarId {
+    /// Emit a single-output op, inferring the output type via the op registry.
+    ///
+    /// Input vars have their use-lists updated: each input gains an Operand
+    ///  node linking it to the new op.
+    pub fn emit(self: *FunctionBuilder, params: Params, inputs: []const *Var) BuildError!*Var {
         const a = self.alloc();
 
-        const out_aval = try ops.infer_output(self, prim, inputs, pms);
-        const out = try self.var_with_aval(out_aval);
+        const out_aval = try ops.infer_output(a, params, inputs);
+        const out_var = try self.create_var(out_aval);
 
-        const inputs_start: u32 = @intCast(self.varids_store.items.len);
-        try self.varids_store.appendSlice(a, inputs);
-        const inputs_span: Span = .{ .start = inputs_start, .len = @intCast(inputs.len) };
+        const operands = try a.alloc(Operand, inputs.len);
+        const op = try a.create(Op);
+        const out_slice = try a.alloc(*Var, 1);
+        out_slice[0] = out_var;
 
-        const outputs_start: u32 = @intCast(self.varids_store.items.len);
-        try self.varids_store.append(a, out);
-        const outputs_span: Span = .{ .start = outputs_start, .len = 1 };
+        op.* = .{ .inputs = operands, .outputs = out_slice, .params = params };
+        out_var.defining_op = op;
 
-        const params_start: u32 = @intCast(self.params_store.items.len);
-        try self.params_store.appendSlice(a, pms);
-        const params_span: Span = .{ .start = params_start, .len = @intCast(pms.len) };
+        for (inputs, 0..) |in_var, i| {
+            operands[i] = .{
+                .value = in_var,
+                .owner = op,
+                .index = @intCast(i),
+            };
+            operands[i].next = in_var.first_use;
+            if (in_var.first_use) |head| head.prev = &operands[i];
+            in_var.first_use = &operands[i];
+        }
 
-        try self.eqns.append(a, .{
-            .prim = prim,
-            .inputs = inputs_span,
-            .outputs = outputs_span,
-            .params = params_span,
-        });
-
-        return out;
+        try self.ops_list.append(a, op);
+        return out_var;
     }
 
-    fn emit_with_outputs(self: *FunctionBuilder, prim: Prim, inputs: []const VarId, outputs: []const VarId, pms: []const Param) BuildError!void {
+    /// Emit a multi-output op with explicit output types.
+    ///
+    /// Input vars have their use-lists updated (see `emit`).
+    fn emit_with_outputs(self: *FunctionBuilder, params: Params, inputs: []const *Var, out_avals: []const Aval) BuildError![]*Var {
         const a = self.alloc();
 
-        const inputs_start: u32 = @intCast(self.varids_store.items.len);
-        try self.varids_store.appendSlice(a, inputs);
-        const inputs_span: Span = .{ .start = inputs_start, .len = @intCast(inputs.len) };
+        const out_vars = try a.alloc(*Var, out_avals.len);
+        for (out_avals, 0..) |aval, i| {
+            out_vars[i] = try self.create_var(aval);
+        }
 
-        const outputs_start: u32 = @intCast(self.varids_store.items.len);
-        try self.varids_store.appendSlice(a, outputs);
-        const outputs_span: Span = .{ .start = outputs_start, .len = @intCast(outputs.len) };
+        const operands = try a.alloc(Operand, inputs.len);
+        const op = try a.create(Op);
 
-        const params_start: u32 = @intCast(self.params_store.items.len);
-        try self.params_store.appendSlice(a, pms);
-        const params_span: Span = .{ .start = params_start, .len = @intCast(pms.len) };
+        op.* = .{ .inputs = operands, .outputs = out_vars, .params = params };
+        for (out_vars) |v| v.defining_op = op;
 
-        try self.eqns.append(a, .{
-            .prim = prim,
-            .inputs = inputs_span,
-            .outputs = outputs_span,
-            .params = params_span,
-        });
+        for (inputs, 0..) |in_var, i| {
+            operands[i] = .{
+                .value = in_var,
+                .owner = op,
+                .index = @intCast(i),
+            };
+            operands[i].next = in_var.first_use;
+            if (in_var.first_use) |head| head.prev = &operands[i];
+            in_var.first_use = &operands[i];
+        }
+
+        try self.ops_list.append(a, op);
+        return out_vars;
     }
 
     // ====================================================================
     // Op Convenience Methods
     // ====================================================================
 
-    pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const i64) BuildError!VarId {
+    pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const i64) BuildError!*Var {
         const a = self.alloc();
         const dims_copy = try a.dupe(i64, dims);
-        const id = try self.var_with_aval(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
-        try self.params.append(a, id);
-        return id;
+        const v = try self.create_var(.{ .tensor = .{ .dtype = dtype, .shape = .{ .dims = dims_copy } } });
+        try self.params_list.append(a, v);
+        return v;
     }
 
-    pub fn literal_scalar(self: *FunctionBuilder, value: Literal) BuildError!VarId {
-        return self.emit(.literal, &.{}, &.{.{ .literal = value }});
+    pub fn literal_scalar(self: *FunctionBuilder, value: Literal) BuildError!*Var {
+        return self.emit(.{ .literal = value }, &.{});
     }
 
-    pub fn add(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        return self.emit(.add, &.{ lhs, rhs }, &.{});
+    /// Emit a scalar constant of `dtype` from an `f64` value.
+    ///
+    /// Handles dtype-aware conversion from f64. Prefer this over the two-step
+    /// `Literal.from_f64` + `literal_scalar` pattern.
+    pub fn scalar(self: *FunctionBuilder, dtype: DType, val: f64) BuildError!*Var {
+        return self.literal_scalar(Literal.from_f64(dtype, val));
     }
 
-    pub fn subtract(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        return self.emit(.subtract, &.{ lhs, rhs }, &.{});
+    pub fn add(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return self.emit(.{ .add = {} }, &.{ lhs, rhs });
     }
 
-    pub fn multiply(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        return self.emit(.multiply, &.{ lhs, rhs }, &.{});
+    pub fn subtract(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return self.emit(.{ .subtract = {} }, &.{ lhs, rhs });
     }
 
-    pub fn divide(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        return self.emit(.divide, &.{ lhs, rhs }, &.{});
+    pub fn multiply(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return self.emit(.{ .multiply = {} }, &.{ lhs, rhs });
     }
 
-    pub fn maximum(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        return self.emit(.maximum, &.{ lhs, rhs }, &.{});
+    pub fn divide(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return self.emit(.{ .divide = {} }, &.{ lhs, rhs });
     }
 
-    pub fn exp(self: *FunctionBuilder, operand: VarId) BuildError!VarId {
-        return self.emit(.exp, &.{operand}, &.{});
+    pub fn maximum(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return self.emit(.{ .maximum = {} }, &.{ lhs, rhs });
     }
 
-    pub fn log(self: *FunctionBuilder, operand: VarId) BuildError!VarId {
-        return self.emit(.log, &.{operand}, &.{});
+    pub fn exp(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
+        return self.emit(.{ .exp = {} }, &.{operand_var});
     }
 
-    pub fn rsqrt(self: *FunctionBuilder, operand: VarId) BuildError!VarId {
-        return self.emit(.rsqrt, &.{operand}, &.{});
+    pub fn log(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
+        return self.emit(.{ .log = {} }, &.{operand_var});
     }
 
-    pub fn logistic(self: *FunctionBuilder, operand: VarId) BuildError!VarId {
-        return self.emit(.logistic, &.{operand}, &.{});
+    pub fn rsqrt(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
+        return self.emit(.{ .rsqrt = {} }, &.{operand_var});
     }
 
-    pub fn compare(self: *FunctionBuilder, lhs: VarId, rhs: VarId, cmp: CompareParams) BuildError!VarId {
-        return self.emit(.compare, &.{ lhs, rhs }, &.{.{ .compare = cmp }});
+    pub fn logistic(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
+        return self.emit(.{ .logistic = {} }, &.{operand_var});
     }
 
-    pub fn select(self: *FunctionBuilder, cond: VarId, on_true: VarId, on_false: VarId) BuildError!VarId {
-        return self.emit(.select, &.{ cond, on_true, on_false }, &.{});
+    pub fn compare(self: *FunctionBuilder, lhs: *Var, rhs: *Var, cmp: CompareParams) BuildError!*Var {
+        return self.emit(.{ .compare = cmp }, &.{ lhs, rhs });
     }
 
-    pub fn convert(self: *FunctionBuilder, operand: VarId, out_dtype: DType) BuildError!VarId {
-        return self.emit(.convert, &.{operand}, &.{.{ .out_dtype = out_dtype }});
+    pub fn select(self: *FunctionBuilder, cond: *Var, on_true: *Var, on_false: *Var) BuildError!*Var {
+        return self.emit(.{ .select = {} }, &.{ cond, on_true, on_false });
     }
 
-    pub fn reduce_max(self: *FunctionBuilder, operand: VarId, axes: []const i64) BuildError!VarId {
+    pub fn convert(self: *FunctionBuilder, operand_var: *Var, out_dtype: DType) BuildError!*Var {
+        return self.emit(.{ .convert = out_dtype }, &.{operand_var});
+    }
+
+    pub fn reduce_max(self: *FunctionBuilder, operand_var: *Var, axes: []const i64) BuildError!*Var {
         const axes_copy = try self.alloc().dupe(i64, axes);
-        return self.emit(.reduce_max, &.{operand}, &.{.{ .reduce_axes = axes_copy }});
+        return self.emit(.{ .reduce_max = .{ .axes = axes_copy } }, &.{operand_var});
     }
 
-    pub fn gather(self: *FunctionBuilder, operand: VarId, indices: VarId, gp: GatherParams) BuildError!VarId {
+    pub fn gather(self: *FunctionBuilder, operand_var: *Var, indices: *Var, gp: GatherParams) BuildError!*Var {
         const a = self.alloc();
-        const slice_sizes = try a.dupe(i64, gp.slice_sizes);
-        const offset_dims = try a.dupe(i64, gp.offset_dims);
-        const collapsed_slice_dims = try a.dupe(i64, gp.collapsed_slice_dims);
-        const start_index_map = try a.dupe(i64, gp.start_index_map);
-        return self.emit(
-            .gather,
-            &.{ operand, indices },
-            &.{.{ .gather = .{
-                .slice_sizes = slice_sizes,
-                .offset_dims = offset_dims,
-                .collapsed_slice_dims = collapsed_slice_dims,
-                .start_index_map = start_index_map,
-                .index_vector_dim = gp.index_vector_dim,
-            } }},
-        );
+        return self.emit(.{ .gather = .{
+            .slice_sizes = try a.dupe(i64, gp.slice_sizes),
+            .offset_dims = try a.dupe(i64, gp.offset_dims),
+            .collapsed_slice_dims = try a.dupe(i64, gp.collapsed_slice_dims),
+            .start_index_map = try a.dupe(i64, gp.start_index_map),
+            .index_vector_dim = gp.index_vector_dim,
+        } }, &.{ operand_var, indices });
     }
 
-    pub fn scatter(self: *FunctionBuilder, input: VarId, indices: VarId, updates: VarId, sp: ScatterParams) BuildError!VarId {
+    pub fn scatter(self: *FunctionBuilder, input: *Var, indices: *Var, updates: *Var, sp: ScatterParams) BuildError!*Var {
         const a = self.alloc();
-        const update_window_dims = try a.dupe(i64, sp.update_window_dims);
-        const inserted_window_dims = try a.dupe(i64, sp.inserted_window_dims);
-        const scatter_dims_to_operand_dims = try a.dupe(i64, sp.scatter_dims_to_operand_dims);
-        return self.emit(
-            .scatter,
-            &.{ input, indices, updates },
-            &.{.{ .scatter = .{
-                .update_window_dims = update_window_dims,
-                .inserted_window_dims = inserted_window_dims,
-                .scatter_dims_to_operand_dims = scatter_dims_to_operand_dims,
-                .index_vector_dim = sp.index_vector_dim,
-                .reduction = sp.reduction,
-            } }},
-        );
+        return self.emit(.{ .scatter = .{
+            .update_window_dims = try a.dupe(i64, sp.update_window_dims),
+            .inserted_window_dims = try a.dupe(i64, sp.inserted_window_dims),
+            .scatter_dims_to_operand_dims = try a.dupe(i64, sp.scatter_dims_to_operand_dims),
+            .index_vector_dim = sp.index_vector_dim,
+            .reduction = sp.reduction,
+        } }, &.{ input, indices, updates });
     }
 
-    pub fn slice(self: *FunctionBuilder, operand: VarId, sp: SliceParams) BuildError!VarId {
+    pub fn slice(self: *FunctionBuilder, operand_var: *Var, sp: SliceParams) BuildError!*Var {
         const a = self.alloc();
-        const start_indices = try a.dupe(i64, sp.start_indices);
-        const limit_indices = try a.dupe(i64, sp.limit_indices);
-        const strides = try a.dupe(i64, sp.strides);
-        return self.emit(
-            .slice,
-            &.{operand},
-            &.{.{ .slice = .{
-                .start_indices = start_indices,
-                .limit_indices = limit_indices,
-                .strides = strides,
-            } }},
-        );
+        return self.emit(.{ .slice = .{
+            .start_indices = try a.dupe(i64, sp.start_indices),
+            .limit_indices = try a.dupe(i64, sp.limit_indices),
+            .strides = try a.dupe(i64, sp.strides),
+        } }, &.{operand_var});
     }
 
-    pub fn concatenate(self: *FunctionBuilder, operands: []const VarId, axis: i64) BuildError!VarId {
-        return self.emit(.concatenate, operands, &.{.{ .concat_axis = axis }});
+    pub fn concatenate(self: *FunctionBuilder, operands: []const *Var, axis: i64) BuildError!*Var {
+        return self.emit(.{ .concatenate = .{ .axis = axis } }, operands);
     }
 
-    pub fn dot_general(self: *FunctionBuilder, lhs: VarId, rhs: VarId, dg: DotGeneralParams) BuildError!VarId {
+    pub fn dot_general(self: *FunctionBuilder, lhs: *Var, rhs: *Var, dg: DotGeneralParams) BuildError!*Var {
         const a = self.alloc();
-        const lhs_batch_dims = try a.dupe(i64, dg.lhs_batch_dims);
-        const rhs_batch_dims = try a.dupe(i64, dg.rhs_batch_dims);
-        const lhs_contracting_dims = try a.dupe(i64, dg.lhs_contracting_dims);
-        const rhs_contracting_dims = try a.dupe(i64, dg.rhs_contracting_dims);
-        return self.emit(
-            .dot_general,
-            &.{ lhs, rhs },
-            &.{.{ .dot_general = .{
-                .lhs_batch_dims = lhs_batch_dims,
-                .rhs_batch_dims = rhs_batch_dims,
-                .lhs_contracting_dims = lhs_contracting_dims,
-                .rhs_contracting_dims = rhs_contracting_dims,
-            } }},
-        );
+        return self.emit(.{ .dot_general = .{
+            .lhs_batch_dims = try a.dupe(i64, dg.lhs_batch_dims),
+            .rhs_batch_dims = try a.dupe(i64, dg.rhs_batch_dims),
+            .lhs_contracting_dims = try a.dupe(i64, dg.lhs_contracting_dims),
+            .rhs_contracting_dims = try a.dupe(i64, dg.rhs_contracting_dims),
+        } }, &.{ lhs, rhs });
     }
 
-    pub fn dot(self: *FunctionBuilder, lhs: VarId, rhs: VarId) BuildError!VarId {
-        return self.emit(.dot, &.{ lhs, rhs }, &.{});
+    pub fn dot(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return self.emit(.{ .dot = {} }, &.{ lhs, rhs });
     }
 
-    pub fn iota(self: *FunctionBuilder, out_dtype: DType, out_dims: []const i64, iota_dim: i64) BuildError!VarId {
+    pub fn iota(self: *FunctionBuilder, out_dtype: DType, out_dims: []const i64, iota_dim: i64) BuildError!*Var {
         const a = self.alloc();
-        const out_shape = try a.dupe(i64, out_dims);
-        return self.emit(.iota, &.{}, &.{
-            .{ .out_shape = out_shape },
-            .{ .out_dtype = out_dtype },
-            .{ .iota_dimension = iota_dim },
-        });
+        return self.emit(.{ .iota = .{
+            .out_shape = try a.dupe(i64, out_dims),
+            .out_dtype = out_dtype,
+            .dimension = iota_dim,
+        } }, &.{});
     }
 
-    pub fn reshape(self: *FunctionBuilder, operand: VarId, out_dims: []const i64) BuildError!VarId {
+    pub fn reshape(self: *FunctionBuilder, operand_var: *Var, out_dims: []const i64) BuildError!*Var {
         const a = self.alloc();
-        const out_shape = try a.dupe(i64, out_dims);
-        return self.emit(.reshape, &.{operand}, &.{.{ .out_shape = out_shape }});
+        return self.emit(.{ .reshape = .{
+            .out_shape = try a.dupe(i64, out_dims),
+        } }, &.{operand_var});
     }
 
-    pub fn broadcast_in_dim(self: *FunctionBuilder, operand: VarId, out_dims: []const i64, broadcast_dimensions: []const i64) BuildError!VarId {
+    pub fn broadcast_in_dim(self: *FunctionBuilder, operand_var: *Var, out_dims: []const i64, broadcast_dimensions: []const i64) BuildError!*Var {
         const a = self.alloc();
-        const out_shape = try a.dupe(i64, out_dims);
-        const bd_copy = try a.dupe(i64, broadcast_dimensions);
-        return self.emit(.broadcast_in_dim, &.{operand}, &.{
-            .{ .out_shape = out_shape },
-            .{ .broadcast_dimensions = bd_copy },
-        });
+        return self.emit(.{ .broadcast_in_dim = .{
+            .out_shape = try a.dupe(i64, out_dims),
+            .dimensions = try a.dupe(i64, broadcast_dimensions),
+        } }, &.{operand_var});
     }
 
     /// Create a scalar constant of `dtype` with value `val`, broadcast to `dims`.
     /// Returns a scalar if `dims` is empty.
-    pub fn scalar_broadcast(self: *FunctionBuilder, dtype: DType, dims: []const i64, val: f64) BuildError!VarId {
-        const lit = try self.literal_scalar(ops.types.scalar_literal(dtype, val));
+    pub fn scalar_broadcast(self: *FunctionBuilder, dtype: DType, dims: []const i64, val: f64) BuildError!*Var {
+        const lit = try self.scalar(dtype, val);
         if (dims.len == 0) return lit;
         return self.broadcast_in_dim(lit, dims, &.{});
     }
 
-    pub fn transpose(self: *FunctionBuilder, operand: VarId, permutation: []const i64) BuildError!VarId {
+    pub fn transpose(self: *FunctionBuilder, operand_var: *Var, permutation: []const i64) BuildError!*Var {
         const a = self.alloc();
-        const perm_copy = try a.dupe(i64, permutation);
-        return self.emit(.transpose, &.{operand}, &.{.{ .permutation = perm_copy }});
+        return self.emit(.{ .transpose = .{
+            .permutation = try a.dupe(i64, permutation),
+        } }, &.{operand_var});
     }
 
-    pub fn reduce_sum(self: *FunctionBuilder, operand: VarId, axes: []const i64) BuildError!VarId {
+    pub fn reduce_sum(self: *FunctionBuilder, operand_var: *Var, axes: []const i64) BuildError!*Var {
         const a = self.alloc();
-        const axes_copy = try a.dupe(i64, axes);
-        return self.emit(.reduce_sum, &.{operand}, &.{.{ .reduce_axes = axes_copy }});
+        return self.emit(.{ .reduce_sum = .{
+            .axes = try a.dupe(i64, axes),
+        } }, &.{operand_var});
     }
 
-    pub fn custom_call(self: *FunctionBuilder, target: []const u8, operands: []const VarId, out_like: VarId) BuildError!VarId {
+    pub fn custom_call(self: *FunctionBuilder, target: []const u8, operands: []const *Var, out_like: *Var) BuildError!*Var {
         const a = self.alloc();
-
-        const out_aval = self.avals.items[@intCast(out_like)];
-        _ = out_aval.as_tensor() orelse return error.CustomCallTypeMismatch;
-        for (operands) |op| _ = try self.tensor_of(op);
+        const out_aval = out_like.aval;
 
         const target_copy = try a.dupe(u8, target);
-        return self.emit(.custom_call, operands, &.{
-            .{ .call_target_name = target_copy },
-            .{ .has_side_effect = false },
-            .{ .out_aval = out_aval },
-        });
+        const out_avals = try a.alloc(Aval, 1);
+        out_avals[0] = out_aval;
+        return self.emit(.{ .custom_call = .{
+            .target_name = target_copy,
+            .has_side_effect = false,
+            .out_avals = out_avals,
+        } }, operands);
     }
 
-    pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const VarId) BuildError![]VarId {
+    /// Emit a multi-output custom_call. Used by kernelize pass.
+    pub fn custom_call_multi(self: *FunctionBuilder, cc_params: CustomCallParams, inputs: []const *Var) BuildError![]*Var {
+        return self.emit_with_outputs(.{ .custom_call = cc_params }, inputs, cc_params.out_avals);
+    }
+
+    pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const *Var) BuildError![]*Var {
         var callee_func: ?Function = null;
         for (self.program.functions) |func| {
             if (std.mem.eql(u8, func.name, callee)) {
@@ -920,32 +1162,39 @@ pub const FunctionBuilder = struct {
                 break;
             }
         }
-        const callee_fn = callee_func orelse return error.InvalidParams;
+        const callee_fn = callee_func orelse {
+            pr_log.err("call references unknown function '{s}'", .{callee});
+            return error.CallUnresolvedCallee;
+        };
 
-        if (inputs.len != callee_fn.params.len) return error.InvalidEqnArity;
-        for (inputs, 0..) |in_id, i| {
-            const in_tensor = try self.tensor_of(in_id);
-            const callee_tensor = callee_fn.avals[@intCast(callee_fn.params[i])].as_tensor() orelse return error.CallTypeMismatch;
+        if (inputs.len != callee_fn.params.len) {
+            pr_log.err("call arity mismatch: '{s}' expects {d} inputs, got {d}", .{ callee, callee_fn.params.len, inputs.len });
+            return error.CallArityMismatch;
+        }
+        for (inputs, 0..) |in_var, i| {
+            const in_tensor = in_var.aval.as_tensor();
+            const callee_tensor = callee_fn.params[i].aval.as_tensor();
             if (!same_tensor_signature(in_tensor, callee_tensor)) return error.CallTypeMismatch;
         }
 
         const a = self.alloc();
-        const outputs = try a.alloc(VarId, callee_fn.returns.len);
-        for (callee_fn.returns, 0..) |ret_id, i| {
-            const aval = callee_fn.avals[@intCast(ret_id)];
-            outputs[i] = try self.var_with_aval(aval);
+        const out_avals = try a.alloc(Aval, callee_fn.returns.len);
+        for (callee_fn.returns, 0..) |ret_var, i| {
+            out_avals[i] = ret_var.aval;
         }
 
         const callee_copy = try a.dupe(u8, callee);
-        try self.emit_with_outputs(.call, inputs, outputs, &.{.{ .call_callee = callee_copy }});
-        return outputs;
+        return self.emit_with_outputs(.{ .call = .{ .callee = callee_copy } }, inputs, out_avals);
     }
 
     // ====================================================================
     // Finish
     // ====================================================================
 
-    pub fn finish(self: *FunctionBuilder, returns: []const VarId) BuildError!Function {
+    /// Finalize the function: flush open regions, validate all ops, and
+    /// return an immutable Function. The builder should not be used after this
+    /// (call `deinit` to release its working lists).
+    pub fn finish(self: *FunctionBuilder, returns: []const *Var) BuildError!Function {
         const a = self.alloc();
 
         // Flush any remaining open regions
@@ -955,15 +1204,13 @@ pub const FunctionBuilder = struct {
 
         const func = Function{
             .name = self.name,
-            .params = try self.params.toOwnedSlice(a),
-            .returns = try a.dupe(VarId, returns),
-            .avals = try self.avals.toOwnedSlice(a),
-            .eqns = try self.eqns.toOwnedSlice(a),
-            .varids_store = try self.varids_store.toOwnedSlice(a),
-            .params_store = try self.params_store.toOwnedSlice(a),
+            .params = try self.params_list.toOwnedSlice(a),
+            .returns = try a.dupe(*Var, returns),
+            .ops = try self.ops_list.toOwnedSlice(a),
             .regions = try self.completed_regions.toOwnedSlice(a),
+            .var_count = self.next_var_id,
         };
-        try validate_function(func);
+        try validate_ops_in_func(func);
         return func;
     }
 };
@@ -993,7 +1240,7 @@ test "FunctionBuilder broadcast_in_dim basic" {
     const x = try b.param_tensor(.f32, &.{3});
     const y = try b.broadcast_in_dim(x, &.{ 2, 3 }, &.{1});
     const func = try b.finish(&.{y});
-    try validate_function(func);
+    try validate_ops_in_func(func);
 }
 
 test "FunctionBuilder transpose validation" {
@@ -1006,7 +1253,7 @@ test "FunctionBuilder transpose validation" {
     const x = try b.param_tensor(.f32, &.{ 2, 3, 4 });
     const y = try b.transpose(x, &.{ 2, 0, 1 });
     const func = try b.finish(&.{y});
-    try validate_function(func);
+    try validate_ops_in_func(func);
 }
 
 test "FunctionBuilder reduce_sum basic" {
@@ -1019,7 +1266,7 @@ test "FunctionBuilder reduce_sum basic" {
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.reduce_sum(x, &.{0});
     const func = try b.finish(&.{y});
-    try validate_function(func);
+    try validate_ops_in_func(func);
 }
 
 test "FunctionBuilder literal scalar" {
@@ -1031,7 +1278,16 @@ test "FunctionBuilder literal scalar" {
 
     const one = try b.literal_scalar(.{ .f32 = 1.0 });
     const func = try b.finish(&.{one});
-    try validate_function(func);
+    try validate_ops_in_func(func);
+}
+
+test "Literal.from_f64 tags by DType" {
+    const i = Literal.from_f64(.i32, -7.0);
+    const f = Literal.from_f64(.f32, 1.5);
+    try std.testing.expectEqual(DType.i32, i.dtype());
+    try std.testing.expectEqual(DType.f32, f.dtype());
+    const g = Literal.from_f64(.f16, std.math.floatMax(f32));
+    try std.testing.expectEqual(DType.f16, g.dtype());
 }
 
 test "region push/pop materializes regions" {
@@ -1055,8 +1311,8 @@ test "region push/pop materializes regions" {
     try std.testing.expectEqual(@as(usize, 1), func.regions.len);
     try std.testing.expectEqualStrings("tvm-kernel", func.regions[0].name);
     try std.testing.expectEqualStrings("tvm", func.regions[0].annotation.kernelize.?);
-    try std.testing.expectEqual(@as(u32, 0), func.regions[0].eqn_start);
-    try std.testing.expectEqual(@as(u32, 2), func.regions[0].eqn_len);
+    try std.testing.expectEqual(@as(u32, 0), func.regions[0].op_start);
+    try std.testing.expectEqual(@as(u32, 2), func.regions[0].op_len);
 }
 
 test "nested regions" {
@@ -1086,13 +1342,13 @@ test "nested regions" {
     // Inner region completed first
     try std.testing.expectEqualStrings("inner", func.regions[0].name);
     try std.testing.expect(func.regions[0].annotation.outline);
-    try std.testing.expectEqual(@as(u32, 1), func.regions[0].eqn_start);
-    try std.testing.expectEqual(@as(u32, 1), func.regions[0].eqn_len);
+    try std.testing.expectEqual(@as(u32, 1), func.regions[0].op_start);
+    try std.testing.expectEqual(@as(u32, 1), func.regions[0].op_len);
     // Outer region completed second
     try std.testing.expectEqualStrings("outer", func.regions[1].name);
     try std.testing.expectEqualStrings("tvm", func.regions[1].annotation.kernelize.?);
-    try std.testing.expectEqual(@as(u32, 0), func.regions[1].eqn_start);
-    try std.testing.expectEqual(@as(u32, 3), func.regions[1].eqn_len);
+    try std.testing.expectEqual(@as(u32, 0), func.regions[1].op_start);
+    try std.testing.expectEqual(@as(u32, 3), func.regions[1].op_len);
 }
 
 test "regions_matching filters by predicate" {
@@ -1146,10 +1402,57 @@ test "empty region not materialized" {
     try std.testing.expectEqual(@as(usize, 0), func.regions.len);
 }
 
+test "use-list basics" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{2});
+
+    // x is unused at this point
+    try std.testing.expect(x.is_unused());
+
+    const z = try b.add(x, y);
+    // x and y each have one use now
+    try std.testing.expect(x.has_one_use());
+    try std.testing.expect(y.has_one_use());
+
+    const w = try b.multiply(z, x);
+    // x now has two uses (add and multiply)
+    try std.testing.expect(x.has_n_uses(2));
+    try std.testing.expect(!x.has_one_use());
+    // z has one use
+    try std.testing.expect(z.has_one_use());
+
+    _ = try b.finish(&.{w});
+}
+
+test "Var.replace_all_uses_with" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{2});
+
+    const z = try b.add(x, y);
+    _ = try b.multiply(z, x);
+
+    // x has 2 uses. Replace all uses of x with y.
+    try std.testing.expect(x.has_n_uses(2));
+    @constCast(x).replace_all_uses_with(@constCast(y));
+    try std.testing.expect(x.is_unused());
+    // y now has the uses that x had plus its original use
+    try std.testing.expect(y.has_n_uses(3));
+}
+
 test "no external imports" {
     // This test verifies at compile time that this module depends only on std.
-    // If pr.zig imported mlir, stablehlo, or any ffi module, it would fail to
-    // compile in isolation. The fact that this test compiles is the proof.
     const pr = @This();
     try std.testing.expect(pr.DType.f32 == .f32);
 }

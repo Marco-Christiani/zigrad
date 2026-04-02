@@ -1,7 +1,7 @@
-/// Lowering types shared across the pipeline.
-///
-/// Pure data types with no MLIR C link dependency. Importable unconditionally
-/// regardless of whether MLIR is enabled.
+//! Lowering types shared across the pipeline.
+//!
+//! Pure data types with no MLIR C link dependency. Importable unconditionally
+//! regardless of whether MLIR is enabled.
 const pass = @import("../pipeline/pass.zig");
 
 pub const OutputFormat = enum {

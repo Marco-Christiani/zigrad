@@ -31,10 +31,10 @@ pub const MirageProvider = struct {
     }
 
     fn compile(self: *MirageProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-        if (desc.eqns.len > max_region_eqns) {
+        if (desc.ops.len > max_region_eqns) {
             log.debug(
-                "region '{s}' has {d} eqns (> {d}); skipping mirage compile",
-                .{ desc.name, desc.eqns.len, max_region_eqns },
+                "region '{s}' has {d} ops (> {d}); skipping mirage compile",
+                .{ desc.name, desc.ops.len, max_region_eqns },
             );
             return error.Unsupported;
         }
@@ -42,10 +42,10 @@ pub const MirageProvider = struct {
         var graph = mirage.Graph.init() catch |err| return map_mirage_api_error(err);
         defer graph.deinit();
 
-        var tensor_map = std.AutoHashMap(pr.VarId, mirage.Tensor).init(allocator);
+        var tensor_map = std.AutoHashMap(*const pr.Var, mirage.Tensor).init(allocator);
         defer tensor_map.deinit();
 
-        try lower_region_graph(desc, &graph, &tensor_map, allocator);
+        try lower_region_graph(desc, &graph, &tensor_map);
 
         return self.search_and_transpile(desc.name, allocator, &graph);
     }
@@ -84,7 +84,7 @@ pub const MirageProvider = struct {
         }
 
         const out_tensor = build_mirage_graph(&graph, desc.pattern, handles.items, desc) catch |err| {
-            log.debug("graph construction failed for '{s}' (pattern={s}): {s}", .{
+            log.err("graph construction failed for '{s}' (pattern={s}): {s}", .{
                 desc.name, @tagName(desc.pattern), @errorName(err),
             });
             return err;
@@ -369,12 +369,10 @@ fn emit_graph_input(
 fn lower_region_graph(
     desc: kernel.RegionDescriptor,
     graph: *mirage.Graph,
-    tensor_map: *std.AutoHashMap(pr.VarId, mirage.Tensor),
-    allocator: std.mem.Allocator,
+    tensor_map: *std.AutoHashMap(*const pr.Var, mirage.Tensor),
 ) kernel.CompileError!void {
-    for (desc.inputs) |in_id| {
-        const aval = desc.aval_of(in_id) orelse return error.Unsupported;
-        const tensor = aval.as_tensor() orelse return error.Unsupported;
+    for (desc.inputs) |in_var| {
+        const tensor = in_var.as_tensor();
 
         const dtype = dtype_to_mirage(tensor.dtype) orelse return error.Unsupported;
 
@@ -392,84 +390,76 @@ fn lower_region_graph(
         };
 
         const handle = graph.new_input(&spec) catch |err| return map_mirage_api_error(err);
-        try tensor_map.put(in_id, handle);
+        try tensor_map.put(in_var, handle);
     }
 
-    for (desc.eqns) |eqn| {
-        const inputs = eqn.inputs.slice(pr.VarId, desc.varids_store);
-        const outputs = eqn.outputs.slice(pr.VarId, desc.varids_store);
-        if (outputs.len != 1) return error.Unsupported;
+    for (desc.ops) |op| {
+        if (op.outputs.len != 1) return error.Unsupported;
 
-        const out_tensor = try lower_eqn(graph, desc, eqn, inputs, tensor_map);
-        try tensor_map.put(outputs[0], out_tensor);
+        const out_tensor = try lower_op(graph, op, tensor_map);
+        try tensor_map.put(op.outputs[0], out_tensor);
     }
 
-    for (desc.outputs) |out_id| {
-        const out_tensor = tensor_map.get(out_id) orelse return error.Unsupported;
+    for (desc.outputs) |out_var| {
+        const out_tensor = tensor_map.get(out_var) orelse return error.Unsupported;
         graph.mark_output(out_tensor) catch |err| return map_mirage_api_error(err);
     }
-
-    _ = allocator;
 }
 
-fn lower_eqn(
+fn lower_op(
     graph: *mirage.Graph,
-    desc: kernel.RegionDescriptor,
-    eqn: pr.Eqn,
-    inputs: []const pr.VarId,
-    tensor_map: *const std.AutoHashMap(pr.VarId, mirage.Tensor),
+    op: *const pr.Op,
+    tensor_map: *const std.AutoHashMap(*const pr.Var, mirage.Tensor),
 ) kernel.CompileError!mirage.Tensor {
-    switch (eqn.prim) {
+    switch (op.params) {
         .dot => {
-            if (inputs.len != 2) return error.Unsupported;
-            const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
+            if (op.inputs.len != 2) return error.Unsupported;
+            const lhs = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
+            const rhs = tensor_map.get(op.inputs[1].value) orelse return error.Unsupported;
             return try emit_matmul(graph, lhs, rhs);
         },
-        .dot_general => {
-            if (inputs.len != 2) return error.Unsupported;
+        .dot_general => |dg| {
+            if (op.inputs.len != 2) return error.Unsupported;
 
-            const lhs_aval = desc.aval_of(inputs[0]) orelse return error.Unsupported;
-            const rhs_aval = desc.aval_of(inputs[1]) orelse return error.Unsupported;
-            const lhs_tensor = lhs_aval.as_tensor() orelse return error.Unsupported;
-            const rhs_tensor = rhs_aval.as_tensor() orelse return error.Unsupported;
+            const lhs_tensor = op.inputs[0].value.as_tensor();
+            const rhs_tensor = op.inputs[1].value.as_tensor();
 
             if (!kernel.dot_general_is_canonical_batched_matmul(
-                eqn.params.slice(pr.Param, desc.params_store),
+                dg,
                 lhs_tensor.shape.rank(),
                 rhs_tensor.shape.rank(),
             )) return error.Unsupported;
 
-            const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
+            const lhs = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
+            const rhs = tensor_map.get(op.inputs[1].value) orelse return error.Unsupported;
             return try emit_matmul(graph, lhs, rhs);
         },
         .exp => {
-            if (inputs.len != 1) return error.Unsupported;
-            const input = tensor_map.get(inputs[0]) orelse return error.Unsupported;
+            if (op.inputs.len != 1) return error.Unsupported;
+            const input = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
             return try emit_unary(graph, .exp, input);
         },
         .log => {
-            if (inputs.len != 1) return error.Unsupported;
-            const input = tensor_map.get(inputs[0]) orelse return error.Unsupported;
+            if (op.inputs.len != 1) return error.Unsupported;
+            const input = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
             return try emit_unary(graph, .log, input);
         },
         .add => {
-            if (inputs.len != 2) return error.Unsupported;
-            const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
+            if (op.inputs.len != 2) return error.Unsupported;
+            const lhs = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
+            const rhs = tensor_map.get(op.inputs[1].value) orelse return error.Unsupported;
             return try emit_binary(graph, .add, lhs, rhs);
         },
         .multiply => {
-            if (inputs.len != 2) return error.Unsupported;
-            const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
+            if (op.inputs.len != 2) return error.Unsupported;
+            const lhs = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
+            const rhs = tensor_map.get(op.inputs[1].value) orelse return error.Unsupported;
             return try emit_binary(graph, .mul, lhs, rhs);
         },
         .divide => {
-            if (inputs.len != 2) return error.Unsupported;
-            const lhs = tensor_map.get(inputs[0]) orelse return error.Unsupported;
-            const rhs = tensor_map.get(inputs[1]) orelse return error.Unsupported;
+            if (op.inputs.len != 2) return error.Unsupported;
+            const lhs = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
+            const rhs = tensor_map.get(op.inputs[1].value) orelse return error.Unsupported;
             return try emit_binary(graph, .div, lhs, rhs);
         },
         else => return error.Unsupported,
@@ -478,7 +468,7 @@ fn lower_eqn(
 
 fn emit_matmul(graph: *mirage.Graph, lhs: mirage.Tensor, rhs: mirage.Tensor) kernel.CompileError!mirage.Tensor {
     return graph.matmul(lhs, rhs) catch |err| {
-        log.debug("mirage graph.matmul rejected (lhs={d}, rhs={d}): {s}", .{ lhs, rhs, @errorName(err) });
+        log.err("mirage graph.matmul rejected (lhs={d}, rhs={d}): {s}", .{ lhs, rhs, @errorName(err) });
         return map_mirage_api_error(err);
     };
 }
@@ -489,7 +479,7 @@ fn emit_unary(
     input: mirage.Tensor,
 ) kernel.CompileError!mirage.Tensor {
     return graph.unary(op, input) catch |err| {
-        log.debug("mirage graph.unary({s}) rejected (input={d}): {s}", .{ @tagName(op), input, @errorName(err) });
+        log.err("mirage graph.unary({s}) rejected (input={d}): {s}", .{ @tagName(op), input, @errorName(err) });
         return map_mirage_api_error(err);
     };
 }
@@ -501,7 +491,7 @@ fn emit_binary(
     rhs: mirage.Tensor,
 ) kernel.CompileError!mirage.Tensor {
     return graph.binary(op, lhs, rhs) catch |err| {
-        log.debug("mirage graph.binary({s}) rejected (lhs={d}, rhs={d}): {s}", .{ @tagName(op), lhs, rhs, @errorName(err) });
+        log.err("mirage graph.binary({s}) rejected (lhs={d}, rhs={d}): {s}", .{ @tagName(op), lhs, rhs, @errorName(err) });
         return map_mirage_api_error(err);
     };
 }
@@ -539,13 +529,13 @@ fn map_mirage_status(status: mirage.Status, ctx: StatusContext) kernel.CompileEr
     return switch (status) {
         .invalid_argument => error.Unsupported,
         .internal_error => {
-            log.warn("status_internal_error -> ProviderCallFailed", .{});
+            if (!@import("builtin").is_test) log.warn("status_internal_error -> ProviderCallFailed", .{});
             return error.ProviderCallFailed;
         },
         .unsupported => switch (ctx) {
             .region => error.Unsupported,
             .runtime => {
-                log.warn("status_unsupported (runtime) -> ProviderCallFailed", .{});
+                if (!@import("builtin").is_test) log.warn("status_unsupported (runtime) -> ProviderCallFailed", .{});
                 return error.ProviderCallFailed;
             },
         },

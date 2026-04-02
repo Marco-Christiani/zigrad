@@ -21,10 +21,10 @@ const kernel = @import("../kernel.zig");
 
 /// Artifact kinds for pass input/output validation.
 pub const ArtifactKind = enum {
-    /// Zigrad PR program (internal, toolchain-neutral)
+    /// Zigrad PR (toolchain agnostic)
     pr,
 
-    /// MLIR module bytes (StableHLO dialect, text or bytecode)
+    /// MLIR module bytes (any dialect(s), text or bytecode)
     mlir,
 };
 
@@ -48,13 +48,13 @@ pub const Artifact = union(ArtifactKind) {
     mlir: MlirArtifact,
 
     pub fn kind(self: Artifact) ArtifactKind {
-        return @as(ArtifactKind, self);
+        return std.meta.activeTag(self);
     }
 
     /// Free owned resources. Not all variants own memory.
     pub fn deinit(self: *Artifact, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .pr => {}, // PR program is borrowed, not owned here
+            .pr => {}, // PR program is borrowed
             .mlir => |*m| m.deinit(allocator),
         }
     }
@@ -135,6 +135,9 @@ pub const PassError = error{
 /// Follows the Zig interface pattern (ptr + run_fn). Stateful passes
 /// store their configuration behind `ptr`; stateless passes leave it
 /// undefined.
+///
+/// TODO: adding support for lifecycle hooks makes sense here, some passes need
+///  setup with widened error unions (eg initializing an mlir session).
 pub const Pass = struct {
     ptr: *anyopaque,
     run_fn: *const fn (ptr: *anyopaque, artifact: *Artifact, ctx: *PassContext) PassError!void,
@@ -148,6 +151,7 @@ pub const Pass = struct {
 };
 
 /// Pipeline: a sequence of passes with validation and execution.
+/// TODO: See above comments in `Pass`.
 pub const Pipeline = struct {
     passes: []const Pass,
 

@@ -57,6 +57,8 @@ pub fn run_demo_executable(
     const dims_b = [_]i64{ 3, 2 };
     const dims_c = [_]i64{ 2, 2 };
 
+    // TODO: are we ready to make these tensor calls yet? ideally, we can also make the host buffers tensors, need to
+    //  think about the right way to model this in Tensor.Mode.
     const dev_a = try b.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
     defer b.deinit_buffer(dev_a);
     const dev_b = try b.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
@@ -89,12 +91,12 @@ pub fn run_demo_executable(
     for (out, 0..) |v, i| {
         const diff = @abs(v - expected[i]);
         if (diff > 1e-4) {
-            std.log.err("mismatch[{d}]: got {d}, expected {d}", .{ i, v, expected[i] });
+            log.err("mismatch[{d}]: got {d}, expected {d}", .{ i, v, expected[i] });
             return error.NumericalMismatch;
         }
     }
 
-    std.log.info("OK: demo output matches expected", .{});
+    log.info("OK: demo output matches expected", .{});
 }
 
 pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
@@ -116,12 +118,12 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backe
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
     }, "main") catch |err| {
-        std.log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
+        log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
     defer backend.deinit_executable(exe);
 
-    std.log.err("unexpected: custom_call compiled without a handler", .{});
+    log.err("unexpected: custom_call compiled without a handler", .{});
     return error.UnexpectedSuccess;
 }
 
@@ -236,7 +238,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
     try expect_all_close("dB", got_b, expected_b[0..], 1e-4);
     try expect_all_close("dC", got_c, expected_c[0..], 1e-4);
 
-    std.log.info("OK: vjp-demo gradients match expected", .{});
+    log.info("OK: gradients match expected", .{});
 }
 
 pub fn run_train_demo(
@@ -294,11 +296,8 @@ pub fn run_train_demo(
             defer vg.deinit();
             var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
             defer params_tree.deinit();
-            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, @as(f32, 1e-2), struct {
-                fn f(lr: f32, param: Tensor, grad: Tensor) anyerror!Tensor {
-                    return zg.frontend.optim.sgd_update(param, grad, lr);
-                }
-            }.f);
+            const optim = zg.frontend.optim.SGD{ .lr = 1e-2 };
+            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.frontend.optim.SGD.update);
             defer updated.deinit();
             return .{
                 .loss_val = vg.value,
@@ -458,8 +457,8 @@ pub fn run_train_demo(
         loop_timer.end_step(loss);
     }
 
-    std.log.info("train-demo avg_step_ms={d:.3}", .{loop_timer.avg_ms()});
-    std.log.info("OK: train-demo executed", .{});
+    log.info("avg_step_ms={d:.3}", .{loop_timer.avg_ms()});
+    log.info("OK", .{});
 }
 
 /// End-to-end kernel provider demo.
@@ -648,7 +647,7 @@ fn run_kernel_provider_demo_executable(
             return error.NumericalMismatch;
         }
     }
-    std.log.info("OK: kernelized demo output matches expected ({d} provider(s))", .{n_providers});
+    log.info("OK: output matches expected ({d} provider(s))", .{n_providers});
 }
 
 pub const KernelProviderDemoKind = enum {
@@ -933,9 +932,7 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
 
     // scale scores
     const scale_val = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-    const scale = try b.scalar_literal(zg.pr.ops.types.scalar_literal(.f32, scale_val));
-    const scale_broadcast = try scale.broadcast_in_dim(scores.dims(), &.{});
-    const scaled = try scores.mul(scale_broadcast);
+    const scaled = try scores.mul(try zg.Tensor.constant_like(scores, scale_val));
 
     // softmax over last dim [S]
     const rank = scaled.rank();

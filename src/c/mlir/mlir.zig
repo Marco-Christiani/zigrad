@@ -1,7 +1,7 @@
-// MLIR Zig Wrapper - Core API
-// Adapted from ZML (https://github.com/zml/zml)
-// Original Copyright (c) 2024 ZML Contributors
-// Apache License 2.0
+//! MLIR Zig Wrapper - Core API
+//! Adapted from ZML (https://github.com/zml/zml)
+//! Original Copyright (c) 2024 ZML Contributors
+//! Apache License 2.0
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -55,8 +55,9 @@ pub const Error = error{
     NotFound,
     /// Bytecode version incompatibility.
     InvalidMlirBytecodeVersion,
-    OutOfMemory,
-};
+    /// The zigrad MLIR library could not be loaded.
+    MissingMlirExtension,
+} || std.mem.Allocator.Error;
 
 pub inline fn string_ref(str: []const u8) c.MlirStringRef {
     return .{ .data = str.ptr, .length = str.len };
@@ -71,9 +72,7 @@ pub fn register_passes(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
-pub const RegisterZigradExtensionsError = error{MissingMlirExtensionShim};
-
-pub fn register_zigrad_extensions(ctx: Context) RegisterZigradExtensionsError!void {
+pub fn register_zigrad_extensions(ctx: Context) Error!void {
     shim_mutex.lock();
     defer shim_mutex.unlock();
 
@@ -81,11 +80,11 @@ pub fn register_zigrad_extensions(ctx: Context) RegisterZigradExtensionsError!vo
         .uninitialized => {
             const loaded = load_shim_locked() orelse {
                 shim_state = .unavailable;
-                return error.MissingMlirExtensionShim;
+                return error.MissingMlirExtension;
             };
             shim_state = .{ .loaded = loaded };
         },
-        .unavailable => return error.MissingMlirExtensionShim,
+        .unavailable => return error.MissingMlirExtension,
         .loaded => {},
     }
 

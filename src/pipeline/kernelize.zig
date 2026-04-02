@@ -4,9 +4,9 @@
 /// regions with `custom_call` ops. Never invokes providers or performs compilation.
 ///
 /// For each region with a `kernelize` annotation, the pass:
-/// 1. Computes a kernel signature from the region's equation signature.
+/// 1. Computes a kernel signature from the region's op signature.
 /// 2. Looks up the signature in the store for a tuning decision.
-/// 3. Profitable decisions: rewrites the region's equations into a single
+/// 3. Profitable decisions: rewrites the region's ops into a single
 ///    `custom_call` op carrying kernel_key, provider_name, and carrier metadata.
 /// 4. Negative or absent decisions: leaves the region unchanged for baseline lowering.
 ///
@@ -26,8 +26,8 @@ const KernelCandidate = struct {
     provider_name: []const u8,
 
     // Populated after successful store lookup (used for PR rewriting).
-    inputs: []const pr.VarId = &.{},
-    outputs: []const pr.VarId = &.{},
+    inputs: []const *pr.Var = &.{},
+    outputs: []const *pr.Var = &.{},
     kernel_key: []const u8 = &.{},
 };
 
@@ -157,12 +157,12 @@ pub const KernelizePass = struct {
             const decision = store.get(kernel_signature) orelse {
                 log.debug("store: no decision for region '{s}' (shape '{s}'), skipping", .{ candidate.region.name, kernel_signature });
                 if (entries) |e| {
-                    const ops = build_ops_str(entries_alloc, desc) catch "";
+                    const ops_str = build_ops_str(entries_alloc, desc) catch "";
                     const shape = build_shape_str(entries_alloc, desc) catch "";
                     e.append(entries_alloc, .{
                         .name = candidate.region.name,
                         .provider = candidate.provider_name,
-                        .ops = ops,
+                        .ops = ops_str,
                         .shape = shape,
                         .outcome = .fallback,
                     }) catch {};
@@ -175,19 +175,19 @@ pub const KernelizePass = struct {
                     try rewrites.append(temp_allocator, .{
                         .region = candidate.region,
                         .provider_name = art.provider_name,
-                        .inputs = try temp_allocator.dupe(pr.VarId, desc.inputs),
-                        .outputs = try temp_allocator.dupe(pr.VarId, desc.outputs),
+                        .inputs = try temp_allocator.dupe(*pr.Var, desc.inputs),
+                        .outputs = try temp_allocator.dupe(*pr.Var, desc.outputs),
                         .kernel_key = try temp_allocator.dupe(u8, kernel_signature),
                     });
                     log.debug("store: profitable decision for region '{s}' -> '{s}'", .{ candidate.region.name, art.target_name });
 
                     if (entries) |e| {
-                        const ops = build_ops_str(entries_alloc, desc) catch "";
+                        const ops_str = build_ops_str(entries_alloc, desc) catch "";
                         const shape = build_shape_str(entries_alloc, desc) catch "";
                         e.append(entries_alloc, .{
                             .name = candidate.region.name,
                             .provider = art.provider_name,
-                            .ops = ops,
+                            .ops = ops_str,
                             .shape = shape,
                             .outcome = .compiled,
                         }) catch {};
@@ -196,12 +196,12 @@ pub const KernelizePass = struct {
                 .negative => |reason| {
                     log.debug("store: negative decision for region '{s}': {s}", .{ candidate.region.name, reason });
                     if (entries) |e| {
-                        const ops = build_ops_str(entries_alloc, desc) catch "";
+                        const ops_str = build_ops_str(entries_alloc, desc) catch "";
                         const shape = build_shape_str(entries_alloc, desc) catch "";
                         e.append(entries_alloc, .{
                             .name = candidate.region.name,
                             .provider = candidate.provider_name,
-                            .ops = ops,
+                            .ops = ops_str,
                             .shape = shape,
                             .outcome = .fallback,
                         }) catch {};
@@ -212,54 +212,47 @@ pub const KernelizePass = struct {
 
         if (rewrites.items.len == 0) return func;
 
-        const allocator = program.allocator();
+        const arena = program.allocator();
 
-        var eqns = try std.ArrayList(pr.Eqn).initCapacity(allocator, func.eqns.len);
-        var varids_store = try std.ArrayList(pr.VarId).initCapacity(allocator, func.varids_store.len);
-        var params_store = try std.ArrayList(pr.Param).initCapacity(allocator, func.params_store.len + rewrites.items.len * 5);
-
-        var eqn_index: usize = 0;
-        while (eqn_index < func.eqns.len) {
-            const rewrite = find_rewrite_starting_at(rewrites.items, eqn_index);
-            if (rewrite) |entry| {
-                try append_custom_call_eqn(allocator, &eqns, &varids_store, &params_store, func, entry);
-                eqn_index += @as(usize, @intCast(entry.region.eqn_len));
+        var new_ops = try std.ArrayList(*pr.Op).initCapacity(arena, func.ops.len);
+        var op_index: usize = 0;
+        while (op_index < func.ops.len) {
+            if (find_rewrite_starting_at(rewrites.items, op_index)) |rewrite| {
+                const new_op = try build_custom_call_op(arena, rewrite);
+                try new_ops.append(arena, new_op);
+                op_index += @as(usize, @intCast(rewrite.region.op_len));
                 continue;
             }
-
-            const eqn = func.eqns[eqn_index];
-            try append_existing_eqn(allocator, &eqns, &varids_store, &params_store, func, eqn);
-            eqn_index += 1;
+            try new_ops.append(arena, func.ops[op_index]);
+            op_index += 1;
         }
 
         return .{
             .name = func.name,
             .params = func.params,
             .returns = func.returns,
-            .avals = func.avals,
-            .eqns = try eqns.toOwnedSlice(allocator),
-            .varids_store = try varids_store.toOwnedSlice(allocator),
-            .params_store = try params_store.toOwnedSlice(allocator),
+            .ops = try new_ops.toOwnedSlice(arena),
             .regions = &.{},
+            .var_count = func.var_count,
         };
     }
 
-    fn find_rewrite_starting_at(rewrites: []const KernelCandidate, eqn_start: usize) ?KernelCandidate {
+    fn find_rewrite_starting_at(rewrites: []const KernelCandidate, op_start: usize) ?KernelCandidate {
         for (rewrites) |entry| {
-            if (entry.region.eqn_len == 0) continue;
-            if (@as(usize, @intCast(entry.region.eqn_start)) == eqn_start) return entry;
+            if (entry.region.op_len == 0) continue;
+            if (@as(usize, @intCast(entry.region.op_start)) == op_start) return entry;
         }
         return null;
     }
 
     fn is_region_nested(region: pr.Region, candidates: []const KernelCandidate) bool {
-        if (region.eqn_len == 0) return false;
-        const start: usize = @intCast(region.eqn_start);
-        const end: usize = start + @as(usize, @intCast(region.eqn_len));
+        if (region.op_len == 0) return false;
+        const start: usize = @intCast(region.op_start);
+        const end: usize = start + @as(usize, @intCast(region.op_len));
         for (candidates) |other| {
-            if (other.region.eqn_len == 0) continue;
-            const other_start: usize = @intCast(other.region.eqn_start);
-            const other_end: usize = other_start + @as(usize, @intCast(other.region.eqn_len));
+            if (other.region.op_len == 0) continue;
+            const other_start: usize = @intCast(other.region.op_start);
+            const other_end: usize = other_start + @as(usize, @intCast(other.region.op_len));
             const contains = (other_start <= start) and (other_end >= end);
             const strictly_larger = (other_start < start) or (other_end > end);
             if (contains and strictly_larger) return true;
@@ -267,91 +260,47 @@ pub const KernelizePass = struct {
         return false;
     }
 
-    fn append_existing_eqn(
-        allocator: std.mem.Allocator,
-        eqns: *std.ArrayList(pr.Eqn),
-        varids_store: *std.ArrayList(pr.VarId),
-        params_store: *std.ArrayList(pr.Param),
-        func: pr.Function,
-        eqn: pr.Eqn,
-    ) !void {
-        const inputs = eqn.inputs.slice(pr.VarId, func.varids_store);
-        const outputs = eqn.outputs.slice(pr.VarId, func.varids_store);
-        const params = eqn.params.slice(pr.Param, func.params_store);
-
-        const in_span = try append_varids(allocator, varids_store, inputs);
-        const out_span = try append_varids(allocator, varids_store, outputs);
-        const param_span = try append_params(allocator, params_store, params);
-
-        try eqns.append(allocator, .{
-            .prim = eqn.prim,
-            .inputs = in_span,
-            .outputs = out_span,
-            .params = param_span,
-        });
-    }
-
-    fn append_custom_call_eqn(
-        allocator: std.mem.Allocator,
-        eqns: *std.ArrayList(pr.Eqn),
-        varids_store: *std.ArrayList(pr.VarId),
-        params_store: *std.ArrayList(pr.Param),
-        func: pr.Function,
-        rewrite: KernelCandidate,
-    ) !void {
-        if (rewrite.outputs.len == 0) return error.InvalidRegion;
-
-        const out_avals = try allocator.alloc(pr.Aval, rewrite.outputs.len);
-        errdefer allocator.free(out_avals);
-        for (rewrite.outputs, 0..) |out_id, idx| {
-            out_avals[idx] = func.avals[@intCast(out_id)];
+    /// Build a new custom_call Op from a rewrite candidate.
+    fn build_custom_call_op(arena: std.mem.Allocator, rewrite: KernelCandidate) !*pr.Op {
+        const out_avals = try arena.alloc(pr.Aval, rewrite.outputs.len);
+        for (rewrite.outputs, 0..) |out_var, idx| {
+            out_avals[idx] = out_var.aval;
         }
 
-        const kernel_key = try allocator.dupe(u8, rewrite.kernel_key);
-        errdefer allocator.free(kernel_key);
-        const provider_name = try allocator.dupe(u8, rewrite.provider_name);
-        errdefer allocator.free(provider_name);
-        const target_name = try allocator.dupe(u8, dispatcher_target_name);
-        errdefer allocator.free(target_name);
+        const operands = try arena.alloc(pr.Operand, rewrite.inputs.len);
+        const new_op = try arena.create(pr.Op);
 
-        const params = [_]pr.Param{
-            .{ .call_target_name = target_name },
-            .{ .call_kernel_key = kernel_key },
-            .{ .call_provider_name = provider_name },
-            .{ .has_side_effect = false },
-            .{ .out_avals = out_avals },
+        for (rewrite.inputs, 0..) |in_var, i| {
+            operands[i] = .{
+                .value = in_var,
+                .owner = new_op,
+                .index = @intCast(i),
+            };
+            // Wire into the Var's use-list.
+            operands[i].next = in_var.first_use;
+            if (in_var.first_use) |head| head.prev = &operands[i];
+            in_var.first_use = &operands[i];
+        }
+
+        const out_vars = try arena.alloc(*pr.Var, rewrite.outputs.len);
+        for (rewrite.outputs, 0..) |out_var, i| {
+            out_vars[i] = out_var;
+            out_var.defining_op = new_op;
+        }
+
+        new_op.* = .{
+            .inputs = operands,
+            .outputs = out_vars,
+            .params = .{ .custom_call = .{
+                .target_name = try arena.dupe(u8, dispatcher_target_name),
+                .has_side_effect = false,
+                .out_avals = out_avals,
+                .kernel_key = try arena.dupe(u8, rewrite.kernel_key),
+                .provider_name = try arena.dupe(u8, rewrite.provider_name),
+            } },
         };
 
-        const in_span = try append_varids(allocator, varids_store, rewrite.inputs);
-        const out_span = try append_varids(allocator, varids_store, rewrite.outputs);
-        const param_span = try append_params(allocator, params_store, &params);
-
-        try eqns.append(allocator, .{
-            .prim = .custom_call,
-            .inputs = in_span,
-            .outputs = out_span,
-            .params = param_span,
-        });
-    }
-
-    fn append_varids(
-        allocator: std.mem.Allocator,
-        store: *std.ArrayList(pr.VarId),
-        values: []const pr.VarId,
-    ) !pr.Span {
-        const start: u32 = @intCast(store.items.len);
-        try store.appendSlice(allocator, values);
-        return .{ .start = start, .len = @intCast(values.len) };
-    }
-
-    fn append_params(
-        allocator: std.mem.Allocator,
-        store: *std.ArrayList(pr.Param),
-        values: []const pr.Param,
-    ) !pr.Span {
-        const start: u32 = @intCast(store.items.len);
-        try store.appendSlice(allocator, values);
-        return .{ .start = start, .len = @intCast(values.len) };
+        return new_op;
     }
 };
 
@@ -361,8 +310,8 @@ pub const KernelizePass = struct {
 
 /// Build a deterministic kernel signature string for a region descriptor.
 ///
-/// The key encodes the region's equation sequence as:
-///   `<prim>,<in0_aval><in1_aval>...-><out0_aval>...;<next_eqn>...`
+/// The key encodes the region's op sequence as:
+///   `<prim>,<in0_aval><in1_aval>...-><out0_aval>...;<next_op>...`
 ///
 /// Two regions produce the same key iff they have identical op sequences with
 /// matching input/output dtypes and dims. This is the deduplication criterion
@@ -372,29 +321,26 @@ pub fn compute_kernel_signature(allocator: std.mem.Allocator, desc: kernel.Regio
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
-    for (desc.eqns, 0..) |eqn, ei| {
-        if (ei > 0) try w.writeByte(';');
-        try w.writeAll(@tagName(eqn.prim));
+    for (desc.ops, 0..) |op, oi| {
+        if (oi > 0) try w.writeByte(';');
+        try w.writeAll(@tagName(op.prim()));
         try w.writeByte(',');
-        const ins = eqn.inputs.slice(pr.VarId, desc.varids_store);
-        for (ins, 0..) |vid, i| {
+        for (op.inputs, 0..) |operand, i| {
             if (i > 0) try w.writeByte(',');
-            try write_aval_key(w, desc.aval_of(vid));
+            try write_aval_key(w, operand.value.aval);
         }
         try w.writeByte('>');
-        const outs = eqn.outputs.slice(pr.VarId, desc.varids_store);
-        for (outs, 0..) |vid, i| {
+        for (op.outputs, 0..) |out_var, i| {
             if (i > 0) try w.writeByte(',');
-            try write_aval_key(w, desc.aval_of(vid));
+            try write_aval_key(w, out_var.aval);
         }
     }
 
     return buf.toOwnedSlice(allocator);
 }
 
-fn write_aval_key(w: anytype, aval: ?pr.Aval) !void {
-    const a = aval orelse return w.writeByte('?');
-    switch (a) {
+fn write_aval_key(w: anytype, aval: pr.Aval) !void {
+    switch (aval) {
         .tensor => |t| {
             try w.writeAll(@tagName(t.dtype));
             try w.writeByte('[');
@@ -415,9 +361,9 @@ fn build_ops_str(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![
     var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    for (desc.eqns, 0..) |eqn, i| {
+    for (desc.ops, 0..) |op, i| {
         if (i > 0) try w.writeByte('+');
-        try w.writeAll(@tagName(eqn.prim));
+        try w.writeAll(@tagName(op.prim()));
     }
     return buf.toOwnedSlice(allocator);
 }
@@ -426,9 +372,9 @@ fn build_shape_str(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) 
     var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    for (desc.inputs, 0..) |vid, i| {
+    for (desc.inputs, 0..) |in_var, i| {
         if (i > 0) try w.writeByte('x');
-        try write_aval_key(w, desc.aval_of(vid));
+        try write_aval_key(w, in_var.aval);
     }
     return buf.toOwnedSlice(allocator);
 }
@@ -468,7 +414,7 @@ test "kernelize pass rewrites profitable region from store" {
     const x = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("test_region", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
+    const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
     const func = try b.finish(&.{y});
@@ -493,15 +439,14 @@ test "kernelize pass rewrites profitable region from store" {
     try kp.pass().run(&artifact, &ctx);
 
     // Region should be rewritten to custom_call.
-    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
-    const rewritten = program.functions[0].eqns[0];
-    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
+    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
+    const rewritten = program.functions[0].ops[0];
+    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
 
-    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
-    try testing.expectEqualStrings(dispatcher_target_name, pr.param(.call_target_name,params).?);
+    try testing.expectEqualStrings(dispatcher_target_name, rewritten.params.custom_call.target_name);
     // kernel_key is the kernel signature used for store lookup at dispatch time.
-    try testing.expectEqualStrings("exp,f32[2]>f32[2]", pr.param(.call_kernel_key,params).?);
-    try testing.expectEqualStrings("mock", pr.param(.call_provider_name,params).?);
+    try testing.expectEqualStrings("exp,f32[2]>f32[2]", rewritten.params.custom_call.kernel_key.?);
+    try testing.expectEqualStrings("mock", rewritten.params.custom_call.provider_name.?);
 }
 
 test "kernelize pass skips negative decision" {
@@ -516,7 +461,7 @@ test "kernelize pass skips negative decision" {
     const x = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("test_region", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
+    const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
     const func = try b.finish(&.{y});
@@ -535,8 +480,8 @@ test "kernelize pass skips negative decision" {
     try kp.pass().run(&artifact, &ctx);
 
     // Region should be left unchanged (negative decision).
-    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
+    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
+    try testing.expectEqual(pr.Prim.exp, program.functions[0].ops[0].prim());
 }
 
 test "kernelize pass skips absent key" {
@@ -551,7 +496,7 @@ test "kernelize pass skips absent key" {
     const x = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("test_region", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
+    const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
     const func = try b.finish(&.{y});
@@ -570,8 +515,8 @@ test "kernelize pass skips absent key" {
     try kp.pass().run(&artifact, &ctx);
 
     // Region should be left unchanged (absent key).
-    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].eqns[0].prim);
+    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
+    try testing.expectEqual(pr.Prim.exp, program.functions[0].ops[0].prim());
 }
 
 test "kernelize pass rewrites multi-output region to custom_call" {
@@ -587,8 +532,8 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     const y = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("multi_out", .{ .kernelize = "mock" });
-    const a = try b.emit(.exp, &.{x}, &.{});
-    const b_out = try b.emit(.log, &.{y}, &.{});
+    const a = try b.emit(.{ .exp = {} }, &.{x});
+    const b_out = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
 
     const func = try b.finish(&.{ a, b_out });
@@ -617,17 +562,13 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try kp.pass().run(&artifact, &ctx);
 
-    try testing.expectEqual(@as(usize, 1), program.functions[0].eqns.len);
-    const rewritten = program.functions[0].eqns[0];
-    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim);
+    try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
+    const rewritten = program.functions[0].ops[0];
+    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
 
-    const outputs = rewritten.outputs.slice(pr.VarId, program.functions[0].varids_store);
-    try testing.expectEqual(@as(usize, 2), outputs.len);
+    try testing.expectEqual(@as(usize, 2), rewritten.outputs.len);
 
-    const params = rewritten.params.slice(pr.Param, program.functions[0].params_store);
-    const maybe_out_avals = pr.param(.out_avals,params);
-    try testing.expect(maybe_out_avals != null);
-    const out_avals = maybe_out_avals.?;
+    const out_avals = rewritten.params.custom_call.out_avals;
     try testing.expectEqual(@as(usize, 2), out_avals.len);
 }
 
@@ -645,11 +586,11 @@ test "kernelize pass same-shape regions share store decision" {
     const y = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("region_a", .{ .kernelize = "mock" });
-    const out_a = try b.emit(.exp, &.{x}, &.{});
+    const out_a = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
     try b.push_region("region_b", .{ .kernelize = "mock" });
-    const out_b = try b.emit(.exp, &.{y}, &.{});
+    const out_b = try b.emit(.{ .exp = {} }, &.{y});
     try b.pop_region();
 
     const func = try b.finish(&.{ out_a, out_b });
@@ -673,10 +614,10 @@ test "kernelize pass same-shape regions share store decision" {
     try kp.pass().run(&artifact, &ctx);
 
     // Both regions must have been rewritten to custom_call.
-    const eqns = program.functions[0].eqns;
-    try testing.expectEqual(@as(usize, 2), eqns.len);
-    try testing.expectEqual(pr.Prim.custom_call, eqns[0].prim);
-    try testing.expectEqual(pr.Prim.custom_call, eqns[1].prim);
+    const ops = program.functions[0].ops;
+    try testing.expectEqual(@as(usize, 2), ops.len);
+    try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
+    try testing.expectEqual(pr.Prim.custom_call, ops[1].prim());
 }
 
 test "kernelize pass different-shape regions need separate decisions" {
@@ -693,11 +634,11 @@ test "kernelize pass different-shape regions need separate decisions" {
     const y = try b.param_tensor(.f32, &.{4});
 
     try b.push_region("region_small", .{ .kernelize = "mock" });
-    const out_small = try b.emit(.exp, &.{x}, &.{});
+    const out_small = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
     try b.push_region("region_large", .{ .kernelize = "mock" });
-    const out_large = try b.emit(.exp, &.{y}, &.{});
+    const out_large = try b.emit(.{ .exp = {} }, &.{y});
     try b.pop_region();
 
     const func = try b.finish(&.{ out_small, out_large });
@@ -721,10 +662,10 @@ test "kernelize pass different-shape regions need separate decisions" {
     try kp.pass().run(&artifact, &ctx);
 
     // Only region_small should be rewritten; region_large has no store decision.
-    const eqns = program.functions[0].eqns;
-    try testing.expectEqual(@as(usize, 2), eqns.len);
-    try testing.expectEqual(pr.Prim.custom_call, eqns[0].prim);
-    try testing.expectEqual(pr.Prim.exp, eqns[1].prim);
+    const ops = program.functions[0].ops;
+    try testing.expectEqual(@as(usize, 2), ops.len);
+    try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
+    try testing.expectEqual(pr.Prim.exp, ops[1].prim());
 }
 
 test "kernelize pass skips rewriting when rewrite_regions is false" {
@@ -738,7 +679,7 @@ test "kernelize pass skips rewriting when rewrite_regions is false" {
 
     const x = try b.param_tensor(.f32, &.{2});
     try b.push_region("test_region", .{ .kernelize = "mock" });
-    const y = try b.emit(.exp, &.{x}, &.{});
+    const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
     const func = try b.finish(&.{y});
@@ -757,11 +698,11 @@ test "kernelize pass skips rewriting when rewrite_regions is false" {
         .rewrite_regions = false,
     };
 
-    const before_eqn_prim = program.functions[0].eqns[0].prim;
+    const before_op_prim = program.functions[0].ops[0].prim();
     var artifact = pass_mod.Artifact{ .pr = &program };
     var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
     try kp.pass().run(&artifact, &ctx);
 
-    // Equations should be unchanged when rewrite_regions is false.
-    try testing.expectEqual(before_eqn_prim, program.functions[0].eqns[0].prim);
+    // Ops should be unchanged when rewrite_regions is false.
+    try testing.expectEqual(before_op_prim, program.functions[0].ops[0].prim());
 }

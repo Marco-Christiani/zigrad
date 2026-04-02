@@ -1,76 +1,31 @@
-/// StableHLO Lowering
-///
-/// Lowers PR (Program Representation) to StableHLO MLIR.
-/// This is the core PR -> MLIR boundary in the pass-based pipeline.
-///
-/// All MLIR/StableHLO concerns are contained here. PR is read-only input.
-///
-/// Provides:
-/// 1. `lower_program_to_mlir`: Direct lowering API (PR program -> MLIR bytes)
-/// 2. `lower_function_to_mlir`: Single-function convenience wrapper
-/// 3. `lower_pass` / `lower_pass_with_config`: Pass-based pipeline integration
+//! StableHLO Lowering
+//!
+//! StableHLO-specific op translation for the PR -> MLIR lowering pipeline.
+//! Provides the `lower_op` callback that maps each PR op to StableHLO MLIR
+//!  ops, plus public entry points that wire this callback into the
+//!  dialect-agnostic scaffold from `context.zig`.
+//!
+//! Provides:
+//!  1. `lower_program_to_mlir`: Direct lowering API (PR program -> StableHLO MLIR bytes)
+//!  2. `lower_function_to_mlir`: Single-function convenience wrapper
+//!  3. `lower_pass` / `lower_pass_with_config`: Pass-based pipeline integration
 const std = @import("std");
 
 const pr = @import("../../../pr/pr.zig");
 const mlir = @import("../../../c/mlir/mlir.zig");
 const stablehlo = @import("../../../c/mlir/dialects/stablehlo.zig");
 const pass = @import("../../../pipeline/pass.zig");
+const MlirSession = @import("../session.zig").MlirSession;
+const context = @import("../context.zig");
 const log = std.log.scoped(.@"zg/lower_stablehlo");
 
-/// Maximum tensor rank supported by the lowering pass (matches PR validation).
-const max_rank = 64;
+const LowerError = context.LowerError;
+const LowerContext = context.LowerContext;
+const OutputFormat = context.OutputFormat;
 
-pub const LowerError = error{ InvalidProgram, InvalidMlir, OutOfMemory };
-
-const zigrad_kernel_call_op_name = "zigrad.kernel_call";
+const zigrad_kernel_call_op_name = context.zigrad_kernel_call_op_name;
 
 const lower_types = @import("../../types.zig");
-pub const OutputFormat = lower_types.OutputFormat;
-
-// ============================================================================
-// Lowering Context
-// ============================================================================
-
-/// State threaded through per-equation lowering. Owns the VarId -> MLIR Value mapping.
-const LowerContext = struct {
-    mlir_ctx: mlir.Context,
-    block: mlir.Block,
-    loc: mlir.Location,
-    value_map: []?mlir.Value,
-    func: pr.Function,
-    arena: std.mem.Allocator,
-
-    fn inputs(self: LowerContext, eqn: pr.Eqn) []const pr.VarId {
-        return eqn.inputs.slice(pr.VarId, self.func.varids_store);
-    }
-
-    fn outputs(self: LowerContext, eqn: pr.Eqn) []const pr.VarId {
-        return eqn.outputs.slice(pr.VarId, self.func.varids_store);
-    }
-
-    fn params(self: LowerContext, eqn: pr.Eqn) []const pr.Param {
-        return eqn.params.slice(pr.Param, self.func.params_store);
-    }
-
-    fn get_value(self: LowerContext, id: pr.VarId) ?mlir.Value {
-        return self.value_map[@intCast(id)];
-    }
-
-    fn set_value(self: LowerContext, id: pr.VarId, value: mlir.Value) void {
-        self.value_map[@intCast(id)] = value;
-    }
-
-    fn tensor_of(self: LowerContext, id: pr.VarId) LowerError!pr.Tensor {
-        return self.func.avals[@intCast(id)].as_tensor() orelse error.InvalidProgram;
-    }
-
-    fn tensor_to_mlir_type(self: LowerContext, t: pr.Tensor) LowerError!mlir.Type {
-        var buf: [max_rank]i64 = undefined;
-        const dims_i64 = buf[0..t.shape.dims.len];
-        for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
-        return mlir.Type.tensor(dims_i64, dtype_to_mlir_type(self.mlir_ctx, t.dtype));
-    }
-};
 
 // ============================================================================
 // Core Lowering Implementation
@@ -78,336 +33,75 @@ const LowerContext = struct {
 
 /// Lower a PR program to StableHLO MLIR bytecode or text.
 ///
-/// Entry Function Selection and Naming:
-/// - `entry_name`: Selects which PR function is the compilation entry point.
-///   - If provided: That function is renamed to "@main" in MLIR.
-///   - If null: "main" (or the only function) is used as entry.
-/// - The entry function is always renamed to "@main" in the MLIR output (XLA/PJRT requirement).
-/// - Non-entry functions retain their PR names, except when a non-entry function
-///   is already named "main" and a different entry is selected; that symbol is
-///   renamed to avoid collisions.
-/// Lower a PR program to StableHLO MLIR.
-///
-/// This is baseline lowering only: PR ops become MLIR ops. No MLIR-stage
-/// passes (select, legalize) are executed - those are separate pipeline
-/// passes composed explicitly by the caller.
+/// Creates an MLIR session with StableHLO registered and delegates to the
+///  dialect-agnostic scaffold with the StableHLO `lower_op` callback.
 pub fn lower_program_to_mlir(
     allocator: std.mem.Allocator,
     program: *const pr.Program,
     entry_name: ?[]const u8,
     out: OutputFormat,
 ) LowerError![]u8 {
-    return lower_program_impl(allocator, program, entry_name, out);
-}
-
-fn lower_program_impl(
-    allocator: std.mem.Allocator,
-    program: *const pr.Program,
-    entry_name: ?[]const u8,
-    out: OutputFormat,
-) LowerError![]u8 {
-    pr.validate_program(program) catch return error.InvalidProgram;
-
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var registry = mlir.Registry.init() catch return error.OutOfMemory;
-    defer registry.deinit();
-
-    mlir.DialectHandle.from_string("func").insert_dialect(registry);
-    mlir.DialectHandle.from_string("stablehlo").insert_dialect(registry);
-
-    var ctx = mlir.Context.init_with_registry(registry, false) catch return error.OutOfMemory;
-    defer ctx.deinit();
-    ctx.allow_unregistered_dialects(false);
-
-    mlir.register_zigrad_extensions(ctx) catch {
-        log.err("missing MLIR extension shim; set ZG_MLIR_SHIM_PATH or provide ZG_EXTERNAL_SDK_ROOT with lib/libzigrad_mlir_ext.so", .{});
-        return error.InvalidMlir;
-    };
-
-    load_dialect(ctx, "func");
-    load_dialect(ctx, "stablehlo");
-
-    const loc = mlir.Location.unknown(ctx);
-
-    var module = mlir.Module.init(loc);
-    defer module.deinit();
-
-    const entry_index = try find_entry_function(program, entry_name);
-
-    for (program.functions, 0..) |func, idx| {
-        const sym_name = choose_symbol_name(arena, program, idx, entry_index, entry_name) catch return error.OutOfMemory;
-        try lower_function_into_module(arena, ctx, module, func, sym_name);
-    }
-
-    if (!module.op().verify()) return error.InvalidMlir;
-
-    return serialize_module(allocator, module, out);
-}
-
-fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: OutputFormat) LowerError![]u8 {
-    var writer_state = std.Io.Writer.Allocating.init(allocator);
-    defer writer_state.deinit();
-
-    switch (out) {
-        .mlir_bytecode => module.op().write_bytecode(&writer_state.writer) catch return error.OutOfMemory,
-        .mlir_text => module.op().print(&writer_state.writer, .{}) catch return error.OutOfMemory,
-    }
-
-    return writer_state.toOwnedSlice() catch return error.OutOfMemory;
+    var session = try MlirSession.init();
+    defer session.deinit();
+    session.load_dialect("stablehlo");
+    return context.lower_program_to_mlir(allocator, session, program, entry_name, out, lower_op);
 }
 
 pub fn lower_function_to_mlir(allocator: std.mem.Allocator, func: pr.Function, out: OutputFormat) LowerError![]u8 {
     var program = pr.Program.init(allocator);
     defer program.deinit();
 
-    program.add_function(func) catch return error.OutOfMemory;
+    try program.add_function(func);
     return lower_program_to_mlir(allocator, &program, func.name, out);
-}
-
-/// Lower a single PR function into the MLIR module.
-///
-/// Regions with an `outline` or `kernelize` annotation are outlined into
-/// separate MLIR functions (func.call). Outlining is unconditional -- it
-/// doesn't prevent MLIR-level patterns from matching on remaining inline
-/// ops. PR-level and MLIR-level kernelization are additive.
-fn lower_function_into_module(
-    arena: std.mem.Allocator,
-    ctx: mlir.Context,
-    module: mlir.Module,
-    func: pr.Function,
-    sym_name: []const u8,
-) LowerError!void {
-    const loc = mlir.Location.unknown(ctx);
-
-    const param_types = arena.alloc(mlir.Type, func.params.len) catch return error.OutOfMemory;
-    const param_locs = arena.alloc(mlir.Location, func.params.len) catch return error.OutOfMemory;
-    for (func.params, 0..) |param_id, i| {
-        const tensor = func.avals[@intCast(param_id)].as_tensor() orelse return error.InvalidProgram;
-        param_types[i] = try tensor_to_mlir_type_standalone(ctx, tensor);
-        param_locs[i] = loc;
-    }
-
-    const result_types = arena.alloc(mlir.Type, func.returns.len) catch return error.OutOfMemory;
-    for (func.returns, 0..) |ret_id, i| {
-        const tensor = func.avals[@intCast(ret_id)].as_tensor() orelse return error.InvalidProgram;
-        result_types[i] = try tensor_to_mlir_type_standalone(ctx, tensor);
-    }
-
-    const fn_type = mlir.Type.function(ctx, param_types, result_types);
-
-    const entry_block = mlir.Block.init(param_types, param_locs) catch return error.OutOfMemory;
-
-    const value_map = arena.alloc(?mlir.Value, func.avals.len) catch return error.OutOfMemory;
-    @memset(value_map, null);
-    for (func.params, 0..) |param_id, i| {
-        value_map[@intCast(param_id)] = entry_block.argument(i);
-    }
-
-    const lower_ctx = LowerContext{
-        .mlir_ctx = ctx,
-        .block = entry_block,
-        .loc = loc,
-        .value_map = value_map,
-        .func = func,
-        .arena = arena,
-    };
-
-    // Build eqn-index -> region lookup for outlining decisions.
-    const region_map = build_region_map(arena, func) catch return error.OutOfMemory;
-
-    var outlined_index: usize = 0;
-    const outlined_prefix = if (sym_name.len == 0) "func" else sym_name;
-    for (func.eqns, 0..) |eqn, eqn_idx| {
-        if (region_map[eqn_idx]) |region| {
-            if (region.annotation.outline or region.annotation.kernelize != null) {
-                try lower_outlined_eqn(arena, &outlined_index, outlined_prefix, ctx, module, lower_ctx, eqn, region);
-                continue;
-            }
-        }
-        try lower_eqn(lower_ctx, eqn);
-    }
-
-    const ret_values = arena.alloc(mlir.Value, func.returns.len) catch return error.OutOfMemory;
-    for (func.returns, 0..) |ret_id, i| {
-        ret_values[i] = value_map[@intCast(ret_id)] orelse return error.InvalidProgram;
-    }
-
-    const return_op = mlir.Operation.make(ctx, "func.return", .{
-        .operands = ret_values,
-        .verify = false,
-        .location = loc,
-    });
-    entry_block.append_operation(return_op);
-
-    const func_op = mlir.Operation.make(ctx, "func.func", .{
-        .results = &.{},
-        .blocks = &.{entry_block},
-        .attributes = &.{
-            .{ "sym_name", mlir.Attribute.string(ctx, sym_name) },
-            .{ "function_type", mlir.Attribute.type_(fn_type) },
-        },
-        .verify = false,
-        .location = loc,
-    });
-    module.get_body().append_operation(func_op);
-}
-
-/// Build per-eqn region lookup. Returns a slice indexed by eqn position;
-/// null if the eqn is not inside any outline/kernelize region.
-fn build_region_map(arena: std.mem.Allocator, func: pr.Function) error{OutOfMemory}![]?pr.Region {
-    const map = arena.alloc(?pr.Region, func.eqns.len) catch return error.OutOfMemory;
-    @memset(map, null);
-    for (func.regions) |region| {
-        const start: usize = region.eqn_start;
-        const end: usize = start + region.eqn_len;
-        for (start..end) |i| {
-            if (i < map.len) map[i] = region;
-        }
-    }
-    return map;
-}
-
-fn lower_outlined_eqn(
-    arena: std.mem.Allocator,
-    outlined_index: *usize,
-    outlined_prefix: []const u8,
-    mlir_ctx: mlir.Context,
-    module: mlir.Module,
-    ctx: LowerContext,
-    eqn: pr.Eqn,
-    region: pr.Region,
-) LowerError!void {
-    const eqn_inputs = ctx.inputs(eqn);
-    const eqn_outputs = ctx.outputs(eqn);
-
-    // All current PR ops are single-output; keep outlining strict.
-    if (eqn_outputs.len != 1) return error.InvalidProgram;
-    if (eqn_inputs.len == 0) return error.InvalidProgram;
-
-    const out_id = eqn_outputs[0];
-    const out_tensor = try ctx.tensor_of(out_id);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-
-    const callee_name_z = std.fmt.allocPrintSentinel(arena, "{s}_outlined_{d}", .{ outlined_prefix, outlined_index.* }, 0) catch return error.OutOfMemory;
-    outlined_index.* += 1;
-
-    // Build callee signature (inputs -> output).
-    const callee_param_types = arena.alloc(mlir.Type, eqn_inputs.len) catch return error.OutOfMemory;
-    const callee_param_locs = arena.alloc(mlir.Location, eqn_inputs.len) catch return error.OutOfMemory;
-    for (eqn_inputs, 0..) |in_id, i| {
-        const in_tensor = try ctx.tensor_of(in_id);
-        callee_param_types[i] = try ctx.tensor_to_mlir_type(in_tensor);
-        callee_param_locs[i] = ctx.loc;
-    }
-    const callee_result_types = &[_]mlir.Type{out_type};
-    const callee_fn_type = mlir.Type.function(mlir_ctx, callee_param_types, callee_result_types);
-
-    // Build callee body.
-    const callee_entry = mlir.Block.init(callee_param_types, callee_param_locs) catch return error.OutOfMemory;
-
-    const callee_value_map = arena.alloc(?mlir.Value, ctx.func.avals.len) catch return error.OutOfMemory;
-    @memset(callee_value_map, null);
-    for (eqn_inputs, 0..) |in_id, i| callee_value_map[@intCast(in_id)] = callee_entry.argument(i);
-
-    const callee_ctx = LowerContext{
-        .mlir_ctx = mlir_ctx,
-        .block = callee_entry,
-        .loc = ctx.loc,
-        .value_map = callee_value_map,
-        .func = ctx.func,
-        .arena = arena,
-    };
-
-    try lower_eqn(callee_ctx, eqn);
-
-    const callee_out = callee_value_map[@intCast(out_id)] orelse return error.InvalidProgram;
-    const callee_ret = mlir.Operation.make(mlir_ctx, "func.return", .{
-        .operands = &.{callee_out},
-        .verify = false,
-        .location = ctx.loc,
-    });
-    callee_entry.append_operation(callee_ret);
-
-    const callee_op = mlir.Operation.make(mlir_ctx, "func.func", .{
-        .results = &.{},
-        .blocks = &.{callee_entry},
-        .attributes = &.{
-            .{ "sym_name", mlir.Attribute.string(mlir_ctx, callee_name_z) },
-            .{ "function_type", mlir.Attribute.type_(callee_fn_type) },
-            .{ "llvm.noinline", mlir.Attribute.unit(mlir_ctx) },
-        },
-        .verify = false,
-        .location = ctx.loc,
-    });
-
-    if (region.annotation.kernelize) |provider| {
-        callee_op.set_attribute_by_name("zigrad.kernelize.provider", mlir.Attribute.string(mlir_ctx, provider));
-    }
-    module.get_body().append_operation(callee_op);
-
-    // Emit a call in the original block.
-    const call_operands = arena.alloc(mlir.Value, eqn_inputs.len) catch return error.OutOfMemory;
-    for (eqn_inputs, 0..) |in_id, i| call_operands[i] = ctx.get_value(in_id) orelse return error.InvalidProgram;
-
-    const call_op = mlir.Operation.make(mlir_ctx, "func.call", .{
-        .results = &.{out_type},
-        .operands = call_operands,
-        .attributes = &.{
-            .{ "callee", mlir.Attribute.symbol(mlir_ctx, callee_name_z) },
-        },
-        .verify = false,
-        .location = ctx.loc,
-    });
-    ctx.block.append_operation(call_op);
-    ctx.set_value(out_id, call_op.result(0));
 }
 
 // ============================================================================
 // Per-Op Lowering (switch dispatch)
 // ============================================================================
 
-fn lower_eqn(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    switch (eqn.prim) {
+fn lower_op(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    switch (op.prim()) {
         // Binary elementwise
-        .add => lower_binary(stablehlo.add, ctx, eqn),
-        .subtract => lower_binary(stablehlo.subtract, ctx, eqn),
-        .multiply => lower_binary(stablehlo.multiply, ctx, eqn),
-        .divide => lower_binary(stablehlo.divide, ctx, eqn),
-        .maximum => lower_binary(stablehlo.maximum, ctx, eqn),
+        .add => lower_binary(stablehlo.add, ctx, op),
+        .subtract => lower_binary(stablehlo.subtract, ctx, op),
+        .multiply => lower_binary(stablehlo.multiply, ctx, op),
+        .divide => lower_binary(stablehlo.divide, ctx, op),
+        .maximum => lower_binary(stablehlo.maximum, ctx, op),
         // Unary
-        .exp => lower_unary(stablehlo.exponential, ctx, eqn),
-        .log => lower_unary(stablehlo.log, ctx, eqn),
-        .rsqrt => lower_unary(stablehlo.rsqrt, ctx, eqn),
-        .logistic => lower_unary(stablehlo.logistic, ctx, eqn),
+        .exp => lower_unary(stablehlo.exponential, ctx, op),
+        .log => lower_unary(stablehlo.log, ctx, op),
+        .rsqrt => lower_unary(stablehlo.rsqrt, ctx, op),
+        .logistic => lower_unary(stablehlo.logistic, ctx, op),
         // Type conversion
-        .convert => try lower_convert(ctx, eqn),
+        .convert => try lower_convert(ctx, op),
         // Constant
-        .literal => try lower_literal(ctx, eqn),
+        .literal => try lower_literal(ctx, op),
         // Shape
-        .reshape => try lower_reshape(ctx, eqn),
-        .transpose => try lower_transpose(ctx, eqn),
-        .broadcast_in_dim => try lower_broadcast_in_dim(ctx, eqn),
-        .iota => try lower_iota(ctx, eqn),
-        .slice => try lower_slice(ctx, eqn),
-        .concatenate => try lower_concatenate(ctx, eqn),
+        .reshape => try lower_reshape(ctx, op),
+        .transpose => try lower_transpose(ctx, op),
+        .broadcast_in_dim => try lower_broadcast_in_dim(ctx, op),
+        .iota => try lower_iota(ctx, op),
+        .slice => try lower_slice(ctx, op),
+        .concatenate => try lower_concatenate(ctx, op),
         // Reduction
-        .reduce_sum => try lower_reduce_sum(ctx, eqn),
-        .reduce_max => try lower_reduce_max(ctx, eqn),
+        .reduce_sum => try lower_reduce(ctx, op, .sum),
+        .reduce_max => try lower_reduce(ctx, op, .max),
         // Contraction
-        .dot => try lower_dot(ctx, eqn),
-        .dot_general => try lower_dot_general(ctx, eqn),
+        .dot => try lower_dot(ctx, op),
+        .dot_general => try lower_dot_general(ctx, op),
         // Compare
-        .compare => try lower_compare(ctx, eqn),
-        .select => try lower_select(ctx, eqn),
+        .compare => try lower_compare(ctx, op),
+        .select => try lower_select(ctx, op),
         // Structured
-        .gather => try lower_gather(ctx, eqn),
-        .scatter => try lower_scatter(ctx, eqn),
-        // Special
-        .call => try lower_call(ctx, eqn),
-        .custom_call => try lower_custom_call(ctx, eqn),
+        .gather => try lower_gather(ctx, op),
+        .scatter => try lower_scatter(ctx, op),
+        // Special - Dialect-agnostic, delegated.
+        .call => try context.lower_call(ctx, op),
+        // TODO: see
+        //  1. https://openxla.org/stablehlo/spec#custom_call
+        //  2. https://openxla.org/stablehlo/spec#xla_gpu_support_special_custom_call_targets
+        //  2. https://openxla.org/stablehlo/spec#alias
+        .custom_call => try context.lower_custom_call(ctx, op),
     }
 }
 
@@ -416,15 +110,13 @@ fn lower_eqn(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
 fn lower_binary(
     comptime op_fn: fn (mlir.Context, mlir.Value, mlir.Value, mlir.Location) mlir.Operation,
     ctx: LowerContext,
-    eqn: pr.Eqn,
+    op: *const pr.Op,
 ) void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const lhs = ctx.get_value(ins[0]).?;
-    const rhs = ctx.get_value(ins[1]).?;
-    const op = op_fn(ctx.mlir_ctx, lhs, rhs, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    const lhs = ctx.get_value(op.operand(0)).?;
+    const rhs = ctx.get_value(op.operand(1)).?;
+    const mlir_op = op_fn(ctx.mlir_ctx, lhs, rhs, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
 // --- Unary ---
@@ -432,103 +124,84 @@ fn lower_binary(
 fn lower_unary(
     comptime op_fn: fn (mlir.Context, mlir.Value, mlir.Location) mlir.Operation,
     ctx: LowerContext,
-    eqn: pr.Eqn,
+    op: *const pr.Op,
 ) void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const operand = ctx.get_value(ins[0]).?;
-    const op = op_fn(ctx.mlir_ctx, operand, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    const operand = ctx.get_value(op.operand(0)).?;
+    const mlir_op = op_fn(ctx.mlir_ctx, operand, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_convert(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.convert(ctx.mlir_ctx, operand, out_type, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+fn lower_convert(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.convert(ctx.mlir_ctx, operand, out_type, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
 // --- Constant ---
 
-fn lower_literal(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const out_id = outs[0];
-    const out_tensor = try ctx.tensor_of(out_id);
-    const lit = pr.param(.literal,eqn_params) orelse return error.InvalidProgram;
+fn lower_literal(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const out_var = op.result(0);
+    const out_tensor = out_var.aval.as_tensor();
+    const lit = op.params.literal;
     const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
     const raw_bytes = switch (lit) {
         inline else => |v| std.mem.asBytes(&v),
     };
-    const op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, raw_bytes, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(out_id, op.result(0));
+    const mlir_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, raw_bytes, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(out_var, mlir_op.result(0));
 }
 
 // --- Shape ops ---
 
-fn lower_reshape(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.reshape(ctx.mlir_ctx, operand, out_type, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+fn lower_reshape(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.reshape(ctx.mlir_ctx, operand, out_type, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_transpose(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const perm = pr.param(.permutation,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.transpose(ctx.mlir_ctx, operand, out_type, ctx.loc, .{ .permutation = perm });
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+fn lower_transpose(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const perm = op.params.transpose.permutation;
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.transpose(ctx.mlir_ctx, operand, out_type, ctx.loc, .{ .permutation = perm });
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_broadcast_in_dim(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const bd = pr.param(.broadcast_dimensions,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.broadcast_in_dim(ctx.mlir_ctx, operand, bd, out_type, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+fn lower_broadcast_in_dim(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const bd = op.params.broadcast_in_dim.dimensions;
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.broadcast_in_dim(ctx.mlir_ctx, operand, bd, out_type, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_iota(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const iota_dim = pr.param(.iota_dimension,eqn_params) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.iota(ctx.mlir_ctx, iota_dim, out_type, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+fn lower_iota(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const iota_dim = op.params.iota.dimension;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.iota(ctx.mlir_ctx, iota_dim, out_type, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_slice(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const sparams = pr.param(.slice,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.slice(
+fn lower_slice(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const sparams = op.params.slice;
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.slice(
         ctx.mlir_ctx,
         operand,
         sparams.start_indices,
@@ -537,56 +210,53 @@ fn lower_slice(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         out_type,
         ctx.loc,
     );
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_concatenate(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const axis = pr.param(.concat_axis,eqn_params) orelse return error.InvalidProgram;
-    const values = ctx.arena.alloc(mlir.Value, ins.len) catch return error.OutOfMemory;
-    for (ins, 0..) |id, i| {
-        values[i] = ctx.get_value(id) orelse return error.InvalidProgram;
+fn lower_concatenate(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const axis = op.params.concatenate.axis;
+    const values = try ctx.arena.alloc(mlir.Value, op.inputs.len);
+    for (op.inputs, 0..) |operand, i| {
+        values[i] = ctx.get_value(operand.value) orelse return error.InvalidProgram;
     }
-    const op = stablehlo.concatenate(ctx.mlir_ctx, values, axis, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    const mlir_op = stablehlo.concatenate(ctx.mlir_ctx, values, axis, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
 // --- Reduction ---
 
-fn lower_reduce_sum(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const axes = pr.param(.reduce_axes,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
-    const zero_bytes = scalar_zero_bytes(out_tensor.dtype);
-    const zero_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, zero_bytes, ctx.loc);
-    ctx.block.append_operation(zero_op);
-    const op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{zero_op.result(0)}, axes, {}, reduce_add_block, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
-}
+const ReduceKind = enum { sum, max };
 
-fn lower_reduce_max(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const axes = pr.param(.reduce_axes,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
+fn lower_reduce(ctx: LowerContext, op: *const pr.Op, kind: ReduceKind) LowerError!void {
+    const axes = switch (op.prim()) {
+        .reduce_sum => op.params.reduce_sum.axes,
+        .reduce_max => op.params.reduce_max.axes,
+        else => return error.InvalidProgram,
+    };
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
     const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
-    const min_bytes = scalar_min_bytes(out_tensor.dtype);
-    const min_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, min_bytes, ctx.loc);
-    ctx.block.append_operation(min_op);
-    const op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{min_op.result(0)}, axes, {}, reduce_max_block, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+
+    switch (kind) {
+        .sum => {
+            const zero_bytes = scalar_zero_bytes(out_tensor.dtype);
+            const zero_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, zero_bytes, ctx.loc);
+            ctx.block.append_operation(zero_op);
+            const mlir_op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{zero_op.result(0)}, axes, {}, reduce_add_block, ctx.loc);
+            ctx.block.append_operation(mlir_op);
+            ctx.set_value(op.result(0), mlir_op.result(0));
+        },
+        .max => {
+            const min_bytes = scalar_min_bytes(out_tensor.dtype);
+            const min_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, min_bytes, ctx.loc);
+            ctx.block.append_operation(min_op);
+            const mlir_op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{min_op.result(0)}, axes, {}, reduce_max_block, ctx.loc);
+            ctx.block.append_operation(mlir_op);
+            ctx.set_value(op.result(0), mlir_op.result(0));
+        },
+    }
 }
 
 fn reduce_add_block(_: anytype, ctx: mlir.Context, ins: []const mlir.Value, accs: []const mlir.Value) mlir.Operation {
@@ -599,54 +269,46 @@ fn reduce_max_block(_: anytype, ctx: mlir.Context, ins: []const mlir.Value, accs
 
 // --- Contraction ---
 
-fn lower_dot(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const lhs = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const rhs = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.dot_general(ctx.mlir_ctx, lhs, rhs, out_type, ctx.loc, .{
+fn lower_dot(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const lhs = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const rhs = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.dot_general(ctx.mlir_ctx, lhs, rhs, out_type, ctx.loc, .{
         .lhs_batching_dimensions = &.{},
         .rhs_batching_dimensions = &.{},
         .lhs_contracting_dimensions = &.{1},
         .rhs_contracting_dimensions = &.{0},
         .precision = .fast,
     });
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_dot_general(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const dg = pr.param(.dot_general,eqn_params) orelse return error.InvalidProgram;
-    const lhs = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const rhs = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
-    const out_tensor = try ctx.tensor_of(outs[0]);
-    const out_type = try ctx.tensor_to_mlir_type(out_tensor);
-    const op = stablehlo.dot_general(ctx.mlir_ctx, lhs, rhs, out_type, ctx.loc, .{
+fn lower_dot_general(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const dg = op.params.dot_general;
+    const lhs = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const rhs = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const out_tensor = op.result(0).aval.as_tensor();
+    const out_type = ctx.tensor_to_mlir_type(out_tensor);
+    const mlir_op = stablehlo.dot_general(ctx.mlir_ctx, lhs, rhs, out_type, ctx.loc, .{
         .lhs_batching_dimensions = dg.lhs_batch_dims,
         .rhs_batching_dimensions = dg.rhs_batch_dims,
         .lhs_contracting_dimensions = dg.lhs_contracting_dims,
         .rhs_contracting_dimensions = dg.rhs_contracting_dims,
         .precision = .fast,
     });
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
 // --- Compare ---
 
-fn lower_compare(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const cparams = pr.param(.compare,eqn_params) orelse return error.InvalidProgram;
-    const lhs = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const rhs = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
-    const op = stablehlo.compare(
+fn lower_compare(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const cparams = op.params.compare;
+    const lhs = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const rhs = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const mlir_op = stablehlo.compare(
         ctx.mlir_ctx,
         lhs,
         rhs,
@@ -654,19 +316,17 @@ fn lower_compare(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         stablehlo.CompareType.init(ctx.mlir_ctx, map_compare_type(cparams.compare_type)),
         ctx.loc,
     );
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_select(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const cond = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const on_true = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
-    const on_false = ctx.get_value(ins[2]) orelse return error.InvalidProgram;
-    const op = stablehlo.select(ctx.mlir_ctx, cond, on_true, on_false, ctx.loc);
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+fn lower_select(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const cond = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const on_true = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const on_false = ctx.get_value(op.operand(2)) orelse return error.InvalidProgram;
+    const mlir_op = stablehlo.select(ctx.mlir_ctx, cond, on_true, on_false, ctx.loc);
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
 fn map_compare_direction(dir: pr.CompareDirection) stablehlo.ComparisonDirection.Direction {
@@ -691,14 +351,11 @@ fn map_compare_type(ctype: pr.CompareType) stablehlo.CompareType.Type {
 
 // --- Structured (gather/scatter) ---
 
-fn lower_gather(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const gparams = pr.param(.gather,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const indices = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
-    const op = stablehlo.gather(ctx.mlir_ctx, operand, indices, gparams.slice_sizes, ctx.loc, .{
+fn lower_gather(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const gparams = op.params.gather;
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const indices = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const mlir_op = stablehlo.gather(ctx.mlir_ctx, operand, indices, gparams.slice_sizes, ctx.loc, .{
         .offset_dims = gparams.offset_dims,
         .collapsed_slice_dims = gparams.collapsed_slice_dims,
         .operand_batching_dims = &.{},
@@ -706,20 +363,17 @@ fn lower_gather(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         .start_index_map = gparams.start_index_map,
         .index_vector_dim = gparams.index_vector_dim,
     });
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_scatter(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const sparams = pr.param(.scatter,eqn_params) orelse return error.InvalidProgram;
-    const operand = ctx.get_value(ins[0]) orelse return error.InvalidProgram;
-    const indices = ctx.get_value(ins[1]) orelse return error.InvalidProgram;
-    const updates = ctx.get_value(ins[2]) orelse return error.InvalidProgram;
-    const update_block = make_update_block(ctx.mlir_ctx, operand.get_type(), ctx.loc, sparams.reduction);
-    const op = stablehlo.scatter(
+fn lower_scatter(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const sparams = op.params.scatter;
+    const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const indices = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const updates = ctx.get_value(op.operand(2)) orelse return error.InvalidProgram;
+    const update_block = try make_update_block(ctx.mlir_ctx, operand.get_type(), ctx.loc, sparams.reduction);
+    const mlir_op = stablehlo.scatter(
         ctx.mlir_ctx,
         &.{operand},
         &.{indices},
@@ -735,137 +389,29 @@ fn lower_scatter(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
         },
         ctx.loc,
     );
-    ctx.block.append_operation(op);
-    ctx.set_value(outs[0], op.result(0));
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn make_update_block(ctx: mlir.Context, operand_type: mlir.Type, loc: mlir.Location, reduction: pr.ScatterReduction) mlir.Block {
+fn make_update_block(ctx: mlir.Context, operand_type: mlir.Type, loc: mlir.Location, reduction: pr.ScatterReduction) mlir.Error.InvalidMlir!mlir.Block {
     const elem_type = if (operand_type.as(mlir.RankedTensorType)) |shaped| shaped.get_element_type() else operand_type;
     const arg_type: mlir.Type = .tensor(&.{}, elem_type);
-    var block = mlir.Block.init(&.{ arg_type, arg_type }, &.{ loc, loc }) catch unreachable;
-    const op = switch (reduction) {
+    var block = try mlir.Block.init(&.{ arg_type, arg_type }, &.{ loc, loc });
+    const mlir_op = switch (reduction) {
         .add => stablehlo.add(ctx, block.argument(0), block.argument(1), loc),
         .max => stablehlo.maximum(ctx, block.argument(0), block.argument(1), loc),
         .min => stablehlo.minimum(ctx, block.argument(0), block.argument(1), loc),
         .mul => stablehlo.multiply(ctx, block.argument(0), block.argument(1), loc),
     };
-    block.append_operation(op);
-    const ret = stablehlo.return_(ctx, op.result(0), loc);
+    block.append_operation(mlir_op);
+    const ret = stablehlo.return_(ctx, mlir_op.result(0), loc);
     block.append_operation(ret);
     return block;
 }
 
-// --- Special (call / custom_call) ---
-
-fn lower_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    const callee = pr.param(.call_callee,eqn_params) orelse return error.InvalidProgram;
-
-    const operand_values = ctx.arena.alloc(mlir.Value, ins.len) catch return error.OutOfMemory;
-    for (ins, 0..) |id, i| {
-        operand_values[i] = ctx.get_value(id) orelse return error.InvalidProgram;
-    }
-
-    const result_types = ctx.arena.alloc(mlir.Type, outs.len) catch return error.OutOfMemory;
-    for (outs, 0..) |out_id, i| {
-        const out_tensor = try ctx.tensor_of(out_id);
-        result_types[i] = try ctx.tensor_to_mlir_type(out_tensor);
-    }
-
-    const callee_z = ctx.arena.dupeZ(u8, callee) catch return error.OutOfMemory;
-
-    const op = mlir.Operation.make(ctx.mlir_ctx, "func.call", .{
-        .results = result_types,
-        .operands = operand_values,
-        .attributes = &.{
-            .{ "callee", mlir.Attribute.symbol(ctx.mlir_ctx, callee_z) },
-        },
-        .verify = false,
-        .location = ctx.loc,
-    });
-
-    ctx.block.append_operation(op);
-    for (outs, 0..) |out_id, i| {
-        ctx.set_value(out_id, op.result(i));
-    }
-}
-
-fn lower_custom_call(ctx: LowerContext, eqn: pr.Eqn) LowerError!void {
-    const ins = ctx.inputs(eqn);
-    const outs = ctx.outputs(eqn);
-    const eqn_params = ctx.params(eqn);
-    if (outs.len == 0) return error.InvalidProgram;
-
-    const target = pr.param(.call_target_name,eqn_params) orelse return error.InvalidProgram;
-    const has_side_effect = pr.param(.has_side_effect,eqn_params) orelse return error.InvalidProgram;
-    const kernel_key = pr.param(.call_kernel_key,eqn_params);
-    const provider_name = pr.param(.call_provider_name,eqn_params);
-
-    const result_types = ctx.arena.alloc(mlir.Type, outs.len) catch return error.OutOfMemory;
-    for (outs, 0..) |out_id, i| {
-        const out_tensor = try ctx.tensor_of(out_id);
-        result_types[i] = try ctx.tensor_to_mlir_type(out_tensor);
-    }
-
-    const operand_values = ctx.arena.alloc(mlir.Value, ins.len) catch return error.OutOfMemory;
-    for (ins, 0..) |id, i| {
-        operand_values[i] = ctx.get_value(id) orelse return error.InvalidProgram;
-    }
-
-    // typed_ffi custom calls expect dictionary backend_config. Keep keys stable
-    // to match backend dispatcher parsing.
-    var backend_fields: [3]mlir.AttrTuple = undefined;
-    var backend_field_count: usize = 0;
-    if (kernel_key) |value| {
-        backend_fields[backend_field_count] = .{ "zigrad.kernel_key", mlir.Attribute.string(ctx.mlir_ctx, value) };
-        backend_field_count += 1;
-    }
-    if (provider_name) |value| {
-        backend_fields[backend_field_count] = .{ "zigrad.provider", mlir.Attribute.string(ctx.mlir_ctx, value) };
-        backend_field_count += 1;
-    }
-    const backend_config = mlir.Attribute.dict(ctx.mlir_ctx, backend_fields[0..backend_field_count]);
-
-    const op = mlir.Operation.make(ctx.mlir_ctx, zigrad_kernel_call_op_name, .{
-        .results = result_types,
-        .operands = operand_values,
-        .attributes = &.{
-            .{ "api_version", mlir.Attribute.int(ctx.mlir_ctx, .i32, @intFromEnum(stablehlo.CustomCallOpts.ApiVersion.typed_ffi)) },
-            .{ "call_target_name", mlir.Attribute.string(ctx.mlir_ctx, target) },
-            .{ "has_side_effect", mlir.Attribute.boolean(ctx.mlir_ctx, has_side_effect) },
-            .{ "backend_config", backend_config },
-        },
-        .verify = false,
-        .location = ctx.loc,
-    });
-
-    ctx.block.append_operation(op);
-    for (outs, 0..) |out_id, i| {
-        ctx.set_value(out_id, op.result(i));
-    }
-}
-
 // ============================================================================
-// Type Mapping Helpers
+// StableHLO-specific Type Mapping Helpers
 // ============================================================================
-
-fn dtype_to_mlir_type(ctx: mlir.Context, dt: pr.DType) mlir.Type {
-    return switch (dt) {
-        .f16 => mlir.Type.float(ctx, .f16),
-        .bf16 => mlir.Type.float(ctx, .bf16),
-        .f32 => mlir.Type.float(ctx, .f32),
-        .f64 => mlir.Type.float(ctx, .f64),
-        .i8 => mlir.Type.int(ctx, .i8),
-        .u8 => mlir.Type.int(ctx, .i8),
-        .i32 => mlir.Type.int(ctx, .i32),
-        .i64 => mlir.Type.int(ctx, .i64),
-        .u32 => mlir.Type.int(ctx, .i32),
-        .u64 => mlir.Type.int(ctx, .i64),
-        .bool => mlir.Type.int(ctx, .i1),
-    };
-}
 
 fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     return switch (dt) {
@@ -881,19 +427,6 @@ fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
         .u64 => .i64,
         .bool => .bool,
     };
-}
-
-fn load_dialect(ctx: mlir.Context, comptime name: [:0]const u8) void {
-    const handle = mlir.DialectHandle.from_string(name);
-    handle.register_dialect(ctx);
-    _ = handle.load_dialect(ctx);
-}
-
-fn tensor_to_mlir_type_standalone(ctx: mlir.Context, t: pr.Tensor) LowerError!mlir.Type {
-    var buf: [max_rank]i64 = undefined;
-    const dims_i64 = buf[0..t.shape.dims.len];
-    for (t.shape.dims, 0..) |d, i| dims_i64[i] = @intCast(d);
-    return mlir.Type.tensor(dims_i64, dtype_to_mlir_type(ctx, t.dtype));
 }
 
 fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
@@ -914,7 +447,7 @@ fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
 fn scalar_min_bytes(dtype: pr.DType) []const u8 {
     return switch (dtype) {
         .f16 => std.mem.asBytes(&@as(u16, 0xFC00)), // -inf in f16
-        .bf16 => std.mem.asBytes(&f32_to_bf16_bits(-std.math.inf(f32))),
+        .bf16 => std.mem.asBytes(&pr.DType.bf16.encode_f32(-std.math.inf(f32))),
         .f32 => std.mem.asBytes(&@as(f32, -std.math.inf(f32))),
         .f64 => std.mem.asBytes(&@as(f64, -std.math.inf(f64))),
         .i8 => std.mem.asBytes(&std.math.minInt(i8)),
@@ -927,16 +460,13 @@ fn scalar_min_bytes(dtype: pr.DType) []const u8 {
     };
 }
 
-fn f32_to_bf16_bits(val: f32) u16 {
-    const bits: u32 = @bitCast(val);
-    return @intCast(bits >> 16);
-}
-
 // ============================================================================
 // Pass Integration
 // ============================================================================
 
 pub const LowerPassConfig = lower_types.LowerPassConfig;
+
+// TODO: we dont need all these variations anymore do we?
 
 pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
@@ -949,12 +479,17 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         .bytecode => .mlir_bytecode,
     };
 
-    const bytes = try lower_program_impl(
+    // Domain boundary: remap internal lowering errors to pipeline-level LoweringFailed.
+    // The log line carries the specific error name for diagnostics.
+    const bytes = lower_program_to_mlir(
         ctx.allocator,
         program,
         cfg.entry_name,
         format,
-    );
+    ) catch |e| {
+        log.err("lowering failed: {s}", .{@errorName(e)});
+        return error.LoweringFailed;
+    };
 
     artifact.replace(ctx.allocator, .{
         .mlir = .{
@@ -975,25 +510,6 @@ pub fn lower_pass_with_config(config: *LowerPassConfig) pass.Pass {
     };
 }
 
-/// Validate pass: PR artifact -> PR artifact.
-fn validate_pass_run(_: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
-    _ = ctx;
-
-    if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
-
-    const program = artifact.pr;
-    pr.validate_program(program) catch return error.ValidationFailed;
-}
-
-/// Metadata for the validate pass.
-pub const validate_pass = pass.Pass{
-    .ptr = undefined,
-    .run_fn = validate_pass_run,
-    .name = "pr_validate",
-    .input_kind = .pr,
-    .output_kind = .pr,
-};
-
 /// Convenience: lower with encoding preference.
 pub fn lower(
     allocator: std.mem.Allocator,
@@ -1012,58 +528,6 @@ pub fn lower(
         .bytes = bytes,
         .encoding = encoding,
     };
-}
-
-// ============================================================================
-// Utility
-// ============================================================================
-
-fn find_entry_function(program: *const pr.Program, entry_name: ?[]const u8) LowerError!usize {
-    if (program.functions.len == 0) return error.InvalidProgram;
-
-    if (entry_name) |name| {
-        for (program.functions, 0..) |func, idx| {
-            if (std.mem.eql(u8, func.name, name)) return idx;
-        }
-        return error.InvalidProgram;
-    }
-
-    for (program.functions, 0..) |func, idx| {
-        if (std.mem.eql(u8, func.name, "main")) return idx;
-    }
-
-    if (program.functions.len == 1) return 0;
-    return error.InvalidProgram;
-}
-
-fn choose_symbol_name(
-    arena: std.mem.Allocator,
-    program: *const pr.Program,
-    idx: usize,
-    entry_index: usize,
-    entry_name: ?[]const u8,
-) error{OutOfMemory}![]const u8 {
-    if (idx == entry_index) return "main";
-
-    const func = program.functions[idx];
-    if (entry_name == null or !std.mem.eql(u8, func.name, "main")) return func.name;
-
-    var suffix: usize = 0;
-    while (true) : (suffix += 1) {
-        const candidate = std.fmt.allocPrint(arena, "main_non_entry_{d}", .{suffix}) catch return error.OutOfMemory;
-        if (!is_symbol_name_used(program, entry_index, candidate)) {
-            log.warn("renaming non-entry function 'main' to '{s}' to avoid entry collision", .{candidate});
-            return candidate;
-        }
-    }
-}
-
-fn is_symbol_name_used(program: *const pr.Program, entry_index: usize, name: []const u8) bool {
-    for (program.functions, 0..) |func, idx| {
-        if (idx == entry_index) continue;
-        if (std.mem.eql(u8, func.name, name)) return true;
-    }
-    return false;
 }
 
 // ============================================================================
@@ -1180,8 +644,8 @@ test "lowering supports multi-output custom_call boundary" {
     const y = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("mock_multi", .{ .kernelize = "mock" });
-    const ex = try b.emit(.exp, &.{x}, &.{});
-    const lg = try b.emit(.log, &.{y}, &.{});
+    const ex = try b.emit(.{ .exp = {} }, &.{x});
+    const lg = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
 
     const func = try b.finish(&.{ ex, lg });

@@ -3,25 +3,20 @@ const zg = @import("zigrad");
 const stz = @import("safetensors_zg");
 
 const llama_model = @import("llama_model.zig");
-const ops = zg.pr.ops;
 const Tensor = zg.Tensor;
 
-/// Create a scalar literal tensor from a traced tensor's builder.
-/// TODO: this is a smell, dont we have this in core or this a missing method?
-fn scalar_literal_from(t: Tensor, lit: zg.pr.Literal) !Tensor {
-    const b = t.mode.traced.builder;
-    return Tensor.from_id(b, try b.literal_scalar(lit));
-}
+const log = std.log.scoped(.@"zg/llama-ft-demo");
 
 /// Create an iota tensor from a traced tensor's builder.
 /// TODO: missing method?
 fn iota_from(t: Tensor, out_dtype: zg.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
     const b = t.mode.traced.builder;
-    return Tensor.from_id(b, try b.iota(out_dtype, out_dims, iota_dim));
+    return Tensor.from_var(b, try b.iota(out_dtype, out_dims, iota_dim));
 }
 
 const num_layers: usize = 16;
 
+// TODO: these arent necessary, should directly use the llama model struct(s)
 const LayerSpec = struct {
     input_norm: Tensor,
     post_norm: Tensor,
@@ -90,12 +85,8 @@ fn train_step_fn_mirage(params: ParamsSpec, batch: BatchSpec) !TrainStepResult {
 fn sgd_step(params: ParamsSpec, vg: *zg.frontend.transforms.ValueAndGrad, lr: f32) !TrainStepResult {
     var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
     defer params_tree.deinit();
-    const SgdCtx = struct { lr: f32 };
-    var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, SgdCtx{ .lr = lr }, struct {
-        fn f(ctx: SgdCtx, param: Tensor, grad: Tensor) anyerror!Tensor {
-            return zg.frontend.optim.sgd_update(param, grad, ctx.lr);
-        }
-    }.f);
+    const optim = zg.frontend.optim.SGD{ .lr = lr };
+    var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.frontend.optim.SGD.update);
     defer updated.deinit();
     return .{
         .loss_val = vg.value,
@@ -185,9 +176,7 @@ fn loss_fn_with_options(
     else
         try loss_per.convert(logits_f.dtype);
 
-    const zero_lit = ops.types.scalar_literal(logits_f.dtype, 0.0);
-    const zero = try scalar_literal_from(logits_f, zero_lit);
-    const zero_b = try zero.broadcast_in_dim(&.{ batch_size, seq }, &.{});
+    const zero_b = try Tensor.constant_like(attn_mask, 0.0);
     const attn_zero = try attn_mask.compare(zero_b, .{ .direction = .GT, .compare_type = .FLOAT });
     const masked = try loss_per_out.select(attn_zero, zero_b);
     const masked_f = if (masked.dtype == .f32) masked else try masked.convert(.f32);
@@ -288,7 +277,7 @@ pub fn run_llama_ft_demo(
         switch (provider) {
             .mirage => {
                 if (comptime !zg.build_options.has_mirage) {
-                    std.log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
+                    log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
                     return error.MirageUnavailable;
                 }
                 mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
@@ -301,7 +290,7 @@ pub fn run_llama_ft_demo(
                 // Mirage uses MLIR-level pattern matching, not PR-level store.
                 // This path is a placeholder -- full MLIR pipeline assembly
                 // will be added in a future phase.
-                std.log.warn("mirage kernel provider not yet supported via store-based path; ignoring", .{});
+                log.warn("mirage kernel provider not yet supported via store-based path; ignoring", .{});
             },
         }
     }
@@ -351,22 +340,16 @@ pub fn run_llama_ft_demo(
     defer if (!std.mem.eql(u8, weights_path, default_path)) allocator.free(weights_path);
 
     const donatable_mask = if (compiled_train) |ct| ct.donatable else compiled_fwd.?.donatable;
-    var load_result = load_llama_weights(allocator, weights_path, &host_tree, .{
+    var load_result = try load_llama_weights(allocator, weights_path, &host_tree, .{
         .hidden = hidden,
         .kv_out = kv_out,
-    }) catch |err| switch (err) {
-        error.TensorShapeMismatch,
-        error.TensorDtypeMismatch,
-        stz.Error.TensorNotFound,
-        => null,
-        else => return err,
-    };
+    });
     // mmap must stay alive until after device upload (borrowed buffers reference it)
     defer if (load_result) |*lr| lr.deinit();
 
     if (load_result != null) {
         if (!quiet) {
-            std.log.info("llama-ft-demo: loaded weights from {s}", .{weights_path});
+            log.info("Loaded weights from {s}", .{weights_path});
         }
     } else {
         // Fill param leaves with synthetic pattern
@@ -374,7 +357,7 @@ pub fn run_llama_ft_demo(
             if (!is_donatable) continue;
             fill_pattern(buf, 1e-3, 0.0);
         }
-        std.log.warn("llama-ft-demo: using synthetic weights (set ZG_LLAMA_SAFETENSORS_PATH)", .{});
+        log.warn("Using synthetic weights (set ZG_LLAMA_SAFETENSORS_PATH to use a specific checkpoint)", .{});
     }
 
     // Fill batch leaves
@@ -498,8 +481,8 @@ pub fn run_llama_ft_demo(
         if (nvtx_range) |*range| range.pop() catch {};
     }
 
-    std.log.info("llama-ft-demo avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ loop_timer.avg_ms(), warmup_steps, steps, seq });
-    std.log.info("OK: llama-ft-demo executed", .{});
+    log.info("avg_step_ms={d:.3} (warmup={d} steps={d} seq={d})", .{ loop_timer.avg_ms(), warmup_steps, steps, seq });
+    log.info("OK", .{});
 }
 
 /// TODO: this doesnt really belong here
@@ -509,6 +492,8 @@ const NvtxRange = struct {
     pop_fn: *const fn () callconv(.c) c_int,
 
     pub fn init() !NvtxRange {
+        // is this the correct env var anymore? I dont think we ship this in a default build, also should precedence
+        //  be given to CUDA_HOME? what about system paths for non-nixos systems?
         if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZG_EXTERNAL_SDK_ROOT")) |sdk| {
             defer std.heap.page_allocator.free(sdk);
             var buf1: [1024]u8 = undefined;
@@ -540,6 +525,7 @@ const NvtxRange = struct {
     }
 
     pub fn push(self: *NvtxRange, label: [:0]const u8) !void {
+        // TODO: when this is moved and built out, need proper error checking/mapping
         _ = self.push_fn(label);
     }
 
@@ -580,6 +566,8 @@ const ModelDims = struct {
 /// When zero-copy is used, some host_tree leaves are borrowed views into the
 ///  mmap'd file data. The caller must keep `mmap_data` alive until those
 ///  buffers are uploaded to device, then munmap.
+/// TODO: this is poorly named and could be implemented in method form instead,
+///  it would be ideal if we could unify the optionality (mmap, direct, etc).
 const LoadResult = struct {
     mmap_data: ?[]align(std.heap.page_size_min) u8,
 
@@ -637,10 +625,15 @@ fn load_llama_weights(
 
     // w_out: use lm_head.weight if present, otherwise transpose w_emb.
     const w_out = try get_buf(host_tree, "0.w_out");
-    const lm_view = get_optional(&st_file, "lm_head.weight") catch |err| return err;
+    const lm_head_w_name = "lm_head.weight";
+    const lm_view = st_file.get(lm_head_w_name) catch |err| switch (err) {
+        stz.Error.TensorNotFound => null,
+        else => return err,
+    };
     if (lm_view) |view| {
         try load_weight(view, w_out, .transposed);
     } else {
+        log.warn("{s} not found in checkpoint, assuming tied weights", .{lm_head_w_name});
         try transpose_buf(w_emb, w_out);
     }
 
@@ -652,6 +645,10 @@ fn load_llama_weights(
 /// For `.direct` layout with matching dtype, replaces the heap-backed buffer
 ///  with a zero-copy borrowed view into the mmap'd file data. For transposed
 ///  or cross-dtype loads, copies element-by-element into the existing buffer.
+/// TODO: Seems generally useful. consider moving into stz or zigrad libs and make
+///  dtype-generic (comptime dtype). Actually would be rather interesting to explore
+///  a backend JIT path here, these are simple transforms that can be expressed by
+///  all backends.
 fn load_weight(view: stz.TensorView, buf: *zg.HostBuffer, layout: CopyLayout) !void {
     switch (layout) {
         .direct => {
@@ -752,19 +749,23 @@ fn copy_view_to_buf(view: stz.TensorView, dst: *zg.HostBuffer, layout: CopyLayou
 }
 
 /// Read one element from a safetensors view as f32.
+/// TODO: Seems generally useful. consider moving into stz or zigrad libs and make
+///  dtype-generic (comptime dtype).
 inline fn read_element(view: stz.TensorView, idx: usize) f32 {
     return switch (view.info.dtype) {
         .f32 => std.mem.bytesAsSlice(f32, view.data)[idx],
-        .bf16 => bf16_to_f32(std.mem.bytesAsSlice(u16, view.data)[idx]),
+        .bf16 => zg.DType.bf16.decode_f32(std.mem.bytesAsSlice(u16, view.data)[idx]),
         else => unreachable,
     };
 }
 
 /// Write one f32 element into a host buffer, converting to the buffer's dtype.
+/// TODO: Seems generally useful. consider moving into stz or zigrad libs and make
+///  dtype-generic (comptime dtype).
 inline fn write_element(buf: *zg.HostBuffer, idx: usize, val: f32) void {
     switch (buf.dtype) {
         .f32 => buf.as_slice(f32)[idx] = val,
-        .bf16 => buf.as_slice(u16)[idx] = f32_to_bf16(val),
+        .bf16 => buf.as_slice(u16)[idx] = zg.DType.bf16.encode_f32(val),
         else => unreachable,
     }
 }
@@ -775,6 +776,9 @@ inline fn write_element(buf: *zg.HostBuffer, idx: usize, val: f32) void {
 ///  (not safetensors views).
 /// Dtype-agnostic: copies `dtype.size_in_bytes()` bytes per element, so works for any dtype without
 ///  per-type branches. Both buffers must have the same dtype.
+/// TODO: Consider a method on HostBuffer for basic ops like this, could provide naive native and
+///  blas impls. Might make sense to consider (re-)using a high level frontend API that computes
+///  this using the backend (simple JIT path).
 fn transpose_buf(src: *zg.HostBuffer, dst: *zg.HostBuffer) !void {
     if (src.shape.const_slice().len != 2 or dst.shape.const_slice().len != 2) return error.TensorShapeMismatch;
     const src_rows: usize = @intCast(src.shape.const_slice()[0]);
@@ -795,18 +799,11 @@ fn transpose_buf(src: *zg.HostBuffer, dst: *zg.HostBuffer) !void {
     }
 }
 
-fn get_optional(file: *stz.SafeTensorsFile, name: []const u8) !?stz.TensorView {
-    const view = file.get(name) catch |err| switch (err) {
-        stz.Error.TensorNotFound => return null,
-        else => return err,
-    };
-    return view;
-}
-
 /// Memory-map a file read-only.
 ///
 /// Returns a page-aligned slice backed by the kernel page cache.
 /// Caller must `std.posix.munmap` when done.
+/// TODO: This is duplicated (eg in llama demo). consider moving into stz or zigrad libs.
 fn mmap_file(path: []const u8) ![]align(std.heap.page_size_min) u8 {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.openFileAbsolute(path, .{})
@@ -828,6 +825,7 @@ fn mmap_file(path: []const u8) ![]align(std.heap.page_size_min) u8 {
 }
 
 /// Compare a safetensors shape (usize) with an expected shape (i64).
+/// TODO: Seems generally useful. consider moving into stz or zigrad libs.
 fn shape_eql(stz_shape: []const usize, expected: []const i64) bool {
     if (stz_shape.len != expected.len) return false;
     for (stz_shape, expected) |a, b| {
@@ -842,6 +840,8 @@ fn shape_eql(stz_shape: []const usize, expected: []const i64) bool {
 ///  then decodes the first element from the buffer's dtype to f32.
 ///
 /// Does not take ownership of `loss_buf`.
+/// TODO: Seems like generally useful boilerplate that may belong in Tensor, Buffer, HostBuffer, or similar
+///  like a .item() method.
 fn read_loss(b: *zg.Backend, loss_buf: zg.Backend.Buffer, loss_host: *zg.HostBuffer, loss_dtype: zg.DType) !f32 {
     if (try b.buffer_to_host(loss_buf, loss_host.data_mut())) |ev| {
         try b.await_event(ev);
@@ -851,16 +851,6 @@ fn read_loss(b: *zg.Backend, loss_buf: zg.Backend.Buffer, loss_host: *zg.HostBuf
         inline .f32, .bf16, .f16, .f64 => |tag| tag.decode_f32(std.mem.bytesAsSlice(tag.StorageType(), loss_host.data())[0]),
         else => @panic("read_loss: unsupported dtype"),
     };
-}
-
-inline fn bf16_to_f32(val: u16) f32 {
-    const bits: u32 = @as(u32, val) << 16;
-    return @bitCast(bits);
-}
-
-inline fn f32_to_bf16(val: f32) u16 {
-    const bits: u32 = @bitCast(val);
-    return @intCast(bits >> 16);
 }
 
 /// Fill a host buffer with a deterministic ramp pattern: `offset + scale * (i % 1024)`.

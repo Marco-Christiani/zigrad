@@ -1,14 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const ops = zg.pr.ops;
 const Tensor = zg.Tensor;
-
-/// Create a scalar literal tensor from a traced tensor's builder.
-/// TODO: we added this method, should clean this up
-fn scalar_literal(t: Tensor, lit: zg.pr.Literal) !Tensor {
-    const b = t.mode.traced.builder;
-    return Tensor.from_id(b, try b.literal_scalar(lit));
-}
 
 pub const LlamaWeights = struct {
     w_emb: Tensor,
@@ -50,16 +42,10 @@ pub fn forward(
     std.debug.assert(weights.w_out.dims()[0] == hidden);
 
     // Build bool masks, reuse across layers
-    const zero_lit = ops.types.scalar_literal(mask.dtype, 0.0);
-    const zero = try scalar_literal(mask, zero_lit);
-    const zero_mask = try zero.broadcast_in_dim(mask.dims(), &.{});
+    const zero_mask = try Tensor.constant_like(mask, 0.0);
     const causal_pred = try mask.compare(zero_mask, .{ .direction = .GT, .compare_type = .FLOAT });
 
-    const zero_attn = if (attention_mask.dtype == mask.dtype)
-        zero
-    else
-        try scalar_literal(attention_mask, ops.types.scalar_literal(attention_mask.dtype, 0.0));
-    const zero_attn_b = try zero_attn.broadcast_in_dim(attention_mask.dims(), &.{});
+    const zero_attn_b = try Tensor.constant_like(attention_mask, 0.0);
     const attn_pred = try attention_mask.compare(zero_attn_b, .{ .direction = .GT, .compare_type = .FLOAT });
 
     // Gather embeddings w/o flattening tokens
@@ -180,10 +166,7 @@ fn self_attention(
     const scores_f32 = if (scores.dtype == .bf16) try scores.convert(.f32) else scores;
 
     const scale = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
-    const scale_lit = ops.types.scalar_literal(scores_f32.dtype, scale);
-    const scale_t = try scalar_literal(scores_f32, scale_lit);
-    const scale_b = try scale_t.broadcast_in_dim(scores_f32.dims(), &.{});
-    const scaled = try scores_f32.mul(scale_b);
+    const scaled = try scores_f32.mul(try Tensor.constant_like(scores_f32, scale));
 
     const masked = try apply_attention_masks(scaled, causal_pred, attn_pred);
 
@@ -249,9 +232,7 @@ fn apply_rope_bshd(x: Tensor, sin: Tensor, cos: Tensor) !Tensor {
 
 fn apply_attention_masks(scores: Tensor, causal_pred: Tensor, attn_pred: Tensor) !Tensor {
     const neg_inf: f64 = -std.math.inf(f64);
-    const neg_lit = ops.types.scalar_literal(scores.dtype, neg_inf);
-    const neg = try scalar_literal(scores, neg_lit);
-    const neg_b = try neg.broadcast_in_dim(scores.dims(), &.{});
+    const neg_b = try Tensor.constant_like(scores, neg_inf);
 
     if (scores.dims().len == 3) {
         // scores: [BH, S, S], causal_pred: [S,S], attn_pred: [BH,S]
@@ -375,18 +356,15 @@ fn silu_like(x: Tensor) !Tensor {
     }
 
     const x_f32 = if (x.dtype == .f32) x else try x.convert(.f32);
-    const shape = x_f32.dims();
 
-    const zero = try scalar_literal(x_f32, ops.types.scalar_literal(.f32, 0.0));
-    const zero_b = try zero.broadcast_in_dim(shape, &.{});
+    const zero_b = try Tensor.constant_like(x_f32, 0.0);
     const neg = try zero_b.sub(x_f32);
 
     const exp_in = if (x.dtype == .bf16) try neg.convert(.bf16) else neg;
     const exp = try exp_in.exp();
     const exp_f32 = if (exp.dtype == .f32) exp else try exp.convert(.f32);
 
-    const one = try scalar_literal(x_f32, ops.types.scalar_literal(.f32, 1.0));
-    const one_b = try one.broadcast_in_dim(shape, &.{});
+    const one_b = try Tensor.constant_like(x_f32, 1.0);
     const denom = try exp_f32.add(one_b);
     const inv = try one_b.div(denom);
     const y_f32 = try x_f32.mul(inv);
@@ -394,6 +372,7 @@ fn silu_like(x: Tensor) !Tensor {
     return if (x.dtype == .bf16) try y_f32.convert(.bf16) else y_f32;
 }
 
+// TODO: see above comment
 pub fn rms_norm(x: Tensor, weight: Tensor, eps: f32) !Tensor {
     if (x.dims().len == 3) {
         const h = x.dims()[2];
@@ -402,18 +381,11 @@ pub fn rms_norm(x: Tensor, weight: Tensor, eps: f32) !Tensor {
         const w_f32 = if (weight.dtype == .f32) weight else try weight.convert(.f32);
 
         const hidden_f: f32 = @floatFromInt(h);
-        const mean_scale_lit = ops.types.scalar_literal(.f32, 1.0 / hidden_f);
-        const mean_scale = try scalar_literal(x_f32, mean_scale_lit);
 
         const x_sq = try x_f32.mul(x_f32);
         const sum = try x_sq.reduce_sum(&.{2});
-        const mean_scale_b = try mean_scale.broadcast_in_dim(&.{ x_f32.dims()[0], x_f32.dims()[1] }, &.{});
-        const mean = try sum.mul(mean_scale_b);
-
-        const eps_lit = ops.types.scalar_literal(.f32, eps);
-        const eps_tensor = try scalar_literal(x_f32, eps_lit);
-        const eps_b = try eps_tensor.broadcast_in_dim(&.{ x_f32.dims()[0], x_f32.dims()[1] }, &.{});
-        const denom = try mean.add(eps_b);
+        const mean = try sum.mul(try Tensor.constant_like(sum, 1.0 / hidden_f));
+        const denom = try mean.add(try Tensor.constant_like(mean, eps));
         const inv = try denom.rsqrt();
         const inv_b = try inv.broadcast_in_dim(x_f32.dims(), &.{ 0, 1 });
         const normed = try x_f32.mul(inv_b);
@@ -439,18 +411,11 @@ fn rms_norm_no_weight_f32(x: Tensor, eps: f32) !Tensor {
 
     const hidden = x.dims()[1];
     const hidden_f: f32 = @floatFromInt(hidden);
-    const mean_scale_lit = ops.types.scalar_literal(.f32, 1.0 / hidden_f);
-    const mean_scale = try scalar_literal(x, mean_scale_lit);
 
     const x_sq = try x.mul(x);
     const sum = try x_sq.reduce_sum(&.{1});
-    const mean_scale_b = try mean_scale.broadcast_in_dim(&.{x.dims()[0]}, &.{});
-    const mean = try sum.mul(mean_scale_b);
-
-    const eps_lit = ops.types.scalar_literal(.f32, eps);
-    const eps_tensor = try scalar_literal(x, eps_lit);
-    const eps_b = try eps_tensor.broadcast_in_dim(&.{x.dims()[0]}, &.{});
-    const denom = try mean.add(eps_b);
+    const mean = try sum.mul(try Tensor.constant_like(sum, 1.0 / hidden_f));
+    const denom = try mean.add(try Tensor.constant_like(mean, eps));
     const inv = try denom.rsqrt();
     const inv_b = try inv.broadcast_in_dim(x.dims(), &.{0});
     return x.mul(inv_b);

@@ -15,6 +15,7 @@
 /// on PR types.
 const std = @import("std");
 const pr = @import("pr/pr.zig");
+const Allocator = std.mem.Allocator;
 
 // ============================================================================
 // Region Descriptor
@@ -22,45 +23,32 @@ const pr = @import("pr/pr.zig");
 
 /// A view into a PR subgraph representing a kernelizable region.
 ///
-/// Contains the equations, their types, and the region's boundary
-/// (which vars flow in from outside, which flow out). This is the
-/// information a kernel provider needs to decide whether it can handle
-/// a region and to compile a kernel for it.
+/// Contains the ops, and the region's boundary (which vars flow in from
+/// outside, which flow out). This is the information a kernel provider
+/// needs to decide whether it can handle a region and to compile a kernel
+/// for it.
 ///
-/// RegionDescriptor does not own any memory -- all slices are views into
-/// the parent Function's storage.
+/// RegionDescriptor does not own any memory - all slices are views into
+/// the parent Function's storage, except `inputs` and `outputs` which are
+/// allocated by `describe_region`.
+///
+/// TODO: doesnt belong here
 pub const RegionDescriptor = struct {
     name: []const u8,
     annotation: pr.Annotation,
 
-    /// Equations in this region (slice of Function.eqns).
-    eqns: []const pr.Eqn,
+    /// Ops in this region (slice of Function.ops).
+    ops: []const *pr.Op,
 
-    /// Full aval table from the parent function (needed for type lookup).
-    avals: []const pr.Aval,
+    /// Vars produced outside this region but consumed inside it.
+    inputs: []const *pr.Var,
 
-    /// Backing store for equation input/output var IDs.
-    varids_store: []const pr.VarId,
+    /// Vars produced inside this region and consumed outside it.
+    outputs: []const *pr.Var,
 
-    /// Backing store for equation parameters.
-    params_store: []const pr.Param,
-
-    /// VarIds produced outside this region but consumed inside it.
-    inputs: []const pr.VarId,
-
-    /// VarIds produced inside this region and consumed outside it.
-    outputs: []const pr.VarId,
-
-    /// Look up the type of a variable.
-    pub fn aval_of(self: RegionDescriptor, id: pr.VarId) ?pr.Aval {
-        const idx: usize = @intCast(id);
-        if (idx >= self.avals.len) return null;
-        return self.avals[idx];
-    }
-
-    /// Get a human-readable summary for diagnostics.
-    pub fn eqn_count(self: RegionDescriptor) usize {
-        return self.eqns.len;
+    /// Number of ops in this region.
+    pub fn op_count(self: RegionDescriptor) usize {
+        return self.ops.len;
     }
 };
 
@@ -68,8 +56,8 @@ pub const RegionDescriptor = struct {
 ///
 /// Accepts only no batch dimensions and one contracting dimension per input,
 /// with lhs contracting dim 1 and rhs contracting dim 0.
-pub fn dot_general_is_matrix_matmul(params: []const pr.Param) bool {
-    return dot_general_is_canonical_batched_matmul(params, 2, 2);
+pub fn dot_general_is_matrix_matmul(dg: pr.DotGeneralParams) bool {
+    return dot_general_is_canonical_batched_matmul(dg, 2, 2);
 }
 
 /// Returns whether dot_general matches canonical batched matmul form.
@@ -77,8 +65,7 @@ pub fn dot_general_is_matrix_matmul(params: []const pr.Param) bool {
 /// Canonical form requires both operands to have rank `batch_len + 2` with
 /// batch dims as `0..batch_len-1`, lhs contracting dim at `rank-1`, and rhs
 /// contracting dim at `rank-2`.
-pub fn dot_general_is_canonical_batched_matmul(params: []const pr.Param, lhs_rank: usize, rhs_rank: usize) bool {
-    const dg = pr.param(.dot_general, params) orelse return false;
+pub fn dot_general_is_canonical_batched_matmul(dg: pr.DotGeneralParams, lhs_rank: usize, rhs_rank: usize) bool {
     const batch_len = dg.lhs_batch_dims.len;
 
     if (batch_len != dg.rhs_batch_dims.len) return false;
@@ -101,68 +88,49 @@ fn dims_are_prefix(dims: []const i64) bool {
 
 /// Build a RegionDescriptor from a Function and a Region.
 ///
-/// Computes the boundary variables (inputs/outputs) by analyzing which
-/// VarIds are produced/consumed inside vs outside the region.
-pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: pr.Region) error{OutOfMemory}!RegionDescriptor {
-    const start: usize = region.eqn_start;
-    const len: usize = region.eqn_len;
+/// Uses the intrinsic def-use chains on Var/Operand:
+/// - Inputs: `Var.defining_op` identifies vars defined outside the region.
+/// - Outputs: `Var.first_use` walk identifies vars consumed outside.
+/// TODO: doesnt belong here
+pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: pr.Region) Allocator.Error!RegionDescriptor {
+    const start: usize = region.op_start;
+    const len: usize = region.op_len;
     const end = start + len;
-    if (end > func.eqns.len) return error.OutOfMemory; // bounds check
+    const region_ops = func.ops[start..end];
 
-    const region_eqns = func.eqns[start..end];
+    const seen = try allocator.alloc(bool, func.var_count);
+    defer allocator.free(seen);
+    @memset(seen, false);
 
-    // Collect VarIds produced inside the region.
-    var produced = std.AutoHashMap(pr.VarId, void).init(allocator);
-    defer produced.deinit();
-    for (region_eqns) |eqn| {
-        const outs = eqn.outputs.slice(pr.VarId, func.varids_store);
-        for (outs) |out_id| try produced.put(out_id, {});
-    }
-
-    // Inputs: consumed inside but not produced inside.
-    var inputs_list = std.ArrayList(pr.VarId).empty;
+    // Inputs: consumed inside but defined outside the region.
+    var inputs_list = std.ArrayList(*pr.Var).empty;
     defer inputs_list.deinit(allocator);
-    var seen_inputs = std.AutoHashMap(pr.VarId, void).init(allocator);
-    defer seen_inputs.deinit();
-    for (region_eqns) |eqn| {
-        const ins = eqn.inputs.slice(pr.VarId, func.varids_store);
-        for (ins) |in_id| {
-            if (!produced.contains(in_id) and !seen_inputs.contains(in_id)) {
-                try inputs_list.append(allocator, in_id);
-                try seen_inputs.put(in_id, {});
+    for (region_ops) |op| {
+        for (op.inputs) |operand| {
+            const v = operand.value;
+            if (seen[v.id]) continue;
+            seen[v.id] = true;
+            const def = v.defining_op orelse {
+                // function parameter, always external
+                try inputs_list.append(allocator, v);
+                continue;
+            };
+            if (!op_in_slice(def, region_ops)) {
+                try inputs_list.append(allocator, v);
             }
         }
     }
 
-    // Outputs: produced inside and consumed outside (or is a function return).
-    var consumed_outside = std.AutoHashMap(pr.VarId, void).init(allocator);
-    defer consumed_outside.deinit();
-
-    // Check equations outside the region for consumption.
-    for (func.eqns, 0..) |eqn, idx| {
-        if (idx >= start and idx < end) continue;
-        const ins = eqn.inputs.slice(pr.VarId, func.varids_store);
-        for (ins) |in_id| {
-            if (produced.contains(in_id)) try consumed_outside.put(in_id, {});
-        }
-    }
-
-    // Also count function returns as external consumption.
-    for (func.returns) |ret_id| {
-        if (produced.contains(ret_id)) try consumed_outside.put(ret_id, {});
-    }
-
-    var outputs_list = std.ArrayList(pr.VarId).empty;
+    // Outputs: produced inside and used outside (or is a function return).
+    @memset(seen, false);
+    var outputs_list = std.ArrayList(*pr.Var).empty;
     defer outputs_list.deinit(allocator);
-    // Preserve output order by iterating region eqns.
-    var seen_outputs = std.AutoHashMap(pr.VarId, void).init(allocator);
-    defer seen_outputs.deinit();
-    for (region_eqns) |eqn| {
-        const outs = eqn.outputs.slice(pr.VarId, func.varids_store);
-        for (outs) |out_id| {
-            if (consumed_outside.contains(out_id) and !seen_outputs.contains(out_id)) {
-                try outputs_list.append(allocator, out_id);
-                try seen_outputs.put(out_id, {});
+    for (region_ops) |op| {
+        for (op.outputs) |out_var| {
+            if (seen[out_var.id]) continue;
+            if (has_use_outside(out_var, region_ops) or is_func_return(out_var, func.returns)) {
+                seen[out_var.id] = true;
+                try outputs_list.append(allocator, out_var);
             }
         }
     }
@@ -170,13 +138,34 @@ pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: 
     return .{
         .name = region.name,
         .annotation = region.annotation,
-        .eqns = region_eqns,
-        .avals = func.avals,
-        .varids_store = func.varids_store,
-        .params_store = func.params_store,
+        .ops = region_ops,
         .inputs = try inputs_list.toOwnedSlice(allocator),
         .outputs = try outputs_list.toOwnedSlice(allocator),
     };
+}
+
+/// Check if an op pointer appears in a slice (pointer identity).
+fn op_in_slice(op: *const pr.Op, ops: []const *pr.Op) bool {
+    for (ops) |o| {
+        if (o == op) return true;
+    }
+    return false;
+}
+
+/// Walk a Var's use-list for any consumer not in the given op slice.
+fn has_use_outside(v: *const pr.Var, region_ops: []const *pr.Op) bool {
+    var cur = v.first_use;
+    while (cur) |use| : (cur = use.next) {
+        if (!op_in_slice(use.owner, region_ops)) return true;
+    }
+    return false;
+}
+
+fn is_func_return(v: *const pr.Var, returns: []*pr.Var) bool {
+    for (returns) |ret| {
+        if (ret == v) return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -229,8 +218,7 @@ pub const DispatchError = error{
     /// Provider runtime not available (library loading failed).
     ProviderLoadFailed,
     WorkspaceUnavailable,
-    OutOfMemory,
-};
+} || Allocator.Error;
 
 /// Provider dispatch function signature.
 ///
@@ -310,8 +298,7 @@ pub const CompileError = error{
     ProviderLoadFailed,
     /// Provider API call failed or returned unexpected data.
     ProviderCallFailed,
-    OutOfMemory,
-};
+} || Allocator.Error;
 
 /// Extension component that claims PR regions and produces compiled kernel artifacts.
 ///
@@ -409,7 +396,7 @@ pub const KernelStore = struct {
     }
 
     /// Record a profitable tuning decision.
-    pub fn put_profitable(self: *KernelStore, kernel_signature: []const u8, artifact: StoredArtifact) error{OutOfMemory}!void {
+    pub fn put_profitable(self: *KernelStore, kernel_signature: []const u8, artifact: StoredArtifact) Allocator.Error!void {
         const owned_key = try self.decisions.allocator.dupe(u8, kernel_signature);
         errdefer self.decisions.allocator.free(owned_key);
         const owned_name = try self.decisions.allocator.dupe(u8, artifact.provider_name);
@@ -428,7 +415,7 @@ pub const KernelStore = struct {
     }
 
     /// Record a negative tuning decision (provider declined).
-    pub fn put_negative(self: *KernelStore, kernel_signature: []const u8, reason: []const u8) error{OutOfMemory}!void {
+    pub fn put_negative(self: *KernelStore, kernel_signature: []const u8, reason: []const u8) Allocator.Error!void {
         const owned_key = try self.decisions.allocator.dupe(u8, kernel_signature);
         errdefer self.decisions.allocator.free(owned_key);
         const owned_reason = try self.decisions.allocator.dupe(u8, reason);
@@ -485,8 +472,8 @@ pub const DispatchRegistry = struct {
     }
 
     /// Register a provider's dispatch entry. Duplicates are silently replaced.
-    pub fn register(self: *DispatchRegistry, provider_name: []const u8, entry: DispatchEntry) error{OutOfMemory}!void {
-        const result = self.entries.getOrPut(provider_name) catch return error.OutOfMemory;
+    pub fn register(self: *DispatchRegistry, provider_name: []const u8, entry: DispatchEntry) Allocator.Error!void {
+        const result = try self.entries.getOrPut(provider_name);
         if (!result.found_existing) {
             result.key_ptr.* = try self.entries.allocator.dupe(u8, provider_name);
         }
@@ -517,7 +504,7 @@ test "describe_region computes boundary vars" {
     const y = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("add_region", .{ .kernelize = "test" });
-    const z = try b.emit(.add, &.{ x, y }, &.{});
+    const z = try b.add(x, y);
     try b.pop_region();
 
     const func = try b.finish(&.{z});
@@ -530,7 +517,7 @@ test "describe_region computes boundary vars" {
     defer testing.allocator.free(desc.outputs);
 
     try testing.expectEqualStrings("add_region", desc.name);
-    try testing.expectEqual(@as(usize, 1), desc.eqns.len);
+    try testing.expectEqual(@as(usize, 1), desc.ops.len);
     try testing.expectEqual(@as(usize, 2), desc.inputs.len); // x, y
     try testing.expectEqual(@as(usize, 1), desc.outputs.len); // z
     try testing.expectEqual(x, desc.inputs[0]);
@@ -550,8 +537,8 @@ test "describe_region internal vars not in outputs" {
     const x = try b.param_tensor(.f32, &.{2});
 
     try b.push_region("chain", .{ .kernelize = "test" });
-    const tmp = try b.emit(.exp, &.{x}, &.{});
-    const out = try b.emit(.log, &.{tmp}, &.{});
+    const tmp = try b.exp(x);
+    const out = try b.log(tmp);
     try b.pop_region();
 
     const func = try b.finish(&.{out});
@@ -561,67 +548,70 @@ test "describe_region internal vars not in outputs" {
     defer testing.allocator.free(desc.inputs);
     defer testing.allocator.free(desc.outputs);
 
-    try testing.expectEqual(@as(usize, 2), desc.eqns.len);
+    try testing.expectEqual(@as(usize, 2), desc.ops.len);
     try testing.expectEqual(@as(usize, 1), desc.inputs.len); // x
     try testing.expectEqual(@as(usize, 1), desc.outputs.len); // out (tmp is internal)
 }
 
-test "dot_general_is_matrix_matmul canonical" {
-    const params = [_]pr.Param{.{ .dot_general = .{
+test dot_general_is_matrix_matmul {
+    const dg: pr.DotGeneralParams = .{
         .lhs_batch_dims = &.{},
         .rhs_batch_dims = &.{},
         .lhs_contracting_dims = &.{1},
         .rhs_contracting_dims = &.{0},
-    } }};
-    try std.testing.expect(dot_general_is_matrix_matmul(params[0..]));
+    };
+    try std.testing.expect(dot_general_is_matrix_matmul(dg));
 }
 
 test "dot_general_is_matrix_matmul rejects non-canonical" {
-    const with_batch = [_]pr.Param{.{ .dot_general = .{
-        .lhs_batch_dims = &.{0},
-        .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{1},
-        .rhs_contracting_dims = &.{0},
-    } }};
-    try std.testing.expect(!dot_general_is_matrix_matmul(with_batch[0..]));
-
-    const wrong_contract = [_]pr.Param{.{ .dot_general = .{
-        .lhs_batch_dims = &.{},
-        .rhs_batch_dims = &.{},
-        .lhs_contracting_dims = &.{0},
-        .rhs_contracting_dims = &.{1},
-    } }};
-    try std.testing.expect(!dot_general_is_matrix_matmul(wrong_contract[0..]));
+    {
+        const with_batch: pr.DotGeneralParams = .{
+            .lhs_batch_dims = &.{0},
+            .rhs_batch_dims = &.{0},
+            .lhs_contracting_dims = &.{1},
+            .rhs_contracting_dims = &.{0},
+        };
+        try std.testing.expect(!dot_general_is_matrix_matmul(with_batch));
+    }
+    {
+        const wrong_contract: pr.DotGeneralParams = .{
+            .lhs_batch_dims = &.{},
+            .rhs_batch_dims = &.{},
+            .lhs_contracting_dims = &.{0},
+            .rhs_contracting_dims = &.{1},
+        };
+        try std.testing.expect(!dot_general_is_matrix_matmul(wrong_contract));
+    }
 }
 
-test "dot_general_is_canonical_batched_matmul canonical" {
-    const params = [_]pr.Param{.{ .dot_general = .{
+test dot_general_is_canonical_batched_matmul {
+    const dg: pr.DotGeneralParams = .{
         .lhs_batch_dims = &.{ 0, 1 },
         .rhs_batch_dims = &.{ 0, 1 },
         .lhs_contracting_dims = &.{3},
         .rhs_contracting_dims = &.{2},
-    } }};
-    try std.testing.expect(dot_general_is_canonical_batched_matmul(params[0..], 4, 4));
+    };
+    try std.testing.expect(dot_general_is_canonical_batched_matmul(dg, 4, 4));
 }
 
 test "dot_general_is_canonical_batched_matmul rejects non-prefix batch" {
-    const params = [_]pr.Param{.{ .dot_general = .{
+    const dg: pr.DotGeneralParams = .{
         .lhs_batch_dims = &.{1},
         .rhs_batch_dims = &.{1},
         .lhs_contracting_dims = &.{2},
         .rhs_contracting_dims = &.{1},
-    } }};
-    try std.testing.expect(!dot_general_is_canonical_batched_matmul(params[0..], 3, 3));
+    };
+    try std.testing.expect(!dot_general_is_canonical_batched_matmul(dg, 3, 3));
 }
 
 test "dot_general_is_canonical_batched_matmul rejects rank mismatch" {
-    const params = [_]pr.Param{.{ .dot_general = .{
+    const dg: pr.DotGeneralParams = .{
         .lhs_batch_dims = &.{0},
         .rhs_batch_dims = &.{0},
         .lhs_contracting_dims = &.{2},
         .rhs_contracting_dims = &.{1},
-    } }};
-    try std.testing.expect(!dot_general_is_canonical_batched_matmul(params[0..], 3, 4));
+    };
+    try std.testing.expect(!dot_general_is_canonical_batched_matmul(dg, 3, 4));
 }
 
 test "finalize calls hook when set" {

@@ -105,10 +105,10 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     //  are freed in bulk when the program is destroyed.
     var args_tree = try Tree(Tensor).from(alloc, args);
 
-    // Collect VarIds from the input tensors.
-    const input_ids = try alloc.alloc(pr.VarId, args_tree.leaves.len);
+    // Collect Var pointers from the input tensors.
+    const input_vars = try alloc.alloc(*pr.Var, args_tree.leaves.len);
     for (args_tree.leaves, 0..) |t, i| {
-        input_ids[i] = try t.get_id();
+        input_vars[i] = try t.get_var();
     }
 
     // Build sub-function for the loss: create traced params matching the
@@ -129,14 +129,15 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
         else => loss_result,
     };
 
-    const loss_id = try loss_tensor.get_id();
-    const loss_func = try loss_builder.finish(&.{loss_id});
+    const loss_var = try loss_tensor.get_var();
+    const loss_func = try loss_builder.finish(&.{loss_var});
 
     // Register the loss function in the program. The VJP function replays the forward
     //  equations internally (it needs intermediates for the backward pass), so this
     //  function is never called at runtime. We keep it in the program for IR
     //  debuggability (eg MLIR dumps show the clean forward pass as a readable
     //  reference alongside the larger VJP function).
+    // TODO: see the comments about inlining in `ad` and once that lands we can update this
     try program.add_function(loss_func);
 
     // Apply VJP.
@@ -145,14 +146,12 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     try program.add_function(vjp_func);
 
     // Emit cotangent (ones_like for scalar loss) in the OUTER builder.
-    const loss_aval = loss_func.avals[@intCast(loss_id)].as_tensor() orelse
-        return error.UnsupportedAval;
-    const cot = try ad.emit_cotangent(builder, loss_aval);
+    const cot = try ad.emit_cotangent(builder, loss_var.as_tensor());
 
     // Call VJP function from outer builder.
     const total_leaf_count = args_tree.leaves.len;
-    const call_args = try alloc.alloc(pr.VarId, total_leaf_count + 1);
-    @memcpy(call_args[0..total_leaf_count], input_ids[0..total_leaf_count]);
+    const call_args = try alloc.alloc(*pr.Var, total_leaf_count + 1);
+    @memcpy(call_args[0..total_leaf_count], input_vars[0..total_leaf_count]);
     call_args[total_leaf_count] = cot;
 
     const call_outputs = try builder.call(vjp_name, call_args);
@@ -160,13 +159,13 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     if (call_outputs.len != total_leaf_count + 1) return error.UnexpectedOutputs;
 
     // Extract value tensor.
-    const value_tensor = try Tensor.from_id(builder, call_outputs[0]);
+    const value_tensor = Tensor.from_var(builder, call_outputs[0]);
 
     // Extract grads for the first argument (params) into a Tree.
     const grad_leaves = try alloc.alloc(Tensor, param_leaf_count);
     errdefer alloc.free(grad_leaves);
-    for (call_outputs[1 .. 1 + param_leaf_count], 0..) |gid, i| {
-        grad_leaves[i] = try Tensor.from_id(builder, gid);
+    for (call_outputs[1 .. 1 + param_leaf_count], 0..) |gv, i| {
+        grad_leaves[i] = Tensor.from_var(builder, gv);
     }
 
     const grad_paths = try alloc.alloc([]const u8, param_leaf_count);
