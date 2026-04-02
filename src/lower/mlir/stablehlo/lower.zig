@@ -75,12 +75,12 @@ fn lower_op(ctx: LowerContext, op: *const pr.Op) LowerError!void {
         // Type conversion
         .convert => try lower_convert(ctx, op),
         // Constant
-        .literal => try lower_literal(ctx, op),
+        .literal => lower_literal(ctx, op),
         // Shape
         .reshape => try lower_reshape(ctx, op),
         .transpose => try lower_transpose(ctx, op),
         .broadcast_in_dim => try lower_broadcast_in_dim(ctx, op),
-        .iota => try lower_iota(ctx, op),
+        .iota => lower_iota(ctx, op),
         .slice => try lower_slice(ctx, op),
         .concatenate => try lower_concatenate(ctx, op),
         // Reduction
@@ -143,7 +143,7 @@ fn lower_convert(ctx: LowerContext, op: *const pr.Op) LowerError!void {
 
 // --- Constant ---
 
-fn lower_literal(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+fn lower_literal(ctx: LowerContext, op: *const pr.Op) void {
     const out_var = op.result(0);
     const out_tensor = out_var.aval.as_tensor();
     const lit = op.params.literal;
@@ -187,7 +187,7 @@ fn lower_broadcast_in_dim(ctx: LowerContext, op: *const pr.Op) LowerError!void {
     ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn lower_iota(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+fn lower_iota(ctx: LowerContext, op: *const pr.Op) void {
     const iota_dim = op.params.iota.dimension;
     const out_tensor = op.result(0).aval.as_tensor();
     const out_type = ctx.tensor_to_mlir_type(out_tensor);
@@ -393,7 +393,7 @@ fn lower_scatter(ctx: LowerContext, op: *const pr.Op) LowerError!void {
     ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-fn make_update_block(ctx: mlir.Context, operand_type: mlir.Type, loc: mlir.Location, reduction: pr.ScatterReduction) mlir.Error.InvalidMlir!mlir.Block {
+fn make_update_block(ctx: mlir.Context, operand_type: mlir.Type, loc: mlir.Location, reduction: pr.ScatterReduction) error{InvalidMlir}!mlir.Block {
     const elem_type = if (operand_type.as(mlir.RankedTensorType)) |shaped| shaped.get_element_type() else operand_type;
     const arg_type: mlir.Type = .tensor(&.{}, elem_type);
     var block = try mlir.Block.init(&.{ arg_type, arg_type }, &.{ loc, loc });

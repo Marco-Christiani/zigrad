@@ -24,8 +24,6 @@ const log = std.log.scoped(.@"zg/mlir_passes");
 
 pub const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.func(zg-mirage-kernel-select),canonicalize,cse";
 
-pub const Error = PassError || mlir.Error || Writer.Error;
-
 /// Run an MLIR pass pipeline on the current artifact bytes.
 ///
 /// The caller provides a fully-configured `MlirSession` with all required
@@ -40,7 +38,7 @@ pub fn run_pipeline_on_artifact(
     session: MlirSession,
     mlir_artifact: *pass.MlirArtifact,
     pipeline_str: [:0]const u8,
-) Error!void {
+) PassError!void {
     const ctx = session.ctx;
 
     var module = mlir.Module.parse_bytes(ctx, mlir_artifact.bytes) catch {
@@ -51,7 +49,7 @@ pub fn run_pipeline_on_artifact(
     };
     defer module.deinit();
 
-    var pm = try mlir.PassManager.init(ctx);
+    var pm = mlir.PassManager.init(ctx) catch @panic("Failed to init PassManager in run_pipeline_on_artifact().");
     defer pm.deinit();
 
     var op_pm = pm.as_op_pass_manager();
@@ -73,8 +71,12 @@ pub fn run_pipeline_on_artifact(
     defer writer_state.deinit();
 
     switch (mlir_artifact.encoding) {
-        .bytecode => try module.op().write_bytecode(&writer_state.writer),
-        .text => try module.op().print(&writer_state.writer, .{}),
+        .bytecode => module.op().write_bytecode(&writer_state.writer) catch |e| switch (e) {
+            inline else => |ee| @panic("Serialization failed got " ++ @errorName(ee) ++ " in run_pipeline_on_artifact()."),
+        },
+        .text => module.op().print(&writer_state.writer, .{}) catch |e| switch (e) {
+            inline else => |ee| @panic("Serialization failed got " ++ @errorName(ee) ++ " in run_pipeline_on_artifact()."),
+        },
     }
 
     const new_bytes = try writer_state.toOwnedSlice();

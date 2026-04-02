@@ -461,7 +461,9 @@ pub fn tensor_to_mlir_type_standalone(ctx: mlir.Context, t: pr.Tensor) mlir.Type
 // Serialization
 // ============================================================================
 
-fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: OutputFormat) std.Io.Writer.Error![]u8 {
+const SerializeError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
+fn serialize_module(allocator: std.mem.Allocator, module: mlir.Module, out: OutputFormat) SerializeError![]u8 {
     var writer_state = std.Io.Writer.Allocating.init(allocator);
     defer writer_state.deinit();
 
