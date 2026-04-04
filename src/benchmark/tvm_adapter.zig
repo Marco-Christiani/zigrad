@@ -69,6 +69,7 @@ pub fn execute_gpu_with_module(
     var shape_b = [_]i64{ k, n };
     var shape_c = [_]i64{ m, n };
 
+    // TODO: cast safety
     var t_a = try tvm_runtime.Tensor.allocate(allocator, @constCast(a), &shape_a, .cuda);
     defer t_a.deinit();
     var t_b = try tvm_runtime.Tensor.allocate(allocator, @constCast(b), &shape_b, .cuda);

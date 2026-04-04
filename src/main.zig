@@ -483,6 +483,7 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
     try harness.print_results();
 }
 
+// TODO: this is a smell
 const ProviderKindList = struct {
     buf: [2]demos.KernelProviderDemoKind,
     len: usize,

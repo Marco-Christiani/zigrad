@@ -2,6 +2,7 @@
 //!
 //! Provides configurable matrix-multiply benchmarks with correctness checking,
 //!  timing statistics, and adapters for TVM and XLA execution.
+//! TODO: this is kind of legacy scratch work and should be formalized, extracted, or deleted.
 pub const harness = @import("harness.zig");
 pub const config = @import("config.zig");
 pub const stats = @import("stats.zig");

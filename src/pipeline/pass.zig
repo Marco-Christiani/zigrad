@@ -70,6 +70,9 @@ pub const Artifact = union(ArtifactKind) {
 /// Represents serialized MLIR at some pipeline stage. Passes that transform
 ///  MLIR (select, legalize) operate on `bytes` directly - there
 ///  is no separate snapshot field.
+/// TODO: rename this, doesnt have to be mlir-specific, and if it can be
+///  text or bytes then calling the field bytes is rather confusing even
+///  though it refers to the data type.
 pub const MlirArtifact = struct {
     bytes: []u8,
     encoding: MlirEncoding,

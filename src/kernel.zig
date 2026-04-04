@@ -16,6 +16,7 @@
 const std = @import("std");
 const pr = @import("pr/pr.zig");
 const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.@"zg/kernel");
 
 // ============================================================================
 // Region Descriptor
@@ -176,6 +177,7 @@ fn is_func_return(v: *const pr.Var, returns: []*pr.Var) bool {
 pub const DType = pr.DType;
 
 /// Execution platform for dispatch.
+/// TODO: should we prefer an existing enum?
 pub const DispatchPlatform = enum { host, cuda };
 
 /// Descriptor for a single buffer passed through the FFI boundary.
@@ -193,6 +195,8 @@ pub const BufferDesc = struct {
 /// Contains all information a provider needs to execute a compiled kernel:
 ///  input/output buffers, device identity, and an optional device stream
 ///  for GPU synchronization.
+/// TODO: consider RTTI ctx pattern here
+/// TODO: consider passing a device allocator if backends support sharing
 pub const DispatchContext = struct {
     inputs: []const BufferDesc,
     outputs: []const BufferDesc,
@@ -223,6 +227,7 @@ pub const DispatchError = error{
 /// targets a kernelized op. The provider_ctx is the provider's own
 /// state (cast from `*anyopaque`); artifact_data and kernel_key
 /// identify the compiled kernel; ctx carries buffers and device info.
+/// TODO: consider RTTI pattern here
 pub const DispatchFn = *const fn (
     provider_ctx: *anyopaque,
     artifact_data: []const u8,

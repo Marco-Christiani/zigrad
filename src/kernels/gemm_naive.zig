@@ -1,4 +1,5 @@
 //! Naive matmul implementation (baseline, no optimizations).
+//! TODO: again, outdated scratch, see benchmark/root.zig, same thing.
 const std = @import("std");
 
 /// Naive strawman triple-loop matmul: C += A @ B.

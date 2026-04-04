@@ -17,6 +17,7 @@ const BenchmarkResult = config.BenchmarkResult;
 const log = std.log.scoped(.@"zg/benchmark");
 
 /// Tolerance for correctness verification (matches TVM convention).
+/// TODO: centralize
 const TOLERANCE: f64 = 1e-4;
 const syms = zg.utils.Symbols.unicode;
 
@@ -267,8 +268,11 @@ pub const Harness = struct {
             //     .{ self.tvm_cache_dir, if (device == .cpu) "cpu" else "cuda" },
             // );
             // defer self.allocator.free(work_dir);
-            // we are migrating to the hash based system, device is included in the hash, a valid path is thus
-            // `artifacts/tvm_cache/cpu/820e34c955246375`
+            // TODO: we are migrating to the hash based system, device is included in the hash,
+            //  a valid path is like `artifacts/tvm_cache/cpu/820e34c955246375` and would have
+            //  to be passed explicitly unless we put the hashing in the load path, which it
+            //  probably should be. Also, we have to look into evidence of the above convention
+            //  lingering around. Once we remove references we can clean this up.
             const work_dir = self.tvm_cache_dir;
 
             module.* = try tvm_module.load(self.allocator, .{ .work_dir = work_dir });

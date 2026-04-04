@@ -1,4 +1,7 @@
 //! Public API for hand-rolled naive GEMM kernel and BLAS baselines.
+//! TODO: again, outdated scratch, see benchmark/root.zig, same thing.
+//!  also, this naive impl is duped in benchmark/ and gemm_f32 is a
+//!  forwarding wrapper to gemm_naive.
 const std = @import("std");
 const build_options = @import("build_options");
 
