@@ -1,18 +1,20 @@
-/// Standalone Tuning Tool
-///
-/// Walks a PR program for kernelizable regions, invokes providers to compile
-/// each candidate, and records the results as tuning decisions in a `KernelStore`.
-/// Provider dispatch entries are registered in a `DispatchRegistry` for
-/// execute-time resolution.
-///
-/// This decouples tuning (an expensive, user-controlled operation) from the
-/// pipeline (which consults a pre-computed store, never calls providers).
-///
-/// Usage:
-///   var result = try tune(allocator, &program, providers);
-///   defer result.deinit();
-///   // result.store -> pass to pipeline via CompileConfig.kernel_store
-///   // result.dispatch_registry -> pass to ExecuteOptions.dispatch_registry
+//! Kernel tuning for the KP system.
+//!
+//! Walks a PR program for kernelizable regions, invokes providers to compile
+//!  each candidate, and records the results as decisions in a `KernelStore`.
+//! Provider dispatch entries are registered in a `DispatchRegistry` for
+//!  execute-time resolution.
+//!
+//! This decouples tuning (an expensive, user-controlled operation) from the
+//!  pipeline (which consults a pre-computed store, not calling providers).
+//!
+//! Usage:
+//! ```zig
+//! var result = try tune(allocator, &program, providers);
+//! defer result.deinit();
+//! // result.store - pass to pipeline via CompileConfig.kernel_store
+//! // result.dispatch_registry - pass to ExecuteOptions.dispatch_registry
+//! ```
 const std = @import("std");
 const pr = @import("pr/pr.zig");
 const kernel = @import("kernel.zig");

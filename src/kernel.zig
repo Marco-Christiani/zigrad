@@ -1,18 +1,18 @@
-/// Kernel Provider Interface and Store Types
-///
-/// Type hierarchy:
-/// - `KernelProvider`: extension point -- compiles regions into `KernelArtifact`s.
-/// - `KernelArtifact`: pure compile output -- data, provider name, workspace.
-/// - `KernelStore`: pre-computed tuning decisions keyed by shape signature.
-/// - `DispatchRegistry`: maps provider names to dispatch function pointers.
-/// - `StoredArtifact` / `Decision`: store-internal value types.
-///
-/// Data flow: `tune()` invokes providers -> populates `KernelStore` +
-/// `DispatchRegistry` -> pipeline consults store -> backend resolves dispatch
-/// from registry at execute time.
-///
-/// This module is independent of the pipeline and backend. It depends only
-/// on PR types.
+//! Kernel provider interface and store types.
+//!
+//! Type hierarchy:
+//! 1. `KernelProvider`: extension point that compiles PR regions into `KernelArtifact`s.
+//! 2. `KernelArtifact`: pure compile output (data bytes, provider name, workspace size).
+//! 3. `KernelStore`: pre-computed tuning decisions keyed by shape signature.
+//! 4. `DispatchRegistry`: maps provider names to dispatch function pointers.
+//! 5. `StoredArtifact` / `Decision`: store-internal value types.
+//!
+//! Data flow: `tune()` invokes providers -> populates `KernelStore` +
+//!  `DispatchRegistry` -> pipeline consults store -> backend resolves dispatch
+//!  from registry at execute time.
+//!
+//! This module is independent of the pipeline and backend. It depends only
+//!  on PR types.
 const std = @import("std");
 const pr = @import("pr/pr.zig");
 const Allocator = std.mem.Allocator;
@@ -24,13 +24,13 @@ const Allocator = std.mem.Allocator;
 /// A view into a PR subgraph representing a kernelizable region.
 ///
 /// Contains the ops, and the region's boundary (which vars flow in from
-/// outside, which flow out). This is the information a kernel provider
-/// needs to decide whether it can handle a region and to compile a kernel
-/// for it.
+///  outside, which flow out). This is the information a kernel provider
+///  needs to decide whether it can handle a region and to compile a kernel
+///  for it.
 ///
 /// RegionDescriptor does not own any memory - all slices are views into
-/// the parent Function's storage, except `inputs` and `outputs` which are
-/// allocated by `describe_region`.
+///  the parent Function's storage, except `inputs` and `outputs` which are
+///  allocated by `describe_region`.
 ///
 /// TODO: doesnt belong here
 pub const RegionDescriptor = struct {
@@ -55,7 +55,7 @@ pub const RegionDescriptor = struct {
 /// Returns whether a dot_general parameter set matches plain rank-2 matmul.
 ///
 /// Accepts only no batch dimensions and one contracting dimension per input,
-/// with lhs contracting dim 1 and rhs contracting dim 0.
+///  with lhs contracting dim 1 and rhs contracting dim 0.
 pub fn dot_general_is_matrix_matmul(dg: pr.DotGeneralParams) bool {
     return dot_general_is_canonical_batched_matmul(dg, 2, 2);
 }
@@ -63,8 +63,8 @@ pub fn dot_general_is_matrix_matmul(dg: pr.DotGeneralParams) bool {
 /// Returns whether dot_general matches canonical batched matmul form.
 ///
 /// Canonical form requires both operands to have rank `batch_len + 2` with
-/// batch dims as `0..batch_len-1`, lhs contracting dim at `rank-1`, and rhs
-/// contracting dim at `rank-2`.
+///  batch dims as `0..batch_len-1`, lhs contracting dim at `rank-1`, and rhs
+///  contracting dim at `rank-2`.
 pub fn dot_general_is_canonical_batched_matmul(dg: pr.DotGeneralParams, lhs_rank: usize, rhs_rank: usize) bool {
     const batch_len = dg.lhs_batch_dims.len;
 
@@ -87,10 +87,6 @@ fn dims_are_prefix(dims: []const i64) bool {
 }
 
 /// Build a RegionDescriptor from a Function and a Region.
-///
-/// Uses the intrinsic def-use chains on Var/Operand:
-/// - Inputs: `Var.defining_op` identifies vars defined outside the region.
-/// - Outputs: `Var.first_use` walk identifies vars consumed outside.
 /// TODO: doesnt belong here
 pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: pr.Region) Allocator.Error!RegionDescriptor {
     const start: usize = region.op_start;
@@ -115,6 +111,7 @@ pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: 
                 try inputs_list.append(allocator, v);
                 continue;
             };
+            // input if defined outside this region
             if (!op_in_slice(def, region_ops)) {
                 try inputs_list.append(allocator, v);
             }
@@ -128,6 +125,7 @@ pub fn describe_region(allocator: std.mem.Allocator, func: pr.Function, region: 
     for (region_ops) |op| {
         for (op.outputs) |out_var| {
             if (seen[out_var.id]) continue;
+            // output if consumed outside or returned
             if (has_use_outside(out_var, region_ops) or is_func_return(out_var, func.returns)) {
                 seen[out_var.id] = true;
                 try outputs_list.append(allocator, out_var);
@@ -182,8 +180,7 @@ pub const DispatchPlatform = enum { host, cuda };
 
 /// Descriptor for a single buffer passed through the FFI boundary.
 ///
-/// Provider-agnostic: the backend extracts these from FFI frames,
-/// providers consume them without knowing about XLA types.
+/// Provider-agnostic, the backend extracts these from FFI frames.
 pub const BufferDesc = struct {
     data: *anyopaque,
     dtype: DType,
@@ -194,8 +191,8 @@ pub const BufferDesc = struct {
 /// Context passed to a provider's dispatch function at execution time.
 ///
 /// Contains all information a provider needs to execute a compiled kernel:
-/// input/output buffers, device identity, and an optional device stream
-/// for GPU synchronization.
+///  input/output buffers, device identity, and an optional device stream
+///  for GPU synchronization.
 pub const DispatchContext = struct {
     inputs: []const BufferDesc,
     outputs: []const BufferDesc,
@@ -211,7 +208,7 @@ pub const DispatchContext = struct {
 };
 
 pub const DispatchError = error{
-    /// Dispatch failed; provider logged details.
+    /// Dispatch failed, provider logged details.
     DispatchFailed,
     UnsupportedDType,
     ShapeMismatch,
@@ -240,9 +237,9 @@ pub const DispatchFn = *const fn (
 /// Pure compile output from a kernel provider.
 ///
 /// Contains the provider name, compiled data, target name, and workspace
-/// requirement. Carries no runtime pointers -- dispatch is resolved at
-/// execute time via `DispatchRegistry` (for store-based paths) or via
-/// `KernelProvider.dispatch_fn` (registered per-provider, not per-artifact).
+///  requirement. Carries no runtime pointers -- dispatch is resolved at
+///  execute time via `DispatchRegistry` (for store-based paths) or via
+///  `KernelProvider.dispatch_fn` (registered per-provider, not per-artifact).
 pub const KernelArtifact = struct {
     /// Provider that produced this artifact.
     provider_name: []const u8,
@@ -256,8 +253,9 @@ pub const KernelArtifact = struct {
 
     /// Workspace bytes required at dispatch time.
     ///
-    /// Providers set this from compile metadata; the backend allocates
-    /// device memory of this size before calling the dispatch function.
+    /// Providers set this from compile metadata.
+    /// Backend allocates device memory of this size before calling
+    ///  the dispatch function.
     workspace_bytes: usize = 0,
 
     pub fn deinit(self: *KernelArtifact, allocator: std.mem.Allocator) void {
@@ -292,7 +290,7 @@ pub const CompileContext = struct {
 pub const CompileError = error{
     /// Provider cannot handle this region (unsupported ops, shapes, etc.)
     Unsupported,
-    /// Compilation failed; provider logged details.
+    /// Compilation failed, provider logged details.
     CompileFailed,
     /// Provider runtime not available (library loading failed).
     ProviderLoadFailed,
@@ -306,8 +304,8 @@ pub const CompileError = error{
 /// The compile function receives a `CompileContext` for device targeting.
 ///
 /// Dispatch fields (`dispatch_fn`, `dispatch_ctx`) identify how to execute compiled
-/// artifacts at runtime. They are per-provider (not per-artifact) because all artifacts
-/// from a given provider share the same dispatch implementation and state.
+///  artifacts at runtime. They are per-provider (not per-artifact) because all artifacts
+///  from a given provider share the same dispatch implementation and state.
 pub const KernelProvider = struct {
     name: []const u8,
     ptr: *anyopaque,
@@ -327,8 +325,8 @@ pub const KernelProvider = struct {
     /// Release provider resources after all kernels have been compiled.
     ///
     /// Providers set this to free heavyweight state (e.g. GPU memory pools)
-    /// that would otherwise compete with the backend allocator. No-op when
-    /// the provider leaves `finalize_fn` as `null`.
+    ///  that would otherwise compete with the backend allocator. No-op when
+    ///  the provider leaves `finalize_fn` as `null`.
     pub fn finalize(self: KernelProvider) void {
         const f = self.finalize_fn orelse return;
         f(self.ptr);
@@ -341,8 +339,8 @@ pub const KernelProvider = struct {
 
 /// A pre-compiled artifact stored in the kernel store.
 ///
-/// Pure data -- dispatch is resolved at execute time via `DispatchRegistry`.
-/// The store owns copies of all slices (`provider_name`, `data`, `target_name`).
+/// Dispatch is resolved at execute time via `DispatchRegistry`.
+/// The store owns copies of all slices.
 pub const StoredArtifact = struct {
     provider_name: []const u8,
     data: []const u8,
@@ -354,8 +352,8 @@ pub const StoredArtifact = struct {
 ///
 /// `.profitable`: provider compiled a kernel successfully and the artifact is stored.
 /// `.negative`: provider evaluated the region and decided not to kernelize (reason recorded).
-/// Absence from the store (null from `get()`) means the key was never evaluated --
-/// the region should be left for baseline lowering.
+/// Absence from the store (null from `get()`) means the key was never evaluated -
+///  the region should be left for baseline lowering.
 pub const Decision = union(enum) {
     profitable: StoredArtifact,
     negative: []const u8,
@@ -364,8 +362,9 @@ pub const Decision = union(enum) {
 /// Pre-computed tuning decisions keyed by kernel signature.
 ///
 /// The sole decision boundary between tuning and the pipeline. `tune()`
-/// populates the store; `KernelizePass` consults it. The pipeline never
-/// invokes providers directly -- all provider interaction happens in `tune()`.
+///  populates the store; `KernelizePass` consults it. The pipeline does
+///  not invoke providers directly, all provider interaction happens in
+///  `tune()`.
 pub const KernelStore = struct {
     decisions: std.StringHashMap(Decision),
 
@@ -444,8 +443,9 @@ pub const KernelStore = struct {
 
 /// Entry mapping a provider name to its dispatch function and context.
 ///
-/// Populated at execute time by the caller. The backend resolves provider
-/// names from `StoredArtifact.provider_name` to dispatch entries here.
+/// Populated at execute time by the caller.
+/// The backend resolves provider names from `StoredArtifact.provider_name`
+///  to dispatch entries here.
 pub const DispatchEntry = struct {
     dispatch_fn: DispatchFn,
     dispatch_ctx: *anyopaque,
@@ -454,8 +454,8 @@ pub const DispatchEntry = struct {
 /// Maps provider names to dispatch entries for execute-time resolution.
 ///
 /// Populated before execution begins (typically by `tune()`), consulted at
-/// dispatch time by the backend's FFI handler. Decouples compile-time
-/// decisions (in the store) from execute-time dispatch (function pointers).
+///  dispatch time by the backend's FFI handler. Decouples compile-time
+///  decisions (in the store) from execute-time dispatch (fn pointers).
 pub const DispatchRegistry = struct {
     entries: std.StringHashMap(DispatchEntry),
 
@@ -471,11 +471,15 @@ pub const DispatchRegistry = struct {
         self.entries.deinit();
     }
 
-    /// Register a provider's dispatch entry. Duplicates are silently replaced.
+    /// Register a provider's dispatch entry.
+    /// **Duplicates are silently replaced.**
     pub fn register(self: *DispatchRegistry, provider_name: []const u8, entry: DispatchEntry) Allocator.Error!void {
-        const result = try self.entries.getOrPut(provider_name);
-        if (!result.found_existing) {
-            result.key_ptr.* = try self.entries.allocator.dupe(u8, provider_name);
+        const owned_name = try self.entries.allocator.dupe(u8, provider_name);
+        errdefer self.entries.allocator.free(owned_name);
+
+        const result = try self.entries.getOrPut(owned_name);
+        if (result.found_existing) {
+            self.entries.allocator.free(owned_name);
         }
         result.value_ptr.* = entry;
     }

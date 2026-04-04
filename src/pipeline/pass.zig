@@ -1,18 +1,17 @@
-/// Pass-Based Pipeline Infrastructure
-///
-/// This module defines the core abstractions for the pass-based compilation model:
-/// - Artifact: Tagged union representing IR at various stages (PR, MLIR)
-/// - PassContext: Shared state threaded through passes
-/// - Pass: Pass metadata + runnable function + optional user config
-/// - Pipeline: Pass sequence with validation and execution
-///
-/// The pipeline operates on PR and MLIR only. Compilation (MLIR -> EA) is a
-/// backend responsibility, called separately after the pipeline completes.
-///
-/// Key design principles:
-/// - Passes declare input/output artifact kinds for validation
-/// - Artifact kinds are runtime-validated at pass composition
-/// - PassContext is backend-agnostic; pass-specific state lives behind Pass.ptr
+//! Pass Pipeline Infrastructure
+//!
+//! This module defines the core abstractions for the pass-based compilation model:
+//!  - `Artifact`: Tagged union representing IR at various stages (PR, IM - eg MLIR)
+//!  - `PassContext`: Shared state threaded through passes
+//!  - `Pass`: Pass metadata + runnable function + optional user config
+//!  - `Pipeline`: Pass sequence with validation and execution
+//!
+//! ## ADR
+//!  - The pipeline operates on PR and IM (MLIR) only. Compilation (IM -> EA) is a
+//!     backend responsibility, called separately after the pipeline completes.
+//!  - Passes declare input/output artifact kinds for validation
+//!  - Artifact kinds are runtime-validated at pass composition
+//!  - PassContext is backend-agnostic. Pass-specific state lives behind Pass.ptr
 const std = @import("std");
 const log = std.log.scoped(.@"zg/pipeline");
 

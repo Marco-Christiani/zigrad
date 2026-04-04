@@ -1,5 +1,5 @@
-/// Special Operations
-/// Ops with unique semantics (custom_call, call).
+//! Special Operations
+//! Ops with unique semantics (custom_call, call).
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");

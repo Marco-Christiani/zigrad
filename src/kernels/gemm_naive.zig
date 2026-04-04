@@ -1,8 +1,7 @@
-/// Naive matmul implementation (baseline, no optimizations).
+//! Naive matmul implementation (baseline, no optimizations).
 const std = @import("std");
 
-/// Naive triple-loop matmul: C = A @ B.
-/// A is MxK, B is KxN, C is MxN (row-major layout).
+/// Naive strawman triple-loop matmul: C += A @ B.
 pub fn gemm_f32(
     m: usize,
     n: usize,

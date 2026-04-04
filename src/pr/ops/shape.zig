@@ -1,5 +1,5 @@
-/// Shape Operations
-/// Ops that manipulate tensor shape without changing element values.
+//! Shape Operations
+//! Ops that manipulate tensor shape without changing element values.
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");

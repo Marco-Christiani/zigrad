@@ -1,12 +1,15 @@
-/// StableHLO Legalize Pass
-///
-/// Converts `zigrad` dialect operations to `stablehlo`.
-/// When using the kernelize feature, this pass must run after MLIR-level
-///  selection or PR-level lowering and before backend compilation.
-/// NOTE: given recent changes this is actually deserving of some scrutiny,
-///  we can keep this logic in Zigrad almost certainly for the PR case and
-///  there is a good chance we can do so for the other case although that
-///  would be a larger lift and requires osme investigation
+//! StableHLO Legalize Pass
+//!
+//! Converts `zigrad` dialect operations to `stablehlo`.
+//! When using the kernelize feature, this pass must run after MLIR-level
+//!  selection or PR-level lowering and before backend compilation.
+//!
+//! ## ADR
+//!
+//! NOTE: given recent changes this is actually deserving of some scrutiny,
+//!  we can keep this logic in Zigrad almost certainly for the PR case and
+//!  there is a good chance we can do so for the other case although that
+//!  would be a larger lift and requires some investigation
 const std = @import("std");
 
 const pass_mod = @import("../../../pipeline/pass.zig");

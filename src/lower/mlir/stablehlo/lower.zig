@@ -413,6 +413,7 @@ fn make_update_block(ctx: mlir.Context, operand_type: mlir.Type, loc: mlir.Locat
 // StableHLO-specific Type Mapping Helpers
 // ============================================================================
 
+// TODO: this doesnt belong here
 fn dtype_to_dense_elements_type(dt: pr.DType) mlir.DenseElementsAttributeTypes {
     return switch (dt) {
         .f16 => .f16,

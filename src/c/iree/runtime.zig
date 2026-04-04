@@ -1,15 +1,15 @@
-/// IREE Runtime C API bindings.
-///
-/// Thin wrappers around `iree/runtime/api.h` (which transitively includes
-/// the HAL, VM, and base C APIs).  libIREERuntime.so is linked at build time
-/// when `-Diree-backend=true`.
-///
-/// Several IREE C API functions are `static inline` or macros that Zig's
-/// `@cImport` cannot translate.  These are wrapped in `src/c/iree/shim.c`
-/// and accessed here via `@cImport("iree_shim.h")` or `extern` declarations.
-///
-/// Error handling: IREE returns `iree_status_t`; non-OK statuses are
-/// converted to Zig errors and logged before propagation.
+//! IREE Runtime C API bindings.
+//!
+//! Thin wrappers around `iree/runtime/api.h` (which transitively includes
+//!  the HAL, VM, and base C APIs). libIREERuntime.so is linked at build time
+//!  when `-Diree-backend=true`.
+//!
+//! Several IREE C API functions are `static inline` or macros that Zig's
+//!  `@cImport` cannot translate.  These are wrapped in `src/c/iree/shim.c`
+//!  and accessed here via `@cImport("iree_zig.h")` or `extern` declarations.
+//!
+//! Error handling: IREE returns `iree_status_t`, non-OK statuses are
+//!  converted to Zig errors and logged before propagation.
 const std = @import("std");
 const log = std.log.scoped(.@"zg/iree_runtime");
 

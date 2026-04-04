@@ -1,23 +1,22 @@
-/// Minimal IREE VMFB runner.
-///
-/// Loads a pre-compiled VMFB and executes a function with user-specified inputs.
-/// This binary does NOT depend on zigrad, MLIR, PJRT, or TVM.
-/// It links only the IREE runtime static archives + libc.
-///
-/// Usage:
-///   iree-runner <vmfb-path> [options] [--input=<spec>...]
-///
-/// Options:
-///   --function=<name>   Entry function (default: "module.main")
-///   --driver=<name>     HAL driver (default: "local-sync")
-///   --input=<spec>      Input tensor spec (repeatable). Format:
-///                         <dim0>x<dim1>x...x<dtype>[=v0,v1,v2,...]
-///                       If values are omitted, zeros are used.
-///                       Supported dtypes: f32, f64, i32, i64
-///
-/// Examples:
-///   iree-runner demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=3x2xf32=7,8,9,10,11,12
-///   iree-runner demo.vmfb  (no inputs, for zero-arg functions)
+//! Minimal IREE VMFB runner.
+//!
+//! Loads a pre-compiled VMFB and executes a function with user-specified inputs.
+//! Standalone binary target links only IREE runtime static archives + libc.
+//!
+//! Usage:
+//!   iree-runner <vmfb-path> [options] [--input=<spec>...]
+//!
+//! Options:
+//!   --function=<name>   Entry function (default: "module.main")
+//!   --driver=<name>     HAL driver (default: "local-sync")
+//!   --input=<spec>      Input tensor spec (repeatable). Format:
+//!                         <dim0>x<dim1>x...x<dtype>[=v0,v1,v2,...]
+//!                       If values are omitted, zeros are used.
+//!                       Supported dtypes: f32, f64, i32, i64
+//!
+//! Examples:
+//!   iree-runner demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=3x2xf32=7,8,9,10,11,12
+//!   iree-runner demo.vmfb  (no inputs, for zero-arg functions)
 const std = @import("std");
 const rt = @import("c/iree/runtime.zig");
 

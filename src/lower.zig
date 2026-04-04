@@ -1,15 +1,15 @@
-/// Lower Module
-///
-/// Lowering passes that transform PR into target-specific IR.
-///
-/// Sub-modules:
-/// - mlir: MLIR infrastructure + dialect-specific lowering (gated by has_mlir)
-/// - types: Pure data types (always available, no link dependency)
+//! PR -> IM lowering.
+//!
+//! Lowering passes for PR to target-specific intermediate representations (IMs).
+//!
+//! Sub-modules:
+//! - `mlir`: MLIR infrastructure and dialect-specific lowering (gated by `-Dmlir`).
+//! - `types`: Pure data types shared across lowering targets (always available,
+//!     no link dependency).
 const build_options = @import("build_options");
 
 pub const types = @import("lower/types.zig");
 
-/// Pure data types - always available regardless of MLIR enablement.
 pub const LowerPassConfig = types.LowerPassConfig;
 pub const OutputFormat = types.OutputFormat;
 

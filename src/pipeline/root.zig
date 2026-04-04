@@ -1,15 +1,13 @@
-/// Pipeline Module
-///
-/// Pass-based pipeline infrastructure for compilation.
-/// The pipeline operates on PR and MLIR only - compilation to executable
-///  artifacts is a backend responsibility.
-///
-/// Key types:
-/// - Artifact: Tagged union representing IR at various stages (PR, MLIR)
-/// - PassContext: Shared state threaded through passes
-/// - Pass: Pass descriptor (name + input/output kinds + run)
-///
-/// MLIR-specific passes (select, legalize) live in `lower/mlir/`.
+//! Entrypoint for pass pipeline infrastructure.
+//!
+//! The pipeline is a chain of passes that transform artifacts from PR through
+//!  to IM (MLIR). Compilation from IM to executable artifacts is a backend
+//!  responsibility, the pipeline conventionally ends at an IM ready to be
+//!  compiled by a backend toolchain.
+//!
+//! MLIR-specific passes (select, legalize) live in `lower/mlir/`.
+//!
+//! See `pass` for more.
 const pass = @import("pass.zig");
 
 // Re-export pass types

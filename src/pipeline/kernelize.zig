@@ -1,17 +1,17 @@
-/// Kernelization Pass
-///
-/// PR -> PR pass that consults a pre-computed `KernelStore` to replace annotated
-/// regions with `custom_call` ops. Never invokes providers or performs compilation.
-///
-/// For each region with a `kernelize` annotation, the pass:
-/// 1. Computes a kernel signature from the region's op signature.
-/// 2. Looks up the signature in the store for a tuning decision.
-/// 3. Profitable decisions: rewrites the region's ops into a single
-///    `custom_call` op carrying kernel_key, provider_name, and carrier metadata.
-/// 4. Negative or absent decisions: leaves the region unchanged for baseline lowering.
-///
-/// The store is populated externally by `tune()` (src/tune.zig). This pass is a
-/// pure consumer -- it never modifies the store.
+//! Kernelization Pass
+//!
+//! PR -> PR pass that consults a pre-computed `KernelStore` to replace annotated
+//!  regions with `custom_call` ops. Never invokes providers or performs compilation.
+//!
+//! For each region with a `kernelize` annotation, the pass:
+//!  1. Computes a kernel signature from the region's op signature.
+//!  2. Looks up the signature in the store for a tuning decision.
+//!  3. Profitable decisions: rewrites the region's ops into a single
+//!      `custom_call` op carrying kernel_key, provider_name, and carrier metadata.
+//!  4. Negative or absent decisions: leaves the region unchanged for baseline lowering.
+//!
+//! The store is populated externally by `tune()` (src/tune.zig). This pass is a
+//!  pure consumer, it does not modifies the store.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");

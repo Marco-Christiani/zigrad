@@ -1,8 +1,8 @@
-/// TVM matmul adapter for benchmark harness.
-///
-/// Bridges the benchmark harness to TVM compiled kernels via DLPack tensors
-/// and the typed TVM FFI wrappers. CPU path borrows host memory via DLPack;
-/// GPU path allocates device tensors and copies data.
+//! TVM matmul adapter for benchmark harness.
+//!
+//! Bridges the benchmark harness to TVM compiled kernels via DLPack tensors
+//!  and the typed TVM FFI wrappers. CPU path borrows host memory via DLPack,
+//!  GPU path allocates device tensors and copies data.
 const std = @import("std");
 const zg = @import("../root.zig");
 const dlpack = zg.tvm.dlpack;

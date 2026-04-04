@@ -1,4 +1,4 @@
-/// Main benchmark orchestration for matmul performance testing.
+//! Main benchmark orchestration for matmul performance testing.
 const std = @import("std");
 const zg = @import("../root.zig");
 const gemm = zg.kernels.gemm;

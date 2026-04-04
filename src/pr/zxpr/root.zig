@@ -1,24 +1,20 @@
-///! ZXPR: Zigrad Expression Representation
-///!
-///! A human-readable text format for zigrad's Program Representation (PR).
-///! Inspired by jaxpr.
-///!
-///! Features:
-///! - Clean functional syntax with `let`/`in` bindings
-///! - Op-specific attribute annotations
-///! - AD-aware annotations (VJP support indicators)
-///!
-///! Example:
-///!
-///! zxpr main {
-///!   ; params (2)
-///!   a: 2x3<f32>
-///!   b: 3x2<f32>
-///!   ; body (1 ops)
-///!   let
-///!     c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp
-///!   in c
-///! }
+//! ZXPR: Zigrad Expression Representation
+//!
+//! A human-readable text format for zigrad's Program Representation (PR).
+//! Inspired by jaxpr.
+//!
+//! Example:
+//! ```zxpr
+//! zxpr main {
+//!   ; params (2)
+//!   a: 2x3<f32>
+//!   b: 3x2<f32>
+//!   ; body (1 ops)
+//!   let
+//!     c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp
+//!   in c
+//! }
+//! ```
 const std = @import("std");
 const pr = @import("../pr.zig");
 const ops = @import("../ops/ops.zig");

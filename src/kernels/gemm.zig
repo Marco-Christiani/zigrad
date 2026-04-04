@@ -1,13 +1,12 @@
-/// Public API for hand-rolled naive GEMM kernel and BLAS baselines.
+//! Public API for hand-rolled naive GEMM kernel and BLAS baselines.
 const std = @import("std");
 const build_options = @import("build_options");
 
 const gemm_naive = @import("gemm_naive.zig");
 
-/// Single-precision matmul: C = A @ B.
-/// A is M×K, B is K×N, C is M×N (row-major layout).
+/// Single-precision matmul: C += A @ B.
 ///
-/// Simple triple-loop baseline implementation (i-k-j order).
+/// Strawman triple-loop implementation (i-k-j order).
 /// Caller must zero C before calling if accumulation is not desired.
 pub fn gemm_f32(
     m: usize,
@@ -17,11 +16,11 @@ pub fn gemm_f32(
     a: []const f32,
     /// Leading dimension of A (stride).
     lda: usize,
-    /// Input matrix B (K×N).
+    /// Input matrix B (KxN).
     b: []const f32,
     /// Leading dimension of B (stride).
     ldb: usize,
-    /// Output matrix C (M×N), accumulated into.
+    /// Output matrix C (MxN), accumulated into.
     c: []f32,
     /// Leading dimension of C (stride).
     ldc: usize,
@@ -45,21 +44,21 @@ test "gemm: naive 2x2 matmul" {
 
 const blas = if (build_options.has_mkl) @cImport({
     @cInclude("mkl_cblas.h");
-}) else @compileError("MKL not available -- rebuild with MKL in SDK");
+}) else @compileError("MKL not available. Rebuild with MKL in SDK");
 
 pub fn blas_gemm_f32(
     m: usize,
     n: usize,
     k: usize,
-    /// Input matrix A (M×K).
+    /// Input matrix A (MxK).
     a: []const f32,
     /// Leading dimension of A (stride).
     lda: usize,
-    /// Input matrix B (K×N).
+    /// Input matrix B (KxN).
     b: []const f32,
     /// Leading dimension of B (stride).
     ldb: usize,
-    /// Output matrix C (M×N), accumulated into.
+    /// Output matrix C (MxN), accumulated into.
     c: []f32,
     /// Leading dimension of C (stride).
     ldc: usize,

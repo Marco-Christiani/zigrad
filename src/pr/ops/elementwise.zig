@@ -1,5 +1,5 @@
-/// Elementwise Operations
-/// Binary ops that operate element-by-element on tensors of the same shape.
+//! Elementwise Operations
+//! Binary ops that operate element-by-element on tensors of the same shape.
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");

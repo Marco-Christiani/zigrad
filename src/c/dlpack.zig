@@ -1,7 +1,4 @@
-//! DLPack v1.2 type definitions — standalone, no TVM dependency.
-//!
-//! Pure Zig `extern struct` definitions ABI-compatible with the DLPack
-//! interchange format used by TVM, PyTorch, JAX, IREE, etc.
+//! DLPack v1.2 type definitions.
 
 const std = @import("std");
 
@@ -55,8 +52,8 @@ pub const Tensor = extern struct {
 
     /// Create a contiguous DLPack tensor borrowing existing host memory.
     ///
-    /// The returned tensor references `data` and `shape` by pointer —
-    /// both must outlive the tensor.
+    /// The returned tensor references `data` and `shape` by pointer so
+    ///  both must outlive the tensor.
     pub fn init_contiguous(comptime T: type, data: []T, shape: []i64) Tensor {
         return .{
             .data = @ptrCast(data.ptr),

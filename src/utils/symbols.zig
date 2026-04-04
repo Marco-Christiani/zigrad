@@ -1,4 +1,6 @@
-/// Named symbol presets for terminal and text output.
+//! Named symbol presets for terminal and text output.
+
+/// Printable symbols
 pub const Symbols = struct {
     /// Marker used for successful outcomes.
     check: []const u8,
@@ -6,10 +8,10 @@ pub const Symbols = struct {
     /// Marker used for failed outcomes.
     x: []const u8,
 
-    /// Multiplication symbol used in textual output.
+    /// Multiplication symbol.
     mul: []const u8,
 
-    /// Right arrow used in textual output.
+    /// Arrow pointing right.
     right_arrow: []const u8,
 
     pub const unicode = Symbols{

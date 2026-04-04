@@ -1,4 +1,4 @@
-/// Correctness verification utilities for matmul benchmarks.
+//! Correctness verification utilities for matmul benchmarks.
 const std = @import("std");
 
 /// Naive reference matmul implementation (not optimized, for verification only).

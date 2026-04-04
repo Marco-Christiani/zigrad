@@ -1,6 +1,6 @@
-/// Op Registry
-/// Central registry for all ops with comptime dispatch and validation.
-/// Each handler receives the op and its typed params directly.
+//! Op Registry
+//! Central registry for all ops with comptime dispatch and validation.
+//! Each handler receives the op and its typed params directly.
 const std = @import("std");
 const pr = @import("../pr.zig");
 

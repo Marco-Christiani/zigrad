@@ -22,7 +22,7 @@ const frontend = @import("frontend.zig");
 ///
 /// ## Typical usage
 ///
-/// ```
+/// ```zig
 /// var compiled = try frontend.compile(train_step, alloc, b, device, specs, cfg);
 /// var state = try TrainState.init_from_model(alloc, &compiled, b, initial_bufs);
 /// for (0..num_steps) |_| {

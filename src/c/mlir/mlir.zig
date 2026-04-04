@@ -64,7 +64,7 @@ pub inline fn string_ref(str: []const u8) c.MlirStringRef {
 }
 
 pub inline fn from_string_ref(str: c.MlirStringRef) []const u8 {
-    // Note: mlir.StringRef need not to be null terminated.
+    // Note: mlir.StringRef need not be null terminated.
     return str.data[0..str.length];
 }
 

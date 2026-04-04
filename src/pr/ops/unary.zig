@@ -1,4 +1,4 @@
-/// Unary elementwise operations.
+//! Unary elementwise operations.
 const std = @import("std");
 const types = @import("types.zig");
 const pr = @import("../pr.zig");

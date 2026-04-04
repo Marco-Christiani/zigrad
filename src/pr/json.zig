@@ -1,11 +1,11 @@
-///! JSON graph emitter for PR.
-///!
-///! Graph model: nodes = ops (params + equations), edges = vars (typed data flow).
-///!
-///! Each op becomes one node regardless of output count. Each variable
-///! flowing between ops becomes an edge carrying the var's name, dtype, shape,
-///! and ZXPR snippet. This matches the PR's SSA structure where variables are
-///! the named, typed connections between operations.
+//! JSON graph emitter for PR.
+//!
+//! Graph model: nodes = ops (params + equations), edges = vars (typed data flow).
+//!
+//! Each op becomes one node regardless of output count. Each variable
+//!  flowing between ops becomes an edge carrying the var's name, dtype, shape,
+//!  and ZXPR snippet. This matches the PR's SSA structure where variables are
+//!  the named, typed connections between operations.
 const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
@@ -18,7 +18,7 @@ const var_name = zxpr.var_name;
 ///
 /// Nodes represent ops (params and equations). Edges represent variables.
 /// A param node has one outgoing var edge per consumer. An op node
-/// has outgoing var edges for each of its output variables.
+///  has outgoing var edges for each of its output variables.
 pub fn emit(func: pr.Function, writer: *Writer) !void {
     try writer.writeAll("{");
 

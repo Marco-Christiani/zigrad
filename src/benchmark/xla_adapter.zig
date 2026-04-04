@@ -1,4 +1,4 @@
-/// XLA/PJRT CPU matmul adapter for benchmark harness.
+//! XLA/PJRT CPU matmul adapter for benchmark harness.
 const std = @import("std");
 const zg = @import("../root.zig");
 const pr = zg.pr;

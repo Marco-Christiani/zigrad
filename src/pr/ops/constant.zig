@@ -1,5 +1,5 @@
-/// Constant Operations
-/// Ops that produce constant values (no inputs).
+//! Constant Operations
+//! Ops that produce constant values (no inputs).
 const types = @import("types.zig");
 const pr = @import("../pr.zig");
 const Aval = pr.Aval;

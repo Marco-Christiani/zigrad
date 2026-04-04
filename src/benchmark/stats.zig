@@ -1,4 +1,4 @@
-/// Statistical utilities for benchmark result analysis.
+//! Statistical utilities for benchmark result analysis.
 const std = @import("std");
 
 /// Computes the median of a slice of f64 values.

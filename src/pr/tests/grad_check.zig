@@ -1,7 +1,7 @@
-/// Finite-difference gradient checker for PR automatic differentiation.
-///
-/// Compares analytic gradients (from VJP) against numeric gradients
-/// (central finite differences) to verify AD correctness.
+//! Finite-difference gradient checker for PR automatic differentiation.
+//!
+//! Compares analytic gradients (from VJP) against numeric gradients
+//!  (central finite differences) to verify AD correctness.
 const std = @import("std");
 const pr = @import("../pr.zig");
 const pr_eval = @import("eval.zig");

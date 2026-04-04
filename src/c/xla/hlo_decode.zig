@@ -1,7 +1,7 @@
-/// HLO Protobuf Decoder
-///
-/// Decodes XLA HLO protobuf bytes into human-readable text.
-/// Used by `dump_optimized_program` (pipeline) and the standalone `decode_hlo` tool.
+//! HLO Protobuf Decoder
+//!
+//! Decodes XLA HLO protobuf bytes into human-readable text.
+//! Used by `dump_optimized_program` (pipeline) and the standalone `decode_hlo` tool.
 const std = @import("std");
 const protobuf = @import("protobuf");
 const xla = @import("xla_pb");

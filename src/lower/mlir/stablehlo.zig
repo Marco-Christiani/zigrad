@@ -1,8 +1,8 @@
-/// StableHLO Dialect Module
-///
-/// StableHLO-specific lowering and MLIR passes:
-/// - lower: PR -> StableHLO translation
-/// - legalize: zigrad.kernel_call -> stablehlo.custom_call
+//! StableHLO Dialect Module
+//!
+//! StableHLO-specific lowering and MLIR passes:
+//! - lower: PR -> StableHLO translation
+//! - legalize: zigrad.kernel_call -> stablehlo.custom_call
 const lower_mod = @import("stablehlo/lower.zig");
 const legalize_mod = @import("stablehlo/legalize.zig");
 

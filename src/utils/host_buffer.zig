@@ -1,7 +1,7 @@
-/// Host Buffer Utils
-///
-/// Host-side buffer management with shape and dtype metadata.
-/// No device buffer operations, those belong to backend.Buffer.
+//! Host-side buffer with shape and dtype metadata.
+//!
+//! Manages CPU-resident data with owned, borrowed, or memory-mapped backing.
+//! Upload to a device via `backend.Buffer`.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 

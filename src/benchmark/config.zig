@@ -1,4 +1,4 @@
-/// Configuration types for the matmul benchmark harness.
+//! Configuration types for the matmul benchmark harness.
 const std = @import("std");
 const utils = @import("../utils/root.zig");
 

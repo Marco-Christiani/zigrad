@@ -3,12 +3,12 @@
 //! Unified tensor type with three modes:
 //!
 //! - **traced**: compile-time. Bound to a `FunctionBuilder`. Each operation
-//!   emits a PR op and returns a new traced Tensor. Used during program
-//!   construction (tracing).
+//!    emits a PR op and returns a new traced Tensor. Used during program
+//!    construction (tracing).
 //! - **device**: runtime. Wraps a backend device buffer. Supports host
-//!   transfer (`to_host_sync`, `to_host_async`) and cleanup (`deinit`).
+//!    transfer (`to_host_sync`, `to_host_async`) and cleanup (`deinit`).
 //! - **abstract**: specification only (dtype + shape, no data). Used to
-//!   define input specs for `frontend.compile`.
+//!    define input specs for `frontend.compile`.
 //!
 //! All modes carry `dtype` and `shape` as direct fields for uniform access.
 //! In traced mode these are copied from the underlying `Var.aval` at

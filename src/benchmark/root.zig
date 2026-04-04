@@ -1,3 +1,7 @@
+//! Benchmarking harness for comparing kernel implementations across backends.
+//!
+//! Provides configurable matrix-multiply benchmarks with correctness checking,
+//!  timing statistics, and adapters for TVM and XLA execution.
 pub const harness = @import("harness.zig");
 pub const config = @import("config.zig");
 pub const stats = @import("stats.zig");

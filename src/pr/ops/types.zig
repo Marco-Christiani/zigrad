@@ -1,4 +1,4 @@
-/// Context types for op implementations and helpers.
+//! Context types for op implementations and helpers.
 const std = @import("std");
 const pr = @import("../pr.zig");
 

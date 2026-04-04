@@ -1,17 +1,17 @@
-/// Structured parameter tree with flat storage.
-///
-/// Generic over leaf type. Stores leaves in DFS traversal order with
-///  parallel dot-separated paths. Structure is recoverable at comptime
-///  via `extract`.
-///
-/// Useful for the spec -> host -> device buffer pipeline:
-///
-/// ```zig
-/// var specs = try Tree(Tensor).from(allocator, inputs_spec);
-/// var host = try specs.map(HostBuffer, allocator, alloc_host);
-/// var dev  = try host.map(Backend.Buffer, ctx, upload);
-/// // dev.leaves[0..param_count] // ready for execution
-/// ```
+//! Structured parameter tree with flat storage.
+//!
+//! Generic over leaf type. Stores leaves in DFS traversal order with
+//!  parallel dot-separated paths. Structure is recoverable at comptime
+//!  via `extract`.
+//!
+//! Useful for the spec -> host -> device buffer pipeline:
+//!
+//! ```zig
+//! var specs = try Tree(Tensor).from(allocator, inputs_spec);
+//! var host = try specs.map(HostBuffer, allocator, alloc_host);
+//! var dev  = try host.map(Backend.Buffer, ctx, upload);
+//! // dev.leaves[0..param_count] // ready for execution
+//! ```
 const std = @import("std");
 
 pub fn Tree(comptime Leaf: type) type {

@@ -1,18 +1,23 @@
 const std = @import("std");
 const log = std.log.scoped(.@"zg/loop_timer");
 
-/// Non-inverting timer for step loops.
+/// Convenience timer for timing events in loops.
 ///
-/// Caller owns the loop. LoopTimer provides timing bookkeeping and
-/// formatted per-step logging. Usage:
+/// Provides timing bookkeeping and formatted per-step logging,
+///  does NOT manage barriers, that is the user's responsbility
+///  and a requirement for valid results.
 ///
-/// ```
+/// Usage:
+///
+/// ```zig
 /// var timer = LoopTimer{ .label = "train" };
 /// for (0..steps) |_| {
 ///     try timer.start_step();
 ///     // ... work ...
+///     // (barrier)
 ///     timer.mark("dispatch");
 ///     // ... more work ...
+///     // (barrier)
 ///     timer.mark("exec");
 ///     timer.end_step(loss);
 /// }
@@ -46,8 +51,8 @@ pub const LoopTimer = struct {
     }
 
     /// Finalize the current step. Accumulates total time, increments step
-    /// count, and (unless `quiet`) logs a line with per-phase and total
-    /// durations plus the optional loss value.
+    ///  count, and (unless `quiet`) logs a line with per-phase and total
+    ///  durations plus the optional loss value.
     pub fn end_step(self: *LoopTimer, loss: ?f32) void {
         var step_ns: u64 = 0;
         for (self.phases[0..self.phase_count]) |p| step_ns += p.ns;

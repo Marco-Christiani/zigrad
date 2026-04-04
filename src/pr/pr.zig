@@ -1,20 +1,20 @@
 //! Program Representation (PR)
 //!
 //! PR is the compiler's core intermediate representation: a toolchain-neutral
-//! graph of tensor operations. It sits between user-facing tracing (Tensor /
-//! FunctionBuilder) and target-specific lowering (MLIR / StableHLO).
+//!  graph of tensor operations. It sits between user-facing tracing (Tensor /
+//!  FunctionBuilder) and target-specific lowering (MLIR / StableHLO).
 //!
 //! ## Key types
 //!
-//! 1. `Program` - top-level container; owns an arena that backs all IR nodes.
-//! 2. `Function` - named function with params, return vars, and a linear op list.
-//! 3. `FunctionBuilder` - mutable builder for constructing a Function:
-//!     `init`, `emit` ops, and `finish` (validates on `finish`).
-//! 4. `Op` - a single operation: typed `Params` union + input `Operand` list +
-//!     output `Var` list.
-//! 5. `Var` - SSA value with an `Aval` (abstract type) and an intrinsic
-//!      doubly-linked use-list.
-//! 6. `Operand` - use-chain node linking a consuming Op to the Var it reads.
+//!  1. `Program` - top-level container; owns an arena that backs all IR nodes.
+//!  2. `Function` - named function with params, return vars, and a linear op list.
+//!  3. `FunctionBuilder` - mutable builder for constructing a Function:
+//!      `init`, `emit` ops, and `finish` (validates on `finish`).
+//!  4. `Op` - a single operation: typed `Params` union + input `Operand` list +
+//!      output `Var` list.
+//!  5. `Var` - SSA value with an `Aval` (abstract type) and an intrinsic
+//!       doubly-linked use-list.
+//!  6. `Operand` - use-chain node linking a consuming Op to the Var it reads.
 //!
 //! ## Ownership
 //!
@@ -24,12 +24,12 @@
 //!
 //! ## Design invariants
 //!
-//! - PR is toolchain-neutral
-//! - Ops are single-output (except `call` / `custom_call` which use
-//!    `emit_with_outputs`).
-//! - FunctionBuilder validates eagerly on `finish` via the op registry.
-//! - Slice params (dims, axes, etc.) are duped into the arena by builder
-//!    convenience methods so callers can pass stack/temp slices.
+//!  - PR is toolchain-neutral
+//!  - Ops are single-output (except `call` / `custom_call` which use
+//!     `emit_with_outputs`).
+//!  - FunctionBuilder validates eagerly on `finish` via the op registry.
+//!  - Slice params (dims, axes, etc.) are duped into the arena by builder
+//!     convenience methods so callers can pass stack/temp slices.
 const std = @import("std");
 const ops = @import("ops/ops.zig");
 const pr_log = std.log.scoped(.@"zg/pr");

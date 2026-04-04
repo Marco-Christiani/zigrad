@@ -1,20 +1,20 @@
-/// Zigrad Root Module
-///
-/// Public API for the Zigrad compiler.
-///
-/// Module organization:
-/// - `pr`: Program Representation (Zigrad-owned, toolchain-neutral).
-///   Includes `pr.ad` for core AD transforms (VJP, JVP).
-/// - `lower`: Lowering passes (PR -> MLIR).
-/// - `backend`: Unified backend (compile + execute).
-/// - `pipeline`: Pass-based pipeline infrastructure.
-/// - `frontend`: User-facing program construction, compilation, and training.
-///   - `frontend.compile`: AOT compilation of traced functions.
-///   - `frontend.transforms`: Trace-time function transforms (e.g. `value_and_grad`).
-///   - `frontend.optim`: Traced-mode optimizer building blocks.
-///   - `frontend.train`: Training loop state management (`TrainState`).
-/// - `Tensor`: Unified tensor type (traced, device, or abstract mode).
-/// - `utils`: Utility types (HostBuffer, Tree, etc.).
+//! Zigrad Root Module
+//!
+//! Public API for the Zigrad compiler.
+//!
+//! Module organization:
+//! - `pr`: Program Representation (Zigrad's in memory IR).
+//!    Includes `pr.ad` for core AD transforms (VJP, JVP).
+//! - `lower`: Lowering passes (PR -> MLIR).
+//! - `backend`: Unified backend interface (compile + execute).
+//! - `pipeline`: Infrastructure for compiler passes.
+//! - `frontend`: Higher level user-facing APIs.
+//!   - `frontend.compile`: AOT compilation of traced functions.
+//!   - `frontend.transforms`: Trace-time function transforms (e.g. `value_and_grad`).
+//!   - `frontend.optim`: Traced-mode optimizer building blocks.
+//!   - `frontend.train`: Training loop state management (`TrainState`).
+//! - `Tensor`: Unified tensor type (traced, device, or abstract mode).
+//! - `utils`: Utility types (`HostBuffer`, `Tree`, etc.).
 const std = @import("std");
 
 pub const build_options = @import("build_options");

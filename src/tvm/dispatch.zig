@@ -1,8 +1,7 @@
-/// TVM kernel dispatch state.
-///
-/// Owns the module cache and provides a dispatch function conforming to
-/// kernel.DispatchFn. Moved here from the PJRT backend to decouple the
-/// backend from TVM-specific logic.
+//! TVM kernel dispatch state.
+//!
+//! Owns a cache of loaded TVM runtime modules and provides a dispatch
+//!  function conforming to `kernel.DispatchFn`.
 const std = @import("std");
 const kernel = @import("../kernel.zig");
 const dlpack = @import("../c/dlpack.zig");
