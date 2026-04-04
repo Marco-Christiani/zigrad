@@ -81,6 +81,7 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <UContainer>
   <UPage>
     <UPageHeader
       title="API Reference"
@@ -283,6 +284,7 @@ onUnmounted(() => {
       </div>
     </UPageBody>
   </UPage>
+  </UContainer>
 </template>
 
 <style>
