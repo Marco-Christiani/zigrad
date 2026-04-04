@@ -6,9 +6,9 @@ const syms = utils.Symbols.unicode;
 
 /// Matmul shape specification (MxK @ KxN = MxN).
 pub const Shape = struct {
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
 
     pub fn format(
         self: Shape,

@@ -4,9 +4,9 @@ const std = @import("std");
 /// Naive reference matmul implementation (not optimized, for verification only).
 /// C = A @ B where A is MxK, B is KxN, C is MxN (row-major layout).
 pub fn reference_matmul_f32(
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
     a: []const f32,
     lda: usize,
     b: []const f32,
@@ -14,18 +14,21 @@ pub fn reference_matmul_f32(
     c: []f32,
     ldc: usize,
 ) void {
+    const _m: usize = @intCast(m);
+    const _n: usize = @intCast(n);
+    const _k: usize = @intCast(k);
     // Zero output
-    for (0..m) |i| {
-        for (0..n) |j| {
+    for (0.._m) |i| {
+        for (0.._n) |j| {
             c[i * ldc + j] = 0.0;
         }
     }
 
     // Triple loop: C[i,j] += A[i,k] * B[k,j]
-    for (0..m) |i| {
-        for (0..k) |k_idx| {
+    for (0.._m) |i| {
+        for (0.._k) |k_idx| {
             const a_val = a[i * lda + k_idx];
-            for (0..n) |j| {
+            for (0.._n) |j| {
                 c[i * ldc + j] += a_val * b[k_idx * ldb + j];
             }
         }

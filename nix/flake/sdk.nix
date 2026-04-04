@@ -195,6 +195,14 @@ in {
         tvm = false;
         gpu = false;
       };
+      full-benchmark = mkSdk {
+        mlir = true;
+        iree = true;
+        tvm = true;
+        gpu = true;
+        mirage = true;
+        mkl = true;
+      };
     };
 
     zigrad = pkgs.callPackage ../zigrad.nix {

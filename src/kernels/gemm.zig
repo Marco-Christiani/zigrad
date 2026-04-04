@@ -9,10 +9,10 @@ const gemm_naive = @import("gemm_naive.zig");
 /// Strawman triple-loop implementation (i-k-j order).
 /// Caller must zero C before calling if accumulation is not desired.
 pub fn gemm_f32(
-    m: usize,
-    n: usize,
-    k: usize,
-    /// Input matrix A (M×K).
+    m: i64,
+    n: i64,
+    k: i64,
+    /// Input matrix A (MxK).
     a: []const f32,
     /// Leading dimension of A (stride).
     lda: usize,
@@ -25,7 +25,7 @@ pub fn gemm_f32(
     /// Leading dimension of C (stride).
     ldc: usize,
 ) void {
-    gemm_naive.gemm_f32(m, n, k, a, lda, b, ldb, c, ldc);
+    gemm_naive.gemm_f32(@intCast(m), @intCast(n), @intCast(k), a, lda, b, ldb, c, ldc);
 }
 
 test "gemm: naive 2x2 matmul" {
@@ -47,9 +47,9 @@ const blas = if (build_options.has_mkl) @cImport({
 }) else @compileError("MKL not available. Rebuild with MKL in SDK");
 
 pub fn blas_gemm_f32(
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
     /// Input matrix A (MxK).
     a: []const f32,
     /// Leading dimension of A (stride).

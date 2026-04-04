@@ -13,9 +13,9 @@ const tvm_module = zg.tvm.module;
 pub fn execute_with_module(
     allocator: std.mem.Allocator,
     tuned: *tvm_module.TunedModule,
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
     a: []const f32,
     b: []const f32,
     c: []f32,
@@ -23,9 +23,9 @@ pub fn execute_with_module(
     try zg.tvm.ffi.ensure_loaded(allocator, .{});
 
     // Create DLPack tensors borrowing existing host buffers
-    var shape_a = [_]i64{ @intCast(m), @intCast(k) };
-    var shape_b = [_]i64{ @intCast(k), @intCast(n) };
-    var shape_c = [_]i64{ @intCast(m), @intCast(n) };
+    var shape_a = [_]i64{ m, k };
+    var shape_b = [_]i64{ k, n };
+    var shape_c = [_]i64{ m, n };
 
     var dl_a = dlpack.ManagedTensor.borrowing(
         dlpack.Tensor.init_contiguous(f32, @constCast(a), &shape_a),
@@ -55,9 +55,9 @@ pub fn execute_with_module(
 pub fn execute_gpu_with_module(
     allocator: std.mem.Allocator,
     tuned: *tvm_module.TunedModule,
-    m: usize,
-    n: usize,
-    k: usize,
+    m: i64,
+    n: i64,
+    k: i64,
     a: []const f32,
     b: []const f32,
     c: []f32,
@@ -65,9 +65,9 @@ pub fn execute_gpu_with_module(
     try zg.tvm.ffi.ensure_loaded(allocator, .{});
 
     // Allocate GPU tensors (includes host->device copy)
-    var shape_a = [_]i64{ @intCast(m), @intCast(k) };
-    var shape_b = [_]i64{ @intCast(k), @intCast(n) };
-    var shape_c = [_]i64{ @intCast(m), @intCast(n) };
+    var shape_a = [_]i64{ m, k };
+    var shape_b = [_]i64{ k, n };
+    var shape_c = [_]i64{ m, n };
 
     var t_a = try tvm_runtime.Tensor.allocate(allocator, @constCast(a), &shape_a, .cuda);
     defer t_a.deinit();
@@ -75,7 +75,7 @@ pub fn execute_gpu_with_module(
     defer t_b.deinit();
 
     // Allocate output tensor on GPU (zero-initialized)
-    const c_init = try allocator.alloc(f32, m * n);
+    const c_init = try allocator.alloc(f32, @intCast(m * n));
     defer allocator.free(c_init);
     @memset(c_init, 0);
     var t_c = try tvm_runtime.Tensor.allocate(allocator, c_init, &shape_c, .cuda);

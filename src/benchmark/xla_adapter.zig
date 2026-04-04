@@ -62,9 +62,9 @@ pub const XlaContext = struct {
     /// Execute XLA CPU matmul (compiles on-the-fly, caches per shape).
     pub fn execute(
         self: *XlaContext,
-        m: usize,
-        n: usize,
-        k: usize,
+        m: i64,
+        n: i64,
+        k: i64,
         a: []const f32,
         b: []const f32,
         c: []f32,
@@ -87,16 +87,13 @@ pub const XlaContext = struct {
         const a_bytes = std.mem.sliceAsBytes(a);
         const b_bytes = std.mem.sliceAsBytes(b);
 
-        var dev_a = try self.backend_handle.buffer_from_host(self.device, a_bytes, .f32, &.{
-            @intCast(m),
-            @intCast(k),
-        });
+        var shape_a = [_]i64{ m, k };
+        var shape_b = [_]i64{ k, n };
+
+        var dev_a = try self.backend_handle.buffer_from_host(self.device, a_bytes, .f32, &shape_a);
         defer self.backend_handle.deinit_buffer(&dev_a);
 
-        var dev_b = try self.backend_handle.buffer_from_host(self.device, b_bytes, .f32, &.{
-            @intCast(k),
-            @intCast(n),
-        });
+        var dev_b = try self.backend_handle.buffer_from_host(self.device, b_bytes, .f32, &shape_b);
         defer self.backend_handle.deinit_buffer(&dev_b);
 
         // Execute
@@ -123,9 +120,9 @@ pub const XlaContext = struct {
     /// Compile XLA matmul for a specific shape.
     fn compile_matmul(
         self: *XlaContext,
-        m: usize,
-        n: usize,
-        k: usize,
+        m: i64,
+        n: i64,
+        k: i64,
     ) !*backend.pjrt.LoadedExecutable {
         // Build minimal PR program
         var program = pr.Program.init(self.allocator);

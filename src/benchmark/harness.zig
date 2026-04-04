@@ -9,10 +9,10 @@ const correctness = @import("correctness.zig");
 const tvm_adapter = @import("tvm_adapter.zig");
 const xla_adapter = @import("xla_adapter.zig");
 
-pub const BenchmarkConfig = config.BenchmarkConfig;
-pub const Shape = config.Shape;
-pub const Implementation = config.Implementation;
-pub const BenchmarkResult = config.BenchmarkResult;
+const BenchmarkConfig = config.BenchmarkConfig;
+const Shape = config.Shape;
+const Implementation = config.Implementation;
+const BenchmarkResult = config.BenchmarkResult;
 
 const log = std.log.scoped(.@"zg/benchmark");
 
@@ -90,11 +90,11 @@ pub const Harness = struct {
         log.info("benchmarking shape: {any}", .{shape});
 
         // Allocate input/output matrices (row-major layout)
-        const a = try self.allocator.alloc(f32, shape.m * shape.k);
+        const a = try self.allocator.alloc(f32, @intCast(shape.m * shape.k));
         defer self.allocator.free(a);
-        const b = try self.allocator.alloc(f32, shape.k * shape.n);
+        const b = try self.allocator.alloc(f32, @intCast(shape.k * shape.n));
         defer self.allocator.free(b);
-        const c = try self.allocator.alloc(f32, shape.m * shape.n);
+        const c = try self.allocator.alloc(f32, @intCast(shape.m * shape.n));
         defer self.allocator.free(c);
 
         // Fill inputs with random data
@@ -106,17 +106,17 @@ pub const Harness = struct {
         defer if (reference) |ref| self.allocator.free(ref);
 
         if (self.config.verify_correctness) {
-            reference = try self.allocator.alloc(f32, shape.m * shape.n);
+            reference = try self.allocator.alloc(f32, @intCast(shape.m * shape.n));
             correctness.reference_matmul_f32(
                 shape.m,
                 shape.n,
                 shape.k,
                 a,
-                shape.k,
+                @intCast(shape.k),
                 b,
-                shape.n,
+                @intCast(shape.n),
                 reference.?,
-                shape.n,
+                @intCast(shape.n),
             );
         }
 
@@ -212,12 +212,15 @@ pub const Harness = struct {
         b: []const f32,
         c: []f32,
     ) !void {
+        const lda: usize = @intCast(shape.k);
+        const ldb: usize = @intCast(shape.n);
+        const ldc: usize = @intCast(shape.n);
         switch (impl) {
             .blas => {
-                gemm.blas_gemm_f32(shape.m, shape.n, shape.k, a, shape.k, b, shape.n, c, shape.n);
+                gemm.blas_gemm_f32(shape.m, shape.n, shape.k, a, lda, b, ldb, c, ldc);
             },
             .zig_naive => {
-                gemm.gemm_f32(shape.m, shape.n, shape.k, a, shape.k, b, shape.n, c, shape.n);
+                gemm.gemm_f32(shape.m, shape.n, shape.k, a, lda, b, ldb, c, ldc);
             },
             .tvm_cpu => try self.run_tvm(shape, a, b, c, .cpu),
             .tvm_gpu => try self.run_tvm(shape, a, b, c, .gpu),
@@ -243,6 +246,7 @@ pub const Harness = struct {
         c: []f32,
         device: DeviceKind,
     ) !void {
+        try zg.tvm.ffi.ensure_loaded(self.allocator, .{});
         const cache_key = try std.fmt.allocPrint(self.allocator, "{d}x{d}x{d}", .{ shape.m, shape.n, shape.k });
         defer self.allocator.free(cache_key);
 
@@ -257,12 +261,15 @@ pub const Harness = struct {
             const module = try self.allocator.create(tvm_module.TunedModule);
             errdefer self.allocator.destroy(module);
 
-            const work_dir = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}/{s}",
-                .{ self.tvm_cache_dir, if (device == .cpu) "cpu" else "cuda" },
-            );
-            defer self.allocator.free(work_dir);
+            // const work_dir = try std.fmt.allocPrint(
+            //     self.allocator,
+            //     "{s}/{s}",
+            //     .{ self.tvm_cache_dir, if (device == .cpu) "cpu" else "cuda" },
+            // );
+            // defer self.allocator.free(work_dir);
+            // we are migrating to the hash based system, device is included in the hash, a valid path is thus
+            // `artifacts/tvm_cache/cpu/820e34c955246375`
+            const work_dir = self.tvm_cache_dir;
 
             module.* = try tvm_module.load(self.allocator, .{ .work_dir = work_dir });
 
@@ -314,10 +321,8 @@ pub const Harness = struct {
         var stdout_writer = std.fs.File.stdout().writer(&buffer);
         const writer = &stdout_writer.interface;
 
-        try writer.writeAll("\n");
-        try writer.writeAll("============================================================\n");
-        try writer.writeAll("Matmul Benchmark Results (CPU)\n");
-        try writer.writeAll("============================================================\n");
+        const header_sep = "\n" ++ "=" ** 60 ++ "\n";
+        try writer.writeAll(header_sep ++ "Matmul Benchmark Results (CPU)" ++ header_sep);
 
         // Group results by shape
         var seen_shapes = std.AutoHashMap(Shape, void).init(self.allocator);
@@ -327,9 +332,7 @@ pub const Harness = struct {
             if (seen_shapes.contains(shape)) continue;
             try seen_shapes.put(shape, {});
 
-            try writer.writeAll("\n");
-            try writer.print("Shape: {any}\n", .{shape});
-            try writer.writeAll("\n");
+            try writer.print("\nShape: {any}\n\n", .{shape});
             try writer.writeAll("Implementation            Median (us)    GFLOP/s    vs Naive\n");
             try writer.writeAll("---------------------------------------------------------\n");
 
@@ -363,10 +366,7 @@ pub const Harness = struct {
         }
 
         // Summary statistics
-        try writer.writeAll("\n");
-        try writer.writeAll("============================================================\n");
-        try writer.writeAll("Summary\n");
-        try writer.writeAll("============================================================\n");
+        try writer.writeAll(header_sep ++ "Summary" ++ header_sep);
 
         if (self.results.items.len > 0) {
             // Find best implementations

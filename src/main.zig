@@ -432,7 +432,14 @@ fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
             const value = arg["--impls=".len..];
             var impl_strs = std.mem.splitScalar(u8, value, ',');
             while (impl_strs.next()) |s| {
-                if (std.meta.stringToEnum(zg.benchmark.Implementation, s)) |impl| {
+                if (std.mem.eql(u8, "all-cpu", s)) {
+                    for (std.meta.tags(zg.benchmark.Implementation)) |e| {
+                        if (std.mem.endsWith(u8, @tagName(e), "cpu")) {
+                            try impls.append(gpa, e);
+                        }
+                    }
+                    break;
+                } else if (std.meta.stringToEnum(zg.benchmark.Implementation, s)) |impl| {
                     try impls.append(gpa, impl);
                 } else {
                     std.log.err("unknown implementation: {s}", .{s});
@@ -666,8 +673,8 @@ fn run_iree_aot_compile(
 
 fn parse_shape(s: []const u8) !zg.benchmark.Shape {
     var parts = std.mem.splitScalar(u8, s, 'x');
-    const m = try std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10);
-    const n = try std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10);
-    const k = try std.fmt.parseInt(usize, parts.next() orelse return error.InvalidShape, 10);
+    const m = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
+    const n = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
+    const k = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
     return .{ .m = m, .n = n, .k = k };
 }
