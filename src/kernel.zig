@@ -457,31 +457,26 @@ pub const DispatchEntry = struct {
 ///  dispatch time by the backend's FFI handler. Decouples compile-time
 ///  decisions (in the store) from execute-time dispatch (fn pointers).
 pub const DispatchRegistry = struct {
-    entries: std.StringHashMap(DispatchEntry),
+    allocator: std.mem.Allocator,
+    entries: std.StringHashMapUnmanaged(DispatchEntry) = .{},
 
     pub fn init(reg_allocator: std.mem.Allocator) DispatchRegistry {
-        return .{ .entries = std.StringHashMap(DispatchEntry).init(reg_allocator) };
+        return .{ .allocator = reg_allocator };
     }
 
     pub fn deinit(self: *DispatchRegistry) void {
-        var it = self.entries.iterator();
-        while (it.next()) |entry| {
-            self.entries.allocator.free(entry.key_ptr.*);
-        }
-        self.entries.deinit();
+        self.entries.deinit(self.allocator);
     }
 
     /// Register a provider's dispatch entry.
     /// **Duplicates are silently replaced.**
+    ///
+    /// `provider_name` is borrowed and must outlive the registry.
     pub fn register(self: *DispatchRegistry, provider_name: []const u8, entry: DispatchEntry) Allocator.Error!void {
-        const owned_name = try self.entries.allocator.dupe(u8, provider_name);
-        errdefer self.entries.allocator.free(owned_name);
-
-        const result = try self.entries.getOrPut(owned_name);
-        if (result.found_existing) {
-            self.entries.allocator.free(owned_name);
+        if (self.entries.contains(provider_name)) {
+            log.info("dispatch registry replacing provider '{s}' entry", .{provider_name});
         }
-        result.value_ptr.* = entry;
+        try self.entries.put(self.allocator, provider_name, entry);
     }
 
     /// Look up a dispatch entry by provider name.
