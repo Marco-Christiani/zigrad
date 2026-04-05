@@ -45,7 +45,7 @@ const output_dim: i64 = 10;
 ///  holding any data, Zigrad uses them to trace the computation graph.
 /// Marking parameters as `donatable` lets the backend reuse their memory
 ///  for updated values (important for training loops). Later comments
-///  explain the dontation concept further.
+///  explain the donation concept further.
 /// TODO: I still dont like the name abstract, its ambiguous.
 const donatable: Tensor.AbstractOpts = .{ .donatable = true };
 const params_spec: Params = .{
@@ -109,8 +109,8 @@ fn train_step(params: Params, batch: Batch) !struct { loss_val: Tensor, updated:
     // This updates the model, defined by the leaves of the tensor tree.
     // Since we are creating a single graph and care about performance, this is why
     //  we marked params as donatable so we can get in-place updates.
-    // TODO: with the newer def-use features we still need to revisit automated liveness analysis
-    //  dontable is likely better regarded as a lower level detail progressively disclosed
+    // TODO: with the newer def-use features we still need to revisit automated liveness analysis.
+    //  Donatable is likely better regarded as a lower level detail progressively disclosed
     //  following our opt-in-to-control philosophy.
     var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
     defer params_tree.deinit();
@@ -184,31 +184,32 @@ pub fn main() !void {
     defer spec_tree.deinit();
 
     // This applies our function to every leaf of the tree.
-    // So, for every parameter (defined above) we create a host buffer.
-    var host_bufs = try spec_tree.map(zg.HostBuffer, allocator, struct {
-        fn f(alloc: std.mem.Allocator, spec: Tensor) anyerror!zg.HostBuffer {
-            return zg.HostBuffer.init(alloc, spec.shape, spec.dtype);
+    // So, for every parameter (defined above) we create a host tensor.
+    var host_tensors = try spec_tree.map(Tensor, allocator, struct {
+        fn f(alloc: std.mem.Allocator, spec: Tensor) !Tensor {
+            return try Tensor.host(spec.dtype, spec.shape.const_slice(), .{ .alloc = alloc });
         }
     }.f);
     // The tree will free the leaves for us, we just tell it what function to use.
-    defer host_bufs.deinit_with(zg.HostBuffer.deinit);
+    defer host_tensors.deinit_with(deinit_tensor);
 
-    // Fill params with small random-ish values
-    for (host_bufs.leaves[0..6]) |*buf| fill_pattern(buf.as_slice(f32));
     // TODO: using synthetic values for now, will need to migrate to real data.
-    // Fill batch input
-    fill_pattern(host_bufs.leaves[6].as_slice(f32));
-    // Fill targets
-    fill_pattern(host_bufs.leaves[7].as_slice(f32));
+    // For now, this fills params (leaves[0..6]) and batches (inputs [6] and targets [7])
+    for (host_tensors.leaves) |t| fill_pattern(t.as_slice(f32));
 
     // --- Upload to device ---
-    var dev_bufs = try backend.transfer(device, &host_bufs, .to_device);
+    const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
+    var dev_bufs = try host_tensors.map(zg.Backend.Buffer, UploadCtx{ .b = backend, .d = device }, struct {
+        fn f(ctx: UploadCtx, t: Tensor) !zg.Backend.Buffer {
+            return try ctx.b.buffer_from_host(ctx.d, t.host_data(), t.dtype, t.shape.const_slice());
+        }
+    }.f);
+    // TrainState takes ownership of the device buffers, only free the tree container
     defer dev_bufs.deinit();
 
     // --- Training loop ---
     std.log.info("training for {} steps...", .{steps});
-    const train = zg.frontend.train;
-    var state = try train.TrainState.init_from_model(
+    var state = try zg.frontend.train.TrainState.init_from_model(
         allocator,
         &compiled,
         backend,
@@ -216,40 +217,43 @@ pub fn main() !void {
     );
     defer state.deinit(.all);
 
-    var loss_host = try zg.HostBuffer.init(allocator, .{}, .f32);
-    defer loss_host.deinit();
-
     for (0..steps) |step| {
         const result = try state.step();
 
-        if (result.event) |ev| {
-            try backend.await_event(ev);
-            backend.deinit_event(ev);
-        }
+        // Deinit execution event without awaiting. buffer_to_host (called by
+        //  item below) chains behind execution internally.
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        if (result.event) |ev| backend.deinit_event(ev);
 
-        // Read loss back to host
+        // Read loss back to host.
         // By default, we prefer async operations to create a "pit of success"
         //  style API. This is because it naturally encourages you to pipeline,
         //  which results in better performance. While the device (assuming its
         //  not CPU) is busy, the CPU can do other work like load the next batch.
+        //  That is also why the above "event" exists.
+        // Here we wrap the device buffer as a Tensor so we can use item(),
+        //  which performs a synchronous transfer to stack mem and handles dtype
+        //  decoding.
         // TODO: we never finished the sync/async variants
         // TODO: same comments as the exe situation, this is pretty bad.
-        if (try backend.buffer_to_host(result.loss_buf, loss_host.data_mut())) |ev| {
-            try backend.await_event(ev);
-            backend.deinit_event(ev);
-        }
-
-        // TODO: missing a .item() method
-        const loss_val = loss_host.as_slice(f32)[0];
+        // TODO: this is awkward, we can get around this while we address the
+        //  separate buffer types.
+        const loss_dev = Tensor.from_buffer(backend, result.loss_buf, .f32, &.{});
+        const loss_val = try loss_dev.item(f32);
 
         if (step % 10 == 0 or step == steps - 1) {
             std.log.info("step {d:>4}: loss = {d:.4}", .{ step, loss_val });
         }
+
         // TODO: same comments as the exe situation
         backend.deinit_buffer(result.loss_buf);
     }
 
     std.log.info("done", .{});
+}
+
+fn deinit_tensor(t: *Tensor) void {
+    t.*.deinit();
 }
 
 /// Fill a buffer with a simple deterministic pattern.
