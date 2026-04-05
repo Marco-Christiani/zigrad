@@ -467,9 +467,8 @@ pub fn run_train_demo(
 ///  pipeline. Accepts one or more providers, each gets its own kernelized
 ///  region in the program.
 ///
-/// TVM requires `ZG_EXTERNAL_SDK_ROOT` and XLA typed-FFI support, Mirage
-///  requires the Mirage shared library. Both can be enabled individually
-///  or simultaneously.
+/// TVM requires libtvm in the SDK lib/ directory, Mirage requires the
+///  Mirage shared library. Both can be enabled individually or simultaneously.
 /// Run the kernel provider demo: tune -> store -> compile -> execute.
 ///
 /// Always uses the store-based (PR-level) path: `tune()` populates a

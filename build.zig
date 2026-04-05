@@ -390,24 +390,32 @@ fn add_runtime_bundle(
 ) void {
     exe.root_module.linkSystemLibrary("dl", .{});
 
+    // RUNPATH entries for bare-soname dlopen resolution.
+    //
+    // Policy: include every SDK lib directory so that dlopen("libfoo.so")
+    //  resolves automatically when the binary lives in the SDK tree.
+    // Nonexistent directories (e.g. CUDA dirs in a CPU-only build) are
+    //  silently skipped by the dynamic linker.
+    //
+    // NOTE: RUNPATH (DT_RUNPATH) does NOT propagate to transitive deps of
+    //  dlopen'd libraries. Plugin transitive deps (e.g. PJRT plugin needing
+    //  libcudart) must be handled by the plugin's own RUNPATH, this
+    //  responsibility is delegated to the builder (e.g., our nix derivations)
     const rpaths = [_][]const u8{
         "$ORIGIN",
-        "$ORIGIN/../lib",
-        "$ORIGIN/../runtime",
-        "$ORIGIN/../runtime/xla/pjrt/c",
-        "$ORIGIN/../runtime/nvidia/cudnn/lib",
+        "$ORIGIN/../lib", // build-time linked (MLIR-C, StablehloCAPI) + opt-in (TVM, Mirage)
+        "$ORIGIN/../runtime/nvidia/nvrtc/lib",
         "$ORIGIN/../runtime/nvidia/cublas/lib",
         "$ORIGIN/../runtime/nvidia/cudart/lib",
+        "$ORIGIN/../runtime/nvidia/cudnn/lib",
         "$ORIGIN/../runtime/nvidia/cufft/lib",
         "$ORIGIN/../runtime/nvidia/cupti/lib",
         "$ORIGIN/../runtime/nvidia/cusparse/lib",
         "$ORIGIN/../runtime/nvidia/nvjitlink/lib",
-        "$ORIGIN/../runtime/nvidia/nvrtc/lib",
         "$ORIGIN/../runtime/nvidia/nccl/lib",
         "$ORIGIN/../runtime/nvidia/nvshmem/lib",
         "$ORIGIN/../runtime/sys/lib",
-        // NixOS host driver injection
-        "/run/opengl-driver/lib",
+        "/run/opengl-driver/lib", // NixOS host GPU driver
     };
     inline for (rpaths) |p| exe.root_module.addRPathSpecial(p);
 

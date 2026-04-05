@@ -492,30 +492,13 @@ const NvtxRange = struct {
     pop_fn: *const fn () callconv(.c) c_int,
 
     pub fn init() !NvtxRange {
-        // is this the correct env var anymore? I dont think we ship this in a default build, also should precedence
-        //  be given to CUDA_HOME? what about system paths for non-nixos systems?
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZG_EXTERNAL_SDK_ROOT")) |sdk| {
-            defer std.heap.page_allocator.free(sdk);
-            var buf1: [1024]u8 = undefined;
-            var buf2: [1024]u8 = undefined;
-            const p1 = std.fmt.bufPrintZ(&buf1, "{s}/runtime/nvidia/nvtx/lib/libnvToolsExt.so", .{sdk}) catch null;
-            if (p1) |p| {
-                if (open_nvtx(p)) |range| return range;
-            }
-            const p2 = std.fmt.bufPrintZ(&buf2, "{s}/runtime/nvidia/nvtx/lib/libnvToolsExt.so.1", .{sdk}) catch null;
-            if (p2) |p| {
-                if (open_nvtx(p)) |range| return range;
-            }
-        } else |_| {}
-
-        const names = [_][]const u8{
+        const sonames = [_][:0]const u8{
             "libnvToolsExt.so",
             "libnvToolsExt.so.1",
             "libnvToolsExt.so.1.0",
         };
-        var i: usize = 0;
-        while (i < names.len) : (i += 1) {
-            if (open_nvtx(names[i])) |range| return range;
+        for (sonames) |name| {
+            if (open_nvtx(name)) |range| return range;
         }
         return error.FileNotFound;
     }

@@ -108,21 +108,19 @@ pub fn ensure_loaded() MirageError!void {
 }
 
 fn load_runtime_library() MirageError!*anyopaque {
+    // Bare soname: resolved via RUNPATH ($ORIGIN/../lib) or system linker.
     if (dlopen("libmirage_runtime.so", RTLD_NOW | RTLD_GLOBAL)) |h| {
         return h;
     } else if (dlerror()) |err| {
         log.debug("dlopen(libmirage_runtime.so) failed: {s}", .{std.mem.span(err)});
     }
 
+    // Mirage-specific SDK root override (separate from the main SDK bundle).
     const allocator = std.heap.smp_allocator;
-
     var has_static_archive = false;
 
     const runtime_handle = try load_runtime_from_sdk_root(allocator, "ZG_RUNTIME_SDK_ROOT", &has_static_archive);
     if (runtime_handle) |h| return h;
-
-    const external_handle = try load_runtime_from_sdk_root(allocator, "ZG_EXTERNAL_SDK_ROOT", &has_static_archive);
-    if (external_handle) |h| return h;
 
     if (has_static_archive) {
         log.err("mirage runtime shared library missing; found static archive only (libmirage_runtime.a)", .{});

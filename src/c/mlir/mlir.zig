@@ -136,6 +136,7 @@ fn load_shim_locked() ?ShimHandle {
 }
 
 fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
+    // Targeted override for development or non-standard layouts.
     if (std.process.getEnvVarOwned(allocator, "ZG_MLIR_SHIM_PATH")) |shim_path| {
         return shim_path;
     } else |err| switch (err) {
@@ -143,27 +144,13 @@ fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
         else => return err,
     }
 
-    const sdk_root = std.process.getEnvVarOwned(allocator, "ZG_EXTERNAL_SDK_ROOT") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-    defer if (sdk_root) |root| allocator.free(root);
-
-    if (sdk_root) |root| {
-        const sdk_shim = try std.fs.path.join(allocator, &.{ root, "lib", "libzigrad_mlir_ext.so" });
-        if (path_exists(sdk_shim)) return sdk_shim;
-        allocator.free(sdk_shim);
+    // Local dev build fallback.
+    if (path_exists("shim/build/libzigrad_mlir_ext.so")) {
+        return try std.fs.cwd().realpathAlloc(allocator, "shim/build/libzigrad_mlir_ext.so");
     }
 
-    const local_candidates = [_][]const u8{
-        "shim/build/libzigrad_mlir_ext.so",
-    };
-    for (local_candidates) |candidate| {
-        if (!path_exists(candidate)) continue;
-        return @as(?[]u8, try std.fs.cwd().realpathAlloc(allocator, candidate));
-    }
-
-    return null;
+    // Bare soname: resolved via RUNPATH ($ORIGIN/../lib) or system linker.
+    return try allocator.dupe(u8, "libzigrad_mlir_ext.so");
 }
 
 fn path_exists(path: []const u8) bool {

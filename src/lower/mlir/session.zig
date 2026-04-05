@@ -43,7 +43,7 @@ pub const MlirSession = struct {
         ctx.allow_unregistered_dialects(false);
 
         mlir.register_zigrad_extensions(ctx) catch |e| {
-            log.err("set ZG_MLIR_SHIM_PATH or provide ZG_EXTERNAL_SDK_ROOT with lib/libzigrad_mlir_ext.so", .{});
+            log.err("MLIR extension shim not found; set ZG_MLIR_SHIM_PATH or ensure libzigrad_mlir_ext.so is in the SDK lib/ directory", .{});
             return e;
         };
 
