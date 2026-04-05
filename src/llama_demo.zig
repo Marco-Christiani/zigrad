@@ -323,16 +323,16 @@ pub fn run_llama_ft_demo(
         }
     }
 
-    // Build host buffers from spec tree - shapes and dtypes derived from specs.
+    // Build host tensors from spec tree - shapes and dtypes derived from specs.
     var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
     defer spec_tree.deinit();
 
-    var host_tree = try spec_tree.map(zg.HostBuffer, allocator, struct {
-        fn f(alloc: std.mem.Allocator, spec: Tensor) anyerror!zg.HostBuffer {
-            return zg.HostBuffer.init(alloc, spec.shape, spec.dtype);
+    var host_tree = try spec_tree.map(Tensor, allocator, struct {
+        fn f(alloc: std.mem.Allocator, spec: Tensor) anyerror!Tensor {
+            return Tensor.host(spec.dtype, spec.shape.const_slice(), .{ .alloc = alloc });
         }
     }.f);
-    defer host_tree.deinit_with(zg.HostBuffer.deinit);
+    defer host_tree.deinit_with(deinit_tensor);
 
     // Load or synthesize weights into param (donatable) leaves
     const default_path = "./weights/llama-3.2-1b-instruct/model.safetensors";
@@ -353,7 +353,7 @@ pub fn run_llama_ft_demo(
         }
     } else {
         // Fill param leaves with synthetic pattern
-        for (host_tree.leaves, donatable_mask) |*buf, is_donatable| {
+        for (host_tree.leaves, donatable_mask) |buf, is_donatable| {
             if (!is_donatable) continue;
             fill_pattern(buf, 1e-3, 0.0);
         }
@@ -375,12 +375,12 @@ pub fn run_llama_ft_demo(
     const batch_usize: usize = @intCast(batch_size);
     const seq_usize: usize = @intCast(seq);
 
-    const host_x = host_tree.get("1.x") orelse return error.MissingSpec;
-    const host_target_ids = host_tree.get("1.target_ids") orelse return error.MissingSpec;
-    const host_attention_mask = host_tree.get("1.attention_mask") orelse return error.MissingSpec;
-    const host_mask = host_tree.get("1.mask") orelse return error.MissingSpec;
-    const host_sin = host_tree.get("1.sin") orelse return error.MissingSpec;
-    const host_cos = host_tree.get("1.cos") orelse return error.MissingSpec;
+    const host_x = (host_tree.get("1.x") orelse return error.MissingSpec).*;
+    const host_target_ids = (host_tree.get("1.target_ids") orelse return error.MissingSpec).*;
+    const host_attention_mask = (host_tree.get("1.attention_mask") orelse return error.MissingSpec).*;
+    const host_mask = (host_tree.get("1.mask") orelse return error.MissingSpec).*;
+    const host_sin = (host_tree.get("1.sin") orelse return error.MissingSpec).*;
+    const host_cos = (host_tree.get("1.cos") orelse return error.MissingSpec).*;
 
     fill_i32_tokens(host_x.as_slice(i32), batch_usize, seq_usize, &tokens);
     fill_i32_tokens(host_target_ids.as_slice(i32), batch_usize, seq_usize, &targets);
@@ -389,12 +389,15 @@ pub fn run_llama_ft_demo(
     fill_rope_tables(host_sin, host_cos, seq_usize, 64);
 
     // Transfer host -> device.
-    var dev_tree = try b.transfer(device, &host_tree, .to_device);
-    defer dev_tree.deinit(); // array only. buffer ownership managed by TrainState / defer below
+    const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
+    var dev_tree = try host_tree.map(Tensor, UploadCtx{ .b = b, .d = device }, struct {
+        fn f(ctx: UploadCtx, t: Tensor) anyerror!Tensor {
+            return t.to_device(ctx.b, ctx.d);
+        }
+    }.f);
+    defer dev_tree.deinit(); // array only. tensor ownership managed by TrainState / defer below
 
     const loss_dtype: zg.DType = if (upcast_loss) .f32 else host_dtype;
-    var loss_host = try zg.HostBuffer.init(allocator, .{}, loss_dtype);
-    defer loss_host.deinit();
 
     var loop_timer = zg.utils.LoopTimer{ .label = "llama-ft-demo", .quiet = quiet };
 
@@ -405,6 +408,7 @@ pub fn run_llama_ft_demo(
             &compiled_train.?,
             b,
             dev_tree.leaves,
+            .{ .loss_dtype = loss_dtype },
         );
         defer state.deinit(.all);
 
@@ -414,8 +418,8 @@ pub fn run_llama_ft_demo(
             // Also, deinit only the event handle.
             // TODO: this expose a bit of an annoying aspect of the API
             if (result.event) |ev| b.deinit_event(ev);
-            _ = try read_loss(b, result.loss_buf, &loss_host, loss_dtype);
-            b.deinit_buffer(result.loss_buf);
+            _ = try result.loss.item(f32);
+            result.loss.deinit();
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -432,10 +436,10 @@ pub fn run_llama_ft_demo(
             if (result.event) |ev| b.deinit_event(ev);
             loop_timer.mark("dispatch");
 
-            const loss: ?f32 = if (quiet or execute_only) null else try read_loss(b, result.loss_buf, &loss_host, loss_dtype);
+            const loss: ?f32 = if (quiet or execute_only) null else try result.loss.item(f32);
             loop_timer.mark("sync+read");
 
-            b.deinit_buffer(result.loss_buf);
+            result.loss.deinit();
             loop_timer.mark("cleanup");
 
             loop_timer.end_step(loss);
@@ -446,16 +450,29 @@ pub fn run_llama_ft_demo(
         // Forward-only mode: simple execute loop, no parameter swapping.
         const fwd_exe = compiled_fwd.?.exe;
 
-        defer for (dev_tree.leaves) |buf| b.deinit_buffer(buf);
+        defer for (dev_tree.leaves) |t| t.deinit();
+
+        // Extract raw buffers for direct execute_into calls.
+        // TODO: consider a better api for this use case
+        const input_bufs = try allocator.alloc(zg.Backend.Buffer, dev_tree.leaves.len);
+        defer allocator.free(input_bufs);
+        for (input_bufs, dev_tree.leaves) |*slot, t| {
+            slot.* = try t.buffer();
+        }
 
         var output_bufs: [1]zg.Backend.Buffer = undefined;
 
         for (0..warmup_steps) |_| {
-            const ev = try b.execute_into(fwd_exe, dev_tree.leaves, &output_bufs, null, .{});
+            const ev = try b.execute_into(fwd_exe, input_bufs, &output_bufs, null, .{});
             if (ev) |e| b.deinit_event(e);
             // read to warm up the DMA path otherwise first timed step pays a ~65ms lazy-init penalty
-            _ = try read_loss(b, output_bufs[0], &loss_host, loss_dtype);
-            b.deinit_buffer(output_bufs[0]);
+            // TODO: again, if we standardize on execute_into working with buffers directly then
+            //  it would make sense to provide a api for this, so a .item() method, then update
+            //  Tensor.item appropriately. its already implemented, just a matter of splitting,
+            //  except the difference is that this is device buffer backed by an opaque handle.
+            const loss_tensor = Tensor.from_buffer(b, output_bufs[0], loss_dtype, &.{});
+            _ = try loss_tensor.item(f32);
+            loss_tensor.deinit();
         }
 
         const nvtx_label: [:0]const u8 = "llama-ft-demo timed loop";
@@ -465,14 +482,15 @@ pub fn run_llama_ft_demo(
 
         for (0..steps) |_| {
             try loop_timer.start_step();
-            const event = try b.execute_into(fwd_exe, dev_tree.leaves, &output_bufs, null, .{});
+            const event = try b.execute_into(fwd_exe, input_bufs, &output_bufs, null, .{});
             if (event) |ev| b.deinit_event(ev);
             loop_timer.mark("dispatch");
 
-            const loss: ?f32 = if (quiet or execute_only) null else try read_loss(b, output_bufs[0], &loss_host, loss_dtype);
+            const loss_tensor = Tensor.from_buffer(b, output_bufs[0], loss_dtype, &.{});
+            const loss: ?f32 = if (quiet or execute_only) null else try loss_tensor.item(f32);
             loop_timer.mark("sync+read");
 
-            b.deinit_buffer(output_bufs[0]);
+            loss_tensor.deinit();
             loop_timer.mark("cleanup");
 
             loop_timer.end_step(loss);
@@ -562,7 +580,7 @@ const LoadResult = struct {
 fn load_llama_weights(
     allocator: std.mem.Allocator,
     path: []const u8,
-    host_tree: *zg.utils.Tree(zg.HostBuffer),
+    host_tree: *zg.utils.Tree(Tensor),
     model_dims: ModelDims,
 ) !?LoadResult {
     const data = mmap_file(path) catch return null;
@@ -571,8 +589,9 @@ fn load_llama_weights(
     var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
     defer st_file.deinit();
 
+    // TODO: unnecessary, just unwrap the optional and delete this, or provide a fallible get.
     const get_buf = struct {
-        fn f(tree: *zg.utils.Tree(zg.HostBuffer), tree_path: []const u8) !*zg.HostBuffer {
+        fn f(tree: *zg.utils.Tree(Tensor), tree_path: []const u8) !*Tensor {
             return tree.get(tree_path) orelse error.MissingSpec;
         }
     }.f;
@@ -617,47 +636,50 @@ fn load_llama_weights(
         try load_weight(view, w_out, .transposed);
     } else {
         log.warn("{s} not found in checkpoint, assuming tied weights", .{lm_head_w_name});
-        try transpose_buf(w_emb, w_out);
+        try transpose_buf(w_emb.*, w_out.*);
     }
 
     return .{ .mmap_data = data };
 }
 
-/// Load a single weight tensor from a safetensors view into a host buffer.
+/// Load a single weight tensor from a safetensors view into a host tensor.
 ///
-/// For `.direct` layout with matching dtype, replaces the heap-backed buffer
+/// For `.direct` layout with matching dtype, replaces the heap-backed tensor
 ///  with a zero-copy borrowed view into the mmap'd file data. For transposed
-///  or cross-dtype loads, copies element-by-element into the existing buffer.
+///  or cross-dtype loads, copies element-by-element into the existing tensor.
 /// TODO: Seems generally useful. consider moving into stz or zigrad libs and make
 ///  dtype-generic (comptime dtype). Actually would be rather interesting to explore
 ///  a backend JIT path here, these are simple transforms that can be expressed by
 ///  all backends.
-fn load_weight(view: stz.TensorView, buf: *zg.HostBuffer, layout: CopyLayout) !void {
+fn load_weight(view: stz.TensorView, buf: *Tensor, layout: CopyLayout) !void {
     switch (layout) {
         .direct => {
             if (!shape_eql(view.info.shape, buf.shape.const_slice())) return error.TensorShapeMismatch;
 
-            // zero-copy: replace the heap buffer with a borrowed view
+            // zero-copy: replace the heap tensor with a borrowed view
             if (stz_dtype_matches(view.info.dtype, buf.dtype)) {
-                buf.deinit(); // free the pre-allocated heap buffer
-                buf.* = zg.HostBuffer.borrow(view.data, buf.shape, buf.dtype);
+                const dtype = buf.dtype;
+                const shape = buf.shape.const_slice();
+                buf.deinit(); // free the pre-allocated heap buffer, if it even exists
+                buf.* = try Tensor.host(dtype, shape, .{ .borrow = view.data });
                 return;
             }
 
-            // cross-dtype: element-wise copy into existing buffer
+            // cross-dtype: element-wise copy into existing tensor
             const src_count = buf.shape.num_elements();
             var i: usize = 0;
             while (i < src_count) : (i += 1) {
-                write_element(buf, i, read_element(view, i));
+                write_element(buf.*, i, read_element(view, i));
             }
         },
         .transposed, .transposed_into_cols => {
-            try copy_view_to_buf(view, buf, layout);
+            try copy_view_to_buf(view, buf.*, layout);
         },
     }
 }
 
 /// Check if a safetensors dtype matches a zigrad dtype.
+/// TODO: similarly, this probably could be moved to core
 fn stz_dtype_matches(stz_dt: stz.Dtype, zg_dt: zg.DType) bool {
     return switch (zg_dt) {
         .f32 => stz_dt == .f32,
@@ -685,14 +707,14 @@ const CopyLayout = union(enum) {
     transposed_into_cols: struct { col_offset: usize },
 };
 
-/// Copy a safetensors view into a host buffer with layout transformation.
+/// Copy a safetensors view into a host tensor with layout transformation.
 ///
 /// Reads element-by-element via `read_element`/`write_element`, converting dtype and applying the
 ///  requested transpose one pass with no intermediate buffers.
 /// No intermediate buffer is allocated. Only handles `.transposed` and `.transposed_into_cols`,
 ///  `.direct` is handled by `load_weight`.
 /// TODO: inline this.
-fn copy_view_to_buf(view: stz.TensorView, dst: *zg.HostBuffer, layout: CopyLayout) !void {
+fn copy_view_to_buf(view: stz.TensorView, dst: Tensor, layout: CopyLayout) !void {
     const src_rows = view.info.shape[0];
     const src_cols = if (view.info.shape.len >= 2) view.info.shape[1] else 1;
 
@@ -737,18 +759,18 @@ fn copy_view_to_buf(view: stz.TensorView, dst: *zg.HostBuffer, layout: CopyLayou
 inline fn read_element(view: stz.TensorView, idx: usize) f32 {
     return switch (view.info.dtype) {
         .f32 => std.mem.bytesAsSlice(f32, view.data)[idx],
-        .bf16 => zg.DType.bf16.decode_f32(std.mem.bytesAsSlice(u16, view.data)[idx]),
+        .bf16 => zg.DType.bf16.decode(f32, std.mem.bytesAsSlice(u16, view.data)[idx]),
         else => unreachable,
     };
 }
 
-/// Write one f32 element into a host buffer, converting to the buffer's dtype.
+/// Write one f32 element into a host tensor, converting to the tensor's dtype.
 /// TODO: Seems generally useful. consider moving into stz or zigrad libs and make
 ///  dtype-generic (comptime dtype).
-inline fn write_element(buf: *zg.HostBuffer, idx: usize, val: f32) void {
+inline fn write_element(buf: Tensor, idx: usize, val: f32) void {
     switch (buf.dtype) {
         .f32 => buf.as_slice(f32)[idx] = val,
-        .bf16 => buf.as_slice(u16)[idx] = zg.DType.bf16.encode_f32(val),
+        .bf16 => buf.as_slice(u16)[idx] = zg.DType.bf16.encode(f32, val),
         else => unreachable,
     }
 }
@@ -759,10 +781,10 @@ inline fn write_element(buf: *zg.HostBuffer, idx: usize, val: f32) void {
 ///  (not safetensors views).
 /// Dtype-agnostic: copies `dtype.size_in_bytes()` bytes per element, so works for any dtype without
 ///  per-type branches. Both buffers must have the same dtype.
-/// TODO: Consider a method on HostBuffer for basic ops like this, could provide naive native and
+/// TODO: Consider a method on Tensor for basic ops like this, could provide naive native and
 ///  blas impls. Might make sense to consider (re-)using a high level frontend API that computes
 ///  this using the backend (simple JIT path).
-fn transpose_buf(src: *zg.HostBuffer, dst: *zg.HostBuffer) !void {
+fn transpose_buf(src: Tensor, dst: Tensor) !void {
     if (src.shape.const_slice().len != 2 or dst.shape.const_slice().len != 2) return error.TensorShapeMismatch;
     const src_rows: usize = @intCast(src.shape.const_slice()[0]);
     const src_cols: usize = @intCast(src.shape.const_slice()[1]);
@@ -771,8 +793,8 @@ fn transpose_buf(src: *zg.HostBuffer, dst: *zg.HostBuffer) !void {
     if (src.dtype != dst.dtype) return error.TensorDtypeMismatch;
 
     const elem = src.dtype.size_in_bytes();
-    const s = src.data();
-    const d = dst.data_mut();
+    const s = src.host_data();
+    const d = dst.host_data_mut();
     for (0..src_rows) |r| {
         for (0..src_cols) |c| {
             const src_off = (r * src_cols + c) * elem;
@@ -817,35 +839,15 @@ fn shape_eql(stz_shape: []const usize, expected: []const i64) bool {
     return true;
 }
 
-/// Read the scalar loss value from a device buffer, returning f32.
+/// Fill a host tensor with a deterministic ramp pattern: `offset + scale * (i % 1024)`.
 ///
-/// Copies `loss_buf` into the caller-provided `loss_host` staging buffer, awaits the transfer event,
-///  then decodes the first element from the buffer's dtype to f32.
-///
-/// Does not take ownership of `loss_buf`.
-/// TODO: Seems like generally useful boilerplate that may belong in Tensor, Buffer, HostBuffer, or similar
-///  like a .item() method.
-fn read_loss(b: *zg.Backend, loss_buf: zg.Backend.Buffer, loss_host: *zg.HostBuffer, loss_dtype: zg.DType) !f32 {
-    if (try b.buffer_to_host(loss_buf, loss_host.data_mut())) |ev| {
-        try b.await_event(ev);
-        b.deinit_event(ev);
-    }
-    return switch (loss_dtype) {
-        inline .f32, .bf16, .f16, .f64 => |tag| tag.decode_f32(std.mem.bytesAsSlice(tag.StorageType(), loss_host.data())[0]),
-        else => @panic("read_loss: unsupported dtype"),
-    };
-}
-
-/// Fill a host buffer with a deterministic ramp pattern: `offset + scale * (i % 1024)`.
-///
-/// Dtype-generic via `inline switch` + `DType.encode_f32`.
-/// Supports any float dtype (f32, bf16, f16, f64).
-fn fill_pattern(buf: *zg.HostBuffer, scale: f32, offset: f32) void {
+/// Dtype-generic, supports any float dtype (f32, bf16, f16, f64).
+fn fill_pattern(buf: Tensor, scale: f32, offset: f32) void {
     switch (buf.dtype) {
         inline .f32, .bf16, .f16, .f64 => |tag| {
             const slice = buf.as_slice(tag.StorageType());
             for (slice, 0..) |*v, i| {
-                v.* = tag.encode_f32(offset + scale * @as(f32, @floatFromInt(i % 1024)));
+                v.* = tag.encode(f32, offset + scale * @as(f32, @floatFromInt(i % 1024)));
             }
         },
         else => @panic("fill_pattern: unsupported dtype"),
@@ -867,16 +869,16 @@ fn fill_i32_tokens(out: []i32, batch: usize, seq: usize, tokens: []const usize) 
 
 /// Fill a [batch, seq] attn mask: 1.0 for the first `active_len` positions per row, 0.0 elsewhere.
 /// Dtype-generic.
-fn fill_attention_mask(buf: *zg.HostBuffer, batch: usize, seq: usize, active_len: usize) void {
+fn fill_attention_mask(buf: Tensor, batch: usize, seq: usize, active_len: usize) void {
     switch (buf.dtype) {
         inline .f32, .bf16, .f16, .f64 => |tag| {
             const T = tag.StorageType();
             const slice = buf.as_slice(T);
-            @memset(slice, tag.encode_f32(0.0));
+            @memset(slice, tag.encode(f32, 0.0));
             const count = @min(seq, active_len);
-            const one = tag.encode_f32(1.0);
-            for (0..batch) |b| for (0..count) |i| {
-                slice[b * seq + i] = one;
+            const one = tag.encode(f32, 1.0);
+            for (0..batch) |bx| for (0..count) |i| {
+                slice[bx * seq + i] = one;
             };
         },
         else => @panic("fill_attention_mask: unsupported dtype"),
@@ -885,13 +887,13 @@ fn fill_attention_mask(buf: *zg.HostBuffer, batch: usize, seq: usize, active_len
 
 /// Fill a [seq, seq] lower-triangular causal mask: 1.0 where col <= row, 0.0 above the diagonal.
 /// Dtype-generic.
-fn fill_causal_mask(buf: *zg.HostBuffer, seq: usize) void {
+fn fill_causal_mask(buf: Tensor, seq: usize) void {
     switch (buf.dtype) {
         inline .f32, .bf16, .f16, .f64 => |tag| {
             const T = tag.StorageType();
             const slice = buf.as_slice(T);
-            @memset(slice, tag.encode_f32(0.0));
-            const one = tag.encode_f32(1.0);
+            @memset(slice, tag.encode(f32, 0.0));
+            const one = tag.encode(f32, 1.0);
             for (0..seq) |i| for (0..i + 1) |j| {
                 slice[i * seq + j] = one;
             };
@@ -931,7 +933,7 @@ fn llama3_rope_freq_correction(inv_freq: []f32) void {
 /// Inverse frequencies are computed in f32 (precision requirement), then encoded into the buffer's
 /// dtype. Applies LLaMA 3 wavelength-based frequency correction via `llama3_rope_freq_correction`.
 /// Base frequency is 500000.0 (LLaMA 3.2-1B config).
-fn fill_rope_tables(sin: *zg.HostBuffer, cos: *zg.HostBuffer, seq: usize, head_dim: usize) void {
+fn fill_rope_tables(sin: Tensor, cos: Tensor, seq: usize, head_dim: usize) void {
     const half = head_dim / 2;
 
     const base: f32 = 500000.0;
@@ -949,10 +951,15 @@ fn fill_rope_tables(sin: *zg.HostBuffer, cos: *zg.HostBuffer, seq: usize, head_d
             const c = cos.as_slice(T);
             for (0..seq) |i| for (0..half) |j| {
                 const theta = @as(f32, @floatFromInt(i)) * inv_freq[j];
-                s[i * half + j] = tag.encode_f32(@sin(theta));
-                c[i * half + j] = tag.encode_f32(@cos(theta));
+                s[i * half + j] = tag.encode(f32, @sin(theta));
+                c[i * half + j] = tag.encode(f32, @cos(theta));
             };
         },
         else => @panic("fill_rope_tables: unsupported dtype"),
     }
+}
+
+// TODO: need to resolve and remove this
+fn deinit_tensor(t: *Tensor) void {
+    t.*.deinit();
 }

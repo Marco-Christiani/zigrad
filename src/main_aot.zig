@@ -90,7 +90,8 @@ fn run_demo_executable(
     defer backend.deinit_event(&ev);
     try backend.await_event(&ev);
 
-    const out = out_host.as_slice(f32)[0..4];
+    const out = out_host.as_slice(f32);
+    std.debug.assert(out.len == 4);
     const expected = [_]f32{
         120.0, 132.0,
         282.0, 312.0,

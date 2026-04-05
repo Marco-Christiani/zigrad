@@ -96,21 +96,15 @@ pub fn run_llm_ft_demo(
     defer b.deinit_executable(compiled.exe);
     defer compiled.deinit();
 
-    const shape_w_emb = zg.BoundedShape.from_slice(&.{ vocab, hidden });
-    const shape_w_out = zg.BoundedShape.from_slice(&.{ hidden, vocab });
-    const shape_b = zg.BoundedShape.from_slice(&.{vocab});
-    const shape_x = zg.BoundedShape.from_slice(&.{ bs, vocab });
-    const shape_y = zg.BoundedShape.from_slice(&.{ bs, vocab });
-
-    var host_w_emb = try zg.HostBuffer.init(allocator, shape_w_emb, .f32);
+    var host_w_emb = try Tensor.host(.f32, &.{ vocab, hidden }, .{ .alloc = allocator });
     defer host_w_emb.deinit();
-    var host_w_out = try zg.HostBuffer.init(allocator, shape_w_out, .f32);
+    var host_w_out = try Tensor.host(.f32, &.{ hidden, vocab }, .{ .alloc = allocator });
     defer host_w_out.deinit();
-    var host_b = try zg.HostBuffer.init(allocator, shape_b, .f32);
+    var host_b = try Tensor.host(.f32, &.{vocab}, .{ .alloc = allocator });
     defer host_b.deinit();
-    var host_x = try zg.HostBuffer.init(allocator, shape_x, .f32);
+    var host_x = try Tensor.host(.f32, &.{ bs, vocab }, .{ .alloc = allocator });
     defer host_x.deinit();
-    var host_y = try zg.HostBuffer.init(allocator, shape_y, .f32);
+    var host_y = try Tensor.host(.f32, &.{ bs, vocab }, .{ .alloc = allocator });
     defer host_y.deinit();
 
     if (std.process.getEnvVarOwned(allocator, "ZG_LLM_SAFETENSORS_PATH")) |path| {
@@ -121,9 +115,9 @@ pub fn run_llm_ft_demo(
             host_w_emb.as_slice(f32),
             host_w_out.as_slice(f32),
             host_b.as_slice(f32),
-            shape_w_emb.const_slice(),
-            shape_w_out.const_slice(),
-            shape_b.const_slice(),
+            host_w_emb.shape.const_slice(),
+            host_w_out.shape.const_slice(),
+            host_b.shape.const_slice(),
         );
         if (!quiet) {
             log.info("Loaded weights from {s}", .{path});
@@ -143,54 +137,40 @@ pub fn run_llm_ft_demo(
     fill_one_hot(host_x.as_slice(f32), tokens, vocab);
     fill_one_hot(host_y.as_slice(f32), targets, vocab);
 
-    const tmp_w_emb = try b.buffer_from_host(device, host_w_emb.data(), host_w_emb.dtype, host_w_emb.shape.const_slice());
-    const tmp_w_out = try b.buffer_from_host(device, host_w_out.data(), host_w_out.dtype, host_w_out.shape.const_slice());
-    const tmp_b = try b.buffer_from_host(device, host_b.data(), host_b.dtype, host_b.shape.const_slice());
-    const tmp_x = try b.buffer_from_host(device, host_x.data(), host_x.dtype, host_x.shape.const_slice());
-    const tmp_y = try b.buffer_from_host(device, host_y.data(), host_y.dtype, host_y.shape.const_slice());
-
-    var loss_host = try zg.HostBuffer.init(allocator, .{}, .f32);
-    defer loss_host.deinit();
+    const dev_w_emb = try host_w_emb.to_device(b, device);
+    const dev_w_out = try host_w_out.to_device(b, device);
+    const dev_b = try host_b.to_device(b, device);
+    const dev_x = try host_x.to_device(b, device);
+    const dev_y = try host_y.to_device(b, device);
 
     var state = try train.TrainState.init_from_model(
         allocator,
         &compiled,
         b,
-        &.{ tmp_w_emb, tmp_w_out, tmp_b, tmp_x, tmp_y },
+        &.{ dev_w_emb, dev_w_out, dev_b, dev_x, dev_y },
+        .{},
     );
     defer state.deinit(.all);
 
     for (0..warmup_steps) |_| {
         const result = try state.step();
-        if (result.event) |ev| {
-            try b.await_event(ev);
-            b.deinit_event(ev);
-        }
-        b.deinit_buffer(result.loss_buf);
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        if (result.event) |ev| b.deinit_event(ev);
+        result.loss.deinit();
     }
 
     var loop_timer = zg.utils.LoopTimer{ .label = "llm-ft-demo", .quiet = quiet };
     for (0..steps) |_| {
         try loop_timer.start_step();
         const result = try state.step();
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        if (result.event) |ev| b.deinit_event(ev);
         loop_timer.mark("dispatch");
 
-        if (result.event) |ev| {
-            try b.await_event(ev);
-            b.deinit_event(ev);
-        }
-        loop_timer.mark("exec");
+        const loss: ?f32 = if (quiet) null else try result.loss.item(f32);
+        loop_timer.mark("sync+read");
 
-        const loss: ?f32 = if (quiet) null else blk: {
-            if (try b.buffer_to_host(result.loss_buf, loss_host.data_mut())) |loss_ev| {
-                try b.await_event(loss_ev);
-                b.deinit_event(loss_ev);
-            }
-            break :blk loss_host.as_slice(f32)[0];
-        };
-        loop_timer.mark("loss_read");
-
-        b.deinit_buffer(result.loss_buf);
+        result.loss.deinit();
         loop_timer.mark("cleanup");
 
         loop_timer.end_step(loss);

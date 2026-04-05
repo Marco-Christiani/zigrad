@@ -1,7 +1,13 @@
 const std = @import("std");
 const zg = @import("zigrad");
 
+const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/demos");
+
+// TODO: need to resolve and remove this
+fn deinit_tensor(t: *Tensor) void {
+    t.*.deinit();
+}
 
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
@@ -42,28 +48,19 @@ pub fn run_demo_executable(
         2.0, 2.0,
     };
 
-    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
-    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
-    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
-
-    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    // TODO: in the init path, do we really want to require this sliceAsBytes pattern or just use comptime?
+    const host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
-    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    const host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
     defer host_b.deinit();
-    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    const host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
 
-    const dims_a = [_]i64{ 2, 3 };
-    const dims_b = [_]i64{ 3, 2 };
-    const dims_c = [_]i64{ 2, 2 };
-
-    // TODO: are we ready to make these tensor calls yet? ideally, we can also make the host buffers tensors, need to
-    //  think about the right way to model this in Tensor.Mode.
-    const dev_a = try b.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
+    const dev_a = try b.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
     defer b.deinit_buffer(dev_a);
-    const dev_b = try b.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
+    const dev_b = try b.buffer_from_host(device, host_b.host_data(), .f32, host_b.dims());
     defer b.deinit_buffer(dev_b);
-    const dev_c = try b.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
+    const dev_c = try b.buffer_from_host(device, host_c.host_data(), .f32, host_c.dims());
     defer b.deinit_buffer(dev_c);
 
     const result = try b.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
@@ -75,14 +72,15 @@ pub fn run_demo_executable(
 
     if (result.outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zg.HostBuffer.init(allocator, shape_c, .f32);
+    var out_host = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
     defer out_host.deinit();
-    if (try b.buffer_to_host(result.outputs[0], out_host.data_mut())) |ev| {
+    if (try b.buffer_to_host(result.outputs[0], out_host.host_data_mut())) |ev| {
         defer b.deinit_event(ev);
         try b.await_event(ev);
     }
 
-    const out = out_host.as_slice(f32)[0..4];
+    const out = out_host.as_const_slice(f32);
+    std.debug.assert(out.len == 4);
     const expected = [_]f32{
         120.0, 132.0,
         282.0, 312.0,
@@ -163,30 +161,22 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
         1.0, 1.0,
     };
 
-    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
-    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
-    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
-
-    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    const host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
-    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    const host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
     defer host_b.deinit();
-    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    const host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
-    var host_ct = try zg.HostBuffer.from_slice(allocator, &CtOut, shape_c, .f32);
+    const host_ct = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&CtOut) });
     defer host_ct.deinit();
 
-    const dims_a = [_]i64{ 2, 3 };
-    const dims_b = [_]i64{ 3, 2 };
-    const dims_c = [_]i64{ 2, 2 };
-
-    const dev_a = try backend.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
+    const dev_a = try backend.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
     defer backend.deinit_buffer(dev_a);
-    const dev_b = try backend.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
+    const dev_b = try backend.buffer_from_host(device, host_b.host_data(), .f32, host_b.dims());
     defer backend.deinit_buffer(dev_b);
-    const dev_c = try backend.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
+    const dev_c = try backend.buffer_from_host(device, host_c.host_data(), .f32, host_c.dims());
     defer backend.deinit_buffer(dev_c);
-    const dev_ct = try backend.buffer_from_host(device, host_ct.data(), .f32, dims_c[0..]);
+    const dev_ct = try backend.buffer_from_host(device, host_ct.host_data(), .f32, host_ct.dims());
     defer backend.deinit_buffer(dev_ct);
 
     const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct }, .{});
@@ -198,27 +188,30 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
 
     if (result.outputs.len != 3) return error.UnexpectedOutputs;
 
-    var out_a = try zg.HostBuffer.init(allocator, shape_a, .f32);
+    var out_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .alloc = allocator });
     defer out_a.deinit();
-    var out_b = try zg.HostBuffer.init(allocator, shape_b, .f32);
+    var out_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .alloc = allocator });
     defer out_b.deinit();
-    var out_c = try zg.HostBuffer.init(allocator, shape_c, .f32);
+    var out_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
     defer out_c.deinit();
 
-    const ev_a = try backend.buffer_to_host(result.outputs[0], out_a.data_mut());
+    const ev_a = try backend.buffer_to_host(result.outputs[0], out_a.host_data_mut());
     defer if (ev_a) |ev| backend.deinit_event(ev);
-    const ev_b = try backend.buffer_to_host(result.outputs[1], out_b.data_mut());
+    const ev_b = try backend.buffer_to_host(result.outputs[1], out_b.host_data_mut());
     defer if (ev_b) |ev| backend.deinit_event(ev);
-    const ev_c = try backend.buffer_to_host(result.outputs[2], out_c.data_mut());
+    const ev_c = try backend.buffer_to_host(result.outputs[2], out_c.host_data_mut());
     defer if (ev_c) |ev| backend.deinit_event(ev);
 
     if (ev_a) |ev| try backend.await_event(ev);
     if (ev_b) |ev| try backend.await_event(ev);
     if (ev_c) |ev| try backend.await_event(ev);
 
-    const got_a = out_a.as_slice(f32)[0..6];
-    const got_b = out_b.as_slice(f32)[0..6];
-    const got_c = out_c.as_slice(f32)[0..4];
+    const got_a = out_a.as_const_slice(f32);
+    const got_b = out_b.as_const_slice(f32);
+    const got_c = out_c.as_const_slice(f32);
+    std.debug.assert(got_a.len == 6);
+    std.debug.assert(got_b.len == 6);
+    std.debug.assert(got_c.len == 4);
 
     const expected_a = [_]f32{
         30.0, 38.0, 46.0,
@@ -234,9 +227,9 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
         143.0, 158.0,
     };
 
-    try expect_all_close("dA", got_a, expected_a[0..], 1e-4);
-    try expect_all_close("dB", got_b, expected_b[0..], 1e-4);
-    try expect_all_close("dC", got_c, expected_c[0..], 1e-4);
+    try expect_all_close("dA", got_a, expected_a, 1e-4);
+    try expect_all_close("dB", got_b, expected_b, 1e-4);
+    try expect_all_close("dC", got_c, expected_c, 1e-4);
 
     log.info("OK: gradients match expected", .{});
 }
@@ -252,8 +245,6 @@ pub fn run_train_demo(
     steps: usize,
     quiet: bool,
 ) !void {
-    const Tensor = zg.Tensor;
-
     const ParamsSpec = struct {
         w1: Tensor,
         b1: Tensor,
@@ -362,20 +353,20 @@ pub fn run_train_demo(
     fill_pattern(true_w3, 1e-6, 0.0);
     fill_pattern(true_b3, 1e-6, 0.0);
 
-    // Build host buffers from tree
+    // Build host tensors from tree
     var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
     defer spec_tree.deinit();
 
-    var host_tree = try spec_tree.map(zg.HostBuffer, allocator, struct {
-        fn f(alloc: std.mem.Allocator, spec: Tensor) anyerror!zg.HostBuffer {
-            return zg.HostBuffer.init(alloc, spec.shape, spec.dtype);
+    var host_tensors = try spec_tree.map(Tensor, allocator, struct {
+        fn f(alloc: std.mem.Allocator, spec: Tensor) !Tensor {
+            return try Tensor.host(spec.dtype, spec.shape.const_slice(), .{ .alloc = alloc });
         }
     }.f);
-    defer host_tree.deinit_with(zg.HostBuffer.deinit);
+    defer host_tensors.deinit_with(deinit_tensor);
 
     // Fill param buffers with pattern, batch input with data
-    for (host_tree.leaves[0..6]) |*buf| fill_pattern(buf.as_slice(f32), 1e-7, 0.0);
-    fill_inputs(host_tree.leaves[6].as_slice(f32));
+    for (host_tensors.leaves[0..6]) |*buf| fill_pattern(buf.as_slice(f32), 1e-7, 0.0);
+    fill_inputs(host_tensors.leaves[6].as_slice(f32));
 
     // Generate targets from true weights
     const scratch1 = try allocator.alloc(f32, @intCast(bs * h1));
@@ -383,8 +374,8 @@ pub fn run_train_demo(
     const scratch2 = try allocator.alloc(f32, @intCast(bs * h2));
     defer allocator.free(scratch2);
     try fill_targets(
-        &host_tree.leaves[7],
-        &host_tree.leaves[6],
+        host_tensors.leaves[7],
+        host_tensors.leaves[6],
         true_w1,
         true_b1,
         true_w2,
@@ -401,57 +392,47 @@ pub fn run_train_demo(
     );
 
     // Upload to device
-    var dev_tree = try backend.transfer(device, &host_tree, .to_device);
-    defer dev_tree.deinit(); // array only, buffer ownership managed below
-
-    var loss_host = try zg.HostBuffer.init(allocator, .{}, .f32);
-    defer loss_host.deinit();
+    const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
+    var dev_tree = try host_tensors.map(Tensor, UploadCtx{ .b = backend, .d = device }, struct {
+        fn f(ctx: UploadCtx, t: Tensor) anyerror!Tensor {
+            return t.to_device(ctx.b, ctx.d);
+        }
+    }.f);
+    defer dev_tree.deinit(); // array only, tensor ownership managed by TrainState
 
     var state = try train.TrainState.init_from_model(
         allocator,
         &compiled,
         backend,
         dev_tree.leaves,
+        .{},
     );
     defer state.deinit(.all);
 
     for (0..warmup_steps) |_| {
         const result = try state.step();
-        if (result.event) |ev| {
-            try backend.await_event(ev);
-            backend.deinit_event(ev);
-        }
-        if (!quiet) {
-            if (try backend.buffer_to_host(result.loss_buf, loss_host.data_mut())) |loss_ev| {
-                try backend.await_event(loss_ev);
-                backend.deinit_event(loss_ev);
-            }
-        }
-        backend.deinit_buffer(result.loss_buf);
+        // Deinit execution event without awaiting. buffer_to_host (called by
+        //  item below) chains behind execution internally.
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        if (result.event) |ev| backend.deinit_event(ev);
+        if (!quiet) _ = try result.loss.item(f32);
+        result.loss.deinit();
     }
 
     var loop_timer = zg.utils.LoopTimer{ .label = "train-demo", .quiet = quiet };
     for (0..steps) |_| {
         try loop_timer.start_step();
         const result = try state.step();
+        // Deinit execution event without awaiting. item() below syncs via
+        //  buffer_to_host which chains behind execution.
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        if (result.event) |ev| backend.deinit_event(ev);
         loop_timer.mark("dispatch");
 
-        if (result.event) |ev| {
-            try backend.await_event(ev);
-            backend.deinit_event(ev);
-        }
-        loop_timer.mark("exec");
+        const loss: ?f32 = if (quiet) null else try result.loss.item(f32);
+        loop_timer.mark("sync+read");
 
-        const loss: ?f32 = if (quiet) null else blk: {
-            if (try backend.buffer_to_host(result.loss_buf, loss_host.data_mut())) |loss_ev| {
-                try backend.await_event(loss_ev);
-                backend.deinit_event(loss_ev);
-            }
-            break :blk loss_host.as_slice(f32)[0];
-        };
-        loop_timer.mark("loss_read");
-
-        backend.deinit_buffer(result.loss_buf);
+        result.loss.deinit();
         loop_timer.mark("cleanup");
 
         loop_timer.end_step(loss);
@@ -596,25 +577,19 @@ fn run_kernel_provider_demo_executable(
     const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
     const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
     const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
-    const shape_a = zg.BoundedShape.from_slice(&.{ 2, 3 });
-    const shape_b = zg.BoundedShape.from_slice(&.{ 3, 2 });
-    const shape_c = zg.BoundedShape.from_slice(&.{ 2, 2 });
 
-    var host_a = try zg.HostBuffer.from_slice(allocator, &A, shape_a, .f32);
+    const host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
-    var host_b = try zg.HostBuffer.from_slice(allocator, &B, shape_b, .f32);
+    const host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
     defer host_b.deinit();
-    var host_c = try zg.HostBuffer.from_slice(allocator, &C, shape_c, .f32);
+    const host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
 
-    const dims_a = [_]i64{ 2, 3 };
-    const dims_b = [_]i64{ 3, 2 };
-    const dims_c = [_]i64{ 2, 2 };
-    const dev_a = try backend.buffer_from_host(device, host_a.data(), .f32, dims_a[0..]);
+    const dev_a = try backend.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
     defer backend.deinit_buffer(dev_a);
-    const dev_b = try backend.buffer_from_host(device, host_b.data(), .f32, dims_b[0..]);
+    const dev_b = try backend.buffer_from_host(device, host_b.host_data(), .f32, host_b.dims());
     defer backend.deinit_buffer(dev_b);
-    const dev_c = try backend.buffer_from_host(device, host_c.data(), .f32, dims_c[0..]);
+    const dev_c = try backend.buffer_from_host(device, host_c.host_data(), .f32, host_c.dims());
     defer backend.deinit_buffer(dev_c);
 
     const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, exec_opts);
@@ -626,9 +601,9 @@ fn run_kernel_provider_demo_executable(
 
     if (result.outputs.len != 1) return error.UnexpectedOutputs;
 
-    var out_host = try zg.HostBuffer.init(allocator, shape_c, .f32);
+    var out_host = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
     defer out_host.deinit();
-    if (try backend.buffer_to_host(result.outputs[0], out_host.data_mut())) |ev| {
+    if (try backend.buffer_to_host(result.outputs[0], out_host.host_data_mut())) |ev| {
         defer backend.deinit_event(ev);
         try backend.await_event(ev);
     }
@@ -640,7 +615,8 @@ fn run_kernel_provider_demo_executable(
         116.0 * n + 4.0, 128.0 * n + 4.0,
         278.0 * n + 4.0, 308.0 * n + 4.0,
     };
-    const out = out_host.as_slice(f32)[0..4];
+    const out = out_host.as_const_slice(f32);
+    std.debug.assert(out.len == 4);
     for (out, 0..) |v, i| {
         const diff = @abs(v - expected[i]);
         if (diff > 1e-4) {
@@ -828,8 +804,8 @@ fn fill_inputs(x: []f32) void {
 }
 
 fn fill_targets(
-    host_y: *zg.HostBuffer,
-    host_x: *zg.HostBuffer,
+    host_y: Tensor,
+    host_x: Tensor,
     w1: []const f32,
     b1: []const f32,
     w2: []const f32,
