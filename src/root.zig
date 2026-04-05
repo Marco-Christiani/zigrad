@@ -13,7 +13,7 @@
 //!   - `frontend.transforms`: Trace-time function transforms (e.g. `value_and_grad`).
 //!   - `frontend.optim`: Traced-mode optimizer building blocks.
 //!   - `frontend.train`: Training loop state management (`TrainState`).
-//! - `Tensor`: Unified tensor type (traced, device, or abstract mode).
+//! - `Tensor`: Unified tensor type (traced, device, host, or abstract backing).
 //! - `utils`: Utility types (`HostBuffer`, `Tree`, etc.).
 const std = @import("std");
 

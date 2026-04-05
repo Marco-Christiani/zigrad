@@ -10,7 +10,7 @@ const log = std.log.scoped(.@"zg/llama-ft-demo");
 /// Create an iota tensor from a traced tensor's builder.
 /// TODO: missing method?
 fn iota_from(t: Tensor, out_dtype: zg.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
-    const b = t.mode.traced.builder;
+    const b = t.backing.traced.builder;
     return Tensor.from_var(b, try b.iota(out_dtype, out_dims, iota_dim));
 }
 

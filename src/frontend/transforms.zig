@@ -195,7 +195,7 @@ fn ArgsParamsType(comptime ArgsType: type) type {
 /// Extract the FunctionBuilder pointer from the first Tensor leaf in a structured value.
 fn extract_builder(val: anytype) ?*pr.FunctionBuilder {
     const T = @TypeOf(val);
-    if (T == Tensor) return val.mode.traced.builder;
+    if (T == Tensor) return val.backing.traced.builder;
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
             inline for (info.fields) |field| {

@@ -135,7 +135,7 @@ fn self_attention(
     else
         try x.convert(layer.qkv_proj.dtype);
     const x_flat = try x_dot.reshape(&.{ batch_size * seq, hidden });
-    const qkv_region_name = try std.fmt.allocPrint(x.mode.traced.builder.program.allocator(), "llama_l{d}_attn_qkv", .{layer_idx});
+    const qkv_region_name = try std.fmt.allocPrint(x.backing.traced.builder.program.allocator(), "llama_l{d}_attn_qkv", .{layer_idx});
     const qkv_flat = try matmul_with_optional_kernel_region(x_flat, layer.qkv_proj, opts.kernelize_provider, qkv_region_name);
     const qkv = try qkv_flat.reshape(&.{ batch_size, seq, total_heads * head_dim });
     // QKV layout is [Q heads | K heads | V heads].
@@ -191,7 +191,7 @@ fn self_attention(
     else
         try out_bshd.convert(layer.o_proj.dtype);
     const out_flat = try out_dot.reshape(&.{ batch_size * seq, hidden });
-    const o_region_name = try std.fmt.allocPrint(x.mode.traced.builder.program.allocator(), "llama_l{d}_attn_o", .{layer_idx});
+    const o_region_name = try std.fmt.allocPrint(x.backing.traced.builder.program.allocator(), "llama_l{d}_attn_o", .{layer_idx});
     const proj_flat = try matmul_with_optional_kernel_region(out_flat, layer.o_proj, opts.kernelize_provider, o_region_name);
     return proj_flat.reshape(&.{ batch_size, seq, hidden });
 }
@@ -296,7 +296,7 @@ fn softmax_last_dim_accum_f32(x: Tensor) !Tensor {
 }
 
 fn mlp(x: Tensor, layer: LayerWeights, layer_idx: usize, opts: ForwardOptions) !Tensor {
-    const a = x.mode.traced.builder.program.allocator();
+    const a = x.backing.traced.builder.program.allocator();
     const provider = opts.kernelize_provider;
 
     if (x.dims().len == 3) {
@@ -335,12 +335,12 @@ fn matmul_with_optional_kernel_region(
     region_name: []const u8,
 ) !Tensor {
     if (kernelize_provider) |provider_name| {
-        try lhs.mode.traced.builder.push_region(region_name, .{ .kernelize = provider_name });
+        try lhs.backing.traced.builder.push_region(region_name, .{ .kernelize = provider_name });
         const out = lhs.matmul(rhs) catch |err| {
-            lhs.mode.traced.builder.pop_region() catch {};
+            lhs.backing.traced.builder.pop_region() catch {};
             return err;
         };
-        try lhs.mode.traced.builder.pop_region();
+        try lhs.backing.traced.builder.pop_region();
         return out;
     }
     return lhs.matmul(rhs);

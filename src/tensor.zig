@@ -1,29 +1,33 @@
 //! Tensor
 //!
-//! Unified tensor type with three modes:
+//! Unified tensor type with four backing variants:
 //!
-//! - **traced**: compile-time. Bound to a `FunctionBuilder`. Each operation
-//!    emits a PR op and returns a new traced Tensor. Used during program
-//!    construction (tracing).
-//! - **device**: runtime. Wraps a backend device buffer. Supports host
-//!    transfer (`to_host_sync`, `to_host_async`) and cleanup (`deinit`).
-//! - **abstract**: specification only (dtype + shape, no data). Used to
-//!    define input specs for `frontend.compile`.
+//! 1. **traced**: compile-time. Bound to a `FunctionBuilder`. Each operation
+//!     emits a PR op and returns a new traced Tensor. Used during program
+//!     construction (tracing).
+//! 2. **device**: runtime. Wraps a backend device buffer. Supports host
+//!     transfer and cleanup.
+//! 3. **host**: runtime. CPU-resident data with owned, borrowed, or
+//!     memory-mapped memory. Supports typed access (`as_slice`, `item`)
+//!     and transfer to device (`to_device`).
+//! 4. **abstract**: specification only (dtype + shape, no data). Used to
+//!     define input specs for `frontend.compile`.
 //!
-//! All modes carry `dtype` and `shape` as direct fields for uniform access.
+//! All variants carry `dtype` and `shape` as direct fields for uniform access.
 //! In traced mode these are copied from the underlying `Var.aval` at
 //!  construction time, this is deliberate denormalization so callers don't
-//!  need to switch on mode for basic type queries.
+//!  need to switch on backing for basic type queries.
 const std = @import("std");
 const pr = @import("pr/pr.zig");
 const backend_mod = @import("backend/root.zig");
 const Backend = backend_mod.Backend;
+const HostBuffer = @import("utils/host_buffer.zig").HostBuffer;
 
 const Tensor = @This();
 
 dtype: pr.DType,
 shape: pr.BoundedShape,
-mode: Mode,
+backing: Backing,
 
 /// When `true`, the backend may reuse this input buffer for an output.
 ///
@@ -35,12 +39,14 @@ donatable: bool = false,
 
 pub const max_rank = pr.max_rank;
 
-/// Which execution mode this tensor is in.
-pub const Mode = union(enum) {
+/// What data this tensor is backed by, determined by the lifecycle stage.
+pub const Backing = union(enum) {
     /// Compile-time: operations emit PR ops via the builder.
     traced: Traced,
     /// Runtime: wraps a device buffer for execution/transfer.
     device: Device,
+    /// Runtime: CPU-resident data (owned, borrowed, or memory-mapped).
+    host: HostBuffer,
     /// Specification: dtype + shape only, for defining compile input specs.
     abstract: void,
 };
@@ -58,6 +64,18 @@ pub const Device = struct {
     backend: *Backend,
 };
 
+/// Source specification for constructing a host-backed tensor.
+pub const HostSrc = union(enum) {
+    /// Allocate zeroed host memory.
+    alloc: std.mem.Allocator,
+    /// Borrow externally-owned bytes (no-op on deinit). Caller must
+    ///  ensure the bytes outlive this tensor.
+    borrow: []const u8,
+    /// Memory-map a file path (read-only, munmap on deinit).
+    /// TODO: accept a file handle or std.fs.File for non-path-based mmap.
+    mmap: []const u8,
+};
+
 // ============================================================================
 // Construction
 // ============================================================================
@@ -68,7 +86,7 @@ pub fn from_var(builder: *pr.FunctionBuilder, v: *pr.Var) Tensor {
     return .{
         .dtype = t.dtype,
         .shape = .from_slice(t.shape.dims),
-        .mode = .{ .traced = .{ .var_ref = v, .builder = builder } },
+        .backing = .{ .traced = .{ .var_ref = v, .builder = builder } },
     };
 }
 
@@ -77,7 +95,7 @@ pub fn from_buffer(b: *Backend, buf: Backend.Buffer, dtype: pr.DType, shape: []c
     return .{
         .dtype = dtype,
         .shape = .from_slice(shape),
-        .mode = .{ .device = .{ .buffer = buf, .backend = b } },
+        .backing = .{ .device = .{ .buffer = buf, .backend = b } },
     };
 }
 
@@ -88,9 +106,31 @@ pub fn param(builder: *pr.FunctionBuilder, dtype: pr.DType, shape: []const i64) 
 }
 
 /// Upload host data to a device tensor.
-pub fn from_host(b: *Backend, device: Backend.Device, data: []const u8, dtype: pr.DType, shape: []const i64) !Tensor {
+pub fn from_host_bytes(b: *Backend, device: Backend.Device, data: []const u8, dtype: pr.DType, shape: []const i64) !Tensor {
     const buf = try b.buffer_from_host(device, data, dtype, shape);
     return from_buffer(b, buf, dtype, shape);
+}
+
+/// Create a host-backed tensor.
+///
+/// The `src` parameter selects the memory strategy:
+///  - `.alloc`: allocate zeroed memory (caller fills via `as_slice`/`fill`).
+///  - `.borrow`: wrap existing bytes without copying (caller manages lifetime).
+///  - `.mmap`: memory-map a file path (read-only, unmapped on `deinit`).
+pub fn host(dtype: pr.DType, shape: []const i64, src: HostSrc) !Tensor {
+    const bounded = pr.BoundedShape.from_slice(shape);
+    const hb: HostBuffer = switch (src) {
+        .alloc => |a| try HostBuffer.init(a, bounded, dtype),
+        .borrow => |bytes| blk: {
+            const align_req = dtype.size_in_bytes();
+            if (align_req > 1 and @intFromPtr(bytes.ptr) % align_req != 0) {
+                @panic("Tensor.host: borrowed bytes are not aligned for dtype");
+            }
+            break :blk HostBuffer.borrow(bytes, bounded, dtype);
+        },
+        .mmap => |path| try HostBuffer.from_mmap(path, bounded, dtype),
+    };
+    return .{ .dtype = dtype, .shape = bounded, .backing = .{ .host = hb } };
 }
 
 pub const AbstractOpts = struct {
@@ -103,7 +143,7 @@ pub const AbstractOpts = struct {
 ///  (e.g. trainable parameters). The donation flag flows through compilation
 ///  into the execute loop, controlling buffer reuse and ownership.
 pub fn abstract(dtype: pr.DType, shape: []const i64, opts: AbstractOpts) Tensor {
-    return .{ .dtype = dtype, .shape = .from_slice(shape), .mode = .abstract, .donatable = opts.donatable };
+    return .{ .dtype = dtype, .shape = .from_slice(shape), .backing = .abstract, .donatable = opts.donatable };
 }
 
 /// Shorthand for an abstract donatable tensor (trainable parameter spec).
@@ -116,16 +156,16 @@ pub fn abstract_donatable(dtype: pr.DType, shape: []const i64) Tensor {
 // ============================================================================
 
 fn traced_builder(self: Tensor) !*pr.FunctionBuilder {
-    return switch (self.mode) {
+    return switch (self.backing) {
         .traced => |t| t.builder,
-        .device, .abstract => error.UnsupportedAval,
+        .device, .host, .abstract => error.UnsupportedAval,
     };
 }
 
 fn traced_var(self: Tensor) !*pr.Var {
-    return switch (self.mode) {
+    return switch (self.backing) {
         .traced => |t| t.var_ref,
-        .device, .abstract => error.UnsupportedAval,
+        .device, .host, .abstract => error.UnsupportedAval,
     };
 }
 
@@ -309,36 +349,172 @@ pub fn gather_2d(self: Tensor, indices: Tensor) !Tensor {
 }
 
 // ============================================================================
-// Device-mode operations
+// Host-mode operations
 // ============================================================================
 
-/// Copy buffer contents to host memory.
+/// View host data as a mutable typed slice. Host-backed (heap) only.
 ///
-/// Returns null when the transfer completed synchronously.
-pub fn to_host_async(self: Tensor, dst: []u8) !?Backend.Event {
-    return switch (self.mode) {
-        .device => |d| d.backend.buffer_to_host(d.buffer, dst),
-        .traced, .abstract => error.UnsupportedAval,
+/// The returned slice points into the tensor's backing memory; no copy is made.
+/// Panics if the backing is not mutable (mmap, borrowed) or not host-backed.
+pub fn as_slice(self: Tensor, comptime T: type) []T {
+    return switch (self.backing) {
+        .host => |hb| @alignCast(std.mem.bytesAsSlice(T, switch (hb.backing) {
+            .heap => |h| h.data,
+            .mmap, .borrowed => @panic("as_slice requires mutable host backing (heap)"),
+        })),
+        .traced, .device, .abstract => @panic("as_slice requires host backing"),
     };
 }
 
-/// Copy buffer to host, blocking until complete.
+/// View host data as an immutable typed slice. Any host backing variant.
+pub fn as_const_slice(self: Tensor, comptime T: type) []const T {
+    return switch (self.backing) {
+        .host => |hb| @alignCast(std.mem.bytesAsSlice(T, hb.data())),
+        .traced, .device, .abstract => @panic("as_const_slice requires host backing"),
+    };
+}
+
+/// Raw byte slice (read-only). Host-backed only.
+pub fn host_data(self: Tensor) []const u8 {
+    return switch (self.backing) {
+        .host => |hb| hb.data(),
+        .traced, .device, .abstract => @panic("host_data requires host backing"),
+    };
+}
+
+/// Raw mutable byte slice. Host-backed (heap) only.
+pub fn host_data_mut(self: Tensor) []u8 {
+    return switch (self.backing) {
+        .host => |hb| hb.data_mut(),
+        .traced, .device, .abstract => @panic("host_data_mut requires host backing"),
+    };
+}
+
+/// Fill host buffer with a scalar value. Host-backed (heap) only.
+pub fn fill(self: Tensor, comptime T: type, value: T) void {
+    const count = self.shape.num_elements();
+    const typed: []T = @alignCast(std.mem.bytesAsSlice(T, self.host_data_mut()));
+    for (typed[0..count]) |*elem| elem.* = value;
+}
+
+/// Extract a scalar value, transferring from device if needed, **implies a sync**.
+///
+/// Works on both host and device tensors. For device tensors, performs a
+///  synchronous transfer into a stack buffer.
+///
+/// When `T` is a float type, decodes from the tensor's dtype via
+///  `DType.decode`, e.g. `item(f32)` on a bf16 tensor decodes correctly.
+/// For non-float `T`, reinterprets the raw bytes directly (caller must
+///  ensure `T` matches the tensor's storage type).
+///
+/// Does not take ownership of the device buffer.
+///
+/// TODO: verify that PJRT_Event_Destroy on a non-awaited event is safe
+///  per the PJRT spec. Current plugins appear to handle this correctly
+///  (buffer_to_host chains behind execution), but the spec guarantee is
+///  unconfirmed.
+pub fn item(self: Tensor, comptime T: type) !T {
+    // Stack buffer for device transfer, fill w a sentinal value.
+    var buf: [8]u8 = "\xDE\xAD\xBE\xEF\xEF\xBE\xAD\xDE".*;
+
+    const bytes: []const u8 = switch (self.backing) {
+        .host => self.host_data(),
+        .device => |d| blk: {
+            const nbytes = self.dtype.size_in_bytes();
+            if (try d.backend.buffer_to_host(d.buffer, buf[0..nbytes])) |event| {
+                try d.backend.await_event(event);
+                d.backend.deinit_event(event);
+            }
+            break :blk buf[0..nbytes];
+        },
+        .traced, .abstract => return error.UnsupportedAval,
+    };
+    return switch (self.dtype) {
+        inline .f32, .f64, .bf16, .f16, .i32 => |tag| {
+            return tag.decode(T, std.mem.bytesToValue(tag.StorageType(), bytes[0..@sizeOf(tag.StorageType())]));
+        },
+        else => @panic("item: unsupported dtype"),
+    };
+}
+
+// ============================================================================
+// Transfer operations
+// ============================================================================
+
+/// Copy device buffer contents to a caller-provided host byte slice.
+///
+/// Returns null when the transfer completed synchronously.
+pub fn to_host_async(self: Tensor, dst: []u8) !?Backend.Event {
+    return switch (self.backing) {
+        .device => |d| d.backend.buffer_to_host(d.buffer, dst),
+        .traced, .host, .abstract => error.UnsupportedAval,
+    };
+}
+
+/// Copy device buffer to a caller-provided host byte slice, blocking until complete.
 pub fn to_host_sync(self: Tensor, dst: []u8) !void {
-    switch (self.mode) {
+    switch (self.backing) {
         .device => |d| {
             if (try d.backend.buffer_to_host(d.buffer, dst)) |event| {
                 try d.backend.await_event(event);
                 d.backend.deinit_event(event);
             }
         },
-        .traced, .abstract => return error.UnsupportedAval,
+        .traced, .host, .abstract => return error.UnsupportedAval,
     }
 }
 
-/// Release the device buffer.
+/// Transfer a device tensor to a new host-backed tensor, blocking until complete.
+///
+/// Allocates a new host buffer and copies device data into it. The returned
+/// tensor owns the host memory; call `deinit` to free it.
+pub fn to_host(self: Tensor, allocator: std.mem.Allocator) !Tensor {
+    switch (self.backing) {
+        .device => |d| {
+            var hb = try HostBuffer.init(allocator, self.shape, self.dtype);
+            errdefer hb.deinit();
+            if (try d.backend.buffer_to_host(d.buffer, hb.data_mut())) |event| {
+                try d.backend.await_event(event);
+                d.backend.deinit_event(event);
+            }
+            return .{ .dtype = self.dtype, .shape = self.shape, .backing = .{ .host = hb } };
+        },
+        .traced, .host, .abstract => return error.UnsupportedAval,
+    }
+}
+
+/// Transfer a host tensor to a device, returning a new device-backed tensor.
+///
+/// The host data is copied to the device; the caller retains ownership
+/// of the source host tensor.
+pub fn to_device(self: Tensor, b: *Backend, device: Backend.Device) !Tensor {
+    return switch (self.backing) {
+        .host => |hb| {
+            const buf = try b.buffer_from_host(device, hb.data(), self.dtype, self.shape.const_slice());
+            return from_buffer(b, buf, self.dtype, self.shape.const_slice());
+        },
+        .traced, .device, .abstract => error.UnsupportedAval,
+    };
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+/// Release resources held by this tensor.
+///
+/// - **device**: releases the device buffer via the backend.
+/// - **host (heap)**: frees the backing allocation.
+/// - **host (mmap)**: unmaps the memory region.
+/// - **host (borrowed)**, **traced**, **abstract**: no-op.
 pub fn deinit(self: Tensor) void {
-    switch (self.mode) {
+    switch (self.backing) {
         .device => |d| d.backend.deinit_buffer(d.buffer),
+        .host => |hb| switch (hb.backing) {
+            .heap => |h| h.allocator.free(h.data),
+            .mmap => |s| std.posix.munmap(s),
+            .borrowed => {},
+        },
         .traced, .abstract => {},
     }
 }
@@ -357,17 +533,28 @@ pub fn rank(self: Tensor) usize {
     return self.shape.len;
 }
 
-/// Get the underlying backend buffer (device mode only).
+/// Get the underlying backend buffer (device backing only).
 pub fn buffer(self: Tensor) !Backend.Buffer {
-    return switch (self.mode) {
+    return switch (self.backing) {
         .device => |d| d.buffer,
-        .traced, .abstract => error.UnsupportedAval,
+        .traced, .host, .abstract => error.UnsupportedAval,
     };
 }
 
-/// Get the underlying Var (traced mode only).
+/// Get the underlying Var (traced backing only).
 pub fn get_var(self: Tensor) !*pr.Var {
     return self.traced_var();
+}
+
+/// Get the embedded HostBuffer (host backing only).
+///
+/// Useful for interop with APIs that still accept `HostBuffer` directly
+/// (e.g. `Backend.transfer`).
+pub fn get_host_buffer(self: *const Tensor) *const HostBuffer {
+    return switch (self.backing) {
+        .host => |*hb| hb,
+        .traced, .device, .abstract => @panic("get_host_buffer requires host backing"),
+    };
 }
 
 /// Create a scalar constant broadcast to match this tensor's dtype and shape.
