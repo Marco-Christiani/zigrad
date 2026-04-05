@@ -130,6 +130,7 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) !Artifact {
     };
 }
 
+// TODO: hardcoding endianess here
 fn readU32(data: []const u8, pos: *usize) u32 {
     if (pos.* + 4 > data.len) return 0;
     const val = std.mem.readInt(u32, data[pos.*..][0..4], .little);
@@ -137,6 +138,7 @@ fn readU32(data: []const u8, pos: *usize) u32 {
     return val;
 }
 
+// TODO: hardcoding endianess here
 fn readU64(data: []const u8, pos: *usize) u64 {
     if (pos.* + 8 > data.len) return 0;
     const val = std.mem.readInt(u64, data[pos.*..][0..8], .little);

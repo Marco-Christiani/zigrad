@@ -179,6 +179,9 @@ pub const TransferDirection = enum {
 ///  the source tree's allocator. Caller must `deinit` the returned tree.
 ///
 /// NOTE: `.to_host` is not yet implemented -- produces a compile error.
+/// TODO: with new tensor methods this now seems dead, were we going somewhere with this? I think the tree support
+///  was the selling point so we should probably keep it and decide about relocation or just use it
+///  as a reference for when we implemet tree transfer support (to avoid the verbose map pattern).
 pub fn transfer(
     self: *Backend,
     device: Device,
@@ -195,8 +198,8 @@ pub fn transfer(
                 // tree of buffers
                 const Ctx = struct { b: *Backend, d: Device };
                 return source.map(Buffer, Ctx{ .b = self, .d = device }, struct {
-                    fn f(ctx: Ctx, buf: host_buffer.HostBuffer) anyerror!Buffer {
-                        return ctx.b.buffer_from_host(ctx.d, buf.data(), buf.dtype, buf.shape.const_slice());
+                    fn f(ctx: Ctx, buf: host_buffer.HostBuffer) !Buffer {
+                        return try ctx.b.buffer_from_host(ctx.d, buf.data(), buf.dtype, buf.shape.const_slice());
                     }
                 }.f);
             } else {

@@ -114,7 +114,7 @@ pub fn from_host_bytes(b: *Backend, device: Backend.Device, data: []const u8, dt
 /// Create a host-backed tensor.
 ///
 /// The `src` parameter selects the memory strategy:
-///  - `.alloc`: allocate zeroed memory (caller fills via `as_slice`/`fill`).
+///  - `.alloc`: allocate (aligned) zeroed memory (caller fills via `as_slice`/`fill`).
 ///  - `.borrow`: wrap existing bytes without copying (caller manages lifetime).
 ///  - `.mmap`: memory-map a file path (read-only, unmapped on `deinit`).
 pub fn host(dtype: pr.DType, shape: []const i64, src: HostSrc) !Tensor {
