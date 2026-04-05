@@ -199,13 +199,13 @@ pub fn main() !void {
 
     // --- Upload to device ---
     const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
-    var dev_bufs = try host_tensors.map(zg.Backend.Buffer, UploadCtx{ .b = backend, .d = device }, struct {
-        fn f(ctx: UploadCtx, t: Tensor) !zg.Backend.Buffer {
-            return try ctx.b.buffer_from_host(ctx.d, t.host_data(), t.dtype, t.shape.const_slice());
+    var dev_tensors = try host_tensors.map(Tensor, UploadCtx{ .b = backend, .d = device }, struct {
+        fn f(ctx: UploadCtx, t: Tensor) !Tensor {
+            return try t.to_device(ctx.b, ctx.d);
         }
     }.f);
-    // TrainState takes ownership of the device buffers, only free the tree container
-    defer dev_bufs.deinit();
+    // TrainState takes ownership of the device tensors, only free the tree container
+    defer dev_tensors.deinit();
 
     // --- Training loop ---
     std.log.info("training for {} steps...", .{steps});
@@ -213,7 +213,8 @@ pub fn main() !void {
         allocator,
         &compiled,
         backend,
-        dev_bufs.leaves,
+        dev_tensors.leaves,
+        .{},
     );
     defer state.deinit(.all);
 
@@ -231,22 +232,16 @@ pub fn main() !void {
         //  which results in better performance. While the device (assuming its
         //  not CPU) is busy, the CPU can do other work like load the next batch.
         //  That is also why the above "event" exists.
-        // Here we wrap the device buffer as a Tensor so we can use item(),
-        //  which performs a synchronous transfer to stack mem and handles dtype
-        //  decoding.
+        // item() performs a synchronous transfer to stack mem and handles dtype
+        //  decoding (e.g. bf16 to f32).
         // TODO: we never finished the sync/async variants
-        // TODO: same comments as the exe situation, this is pretty bad.
-        // TODO: this is awkward, we can get around this while we address the
-        //  separate buffer types.
-        const loss_dev = Tensor.from_buffer(backend, result.loss_buf, .f32, &.{});
-        const loss_val = try loss_dev.item(f32);
+        const loss_val = try result.loss.item(f32);
 
         if (step % 10 == 0 or step == steps - 1) {
             std.log.info("step {d:>4}: loss = {d:.4}", .{ step, loss_val });
         }
 
-        // TODO: same comments as the exe situation
-        backend.deinit_buffer(result.loss_buf);
+        result.loss.deinit();
     }
 
     std.log.info("done", .{});
