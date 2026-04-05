@@ -129,7 +129,7 @@ tasks:
     cmd: zig build -Doptimize={{ .optimize }} -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Dinstall-runtime-link=true
 
   test:
-    cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
+    cmd: zig build -Doptimize=Debug -Dsdk=$ZG_EXTERNAL_SDK_ROOT test --summary all && echo "[OK] tests passed"
 
   docs:
     desc: Emit Zig autodocs to zig-out/autodoc
