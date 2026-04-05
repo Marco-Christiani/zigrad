@@ -1,0 +1,14 @@
+.{
+    .name = .mnist,
+    .version = "0.0.0",
+    .fingerprint = 0x6805ab6e862a6940,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .zigrad = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
