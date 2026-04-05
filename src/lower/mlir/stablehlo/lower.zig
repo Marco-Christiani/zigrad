@@ -448,7 +448,7 @@ fn scalar_zero_bytes(dtype: pr.DType) []const u8 {
 fn scalar_min_bytes(dtype: pr.DType) []const u8 {
     return switch (dtype) {
         .f16 => std.mem.asBytes(&@as(u16, 0xFC00)), // -inf in f16
-        .bf16 => std.mem.asBytes(&pr.DType.bf16.encode_f32(-std.math.inf(f32))),
+        .bf16 => std.mem.asBytes(&pr.DType.bf16.encode(f32, -std.math.inf(f32))),
         .f32 => std.mem.asBytes(&@as(f32, -std.math.inf(f32))),
         .f64 => std.mem.asBytes(&@as(f64, -std.math.inf(f64))),
         .i8 => std.mem.asBytes(&std.math.minInt(i8)),

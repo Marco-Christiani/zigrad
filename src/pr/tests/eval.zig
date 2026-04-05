@@ -227,8 +227,8 @@ fn eval_literal(allocator: std.mem.Allocator, lit: pr.Literal) EvalError!HostTen
         .u32 => |v| @floatFromInt(v),
         .u64 => |v| @floatFromInt(v),
         .bool => |v| if (v) @as(f32, 1.0) else 0.0,
-        .f16 => |v| pr.DType.f16.decode_f32(v),
-        .bf16 => |v| pr.DType.bf16.decode_f32(v),
+        .f16 => |v| pr.DType.f16.decode(f32, v),
+        .bf16 => |v| pr.DType.bf16.decode(f32, v),
     };
     return t;
 }

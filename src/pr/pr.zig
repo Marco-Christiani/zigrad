@@ -65,7 +65,7 @@ pub const DType = enum {
     /// Zig type used to store one element of this dtype in host memory.
     ///
     /// Float16 variants (bf16, f16) map to `u16` (bit-pattern storage), not
-    ///  a native float type. Use `encode_f32`/`decode_f32` for value conversion.
+    ///  a native float type. Use `encode`/`decode` for value conversion.
     ///
     /// Intended for use inside `inline switch` branches where the tag is
     ///  comptime-known, enabling generic dtype-agnostic code without per-dtype
@@ -85,27 +85,27 @@ pub const DType = enum {
         };
     }
 
-    /// Convert an f32 value to this dtype's storage representation.
-    pub inline fn encode_f32(comptime self: DType, val: f32) StorageType(self) {
+    /// Convert a float value to this dtype's storage representation.
+    pub inline fn encode(comptime self: DType, comptime T: type, val: T) StorageType(self) {
         return switch (self) {
-            .f32 => val,
+            .f32 => @floatCast(val),
             .f64 => @floatCast(val),
-            .bf16 => @intCast(@as(u32, @bitCast(val)) >> 16),
+            .bf16 => @intCast(@as(u32, @bitCast(@as(f32, @floatCast(val)))) >> 16),
             .f16 => @bitCast(@as(f16, @floatCast(val))),
             .i32 => @intFromFloat(val),
-            else => @compileError("encode_f32 not supported for " ++ @tagName(self)),
+            else => @compileError("encode not supported for " ++ @tagName(self)),
         };
     }
 
-    /// Decode this dtype's storage representation back to f32.
-    pub inline fn decode_f32(comptime self: DType, raw: StorageType(self)) f32 {
+    /// Decode this dtype's storage representation to a float type.
+    pub inline fn decode(comptime self: DType, comptime T: type, raw: StorageType(self)) T {
         return switch (self) {
-            .f32 => raw,
+            .f32 => @floatCast(raw),
             .f64 => @floatCast(raw),
-            .bf16 => @bitCast(@as(u32, raw) << 16),
+            .bf16 => @floatCast(@as(f32, @bitCast(@as(u32, raw) << 16))),
             .f16 => @floatCast(@as(f16, @bitCast(raw))),
             .i32 => @floatFromInt(raw),
-            else => @compileError("decode_f32 not supported for " ++ @tagName(self)),
+            else => @compileError("decode not supported for " ++ @tagName(self)),
         };
     }
 };
@@ -208,8 +208,8 @@ pub const Literal = union(DType) {
     /// Create a typed scalar literal by converting from f64.
     pub fn from_f64(value_dtype: DType, value: f64) Literal {
         return switch (value_dtype) {
-            .f16 => .{ .f16 = DType.f16.encode_f32(@floatCast(value)) },
-            .bf16 => .{ .bf16 = DType.bf16.encode_f32(@floatCast(value)) },
+            .f16 => .{ .f16 = DType.f16.encode(f64, value) },
+            .bf16 => .{ .bf16 = DType.bf16.encode(f64, value) },
             .f32 => .{ .f32 = @floatCast(value) },
             .f64 => .{ .f64 = value },
             .i8 => .{ .i8 = @intFromFloat(value) },

@@ -37,8 +37,8 @@ pub const literal = struct {
 
     pub fn format(writer: *types.Writer, _: *const pr.Op, lit: pr.Literal) types.FormatError!void {
         switch (lit) {
-            .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode_f32(v)}),
-            .bf16 => |v| try writer.print("{d}", .{pr.DType.bf16.decode_f32(v)}),
+            .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode(f32, v)}),
+            .bf16 => |v| try writer.print("{d}", .{pr.DType.bf16.decode(f32, v)}),
             inline .f32, .f64, .i8, .u8, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
             .bool => |v| try writer.print("{s}", .{if (v) "true" else "false"}),
         }

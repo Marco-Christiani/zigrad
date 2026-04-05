@@ -465,8 +465,8 @@ fn emit_i64_array(writer: *Writer, items: []const i64) !void {
 /// JSON literal values. bf16 is widened to f32 for JSON compatibility.
 fn emit_literal_json(writer: *Writer, lit: pr.Literal) !void {
     switch (lit) {
-        .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode_f32(v)}),
-        .bf16 => |v| try writer.print("{d}", .{pr.DType.bf16.decode_f32(v)}),
+        .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode(f32, v)}),
+        .bf16 => |v| try writer.print("{d}", .{pr.DType.bf16.decode(f32, v)}),
         .bool => |v| try writer.writeAll(if (v) "true" else "false"),
         inline .f32, .f64 => |v| try writer.print("{d}", .{v}),
         inline .i8, .u8, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),

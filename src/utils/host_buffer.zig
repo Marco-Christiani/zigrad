@@ -183,7 +183,7 @@ pub const HostBuffer = struct {
                 try writer.writeAll("[");
                 for (slice[0..max_print], 0..) |val, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d:.2}", .{DType.bf16.decode_f32(val)});
+                    try writer.print("{d:.2}", .{DType.bf16.decode(f32, val)});
                 }
                 if (max_print < self.shape.num_elements()) {
                     try writer.writeAll(", ...");
