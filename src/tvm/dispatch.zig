@@ -8,6 +8,7 @@ const dlpack = @import("../c/dlpack.zig");
 const tvm_api = @import("../c/tvm/api.zig");
 const tvm_runtime = @import("../c/tvm/runtime.zig");
 const tvm_c = @import("../c/tvm/c.zig");
+const Cache = @import("../cache.zig").Cache;
 
 const log = std.log.scoped(.@"zg/tvm_dispatch");
 
@@ -26,11 +27,13 @@ pub const TvmDispatchState = struct {
     cache_mutex: std.Thread.Mutex = .{},
     cache: std.StringHashMap(TvmDispatchEntry),
     allocator: std.mem.Allocator,
+    artifact_cache: Cache,
 
-    pub fn init(allocator: std.mem.Allocator) TvmDispatchState {
+    pub fn init(allocator: std.mem.Allocator, artifact_cache: Cache) TvmDispatchState {
         return .{
             .cache = std.StringHashMap(TvmDispatchEntry).init(allocator),
             .allocator = allocator,
+            .artifact_cache = artifact_cache,
         };
     }
 
@@ -74,7 +77,7 @@ pub const TvmDispatchState = struct {
             if (self.cache.get(kernel_key)) |cached| {
                 entry = cached;
             } else {
-                const loaded = try load_dispatch_entry(kernel_key, artifact_data);
+                const loaded = try load_dispatch_entry(self.artifact_cache, kernel_key, artifact_data);
                 const cache_key = try self.allocator.dupe(u8, kernel_key);
                 try self.cache.put(cache_key, loaded);
                 entry = loaded;
@@ -160,12 +163,20 @@ fn opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
     return .{ .raw = v };
 }
 
-fn load_dispatch_entry(kernel_key: []const u8, artifact_data: []const u8) !TvmDispatchEntry {
+/// TODO: artifact materialization belongs in the provider, not dispatch.
+///  TVM's C API requires a file path (load_from_file), so we write the .so
+///  bytes to disk here as a trampoline. This should move to TvmProvider
+///  during store-population (after tuning), so dispatch receives a path or
+///  pre-loaded handle rather than raw bytes it must write out.
+fn load_dispatch_entry(artifact_cache: Cache, kernel_key: []const u8, artifact_data: []const u8) !TvmDispatchEntry {
     const hash = std.hash.Wyhash.hash(0, kernel_key);
-    const path = try std.fmt.allocPrintSentinel(std.heap.c_allocator, "/tmp/zigrad-kernel-{x}.so", .{hash}, 0);
-    defer std.heap.c_allocator.free(path);
+    var name_buf: [128]u8 = undefined;
+    const filename = try std.fmt.bufPrint(&name_buf, "{x}.so", .{hash});
+    const dispatch_cache = try artifact_cache.subdir("tvm/dispatch", .{});
+    var resolved = try dispatch_cache.join(filename);
+    const path = resolved.pathZ();
 
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(artifact_data);
 

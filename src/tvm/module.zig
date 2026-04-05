@@ -11,14 +11,15 @@ const api = @import("../c/tvm/api.zig");
 const RuntimeModule = @import("../c/tvm/runtime.zig").RuntimeModule;
 const Value = api.Value;
 const TargetKind = @import("../c/tvm/tir.zig").TargetKind;
+const Cache = @import("../cache.zig").Cache;
 
 const log = std.log.scoped(.@"zg/tvm_loader");
 
 /// Options for loading a tuned module.
 pub const LoadOpts = struct {
-    /// Base directory containing tuning artifacts (tuning_record.json + candidate .so files).
-    work_dir: []const u8 = "artifacts/tvm_cache",
-    /// Target to load tuned modules for. Determines the per-target subdirectory.
+    /// Cache pointing to the directory containing tuning artifacts.
+    work_cache: Cache,
+    /// Target to load tuned modules for.
     target_kind: TargetKind = .cpu,
 };
 
@@ -50,18 +51,46 @@ pub const CacheEntry = struct {
     best_time_us: f64,
 };
 
+const current_schema_version: u32 = 1;
+
 const CacheIndex = struct {
-    version: u32 = 1,
+    schema_version: u32 = current_schema_version,
+    file_version: u32 = 0,
     entries: []CacheEntry = &.{},
 };
 
+/// Fixed-size buffer for cache keys (wyhash u64, up to 16 hex chars).
+pub const CacheKey = struct {
+    buf: [16]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn slice(self: *const CacheKey) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// Compute a deterministic cache key for a matmul shape + target.
+/// **Assumes f32.**
+pub fn matmul_cache_key(target_kind: TargetKind, m: i64, n: i64, k: i64) CacheKey {
+    const target_suffix: []const u8 = @tagName(target_kind);
+    var input_buf: [128]u8 = undefined;
+    const key_str = std.fmt.bufPrint(&input_buf, "matmul:f32:{s}:{d}:{d}:{d}", .{
+        target_suffix, m, n, k,
+    }) catch unreachable;
+    const hash = std.hash.Wyhash.hash(0, key_str);
+    var result: CacheKey = .{};
+    const formatted = std.fmt.bufPrint(&result.buf, "{x}", .{hash}) catch unreachable;
+    result.len = @intCast(formatted.len);
+    return result;
+}
+
 pub fn cache_lookup(
     allocator: std.mem.Allocator,
-    base_dir: []const u8,
+    base_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !?CacheEntry {
-    var index = try read_cache_index(allocator, base_dir);
+    var index = try read_cache_index(allocator, base_cache);
     defer deinit_cache_index(allocator, &index);
 
     for (index.entries) |entry| {
@@ -80,10 +109,10 @@ pub fn cache_lookup(
 
 pub fn cache_update(
     allocator: std.mem.Allocator,
-    base_dir: []const u8,
+    base_cache: Cache,
     entry: CacheEntry,
 ) !void {
-    var index = try read_cache_index(allocator, base_dir);
+    var index = try read_cache_index(allocator, base_cache);
     defer deinit_cache_index(allocator, &index);
 
     for (index.entries) |*existing| {
@@ -93,7 +122,7 @@ pub fn cache_update(
             existing.key = try allocator.dupe(u8, entry.key);
             existing.artifact_path = try allocator.dupe(u8, entry.artifact_path);
             existing.best_time_us = entry.best_time_us;
-            return write_cache_index(allocator, base_dir, index);
+            return write_cache_index(allocator, base_cache, &index);
         }
     }
 
@@ -107,65 +136,56 @@ pub fn cache_update(
     };
     allocator.free(index.entries);
     index.entries = entries;
-    return write_cache_index(allocator, base_dir, index);
+    return write_cache_index(allocator, base_cache, &index);
 }
 
-pub fn best_candidate_from_records(allocator: std.mem.Allocator, work_dir: []const u8) !RankedCandidate {
-    const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{work_dir});
-    defer allocator.free(record_path);
-
-    const candidates = try find_ranked_candidates(allocator, record_path, work_dir);
+pub fn best_candidate_from_records(allocator: std.mem.Allocator, work_cache: Cache) !RankedCandidate {
+    const candidates = try find_ranked_candidates(allocator, work_cache);
     defer allocator.free(candidates);
     return candidates[0];
 }
 
-pub fn stable_artifact_path(allocator: std.mem.Allocator, work_dir: []const u8, key: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/kernel_{s}.so", .{ work_dir, key });
-}
-
-pub fn ensure_cache_dir(allocator: std.mem.Allocator, base_dir: []const u8, key: []const u8) ![]u8 {
-    const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_dir, key });
-    std.fs.cwd().makePath(dir) catch {};
-    return dir;
+pub fn stable_artifact_path(work_cache: Cache, key: []const u8) !Cache {
+    var name_buf: [256]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "kernel_{s}.so", .{key}) catch return error.NameTooLong;
+    return work_cache.join(name);
 }
 
 pub const UpdateResult = struct {
-    stable_path: []u8,
+    stable_path: Cache,
     best_candidate: usize,
     best_time_us: f64,
 };
 
 pub fn update_cache_from_work_dir(
     allocator: std.mem.Allocator,
-    base_dir: []const u8,
-    work_dir: []const u8,
+    base_cache: Cache,
+    work_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !UpdateResult {
-    const best = try best_candidate_from_records(allocator, work_dir);
+    const best = try best_candidate_from_records(allocator, work_cache);
 
-    const candidate_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{
-        work_dir, best.idx,
-    });
-    defer allocator.free(candidate_path);
+    var candidate_name_buf: [64]u8 = undefined;
+    const candidate_name = std.fmt.bufPrint(&candidate_name_buf, "candidate_{d}.so", .{best.idx}) catch unreachable;
+    const candidate = try work_cache.join(candidate_name);
 
-    const stable_path = try stable_artifact_path(allocator, work_dir, key);
+    const stable = try stable_artifact_path(work_cache, key);
 
-    std.fs.cwd().copyFile(candidate_path, std.fs.cwd(), stable_path, .{}) catch |err| {
-        allocator.free(stable_path);
+    std.fs.cwd().copyFile(candidate.path(), std.fs.cwd(), stable.path(), .{}) catch |err| {
         return err;
     };
 
     const entry = CacheEntry{
         .key = key,
         .target_kind = target_kind,
-        .artifact_path = stable_path,
+        .artifact_path = stable.path(),
         .best_time_us = best.time_secs * 1e6,
     };
-    try cache_update(allocator, base_dir, entry);
+    try cache_update(allocator, base_cache, entry);
 
     return .{
-        .stable_path = stable_path,
+        .stable_path = stable,
         .best_candidate = best.idx,
         .best_time_us = best.time_secs * 1e6,
     };
@@ -173,11 +193,11 @@ pub fn update_cache_from_work_dir(
 
 pub fn load_cached(
     allocator: std.mem.Allocator,
-    base_dir: []const u8,
+    base_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !?TunedModule {
-    const cached = try cache_lookup(allocator, base_dir, key, target_kind);
+    const cached = try cache_lookup(allocator, base_cache, key, target_kind);
     if (cached == null) return null;
     defer {
         allocator.free(cached.?.key);
@@ -199,39 +219,16 @@ pub fn load_cached(
     };
 }
 
-pub fn matmul_cache_key(
-    allocator: std.mem.Allocator,
-    target_kind: TargetKind,
-    m: i64,
-    n: i64,
-    k: i64,
-) ![]u8 {
-    const target_suffix = switch (target_kind) {
-        .cpu => "cpu",
-        .cuda => "cuda",
-    };
-    const key_str = try std.fmt.allocPrint(allocator, "matmul:f32:{s}:{d}:{d}:{d}", .{
-        target_suffix, m, n, k,
-    });
-    defer allocator.free(key_str);
-
-    const hash = std.hash.Wyhash.hash(0, key_str);
-    return std.fmt.allocPrint(allocator, "{x}", .{hash});
-}
-
 /// Load the best tuned module from a previous tuning run.
 ///
 /// Parses tuning_record.json to find the fastest candidate, then loads
 /// the corresponding .so file and returns a handle to the main function.
 pub fn load(allocator: std.mem.Allocator, opts: LoadOpts) !TunedModule {
-    const record_path = try std.fmt.allocPrint(allocator, "{s}/tuning_record.json", .{opts.work_dir});
-    defer allocator.free(record_path);
-
-    const candidates = try find_ranked_candidates(allocator, record_path, opts.work_dir);
+    const candidates = try find_ranked_candidates(allocator, opts.work_cache);
     defer allocator.free(candidates);
 
     const best = candidates[0];
-    var tuned = try load_candidate(allocator, opts.work_dir, best.idx);
+    var tuned = try load_candidate(allocator, opts.work_cache, best.idx);
     tuned.best_time_us = best.time_secs * 1e6;
 
     log.info("loaded tuned module (candidate {d}, {d:.2} us)", .{ best.idx, tuned.best_time_us });
@@ -242,7 +239,7 @@ pub fn load(allocator: std.mem.Allocator, opts: LoadOpts) !TunedModule {
 // Private helpers
 // ============================================================================
 
-const RankedCandidate = struct {
+pub const RankedCandidate = struct {
     idx: usize,
     time_secs: f64,
 };
@@ -250,7 +247,10 @@ const RankedCandidate = struct {
 /// Parse tuning_record.json and return candidates ranked by speed (fastest first).
 ///
 /// Only includes candidates whose .so file exists on disk.
-fn find_ranked_candidates(allocator: std.mem.Allocator, record_path: []const u8, work_dir: []const u8) ![]RankedCandidate {
+fn find_ranked_candidates(allocator: std.mem.Allocator, work_cache: Cache) ![]RankedCandidate {
+    const record_file = try work_cache.join("tuning_record.json");
+    const record_path = record_file.path();
+
     const file = std.fs.cwd().openFile(record_path, .{}) catch |err| {
         log.err("failed to open tuning records at {s}: {s}", .{ record_path, @errorName(err) });
         return error.NoTuningRecords;
@@ -274,16 +274,17 @@ fn find_ranked_candidates(allocator: std.mem.Allocator, record_path: []const u8,
     while (lines.next()) |line| {
         if (line.len == 0) continue;
 
-        // Extract run_secs with pattern matching instead of a full JSON parse.
-        // Format: [workload_id, [[trace, decisions], [run_secs], target, args]]
-        // Look for pattern "]],[" followed by a float.
         const run_secs = parse_run_secs(line);
 
         if (run_secs) |t| {
-            const so_path = try std.fmt.allocPrint(allocator, "{s}/candidate_{d}.so", .{ work_dir, line_num });
-            defer allocator.free(so_path);
+            var name_buf: [64]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, "candidate_{d}.so", .{line_num}) catch unreachable;
+            const candidate = work_cache.join(name) catch {
+                line_num += 1;
+                continue;
+            };
 
-            std.fs.cwd().access(so_path, .{}) catch {
+            std.fs.cwd().access(candidate.path(), .{}) catch {
                 log.debug("skipping candidate {d}: .so not found", .{line_num});
                 line_num += 1;
                 continue;
@@ -322,12 +323,10 @@ fn find_ranked_candidates(allocator: std.mem.Allocator, record_path: []const u8,
 /// decisions array and the target object: `...decisions], [<run_secs>], {target...`.
 /// Handles both float (`1.85e-05`) and integer (`10000000000`) representations.
 fn parse_run_secs(line: []const u8) ?f64 {
-    // Scan backwards from end to find ],{ (boundary between run_secs array and target object)
     var i: usize = line.len;
     while (i > 4) {
         i -= 1;
         if (line[i] == '{' and line[i - 1] == ',' and line[i - 2] == ']') {
-            // Found ],{ now find the opening [ of the run_secs array
             var j = i - 3;
             while (j > 0 and line[j] != '[') j -= 1;
             if (j > 0 and line[j] == '[') {
@@ -340,9 +339,11 @@ fn parse_run_secs(line: []const u8) ?f64 {
 }
 
 /// Load a specific candidate module by index.
-fn load_candidate(allocator: std.mem.Allocator, work_dir: []const u8, candidate_idx: usize) !TunedModule {
-    const so_path = try std.fmt.allocPrintSentinel(allocator, "{s}/candidate_{d}.so", .{ work_dir, candidate_idx }, 0);
-    defer allocator.free(so_path);
+fn load_candidate(allocator: std.mem.Allocator, work_cache: Cache, candidate_idx: usize) !TunedModule {
+    var name_buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "candidate_{d}.so", .{candidate_idx}) catch unreachable;
+    var so = try work_cache.join(name);
+    const so_path = so.pathZ();
 
     log.info("loading tuned module: {s}", .{so_path});
 
@@ -359,9 +360,9 @@ fn load_candidate(allocator: std.mem.Allocator, work_dir: []const u8, candidate_
     };
 }
 
-fn read_cache_index(allocator: std.mem.Allocator, base_dir: []const u8) !CacheIndex {
-    const path = try std.fmt.allocPrint(allocator, "{s}/index.json", .{base_dir});
-    defer allocator.free(path);
+fn read_cache_index(allocator: std.mem.Allocator, base_cache: Cache) !CacheIndex {
+    const idx_file = try base_cache.join("index.json");
+    const path = idx_file.path();
 
     const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .{ .entries = try allocator.alloc(CacheEntry, 0) },
@@ -381,6 +382,12 @@ fn read_cache_index(allocator: std.mem.Allocator, base_dir: []const u8) !CacheIn
     });
     defer parsed.deinit();
 
+    if (parsed.value.schema_version != current_schema_version) {
+        log.warn("index.json schema_version {d}, expected {d}", .{
+            parsed.value.schema_version, current_schema_version,
+        });
+    }
+
     var entries = try allocator.alloc(CacheEntry, parsed.value.entries.len);
     for (parsed.value.entries, 0..) |entry, i| {
         entries[i] = .{
@@ -390,19 +397,35 @@ fn read_cache_index(allocator: std.mem.Allocator, base_dir: []const u8) !CacheIn
             .best_time_us = entry.best_time_us,
         };
     }
-    return .{ .version = parsed.value.version, .entries = entries };
+    return .{
+        .schema_version = parsed.value.schema_version,
+        .file_version = parsed.value.file_version,
+        .entries = entries,
+    };
 }
 
-fn write_cache_index(allocator: std.mem.Allocator, base_dir: []const u8, index: CacheIndex) !void {
-    const path = try std.fmt.allocPrint(allocator, "{s}/index.json", .{base_dir});
-    defer allocator.free(path);
+fn write_cache_index(allocator: std.mem.Allocator, base_cache: Cache, index: *CacheIndex) !void {
+    const idx_file = try base_cache.join("index.json");
+    const path = idx_file.path();
 
-    const bytes = try std.json.Stringify.valueAlloc(allocator, index, .{});
+    // Serialize current state to compare against file on disk.
+    const bytes = try std.json.Stringify.valueAlloc(allocator, index.*, .{});
     defer allocator.free(bytes);
+
+    const old_bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch null;
+    if (old_bytes) |old| {
+        defer allocator.free(old);
+        if (std.mem.eql(u8, old, bytes)) return;
+    }
+
+    // Content changed: bump file_version, re-serialize, write
+    index.file_version += 1;
+    const final_bytes = try std.json.Stringify.valueAlloc(allocator, index.*, .{});
+    defer allocator.free(final_bytes);
 
     const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
-    try file.writeAll(bytes);
+    try file.writeAll(final_bytes);
 }
 
 fn deinit_cache_index(allocator: std.mem.Allocator, index: *CacheIndex) void {

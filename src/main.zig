@@ -22,6 +22,8 @@ pub const std_options = std.Options{
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
 
+    const cache = try zg.Cache.init(.{});
+
     // Parse args
     var cmd = cli.parse(gpa) catch |err| {
         if (err == error.HelpShown) return;
@@ -67,11 +69,8 @@ pub fn main() !void {
         const shape = try parse_shape(opts.shape orelse "128x128x128");
 
         const target_kind: zg.tvm.tir.TargetKind = if (opts.cuda or opts.gpu) .cuda else .cpu;
-        const target_suffix: []const u8 = @tagName(target_kind);
 
-        const work_dir = opts.work_dir orelse "artifacts/tvm_cache";
-        const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ work_dir, target_suffix });
-        defer gpa.free(base_dir);
+        const tvm_cache = try cache.subdir("tvm", .{});
 
         try zg.tvm.ffi.ensure_loaded(gpa, .{});
         const m: i64 = @intCast(shape.m);
@@ -92,19 +91,16 @@ pub fn main() !void {
         const tensor_shapes = try gpa.dupe([]const i64, &[_][]const i64{ shape_a, shape_b, shape_c });
         defer gpa.free(tensor_shapes);
 
-        const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, m, n, k);
-        defer gpa.free(key);
-        const full_work_dir = try zg.tvm.module.ensure_cache_dir(gpa, base_dir, key);
-        defer gpa.free(full_work_dir);
+        const key = zg.tvm.module.matmul_cache_key(target_kind, m, n, k);
+        const work_cache = try tvm_cache.subdir(key.slice(), .{});
 
         try zg.tvm.tune.tune(gpa, ir_mod, target, target_kind, tensor_shapes, .{
-            .work_dir = full_work_dir,
+            .work_cache = work_cache,
             .max_trials = opts.trials orelse 64,
             .trials_per_iter = opts.trials_per_iter orelse 16,
         });
 
-        const update = try zg.tvm.module.update_cache_from_work_dir(gpa, base_dir, full_work_dir, key, target_kind);
-        gpa.free(update.stable_path);
+        _ = try zg.tvm.module.update_cache_from_work_dir(gpa, tvm_cache, work_cache, key.slice(), target_kind);
         return;
     }
     if (cmd.matchSubCmd("tvm-run")) |sub_cmd| {
@@ -113,9 +109,8 @@ pub fn main() !void {
 
         const shape = try parse_shape(opts.shape orelse "128x128x128");
         const target_kind: zg.tvm.tir.TargetKind = if (opts.cuda or opts.gpu) .cuda else .cpu;
-        const work_dir = opts.work_dir orelse "artifacts/tvm_cache";
 
-        return run_tvm_demo(gpa, @intCast(shape.m), @intCast(shape.n), @intCast(shape.k), target_kind, work_dir);
+        return run_tvm_demo(gpa, @intCast(shape.m), @intCast(shape.n), @intCast(shape.k), target_kind, cache);
     }
     if (cmd.matchSubCmd("benchmark")) |sub_cmd| {
         if (comptime !build_options.has_tvm) return require_tvm();
@@ -315,19 +310,16 @@ fn run_tvm_demo(
     N: i64,
     K: i64,
     target_kind: if (build_options.has_tvm) zg.tvm.tir.TargetKind else void,
-    base_work_dir: []const u8,
+    artifact_cache: zg.Cache,
 ) !void {
     const tvm_runtime = zg.tvm.runtime;
     const dlpack_mod = zg.tvm.dlpack;
 
-    const target_suffix: []const u8 = @tagName(target_kind);
-    const base_dir = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base_work_dir, target_suffix });
-    defer gpa.free(base_dir);
-    const key = try zg.tvm.module.matmul_cache_key(gpa, target_kind, M, N, K);
-    defer gpa.free(key);
+    const tvm_cache = try artifact_cache.subdir("tvm", .{});
+    const key = zg.tvm.module.matmul_cache_key(target_kind, M, N, K);
 
     try zg.tvm.ffi.ensure_loaded(gpa, .{});
-    const tuned = try zg.tvm.module.load_cached(gpa, base_dir, key, target_kind) orelse return error.NoTuningRecords;
+    const tuned = try zg.tvm.module.load_cached(gpa, tvm_cache, key.slice(), target_kind) orelse return error.NoTuningRecords;
     var tuned_mut = tuned;
     defer tuned_mut.deinit();
 
@@ -672,7 +664,9 @@ fn run_iree_aot_compile(
     std.log.info("wrote {d} bytes VMFB -> {s}", .{ vmfb.len, output_path });
 }
 
-fn parse_shape(s: []const u8) !zg.benchmark.Shape {
+const MatmulShape = struct { m: i64, n: i64, k: i64 };
+
+fn parse_shape(s: []const u8) !MatmulShape {
     var parts = std.mem.splitScalar(u8, s, 'x');
     const m = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);
     const n = try std.fmt.parseInt(i64, parts.next() orelse return error.InvalidShape, 10);

@@ -1,9 +1,10 @@
 //! MetaSchedule autotuning for TVM.
 //!
 //! Runs TVM's MetaSchedule search to find optimal schedules for a given
-//! IRModule and target. Uses a random cost model with evolutionary search.
+//!  IRModule and target.
+//! Uses a random cost model with evolutionary search.
 //! Builder and runner callbacks receive provider state through TVM's
-//! userdata pointer — no globals.
+//!  userdata pointer.
 const std = @import("std");
 const tir = @import("../c/tvm/tir.zig");
 const runtime = @import("../c/tvm/runtime.zig");
@@ -12,6 +13,7 @@ const compile = @import("../c/tvm/compile.zig");
 const api = @import("../c/tvm/api.zig");
 const c = @import("../c/tvm/c.zig");
 const dlpack = @import("../c/dlpack.zig");
+const Cache = @import("../cache.zig").Cache;
 const Value = api.Value;
 const Array = api.Array;
 const IRModule = tir.IRModule;
@@ -25,19 +27,23 @@ const nvrtc_callback = @import("nvrtc_callback.zig");
 const log = std.log.scoped(.@"zg/tvm_tune");
 
 pub const TuneOpts = struct {
-    work_dir: []const u8 = "artifacts/tvm_cache",
+    work_cache: Cache,
     max_trials: u32 = 64,
     trials_per_iter: u32 = 16,
 };
 
-/// Persistent state for MetaSchedule callbacks. Passed as userdata to
-/// builder/runner callbacks via TVM's TVMFFIFunctionCreate self pointer.
+/// Persistent state for MetaSchedule callbacks.
+/// Passed as userdata to builder/runner callbacks via TVM's
+///  TVMFFIFunctionCreate self pointer.
 const TuneState = struct {
     allocator: std.mem.Allocator,
     target: Target,
     target_kind: TargetKind,
-    work_dir: []const u8,
+    work_cache: Cache,
     build_counter: u32 = 0,
+    /// Counter value at the start of this tuning run (before any new candidates).
+    initial_counter: u32 = 0,
+    max_trials: u32,
     /// Tensor shapes for the workload (A, B, C for matmul).
     tensor_shapes: []const []const i64,
 };
@@ -45,8 +51,8 @@ const TuneState = struct {
 /// Tune an IRModule via MetaSchedule, returning the tuned IRModule.
 ///
 /// Runs evolutionary search with a random cost model. The builder callback
-/// compiles TIR candidates to .so artifacts; the runner callback loads and
-/// benchmarks them. Results are persisted to a JSON database in work_dir.
+///  compiles TIR candidates to .so artifacts, the runner callback loads and
+///  benchmarks them. Results are persisted to a JSON store in work_dir.
 pub fn tune(
     allocator: std.mem.Allocator,
     ir_mod: IRModule,
@@ -64,7 +70,8 @@ pub fn tune(
         try load_cuda_intrinsics(allocator);
     }
 
-    std.fs.cwd().makePath(opts.work_dir) catch {};
+    const work_dir = opts.work_cache.path();
+    std.fs.cwd().makePath(work_dir) catch {};
 
     try register_cpu_count(allocator);
 
@@ -78,10 +85,10 @@ pub fn tune(
     log.debug("created SearchStrategy", .{});
 
     // JSON database
-    const workload_path = try std.fmt.allocPrintSentinel(allocator, "{s}/workload.json", .{opts.work_dir}, 0);
-    defer allocator.free(workload_path);
-    const record_path = try std.fmt.allocPrintSentinel(allocator, "{s}/tuning_record.json", .{opts.work_dir}, 0);
-    defer allocator.free(record_path);
+    var workload = try opts.work_cache.join("workload.json");
+    const workload_path = workload.pathZ();
+    var record = try opts.work_cache.join("tuning_record.json");
+    const record_path = record.pathZ();
 
     const database = try MetaSchedule.json_database(allocator, workload_path, record_path);
     log.debug("created JSONDatabase", .{});
@@ -99,12 +106,22 @@ pub fn tune(
     });
     log.debug("created TuneContext", .{});
 
-    // Tune state (passed as userdata to callbacks)
+    // Seed build_counter from persisted state so incremental tuning
+    // doesn't overwrite previous candidates.
+    const persisted = read_tune_state(allocator, opts.work_cache);
+    const initial_counter = persisted.next_candidate;
+    if (initial_counter > 0) {
+        log.info("resuming from candidate {d} (found {d} existing)", .{ initial_counter, initial_counter });
+    }
+
     var state = TuneState{
         .allocator = allocator,
         .target = target,
         .target_kind = kind,
-        .work_dir = opts.work_dir,
+        .work_cache = opts.work_cache,
+        .build_counter = initial_counter,
+        .initial_counter = initial_counter,
+        .max_trials = opts.max_trials,
         .tensor_shapes = tensor_shapes,
     };
 
@@ -157,6 +174,11 @@ pub fn tune(
         log.err("TaskSchedulerTune failed: {s}", .{@errorName(err)});
         return err;
     };
+
+    // Persist build counter so the next run continues from where we left off.
+    write_tune_state(allocator, opts.work_cache, .{
+        .next_candidate = @atomicLoad(u32, &state.build_counter, .seq_cst),
+    });
 
     log.info("tuning complete. results: {s}", .{record_path});
 }
@@ -226,8 +248,13 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
 
         // Export to .so
         const build_id = @atomicRmw(u32, &state.build_counter, .Add, 1, .seq_cst);
-        const so_path = try std.fmt.allocPrintSentinel(allocator, "{s}/candidate_{d}.so", .{ state.work_dir, build_id }, 0);
-        defer allocator.free(so_path);
+        var name_buf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "candidate_{d}.so", .{build_id}) catch unreachable;
+        var so = state.work_cache.join(name) catch {
+            try results_list.append(allocator, try make_builder_error(allocator, "path too long"));
+            continue;
+        };
+        const so_path = so.pathZ();
 
         built_mod.export_shared(allocator, so_path, state.target_kind) catch {
             try results_list.append(allocator, try make_builder_error(allocator, "export failed"));
@@ -236,7 +263,9 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
 
         const br = try MetaSchedule.builder_result(allocator, so_path, null);
         try results_list.append(allocator, br);
-        log.debug("built candidate {d}", .{i});
+        log.debug("built trial {d}/{d} (total {d}/{d})", .{
+            i + 1, num_inputs, build_id + 1, state.initial_counter + state.max_trials,
+        });
     }
 
     var results_arr = try Array.from_values(allocator, results_list.items);
@@ -395,8 +424,8 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
 /// Load and register CUDA tensor intrinsics (WMMA, MMA) from pre-serialized
 /// JSON files in `artifacts/cuda_intrinsics/`.
 ///
-/// These intrinsics are required for CUDA MetaSchedule tuning — without them
-/// the schedule space generator cannot emit tensor core instructions.
+/// These intrinsics are required for CUDA MetaSchedule tuning. Without them,
+///  the schedule space generator cannot emit tensor core instructions.
 /// Pre-generated by `scripts/generate_cuda_intrinsics.py`.
 /// Safe to call multiple times (only loads once).
 var cuda_intrinsics_loaded: bool = false;
@@ -458,6 +487,32 @@ fn load_cuda_intrinsics(allocator: std.mem.Allocator) !void {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Persisted per-shape tuning state, stored as `state.json` in the work dir.
+const PersistedTuneState = struct {
+    next_candidate: u32 = 0,
+};
+
+fn read_tune_state(allocator: std.mem.Allocator, work_cache: Cache) PersistedTuneState {
+    const state_file = work_cache.join("state.json") catch return .{};
+    const bytes = std.fs.cwd().readFileAlloc(allocator, state_file.path(), 4096) catch return .{};
+    defer allocator.free(bytes);
+    const parsed = std.json.parseFromSlice(PersistedTuneState, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    }) catch return .{};
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+fn write_tune_state(allocator: std.mem.Allocator, work_cache: Cache, state: PersistedTuneState) void {
+    const state_file = work_cache.join("state.json") catch return;
+    const path = state_file.path();
+    const bytes = std.json.Stringify.valueAlloc(allocator, state, .{}) catch return;
+    defer allocator.free(bytes);
+    const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
+    defer file.close();
+    file.writeAll(bytes) catch {};
+}
 
 fn make_noop_callback() !Value {
     const noop = struct {

@@ -11,6 +11,7 @@ const tuned_module = @import("module.zig");
 const kernel = @import("../kernel.zig");
 const dispatch_mod = @import("dispatch.zig");
 const pr = @import("../pr/pr.zig");
+const Cache = @import("../cache.zig").Cache;
 const TargetKind = tir.TargetKind;
 
 const log = std.log.scoped(.@"zg/tvm_provider");
@@ -18,7 +19,7 @@ const log = std.log.scoped(.@"zg/tvm_provider");
 pub const TvmProvider = struct {
     allocator: std.mem.Allocator,
     target_kind: TargetKind,
-    work_dir: []const u8,
+    cache: Cache,
     max_trials: u32 = 64,
     trials_per_iter: u32 = 16,
 
@@ -98,33 +99,24 @@ pub const TvmProvider = struct {
         const shape_c = [_]i64{ matmul.m, matmul.n };
         const shapes: [3][]const i64 = .{ &shape_a, &shape_b, &shape_c };
 
-        // Per-target base dir for cache index and per-kernel subdirectories.
-        const target_suffix = switch (self.target_kind) {
-            .cpu => "cpu",
-            .cuda => "cuda",
-        };
-        const base_dir = std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.work_dir, target_suffix }) catch
+        const tvm_cache = self.cache.subdir("tvm", .{}) catch
             return error.OutOfMemory;
-        defer allocator.free(base_dir);
-        std.fs.cwd().makePath(base_dir) catch {};
 
-        const key = try tuned_module.matmul_cache_key(allocator, self.target_kind, matmul.m, matmul.n, matmul.k);
-        defer allocator.free(key);
+        const key = tuned_module.matmul_cache_key(self.target_kind, matmul.m, matmul.n, matmul.k);
 
-        if (load_cached_kernel(allocator, base_dir, key, self.target_kind) catch null) |cached| {
+        if (load_cached_kernel(allocator, tvm_cache, key.slice(), self.target_kind) catch null) |cached| {
             return .{
                 .provider_name = "tvm",
                 .data = cached,
-                .target_name = try allocator.dupe(u8, key),
+                .target_name = try allocator.dupe(u8, key.slice()),
             };
         }
 
-        const work_dir = tuned_module.ensure_cache_dir(allocator, base_dir, key) catch
+        const work_cache = tvm_cache.subdir(key.slice(), .{}) catch
             return error.OutOfMemory;
-        defer allocator.free(work_dir);
 
         tune_mod.tune(allocator, ir_mod, target, self.target_kind, &shapes, .{
-            .work_dir = work_dir,
+            .work_cache = work_cache,
             .max_trials = self.max_trials,
             .trials_per_iter = self.trials_per_iter,
         }) catch |err| switch (err) {
@@ -145,9 +137,9 @@ pub const TvmProvider = struct {
 
         const update = tuned_module.update_cache_from_work_dir(
             allocator,
-            base_dir,
-            work_dir,
-            key,
+            tvm_cache,
+            work_cache,
+            key.slice(),
             self.target_kind,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -156,12 +148,11 @@ pub const TvmProvider = struct {
                 return error.CompileFailed;
             },
         };
-        defer allocator.free(update.stable_path);
 
-        const so_bytes = std.fs.cwd().readFileAlloc(allocator, update.stable_path, 100 * 1024 * 1024) catch |err| switch (err) {
+        const so_bytes = std.fs.cwd().readFileAlloc(allocator, update.stable_path.path(), 100 * 1024 * 1024) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
-                log.err("failed to read {s}: {s}", .{ update.stable_path, @errorName(err) });
+                log.err("failed to read {s}: {s}", .{ update.stable_path.path(), @errorName(err) });
                 return error.CompileFailed;
             },
         };
@@ -173,7 +164,7 @@ pub const TvmProvider = struct {
         return .{
             .provider_name = "tvm",
             .data = so_bytes,
-            .target_name = try allocator.dupe(u8, key),
+            .target_name = try allocator.dupe(u8, key.slice()),
         };
     }
 };
@@ -233,11 +224,11 @@ fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
 
 fn load_cached_kernel(
     allocator: std.mem.Allocator,
-    base_dir: []const u8,
+    base_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !?[]u8 {
-    const cached = try tuned_module.cache_lookup(allocator, base_dir, key, target_kind);
+    const cached = try tuned_module.cache_lookup(allocator, base_cache, key, target_kind);
     if (cached == null) return null;
     defer {
         allocator.free(cached.?.key);

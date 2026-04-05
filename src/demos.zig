@@ -487,6 +487,8 @@ pub fn run_kernel_provider_demo(
     const backend = &pjrt_backend.interface;
     try pjrt_backend.register_kernel_dispatcher();
 
+    const demo_cache = try zg.Cache.init(.{});
+
     // --- TVM setup (requires TVM headers in SDK) ---
     var tvm_dispatch: if (zg.build_options.has_tvm) zg.tvm.dispatch.TvmDispatchState else void = undefined;
     var tvm_impl: if (zg.build_options.has_tvm) zg.tvm.provider.TvmProvider else void = undefined;
@@ -500,11 +502,11 @@ pub fn run_kernel_provider_demo(
         try zg.tvm.ffi.ensure_loaded(allocator, .{});
         try pjrt_backend.require_typed_ffi();
         const target_kind: zg.tvm.tir.TargetKind = if (pjrt_backend.is_cuda()) .cuda else .cpu;
-        tvm_dispatch = zg.tvm.dispatch.TvmDispatchState.init(allocator);
+        tvm_dispatch = zg.tvm.dispatch.TvmDispatchState.init(allocator, demo_cache);
         tvm_impl = .{
             .allocator = allocator,
             .target_kind = target_kind,
-            .work_dir = "artifacts/tvm_cache",
+            .cache = demo_cache,
             .max_trials = 8,
             .trials_per_iter = 4,
             .dispatch_state = &tvm_dispatch,
@@ -682,7 +684,7 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
     }
     const tvm_api = zg.tvm.ffi;
 
-    try tvm_api.ensure_loaded(allocator, .{ .load_compiler = false });
+    try tvm_api.ensure_loaded(allocator, .{ .load_compiler = true });
 
     const names = try tvm_api.list_global_names(allocator);
     defer {
