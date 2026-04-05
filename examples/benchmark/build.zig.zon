@@ -1,0 +1,14 @@
+.{
+    .name = .benchmark,
+    .version = "0.0.0",
+    .fingerprint = 0xb70c48febd833cab,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .zigrad = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

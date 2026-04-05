@@ -26,25 +26,21 @@ pub fn build(b: *std.Build) void {
     const enable_mlir = b.option(bool, "mlir", "Force MLIR/StableHLO lowering on or off");
     const enable_tvm = b.option(bool, "tvm", "Force TVM kernel provider on or off");
     const enable_mirage = b.option(bool, "mirage", "Force Mirage kernel provider on or off");
-    const enable_mkl = b.option(bool, "mkl", "Force Intel MKL on or off");
     const enable_iree = b.option(bool, "iree-backend", "Force IREE backend on or off");
 
     const has_mlir = sdk_has_mlir(b, sdk_root);
     const has_tvm = sdk_has_tvm(b, sdk_root);
     const has_mirage = sdk_has_mirage(b, sdk_root);
-    const has_mkl = sdk_has_mkl(b, sdk_root);
 
     const use_mlir = enable_mlir orelse has_mlir;
     const use_tvm = enable_tvm orelse has_tvm;
     const use_mirage = enable_mirage orelse has_mirage;
-    const use_mkl = enable_mkl orelse has_mkl;
     const use_iree = enable_iree orelse false;
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "has_mlir", use_mlir);
     build_options.addOption(bool, "has_tvm", use_tvm);
     build_options.addOption(bool, "has_mirage", use_mirage);
-    build_options.addOption(bool, "has_mkl", use_mkl);
     build_options.addOption(bool, "has_iree", use_iree);
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
@@ -68,9 +64,6 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addImport("xla_pb", xla_pb_mod);
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
-    if (use_mkl) {
-        zigrad_mod.linkSystemLibrary("mkl_rt", .{});
-    }
 
     // Add CUDA include path if available (needed for nvrtc.h).
     if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
@@ -354,18 +347,6 @@ fn sdk_has_mlir(b: *std.Build, sdk_root: []const u8) bool {
         break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
     };
     const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mlir-c", "IR.h" });
-    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
-    return true;
-}
-
-fn sdk_has_mkl(b: *std.Build, sdk_root: []const u8) bool {
-    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
-        break :blk sdk_root;
-    } else blk: {
-        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
-        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
-    };
-    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mkl_cblas.h" });
     if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
     return true;
 }

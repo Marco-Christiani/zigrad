@@ -29,8 +29,6 @@ pub const kernel = @import("kernel.zig");
 pub const tune = @import("tune.zig");
 pub const Cache = @import("cache.zig").Cache;
 pub const utils = @import("utils/root.zig");
-pub const kernels = @import("kernels/root.zig");
-pub const benchmark = @import("benchmark/root.zig");
 
 // TVM subsystem (gated by SDK header availability)
 pub const tvm = if (build_options.has_tvm) @import("tvm/root.zig") else struct {};

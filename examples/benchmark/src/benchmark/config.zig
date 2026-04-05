@@ -1,8 +1,52 @@
 //! Configuration types for the matmul benchmark harness.
 const std = @import("std");
-const utils = @import("../utils/root.zig");
+const zg = @import("zigrad");
 
-const syms = utils.Symbols.unicode;
+const syms = zg.utils.Symbols.unicode;
+
+/// Element type for benchmark buffers.
+///
+/// Maps to Zig numeric types at comptime.
+/// DLPack's dtype_of does not appear to support bf16 yet and our naive
+///  baseline is zig, which has no native bf16 type.
+/// TODO: need to look into bf16, may just be incomplete bindings on our part.
+pub const DType = enum {
+    f16,
+    f32,
+
+    /// Returns the Zig numeric type corresponding to this dtype.
+    pub fn ZigType(comptime self: DType) type {
+        return switch (self) {
+            .f16 => f16,
+            .f32 => f32,
+        };
+    }
+
+    /// Maps to the PR-level dtype for XLA/PJRT compilation.
+    pub fn to_pr_dtype(self: DType) zg.DType {
+        return switch (self) {
+            .f16 => .f16,
+            .f32 => .f32,
+        };
+    }
+
+    /// Maps a Zig numeric type back to the DType enum (comptime inverse of ZigType).
+    pub fn from_zig_type(comptime T: type) DType {
+        return switch (T) {
+            f16 => .f16,
+            f32 => .f32,
+            else => @compileError("unsupported type for DType: " ++ @typeName(T)),
+        };
+    }
+
+    /// Tolerance for correctness verification (wider for lower precision).
+    pub fn tolerance(self: DType) f64 {
+        return switch (self) {
+            .f16 => 1e-2,
+            .f32 => 1e-4,
+        };
+    }
+};
 
 /// Matmul shape specification (MxK @ KxN = MxN).
 pub const Shape = struct {
@@ -36,6 +80,10 @@ pub const Implementation = enum {
             inline else => |x| @tagName(x),
         };
     }
+
+    pub fn is_gpu(self: Implementation) bool {
+        return std.mem.endsWith(u8, @tagName(self), "gpu");
+    }
 };
 
 /// Benchmark configuration.
@@ -45,6 +93,9 @@ pub const BenchmarkConfig = struct {
 
     /// Implementations to test.
     implementations: []const Implementation,
+
+    /// Element type for all buffers and kernels.
+    dtype: DType = .f32,
 
     /// Number of warmup iterations (cache warming, not measured).
     warmup_iters: usize = 10,
@@ -66,6 +117,9 @@ pub const BenchmarkResult = struct {
 
     /// Shape tested.
     shape: Shape,
+
+    /// Element type used.
+    dtype: DType,
 
     /// Median execution time (microseconds).
     median_us: f64,

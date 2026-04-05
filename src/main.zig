@@ -112,40 +112,6 @@ pub fn main() !void {
 
         return run_tvm_demo(gpa, @intCast(shape.m), @intCast(shape.n), @intCast(shape.k), target_kind, cache);
     }
-    if (cmd.matchSubCmd("benchmark")) |sub_cmd| {
-        if (comptime !build_options.has_tvm) return require_tvm();
-        if (comptime !build_options.has_mkl) return require_mkl();
-        const opts = try sub_cmd.to(cli.BenchmarkOpts, .{});
-
-        // struct to args array for run_benchmark_mode
-        var args = std.ArrayList([]const u8).empty;
-        defer args.deinit(gpa);
-
-        if (opts.shapes) |s| {
-            const arg = try std.fmt.allocPrint(gpa, "--shapes={s}", .{s});
-            try args.append(gpa, arg);
-        }
-        if (opts.impls) |i| {
-            const arg = try std.fmt.allocPrint(gpa, "--impls={s}", .{i});
-            try args.append(gpa, arg);
-        }
-        if (opts.warmup) |w| {
-            const arg = try std.fmt.allocPrint(gpa, "--warmup={d}", .{w});
-            try args.append(gpa, arg);
-        }
-        if (opts.iters) |i| {
-            const arg = try std.fmt.allocPrint(gpa, "--iters={d}", .{i});
-            try args.append(gpa, arg);
-        }
-        if (opts.tvm_cache_dir) |t| {
-            const arg = try std.fmt.allocPrint(gpa, "--tvm-cache-dir={s}", .{t});
-            try args.append(gpa, arg);
-        }
-
-        defer for (args.items) |arg| gpa.free(arg);
-        return run_benchmark_mode(gpa, args.items);
-    }
-
     // IREE backend commands.
     if (cmd.matchSubCmd("iree-aot-demo")) |_| {
         if (comptime build_options.has_iree and build_options.has_mlir) {
@@ -299,11 +265,6 @@ fn require_tvm() error{TvmUnavailable} {
     return error.TvmUnavailable;
 }
 
-fn require_mkl() error{MklUnavailable} {
-    log.err("this command requires building with MKL (headers must be in SDK)", .{});
-    return error.MklUnavailable;
-}
-
 fn run_tvm_demo(
     gpa: std.mem.Allocator,
     M: i64,
@@ -398,81 +359,13 @@ fn run_tvm_demo(
     const ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
     std.log.info("TVM matmul {d}x{d}x{d} ({s}): {d:.3} ms", .{ M, N, K, @tagName(target_kind), ms });
 
-    const expected = @as(f32, @floatFromInt(K - 1)) * @as(f32, @floatFromInt(K - 1)) * 0.01 * @as(f32, @floatFromInt(K)) / 2.0;
-    std.log.info("result[M-1,N-1] = {d:.6} (expected ~{d:.6})", .{ result[@as(usize, @intCast(M * N - 1))], expected });
-}
-
-fn run_benchmark_mode(gpa: std.mem.Allocator, args: []const []const u8) !void {
-    var shapes = std.ArrayList(zg.benchmark.Shape).empty;
-    defer shapes.deinit(gpa);
-    var impls = std.ArrayList(zg.benchmark.Implementation).empty;
-    defer impls.deinit(gpa);
-    var warmup: usize = 10;
-    var iters: usize = 100;
-    var tvm_cache_dir: []const u8 = "artifacts/tvm_cache";
-
-    for (args) |arg| {
-        if (std.mem.startsWith(u8, arg, "--shapes=")) {
-            const value = arg["--shapes=".len..];
-            var shape_strs = std.mem.splitScalar(u8, value, ',');
-            while (shape_strs.next()) |s| {
-                try shapes.append(gpa, try parse_shape(s));
-            }
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--impls=")) {
-            const value = arg["--impls=".len..];
-            var impl_strs = std.mem.splitScalar(u8, value, ',');
-            while (impl_strs.next()) |s| {
-                if (std.mem.eql(u8, "all-cpu", s)) {
-                    for (std.meta.tags(zg.benchmark.Implementation)) |e| {
-                        if (std.mem.endsWith(u8, @tagName(e), "cpu")) {
-                            try impls.append(gpa, e);
-                        }
-                    }
-                    break;
-                } else if (std.meta.stringToEnum(zg.benchmark.Implementation, s)) |impl| {
-                    try impls.append(gpa, impl);
-                } else {
-                    std.log.err("unknown implementation: {s}", .{s});
-                    return error.InvalidArguments;
-                }
-            }
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--warmup=")) {
-            const value = arg["--warmup=".len..];
-            warmup = try std.fmt.parseInt(usize, value, 10);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--iters=")) {
-            const value = arg["--iters=".len..];
-            iters = try std.fmt.parseInt(usize, value, 10);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--tvm-cache-dir=")) {
-            tvm_cache_dir = arg["--tvm-cache-dir=".len..];
-            continue;
-        }
-        std.log.err("unknown argument: {s}", .{arg});
-        return error.InvalidArguments;
+    var expected: f32 = 0;
+    for (0..@intCast(K)) |k| {
+        const a_val: f32 = @as(f32, @floatFromInt((@as(usize, @intCast(M - 1)) * @as(usize, @intCast(K)) + k) % 7)) * 0.1;
+        const b_val: f32 = @as(f32, @floatFromInt((k * @as(usize, @intCast(N)) + @as(usize, @intCast(N - 1))) % 11)) * 0.1;
+        expected += a_val * b_val;
     }
-
-    if (shapes.items.len == 0) try shapes.append(gpa, .{ .m = 128, .n = 128, .k = 128 });
-    if (impls.items.len == 0) try impls.append(gpa, .zig_naive);
-
-    const cfg = zg.benchmark.BenchmarkConfig{
-        .shapes = shapes.items,
-        .implementations = impls.items,
-        .warmup_iters = warmup,
-        .bench_iters = iters,
-    };
-
-    var harness = try zg.benchmark.Harness.init(gpa, cfg, tvm_cache_dir);
-    defer harness.deinit();
-
-    try harness.run();
-    try harness.print_results();
+    std.log.info("result[M-1,N-1] = {d:.6} (expected ~{d:.6})", .{ result[@as(usize, @intCast(M * N - 1))], expected });
 }
 
 // TODO: this is a smell

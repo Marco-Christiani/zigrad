@@ -24,7 +24,6 @@ pub const TvmTuneOpts = struct {
     shape: ?[]const u8 = "128x128x128",
     trials: ?u32 = 64,
     trials_per_iter: ?u32 = 16,
-    work_dir: ?[]const u8 = "artifacts/tvm_cache",
     cuda: bool = false,
     gpu: bool = false,
     cpu: bool = false,
@@ -33,7 +32,6 @@ pub const TvmTuneOpts = struct {
 /// TVM run subcommand
 pub const TvmRunOpts = struct {
     shape: ?[]const u8 = null,
-    work_dir: ?[]const u8 = "artifacts/tvm_cache",
     cuda: bool = false,
     gpu: bool = false,
     cpu: bool = false,
@@ -66,15 +64,6 @@ pub const LlamaFtDemoOpts = struct {
     canonical_shapes: bool = false,
     execute_only: bool = false,
     kernel_provider: ?[]const u8 = null,
-};
-
-/// Benchmark subcommand
-pub const BenchmarkOpts = struct {
-    shapes: ?[]const u8 = "128x128x128",
-    impls: ?[]const u8 = "zig_naive",
-    warmup: ?u32 = 10,
-    iters: ?u32 = 100,
-    tvm_cache_dir: ?[]const u8 = "artifacts/tvm_cache",
 };
 
 /// IREE offline compile subcommand
@@ -199,7 +188,6 @@ pub const setup_cmd: CommandT = .{
                 .{ "shape", "Matmul dimensions in MxNxK format (default: 128x128x128)" },
                 .{ "trials", "Max tuning trials (default: 64)" },
                 .{ "trials_per_iter", "Batch size per iteration (default: 16)" },
-                .{ "work_dir", "Tuning cache directory (default: artifacts/tvm_cache)" },
             },
         }),
         CommandT.from(TvmRunOpts, .{
@@ -211,7 +199,6 @@ pub const setup_cmd: CommandT = .{
                 .{ "gpu", "Run on GPU target (alias for --cuda)" },
                 .{ "cpu", "Run on CPU target (default)" },
                 .{ "shape", "Matmul dimensions (must match tuned shape)" },
-                .{ "work_dir", "Tuning cache directory (default: artifacts/tvm_cache)" },
             },
         }),
         CommandT.from(TvmZxprOpts, .{
@@ -280,18 +267,6 @@ pub const setup_cmd: CommandT = .{
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "path", "Path to the JIT cache artifact" },
-            },
-        }),
-        CommandT.from(BenchmarkOpts, .{
-            .cmd_name = "benchmark" ++ if (!build_options.has_tvm) "-disabled" else "",
-            .cmd_description = "Run matmul performance benchmarks",
-            .default_val_opts = true,
-            .sub_descriptions = &.{
-                .{ "shapes", "Comma-separated list of shapes (default: 128x128x128)" },
-                .{ "impls", "Implementations to test: zig_naive, tvm_cpu, xla_cpu, etc (default: zig_naive)" },
-                .{ "warmup", "Warmup iterations (default: 10)" },
-                .{ "iters", "Benchmark iterations (default: 100)" },
-                .{ "tvm_cache_dir", "TVM module cache directory (default: artifacts/tvm_cache)" },
             },
         }),
     },
