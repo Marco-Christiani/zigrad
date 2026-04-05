@@ -3,7 +3,7 @@
 //! Provides a naive triple-loop baseline and an optional MKL BLAS binding.
 //! Both are comptime-generic over the element type.
 const std = @import("std");
-const build_options = @import("zigrad").build_options;
+const build_options = @import("build_options");
 
 /// Naive strawman triple-loop matmul: C += A @ B.
 ///

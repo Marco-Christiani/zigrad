@@ -30,6 +30,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const has_mkl = sdk_has(b, sdk_abs, &.{ "include", "mkl_cblas.h" });
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "has_mkl", has_mkl);
+    exe.root_module.addOptions("build_options", build_options);
+
     // SDK library linking. Taken from zigrad.
     exe.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
     if (sdk_has(b, sdk_abs, &.{ "include", "mlir-c", "IR.h" })) {
@@ -37,7 +42,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("MLIR-C", .{});
         exe.root_module.linkSystemLibrary("StablehloCAPI", .{});
     }
-    if (sdk_has(b, sdk_abs, &.{ "include", "mkl_cblas.h" })) {
+    if (has_mkl) {
         exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{sdk_abs}) });
         exe.root_module.linkSystemLibrary("mkl_rt", .{});
     }
@@ -45,25 +50,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("dl", .{});
 
     // Runtime rpaths (match parent project layout).
-    const rpaths = [_][]const u8{
-        "$ORIGIN",
-        "$ORIGIN/../lib",
-        "$ORIGIN/../runtime",
-        "$ORIGIN/../runtime/xla/pjrt/c",
-        "$ORIGIN/../runtime/nvidia/cudnn/lib",
-        "$ORIGIN/../runtime/nvidia/cublas/lib",
-        "$ORIGIN/../runtime/nvidia/cudart/lib",
-        "$ORIGIN/../runtime/nvidia/cufft/lib",
-        "$ORIGIN/../runtime/nvidia/cupti/lib",
-        "$ORIGIN/../runtime/nvidia/cusparse/lib",
-        "$ORIGIN/../runtime/nvidia/nvjitlink/lib",
-        "$ORIGIN/../runtime/nvidia/nvrtc/lib",
-        "$ORIGIN/../runtime/nvidia/nccl/lib",
-        "$ORIGIN/../runtime/nvidia/nvshmem/lib",
-        "$ORIGIN/../runtime/sys/lib",
-        "/run/opengl-driver/lib",
-    };
-    inline for (rpaths) |p| exe.root_module.addRPathSpecial(p);
+    for (zigrad_mod.rpaths.items) |p| exe.root_module.addRPathSpecial(p.special);
 
     b.installArtifact(exe);
 
@@ -73,16 +60,7 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the benchmark").dependOn(&run_cmd.step);
 
     // Tests
-    const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zigrad", .module = zigrad_mod },
-        },
-    });
-    const tests = b.addTest(.{ .root_module = test_mod });
+    const tests = b.addTest(.{ .root_module = exe.root_module });
     tests.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run benchmark tests").dependOn(&run_tests.step);

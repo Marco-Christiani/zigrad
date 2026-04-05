@@ -61,3 +61,26 @@ zig build run -- --impls=all --shapes=256x256x256
 ## Output
 
 Prints a table per shape with median time (us), GFLOP/s, and speedup vs naive baseline, followed by a summary of best-performing implementations.
+
+Example:
+
+```
+============================================================
+Matmul Benchmark Results (f32)
+============================================================
+
+Shape: .{ .m = 128, .n = 128, .k = 128 }
+
+Implementation            Median (us)    GFLOP/s    vs Naive
+---------------------------------------------------------
+✓ blas                        360.20      11.64   105.16×
+✓ zig_naive                 37877.33       0.11     1.00×
+✓ tvm_cpu                      18.52     226.47  2045.21×
+✓ xla_cpu                      70.41      59.57   537.97×
+
+============================================================
+Summary
+============================================================
+Best overall: tvm_cpu (226.47 GFLOP/s)
+Best hand-rolled: zig_naive (0.11 GFLOP/s)
+```
