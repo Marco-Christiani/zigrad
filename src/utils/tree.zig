@@ -8,7 +8,7 @@
 //!
 //! ```zig
 //! var specs = try Tree(Tensor).from(allocator, inputs_spec);
-//! var host = try specs.map(HostBuffer, allocator, alloc_host);
+//! var host = try specs.map(Tensor, allocator, alloc_host);
 //! var dev  = try host.map(Backend.Buffer, ctx, upload);
 //! // dev.leaves[0..param_count] // ready for execution
 //! ```

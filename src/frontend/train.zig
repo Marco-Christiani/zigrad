@@ -2,6 +2,7 @@ const std = @import("std");
 
 const backend = @import("../backend/root.zig");
 const Backend = backend.Backend;
+const Tensor = @import("../tensor.zig");
 const frontend = @import("frontend.zig");
 
 /// Manages device buffer state across training steps.
@@ -24,11 +25,12 @@ const frontend = @import("frontend.zig");
 ///
 /// ```zig
 /// var compiled = try frontend.compile(train_step, alloc, b, device, specs, cfg);
-/// var state = try TrainState.init_from_model(alloc, &compiled, b, initial_bufs);
+/// var state = try TrainState.init_from_model(alloc, &compiled, b, initial_tensors, .{});
 /// for (0..num_steps) |_| {
-///     state.set_batch(batch_bufs);
+///     state.set_batch(batch_tensors);
 ///     const result = try state.step();
-///     // result.loss_buf contains the scalar loss
+///     const loss_val = try result.loss.item(f32);
+///     result.loss.deinit();
 /// }
 /// state.deinit(.all);
 /// ```
@@ -44,30 +46,44 @@ pub const TrainState = struct {
     /// Per-input donation mask from the compiled model.
     donatable: []const bool,
     non_donatable_indices: []const i64,
+    /// DType of the loss output (output[0]). Used to wrap the raw buffer
+    ///  as a Tensor in `StepResult`.
+    loss_dtype: @import("../pr/pr.zig").DType,
     allocator: std.mem.Allocator,
 
     pub const StepResult = struct {
-        loss_buf: Backend.Buffer,
+        loss: Tensor,
         event: ?Backend.Event,
     };
 
-    /// Initialize from a CompiledModel and a flat buffer slice.
+    /// Initialize from a CompiledModel and a flat tensor slice.
     ///
-    /// `input_bufs` must have exactly `compiled.input_arity` elements,
+    /// `initial_tensors` must have exactly `compiled.input_arity` elements,
     ///  in the same flattened order as the spec tree passed to `compile`.
+    ///  All tensors must be device-backed.
     /// Ownership follows the donation mask: donatable buffers are owned
     ///  by TrainState (freed on swap/deinit), non-donatable buffers are
     ///  borrowed (caller manages lifetime).
+    pub const InitOpts = struct {
+        /// DType of the loss output (output[0]). Defaults to f32.
+        /// Override for mixed-precision training (e.g. bf16 loss with
+        ///  f32 upcast).
+        loss_dtype: @import("../pr/pr.zig").DType = .f32,
+    };
+
     pub fn init_from_model(
         allocator: std.mem.Allocator,
         compiled: *frontend.CompiledModel,
         backend_: *Backend,
-        initial_bufs: []const Backend.Buffer,
+        initial_tensors: []const Tensor,
+        opts: InitOpts,
     ) !TrainState {
-        if (initial_bufs.len != compiled.input_arity) return error.InvalidInputCount;
+        if (initial_tensors.len != compiled.input_arity) return error.InvalidInputCount;
 
         const input_bufs = try allocator.alloc(Backend.Buffer, compiled.input_arity);
-        @memcpy(input_bufs, initial_bufs);
+        for (input_bufs, initial_tensors) |*slot, t| {
+            slot.* = try t.buffer();
+        }
 
         const output_bufs = try allocator.alloc(Backend.Buffer, compiled.output_arity);
 
@@ -80,15 +96,17 @@ pub const TrainState = struct {
             .backend = backend_,
             .donatable = compiled.donatable,
             .non_donatable_indices = non_donatable_indices,
+            .loss_dtype = opts.loss_dtype,
             .allocator = allocator,
         };
     }
 
     /// Execute one training step. Swaps donatable buffers in-place.
     ///
-    /// Returns `StepResult` with the loss buffer and optional completion event.
-    /// Caller owns loss buffer. Donatable input buffers are replaced with
-    ///  their corresponding outputs; old buffers are freed.
+    /// Returns `StepResult` with the loss as a device Tensor and optional
+    ///  completion event. Caller owns the loss tensor (call `deinit` or
+    ///  use `item()` then `deinit`). Donatable input buffers are replaced
+    ///  with their corresponding outputs; old buffers are freed.
     pub fn step(self: *TrainState) !StepResult {
         const event = try self.backend.execute_into(
             self.exe,
@@ -115,28 +133,32 @@ pub const TrainState = struct {
         }
 
         return .{
-            .loss_buf = loss_buf,
+            .loss = Tensor.from_buffer(self.backend, loss_buf, self.loss_dtype, &.{}),
             .event = event,
         };
     }
 
-    /// Replace a non-donatable (borrowed) input buffer by index.
+    /// Replace a non-donatable (borrowed) input by index.
     ///
-    /// The old buffer is NOT freed (caller owns non-donatable buffers).
-    pub fn set_batch_buf(self: *TrainState, input_idx: usize, buf: Backend.Buffer) void {
+    /// The tensor must be device-backed. The old buffer is NOT freed
+    ///  (caller owns non-donatable buffers).
+    pub fn set_batch_buf(self: *TrainState, input_idx: usize, tensor: Tensor) void {
         std.debug.assert(!self.donatable[input_idx]);
-        self.input_bufs[input_idx] = buf;
+        self.input_bufs[input_idx] = tensor.buffer() catch
+            @panic("set_batch_buf: tensor must be device-backed");
     }
 
-    /// Replace all non-donatable input buffers from a flat slice.
+    /// Replace all non-donatable inputs from a flat tensor slice.
     ///
-    /// `batch_bufs` must have exactly as many elements as there are
-    ///  non-donatable inputs, in spec-tree order.
-    pub fn set_batch(self: *TrainState, batch_bufs: []const Backend.Buffer) void {
+    /// `batch_tensors` must have exactly as many elements as there are
+    ///   non-donatable inputs, in spec-tree order.
+    /// All must be device-backed.
+    pub fn set_batch(self: *TrainState, batch_tensors: []const Tensor) void {
         var batch_idx: usize = 0;
         for (self.input_bufs, self.donatable) |*slot, is_donatable| {
             if (!is_donatable) {
-                slot.* = batch_bufs[batch_idx];
+                slot.* = batch_tensors[batch_idx].buffer() catch
+                    @panic("set_batch: tensor must be device-backed");
                 batch_idx += 1;
             }
         }
