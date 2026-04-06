@@ -227,9 +227,9 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
         143.0, 158.0,
     };
 
-    try expect_all_close("dA", got_a, expected_a, 1e-4);
-    try expect_all_close("dB", got_b, expected_b, 1e-4);
-    try expect_all_close("dC", got_c, expected_c, 1e-4);
+    try expect_all_close("dA", got_a, &expected_a, 1e-4);
+    try expect_all_close("dB", got_b, &expected_b, 1e-4);
+    try expect_all_close("dC", got_c, &expected_c, 1e-4);
 
     log.info("OK: gradients match expected", .{});
 }
