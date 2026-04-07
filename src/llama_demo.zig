@@ -181,8 +181,16 @@ fn loss_fn_with_options(
     const masked = try loss_per_out.select(attn_zero, zero_b);
     const masked_f = if (masked.dtype == .f32) masked else try masked.convert(.f32);
     const loss_sum = try masked_f.reduce_sum(&.{ 0, 1 });
-    if (loss_sum.dtype == logits_f.dtype) return loss_sum;
-    return loss_sum.convert(logits_f.dtype);
+
+    // Normalize by token count: loss / max(mask.sum(), 1)
+    const attn_zero_f = if (attn_zero.dtype == .f32) attn_zero else try attn_zero.convert(.f32);
+    const mask_count = try attn_zero_f.reduce_sum(&.{ 0, 1 });
+    const one = try Tensor.constant_like(mask_count, 1.0);
+    const denom = try mask_count.max(one);
+    const loss_norm = try loss_sum.div(denom);
+
+    if (loss_norm.dtype == logits_f.dtype) return loss_norm;
+    return loss_norm.convert(logits_f.dtype);
 }
 
 pub fn run_llama_ft_demo(

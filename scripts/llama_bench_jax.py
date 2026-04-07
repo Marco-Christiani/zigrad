@@ -263,7 +263,7 @@ def main():
         logits, _ = l3jax.forward(tokens, segment_ids, weights, cfg, cache=None)
         log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
         gathered = jnp.take_along_axis(log_probs, target_ids[..., None], axis=-1)[..., 0]
-        return -jnp.sum(gathered * mask.astype(jnp.float32))
+        return -jnp.sum(gathered * mask.astype(jnp.float32)) / jnp.maximum(mask.sum(), 1)
 
     if args.train:
         def step_fn(weights, tokens, segment_ids, target_ids, mask):
