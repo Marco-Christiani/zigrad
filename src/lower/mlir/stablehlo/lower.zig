@@ -536,8 +536,20 @@ pub fn lower(
 // ============================================================================
 
 test "lowering produces verified bytecode" {
-    var program = try @import("../../../frontend/frontend.zig").build_demo_program(std.testing.allocator);
+    var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
+    {
+        var b = try pr.FunctionBuilder.init(&program, "main");
+        defer b.deinit();
+        const a = try b.param_tensor(.f32, &.{ 2, 3 });
+        const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
+        const c = try b.param_tensor(.f32, &.{ 2, 2 });
+        const dot_id = try b.dot(a, b_id);
+        const add_id = try b.add(dot_id, c);
+        const out_id = try b.multiply(add_id, c);
+        const func = try b.finish(&.{out_id});
+        try program.add_function(func);
+    }
 
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
@@ -679,8 +691,20 @@ test "lowering supports multi-output custom_call boundary" {
 }
 
 test "lowering supports vjp matmul demo" {
-    var program = try @import("../../../frontend/frontend.zig").build_demo_program(std.testing.allocator);
+    var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
+    {
+        var b = try pr.FunctionBuilder.init(&program, "main");
+        defer b.deinit();
+        const a = try b.param_tensor(.f32, &.{ 2, 3 });
+        const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
+        const c = try b.param_tensor(.f32, &.{ 2, 2 });
+        const dot_id = try b.dot(a, b_id);
+        const add_id = try b.add(dot_id, c);
+        const out_id = try b.multiply(add_id, c);
+        const func = try b.finish(&.{out_id});
+        try program.add_function(func);
+    }
 
     const fwd = program.functions[0];
     const vjp_func = try @import("../../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");

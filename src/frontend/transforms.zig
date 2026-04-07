@@ -118,8 +118,8 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     defer loss_builder.deinit();
 
     var sub_tree = try args_tree.map(Tensor, &loss_builder, struct {
-        fn f(b: *pr.FunctionBuilder, spec: Tensor) anyerror!Tensor {
-            return Tensor.param(b, spec.dtype, spec.shape.const_slice());
+        fn f(b: *pr.FunctionBuilder, spec: Tensor) !Tensor {
+            return try Tensor.param(b, spec.dtype, spec.shape.const_slice());
         }
     }.f);
 

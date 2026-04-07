@@ -9,6 +9,28 @@ fn deinit_tensor(t: *Tensor) void {
     t.*.deinit();
 }
 
+/// Demo program: out = (dot(A, B) + C) * C where A: 2x3, B: 3x2, C: 2x2.
+pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
+    var program = zg.pr.Program.init(allocator);
+    errdefer program.deinit();
+
+    var b = try zg.pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a_id = try b.param_tensor(.f32, &.{ 2, 3 });
+    const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
+    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    const dot_id = try b.dot(a_id, b_id);
+    const add_id = try b.add(dot_id, c_id);
+    const out_id = try b.multiply(add_id, c_id);
+
+    const func = try b.finish(&.{out_id});
+    try program.add_function(func);
+
+    return program;
+}
+
 pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.createFileAbsolute(path, .{ .truncate = true })
@@ -126,7 +148,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backe
 }
 
 pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
-    var program = try zg.frontend.build_demo_program(allocator);
+    var program = try build_demo_program(allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
@@ -633,7 +655,7 @@ pub const KernelProviderDemoKind = enum {
 };
 
 pub fn print_pr(allocator: std.mem.Allocator) !void {
-    var program = try zg.frontend.build_demo_program(allocator);
+    var program = try build_demo_program(allocator);
     defer program.deinit();
 
     const fwd = program.functions[0];
@@ -694,27 +716,29 @@ pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
-    var b = try zg.frontend.Builder.init(&program, "main");
-    defer b.deinit();
+    var builder = try zg.pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
 
-    const a = try b.param(zg.Tensor.abstract(.f32, &.{ 2, 3 }, .{}));
-    const b_t = try b.param(zg.Tensor.abstract(.f32, &.{ 3, 2 }, .{}));
-    const c = try b.param(zg.Tensor.abstract(.f32, &.{ 2, 2 }, .{}));
-    const d = try b.param(zg.Tensor.abstract(.f32, &.{ 2, 2 }, .{}));
+    const a = try Tensor.param(&builder, .f32, &.{ 2, 3 });
+    const b_t = try Tensor.param(&builder, .f32, &.{ 3, 2 });
+    const c = try Tensor.param(&builder, .f32, &.{ 2, 2 });
+    const d = try Tensor.param(&builder, .f32, &.{ 2, 2 });
 
     const pre = try c.add(d);
 
-    try b.push_region("tvm_matmul", .{ .kernelize = "tvm" });
+    try builder.push_region("tvm_matmul", .{ .kernelize = "tvm" });
     const dot = try a.matmul(b_t);
-    try b.pop_region();
+    try builder.pop_region();
 
-    try b.push_region("tvm_fused", .{ .kernelize = "tvm", .outline = true });
+    try builder.push_region("tvm_fused", .{ .kernelize = "tvm", .outline = true });
     const sum = try dot.add(pre);
     const mul = try sum.mul(c);
-    try b.pop_region();
+    try builder.pop_region();
 
     const out = try mul.add(d);
-    _ = try b.finish(&.{out});
+    const out_var = try out.get_var();
+    const func_result = try builder.finish(&.{out_var});
+    try program.add_function(func_result);
 
     const func = program.functions[0];
 
@@ -883,8 +907,8 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
-    var b = try zg.frontend.Builder.init(&program, "attention");
-    defer b.deinit();
+    var builder = try zg.pr.FunctionBuilder.init(&program, "attention");
+    defer builder.deinit();
 
     // simplified attention: [B, S, D] shapes
     // Q, K, V: [batch=2, seq=4, head_dim=64]
@@ -892,12 +916,12 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     const seq: i64 = 4;
     const head_dim: i64 = 64;
 
-    const q = try b.param(zg.Tensor.abstract(.f32, &.{ batch, seq, head_dim }, .{}));
-    const k = try b.param(zg.Tensor.abstract(.f32, &.{ batch, seq, head_dim }, .{}));
-    const v = try b.param(zg.Tensor.abstract(.f32, &.{ batch, seq, head_dim }, .{}));
+    const q = try Tensor.param(&builder, .f32, &.{ batch, seq, head_dim });
+    const k = try Tensor.param(&builder, .f32, &.{ batch, seq, head_dim });
+    const v = try Tensor.param(&builder, .f32, &.{ batch, seq, head_dim });
 
     // entire attention block as a single TVM-kernelizable region
-    try b.push_region("attention", .{ .kernelize = "tvm" });
+    try builder.push_region("attention", .{ .kernelize = "tvm" });
 
     // attention scores: Q @ K^T  ->  [B, S, S]
     const scores = try q.dot_general(k, .{
@@ -909,7 +933,7 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
 
     // scale scores
     const scale_val = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-    const scaled = try scores.mul(try zg.Tensor.constant_like(scores, scale_val));
+    const scaled = try scores.mul(try Tensor.constant_like(scores, scale_val));
 
     // softmax over last dim [S]
     const rank = scaled.rank();
@@ -932,9 +956,11 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
         .rhs_contracting_dims = &.{1},
     });
 
-    try b.pop_region();
+    try builder.pop_region();
 
-    _ = try b.finish(&.{out});
+    const out_var = try out.get_var();
+    const func_result = try builder.finish(&.{out_var});
+    try program.add_function(func_result);
 
     const func = program.functions[0];
 

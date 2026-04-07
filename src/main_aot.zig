@@ -1,12 +1,13 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const demos = @import("demos.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
     backend: *zg.backend.pjrt.Backend,
     device: *const zg.backend.pjrt.Device,
 ) !void {
-    var program = try zg.frontend.build_demo_program(allocator);
+    var program = try demos.build_demo_program(allocator);
     defer program.deinit();
 
     const mlir_bytes = try zg.lower.lower_program_to_mlir(

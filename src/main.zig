@@ -222,7 +222,7 @@ pub fn main() !void {
         if (comptime build_options.has_mlir) {
             const opts = try sub_cmd.to(cli.JitCacheOpts, .{});
 
-            var program = try zg.frontend.build_demo_program(gpa);
+            var program = try demos.build_demo_program(gpa);
             defer program.deinit();
 
             const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
@@ -467,7 +467,7 @@ fn run_iree_demo(
     }
     const device = &devs[0];
 
-    var program = try zg.frontend.build_demo_program(gpa);
+    var program = try demos.build_demo_program(gpa);
     defer program.deinit();
 
     if (dump_pr) |_| {
@@ -541,7 +541,7 @@ fn run_iree_aot_compile(
     const compiler = iree_subprocess_compiler(compiler_exe, target_backend, &flag_buf, &iree_flags) catch
         return error.BackendNameTooLong;
 
-    var program = try zg.frontend.build_demo_program(gpa);
+    var program = try demos.build_demo_program(gpa);
     defer program.deinit();
 
     const lowered = try lower_demo_to_mlir(gpa, &program, dump_mlir);

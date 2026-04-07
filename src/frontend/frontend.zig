@@ -76,58 +76,6 @@ pub const optim = @import("optim.zig");
 
 const log = std.log.scoped(.@"zg/frontend");
 
-/// TODO: does this belong here anymore?
-pub const Builder = struct {
-    program: *pr.Program,
-    builder: pr.FunctionBuilder,
-
-    pub fn init(program: *pr.Program, name: []const u8) !Builder {
-        return .{
-            .program = program,
-            .builder = try pr.FunctionBuilder.init(program, name),
-        };
-    }
-
-    pub fn deinit(self: *Builder) void {
-        self.builder.deinit();
-    }
-
-    /// Create a traced parameter tensor from an abstract tensor spec.
-    pub fn param(self: *Builder, spec: Tensor) !Tensor {
-        return Tensor.param(&self.builder, spec.dtype, spec.shape.const_slice());
-    }
-
-    /// Create a 0-d scalar constant tensor.
-    pub fn scalar(self: *Builder, dtype: pr.DType, val: f64) !Tensor {
-        const v = try self.builder.scalar(dtype, val);
-        return Tensor.from_var(&self.builder, v);
-    }
-
-    pub fn iota(self: *Builder, out_dtype: pr.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
-        const v = try self.builder.iota(out_dtype, out_dims, iota_dim);
-        return Tensor.from_var(&self.builder, v);
-    }
-
-    pub fn finish(self: *Builder, returns: []const Tensor) !pr.Function {
-        const vars = try self.program.allocator().alloc(*pr.Var, returns.len);
-        for (returns, 0..) |t, i| vars[i] = try t.get_var();
-        const func = try self.builder.finish(vars);
-        try self.program.add_function(func);
-        return func;
-    }
-
-    /// Push a named annotation region. Equations emitted after this call
-    /// belong to this region until pop_region is called.
-    pub fn push_region(self: *Builder, name: []const u8, annotation: pr.Annotation) !void {
-        try self.builder.push_region(name, annotation);
-    }
-
-    /// Pop the most recent annotation region.
-    pub fn pop_region(self: *Builder) !void {
-        try self.builder.pop_region();
-    }
-};
-
 /// Which transform to apply during `compile`.
 ///
 /// This controls whether VJP is applied as a compilation step. For in-graph
@@ -380,28 +328,6 @@ fn trace_and_call(
     };
 
     return flatten_outputs(allocator, result);
-}
-
-/// TODO: this does not belong here
-pub fn build_demo_program(allocator: std.mem.Allocator) !pr.Program {
-    var program = pr.Program.init(allocator);
-    errdefer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "main");
-    defer b.deinit();
-
-    const a_id = try b.param_tensor(.f32, &.{ 2, 3 });
-    const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
-    const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
-
-    const dot_id = try b.dot(a_id, b_id);
-    const add_id = try b.add(dot_id, c_id);
-    const out_id = try b.multiply(add_id, c_id);
-
-    const func = try b.finish(&.{out_id});
-    try program.add_function(func);
-
-    return program;
 }
 
 /// Assemble and run the compilation pipeline: kernelize -> lower -> compile.
