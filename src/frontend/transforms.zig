@@ -1,9 +1,7 @@
 //! Compile-time function transforms for Tensor-valued functions.
 //!
 //! Transforms augment a function's behavior *during tracing*. They are called
-//!  inside a traced function body, not at the compile call site. This is the
-//!  key difference from `frontend.compile(..., .{ .transform = .value_and_grad })`,
-//!  which applies VJP as a compilation step outside the trace.
+//!  inside a traced function body, not at the trace call site.
 //!
 //! The canonical use is `value_and_grad`, which:
 //!  1. Builds a sub-function from the loss closure,
@@ -23,14 +21,10 @@
 //!     var updated = try params_tree.map2(..., sgd_update);
 //!     return .{ .loss = vg.value, .updated = updated.extract(Params) };
 //! }
-//! // Compile the whole step as one program:
-//! var compiled = try frontend.compile(train_step, alloc, backend, device, specs, .{});
+//! // Trace + compile the whole step as one program:
+//! var traced = try zg.trace(train_step, allocator, specs, "train_step");
+//! var exe = try zg.frontend.compile_program(backend, allocator, &traced.program, device, "train_step", .{});
 //! ```
-//!
-//! Both this module and `frontend.compile(.value_and_grad)` use `pr.ad.vjp_with_value`
-//!  under the hood. The difference is where VJP is applied (inside the trace vs. at
-//!  compile time) and what the compiled program returns (user-defined struct vs. flat
-//!  `[loss, grads...]`).
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
@@ -61,7 +55,7 @@ pub const ValueAndGrad = struct {
 ///
 /// Must be called *during tracing* -- all Tensor arguments must be traced-mode
 ///  (bound to a FunctionBuilder). This is not a standalone compilation entry
-///  point, use `frontend.compile` for that.
+///  point; use `frontend.trace` + `frontend.compile_program` for that.
 ///
 /// ## Mechanism
 ///
@@ -180,6 +174,127 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
 }
 
 // ============================================================================
+// Comptime function generators
+// ============================================================================
+//
+// These produce new comptime function pointers from existing functions.
+// The returned functions are traceable -- pass them to `zg.trace()`.
+//
+// Unlike the trace-time `value_and_grad` above (called inside a traced
+//  function body), these are called at comptime to *generate* a function
+//  that will itself be traced.
+
+/// Options for comptime AD function generators.
+///
+/// Controls which arguments are differentiated. Currently differentiates
+///  w.r.t. the first argument; `argnums` support is planned.
+pub const GradOpts = struct {};
+
+/// Generate a function that computes gradients of `func` w.r.t. its first argument.
+///
+/// Returns a comptime function pointer with the same parameter types as `func`
+///  but returning the first argument's type (populated with gradient tensors).
+///  The returned function is traceable -- pass it to `zg.trace()`.
+///
+/// ```zig
+/// const grad_fn = comptime zg.grad(loss_fn, .{});
+/// var traced = try zg.trace(grad_fn, allocator, specs, "grad_step");
+/// ```
+pub fn make_grad(comptime func: anytype, comptime opts: GradOpts) @TypeOf(&GradCallGen(func, opts).call) {
+    return &GradCallGen(func, opts).call;
+}
+
+/// Generate a function that computes both value and gradients of `func`.
+///
+/// Returns a comptime function pointer with the same parameter types as `func`
+///  but returning `struct { value: Tensor, grads: ParamsType }` where
+///  `ParamsType` is the type of the first argument.
+///
+/// ```zig
+/// const vg_fn = comptime zg.value_and_grad(loss_fn, .{});
+/// var traced = try zg.trace(vg_fn, allocator, specs, "vg_step");
+/// ```
+pub fn make_value_and_grad(comptime func: anytype, comptime opts: GradOpts) @TypeOf(&VgCallGen(func, opts).call) {
+    return &VgCallGen(func, opts).call;
+}
+
+/// Return type for comptime `value_and_grad` generated functions.
+pub fn ValueAndGradResult(comptime GradsType: type) type {
+    return struct { value: Tensor, grads: GradsType };
+}
+
+fn GradCallGen(comptime func: anytype, comptime opts: GradOpts) type {
+    _ = opts;
+    const params = @typeInfo(@TypeOf(func)).@"fn".params;
+    const G = params[0].type.?;
+    return switch (params.len) {
+        1 => struct {
+            pub fn call(a0: params[0].type.?) anyerror!G {
+                return grad_impl(func, G, .{a0});
+            }
+        },
+        2 => struct {
+            pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!G {
+                return grad_impl(func, G, .{a0, a1});
+            }
+        },
+        3 => struct {
+            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!G {
+                return grad_impl(func, G, .{a0, a1, a2});
+            }
+        },
+        4 => struct {
+            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!G {
+                return grad_impl(func, G, .{a0, a1, a2, a3});
+            }
+        },
+        else => @compileError("grad supports functions with up to 4 parameters"),
+    };
+}
+
+fn VgCallGen(comptime func: anytype, comptime opts: GradOpts) type {
+    _ = opts;
+    const params = @typeInfo(@TypeOf(func)).@"fn".params;
+    const G = params[0].type.?;
+    const R = ValueAndGradResult(G);
+    return switch (params.len) {
+        1 => struct {
+            pub fn call(a0: params[0].type.?) anyerror!R {
+                return vg_impl(func, G, .{a0});
+            }
+        },
+        2 => struct {
+            pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!R {
+                return vg_impl(func, G, .{a0, a1});
+            }
+        },
+        3 => struct {
+            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!R {
+                return vg_impl(func, G, .{a0, a1, a2});
+            }
+        },
+        4 => struct {
+            pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!R {
+                return vg_impl(func, G, .{a0, a1, a2, a3});
+            }
+        },
+        else => @compileError("value_and_grad supports functions with up to 4 parameters"),
+    };
+}
+
+fn grad_impl(comptime func: anytype, comptime GradsType: type, args: anytype) !GradsType {
+    var vg = try value_and_grad(func, args);
+    defer vg.deinit();
+    return vg.grads.extract(GradsType);
+}
+
+fn vg_impl(comptime func: anytype, comptime GradsType: type, args: anytype) !ValueAndGradResult(GradsType) {
+    var vg = try value_and_grad(func, args);
+    defer vg.deinit();
+    return .{ .value = vg.value, .grads = vg.grads.extract(GradsType) };
+}
+
+// ============================================================================
 // Internal helpers
 // ============================================================================
 
@@ -211,4 +326,78 @@ fn extract_builder(val: anytype) ?*pr.FunctionBuilder {
         else => {},
     }
     return null;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+const frontend = @import("frontend.zig");
+
+const TestParams = struct { w: Tensor, b: Tensor };
+const TestBatch = struct { x: Tensor };
+
+fn test_loss(params: TestParams, batch: TestBatch) !Tensor {
+    const z = try batch.x.matmul(params.w);
+    const b_broadcast = try params.b.broadcast_in_dim(&.{ 3, 2 }, &.{1});
+    const pred = try z.add(b_broadcast);
+    return try pred.reduce_sum(&.{ 0, 1 });
+}
+
+test make_grad {
+    const grad_fn = comptime make_grad(test_loss, .{});
+
+    // Verify return type is the params type (TestParams).
+    const RetType = @typeInfo(@TypeOf(grad_fn)).pointer.child;
+    const ret_info = @typeInfo(RetType).@"fn";
+    try std.testing.expectEqual(2, ret_info.params.len);
+
+    const ReturnType = @typeInfo(ret_info.return_type.?).error_union.payload;
+    try std.testing.expect(ReturnType == TestParams);
+
+    // Trace through the full pipeline.
+    const specs = .{
+        TestParams{
+            .w = Tensor.abstract(.f32, &.{ 4, 2 }),
+            .b = Tensor.abstract(.f32, &.{2}),
+        },
+        TestBatch{
+            .x = Tensor.abstract(.f32, &.{ 3, 4 }),
+        },
+    };
+
+    var program = try frontend.trace(grad_fn, std.testing.allocator, specs, "grad_test");
+    defer program.deinit();
+
+    // grad returns only grads for first arg (2 leaves: w, b).
+    try std.testing.expectEqual(2, program.output_arity("grad_test"));
+    try std.testing.expectEqual(3, program.input_arity("grad_test"));
+}
+
+test make_value_and_grad {
+    const vg_fn = comptime make_value_and_grad(test_loss, .{});
+
+    // Verify return type is ValueAndGradResult(TestParams).
+    const RetType = @typeInfo(@TypeOf(vg_fn)).pointer.child;
+    const ret_info = @typeInfo(RetType).@"fn";
+    const ReturnType = @typeInfo(ret_info.return_type.?).error_union.payload;
+    try std.testing.expect(@hasField(ReturnType, "value"));
+    try std.testing.expect(@hasField(ReturnType, "grads"));
+
+    const specs = .{
+        TestParams{
+            .w = Tensor.abstract(.f32, &.{ 4, 2 }),
+            .b = Tensor.abstract(.f32, &.{2}),
+        },
+        TestBatch{
+            .x = Tensor.abstract(.f32, &.{ 3, 4 }),
+        },
+    };
+
+    var program = try frontend.trace(vg_fn, std.testing.allocator, specs, "vg_test");
+    defer program.deinit();
+
+    // value_and_grad returns value (1 tensor) + grads for first arg (2 leaves).
+    try std.testing.expectEqual(3, program.output_arity("vg_test"));
+    try std.testing.expectEqual(3, program.input_arity("vg_test"));
 }

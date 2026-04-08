@@ -12,7 +12,7 @@
 //! ```zig
 //! var result = try tune(allocator, &program, providers);
 //! defer result.deinit();
-//! // result.store - pass to pipeline via CompileConfig.kernel_store
+//! // result.store - pass to pipeline via CompileOpts.kernel_store
 //! // result.dispatch_registry - pass to ExecuteOptions.dispatch_registry
 //! ```
 const std = @import("std");
@@ -55,7 +55,7 @@ const TuneCandidate = struct {
 /// providers, and record decisions in the returned store.
 ///
 /// On success, callers should pass `result.store` to the pipeline via
-/// `CompileConfig.kernel_store` and `result.dispatch_registry` to
+/// `CompileOpts.kernel_store` and `result.dispatch_registry` to
 /// `ExecuteOptions.dispatch_registry`. Providers are finalized before return.
 pub fn tune(
     allocator: std.mem.Allocator,

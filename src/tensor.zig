@@ -11,7 +11,7 @@
 //!     memory-mapped memory. Supports typed access (`as_slice`, `item`)
 //!     and transfer to device (`to_device`).
 //! 4. **abstract**: specification only (dtype + shape, no data). Used to
-//!     define input specs for `frontend.compile`.
+//!     define input specs for `frontend.trace`.
 //!
 //! All variants carry `dtype` and `shape` as direct fields for uniform access.
 //! In traced mode these are copied from the underlying `Var.aval` at
@@ -28,14 +28,6 @@ const Tensor = @This();
 dtype: pr.DType,
 shape: pr.BoundedShape,
 backing: Backing,
-
-/// When `true`, the backend may reuse this input buffer for an output.
-///
-/// Mark abstract tensors as donatable when the compiled function is expected
-///  to produce an updated version of the input (e.g. trainable parameters).
-/// Non-donatable inputs (e.g. batch data) are borrowed, the caller manages
-///  their lifetime.
-donatable: bool = false,
 
 pub const max_rank = pr.max_rank;
 
@@ -133,22 +125,9 @@ pub fn host(dtype: pr.DType, shape: []const i64, src: HostSrc) !Tensor {
     return .{ .dtype = dtype, .shape = bounded, .backing = .{ .host = hb } };
 }
 
-pub const AbstractOpts = struct {
-    donatable: bool = false,
-};
-
 /// Create an abstract tensor for specification purposes (shape/dtype only, no data).
-///
-/// Use `opts.donatable = true` for inputs the compiled function will update
-///  (e.g. trainable parameters). The donation flag flows through compilation
-///  into the execute loop, controlling buffer reuse and ownership.
-pub fn abstract(dtype: pr.DType, shape: []const i64, opts: AbstractOpts) Tensor {
-    return .{ .dtype = dtype, .shape = .from_slice(shape), .backing = .abstract, .donatable = opts.donatable };
-}
-
-/// Shorthand for an abstract donatable tensor (trainable parameter spec).
-pub fn abstract_donatable(dtype: pr.DType, shape: []const i64) Tensor {
-    return abstract(dtype, shape, .{ .donatable = true });
+pub fn abstract(dtype: pr.DType, shape: []const i64) Tensor {
+    return .{ .dtype = dtype, .shape = .from_slice(shape), .backing = .abstract };
 }
 
 // ============================================================================
@@ -550,6 +529,8 @@ pub fn get_var(self: Tensor) !*pr.Var {
 ///
 /// Useful for interop with APIs that still accept `HostBuffer` directly
 /// (e.g. `Backend.transfer`).
+/// TODO: unused, along with Backend.transfer, but .buffer() doesnt support
+///  host which is questionable. Need to iron out this API.
 pub fn get_host_buffer(self: *const Tensor) *const HostBuffer {
     return switch (self.backing) {
         .host => |*hb| hb,

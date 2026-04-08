@@ -219,50 +219,39 @@ pub fn run_llama_ft_demo(
     const mlp_hidden: i64 = hidden * 4;
     const qkv_out: i64 = hidden + kv_out + kv_out;
 
-    const donatable: Tensor.AbstractOpts = .{ .donatable = true };
     var layers_spec: [num_layers]LayerSpec = undefined;
     inline for (0..num_layers) |i| {
         layers_spec[i] = .{
-            .input_norm = Tensor.abstract(model_dtype, &.{hidden}, donatable),
-            .post_norm = Tensor.abstract(model_dtype, &.{hidden}, donatable),
-            .qkv_proj = Tensor.abstract(model_dtype, &.{ hidden, qkv_out }, donatable),
-            .o_proj = Tensor.abstract(model_dtype, &.{ hidden, hidden }, donatable),
-            .gate_proj = Tensor.abstract(model_dtype, &.{ hidden, mlp_hidden }, donatable),
-            .up_proj = Tensor.abstract(model_dtype, &.{ hidden, mlp_hidden }, donatable),
-            .down_proj = Tensor.abstract(model_dtype, &.{ mlp_hidden, hidden }, donatable),
+            .input_norm = Tensor.abstract(model_dtype, &.{hidden}),
+            .post_norm = Tensor.abstract(model_dtype, &.{hidden}),
+            .qkv_proj = Tensor.abstract(model_dtype, &.{ hidden, qkv_out }),
+            .o_proj = Tensor.abstract(model_dtype, &.{ hidden, hidden }),
+            .gate_proj = Tensor.abstract(model_dtype, &.{ hidden, mlp_hidden }),
+            .up_proj = Tensor.abstract(model_dtype, &.{ hidden, mlp_hidden }),
+            .down_proj = Tensor.abstract(model_dtype, &.{ mlp_hidden, hidden }),
         };
     }
 
     const params_spec = ParamsSpec{
-        .w_emb = Tensor.abstract(model_dtype, &.{ vocab, hidden }, donatable),
-        .w_out = Tensor.abstract(model_dtype, &.{ hidden, vocab }, donatable),
-        .norm = Tensor.abstract(model_dtype, &.{hidden}, donatable),
+        .w_emb = Tensor.abstract(model_dtype, &.{ vocab, hidden }),
+        .w_out = Tensor.abstract(model_dtype, &.{ hidden, vocab }),
+        .norm = Tensor.abstract(model_dtype, &.{hidden}),
         .layers = layers_spec,
     };
     var dims_seq_seq: [2]i64 = .{ seq, seq };
     var dims_seq_32: [2]i64 = .{ seq, 32 };
     var dims_b_s: [2]i64 = .{ batch_size, seq };
     const batch_spec = BatchSpec{
-        .x = Tensor.abstract(.i32, dims_b_s[0..], .{}),
-        .target_ids = Tensor.abstract(.i32, dims_b_s[0..], .{}),
-        .attention_mask = Tensor.abstract(model_dtype, dims_b_s[0..], .{}),
-        .mask = Tensor.abstract(model_dtype, dims_seq_seq[0..], .{}),
-        .sin = Tensor.abstract(model_dtype, dims_seq_32[0..], .{}),
-        .cos = Tensor.abstract(model_dtype, dims_seq_32[0..], .{}),
+        .x = Tensor.abstract(.i32, dims_b_s[0..]),
+        .target_ids = Tensor.abstract(.i32, dims_b_s[0..]),
+        .attention_mask = Tensor.abstract(model_dtype, dims_b_s[0..]),
+        .mask = Tensor.abstract(model_dtype, dims_seq_seq[0..]),
+        .sin = Tensor.abstract(model_dtype, dims_seq_32[0..]),
+        .cos = Tensor.abstract(model_dtype, dims_seq_32[0..]),
     };
     const inputs_spec = .{ params_spec, batch_spec };
 
-    var compile_cfg = zg.frontend.CompileConfig{
-        .entry_name = "llama_ft_step",
-        .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
-        .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
-        .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,
-        .dump_kernels = dump_kernels,
-    };
-
-    if (compile_cfg.dump_mlir != null) {
-        compile_cfg.lower.encoding = .text;
-    }
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
 
     // Mirage kernel provider: tune -> store -> pass to compile_cfg.
     const MirageDispatch = if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void;
@@ -307,29 +296,27 @@ pub fn run_llama_ft_demo(
     // TODO: Fix this later when KP starts stabilizing
     const use_mirage_loss = cfg.kernel_provider != null;
 
-    var compiled_train: ?zg.frontend.CompiledModel = null;
-    var compiled_fwd: ?zg.frontend.CompiledModel = null;
-    if (train_mode) {
-        compiled_train = if (use_mirage_loss)
-            try zg.frontend.compile(train_step_fn_mirage, allocator, b, device, inputs_spec, compile_cfg)
+    const compile_opts: zg.frontend.CompileOpts = .{
+        .lower = .{ .encoding = lower_encoding },
+        .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
+        .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
+        .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,
+        .dump_kernels = dump_kernels,
+    };
+
+    var program = if (train_mode)
+        (if (use_mirage_loss)
+            try zg.trace(train_step_fn_mirage, allocator, inputs_spec, "llama_ft_step")
         else
-            try zg.frontend.compile(train_step_fn, allocator, b, device, inputs_spec, compile_cfg);
-    } else {
-        compiled_fwd = if (use_mirage_loss)
-            try zg.frontend.compile(loss_fn_mirage, allocator, b, device, inputs_spec, compile_cfg)
+            try zg.trace(train_step_fn, allocator, inputs_spec, "llama_ft_step"))
+    else
+        (if (use_mirage_loss)
+            try zg.trace(loss_fn_mirage, allocator, inputs_spec, "llama_ft_step")
         else
-            try zg.frontend.compile(loss_fn, allocator, b, device, inputs_spec, compile_cfg);
-    }
-    defer {
-        if (compiled_train) |*ct| {
-            b.deinit_executable(ct.exe);
-            ct.deinit();
-        }
-        if (compiled_fwd) |*cf| {
-            b.deinit_executable(cf.exe);
-            cf.deinit();
-        }
-    }
+            try zg.trace(loss_fn, allocator, inputs_spec, "llama_ft_step"));
+    defer program.deinit();
+    const exe = try zg.frontend.compile_program(b, allocator, &program, device, "llama_ft_step", compile_opts);
+    defer b.deinit_executable(exe);
 
     // Build host tensors from spec tree - shapes and dtypes derived from specs.
     var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
@@ -347,7 +334,7 @@ pub fn run_llama_ft_demo(
     const weights_path = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_SAFETENSORS_PATH") catch default_path;
     defer if (!std.mem.eql(u8, weights_path, default_path)) allocator.free(weights_path);
 
-    const donatable_mask = if (compiled_train) |ct| ct.donatable else compiled_fwd.?.donatable;
+    const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
     var load_result = try load_llama_weights(allocator, weights_path, &host_tree, .{
         .hidden = hidden,
         .kv_out = kv_out,
@@ -361,8 +348,8 @@ pub fn run_llama_ft_demo(
         }
     } else {
         // Fill param leaves with synthetic pattern
-        for (host_tree.leaves, donatable_mask) |buf, is_donatable| {
-            if (!is_donatable) continue;
+        const param_leaf_count = comptime zg.utils.Tree(Tensor).leaf_count(ParamsSpec);
+        for (host_tree.leaves[0..param_leaf_count]) |buf| {
             fill_pattern(buf, 1e-3, 0.0);
         }
         log.warn("Using synthetic weights (set ZG_LLAMA_SAFETENSORS_PATH to use a specific checkpoint)", .{});
@@ -411,12 +398,13 @@ pub fn run_llama_ft_demo(
 
     if (train_mode) {
         // Set up state as a convenience for training
-        var state = try train.TrainState.init_from_model(
+        var state = try train.TrainState.init(
             allocator,
-            &compiled_train.?,
+            exe,
             b,
             dev_tree.leaves,
-            .{ .loss_dtype = loss_dtype },
+            program.output_arity("llama_ft_step"),
+            .{ .non_donatable_input_indices = donate, .loss_dtype = loss_dtype },
         );
         defer state.deinit(.all);
 
@@ -456,7 +444,7 @@ pub fn run_llama_ft_demo(
         if (nvtx_range) |*range| range.pop() catch {};
     } else {
         // Forward-only mode: simple execute loop, no parameter swapping.
-        const fwd_exe = compiled_fwd.?.exe;
+        const fwd_exe = exe;
 
         defer for (dev_tree.leaves) |t| t.deinit();
 

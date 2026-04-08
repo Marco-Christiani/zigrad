@@ -660,12 +660,34 @@ pub const Program = struct {
     /// NOTE: this is currently out of any hot path, but not ideal design anymore,
     ///  many call sites use the `functions` field so an update will trigger a refactor
     ///  but this is likely to land at some point.
+    /// TODO: where do we check for dupe names? it happens, i think pipeline or lowering,
+    ///  but probably add checks around here
     pub fn add_function(self: *Program, func: Function) Allocator.Error!void {
         const a = self.allocator();
         const new_items = try a.alloc(Function, self.functions.len + 1);
         @memcpy(new_items[0..self.functions.len], self.functions);
         new_items[self.functions.len] = func;
         self.functions = new_items;
+    }
+
+    /// Look up a function by name.
+    pub fn get_function(self: *const Program, name: []const u8) ?Function {
+        for (self.functions) |f| {
+            if (std.mem.eql(u8, f.name, name)) return f;
+        }
+        return null;
+    }
+
+    /// Number of input parameters for a named function.
+    pub fn input_arity(self: *const Program, name: []const u8) usize {
+        const f = self.get_function(name) orelse return 0;
+        return f.params.len;
+    }
+
+    /// Number of output values for a named function.
+    pub fn output_arity(self: *const Program, name: []const u8) usize {
+        const f = self.get_function(name) orelse return 0;
+        return f.returns.len;
     }
 
     pub fn deinit(self: *Program) void {

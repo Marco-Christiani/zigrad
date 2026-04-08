@@ -257,12 +257,49 @@ pub const maximum = struct {
         return infer_binary_elementwise(error.MaximumTypeMismatch, inputs);
     }
 
+    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
+
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const out = try ctx.builder.maximum(lhs, rhs);
+        ctx.set_primal(op.result(0), out);
+    }
+
+    /// VJP: gradient routes to whichever operand was selected.
+    ///  d_lhs = select(lhs >= rhs, cot, 0), d_rhs = select(lhs >= rhs, 0, cot).
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        if (op.inputs.len != 2) return error.UnsupportedEqn;
+
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+
+        const lhs_tensor = op.operand(0).as_tensor();
+        const cmp = try ctx.builder.compare(lhs_primal, rhs_primal, .{
+            .direction = .GE,
+            .compare_type = .FLOAT,
+        });
+        const zero = try zero_like(ctx.builder, lhs_tensor);
+
+        try ctx.add_cot(op.operand(0), try ctx.builder.select(cmp, out_cot, zero));
+        try ctx.add_cot(op.operand(1), try ctx.builder.select(cmp, zero, out_cot));
+    }
+
     pub const format = format_binary_elementwise;
 };
 
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Zero scalar broadcast to match `tensor`'s shape and dtype.
+/// Handles rank-0 (scalar) tensors by skipping the broadcast.
+fn zero_like(bld: *pr.FunctionBuilder, tensor: Tensor) pr.BuildError!*pr.Var {
+    const zero = try bld.scalar(tensor.dtype, 0.0);
+    if (tensor.shape.rank() == 0) return zero;
+    return try bld.broadcast_in_dim(zero, tensor.shape.dims, &.{});
+}
 
 /// Negate a value by multiplying with a -1 scalar broadcast to match `tensor`'s shape.
 /// Handles rank-0 (scalar) tensors by skipping the broadcast.

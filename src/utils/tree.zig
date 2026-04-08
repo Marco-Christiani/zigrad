@@ -51,7 +51,7 @@ pub fn Tree(comptime Leaf: type) type {
         }
 
         /// Build from pre-existing parallel arrays (e.g., deserialization).
-        /// Caller retains ownership of the underlying data; the tree borrows.
+        /// Caller retains ownership of the underlying data, the tree borrows.
         pub fn from_slices(allocator: std.mem.Allocator, leaves: []Leaf, paths: []const []const u8) Self {
             std.debug.assert(leaves.len == paths.len);
             return .{ .leaves = leaves, .paths = paths, .allocator = allocator };
@@ -60,6 +60,7 @@ pub fn Tree(comptime Leaf: type) type {
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.leaves);
             self.allocator.free(self.paths);
+            self.* = undefined;
         }
 
         /// Deinit every leaf, then free the tree arrays.
@@ -76,12 +77,42 @@ pub fn Tree(comptime Leaf: type) type {
         ///
         /// Inverse of `from`. Accepts any type that `from` can flatten:
         ///  named structs, tuples, arrays, or a bare `Leaf`. Paths are
-        ///  not consulted -- leaf order (DFS) determines field assignment.
-        pub fn extract(self: *const Self, comptime T: type) T {
+        ///  not consulted - leaf order (DFS) determines field assignment.
+        ///
+        /// Handles types with comptime-inferred fields (e.g. anonymous tuples
+        ///  built from module-level `const` values) by stripping `is_comptime`
+        ///  so runtime leaf values can be assigned.
+        pub fn extract(self: Self, comptime T: type) RuntimeOf(T) {
             const expected = comptime leaf_count(T);
             std.debug.assert(self.leaves.len == expected);
             var idx: usize = 0;
             return unflatten_values(T, self.leaves, &idx);
+        }
+
+        /// Flatten a typed value into a leaf array without paths or index.
+        ///
+        /// Useful when you only need the flat leaves (e.g. collecting output
+        ///  tensors from a traced function). Caller owns the returned slice.
+        pub fn flatten(allocator: std.mem.Allocator, value: anytype) ![]Leaf {
+            const T = @TypeOf(value);
+            const count = comptime leaf_count(T);
+            const leaves = try allocator.alloc(Leaf, count);
+            errdefer allocator.free(leaves);
+            var idx: usize = 0;
+            flatten_values(T, value, leaves, &idx);
+            return leaves;
+        }
+
+        /// Reconstruct a typed value from a flat leaf slice (no tree needed).
+        ///
+        /// Standalone inverse of `flatten`. Useful when you have raw output
+        ///  leaves (e.g. from execution) and want to recover structure without
+        ///  constructing a full Tree.
+        pub fn unflatten(comptime T: type, leaves: []const Leaf) RuntimeOf(T) {
+            const expected = comptime leaf_count(T);
+            std.debug.assert(leaves.len == expected);
+            var idx: usize = 0;
+            return unflatten_values(T, leaves, &idx);
         }
 
         // ================================================================
@@ -94,7 +125,7 @@ pub fn Tree(comptime Leaf: type) type {
         /// The map function receives a context value and a leaf, returning
         ///  the transformed leaf. Use `{}` (void) for context-free transforms.
         pub fn map(
-            self: *const Self,
+            self: Self,
             comptime NewLeaf: type,
             context: anytype,
             comptime mapFn: fn (@TypeOf(context), Leaf) anyerror!NewLeaf,
@@ -111,7 +142,7 @@ pub fn Tree(comptime Leaf: type) type {
         /// Zip two trees with the same structure, producing a new tree.
         /// Both trees must have the same number of leaves.
         pub fn map2(
-            self: *const Self,
+            self: Self,
             comptime OtherLeaf: type,
             other: *const Tree(OtherLeaf),
             comptime NewLeaf: type,
@@ -135,7 +166,7 @@ pub fn Tree(comptime Leaf: type) type {
         /// Visit every leaf with its path. Visitor receives context,
         ///  path string, and a mutable pointer to the leaf.
         pub fn for_each(
-            self: *Self,
+            self: Self,
             context: anytype,
             comptime f: fn (@TypeOf(context), []const u8, *Leaf) void,
         ) void {
@@ -146,7 +177,7 @@ pub fn Tree(comptime Leaf: type) type {
 
         /// Fold over all leaves.
         pub fn reduce(
-            self: *const Self,
+            self: Self,
             comptime R: type,
             comptime f: fn (R, Leaf) R,
             init: R,
@@ -161,7 +192,7 @@ pub fn Tree(comptime Leaf: type) type {
         // ================================================================
 
         /// Look up a leaf by dot-path. Linear scan.
-        pub fn get(self: *Self, path: []const u8) ?*Leaf {
+        pub fn get(self: Self, path: []const u8) ?*Leaf {
             for (self.paths, 0..) |p, i| {
                 if (std.mem.eql(u8, p, path)) return &self.leaves[i];
             }
@@ -169,7 +200,7 @@ pub fn Tree(comptime Leaf: type) type {
         }
 
         /// Look up a leaf by dot-path (const).
-        pub fn get_const(self: *const Self, path: []const u8) ?Leaf {
+        pub fn get_const(self: Self, path: []const u8) ?Leaf {
             for (self.paths, 0..) |p, i| {
                 if (std.mem.eql(u8, p, path)) return self.leaves[i];
             }
@@ -186,6 +217,8 @@ pub fn Tree(comptime Leaf: type) type {
         // ================================================================
 
         /// Count leaves in a struct type at comptime.
+        /// TODO: this is kind of an unintuitive name, its not really operating
+        ///  on what the user things the tree is.
         pub fn leaf_count(comptime T: type) comptime_int {
             if (T == Leaf) return 1;
             return switch (@typeInfo(T)) {
@@ -220,7 +253,7 @@ pub fn Tree(comptime Leaf: type) type {
             }
         }
 
-        fn unflatten_values(comptime T: type, leaves: []const Leaf, idx: *usize) T {
+        fn unflatten_values(comptime T: type, leaves: []const Leaf, idx: *usize) RuntimeOf(T) {
             if (T == Leaf) {
                 const val = leaves[idx.*];
                 idx.* += 1;
@@ -228,14 +261,14 @@ pub fn Tree(comptime Leaf: type) type {
             }
             switch (@typeInfo(T)) {
                 .@"struct" => |info| {
-                    var result: T = undefined;
+                    var result: RuntimeOf(T) = undefined;
                     inline for (info.fields) |field| {
                         @field(result, field.name) = unflatten_values(field.type, leaves, idx);
                     }
                     return result;
                 },
                 .array => |info| {
-                    var result: T = undefined;
+                    var result: RuntimeOf(T) = undefined;
                     inline for (0..info.len) |i| {
                         result[i] = unflatten_values(info.child, leaves, idx);
                     }
@@ -245,6 +278,43 @@ pub fn Tree(comptime Leaf: type) type {
             }
         }
     };
+}
+
+/// Strip `is_comptime` from struct fields so runtime values can be
+///  stored. Returns `T` unchanged when no fields are comptime.
+///
+/// Module-level `const` structs passed into anonymous tuples get
+///  comptime-typed fields. `extract` needs a runtime-assignable
+///  version of the type to populate from the leaves array.
+/// TODO: probably better to let it error or something because this
+///  confuses zls a ton.
+pub fn RuntimeOf(comptime T: type) type {
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| {
+            for (info.fields) |field| {
+                if (field.is_comptime) {
+                    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
+                    for (info.fields, 0..) |f, i| {
+                        fields[i] = .{
+                            .name = f.name,
+                            .type = f.type,
+                            .default_value_ptr = null,
+                            .is_comptime = false,
+                            .alignment = f.alignment,
+                        };
+                    }
+                    return @Type(.{ .@"struct" = .{
+                        .layout = info.layout,
+                        .fields = &fields,
+                        .decls = &.{},
+                        .is_tuple = info.is_tuple,
+                    } });
+                }
+            }
+            return T;
+        },
+        else => return T,
+    }
 }
 
 // ============================================================================
@@ -328,6 +398,30 @@ test "from and extract round-trip" {
     try std.testing.expectEqual(@as(i64, 784), recovered.params.w.dim);
     try std.testing.expectEqual(@as(i64, 128), recovered.params.b.dim);
     try std.testing.expectEqual(@as(i64, 64), recovered.batch.x.dim);
+}
+
+test "extract handles comptime-typed tuple fields" {
+    const allocator = std.testing.allocator;
+
+    const Inner = struct { a: i32, b: i32 };
+
+    // Module-level const values produce comptime-typed anonymous tuple fields.
+    const c1: Inner = .{ .a = 1, .b = 2 };
+    const c2: Inner = .{ .a = 3, .b = 4 };
+    const comptime_tuple = .{ c1, c2 };
+
+    var tree = try Tree(i32).from(allocator, comptime_tuple);
+    defer tree.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), tree.len());
+
+    // This would fail without RuntimeOf: "cannot store runtime value
+    //  in compile time variable".
+    const recovered = tree.extract(@TypeOf(comptime_tuple));
+    try std.testing.expectEqual(@as(i32, 1), recovered.@"0".a);
+    try std.testing.expectEqual(@as(i32, 2), recovered.@"0".b);
+    try std.testing.expectEqual(@as(i32, 3), recovered.@"1".a);
+    try std.testing.expectEqual(@as(i32, 4), recovered.@"1".b);
 }
 
 test "map transforms leaf type" {
@@ -517,5 +611,52 @@ test "from populates paths correctly" {
     const expected = tree_paths(i32, Model);
     for (tree.paths, expected) |actual, exp| {
         try std.testing.expectEqualStrings(exp, actual);
+    }
+}
+
+test "const tree supports leaf mutation and cleanup" {
+    const allocator = std.testing.allocator;
+
+    const S = struct { a: i32, b: i32 };
+
+    // Leaf mutation works on a var binding -- only deinit requires var.
+    {
+        var tree = try Tree(i32).from(allocator, S{ .a = 1, .b = 2 });
+        defer tree.deinit();
+
+        // Mutate via get.
+        tree.get("a").?.* = 100;
+        try std.testing.expectEqual(@as(i32, 100), tree.leaves[0]);
+
+        // Mutate via for_each.
+        tree.for_each({}, struct {
+            fn f(_: void, _: []const u8, leaf: *i32) void {
+                leaf.* += 1;
+            }
+        }.f);
+        try std.testing.expectEqual(@as(i32, 101), tree.leaves[0]);
+        try std.testing.expectEqual(@as(i32, 3), tree.leaves[1]);
+
+        // Direct leaf slice mutation.
+        tree.leaves[1] = 999;
+        try std.testing.expectEqual(@as(i32, 999), tree.get("b").?.*);
+    }
+
+    // deinit_with on const tree -- callback receives *Leaf for cleanup.
+    {
+        const Boxed = struct { val: []i32 };
+        var tree = try Tree(Boxed).from(allocator, struct {
+            a: Boxed,
+            b: Boxed,
+        }{
+            .a = .{ .val = try allocator.dupe(i32, &.{ 1, 2 }) },
+            .b = .{ .val = try allocator.dupe(i32, &.{ 3, 4 }) },
+        });
+        // deinit_with frees both the inner allocations and the tree arrays.
+        tree.deinit_with(struct {
+            fn f(leaf: *Boxed) void {
+                std.testing.allocator.free(leaf.val);
+            }
+        }.f);
     }
 }

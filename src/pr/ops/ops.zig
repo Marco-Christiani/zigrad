@@ -116,6 +116,7 @@ pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             if (@hasDecl(Handler, "vjp_forward")) {
                 return Handler.vjp_forward(ctx, op, typed_params);
             }
+            // std.log.warn("missing vjp_forward for {s}", .{@tagName(tag)});
             return error.UnsupportedEqn;
         },
     }
@@ -209,7 +210,7 @@ test "vjp support detection" {
 
     try std.testing.expect(has_vjp(.convert));
 
-    try std.testing.expect(!has_vjp(.maximum));
+    try std.testing.expect(has_vjp(.maximum));
     try std.testing.expect(!has_vjp(.scatter));
     try std.testing.expect(!has_vjp(.compare));
     try std.testing.expect(!has_vjp(.call));

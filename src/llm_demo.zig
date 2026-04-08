@@ -69,32 +69,31 @@ pub fn run_llm_ft_demo(
     const vocab: i64 = 128;
     const hidden: i64 = 64;
 
-    const donatable: Tensor.AbstractOpts = .{ .donatable = true };
     const params_spec = ParamsSpec{
-        .w_emb = Tensor.abstract(.f32, &.{ vocab, hidden }, donatable),
-        .w_out = Tensor.abstract(.f32, &.{ hidden, vocab }, donatable),
-        .b = Tensor.abstract(.f32, &.{vocab}, donatable),
+        .w_emb = Tensor.abstract(.f32, &.{ vocab, hidden }),
+        .w_out = Tensor.abstract(.f32, &.{ hidden, vocab }),
+        .b = Tensor.abstract(.f32, &.{vocab}),
     };
     const batch_spec = BatchSpec{
-        .x = Tensor.abstract(.f32, &.{ bs, vocab }, .{}),
-        .y = Tensor.abstract(.f32, &.{ bs, vocab }, .{}),
+        .x = Tensor.abstract(.f32, &.{ bs, vocab }),
+        .y = Tensor.abstract(.f32, &.{ bs, vocab }),
     };
     const inputs_spec = .{ params_spec, batch_spec };
+    const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
-    var compile_cfg = zg.frontend.CompileConfig{
-        .entry_name = "llm_ft_step",
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+
+    const train = zg.frontend.train;
+    var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "llm_ft_step");
+    defer program.deinit();
+
+    const exe = try zg.frontend.compile_program(b, allocator, &program, device, "llm_ft_step", .{
+        .lower = .{ .encoding = lower_encoding },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    };
-    if (compile_cfg.dump_mlir != null) {
-        compile_cfg.lower.encoding = .text;
-    }
-
-    const train = zg.frontend.train;
-    var compiled = try zg.frontend.compile(Fns.train_step, allocator, b, device, inputs_spec, compile_cfg);
-    defer b.deinit_executable(compiled.exe);
-    defer compiled.deinit();
+    });
+    defer b.deinit_executable(exe);
 
     var host_w_emb = try Tensor.host(.f32, &.{ vocab, hidden }, .{ .alloc = allocator });
     defer host_w_emb.deinit();
@@ -143,12 +142,13 @@ pub fn run_llm_ft_demo(
     const dev_x = try host_x.to_device(b, device);
     const dev_y = try host_y.to_device(b, device);
 
-    var state = try train.TrainState.init_from_model(
+    var state = try train.TrainState.init(
         allocator,
-        &compiled,
+        exe,
         b,
         &.{ dev_w_emb, dev_w_out, dev_b, dev_x, dev_y },
-        .{},
+        program.output_arity("llm_ft_step"),
+        .{ .non_donatable_input_indices = donate },
     );
     defer state.deinit(.all);
 

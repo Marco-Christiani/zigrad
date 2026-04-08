@@ -42,23 +42,19 @@ const hidden2: i64 = 64;
 const output_dim: i64 = 10;
 
 /// Abstract specs for tracing. These describe shapes and dtypes without
-///  holding any data, Zigrad uses them to trace the computation graph.
-/// Marking parameters as `donatable` lets the backend reuse their memory
-///  for updated values (important for training loops). Later comments
-///  explain the donation concept further.
+///  holding any data -- Zigrad uses them to trace the computation graph.
 /// TODO: I still dont like the name abstract, its ambiguous.
-const donatable: Tensor.AbstractOpts = .{ .donatable = true };
 const params_spec: Params = .{
-    .w1 = Tensor.abstract(.f32, &.{ input_dim, hidden1 }, donatable),
-    .b1 = Tensor.abstract(.f32, &.{hidden1}, donatable),
-    .w2 = Tensor.abstract(.f32, &.{ hidden1, hidden2 }, donatable),
-    .b2 = Tensor.abstract(.f32, &.{hidden2}, donatable),
-    .w3 = Tensor.abstract(.f32, &.{ hidden2, output_dim }, donatable),
-    .b3 = Tensor.abstract(.f32, &.{output_dim}, donatable),
+    .w1 = Tensor.abstract(.f32, &.{ input_dim, hidden1 }),
+    .b1 = Tensor.abstract(.f32, &.{hidden1}),
+    .w2 = Tensor.abstract(.f32, &.{ hidden1, hidden2 }),
+    .b2 = Tensor.abstract(.f32, &.{hidden2}),
+    .w3 = Tensor.abstract(.f32, &.{ hidden2, output_dim }),
+    .b3 = Tensor.abstract(.f32, &.{output_dim}),
 };
 const batch_spec: Batch = .{
-    .x = Tensor.abstract(.f32, &.{ batch_size, input_dim }, .{}),
-    .y = Tensor.abstract(.f32, &.{ batch_size, output_dim }, .{}),
+    .x = Tensor.abstract(.f32, &.{ batch_size, input_dim }),
+    .y = Tensor.abstract(.f32, &.{ batch_size, output_dim }),
 };
 
 /// Forward pass: input -> 3 linear layers -> MSE loss.
@@ -154,47 +150,32 @@ pub fn main() !void {
     const device = devs[0];
 
     // --- Compile ---
+    // jit() traces and compiles the function in one step. Donation is specified
+    //  by argument position: here arg 0 (params) is donated for in-place updates.
     std.log.info("compiling train_step...", .{});
-    // NOTE: specs must be runtime values, not comptime. Using `var` forces
-    //  runtime evaluation. Without this, Tree.extract hits "cannot store
-    //  runtime value in compile time variable" because Zig infers comptime
-    //  struct fields from module-level `const` declarations.
-    // TODO: fix in tree.zig unflatten_values to handle comptime-typed structs.
-    var ps = params_spec;
-    var bs = batch_spec;
-    _ = .{ &ps, &bs };
-    const inputs_spec = .{ ps, bs };
-    var compiled = try zg.frontend.compile(
+    var step_fn = try zg.jit(
         train_step,
         allocator,
         backend,
         device,
-        inputs_spec,
-        .{ .entry_name = "train_step" },
+        .{ params_spec, batch_spec },
+        .{ .donate = &.{0} },
     );
-    // TODO: are we revisiting the idea that exe's hold references to backend so
-    //  they deinit themselves? this isnt intuitive at all in the user layer.
-    defer backend.deinit_executable(compiled.exe);
-    defer compiled.deinit();
+    defer step_fn.deinit();
 
     // --- Synthetic data ---
     std.log.info("generating synthetic data...", .{});
-    // Now create some real buffers that can hold data for our model.
-    var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
+    var spec_tree = try zg.utils.Tree(Tensor).from(allocator, .{ params_spec, batch_spec });
     defer spec_tree.deinit();
 
-    // This applies our function to every leaf of the tree.
-    // So, for every parameter (defined above) we create a host tensor.
     var host_tensors = try spec_tree.map(Tensor, allocator, struct {
         fn f(alloc: std.mem.Allocator, spec: Tensor) !Tensor {
             return try Tensor.host(spec.dtype, spec.shape.const_slice(), .{ .alloc = alloc });
         }
     }.f);
-    // The tree will free the leaves for us, we just tell it what function to use.
     defer host_tensors.deinit_with(deinit_tensor);
 
     // TODO: using synthetic values for now, will need to migrate to real data.
-    // For now, this fills params (leaves[0..6]) and batches (inputs [6] and targets [7])
     for (host_tensors.leaves) |t| fill_pattern(t.as_slice(f32));
 
     // --- Upload to device ---
@@ -204,45 +185,32 @@ pub fn main() !void {
             return try t.to_device(ctx.b, ctx.d);
         }
     }.f);
-    // TrainState takes ownership of the device tensors, only free the tree container
+    // Free tree arrays only -- tensor buffer ownership transfers to `inputs`.
     defer dev_tensors.deinit();
 
     // --- Training loop ---
+    // Recover structured input from the flat device tensor tree.
+    // InputType is derived from the compiled function -- no manual struct needed.
+    var inputs = dev_tensors.extract(@TypeOf(step_fn).InputType);
+
     std.log.info("training for {} steps...", .{steps});
-    var state = try zg.frontend.train.TrainState.init_from_model(
-        allocator,
-        &compiled,
-        backend,
-        dev_tensors.leaves,
-        .{},
-    );
-    defer state.deinit(.all);
-
     for (0..steps) |step| {
-        const result = try state.step();
+        // call() takes a pointer to inputs. Donated args (params at index 0)
+        //  are updated in-place -- their buffers are swapped automatically.
+        //  Only non-donated outputs (loss) are returned.
+        const result = try step_fn.call(&inputs);
 
-        // Deinit execution event without awaiting. buffer_to_host (called by
-        //  item below) chains behind execution internally.
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
-        if (result.event) |ev| backend.deinit_event(ev);
-
-        // Read loss back to host.
-        // By default, we prefer async operations to create a "pit of success"
-        //  style API. This is because it naturally encourages you to pipeline,
-        //  which results in better performance. While the device (assuming its
-        //  not CPU) is busy, the CPU can do other work like load the next batch.
-        //  That is also why the above "event" exists.
-        // item() performs a synchronous transfer to stack mem and handles dtype
-        //  decoding (e.g. bf16 to f32).
-        // TODO: we never finished the sync/async variants
-        const loss_val = try result.loss.item(f32);
+        const loss_val = try result.loss_val.item(f32);
 
         if (step % 10 == 0 or step == steps - 1) {
             std.log.info("step {d:>4}: loss = {d:.4}", .{ step, loss_val });
         }
 
-        result.loss.deinit();
+        result.loss_val.deinit();
     }
+
+    // Free all input buffers (final params from last step + batch data).
+    step_fn.deinit_inputs(&inputs);
 
     std.log.info("done", .{});
 }

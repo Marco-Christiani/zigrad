@@ -9,8 +9,9 @@
 //! - `backend`: Unified backend interface (compile + execute).
 //! - `pipeline`: Infrastructure for compiler passes.
 //! - `frontend`: Higher level user-facing APIs.
-//!   - `frontend.compile`: AOT compilation of traced functions.
-//!   - `frontend.transforms`: Trace-time function transforms (e.g. `value_and_grad`).
+//!   - `frontend.trace` / `zg.trace`: Trace a comptime function against abstract specs -> `pr.Program`.
+//!   - `frontend.compile_program`: Run pipeline on a traced program -> backend executable.
+//!   - `frontend.transforms` / `zg.value_and_grad`: Trace-time function transforms.
 //!   - `frontend.optim`: Traced-mode optimizer building blocks.
 //!   - `frontend.train`: Training loop state management (`TrainState`).
 //! - `Tensor`: Unified tensor type (traced, device, host, or abstract backing).
@@ -43,6 +44,12 @@ pub const HostBuffer = utils.HostBuffer;
 pub const DType = pr.DType;
 pub const Shape = pr.Shape;
 pub const BoundedShape = pr.BoundedShape;
+
+// Tier 1: commonly used functions at top level
+pub const jit = frontend.jit;
+pub const trace = frontend.trace;
+pub const grad = frontend.transforms.make_grad;
+pub const value_and_grad = frontend.transforms.make_value_and_grad;
 
 test {
     std.testing.refAllDecls(@This());

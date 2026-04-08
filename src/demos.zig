@@ -132,12 +132,12 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backe
     try program.add_function(func);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    const exe = zg.frontend.compile_program(backend, allocator, &program, device, .{
+    const exe = zg.frontend.compile_program(backend, allocator, &program, device, "main", .{
         .lower = .{ .encoding = lower_encoding },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    }, "main") catch |err| {
+    }) catch |err| {
         log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
@@ -156,12 +156,12 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
     try program.add_function(vjp);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
+    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "main_vjp", .{
         .lower = .{ .encoding = lower_encoding },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    }, "main_vjp");
+    });
     defer backend.deinit_executable(exe);
 
     // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
@@ -325,35 +325,34 @@ pub fn run_train_demo(
     const h2: i64 = 64;
     const out_dim: i64 = 10;
 
-    const donatable: Tensor.AbstractOpts = .{ .donatable = true };
     const params_spec = ParamsSpec{
-        .w1 = Tensor.abstract(.f32, &.{ in_dim, h1 }, donatable),
-        .b1 = Tensor.abstract(.f32, &.{h1}, donatable),
-        .w2 = Tensor.abstract(.f32, &.{ h1, h2 }, donatable),
-        .b2 = Tensor.abstract(.f32, &.{h2}, donatable),
-        .w3 = Tensor.abstract(.f32, &.{ h2, out_dim }, donatable),
-        .b3 = Tensor.abstract(.f32, &.{out_dim}, donatable),
+        .w1 = Tensor.abstract(.f32, &.{ in_dim, h1 }),
+        .b1 = Tensor.abstract(.f32, &.{h1}),
+        .w2 = Tensor.abstract(.f32, &.{ h1, h2 }),
+        .b2 = Tensor.abstract(.f32, &.{h2}),
+        .w3 = Tensor.abstract(.f32, &.{ h2, out_dim }),
+        .b3 = Tensor.abstract(.f32, &.{out_dim}),
     };
     const batch_spec = BatchSpec{
-        .x = Tensor.abstract(.f32, &.{ bs, in_dim }, .{}),
-        .y = Tensor.abstract(.f32, &.{ bs, out_dim }, .{}),
+        .x = Tensor.abstract(.f32, &.{ bs, in_dim }),
+        .y = Tensor.abstract(.f32, &.{ bs, out_dim }),
     };
     const inputs_spec = .{ params_spec, batch_spec };
+    const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
-    var compile_cfg = zg.frontend.CompileConfig{
-        .entry_name = "train_step",
+    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
+
+    const train = zg.frontend.train;
+    var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "train_step");
+    defer program.deinit();
+
+    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "train_step", .{
+        .lower = .{ .encoding = lower_encoding },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    };
-    if (compile_cfg.dump_mlir != null) {
-        compile_cfg.lower.encoding = .text;
-    }
-
-    const train = zg.frontend.train;
-    var compiled = try zg.frontend.compile(Fns.train_step, allocator, backend, device, inputs_spec, compile_cfg);
-    defer backend.deinit_executable(compiled.exe);
-    defer compiled.deinit();
+    });
+    defer backend.deinit_executable(exe);
 
     const true_w1 = try allocator.alloc(f32, @intCast(in_dim * h1));
     defer allocator.free(true_w1);
@@ -416,18 +415,19 @@ pub fn run_train_demo(
     // Upload to device
     const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
     var dev_tree = try host_tensors.map(Tensor, UploadCtx{ .b = backend, .d = device }, struct {
-        fn f(ctx: UploadCtx, t: Tensor) anyerror!Tensor {
-            return t.to_device(ctx.b, ctx.d);
+        fn f(ctx: UploadCtx, t: Tensor) !Tensor {
+            return try t.to_device(ctx.b, ctx.d);
         }
     }.f);
     defer dev_tree.deinit(); // array only, tensor ownership managed by TrainState
 
-    var state = try train.TrainState.init_from_model(
+    var state = try train.TrainState.init(
         allocator,
-        &compiled,
+        exe,
         backend,
         dev_tree.leaves,
-        .{},
+        program.output_arity("train_step"),
+        .{ .non_donatable_input_indices = donate },
     );
     defer state.deinit(.all);
 
@@ -565,13 +565,13 @@ pub fn run_kernel_provider_demo(
     var tune_result = try zg.tune.tune(allocator, &program, providers, .{});
     defer tune_result.deinit();
 
-    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, .{
+    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "main", .{
         .lower = .{ .encoding = lower_encoding },
         .kernel_store = &tune_result.store,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    }, "main");
+    });
     defer backend.deinit_executable(exe);
 
     const exec_opts: zg.Backend.ExecuteOptions = .{
