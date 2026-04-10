@@ -111,7 +111,7 @@ pub fn trace(
     }.f);
 
     // Call the user function with the structured traced tensors.
-    const structured = traced.extract(SpecType);
+    const structured = try traced.extract(SpecType);
     const result_raw = if (@typeInfo(SpecType) == .@"struct" and @typeInfo(SpecType).@"struct".is_tuple)
         @call(.auto, func, structured)
     else

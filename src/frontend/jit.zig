@@ -29,9 +29,10 @@ const pr = @import("../pr/pr.zig");
 const backend_mod = @import("../backend/root.zig");
 const Backend = backend_mod.Backend;
 const Tensor = @import("../tensor.zig");
-const tree = @import("../utils/tree.zig");
-const RuntimeOf = tree.RuntimeOf;
-const TensorTree = tree.Tree(Tensor);
+const utils = @import("../utils/root.zig");
+const meta = utils.meta;
+const RuntimeOf = utils.RuntimeOf;
+const TensorTree = utils.Tree(Tensor);
 const frontend = @import("frontend.zig");
 const train = @import("train.zig");
 
@@ -265,10 +266,14 @@ pub fn Compiled(
         ///
         /// The caller owns all returned Tensors (call `.deinit()` on each).
         pub fn call(self: *Self, args: *InputType) !CallReturn {
-            // Walk input struct at comptime, extract buffers directly.
+            // Flatten input tensors with comptime walk, then extract buffers.
+            var input_tensors: [input_count]Tensor = undefined;
+            var flat_idx: usize = 0;
+            meta.flatten(Tensor, InputType, args.*, &input_tensors, &flat_idx);
+            std.debug.assert(flat_idx == input_count);
+
             var input_bufs: [input_count]Backend.Buffer = undefined;
-            var in_idx: usize = 0;
-            try collect_buffers(InputType, args.*, &input_bufs, &in_idx);
+            for (input_tensors, &input_bufs) |t, *b| b.* = try t.buffer();
 
             // Execute.
             var output_bufs: [output_count]Backend.Buffer = undefined;
@@ -306,32 +311,6 @@ pub fn Compiled(
 
             if (CallReturn == void) return;
             return TensorTree.unflatten(CallReturn, &self.output_tensors);
-        }
-
-        /// Comptime-recursive walk: extract device buffers from a nested
-        ///  struct of Tensors into a flat buffer array.
-        /// TODO: This is essentially just tree.flatten_values, but we extract a field,
-        ///  honestly, not neccessary... but flatten_values is private and flatten
-        ///  allocates. make it pub?
-        fn collect_buffers(comptime T: type, value: T, out: []Backend.Buffer, idx: *usize) !void {
-            if (T == Tensor) {
-                out[idx.*] = try value.buffer();
-                idx.* += 1;
-                return;
-            }
-            switch (@typeInfo(T)) {
-                .@"struct" => |info| {
-                    inline for (info.fields) |field| {
-                        try collect_buffers(field.type, @field(value, field.name), out, idx);
-                    }
-                },
-                .array => |info| {
-                    inline for (0..info.len) |i| {
-                        try collect_buffers(info.child, value[i], out, idx);
-                    }
-                },
-                else => @compileError("unsupported type in jit input: " ++ @typeName(T)),
-            }
         }
 
         /// Comptime-recursive walk: swap output buffers back into donated
@@ -374,28 +353,14 @@ pub fn Compiled(
         /// Call after the last `call()` to free the final input buffers
         ///  (donated args from the last step + non-donated args).
         pub fn deinit_inputs(self: *Self, args: *InputType) void {
-            deinit_tensors(InputType, args);
-            _ = self; // backend not needed -- Tensor.deinit handles it
-        }
-
-        fn deinit_tensors(comptime T: type, target: *T) void {
-            if (T == Tensor) {
-                target.deinit();
-                return;
-            }
-            switch (@typeInfo(T)) {
-                .@"struct" => |info| {
-                    inline for (info.fields) |field| {
-                        deinit_tensors(field.type, &@field(target, field.name));
-                    }
-                },
-                .array => |info| {
-                    inline for (0..info.len) |i| {
-                        deinit_tensors(info.child, &target[i]);
-                    }
-                },
-                else => @compileError("unsupported type in jit input: " ++ @typeName(T)),
-            }
+            // TODO: this is making up for a shortcoming of visit() but easily fixable so
+            //  we can just pass Tensor.deinit as the callback instead.
+            meta.visit(Tensor, InputType, args, struct {
+                fn f(t: *Tensor) void {
+                    t.*.deinit();
+                }
+            }.f);
+            _ = self;
         }
 
         pub fn deinit(self: *Self) void {

@@ -115,7 +115,7 @@ fn train_step(params: Params, batch: Batch) !struct { loss_val: Tensor, updated:
 
     return .{
         .loss_val = vg.value,
-        .updated = updated.extract(Params),
+        .updated = try updated.extract(Params),
     };
 }
 
@@ -190,8 +190,8 @@ pub fn main() !void {
 
     // --- Training loop ---
     // Recover structured input from the flat device tensor tree.
-    // InputType is derived from the compiled function -- no manual struct needed.
-    var inputs = dev_tensors.extract(@TypeOf(step_fn).InputType);
+    // InputType is derived from the compiled function.
+    var inputs = try dev_tensors.extract(@TypeOf(step_fn).InputType);
 
     std.log.info("training for {} steps...", .{steps});
     for (0..steps) |step| {

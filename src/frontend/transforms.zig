@@ -29,8 +29,9 @@ const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
 const ops = @import("../pr/ops/ops.zig");
-const tree_mod = @import("../utils/tree.zig");
-const Tree = tree_mod.Tree;
+const utils = @import("../utils/root.zig");
+const meta = utils.meta;
+const Tree = utils.Tree;
 
 const Tensor = @import("../tensor.zig");
 
@@ -117,7 +118,7 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
         }
     }.f);
 
-    const loss_result = @call(.auto, func, sub_tree.extract(ArgsType));
+    const loss_result = @call(.auto, func, try sub_tree.extract(ArgsType));
     const loss_tensor = switch (@typeInfo(@TypeOf(loss_result))) {
         .error_union => try loss_result,
         else => loss_result,
@@ -162,14 +163,11 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
         grad_leaves[i] = Tensor.from_var(builder, gv);
     }
 
-    const grad_paths = try alloc.alloc([]const u8, param_leaf_count);
-    errdefer alloc.free(grad_paths);
-    const comptime_paths = comptime tree_mod.tree_paths(Tensor, ParamsType);
-    @memcpy(grad_paths, &comptime_paths);
+    const comptime_paths = comptime meta.tree_paths(Tensor, ParamsType);
 
     return .{
         .value = value_tensor,
-        .grads = Tree(Tensor).from_slices(alloc, grad_leaves, grad_paths),
+        .grads = try Tree(Tensor).from_slices(alloc, grad_leaves, &comptime_paths),
     };
 }
 
@@ -285,13 +283,13 @@ fn VgCallGen(comptime func: anytype, comptime opts: GradOpts) type {
 fn grad_impl(comptime func: anytype, comptime GradsType: type, args: anytype) !GradsType {
     var vg = try value_and_grad(func, args);
     defer vg.deinit();
-    return vg.grads.extract(GradsType);
+    return try vg.grads.extract(GradsType);
 }
 
 fn vg_impl(comptime func: anytype, comptime GradsType: type, args: anytype) !ValueAndGradResult(GradsType) {
     var vg = try value_and_grad(func, args);
     defer vg.deinit();
-    return .{ .value = vg.value, .grads = vg.grads.extract(GradsType) };
+    return .{ .value = vg.value, .grads = try vg.grads.extract(GradsType) };
 }
 
 // ============================================================================

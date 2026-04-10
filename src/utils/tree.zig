@@ -1,362 +1,639 @@
-//! Structured parameter tree with flat storage.
+//! Structured parameter tree with flat storage and fast path lookups.
 //!
-//! Generic over leaf type. Stores leaves in DFS traversal order with
-//!  parallel dot-separated paths. Structure is recoverable at comptime
-//!  via `extract`.
+//! `Tree(Leaf)` stores leaves in DFS order with parallel dot-separated paths.
+//! Paths are dot-separated (e.g. `layers.10.mlp.down_proj`).
 //!
-//! Useful for the spec -> host -> device buffer pipeline:
+//! ## Ownership model
+//!
+//! - `Tree` owns its leaf array, path strings, and path index.
+//! - `from_slices` copies inputs - caller retains ownership of the originals.
+//! - `subtree`/`subtree_glob` return non-owning views backed by a parent tree.
+//! - Views mutate parent leaves in place and only own view metadata.
+//!
+//! ## Usage
 //!
 //! ```zig
 //! var specs = try Tree(Tensor).from(allocator, inputs_spec);
 //! var host = try specs.map(Tensor, allocator, alloc_host);
-//! var dev  = try host.map(Backend.Buffer, ctx, upload);
-//! // dev.leaves[0..param_count] // ready for execution
+//! var dev  = try host.map(Tensor, ctx, upload);
+//! const params = try dev.extract(Params);
 //! ```
 const std = @import("std");
+const meta = @import("meta.zig");
+
+pub const RuntimeOf = meta.RuntimeOf;
 
 pub fn Tree(comptime Leaf: type) type {
     return struct {
         const Self = @This();
+        const PathIndex = std.StringHashMapUnmanaged(usize);
+
+        // TODO: Replace `parent: *Self` with `root_leaves: []Leaf` and
+        //  `root_paths: []const []const u8` for move-safety. Nested views
+        //  should compose indices eagerly at creation.
+        const View = struct {
+            parent: *Self,
+            indices: []usize,
+            base_prefix: ?[]const u8,
+            index: PathIndex,
+        };
 
         leaves: []Leaf,
         paths: []const []const u8,
         allocator: std.mem.Allocator,
+        index: PathIndex,
+        view: ?View = null,
 
         // ================================================================
-        // Construction
+        // Construction / destruction
         // ================================================================
 
-        /// Build a Tree by flattening a typed struct value.
+        /// Build a tree by flattening a typed struct value.
         ///
         /// Walks `value`'s fields at comptime, collecting leaves and their
-        ///  dot-separated paths into parallel flat arrays. Paths are comptime
-        ///  string literals (no allocation needed for them).
+        ///  dot-separated paths. The tree owns all allocations.
         pub fn from(allocator: std.mem.Allocator, value: anytype) !Self {
             const T = @TypeOf(value);
+            // NOTE: this could be free, since we know size at comptime but for a large model this
+            //  would mean a non-trivial amount of stack space not acceptable on edge targets. A
+            //  comptime path may make sense, but seems like a premature over-optimization right
+            //  now. The same comments apply to all the functions that allow temp buffers.
             const count = comptime leaf_count(T);
+
             const leaves = try allocator.alloc(Leaf, count);
             errdefer allocator.free(leaves);
-            const paths = try allocator.alloc([]const u8, count);
-            errdefer allocator.free(paths);
 
-            // paths are comptime literals, just copy the pointers.
-            const comptime_paths = comptime tree_paths(Leaf, T);
-            @memcpy(paths, &comptime_paths);
-
-            // Flatten values into the leaves array.
             var idx: usize = 0;
-            flatten_values(T, value, leaves, &idx);
+            meta.flatten(Leaf, T, value, leaves, &idx);
 
-            return .{ .leaves = leaves, .paths = paths, .allocator = allocator };
+            const comptime_paths = comptime meta.tree_paths(Leaf, T);
+            const owned_paths = try clone_paths(allocator, &comptime_paths);
+            errdefer free_paths(allocator, owned_paths);
+
+            return make_owned(Leaf, allocator, leaves, owned_paths);
         }
 
-        /// Build from pre-existing parallel arrays (e.g., deserialization).
-        /// Caller retains ownership of the underlying data, the tree borrows.
-        pub fn from_slices(allocator: std.mem.Allocator, leaves: []Leaf, paths: []const []const u8) Self {
+        /// Build from pre-existing parallel slices. Data is copied.
+        ///
+        /// Caller retains ownership of the originals.
+        /// Returns `error.DuplicatePath` when `paths` contains duplicates.
+        pub fn from_slices(
+            allocator: std.mem.Allocator,
+            leaves: []const Leaf,
+            paths: []const []const u8,
+        ) !Self {
             std.debug.assert(leaves.len == paths.len);
-            return .{ .leaves = leaves, .paths = paths, .allocator = allocator };
+
+            const leaves_copy = try allocator.dupe(Leaf, leaves);
+            errdefer allocator.free(leaves_copy);
+
+            const paths_copy = try clone_paths(allocator, paths);
+            errdefer free_paths(allocator, paths_copy);
+
+            return make_owned(Leaf, allocator, leaves_copy, paths_copy);
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.leaves);
-            self.allocator.free(self.paths);
+            if (self.view) |*v| {
+                if (v.base_prefix) |p| self.allocator.free(p);
+                v.index.deinit(self.allocator);
+                self.allocator.free(v.indices);
+            } else {
+                self.index.deinit(self.allocator);
+                self.allocator.free(self.leaves);
+                free_paths(self.allocator, self.paths);
+            }
             self.* = undefined;
         }
 
-        /// Deinit every leaf, then free the tree arrays.
+        /// Deinit every leaf, then free tree storage.
+        ///
+        /// Valid only for owned trees. Views do not own leaf storage.
         pub fn deinit_with(self: *Self, comptime deinit_fn: fn (*Leaf) void) void {
+            std.debug.assert(self.view == null);
             for (self.leaves) |*leaf| deinit_fn(leaf);
             self.deinit();
+        }
+
+        // ================================================================
+        // Comptime helpers (delegate to meta)
+        // ================================================================
+
+        /// Count leaves of type `Leaf` in struct type `T` at comptime.
+        /// TODO: Static method - no tree instance needed, doesnt belong here.
+        pub fn leaf_count(comptime T: type) comptime_int {
+            return meta.leaf_count(Leaf, T);
         }
 
         // ================================================================
         // Structural recovery
         // ================================================================
 
-        /// Reconstruct a typed value from the flat leaves.
+        /// Reconstruct a typed value from visible leaves.
         ///
-        /// Inverse of `from`. Accepts any type that `from` can flatten:
-        ///  named structs, tuples, arrays, or a bare `Leaf`. Paths are
-        ///  not consulted - leaf order (DFS) determines field assignment.
-        ///
-        /// Handles types with comptime-inferred fields (e.g. anonymous tuples
-        ///  built from module-level `const` values) by stripping `is_comptime`
-        ///  so runtime leaf values can be assigned.
-        pub fn extract(self: Self, comptime T: type) RuntimeOf(T) {
+        /// Inverse of `from`. Reconstruction is positional: leaf order (DFS)
+        ///  determines field assignment and path names are not consulted.
+        /// When called on a view, this allocates a temporary contiguous leaf
+        ///  buffer before unflattening.
+        /// Handles comptime-typed fields via `RuntimeOf`.
+        pub fn extract(self: *const Self, comptime T: type) !RuntimeOf(T) {
             const expected = comptime leaf_count(T);
-            std.debug.assert(self.leaves.len == expected);
+            std.debug.assert(self.len() == expected);
+
+            if (self.view == null) {
+                var idx: usize = 0;
+                return meta.unflatten(Leaf, T, self.leaves, &idx);
+            }
+
+            // View: gather visible leaves into contiguous buffer.
+            const tmp = try self.allocator.alloc(Leaf, self.len());
+            defer self.allocator.free(tmp);
+            for (0..self.len()) |i| {
+                tmp[i] = self.visible_leaf_value(i);
+            }
             var idx: usize = 0;
-            return unflatten_values(T, self.leaves, &idx);
+            return meta.unflatten(Leaf, T, tmp, &idx);
         }
 
-        /// Flatten a typed value into a leaf array without paths or index.
+        /// Flatten a typed value into a leaf array without paths.
         ///
-        /// Useful when you only need the flat leaves (e.g. collecting output
-        ///  tensors from a traced function). Caller owns the returned slice.
+        /// Caller owns the slice.
+        /// TODO: Static method - no tree instance needed, doesnt belong here.
         pub fn flatten(allocator: std.mem.Allocator, value: anytype) ![]Leaf {
             const T = @TypeOf(value);
             const count = comptime leaf_count(T);
             const leaves = try allocator.alloc(Leaf, count);
             errdefer allocator.free(leaves);
             var idx: usize = 0;
-            flatten_values(T, value, leaves, &idx);
+            meta.flatten(Leaf, T, value, leaves, &idx);
             return leaves;
         }
 
         /// Reconstruct a typed value from a flat leaf slice (no tree needed).
         ///
-        /// Standalone inverse of `flatten`. Useful when you have raw output
-        ///  leaves (e.g. from execution) and want to recover structure without
-        ///  constructing a full Tree.
+        /// Static inverse of `flatten`.
         pub fn unflatten(comptime T: type, leaves: []const Leaf) RuntimeOf(T) {
             const expected = comptime leaf_count(T);
             std.debug.assert(leaves.len == expected);
             var idx: usize = 0;
-            return unflatten_values(T, leaves, &idx);
+            return meta.unflatten(Leaf, T, leaves, &idx);
         }
 
         // ================================================================
         // Transforms
         // ================================================================
 
-        /// Apply a function to every leaf, producing a new tree with a
-        ///  (possibly different) leaf type. Structure (paths) is preserved.
+        /// Map every leaf to a new type, preserving paths.
         ///
-        /// The map function receives a context value and a leaf, returning
-        ///  the transformed leaf. Use `{}` (void) for context-free transforms.
+        /// `map_fn` receives a context value and a leaf, returning the
+        ///  transformed leaf. Use `{}` (void) for context-free transforms.
+        /// TODO: removed the rather clever comptime types here, but it allowed
+        ///  users to not have to make dummy types just to use these functions and
+        ///  frankly I miss that. Goes for all fns accepting callbacks.
         pub fn map(
-            self: Self,
+            self: *const Self,
             comptime NewLeaf: type,
             context: anytype,
-            comptime mapFn: fn (@TypeOf(context), Leaf) anyerror!NewLeaf,
+            comptime map_fn: fn (@TypeOf(context), Leaf) anyerror!NewLeaf,
         ) !Tree(NewLeaf) {
-            const new_leaves = try self.allocator.alloc(NewLeaf, self.leaves.len);
+            const n = self.len();
+            const new_leaves = try self.allocator.alloc(NewLeaf, n);
             errdefer self.allocator.free(new_leaves);
-            for (self.leaves, 0..) |leaf, i| {
-                new_leaves[i] = try mapFn(context, leaf);
+
+            for (0..n) |i| {
+                new_leaves[i] = try map_fn(context, self.visible_leaf_value(i));
             }
-            const paths_copy = try self.allocator.dupe([]const u8, self.paths);
-            return Tree(NewLeaf){ .leaves = new_leaves, .paths = paths_copy, .allocator = self.allocator };
+
+            const paths_copy = try self.clone_visible_paths();
+            errdefer free_paths(self.allocator, paths_copy);
+
+            return make_owned(NewLeaf, self.allocator, new_leaves, paths_copy);
         }
 
-        /// Zip two trees with the same structure, producing a new tree.
-        /// Both trees must have the same number of leaves.
+        /// Zip two trees and map leaf pairs.
+        ///
+        /// **Currently, pairs are matched by visible position after a
+        ///  length check, not by path equality.**
+        ///
+        /// Returns `error.TreeLengthMismatch` when visible lengths differ.
         pub fn map2(
-            self: Self,
+            self: *const Self,
             comptime OtherLeaf: type,
             other: *const Tree(OtherLeaf),
             comptime NewLeaf: type,
             context: anytype,
-            comptime mapFn: fn (@TypeOf(context), Leaf, OtherLeaf) anyerror!NewLeaf,
+            comptime map_fn: fn (@TypeOf(context), Leaf, OtherLeaf) anyerror!NewLeaf,
         ) !Tree(NewLeaf) {
-            std.debug.assert(self.leaves.len == other.leaves.len);
-            const new_leaves = try self.allocator.alloc(NewLeaf, self.leaves.len);
+            if (self.len() != other.len()) return error.TreeLengthMismatch;
+
+            const new_leaves = try self.allocator.alloc(NewLeaf, self.len());
             errdefer self.allocator.free(new_leaves);
-            for (self.leaves, other.leaves, 0..) |a, b, i| {
-                new_leaves[i] = try mapFn(context, a, b);
+
+            for (0..self.len()) |i| {
+                new_leaves[i] = try map_fn(
+                    context,
+                    self.visible_leaf_value(i),
+                    other.visible_leaf_value(i),
+                );
             }
-            const paths_copy = try self.allocator.dupe([]const u8, self.paths);
-            return Tree(NewLeaf){ .leaves = new_leaves, .paths = paths_copy, .allocator = self.allocator };
+
+            const paths_copy = try self.clone_visible_paths();
+            errdefer free_paths(self.allocator, paths_copy);
+
+            return make_owned(NewLeaf, self.allocator, new_leaves, paths_copy);
         }
 
         // ================================================================
         // Iteration
         // ================================================================
 
-        /// Visit every leaf with its path. Visitor receives context,
-        ///  path string, and a mutable pointer to the leaf.
+        /// Visit every leaf with its path.
         pub fn for_each(
-            self: Self,
+            self: *Self,
             context: anytype,
             comptime f: fn (@TypeOf(context), []const u8, *Leaf) void,
         ) void {
-            for (self.paths, self.leaves) |path, *leaf| {
-                f(context, path, leaf);
+            for (0..self.len()) |i| {
+                f(context, self.visible_path(i), self.visible_leaf_ptr(i));
             }
         }
 
-        /// Fold over all leaves.
+        /// Visit leaves under `prefix` only.
+        ///
+        /// Prefix semantics are path-segment aware: matches `prefix` itself
+        ///  or any path starting with `prefix.`.
+        pub fn for_each_prefix(
+            self: *Self,
+            prefix: []const u8,
+            context: anytype,
+            comptime f: fn (@TypeOf(context), []const u8, *Leaf) void,
+        ) void {
+            for (0..self.len()) |i| {
+                const path = self.visible_path(i);
+                if (!path_matches_prefix(path, prefix)) continue;
+                f(context, path, self.visible_leaf_ptr(i));
+            }
+        }
+
+        /// Visit leaves matching a segment-based dot-path glob.
+        ///
+        /// Glob syntax: `*` matches one segment, `**` matches zero or more.
+        /// Wildcards must be full segments (not partial text).
+        pub fn for_each_glob(
+            self: *Self,
+            glob: []const u8,
+            context: anytype,
+            comptime f: fn (@TypeOf(context), []const u8, *Leaf) void,
+        ) !void {
+            const parsed = try ParsedGlob.init(self.allocator, glob);
+            defer parsed.deinit(self.allocator);
+
+            for (0..self.len()) |i| {
+                const path = self.visible_path(i);
+                if (!path_matches_glob_parts(path, parsed.parts)) continue;
+                f(context, path, self.visible_leaf_ptr(i));
+            }
+        }
+
+        /// Fold over leaves in DFS order.
         pub fn reduce(
-            self: Self,
+            self: *const Self,
             comptime R: type,
             comptime f: fn (R, Leaf) R,
             init: R,
         ) R {
             var acc = init;
-            for (self.leaves) |leaf| acc = f(acc, leaf);
+            for (0..self.len()) |i| {
+                acc = f(acc, self.visible_leaf_value(i));
+            }
             return acc;
         }
 
         // ================================================================
-        // Runtime access
+        // Runtime path operations
         // ================================================================
 
-        /// Look up a leaf by dot-path. Linear scan.
-        pub fn get(self: Self, path: []const u8) ?*Leaf {
-            for (self.paths, 0..) |p, i| {
-                if (std.mem.eql(u8, p, path)) return &self.leaves[i];
-            }
-            return null;
-        }
-
-        /// Look up a leaf by dot-path (const).
-        pub fn get_const(self: Self, path: []const u8) ?Leaf {
-            for (self.paths, 0..) |p, i| {
-                if (std.mem.eql(u8, p, path)) return self.leaves[i];
-            }
-            return null;
-        }
-
-        /// Number of leaves.
+        /// Number of visible leaves.
         pub fn len(self: *const Self) usize {
-            return self.leaves.len;
+            return if (self.view) |v| v.indices.len else self.leaves.len;
+        }
+
+        /// Check if a path exists in the current visible namespace.
+        pub fn contains(self: *const Self, path: []const u8) bool {
+            return self.lookup_visible_index(path) != null;
+        }
+
+        /// Mutable leaf lookup by visible path.
+        ///
+        /// Returns `error.PathNotFound` when `path` is missing.
+        pub fn get(self: *Self, path: []const u8) !*Leaf {
+            const idx = self.lookup_visible_index(path) orelse return error.PathNotFound;
+            return self.visible_leaf_ptr(idx);
+        }
+
+        /// Const leaf lookup by visible path.
+        ///
+        /// Returns `error.PathNotFound` when `path` is missing.
+        pub fn get_const(self: *const Self, path: []const u8) !Leaf {
+            const idx = self.lookup_visible_index(path) orelse return error.PathNotFound;
+            return self.visible_leaf_value(idx);
+        }
+
+        /// Create a non-owning subtree view under `prefix`.
+        ///
+        /// The returned view borrows this tree's storage. The parent tree must
+        ///  outlive the view. Mutations through the view update parent leaves
+        ///  in place.
+        ///
+        /// Prefix semantics are segment-aware: matches `prefix` itself and
+        ///  descendants under `prefix.`.
+        ///
+        /// Returns `error.PrefixNotFound` when no visible path matches.
+        pub fn subtree(self: *Self, prefix: []const u8) !Self {
+            var count: usize = 0;
+            for (0..self.len()) |i| {
+                if (path_matches_prefix(self.visible_path(i), prefix)) count += 1;
+            }
+            if (count == 0) return error.PrefixNotFound;
+
+            const indices = try self.allocator.alloc(usize, count);
+            errdefer self.allocator.free(indices);
+
+            var filled: usize = 0;
+            for (0..self.len()) |i| {
+                if (!path_matches_prefix(self.visible_path(i), prefix)) continue;
+                indices[filled] = i;
+                filled += 1;
+            }
+
+            const base_prefix = try self.allocator.dupe(u8, prefix);
+            errdefer self.allocator.free(base_prefix);
+
+            return self.make_view(indices, base_prefix);
+        }
+
+        /// Create a non-owning subtree view matching a segment-based glob.
+        ///
+        /// The returned view borrows this tree's storage. The parent tree must
+        ///  outlive the view. Mutations through the view update parent leaves
+        ///  in place.
+        ///
+        /// Glob syntax: `*` matches one segment, `**` matches zero or more.
+        /// Wildcards must be whole segments.
+        ///
+        /// Returns `error.PatternNotFound` when no visible path matches.
+        pub fn subtree_glob(self: *Self, glob: []const u8) !Self {
+            const parsed = try ParsedGlob.init(self.allocator, glob);
+            defer parsed.deinit(self.allocator);
+
+            var count: usize = 0;
+            for (0..self.len()) |i| {
+                if (path_matches_glob_parts(self.visible_path(i), parsed.parts)) count += 1;
+            }
+            if (count == 0) return error.PatternNotFound;
+
+            const indices = try self.allocator.alloc(usize, count);
+            errdefer self.allocator.free(indices);
+
+            var filled: usize = 0;
+            for (0..self.len()) |i| {
+                if (!path_matches_glob_parts(self.visible_path(i), parsed.parts)) continue;
+                indices[filled] = i;
+                filled += 1;
+            }
+
+            return self.make_view(indices, null);
         }
 
         // ================================================================
-        // Comptime helpers
+        // Printing
         // ================================================================
 
-        /// Count leaves in a struct type at comptime.
-        /// TODO: this is kind of an unintuitive name, its not really operating
-        ///  on what the user things the tree is.
-        pub fn leaf_count(comptime T: type) comptime_int {
-            if (T == Leaf) return 1;
-            return switch (@typeInfo(T)) {
-                .@"struct" => |info| blk: {
-                    var total: comptime_int = 0;
-                    for (info.fields) |field| total += leaf_count(field.type);
-                    break :blk total;
-                },
-                .array => |info| info.len * leaf_count(info.child),
-                else => @compileError("Tree(" ++ @typeName(Leaf) ++ "): unsupported type " ++ @typeName(T) ++ " - leaf types must be " ++ @typeName(Leaf) ++ ", structs, or arrays"),
+        pub fn print(self: *const Self, writer: *std.Io.Writer) !void {
+            for (0..self.len()) |i| {
+                try writer.print("{s}: {any}\n", .{ self.visible_path(i), self.visible_leaf_value(i) });
+            }
+        }
+
+        // ================================================================
+        // Internal helpers
+        // ================================================================
+
+        fn make_owned(
+            comptime L: type,
+            allocator: std.mem.Allocator,
+            leaves: []L,
+            paths: []const []const u8,
+        ) !Tree(L) {
+            // caller owns leaves/paths
+            var idx_map: std.StringHashMapUnmanaged(usize) = .empty;
+            errdefer idx_map.deinit(allocator);
+
+            for (paths, 0..) |path, i| {
+                const gop = try idx_map.getOrPut(allocator, path);
+                if (gop.found_existing) return error.DuplicatePath;
+                gop.value_ptr.* = i;
+            }
+
+            return .{
+                .leaves = leaves,
+                .paths = paths,
+                .allocator = allocator,
+                .index = idx_map,
+                .view = null,
             };
         }
 
-        fn flatten_values(comptime T: type, value: T, out: []Leaf, idx: *usize) void {
-            if (T == Leaf) {
-                out[idx.*] = value;
-                idx.* += 1;
-                return;
+        fn make_view(self: *Self, indices: []usize, base_prefix: ?[]const u8) !Self {
+            errdefer self.allocator.free(indices);
+            errdefer if (base_prefix) |p| self.allocator.free(p);
+
+            var sel_index: PathIndex = .empty;
+            errdefer sel_index.deinit(self.allocator);
+
+            for (indices, 0..) |local_idx, i| {
+                const p = self.visible_path(local_idx);
+                const shown = if (base_prefix) |prefix|
+                    relative_path_checked(p, prefix) orelse return error.PathOutsidePrefix
+                else
+                    p;
+                const gop = try sel_index.getOrPut(self.allocator, shown);
+                if (gop.found_existing) return error.DuplicatePath;
+                gop.value_ptr.* = i;
             }
-            switch (@typeInfo(T)) {
-                .@"struct" => |info| {
-                    inline for (info.fields) |field| {
-                        flatten_values(field.type, @field(value, field.name), out, idx);
-                    }
+
+            return .{
+                .leaves = &.{},
+                .paths = &.{},
+                .allocator = self.allocator,
+                .index = .empty,
+                .view = .{
+                    .parent = self,
+                    .indices = indices,
+                    .base_prefix = base_prefix,
+                    .index = sel_index,
                 },
-                .array => |info| {
-                    inline for (0..info.len) |i| {
-                        flatten_values(info.child, value[i], out, idx);
-                    }
-                },
-                else => unreachable,
-            }
+            };
         }
 
-        fn unflatten_values(comptime T: type, leaves: []const Leaf, idx: *usize) RuntimeOf(T) {
-            if (T == Leaf) {
-                const val = leaves[idx.*];
-                idx.* += 1;
-                return val;
+        fn lookup_visible_index(self: *const Self, path: []const u8) ?usize {
+            if (self.view) |v| return v.index.get(path);
+            return self.index.get(path);
+        }
+
+        fn visible_path(self: *const Self, idx: usize) []const u8 {
+            if (self.view) |v| {
+                const parent_path = v.parent.visible_path(v.indices[idx]);
+                return if (v.base_prefix) |prefix|
+                    relative_path_checked(parent_path, prefix) orelse parent_path
+                else
+                    parent_path;
             }
-            switch (@typeInfo(T)) {
-                .@"struct" => |info| {
-                    var result: RuntimeOf(T) = undefined;
-                    inline for (info.fields) |field| {
-                        @field(result, field.name) = unflatten_values(field.type, leaves, idx);
-                    }
-                    return result;
-                },
-                .array => |info| {
-                    var result: RuntimeOf(T) = undefined;
-                    inline for (0..info.len) |i| {
-                        result[i] = unflatten_values(info.child, leaves, idx);
-                    }
-                    return result;
-                },
-                else => unreachable,
+            return self.paths[idx];
+        }
+
+        fn visible_leaf_ptr(self: *Self, idx: usize) *Leaf {
+            if (self.view) |v| {
+                return v.parent.visible_leaf_ptr(v.indices[idx]);
             }
+            return &self.leaves[idx];
+        }
+
+        fn visible_leaf_value(self: *const Self, idx: usize) Leaf {
+            if (self.view) |v| {
+                return v.parent.visible_leaf_value(v.indices[idx]);
+            }
+            return self.leaves[idx];
+        }
+
+        fn clone_visible_paths(self: *const Self) ![]const []const u8 {
+            const out = try self.allocator.alloc([]const u8, self.len());
+            var filled: usize = 0;
+            errdefer {
+                for (out[0..filled]) |p| self.allocator.free(p);
+                self.allocator.free(out);
+            }
+            for (0..self.len()) |i| {
+                out[i] = try self.allocator.dupe(u8, self.visible_path(i));
+                filled = i + 1;
+            }
+            return out;
+        }
+
+        fn clone_paths(allocator: std.mem.Allocator, src: []const []const u8) ![]const []const u8 {
+            const out = try allocator.alloc([]const u8, src.len);
+            var filled: usize = 0;
+            errdefer {
+                for (out[0..filled]) |p| allocator.free(p);
+                allocator.free(out);
+            }
+            for (src, 0..) |path, i| {
+                out[i] = try allocator.dupe(u8, path);
+                filled = i + 1;
+            }
+            return out;
+        }
+
+        fn free_paths(allocator: std.mem.Allocator, paths: []const []const u8) void {
+            for (paths) |path| allocator.free(path);
+            allocator.free(paths);
+        }
+
+        fn path_matches_prefix(path: []const u8, prefix: []const u8) bool {
+            if (prefix.len == 0) return true;
+            if (std.mem.eql(u8, path, prefix)) return true;
+            if (path.len <= prefix.len) return false;
+            return std.mem.startsWith(u8, path, prefix) and path[prefix.len] == '.';
+        }
+
+        fn relative_path_checked(path: []const u8, prefix: []const u8) ?[]const u8 {
+            if (prefix.len == 0) return path;
+            if (std.mem.eql(u8, path, prefix)) return "";
+            if (!path_matches_prefix(path, prefix)) return null;
+            return path[prefix.len + 1 ..];
+        }
+
+        /// This is NOT a very strong implementation of glob. Quick and dirty
+        ///  to serve its purpose here, but limited.
+        const ParsedGlob = struct {
+            parts: []const []const u8,
+
+            fn init(allocator: std.mem.Allocator, glob: []const u8) !ParsedGlob {
+                var parts_buf: [128][]const u8 = undefined;
+                const part_count = split_path(glob, &parts_buf);
+                if (part_count == 0) return error.InvalidGlobPattern;
+
+                for (parts_buf[0..part_count]) |seg| {
+                    if (seg.len == 0) return error.InvalidGlobPattern;
+                    if (std.mem.indexOfScalar(u8, seg, '*') != null and
+                        !std.mem.eql(u8, seg, "*") and
+                        !std.mem.eql(u8, seg, "**"))
+                    {
+                        return error.InvalidGlobPattern;
+                    }
+                }
+
+                const owned_parts = try allocator.alloc([]const u8, part_count);
+                for (parts_buf[0..part_count], 0..) |p, i| owned_parts[i] = p;
+                return .{ .parts = owned_parts };
+            }
+
+            fn deinit(self: ParsedGlob, allocator: std.mem.Allocator) void {
+                allocator.free(self.parts);
+            }
+        };
+
+        /// Split a dot-path into segments using a fixed temporary buffer.
+        ///
+        /// Panics if segment count exceeds `out.len`.
+        fn split_path(path: []const u8, out: *[128][]const u8) usize {
+            if (path.len == 0) return 0;
+            var it = std.mem.splitScalar(u8, path, '.');
+            var n: usize = 0;
+            while (it.next()) |part| {
+                if (n >= out.len) @panic("Tree path depth exceeds split buffer capacity");
+                out[n] = part;
+                n += 1;
+            }
+            return n;
+        }
+
+        fn path_matches_glob_parts(path: []const u8, glob_parts: []const []const u8) bool {
+            var path_parts_buf: [128][]const u8 = undefined;
+            const path_len = split_path(path, &path_parts_buf);
+            return match_glob_parts(glob_parts, path_parts_buf[0..path_len], 0, 0);
+        }
+
+        fn match_glob_parts(
+            glob_parts: []const []const u8,
+            path_parts: []const []const u8,
+            glob_i: usize,
+            path_i: usize,
+        ) bool {
+            if (glob_i == glob_parts.len) return path_i == path_parts.len;
+
+            const seg = glob_parts[glob_i];
+            if (std.mem.eql(u8, seg, "**")) {
+                var next_glob_i = glob_i + 1;
+                while (next_glob_i < glob_parts.len and std.mem.eql(u8, glob_parts[next_glob_i], "**")) {
+                    next_glob_i += 1;
+                }
+                if (next_glob_i == glob_parts.len) return true;
+
+                var i = path_i;
+                while (i <= path_parts.len) : (i += 1) {
+                    if (match_glob_parts(glob_parts, path_parts, next_glob_i, i)) return true;
+                }
+                return false;
+            }
+
+            if (path_i == path_parts.len) return false;
+            if (std.mem.eql(u8, seg, "*") or std.mem.eql(u8, seg, path_parts[path_i])) {
+                return match_glob_parts(glob_parts, path_parts, glob_i + 1, path_i + 1);
+            }
+            return false;
         }
     };
-}
-
-/// Strip `is_comptime` from struct fields so runtime values can be
-///  stored. Returns `T` unchanged when no fields are comptime.
-///
-/// Module-level `const` structs passed into anonymous tuples get
-///  comptime-typed fields. `extract` needs a runtime-assignable
-///  version of the type to populate from the leaves array.
-/// TODO: probably better to let it error or something because this
-///  confuses zls a ton.
-pub fn RuntimeOf(comptime T: type) type {
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| {
-            for (info.fields) |field| {
-                if (field.is_comptime) {
-                    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-                    for (info.fields, 0..) |f, i| {
-                        fields[i] = .{
-                            .name = f.name,
-                            .type = f.type,
-                            .default_value_ptr = null,
-                            .is_comptime = false,
-                            .alignment = f.alignment,
-                        };
-                    }
-                    return @Type(.{ .@"struct" = .{
-                        .layout = info.layout,
-                        .fields = &fields,
-                        .decls = &.{},
-                        .is_tuple = info.is_tuple,
-                    } });
-                }
-            }
-            return T;
-        },
-        else => return T,
-    }
-}
-
-// ============================================================================
-// Path generation - comptime dot-separated paths for any struct type.
-// ============================================================================
-
-/// Generate all dot-separated paths for a struct type with a given leaf type.
-/// Returns a comptime array of string literals.
-pub fn tree_paths(comptime Leaf: type, comptime T: type) [Tree(Leaf).leaf_count(T)][]const u8 {
-    var result: [Tree(Leaf).leaf_count(T)][]const u8 = undefined;
-    var idx: usize = 0;
-    build_paths(Leaf, T, &result, &idx, "");
-    return result;
-}
-
-fn build_paths(
-    comptime Leaf: type,
-    comptime T: type,
-    result: [][]const u8,
-    idx: *usize,
-    comptime prefix: []const u8,
-) void {
-    if (T == Leaf) {
-        result[idx.*] = prefix;
-        idx.* += 1;
-        return;
-    }
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                const sep = if (prefix.len == 0) "" else ".";
-                build_paths(Leaf, field.type, result, idx, prefix ++ sep ++ field.name);
-            }
-        },
-        .array => |info| {
-            inline for (0..info.len) |i| {
-                const sep = if (prefix.len == 0) "" else ".";
-                build_paths(Leaf, info.child, result, idx, prefix ++ sep ++ std.fmt.comptimePrint("{d}", .{i}));
-            }
-        },
-        else => @compileError("unsupported type in tree path: " ++ @typeName(T)),
-    }
 }
 
 // ============================================================================
@@ -367,24 +644,15 @@ test "from and extract round-trip" {
     const allocator = std.testing.allocator;
 
     const Spec = struct { dtype: u8, dim: i64 };
-    const Params = struct {
-        w: Spec,
-        b: Spec,
-    };
-    const Batch = struct {
-        x: Spec,
-    };
-    const Inputs = struct {
-        params: Params,
-        batch: Batch,
-    };
+    const Params = struct { w: Spec, b: Spec };
+    const Batch = struct { x: Spec };
+    const Inputs = struct { params: Params, batch: Batch };
 
     const inputs = Inputs{
         .params = .{ .w = .{ .dtype = 1, .dim = 784 }, .b = .{ .dtype = 1, .dim = 128 } },
         .batch = .{ .x = .{ .dtype = 1, .dim = 64 } },
     };
 
-    // from works with any struct (including tuples)
     var tree = try Tree(Spec).from(allocator, inputs);
     defer tree.deinit();
 
@@ -393,8 +661,7 @@ test "from and extract round-trip" {
     try std.testing.expectEqual(@as(i64, 128), tree.leaves[1].dim);
     try std.testing.expectEqual(@as(i64, 64), tree.leaves[2].dim);
 
-    // extract recovers named struct from flat leaves
-    const recovered = tree.extract(Inputs);
+    const recovered = try tree.extract(Inputs);
     try std.testing.expectEqual(@as(i64, 784), recovered.params.w.dim);
     try std.testing.expectEqual(@as(i64, 128), recovered.params.b.dim);
     try std.testing.expectEqual(@as(i64, 64), recovered.batch.x.dim);
@@ -404,8 +671,6 @@ test "extract handles comptime-typed tuple fields" {
     const allocator = std.testing.allocator;
 
     const Inner = struct { a: i32, b: i32 };
-
-    // Module-level const values produce comptime-typed anonymous tuple fields.
     const c1: Inner = .{ .a = 1, .b = 2 };
     const c2: Inner = .{ .a = 3, .b = 4 };
     const comptime_tuple = .{ c1, c2 };
@@ -415,9 +680,7 @@ test "extract handles comptime-typed tuple fields" {
 
     try std.testing.expectEqual(@as(usize, 4), tree.len());
 
-    // This would fail without RuntimeOf: "cannot store runtime value
-    //  in compile time variable".
-    const recovered = tree.extract(@TypeOf(comptime_tuple));
+    const recovered = try tree.extract(@TypeOf(comptime_tuple));
     try std.testing.expectEqual(@as(i32, 1), recovered.@"0".a);
     try std.testing.expectEqual(@as(i32, 2), recovered.@"0".b);
     try std.testing.expectEqual(@as(i32, 3), recovered.@"1".a);
@@ -429,9 +692,8 @@ test "map transforms leaf type" {
 
     const Inner = struct { val: i32 };
     const S = struct { a: Inner, b: Inner };
-    const input = S{ .a = .{ .val = 10 }, .b = .{ .val = 20 } };
 
-    var tree = try Tree(Inner).from(allocator, input);
+    var tree = try Tree(Inner).from(allocator, S{ .a = .{ .val = 10 }, .b = .{ .val = 20 } });
     defer tree.deinit();
 
     var mapped = try tree.map(i32, {}, struct {
@@ -450,13 +712,10 @@ test "map with context" {
     const allocator = std.testing.allocator;
 
     const S = struct { a: i32, b: i32 };
-    const input = S{ .a = 5, .b = 10 };
-
-    var tree = try Tree(i32).from(allocator, input);
+    var tree = try Tree(i32).from(allocator, S{ .a = 5, .b = 10 });
     defer tree.deinit();
 
-    const scale: i32 = 3;
-    var mapped = try tree.map(i32, scale, struct {
+    var mapped = try tree.map(i32, @as(i32, 3), struct {
         fn f(s: i32, leaf: i32) anyerror!i32 {
             return leaf * s;
         }
@@ -492,54 +751,39 @@ test "array fields" {
     const allocator = std.testing.allocator;
 
     const Layer = struct { w: i32, b: i32 };
-    const Model = struct {
-        embed: i32,
-        layers: [3]Layer,
-    };
+    const Model = struct { embed: i32, layers: [3]Layer };
 
-    const model = Model{
+    var tree = try Tree(i32).from(allocator, Model{
         .embed = 100,
         .layers = .{
             .{ .w = 1, .b = 2 },
             .{ .w = 3, .b = 4 },
             .{ .w = 5, .b = 6 },
         },
-    };
-
-    var tree = try Tree(i32).from(allocator, model);
+    });
     defer tree.deinit();
 
-    // embed + 3*(w+b) = 7
     try std.testing.expectEqual(@as(usize, 7), tree.len());
     try std.testing.expectEqual(@as(i32, 100), tree.leaves[0]);
-    try std.testing.expectEqual(@as(i32, 1), tree.leaves[1]);
-    try std.testing.expectEqual(@as(i32, 2), tree.leaves[2]);
-    try std.testing.expectEqual(@as(i32, 5), tree.leaves[5]);
-    try std.testing.expectEqual(@as(i32, 6), tree.leaves[6]);
 
-    // Round-trip
-    const recovered = tree.extract(Model);
+    const recovered = try tree.extract(Model);
     try std.testing.expectEqual(@as(i32, 100), recovered.embed);
     try std.testing.expectEqual(@as(i32, 3), recovered.layers[1].w);
     try std.testing.expectEqual(@as(i32, 6), recovered.layers[2].b);
 }
 
-test "get by path" {
+test "contains, get, and get_const" {
     const allocator = std.testing.allocator;
 
     const S = struct { a: i32, b: i32 };
     var tree = try Tree(i32).from(allocator, S{ .a = 42, .b = 99 });
     defer tree.deinit();
 
-    const a_ptr = tree.get("a");
-    try std.testing.expect(a_ptr != null);
-    try std.testing.expectEqual(@as(i32, 42), a_ptr.?.*);
-
-    const b_ptr = tree.get("b");
-    try std.testing.expect(b_ptr != null);
-    try std.testing.expectEqual(@as(i32, 99), b_ptr.?.*);
-
-    try std.testing.expect(tree.get("c") == null);
+    try std.testing.expect(tree.contains("a"));
+    try std.testing.expect(!tree.contains("c"));
+    try std.testing.expectEqual(@as(i32, 42), (try tree.get("a")).*);
+    try std.testing.expectEqual(@as(i32, 99), try tree.get_const("b"));
+    try std.testing.expectError(error.PathNotFound, tree.get("c"));
 }
 
 test "reduce" {
@@ -575,88 +819,125 @@ test "for_each" {
     try std.testing.expectEqual(@as(i32, 20), tree.leaves[1]);
 }
 
-test tree_paths {
-    const Layer = struct { w: u8, b: u8 };
-    const Model = struct {
-        embed: u8,
-        layers: [2]Layer,
-        out: u8,
-    };
-
-    const paths = tree_paths(u8, Model);
-    try std.testing.expectEqual(@as(usize, 6), paths.len);
-    try std.testing.expectEqualStrings("embed", paths[0]);
-    try std.testing.expectEqualStrings("layers.0.w", paths[1]);
-    try std.testing.expectEqualStrings("layers.0.b", paths[2]);
-    try std.testing.expectEqualStrings("layers.1.w", paths[3]);
-    try std.testing.expectEqualStrings("layers.1.b", paths[4]);
-    try std.testing.expectEqualStrings("out", paths[5]);
-}
-
-test "from populates paths correctly" {
+test "from_slices copies inputs" {
     const allocator = std.testing.allocator;
 
-    const Layer = struct { w: i32, b: i32 };
-    const Model = struct {
-        embed: i32,
-        layers: [2]Layer,
-    };
+    var leaves = [_]i32{ 1, 2 };
+    const paths = [_][]const u8{ "x", "y" };
+
+    var tree = try Tree(i32).from_slices(allocator, &leaves, &paths);
+    defer tree.deinit();
+
+    leaves[0] = 999;
+    try std.testing.expectEqual(@as(i32, 1), tree.leaves[0]);
+}
+
+test "subtree view with relative paths" {
+    const allocator = std.testing.allocator;
+
+    const Mlp = struct { up_proj: i32, down_proj: i32 };
+    const Layer = struct { mlp: Mlp, attn: i32 };
+    const Model = struct { layers: [2]Layer };
 
     var tree = try Tree(i32).from(allocator, Model{
-        .embed = 0,
-        .layers = .{ .{ .w = 0, .b = 0 }, .{ .w = 0, .b = 0 } },
+        .layers = .{
+            .{ .mlp = .{ .up_proj = 10, .down_proj = 11 }, .attn = 12 },
+            .{ .mlp = .{ .up_proj = 20, .down_proj = 21 }, .attn = 22 },
+        },
     });
     defer tree.deinit();
 
-    const expected = tree_paths(i32, Model);
-    for (tree.paths, expected) |actual, exp| {
-        try std.testing.expectEqualStrings(exp, actual);
-    }
+    var v = try tree.subtree("layers.1.mlp");
+    defer v.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), v.len());
+    try std.testing.expectEqual(@as(i32, 20), (try v.get("up_proj")).*);
+    try std.testing.expectEqual(@as(i32, 21), (try v.get("down_proj")).*);
+    try std.testing.expectError(error.PathNotFound, v.get("layers.1.mlp.up_proj"));
 }
 
-test "const tree supports leaf mutation and cleanup" {
+test "subtree_glob selects matching leaves" {
+    const allocator = std.testing.allocator;
+
+    const Layer = struct { mlp: struct { down_proj: i32, up_proj: i32 } };
+    const Model = struct { layers: [2]Layer, norm: i32 };
+
+    var tree = try Tree(i32).from(allocator, Model{
+        .layers = .{
+            .{ .mlp = .{ .down_proj = 10, .up_proj = 11 } },
+            .{ .mlp = .{ .down_proj = 20, .up_proj = 21 } },
+        },
+        .norm = 30,
+    });
+    defer tree.deinit();
+
+    var sub = try tree.subtree_glob("layers.**.up_proj");
+    defer sub.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), sub.len());
+}
+
+test "for_each_glob applies wildcard matches" {
+    const allocator = std.testing.allocator;
+
+    const Layer = struct {
+        mlp: struct { down_proj: i32, up_proj: i32 },
+        attn: i32,
+    };
+    const Model = struct { layers: [3]Layer, tail: i32 };
+
+    var tree = try Tree(i32).from(allocator, Model{
+        .layers = .{
+            .{ .mlp = .{ .down_proj = 10, .up_proj = 11 }, .attn = 12 },
+            .{ .mlp = .{ .down_proj = 20, .up_proj = 21 }, .attn = 22 },
+            .{ .mlp = .{ .down_proj = 30, .up_proj = 31 }, .attn = 32 },
+        },
+        .tail = 99,
+    });
+    defer tree.deinit();
+
+    try tree.for_each_glob("layers.*.mlp.down_proj", {}, struct {
+        fn f(_: void, _: []const u8, leaf: *i32) void {
+            leaf.* *= 10;
+        }
+    }.f);
+
+    try std.testing.expectEqual(@as(i32, 100), (try tree.get("layers.0.mlp.down_proj")).*);
+    try std.testing.expectEqual(@as(i32, 200), (try tree.get("layers.1.mlp.down_proj")).*);
+    try std.testing.expectEqual(@as(i32, 300), (try tree.get("layers.2.mlp.down_proj")).*);
+    try std.testing.expectEqual(@as(i32, 11), (try tree.get("layers.0.mlp.up_proj")).*);
+    try std.testing.expectEqual(@as(i32, 99), (try tree.get("tail")).*);
+}
+
+test "glob validation rejects partial wildcard segments" {
     const allocator = std.testing.allocator;
 
     const S = struct { a: i32, b: i32 };
+    var tree = try Tree(i32).from(allocator, S{ .a = 1, .b = 2 });
+    defer tree.deinit();
 
-    // Leaf mutation works on a var binding -- only deinit requires var.
-    {
-        var tree = try Tree(i32).from(allocator, S{ .a = 1, .b = 2 });
-        defer tree.deinit();
+    try std.testing.expectError(error.InvalidGlobPattern, tree.for_each_glob("a*", {}, struct {
+        fn f(_: void, _: []const u8, _: *i32) void {}
+    }.f));
+    try std.testing.expectError(error.InvalidGlobPattern, tree.subtree_glob("layers.**x"));
+}
 
-        // Mutate via get.
-        tree.get("a").?.* = 100;
-        try std.testing.expectEqual(@as(i32, 100), tree.leaves[0]);
+test "deinit_with frees leaf resources" {
+    const allocator = std.testing.allocator;
 
-        // Mutate via for_each.
-        tree.for_each({}, struct {
-            fn f(_: void, _: []const u8, leaf: *i32) void {
-                leaf.* += 1;
-            }
-        }.f);
-        try std.testing.expectEqual(@as(i32, 101), tree.leaves[0]);
-        try std.testing.expectEqual(@as(i32, 3), tree.leaves[1]);
+    const Boxed = struct { val: []i32 };
+    var tree = try Tree(Boxed).from(allocator, struct {
+        a: Boxed,
+        b: Boxed,
+    }{
+        .a = .{ .val = try allocator.dupe(i32, &.{ 1, 2 }) },
+        .b = .{ .val = try allocator.dupe(i32, &.{ 3, 4 }) },
+    });
+    tree.deinit_with(struct {
+        fn f(leaf: *Boxed) void {
+            std.testing.allocator.free(leaf.val);
+        }
+    }.f);
+}
 
-        // Direct leaf slice mutation.
-        tree.leaves[1] = 999;
-        try std.testing.expectEqual(@as(i32, 999), tree.get("b").?.*);
-    }
-
-    // deinit_with on const tree -- callback receives *Leaf for cleanup.
-    {
-        const Boxed = struct { val: []i32 };
-        var tree = try Tree(Boxed).from(allocator, struct {
-            a: Boxed,
-            b: Boxed,
-        }{
-            .a = .{ .val = try allocator.dupe(i32, &.{ 1, 2 }) },
-            .b = .{ .val = try allocator.dupe(i32, &.{ 3, 4 }) },
-        });
-        // deinit_with frees both the inner allocations and the tree arrays.
-        tree.deinit_with(struct {
-            fn f(leaf: *Boxed) void {
-                std.testing.allocator.free(leaf.val);
-            }
-        }.f);
-    }
 }

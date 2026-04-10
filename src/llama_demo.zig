@@ -90,7 +90,7 @@ fn sgd_step(params: ParamsSpec, vg: *zg.frontend.transforms.ValueAndGrad, lr: f3
     defer updated.deinit();
     return .{
         .loss_val = vg.value,
-        .updated = updated.extract(ParamsSpec),
+        .updated = try updated.extract(ParamsSpec),
     };
 }
 
