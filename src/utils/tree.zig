@@ -20,8 +20,10 @@
 //! ```
 const std = @import("std");
 const meta = @import("meta.zig");
+const tree_render = @import("tree_render.zig");
 
 pub const RuntimeOf = meta.RuntimeOf;
+pub const TreeRenderOptions = tree_render.Options;
 
 pub fn Tree(comptime Leaf: type) type {
     return struct {
@@ -408,6 +410,18 @@ pub fn Tree(comptime Leaf: type) type {
         // ================================================================
         // Printing
         // ================================================================
+
+        /// Write a tree diagram of visible paths.
+        ///
+        /// Allocates a temporary path slice for rendering.
+        pub fn render(self: *const Self, writer: *std.Io.Writer, opts: TreeRenderOptions) !void {
+            const display_paths = try self.allocator.alloc([]const u8, self.len());
+            defer self.allocator.free(display_paths);
+
+            for (0..self.len(), display_paths) |i, *dp| dp.* = self.visible_path(i);
+
+            try tree_render.render(self.allocator, display_paths, writer, opts);
+        }
 
         pub fn print(self: *const Self, writer: *std.Io.Writer) !void {
             for (0..self.len()) |i| {
@@ -940,4 +954,30 @@ test "deinit_with frees leaf resources" {
     }.f);
 }
 
+test "render ascii tree" {
+    const allocator = std.testing.allocator;
+
+    const Model = struct {
+        a: i32,
+        b: struct { c: i32, d: i32 },
+    };
+
+    var tree = try Tree(i32).from(allocator, Model{ .a = 1, .b = .{ .c = 2, .d = 3 } });
+    defer tree.deinit();
+
+    var out = std.io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    try tree.render(&out.writer, .{ .symbols = .ascii });
+    const results = try out.toOwnedSlice();
+    defer allocator.free(results);
+    try std.testing.expectEqualStrings(
+        \\+ a
+        \\- b
+        \\  + c
+        \\  - d
+        \\
+    ,
+        results,
+    );
 }
