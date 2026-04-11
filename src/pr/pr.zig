@@ -129,10 +129,15 @@ pub const Shape = struct {
 pub const max_rank = 8;
 
 /// Stack-allocated shape with a fixed maximum rank.
-///
-/// Value type that can be freely copied, stored, passed around etc without heap.
 pub const BoundedShape = struct {
+    /// TODO: use of i64 here looks odd, yes, but third party libs want i64,
+    ///  the remaining concern is us casting to usize, consider i32
+    ///  and cast at boundary...? also, this will ripple. Not worth it rn.
     buf: [max_rank]i64 = undefined,
+    // TODO: oh yeah we are also wasting a field here tbh. so this could be
+    //  better in many ways, but I wonder if this should exist at all?
+    //  improving this will quickly start to balloon and we would have to
+    //  move it out, so im defering this, its a micro-optimization anyways.
     len: usize = 0,
 
     pub fn from_slice(s: []const i64) BoundedShape {
@@ -159,6 +164,26 @@ pub const BoundedShape = struct {
         for (self.const_slice()) |d| count *= @intCast(d);
         return count;
     }
+
+    /// Format shape for display.
+    pub fn format(shape: BoundedShape, allocator: std.mem.Allocator) ![]const u8 {
+        const dims = shape.const_slice();
+        if (dims.len == 0) return try allocator.dupe(u8, "scalar");
+
+        var result = std.ArrayList(u8).initCapacity(allocator, 32) catch
+            return try allocator.dupe(u8, "[...]");
+        defer result.deinit(allocator);
+
+        const writer = result.writer(allocator);
+        try writer.writeAll("[");
+        for (dims, 0..) |d, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.print("{d}", .{d});
+        }
+        try writer.writeAll("]");
+
+        return result.toOwnedSlice(allocator);
+    }
 };
 
 /// Abstract value: the type of a Var without its data.
@@ -167,6 +192,7 @@ pub const BoundedShape = struct {
 /// Currently only `tensor` (dtype + shape). The union exists so PR can
 ///  support non-tensor types in the future without changing the Var layout.
 pub const Aval = union(enum) {
+    /// TODO: rename this to reduce confusion
     tensor: Tensor,
 
     /// Extract the tensor type. Exhaustive over Aval variants.
@@ -181,6 +207,7 @@ pub const Aval = union(enum) {
 ///
 /// This is PR's notion of a tensor *type*, not a runtime tensor, so it carries
 ///  no data, no device, no buffer.
+/// TODO: rename this to reduce confusion
 pub const Tensor = struct {
     dtype: DType,
     shape: Shape,

@@ -233,17 +233,17 @@ fn GradCallGen(comptime func: anytype, comptime opts: GradOpts) type {
         },
         2 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!G {
-                return grad_impl(func, G, .{a0, a1});
+                return grad_impl(func, G, .{ a0, a1 });
             }
         },
         3 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!G {
-                return grad_impl(func, G, .{a0, a1, a2});
+                return grad_impl(func, G, .{ a0, a1, a2 });
             }
         },
         4 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!G {
-                return grad_impl(func, G, .{a0, a1, a2, a3});
+                return grad_impl(func, G, .{ a0, a1, a2, a3 });
             }
         },
         else => @compileError("grad supports functions with up to 4 parameters"),
@@ -263,17 +263,17 @@ fn VgCallGen(comptime func: anytype, comptime opts: GradOpts) type {
         },
         2 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!R {
-                return vg_impl(func, G, .{a0, a1});
+                return vg_impl(func, G, .{ a0, a1 });
             }
         },
         3 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!R {
-                return vg_impl(func, G, .{a0, a1, a2});
+                return vg_impl(func, G, .{ a0, a1, a2 });
             }
         },
         4 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!R {
-                return vg_impl(func, G, .{a0, a1, a2, a3});
+                return vg_impl(func, G, .{ a0, a1, a2, a3 });
             }
         },
         else => @compileError("value_and_grad supports functions with up to 4 parameters"),

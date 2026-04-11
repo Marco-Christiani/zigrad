@@ -21,7 +21,7 @@ const std = @import("std");
 const pr = @import("pr/pr.zig");
 const backend_mod = @import("backend/root.zig");
 const Backend = backend_mod.Backend;
-const HostBuffer = @import("utils/host_buffer.zig").HostBuffer;
+const HostBuffer = @import("utils/root.zig").HostBuffer;
 
 const Tensor = @This();
 

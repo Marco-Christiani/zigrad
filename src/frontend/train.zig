@@ -3,7 +3,7 @@ const std = @import("std");
 const backend = @import("../backend/root.zig");
 const Backend = backend.Backend;
 const Tensor = @import("../tensor.zig");
-const Tree = @import("../utils/tree.zig").Tree;
+const TensorTree = @import("../utils/root.zig").Tree(Tensor);
 
 /// Manages device buffer state across training steps.
 ///
@@ -242,7 +242,7 @@ pub fn donate_argnums(comptime SpecsTuple: type, comptime donated: []const usize
         var count: usize = 0;
         for (fields, 0..) |field, arg_idx| {
             if (!is_donated(donated, arg_idx)) {
-                count += Tree(Tensor).leaf_count(field.type);
+                count += TensorTree.leaf_count(field.type);
             }
         }
 
@@ -251,7 +251,7 @@ pub fn donate_argnums(comptime SpecsTuple: type, comptime donated: []const usize
         var out_idx: usize = 0;
         var flat_offset: usize = 0;
         for (fields, 0..) |field, arg_idx| {
-            const n = Tree(Tensor).leaf_count(field.type);
+            const n = TensorTree.leaf_count(field.type);
             if (!is_donated(donated, arg_idx)) {
                 for (0..n) |i| {
                     result[out_idx] = @intCast(flat_offset + i);

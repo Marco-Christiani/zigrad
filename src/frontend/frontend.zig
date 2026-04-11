@@ -47,8 +47,8 @@ const lower = @import("../lower.zig");
 const pipeline = @import("../pipeline/root.zig");
 const backend_mod = @import("../backend/root.zig");
 const Backend = backend_mod.Backend;
-const Tree = @import("../utils/tree.zig").Tree;
 const Tensor = @import("../tensor.zig");
+const TensorTree = @import("../utils/root.zig").Tree(Tensor);
 
 /// Typed compiled function wrapper (trace + compile + typed call).
 pub const jit_mod = @import("jit.zig");
@@ -98,7 +98,7 @@ pub fn trace(
     var program = pr.Program.init(allocator);
     errdefer program.deinit();
 
-    const spec_tree = try Tree(Tensor).from(program.allocator(), specs);
+    const spec_tree = try TensorTree.from(program.allocator(), specs);
 
     var builder = try pr.FunctionBuilder.init(&program, entry_name);
     defer builder.deinit();
@@ -121,7 +121,7 @@ pub fn trace(
         else => result_raw,
     };
 
-    const output_tensors = try Tree(Tensor).flatten(allocator, result);
+    const output_tensors = try TensorTree.flatten(allocator, result);
     defer allocator.free(output_tensors);
     if (output_tensors.len == 0) return error.NoOutputs;
 

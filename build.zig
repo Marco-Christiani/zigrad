@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     //   - include/  (mlir-c, stablehlo, xla/pjrt/c)
     //   - lib/      (libMLIR-C.so, libStablehloCAPI.so, LLVM/MLIR deps)
     //   - runtime/  (xla/pjrt/c plugins + bundled CUDA user-space libs)
+    // TODO: should this support ZG_EXTERNAL_SDK? did we remove that?
     const sdk_root = b.option([]const u8, "sdk", "Path to zigrad external SDK root (include/, lib/, runtime/)") orelse "./result";
 
     // Dev convenience: override runtime bundle root directory.
@@ -66,6 +67,9 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
 
     // Add CUDA include path if available (needed for nvrtc.h).
+    // TODO: should be exposed as a build option so consumers can set it in their build,
+    //  supporting the env var fallback is debatably acceptable, but we should be
+    //  consistent about policy wrt the sdk root.
     if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
         const cuda_include = b.fmt("{s}/include", .{cuda_home});
         zigrad_mod.addIncludePath(.{ .cwd_relative = cuda_include });

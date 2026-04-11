@@ -802,6 +802,7 @@ fn is_permutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
+// TODO: why not just make this a method on pr.Shape?
 fn format_shape(writer: *types.Writer, dims: []const i64) types.FormatError!void {
     try writer.writeByte('[');
     for (dims, 0..) |d, i| {

@@ -2,32 +2,13 @@
 //!
 //! Manages CPU-resident data with owned, borrowed, or memory-mapped backing.
 //! Upload to a device via `backend.Buffer`.
+//! TODO: this isnt a util anymore I suppose, move it.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 
 const DType = pr.DType;
 const Shape = pr.Shape;
 const BoundedShape = pr.BoundedShape;
-
-/// Format a shape for display.
-pub fn format_shape(shape: BoundedShape, allocator: std.mem.Allocator) ![]const u8 {
-    const dims = shape.const_slice();
-    if (dims.len == 0) return try allocator.dupe(u8, "scalar");
-
-    var result = std.ArrayList(u8).initCapacity(allocator, 32) catch
-        return try allocator.dupe(u8, "[...]");
-    defer result.deinit(allocator);
-
-    const writer = result.writer(allocator);
-    try writer.writeAll("[");
-    for (dims, 0..) |d, i| {
-        if (i > 0) try writer.writeAll(", ");
-        try writer.print("{d}", .{d});
-    }
-    try writer.writeAll("]");
-
-    return result.toOwnedSlice(allocator);
-}
 
 pub const HostBuffer = struct {
     /// Backing memory for the buffer. Tagged by allocation strategy
@@ -170,7 +151,7 @@ pub const HostBuffer = struct {
 
     /// Print buffer contents (for debugging).
     pub fn print(self: *HostBuffer, writer: anytype, allocator: std.mem.Allocator) !void {
-        const shape_str = try format_shape(self.shape, allocator);
+        const shape_str = try self.shape.format(allocator);
         defer allocator.free(shape_str);
 
         try writer.print("HostBuffer({s}, {s}): ", .{ self.dtype.name(), shape_str });

@@ -20,8 +20,9 @@
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
-const host_buffer = @import("../utils/host_buffer.zig");
-const Tree = @import("../utils/tree.zig").Tree;
+const utils = @import("../utils/root.zig");
+const host_buffer = utils.host_buffer;
+const Tree = utils.Tree;
 
 const Backend = @This();
 
