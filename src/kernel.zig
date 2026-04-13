@@ -15,6 +15,7 @@
 //!  on PR types.
 const std = @import("std");
 const pr = @import("pr/pr.zig");
+const TypedPtr = @import("utils/rtti.zig").TypedPtr;
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zg/kernel");
 
@@ -195,17 +196,18 @@ pub const BufferDesc = struct {
 /// Contains all information a provider needs to execute a compiled kernel:
 ///  input/output buffers, device identity, and an optional device stream
 ///  for GPU synchronization.
-/// TODO: consider RTTI ctx pattern here
 /// TODO: consider passing a device allocator if backends support sharing
 pub const DispatchContext = struct {
     inputs: []const BufferDesc,
     outputs: []const BufferDesc,
     device_ordinal: i32,
     platform: DispatchPlatform,
-    /// GPU stream handle (e.g. CUDA stream). Null on host.
-    stream: ?*anyopaque,
-    /// Optional provider workspace pointer.
-    workspace: ?*anyopaque,
+    /// Platform stream handle (e.g. `CUstream` on CUDA). Null on host.
+    /// Opaque at this boundary, received as `void*` from the backend FFI.
+    stream: ?*anyopaque = null,
+    /// Provider workspace allocated by the backend. Null when the artifact
+    ///  requires no workspace.
+    workspace: ?*anyopaque = null,
     /// Compile-time workspace requirement reported by the provider artifact.
     workspace_bytes_required: usize,
     allocator: std.mem.Allocator,
@@ -224,13 +226,13 @@ pub const DispatchError = error{
 /// Provider dispatch function signature.
 ///
 /// Called by the backend's generic FFI handler when a custom_call
-/// targets a kernelized op. The provider_ctx is the provider's own
-/// state (cast from `*anyopaque`); artifact_data and kernel_key
-/// identify the compiled kernel; ctx carries buffers and device info.
-/// TODO: consider RTTI pattern here
+///  targets a kernelized op. `provider_ctx` is the provider's own
+///  state (type-tagged via `TypedPtr`).
 pub const DispatchFn = *const fn (
-    provider_ctx: *anyopaque,
+    provider_ctx: TypedPtr,
+    /// Kernel bytecode.
     artifact_data: []const u8,
+    /// Key to identify the compiled kernel.
     kernel_key: []const u8,
     ctx: DispatchContext,
 ) DispatchError!void;
@@ -320,8 +322,9 @@ pub const KernelProvider = struct {
     /// Must be set for providers whose artifacts require runtime dispatch.
     dispatch_fn: ?DispatchFn = null,
     /// Provider-owned state passed as first arg to `dispatch_fn`.
+    /// Type-tagged so the dispatch function can assert its concrete type.
     /// Must outlive all executions that reference this provider.
-    dispatch_ctx: ?*anyopaque = null,
+    dispatch_ctx: ?TypedPtr = null,
 
     pub fn compile(self: KernelProvider, desc: RegionDescriptor, ctx: CompileContext, allocator: std.mem.Allocator) CompileError!KernelArtifact {
         return self.compile_fn(self.ptr, desc, ctx, allocator);
@@ -448,12 +451,13 @@ pub const KernelStore = struct {
 
 /// Entry mapping a provider name to its dispatch function and context.
 ///
-/// Populated at execute time by the caller.
-/// The backend resolves provider names from `StoredArtifact.provider_name`
-///  to dispatch entries here.
+/// Populated before execution begins (typically by `tune()`). The backend
+///  resolves provider names from `StoredArtifact.provider_name` to dispatch
+///  entries here. The `dispatch_ctx` is type-tagged so the dispatch function
+///  can assert its concrete type on cast.
 pub const DispatchEntry = struct {
     dispatch_fn: DispatchFn,
-    dispatch_ctx: *anyopaque,
+    dispatch_ctx: TypedPtr,
 };
 
 /// Maps provider names to dispatch entries for execute-time resolution.
@@ -705,7 +709,7 @@ test "dispatch registry register and get" {
     const testing = std.testing;
 
     const Dummy = struct {
-        fn dispatch(_: *anyopaque, _: []const u8, _: []const u8, _: DispatchContext) DispatchError!void {}
+        fn dispatch(_: TypedPtr, _: []const u8, _: []const u8, _: DispatchContext) DispatchError!void {}
     };
 
     var registry = DispatchRegistry.init(testing.allocator);
@@ -714,11 +718,11 @@ test "dispatch registry register and get" {
     var dummy_ctx: u8 = 42;
     try registry.register("mirage", .{
         .dispatch_fn = Dummy.dispatch,
-        .dispatch_ctx = @ptrCast(&dummy_ctx),
+        .dispatch_ctx = TypedPtr.init(&dummy_ctx),
     });
 
     const entry = registry.get("mirage") orelse return error.TestUnexpectedResult;
-    try testing.expect(entry.dispatch_ctx == @as(*anyopaque, @ptrCast(&dummy_ctx)));
+    try testing.expectEqual(@as(u8, 42), entry.dispatch_ctx.cast(u8).*);
     try testing.expect(registry.get("tvm") == null);
 }
 
@@ -726,7 +730,7 @@ test "dispatch registry replaces duplicate" {
     const testing = std.testing;
 
     const Dummy = struct {
-        fn dispatch(_: *anyopaque, _: []const u8, _: []const u8, _: DispatchContext) DispatchError!void {}
+        fn dispatch(_: TypedPtr, _: []const u8, _: []const u8, _: DispatchContext) DispatchError!void {}
     };
 
     var registry = DispatchRegistry.init(testing.allocator);
@@ -736,13 +740,13 @@ test "dispatch registry replaces duplicate" {
     var ctx2: u8 = 2;
     try registry.register("mirage", .{
         .dispatch_fn = Dummy.dispatch,
-        .dispatch_ctx = @ptrCast(&ctx1),
+        .dispatch_ctx = TypedPtr.init(&ctx1),
     });
     try registry.register("mirage", .{
         .dispatch_fn = Dummy.dispatch,
-        .dispatch_ctx = @ptrCast(&ctx2),
+        .dispatch_ctx = TypedPtr.init(&ctx2),
     });
 
     const entry = registry.get("mirage") orelse return error.TestUnexpectedResult;
-    try testing.expect(entry.dispatch_ctx == @as(*anyopaque, @ptrCast(&ctx2)));
+    try testing.expectEqual(@as(u8, 2), entry.dispatch_ctx.cast(u8).*);
 }

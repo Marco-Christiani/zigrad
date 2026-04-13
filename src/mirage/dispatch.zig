@@ -4,6 +4,7 @@ const mirage = @import("../c/mirage/api.zig");
 const nvrtc = @import("../c/nvrtc.zig");
 const cuda = @import("../c/cuda_driver.zig");
 const artifact_mod = @import("artifact.zig");
+const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
 const log = std.log.scoped(.@"zg/mirage_dispatch");
 
@@ -43,12 +44,12 @@ pub const MirageDispatchState = struct {
     }
 
     pub fn dispatch(
-        provider_ctx: *anyopaque,
+        provider_ctx: TypedPtr,
         artifact_data: []const u8,
         kernel_key: []const u8,
         ctx: kernel.DispatchContext,
     ) kernel.DispatchError!void {
-        const self: *MirageDispatchState = @ptrCast(@alignCast(provider_ctx));
+        const self = provider_ctx.cast(MirageDispatchState);
         self.dispatch_impl(artifact_data, kernel_key, ctx) catch |err| {
             log.err("mirage dispatch failed for '{s}': {s}", .{ kernel_key, @errorName(err) });
             return err;

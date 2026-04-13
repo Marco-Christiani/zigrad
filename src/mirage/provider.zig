@@ -5,6 +5,7 @@ const dispatch_mod = @import("dispatch.zig");
 const artifact_mod = @import("artifact.zig");
 const mirage = @import("../c/mirage/api.zig");
 const mlir_types = @import("mlir.zig");
+const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
 const log = std.log.scoped(.@"zg/mirage_provider");
 const superopt_max_candidates: u32 = 1024;
@@ -21,7 +22,7 @@ pub const MirageProvider = struct {
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
             .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
-            .dispatch_ctx = @ptrCast(self.dispatch_state),
+            .dispatch_ctx = TypedPtr.init(self.dispatch_state),
         };
     }
 

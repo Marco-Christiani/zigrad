@@ -12,6 +12,7 @@ const kernel = @import("../kernel.zig");
 const dispatch_mod = @import("dispatch.zig");
 const pr = @import("../pr/pr.zig");
 const Cache = @import("../cache.zig").Cache;
+const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const TargetKind = tir.TargetKind;
 
 const log = std.log.scoped(.@"zg/tvm_provider");
@@ -34,7 +35,7 @@ pub const TvmProvider = struct {
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
             .dispatch_fn = &dispatch_mod.TvmDispatchState.dispatch,
-            .dispatch_ctx = @ptrCast(self.dispatch_state),
+            .dispatch_ctx = TypedPtr.init(self.dispatch_state),
         };
     }
 

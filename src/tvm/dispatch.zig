@@ -9,6 +9,7 @@ const tvm_api = @import("../c/tvm/api.zig");
 const tvm_runtime = @import("../c/tvm/runtime.zig");
 const tvm_c = @import("../c/tvm/c.zig");
 const Cache = @import("../cache.zig").Cache;
+const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
 const log = std.log.scoped(.@"zg/tvm_dispatch");
 
@@ -49,12 +50,12 @@ pub const TvmDispatchState = struct {
 
     /// Provider dispatch entry point. Conforms to `kernel.DispatchFn`.
     pub fn dispatch(
-        provider_ctx: *anyopaque,
+        provider_ctx: TypedPtr,
         artifact_data: []const u8,
         kernel_key: []const u8,
         ctx: kernel.DispatchContext,
     ) kernel.DispatchError!void {
-        const self: *TvmDispatchState = @ptrCast(@alignCast(provider_ctx));
+        const self = provider_ctx.cast(TvmDispatchState);
         self.dispatch_impl(artifact_data, kernel_key, ctx) catch |err| {
             log.err("tvm dispatch failed for '{s}': {s}", .{ kernel_key, @errorName(err) });
             return error.DispatchFailed;

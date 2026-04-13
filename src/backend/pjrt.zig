@@ -27,6 +27,7 @@ const BackendInterface = @import("Backend.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const pjrt_types = @import("../c/pjrt/types.zig");
+const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const c = @import("../c/pjrt/c.zig").c;
 const log = std.log.scoped(.@"zg/pjrt_backend");
 
@@ -801,7 +802,7 @@ fn execute_dispatch(
     dispatch_key: []const u8,
     workspace_bytes: usize,
     dispatch_fn: ?kernel.DispatchFn,
-    dispatch_ctx: ?*anyopaque,
+    dispatch_ctx: ?TypedPtr,
     artifact_data: []const u8,
 ) ?*c.XLA_FFI_Error {
     const dfn = dispatch_fn orelse {
