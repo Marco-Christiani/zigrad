@@ -56,6 +56,8 @@ pub const MirageDispatchState = struct {
         };
     }
 
+    /// TODO: this isnt using the key and its inconsistent with tvm provider,
+    ///  which hashes the key, this hashes the bytecode.
     fn dispatch_impl(
         self: *MirageDispatchState,
         artifact_data: []const u8,
@@ -67,9 +69,9 @@ pub const MirageDispatchState = struct {
             log.err("failed to decode mirage artifact for '{s}'", .{kernel_key});
             return error.DispatchFailed;
         };
-        defer self.allocator.free(art.kernels);
         defer {
             for (art.kernels) |k| self.allocator.free(k.args);
+            self.allocator.free(art.kernels);
         }
 
         if (art.kernels.len == 0) {
@@ -91,22 +93,22 @@ pub const MirageDispatchState = struct {
         self.cache_mutex.lock();
         defer self.cache_mutex.unlock();
 
-        if (self.cache.get(hash)) |mod| {
-            return mod;
-        }
+        if (self.cache.get(hash)) |mod| return mod;
 
         // Compile: source -> PTX -> CUmodule.
-        const ptx = compile_to_ptx(self.allocator, art.source, "sm_86") catch {
+        const ptx = compile_to_ptx(self.allocator, art.source, "sm_86") catch |e| {
+            log.err("Compilation to PTX failed: {s}", .{@errorName(e)});
             return error.DispatchFailed;
         };
         defer self.allocator.free(ptx);
 
-        cuda.ensure_loaded() catch {
-            log.err("CUDA driver not available", .{});
+        cuda.ensure_loaded() catch |e| {
+            log.err("CUDA driver load failed: {s}", .{@errorName(e)});
             return error.DispatchFailed;
         };
 
         var cu_module: cuda.CUmodule = undefined;
+        // TODO: error boundary should be in the zig bindings with proper mappings
         var rc = cuda.cuModuleLoadData(&cu_module, ptx.ptr);
         if (rc != cuda.CUDA_SUCCESS) {
             log.err("cuModuleLoadData failed: {d}", .{rc});
@@ -146,8 +148,9 @@ pub const MirageDispatchState = struct {
         }
 
         const compiled = CompiledModule{ .cu_module = cu_module, .funcs = funcs };
-        self.cache.put(hash, compiled) catch {
+        self.cache.put(hash, compiled) catch |e| {
             // Cache failure is non-fatal -- just won't cache.
+            log.warn("OOM on cache put: {s}", .{@errorName(e)});
         };
         return compiled;
     }
@@ -161,13 +164,11 @@ pub const MirageDispatchState = struct {
         // Build kernel argument pointers from the arg mapping.
         // cuLaunchKernel takes void** kernel_params where each element
         // is a pointer to the argument value (which is itself a device pointer).
-        const arg_ptrs = self.allocator.alloc(?*anyopaque, kd.args.len) catch
-            return error.OutOfMemory;
+        const arg_ptrs = try self.allocator.alloc(?*anyopaque, kd.args.len);
         defer self.allocator.free(arg_ptrs);
 
         // We need stable storage for the pointer values themselves.
-        const ptr_values = self.allocator.alloc(*anyopaque, kd.args.len) catch
-            return error.OutOfMemory;
+        const ptr_values = try self.allocator.alloc(*anyopaque, kd.args.len);
         defer self.allocator.free(ptr_values);
 
         for (kd.args, 0..) |arg, i| {
@@ -222,6 +223,7 @@ pub const MirageDispatchState = struct {
 };
 
 /// Compile CUDA source to PTX using NVRTC.
+/// TODO: should move this its generally useful
 pub fn compile_to_ptx(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -262,6 +264,7 @@ pub fn compile_to_ptx(
     var prog: nvrtc.nvrtcProgram = std.mem.zeroes(nvrtc.nvrtcProgram);
     const source_z = try tmp.dupeZ(u8, source);
     const create_rc = nvrtc.nvrtcCreateProgram(&prog, source_z.ptr, "mirage_kernel.cu", 0, null, null);
+    // TODO: error boundary should be in the zig bindings with proper mappings
     if (create_rc != nvrtc.NVRTC_SUCCESS) {
         log.err("nvrtcCreateProgram failed: {d}", .{create_rc});
         return error.NvrtcCompileFailed;
@@ -309,14 +312,14 @@ pub fn compile_to_ptx(
 /// Strips host-only code and replaces #include "runtime.h" with
 /// individual device-compatible includes.
 pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
 
     try out.appendSlice(allocator, "#define USE_NVSHMEM 0\n#define NUM_GPUS 1\n\n");
 
     var in_host_function = false;
     var brace_depth: i32 = 0;
 
-    var lines = std.mem.splitSequence(u8, source, "\n");
+    var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
 
@@ -328,15 +331,18 @@ pub fn filter_source_for_nvrtc(allocator: std.mem.Allocator, source: []const u8)
         }
 
         if (std.mem.eql(u8, trimmed, "#include \"runtime.h\"")) {
-            try out.appendSlice(allocator, "#include <cute/layout.hpp>\n");
-            try out.appendSlice(allocator, "#include <cute/tensor.hpp>\n");
-            try out.appendSlice(allocator, "#include <cutlass/cutlass.h>\n");
-            try out.appendSlice(allocator, "#include \"config.h\"\n");
-            try out.appendSlice(allocator, "#include \"kernel/element_unary.h\"\n");
-            try out.appendSlice(allocator, "#include \"kernel/element_binary.h\"\n");
-            try out.appendSlice(allocator, "#include \"kernel/reduction.h\"\n");
-            try out.appendSlice(allocator, "#include \"threadblock/threadblock.h\"\n");
-            try out.appendSlice(allocator, "#include \"utils.h\"\n");
+            try out.appendSlice(allocator,
+                \\#include <cute/layout.hpp>
+                \\#include <cute/tensor.hpp>
+                \\#include <cutlass/cutlass.h>
+                \\#include "config.h"
+                \\#include "kernel/element_unary.h"
+                \\#include "kernel/element_binary.h"
+                \\#include "kernel/reduction.h"
+                \\#include "threadblock/threadblock.h"
+                \\#include "utils.h"
+                \\
+            );
             continue;
         }
 
