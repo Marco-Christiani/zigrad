@@ -325,18 +325,18 @@ pub fn Tree(comptime Leaf: type) type {
             return self.lookup_visible_index(path) != null;
         }
 
-        /// Mutable leaf lookup by visible path.
+        /// Get mutable leaf ptr, lookup by visible path.
         ///
         /// Returns `error.PathNotFound` when `path` is missing.
-        pub fn get(self: *Self, path: []const u8) !*Leaf {
+        pub fn getptr(self: *Self, path: []const u8) !*Leaf {
             const idx = self.lookup_visible_index(path) orelse return error.PathNotFound;
             return self.visible_leaf_ptr(idx);
         }
 
-        /// Const leaf lookup by visible path.
+        /// Get leaf by value, lookup by visible path.
         ///
         /// Returns `error.PathNotFound` when `path` is missing.
-        pub fn get_const(self: *const Self, path: []const u8) !Leaf {
+        pub fn get(self: *const Self, path: []const u8) !Leaf {
             const idx = self.lookup_visible_index(path) orelse return error.PathNotFound;
             return self.visible_leaf_value(idx);
         }

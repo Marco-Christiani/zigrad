@@ -370,12 +370,12 @@ pub fn run_llama_ft_demo(
     const batch_usize: usize = @intCast(batch_size);
     const seq_usize: usize = @intCast(seq);
 
-    const host_x = (host_tree.get("1.x") orelse return error.MissingSpec).*;
-    const host_target_ids = (host_tree.get("1.target_ids") orelse return error.MissingSpec).*;
-    const host_attention_mask = (host_tree.get("1.attention_mask") orelse return error.MissingSpec).*;
-    const host_mask = (host_tree.get("1.mask") orelse return error.MissingSpec).*;
-    const host_sin = (host_tree.get("1.sin") orelse return error.MissingSpec).*;
-    const host_cos = (host_tree.get("1.cos") orelse return error.MissingSpec).*;
+    const host_x = try host_tree.get("1.x");
+    const host_target_ids = try host_tree.get("1.target_ids");
+    const host_attention_mask = try host_tree.get("1.attention_mask");
+    const host_mask = try host_tree.get("1.mask");
+    const host_sin = try host_tree.get("1.sin");
+    const host_cos = try host_tree.get("1.cos");
 
     fill_i32_tokens(host_x.as_slice(i32), batch_usize, seq_usize, &tokens);
     fill_i32_tokens(host_target_ids.as_slice(i32), batch_usize, seq_usize, &targets);
@@ -588,7 +588,7 @@ fn load_llama_weights(
     // TODO: unnecessary, just unwrap the optional and delete this, or provide a fallible get.
     const get_buf = struct {
         fn f(tree: *zg.utils.Tree(Tensor), tree_path: []const u8) !*Tensor {
-            return tree.get(tree_path) orelse error.MissingSpec;
+            return try tree.getptr(tree_path);
         }
     }.f;
 
