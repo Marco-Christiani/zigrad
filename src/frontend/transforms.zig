@@ -118,8 +118,8 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
         }
     }.f);
 
-    const loss_result = @call(.auto, func, try sub_tree.extract(ArgsType));
-    const loss_tensor = switch (@typeInfo(@TypeOf(loss_result))) {
+    const loss_result: anyerror!Tensor = @call(.auto, func, try sub_tree.extract(ArgsType));
+    const loss_tensor: Tensor = switch (@typeInfo(@TypeOf(loss_result))) {
         .error_union => try loss_result,
         else => loss_result,
     };
@@ -135,31 +135,42 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     // TODO: see the comments about inlining in `ad` and once that lands we can update this
     try program.add_function(loss_func);
 
-    // Apply VJP.
+    // Request gradients only for the first-argument leaves (the "params").
+    //  `wrt` filters the VJP function's output list: cotangents for
+    //  non-`wrt` inputs (the batch leaves) are omitted from the return
+    //  signature, so the VJP function returns exactly `param_leaf_count`
+    //  gradients. Any intermediate cotangents that only fed omitted outputs
+    //  become dead and are cleaned up by the backend's DCE.
+    const wrt_indices: [param_leaf_count]usize = comptime blk: {
+        var out: [param_leaf_count]usize = undefined;
+        for (0..param_leaf_count) |i| out[i] = i;
+        break :blk out;
+    };
     const vjp_name = "vg_loss_vjp";
-    const vjp_func = try ad.vjp_with_value(alloc, program, loss_func, vjp_name);
+    const vjp_func = try ad.vjp_with_value(alloc, program, loss_func, vjp_name, .{ .wrt = &wrt_indices });
     try program.add_function(vjp_func);
 
     // Emit cotangent (ones_like for scalar loss) in the OUTER builder.
     const cot = try ad.emit_cotangent(builder, loss_var.as_tensor());
 
-    // Call VJP function from outer builder.
+    // Call VJP function from outer builder. The VJP takes every primal
+    //  input (not just params) plus the loss cotangent seed.
     const total_leaf_count = args_tree.leaves.len;
     const call_args = try alloc.alloc(*pr.Var, total_leaf_count + 1);
     @memcpy(call_args[0..total_leaf_count], input_vars[0..total_leaf_count]);
     call_args[total_leaf_count] = cot;
 
     const call_outputs = try builder.call(vjp_name, call_args);
-    // vjp_with_value returns: [value, grad_0, ..., grad_n]
-    if (call_outputs.len != total_leaf_count + 1) return error.UnexpectedOutputs;
+    // vjp_with_value with `wrt` returns: [value, grad_params_0, ..., grad_params_{K-1}]
+    //  where K == param_leaf_count.
+    if (call_outputs.len != param_leaf_count + 1) return error.UnexpectedOutputs;
 
-    // Extract value tensor.
+    // Extract value tensor
     const value_tensor = Tensor.from_var(builder, call_outputs[0]);
 
-    // Extract grads for the first argument (params) into a Tree.
+    // Extract param gradients into a Tree
     const grad_leaves = try alloc.alloc(Tensor, param_leaf_count);
-    errdefer alloc.free(grad_leaves);
-    for (call_outputs[1 .. 1 + param_leaf_count], 0..) |gv, i| {
+    for (call_outputs[1..], 0..) |gv, i| {
         grad_leaves[i] = Tensor.from_var(builder, gv);
     }
 
