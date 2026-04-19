@@ -10,8 +10,23 @@ const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
 
+const log = std.log.scoped(.@"zg/ad");
+
 pub const VjpError = ops.types.AdError;
 pub const JvpError = ops.types.AdError;
+
+/// Options for `vjp` and `vjp_with_value`.
+pub const VjpOpts = struct {
+    /// Restrict which primal-input indices contribute cotangents to the
+    ///  returned function's outputs. When `null`, every input cotangent
+    ///  is harvested. Frontends typically pass a slice like
+    ///  `&.{0, 1, ..., K-1}` to request gradients only for the first `K`
+    ///  input leaves (e.g. "params, not batch data").
+    ///
+    /// Duplicates and unsorted orderings are legal, the output tuple
+    ///  follows the given order exactly.
+    wrt: ?[]const usize = null,
+};
 
 /// AD mode
 const Mode = enum {
@@ -20,6 +35,24 @@ const Mode = enum {
     /// Forward-mode AD. Propagates tangents forward from inputs to outputs.
     jvp,
 };
+
+/// Whether the transformed function should also return the primal outputs
+///  alongside the dual (cotangent/tangent) values.
+///
+/// Used internally by `ad_impl` to distinguish `vjp` from `vjp_with_value`.
+const PrimalOutputs = enum { skip, emit };
+
+/// Dtypes for which gradients/cotangents are defined.
+///
+/// Integer and unsigned dtypes are non-differentiable and conventionally carry
+///  zero duals.
+/// This is the same set enforced when seeding VJP cotangents.
+fn is_differentiable_dtype(dtype: pr.DType) bool {
+    return switch (dtype) {
+        .f32, .f64, .bf16, .f16 => true,
+        else => false,
+    };
+}
 
 /// Unified AD transform, specialized at comptime on `mode`.
 ///
@@ -33,11 +66,24 @@ const Mode = enum {
 ///      VJP harvests cotangent vectors at inputs (elements of T*_xM).
 ///      JVP harvests tangent vectors at outputs (elements of T_{f(x)}N).
 ///
+/// `wrt` restricts which duals are harvested into the returned function's
+///  outputs:
+///   - For VJP, it selects a subset of `func.params` (by index) whose
+///   cotangents appear in the output.
+///   - For JVP, it selects a subset of `func.returns`, `null` means
+///     "all of them" (the default).
+///  The backward traversal still runs over every op -- only the output tuple
+///   shrinks -- but a smaller output tuple lets downstream DCE drop any
+///   sub-graphs that feed only into dropped outputs.
+///
 /// NOTE: In the Euclidean case (G = I), input cotangents from VJP coincide
 ///       numerically with gradients via the trivial musical isomorphism. For
 ///       non-Cartesian metrics, converting to gradients requires applying G^{-1}.
 ///
-/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+/// NOTE: Missing duals on non-differentiable dtypes (integer inputs) are
+///       filled with zero tensors. Missing duals on float dtypes return
+///       `error.MissingDual`, typically a missing `vjp_backward` / `jvp`
+///       implementation somewhere in the primal chain.
 /// TODO: missing AD support might require a better policy, tbd.
 fn ad_impl(
     comptime mode: Mode,
@@ -45,7 +91,8 @@ fn ad_impl(
     program: *pr.Program,
     func: pr.Function,
     name: []const u8,
-    include_value: bool,
+    primals: PrimalOutputs,
+    wrt: ?[]const usize,
 ) ops.types.AdError!pr.Function {
     var primal_map = try allocator.alloc(?*pr.Var, func.var_count);
     defer allocator.free(primal_map);
@@ -116,27 +163,62 @@ fn ad_impl(
     }
 
     // VJP harvests cotangents at inputs, JVP harvests tangents at outputs.
-    const harvest_vars = switch (mode) {
+    //  `wrt` (if provided) restricts which indices into `all_harvest_vars`
+    //  produce outputs, otherwise we harvest all of them.
+    const all_harvest_vars = switch (mode) {
         .vjp => func.params,
         .jvp => func.returns,
     };
-    const extra: usize = if (include_value) func.returns.len else 0;
-    const returns = try allocator.alloc(*pr.Var, extra + harvest_vars.len);
+    if (wrt) |indices| {
+        for (indices) |idx| {
+            if (idx >= all_harvest_vars.len) return error.WrtIndexOutOfRange;
+        }
+    }
+    const num_harvest: usize = if (wrt) |indices| indices.len else all_harvest_vars.len;
+
+    const num_primal_outputs: usize = switch (primals) {
+        .emit => func.returns.len,
+        .skip => 0,
+    };
+    const returns = try allocator.alloc(*pr.Var, num_primal_outputs + num_harvest);
     defer allocator.free(returns);
 
     var out_idx: usize = 0;
-    if (include_value) {
+    if (primals == .emit) {
         for (func.returns) |ret_var| {
             returns[out_idx] = primal_map[ret_var.id] orelse return error.UnsupportedEqn;
             out_idx += 1;
         }
     }
-    for (harvest_vars) |v| {
+    for (0..num_harvest) |i| {
+        const v = if (wrt) |indices| all_harvest_vars[indices[i]] else all_harvest_vars[i];
         if (dual_map[v.id]) |dual| {
             returns[out_idx] = dual;
         } else {
-            const tensor = v.aval.as_tensor();
-            returns[out_idx] = try b.scalar_broadcast(tensor.dtype, tensor.shape.dims, 0.0);
+            const t = v.aval.as_tensor();
+            if (is_differentiable_dtype(t.dtype)) {
+                // Float input with no dual at harvest time, this almost always means an op
+                //  in the primal chain is missing a `vjp_backward` / `jvp` handler
+                //  and silently dropped the propagation.
+                // The legitimate "orphan float param" case (param does not flow to any
+                //  output) is rare enough that failing loud here is the right default, if
+                //  it starts mattering, gate via a VjpOpts.allow_orphan flag.
+                log.err(
+                    "no dual for float harvest var id={} dtype={s} shape={any} " ++
+                        "likely a missing {s} in the primal chain",
+                    .{
+                        v.id,
+                        @tagName(t.dtype),
+                        t.shape.dims,
+                        if (mode == .vjp) "vjp_backward" else "jvp",
+                    },
+                );
+                return error.MissingDual;
+            }
+            // NOTE: Non-differentiable dtype (i32, i64, u8, ...): gradients are not defined
+            //  for integer-valued inputs. By convention we return a zero tensor of the same
+            //  shape so the output tuple has consistent arity regardless of input dtype.
+            returns[out_idx] = try b.scalar_broadcast(t.dtype, t.shape.dims, 0.0);
         }
         out_idx += 1;
     }
@@ -157,25 +239,48 @@ fn ad_impl(
 /// they are covectors and must be raised with G^{-1} to obtain gradient
 /// tangent vectors.
 ///
+/// See `VjpOpts` for how `opts.wrt` restricts which parameter cotangents
+///  appear in the returned function's outputs. Default `.{}` harvests all
+///  parameter cotangents.
+///
 /// NOTE: In the Euclidean case (G = I), input cotangents from VJP coincide
 ///       numerically with gradients via the trivial musical isomorphism. For
 ///       non-Cartesian metrics, converting to gradients requires applying G^{-1}.
 ///
-/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
-pub fn vjp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
-    return ad_impl(.vjp, allocator, program, func, name, false);
+/// NOTE: Missing duals on non-differentiable dtypes (integer inputs) are
+///       filled with zero tensors. Missing duals on float dtypes return
+///       `error.MissingDual`, typically a missing `vjp_backward` / `jvp`
+///       implementation somewhere in the primal chain.
+pub fn vjp(
+    allocator: std.mem.Allocator,
+    program: *pr.Program,
+    func: pr.Function,
+    name: []const u8,
+    opts: VjpOpts,
+) VjpError!pr.Function {
+    return ad_impl(.vjp, allocator, program, func, name, .skip, opts.wrt);
 }
 
 /// Like `vjp`, but the returned function also emits primal outputs before the input cotangents:
-/// `(N primals, M cotangent seeds) -> (M primal outputs, N input cotangents)`.
+/// `(N primals, M cotangent seeds) -> (M primal outputs, K input cotangents)`
+///  where `K = opts.wrt.?.len` if provided, else `N`.
 ///
 /// NOTE: In the Euclidean case (G = I), input cotangents from VJP coincide
 ///       numerically with gradients via the trivial musical isomorphism. For
 ///       non-Cartesian metrics, converting to gradients requires applying G^{-1}.
 ///
-/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
-pub fn vjp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) VjpError!pr.Function {
-    return ad_impl(.vjp, allocator, program, func, name, true);
+/// NOTE: Missing duals on non-differentiable dtypes (integer inputs) are
+///       filled with zero tensors. Missing duals on float dtypes return
+///       `error.MissingDual`, typically a missing `vjp_backward` / `jvp`
+///       implementation somewhere in the primal chain.
+pub fn vjp_with_value(
+    allocator: std.mem.Allocator,
+    program: *pr.Program,
+    func: pr.Function,
+    name: []const u8,
+    opts: VjpOpts,
+) VjpError!pr.Function {
+    return ad_impl(.vjp, allocator, program, func, name, .emit, opts.wrt);
 }
 
 /// Forward-mode AD (pushforward / differential): transforms `f: M -> N` into
@@ -188,17 +293,23 @@ pub fn vjp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: 
 /// vectors (same shapes), and returns `M` output tangent vectors matching the
 /// original function's output shapes.
 ///
-/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+/// NOTE: Missing duals on non-differentiable dtypes (integer inputs) are
+///       filled with zero tensors. Missing duals on float dtypes return
+///       `error.MissingDual`, typically a missing `vjp_backward` / `jvp`
+///       implementation somewhere in the primal chain.
 pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
-    return ad_impl(.jvp, allocator, program, func, name, false);
+    return ad_impl(.jvp, allocator, program, func, name, .skip, null);
 }
 
 /// Like `jvp`, but the returned function also emits primal outputs before the output tangents:
 /// `(N primals, N tangents) -> (M primal outputs, M output tangents)`.
 ///
-/// NOTE: Missing dual entries (ops w/o AD support) fall back to zero-filled tensors.
+/// NOTE: Missing duals on non-differentiable dtypes (integer inputs) are
+///       filled with zero tensors. Missing duals on float dtypes return
+///       `error.MissingDual`, typically a missing `vjp_backward` / `jvp`
+///       implementation somewhere in the primal chain.
 pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
-    return ad_impl(.jvp, allocator, program, func, name, true);
+    return ad_impl(.jvp, allocator, program, func, name, .emit, null);
 }
 
 /// Emit a ones-like cotangent for VJP seeding.
@@ -226,7 +337,7 @@ test "vjp produces gradients matching input shapes" {
     const func = try b.finish(&.{out_id});
     try program.add_function(func);
 
-    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
@@ -253,7 +364,7 @@ test "vjp_with_value returns primals plus gradients" {
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    const vjp_func = try vjp_with_value(std.testing.allocator, &program, func, "vjp_with_value");
+    const vjp_func = try vjp_with_value(std.testing.allocator, &program, func, "vjp_with_value", .{});
     try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.returns.len + func.params.len), vjp_func.returns.len);
@@ -278,7 +389,7 @@ test "dot_general vjp supports 2 batch dims" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
 
     try std.testing.expectEqual(@as(usize, func.params.len + func.returns.len), vjp_func.params.len);
@@ -313,7 +424,7 @@ test "dot_general vjp supports non-prefix batch dims" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
 }
 
@@ -337,7 +448,7 @@ test "dot_general vjp supports differing batch dim positions" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
 }
 
@@ -361,7 +472,7 @@ test "dot_general vjp supports multi-contract dims" {
     const func = try b.finish(&.{out});
     try program.add_function(func);
 
-    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp");
+    const vjp_func = try vjp(std.testing.allocator, &program, func, "vjp", .{});
     try pr.validate_ops_in_func(vjp_func);
 }
 

@@ -60,14 +60,21 @@ pub const AdContext = struct {
 pub const Writer = std.Io.Writer;
 pub const FormatError = Writer.Error;
 
-// ============================================================================
-// Shared Helpers
-// ============================================================================
-
 pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
     if (a.dtype != b.dtype) return false;
     if (a.shape.rank() != b.shape.rank()) return false;
     return std.mem.eql(i64, a.shape.dims, b.shape.dims);
 }
 
-pub const AdError = pr.BuildError || error{ UnsupportedEqn, UnsupportedDType };
+pub const AdError = pr.BuildError || error{
+    /// An op's `vjp_forward` or `jvp` implementation is missing for a primal
+    ///  value that later ops depend on.
+    UnsupportedEqn,
+    UnsupportedDType,
+    /// An index in `VjpOpts.wrt` is out of range for the source function.
+    WrtIndexOutOfRange,
+    /// A harvested input has no cotangent (VJP) or output has no tangent (JVP).
+    ///  Typically means an op in the primal chain is missing a `vjp_backward`
+    ///  `jvp` handler, or the harvested var is orphaned.
+    MissingDual,
+};
