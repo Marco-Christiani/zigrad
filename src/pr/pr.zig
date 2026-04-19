@@ -1012,10 +1012,6 @@ pub const FunctionBuilder = struct {
         return out_vars;
     }
 
-    // ====================================================================
-    // Op Convenience Methods
-    // ====================================================================
-
     pub fn param_tensor(self: *FunctionBuilder, dtype: DType, dims: []const i64) BuildError!*Var {
         const a = self.alloc();
         const dims_copy = try a.dupe(i64, dims);
@@ -1081,6 +1077,11 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn convert(self: *FunctionBuilder, operand_var: *Var, out_dtype: DType) BuildError!*Var {
+        // Short circuit converting to the same dtype is a no-op.
+        // Save callers from needing to guard with `if (a.dtype == b.dtype)` everywhere.
+        // Backend would fold these away anyway, but keeping the IR clean at construction time
+        //  helps denoise IR dumps saves AD passes from walking dead converts if no DCE pass.
+        if (operand_var.as_tensor().dtype == out_dtype) return operand_var;
         return self.emit(.{ .convert = out_dtype }, &.{operand_var});
     }
 
