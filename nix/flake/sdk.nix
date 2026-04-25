@@ -17,9 +17,14 @@ in {
 
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
+    # Pick mpk's CUDA-pinned variant matching cudaCfg. Without this, the default
+    #  mpk attr resolves to nixpkgs's cudaPackages_12 alias (currently 12.8),
+    #  which leaks ~7 GiB of CUDA 12.8 into the closure alongside our 12.9.
+    mirageVariant = "cuda${builtins.replaceStrings ["."] ["-"] (pkgs.lib.versions.majorMinor cudaCfg.cudaVersion)}-mirage-runtime";
     mirageRuntime =
       if builtins.hasAttr system inputs.mpk.packages
-      then inputs.mpk.packages.${system}.mirage-runtime
+        && builtins.hasAttr mirageVariant inputs.mpk.packages.${system}
+      then inputs.mpk.packages.${system}.${mirageVariant}
       else null;
 
     zigradSrc = import ../helpers/source-filter.nix {
