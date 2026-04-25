@@ -29,6 +29,9 @@ pub fn build(b: *std.Build) void {
     const enable_mirage = b.option(bool, "mirage", "Force Mirage kernel provider on or off");
     const enable_iree = b.option(bool, "iree-backend", "Force IREE backend on or off");
 
+    // When enabled, the op registry emits @compileLog's of the op interface coverage matrix.
+    const emit_op_coverage = b.option(bool, "emit-op-coverage", "Emit op interface coverage at comptime (fails the build)") orelse false;
+
     const has_mlir = sdk_has_mlir(b, sdk_root);
     const has_tvm = sdk_has_tvm(b, sdk_root);
     const has_mirage = sdk_has_mirage(b, sdk_root);
@@ -43,6 +46,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "has_tvm", use_tvm);
     build_options.addOption(bool, "has_mirage", use_mirage);
     build_options.addOption(bool, "has_iree", use_iree);
+    build_options.addOption(bool, "emit_op_coverage", emit_op_coverage);
 
     const safetensors_zg_dep = b.dependency("safetensors_zg", .{});
     const cova_dep = b.dependency("cova", .{});

@@ -1,8 +1,26 @@
 //! Op Registry
-//! Central registry for all ops with comptime dispatch and validation.
-//! Each handler receives the op and its typed params directly.
+//!
+//! Central registry for all ops. Provides:
+//! - `OpFor(prim)`: map from `pr.Prim` enum variant to its implementation struct.
+//! - Runtime dispatch helpers (`validate`, `infer_output`, `vjp_forward`, ...)
+//!
+//! ## Op interface
+//!
+//! Every op implementation is a struct with methods named per `op_methods`
+//!  below. `validate` and `infer_output` are required — missing them fails
+//!  the build via the `validate_op_interface` comptime block. The others
+//!  (`format`, `vjp_forward`, `vjp_backward`, `jvp`) are optional and probed
+//!  via `@hasDecl` at dispatch time.
+//!
+//! Coverage: build with `-Demit-op-coverage=true` to have the registry
+//!  `@compileLog` a per-op table of which interface methods are implemented.
+//!  Used for tracking AD / lowering coverage without grepping the source.
+//!
+//! NOTE: The contained tests are regression gates for specific ops' AD coverage,
+//!  if an op is updated, these must also be updated.
 const std = @import("std");
 const pr = @import("../pr.zig");
+const build_options = @import("build_options");
 
 pub const types = @import("types.zig");
 pub const constant = @import("constant.zig");
@@ -46,22 +64,94 @@ pub fn OpFor(comptime prim: pr.Prim) type {
     };
 }
 
-// TODO: this should be refactored.
-// TODO: its reasonable to have a comptime flag that logs op interface completeness to make it easier to check coverage
+// ============================================================================
+// Interface spec
+// ============================================================================
 
-/// Comptime validation that all ops implement required interface.
+/// A single method in the op interface. `required` means the op must implement
+///  it or compilation fails. Optional methods are probed via `@hasDecl` at
+///  dispatch time.
+const MethodSpec = struct {
+    name: []const u8,
+    required: bool,
+    doc: []const u8,
+};
+
+/// The canonical op interface. Order matters only for the coverage report
+///  layout.
+const op_methods: []const MethodSpec = &.{
+    .{ .name = "validate", .required = true, .doc = "Op construction sanity check" },
+    .{ .name = "infer_output", .required = true, .doc = "Shape/dtype inference" },
+    .{ .name = "format", .required = false, .doc = "IR dump formatting" },
+    .{ .name = "vjp_forward", .required = false, .doc = "Primal re-emit for reverse-mode AD" },
+    .{ .name = "vjp_backward", .required = false, .doc = "Cotangent propagation for reverse-mode AD" },
+    .{ .name = "jvp", .required = false, .doc = "Tangent propagation for forward-mode AD" },
+};
+
+/// Comptime enforcement of required interface methods.
+///
+/// Missing any required method is a hard build error identifying the
+///  op and the missing method.
 fn validate_op_interface() void {
     inline for (comptime std.enums.values(pr.Prim)) |prim| {
         const Op = OpFor(prim);
-        if (!@hasDecl(Op, "validate"))
-            @compileError("Op " ++ @tagName(prim) ++ " missing validate()");
-        if (!@hasDecl(Op, "infer_output"))
-            @compileError("Op " ++ @tagName(prim) ++ " missing infer_output()");
+        inline for (op_methods) |m| {
+            if (m.required and !@hasDecl(Op, m.name)) {
+                @compileError("op " ++ @tagName(prim) ++ " missing required method: " ++ m.name);
+            }
+        }
+    }
+}
+
+/// Comptime coverage report.
+///
+/// Emits one `@compileLog` per row so each line shows up as its own output
+///  entry since a single multi-line `@compileLog` would serialize with `\n`
+///  escaped, which is unreadable.
+///
+/// Opt-in via `-Demit-op-coverage=true`.
+fn emit_op_coverage_report() void {
+    @setEvalBranchQuota(100000);
+    @compileLog("== op interface coverage ==");
+
+    // Header row.
+    comptime var header: []const u8 = std.fmt.comptimePrint("  {s: <18}", .{"op"});
+    inline for (op_methods) |m| {
+        header = header ++ std.fmt.comptimePrint(" {s: <13}", .{m.name});
+    }
+    @compileLog(header);
+
+    // inline for unrolls, each op gets a row
+    inline for (comptime std.enums.values(pr.Prim)) |prim| {
+        const Op = OpFor(prim);
+        comptime var row: []const u8 = std.fmt.comptimePrint("  {s: <18}", .{@tagName(prim)});
+        inline for (op_methods) |m| {
+            row = row ++ std.fmt.comptimePrint(" {s: <13}", .{
+                if (@hasDecl(Op, m.name)) "yes" else "-",
+            });
+        }
+        @compileLog(row);
+    }
+
+    @compileLog('-' ** 30 ++ "totals" ++ '-' ** 30);
+    inline for (op_methods) |m| {
+        comptime var hits: usize = 0;
+        inline for (comptime std.enums.values(pr.Prim)) |prim| {
+            if (@hasDecl(OpFor(prim), m.name)) hits += 1;
+        }
+        const line = comptime std.fmt.comptimePrint("  {s: <13} {d}/{d}  {s}", .{
+            m.name,
+            hits,
+            std.enums.values(pr.Prim).len,
+            m.doc,
+        });
+        @compileLog(line);
     }
 }
 
 comptime {
     validate_op_interface();
+    if (build_options.emit_op_coverage) emit_op_coverage_report();
 }
 
 // ============================================================================
@@ -87,25 +177,18 @@ pub fn infer_output(alloc: std.mem.Allocator, params: pr.Params, inputs: []const
     }
 }
 
-/// Check if an op supports VJP.
+/// Check if an op supports VJP by providing `vjp_forward` and `vjp_backward`.
 pub fn has_vjp(prim: pr.Prim) bool {
-    inline for (comptime std.enums.values(pr.Prim)) |p| {
-        if (prim == p) {
-            const Op = OpFor(p);
-            return @hasDecl(Op, "vjp_forward") and @hasDecl(Op, "vjp_backward");
-        }
-    }
-    unreachable;
+    return switch (prim) {
+        inline else => |p| @hasDecl(OpFor(p), "vjp_forward") and @hasDecl(OpFor(p), "vjp_backward"),
+    };
 }
 
-/// Check if an op has VJP forward (for primals computation).
+/// Check if an op has VJP forward for computing primals.
 pub fn has_vjp_forward(prim: pr.Prim) bool {
-    inline for (comptime std.enums.values(pr.Prim)) |p| {
-        if (prim == p) {
-            return @hasDecl(OpFor(p), "vjp_forward");
-        }
-    }
-    unreachable;
+    return switch (prim) {
+        inline else => |p| @hasDecl(OpFor(p), "vjp_forward"),
+    };
 }
 
 /// Execute VJP forward pass for an op.
@@ -116,7 +199,6 @@ pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             if (@hasDecl(Handler, "vjp_forward")) {
                 return Handler.vjp_forward(ctx, op, typed_params);
             }
-            // std.log.warn("missing vjp_forward for {s}", .{@tagName(tag)});
             return error.UnsupportedEqn;
         },
     }
@@ -138,12 +220,9 @@ pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
 
 /// Check if an op supports JVP.
 pub fn has_jvp(prim: pr.Prim) bool {
-    inline for (comptime std.enums.values(pr.Prim)) |p| {
-        if (prim == p) {
-            return @hasDecl(OpFor(p), "jvp");
-        }
-    }
-    unreachable;
+    return switch (prim) {
+        inline else => |p| @hasDecl(OpFor(p), "jvp"),
+    };
 }
 
 /// Execute JVP for an op (forward-mode tangent propagation).
@@ -175,14 +254,6 @@ pub fn format(writer: *types.Writer, op: *const pr.Op) types.FormatError!void {
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "all prims have op implementations" {
-    inline for (comptime std.enums.values(pr.Prim)) |prim| {
-        const Op = OpFor(prim);
-        try std.testing.expect(@hasDecl(Op, "validate"));
-        try std.testing.expect(@hasDecl(Op, "infer_output"));
-    }
-}
 
 test "vjp support detection" {
     try std.testing.expect(has_vjp(.add));
