@@ -26,10 +26,9 @@
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
-const backend_mod = @import("../backend/root.zig");
-const Backend = backend_mod.Backend;
+const Backend = @import("../Backend.zig");
 const Tensor = @import("../tensor.zig");
-const utils = @import("../utils/root.zig");
+const utils = @import("../utils.zig");
 const meta = utils.meta;
 const RuntimeOf = utils.RuntimeOf;
 const TensorTree = utils.Tree(Tensor);

@@ -1,12 +1,12 @@
-const host_buffer = @import("host_buffer.zig");
-const loop_timer = @import("loop_timer.zig");
-const tree = @import("tree.zig");
-const symbols = @import("symbols.zig");
-const mmap = @import("mmap.zig");
+const host_buffer = @import("utils/host_buffer.zig");
+const loop_timer = @import("utils/loop_timer.zig");
+const tree = @import("utils/tree.zig");
+const symbols = @import("utils/symbols.zig");
+const mmap = @import("utils/mmap.zig");
 
-pub const rtti = @import("rtti.zig");
-pub const safetensors = @import("safetensors.zig");
-pub const meta = @import("meta.zig");
+pub const rtti = @import("utils/rtti.zig");
+pub const safetensors = @import("utils/safetensors.zig");
+pub const meta = @import("utils/meta.zig");
 pub const HostBuffer = host_buffer.HostBuffer;
 pub const LoopTimer = loop_timer.LoopTimer;
 pub const Symbols = symbols.Symbols;

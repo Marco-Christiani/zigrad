@@ -474,7 +474,7 @@ pub fn run_train_demo(
 /// backend dispatches via `DispatchRegistry` at execute time.
 pub fn run_kernel_provider_demo(
     allocator: std.mem.Allocator,
-    pjrt_backend: *zg.backend.pjrt.Backend,
+    pjrt_backend: *zg.pjrt.Backend,
     device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,

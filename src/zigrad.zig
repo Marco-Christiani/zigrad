@@ -21,29 +21,33 @@ const std = @import("std");
 pub const build_options = @import("build_options");
 
 // Core modules
-pub const pr = @import("pr/root.zig");
+pub const pr = @import("pr.zig");
 pub const frontend = @import("frontend/frontend.zig");
-pub const pipeline = @import("pipeline/root.zig");
-pub const backend = @import("backend/root.zig");
+pub const pipeline = @import("pipeline.zig");
 pub const lower = @import("lower.zig");
 pub const kernel = @import("kernel.zig");
 pub const tune = @import("tune.zig");
 pub const Cache = @import("cache.zig").Cache;
-pub const utils = @import("utils/root.zig");
+pub const utils = @import("utils.zig");
 
 // TVM subsystem (gated by SDK header availability)
-pub const tvm = if (build_options.has_tvm) @import("tvm/root.zig") else struct {};
+pub const tvm = if (build_options.has_tvm) @import("tvm.zig") else struct {};
 
 // Mirage subsystem (gated by SDK header availability)
-pub const mirage = if (build_options.has_mirage) @import("mirage/root.zig") else struct {};
+pub const mirage = if (build_options.has_mirage) @import("mirage.zig") else struct {};
 
 // Tier 1: commonly used types at top level
-pub const Backend = backend.Backend;
 pub const Tensor = @import("tensor.zig");
 pub const HostBuffer = utils.HostBuffer;
 pub const DType = pr.DType;
 pub const Shape = pr.Shape;
 pub const BoundedShape = pr.BoundedShape;
+
+// Backends
+pub const Backend = @import("Backend.zig");
+pub const pjrt = @import("backend/pjrt.zig");
+/// IREE backend module.  Only compiled when `-Diree-backend=true`.
+pub const iree = if (build_options.has_iree) @import("backend/iree.zig") else struct {};
 
 // Tier 1: commonly used functions at top level
 pub const jit = frontend.jit;
@@ -55,5 +59,6 @@ pub const from_safetensors = utils.safetensors.from_safetensors;
 pub const FromSafetensorsOpts = utils.safetensors.Opts;
 
 test {
+    @setEvalBranchQuota(10000);
     std.testing.refAllDecls(@This());
 }

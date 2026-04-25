@@ -135,7 +135,7 @@ pub fn main() !void {
     };
     defer gpa.free(plugin_path);
 
-    var pjrt_backend = try zg.backend.pjrt.Backend.init(gpa, plugin_path);
+    var pjrt_backend = try zg.pjrt.Backend.init(gpa, plugin_path);
     defer pjrt_backend.deinit();
     const b = &pjrt_backend.interface;
 
@@ -152,7 +152,7 @@ pub fn main() !void {
             log.err("aot-demo requires MLIR (build with -Dmlir=true)", .{});
             return error.MlirDisabled;
         }
-        const pjrt_device: *const zg.backend.pjrt.Device = @ptrCast(@alignCast(device.handle));
+        const pjrt_device: *const zg.pjrt.Device = @ptrCast(@alignCast(device.handle));
         return main_aot.run(gpa, &pjrt_backend, pjrt_device);
     }
     // Commands that require MLIR lowering
@@ -401,13 +401,13 @@ fn iree_subprocess_compiler(
     target_backend: []const u8,
     flag_buf: *[128]u8,
     flags: *[2][]const u8,
-) !zg.backend.iree.Compiler {
+) !zg.iree.Compiler {
     const backend_flag = std.fmt.bufPrint(flag_buf, "--iree-hal-target-backends={s}", .{target_backend}) catch {
         log.err("IREE target backend name too long: '{s}'", .{target_backend});
         return error.BackendNameTooLong;
     };
     flags.* = .{ backend_flag, "--iree-input-type=stablehlo" };
-    return zg.backend.iree.Compiler.init_subprocess(exe_path, flags);
+    return zg.iree.Compiler.init_subprocess(exe_path, flags);
 }
 
 const LowerResult = struct {
@@ -434,8 +434,6 @@ fn run_iree_demo(
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
-    const iree_mod = zg.backend.iree;
-
     const compiler_exe = try iree_env(gpa, "IREE_COMPILE_EXE", "iree-compile");
     defer gpa.free(compiler_exe);
 
@@ -451,7 +449,7 @@ fn run_iree_demo(
     defer gpa.free(target_backend);
     const compiler = iree_subprocess_compiler(compiler_exe, target_backend, &flag_buf, &iree_flags) catch
         return error.BackendNameTooLong;
-    var backend = try iree_mod.Backend.init(gpa, compiler, driver);
+    var backend = try zg.iree.Backend.init(gpa, compiler, driver);
     defer backend.deinit();
 
     const devs = try backend.get_devices(gpa);
@@ -490,7 +488,7 @@ fn run_iree_demo(
     var buf_c = try backend.buffer_from_host(device, std.mem.asBytes(&C), .f32, &[_]i64{ 2, 2 });
     defer backend.deinit_buffer(&buf_c);
 
-    const inputs = [_]iree_mod.Buffer{ buf_a, buf_b, buf_c };
+    const inputs = [_]zg.iree.Buffer{ buf_a, buf_b, buf_c };
     var result = try backend.execute(&exe, gpa, &inputs, .{});
     defer {
         for (result.outputs) |*b| backend.deinit_buffer(b);

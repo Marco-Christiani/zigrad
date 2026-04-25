@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const zigrad_mod = b.addModule("zigrad", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/zigrad.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

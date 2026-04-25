@@ -18,9 +18,9 @@
 //! Provides concrete implementations only for ubiquitous patterns,
 //!  currently only `.transfer()`.
 const std = @import("std");
-const pr = @import("../pr/pr.zig");
-const kernel = @import("../kernel.zig");
-const utils = @import("../utils/root.zig");
+const pr = @import("pr/pr.zig");
+const kernel = @import("kernel.zig");
+const utils = @import("utils.zig");
 const host_buffer = utils.host_buffer;
 const Tree = utils.Tree;
 

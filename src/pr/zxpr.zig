@@ -1,0 +1,188 @@
+const std = @import("std");
+
+pub const Emitter = @import("zxpr/Emitter.zig");
+pub const style = @import("zxpr/style.zig");
+const json = @import("json.zig");
+const pr = @import("pr.zig");
+
+const Writer = std.Io.Writer;
+
+pub const OutputTarget = union(enum) {
+    stdout,
+    file: []const u8,
+};
+
+pub const ZxprMode = enum {
+    auto,
+    plain,
+};
+
+pub const ZxprSpec = struct {
+    mode: ZxprMode = .auto,
+    style_opts: style.ConfigOpts = .{},
+};
+
+pub const DumpSpec = union(enum) {
+    zxpr: ZxprSpec,
+    json,
+};
+
+pub const Config = struct {
+    target: OutputTarget = .stdout,
+    spec: DumpSpec = .{ .zxpr = .{} },
+
+    /// Optional label identifying which PR function was selected as entry.
+    /// Printed as "entry: <name>" header in ZXPR output for user reference.
+    /// Does not affect actual function names in the dumped content.
+    entry_name: ?[]const u8 = null,
+};
+
+pub fn emit_program(program: *const pr.Program, writer: *Writer, cfg: Config) !void {
+    switch (cfg.spec) {
+        .json => try json.emit_program(program, writer),
+        .zxpr => |zx| {
+            if (cfg.entry_name) |name| {
+                try writer.print("entry: {s}\n", .{name});
+            }
+
+            const mode: style.ConfigMode = switch (zx.mode) {
+                .plain => .plain,
+                .auto => switch (cfg.target) {
+                    .stdout => .auto_stdout,
+                    .file => .plain,
+                },
+            };
+            const zx_cfg = style.config(mode, zx.style_opts);
+
+            for (program.functions, 0..) |func, i| {
+                if (i > 0) try writer.writeAll("\n");
+                try emit(func, writer, zx_cfg);
+            }
+        },
+    }
+}
+
+/// Emit ZXPR representation of a function.
+pub fn emit(func: pr.Function, writer: *Writer, cfg: style.Config) !void {
+    var emitter = Emitter.init(writer, func, cfg);
+    try emitter.emit();
+}
+
+/// Emit a single param declaration: `a: 2x3<f32>`
+pub fn emit_param_line(v: *const pr.Var, writer: *Writer) !void {
+    // Create a minimal emitter just for formatting
+    const dummy_func = pr.Function{
+        .name = "",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+    var emitter = Emitter.init(writer, dummy_func, style.config(.plain, .{}));
+    try emitter.emit_var_with_type(v);
+}
+
+/// Emit a single op binding: `c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp`
+pub fn emit_op_line(op: *const pr.Op, writer: *Writer) !void {
+    const dummy_func = pr.Function{
+        .name = "",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+    var emitter = Emitter.init(writer, dummy_func, style.config(.plain, .{}));
+    try emitter.emit_binding(op);
+}
+
+/// Emit a region block: header + ops + footer.
+pub fn emit_region_block(func: pr.Function, region: pr.Region, writer: *Writer) !void {
+    var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
+    try emitter.emit_region_start(0, region);
+    const op_end = region.op_start + region.op_len;
+    var op_i: u32 = region.op_start;
+    while (op_i < op_end and op_i < func.ops.len) : (op_i += 1) {
+        try writer.writeAll("  ");
+        try emitter.emit_binding(func.ops[op_i]);
+        try writer.writeAll("\n");
+    }
+    try emitter.emit_region_end(0);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
+test "zxpr format" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const a = try b.param_tensor(.f32, &.{ 2, 3 });
+    const c = try b.param_tensor(.f32, &.{ 3, 2 });
+    const d = try b.dot(a, c);
+    const func = try b.finish(&.{d});
+
+    var buf: [512]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w, style.config(.plain, .{}));
+
+    const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "zxpr main {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "; params (2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "a: 2x3<f32>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "let\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "dot[contracting=([1], [0])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "; vjp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "in c") != null);
+}
+
+test "zxpr with transpose shows permutation" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "t");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
+    const y = try b.transpose(x, &.{ 1, 0 });
+    const func = try b.finish(&.{y});
+
+    var buf: [256]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w, style.config(.plain, .{}));
+
+    const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "transpose[perm=[1, 0]]") != null);
+}
+
+test "zxpr kernelize region annotations" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "k");
+    defer b.deinit();
+
+    const a = try b.param_tensor(.f32, &.{ 2, 2 });
+    const c = try b.param_tensor(.f32, &.{ 2, 2 });
+
+    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    const add1 = try b.add(a, c);
+    const add2 = try b.add(add1, c);
+    try b.pop_region();
+
+    const out = try b.add(add2, c);
+    const func = try b.finish(&.{out});
+
+    var buf: [512]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w, style.config(.plain, .{}));
+
+    const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[kernelize=tvm]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "<") != null);
+}

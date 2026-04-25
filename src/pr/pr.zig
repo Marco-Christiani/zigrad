@@ -518,6 +518,47 @@ pub const Var = struct {
     }
 };
 
+/// Generate readable variable name from ID: 0->a, 1->b, ..., 26->aa, etc.
+pub fn var_name(id: u32) []const u8 {
+    const names = comptime blk: {
+        @setEvalBranchQuota(20000);
+        const single = 26;
+        const double = 26 * 26;
+        const triple = 26 * 26 * 26;
+        const total = single + double + triple;
+        var arr: [total][]const u8 = undefined;
+        for (0..total) |i| {
+            if (i < single) {
+                arr[i] = &[_]u8{'a' + @as(u8, @intCast(i))};
+            } else if (i < single + double) {
+                const idx = i - single;
+                const first = 'a' + @as(u8, @intCast(idx / 26));
+                const second = 'a' + @as(u8, @intCast(idx % 26));
+                arr[i] = &[_]u8{ first, second };
+            } else {
+                const idx = i - single - double;
+                const first = 'a' + @as(u8, @intCast(idx / (26 * 26)));
+                const second = 'a' + @as(u8, @intCast((idx / 26) % 26));
+                const third = 'a' + @as(u8, @intCast(idx % 26));
+                arr[i] = &[_]u8{ first, second, third };
+            }
+        }
+        break :blk arr;
+    };
+    if (id < names.len) return names[id];
+    return "???"; // fallback for very large programs
+}
+
+test var_name {
+    try std.testing.expectEqualStrings("a", var_name(0));
+    try std.testing.expectEqualStrings("b", var_name(1));
+    try std.testing.expectEqualStrings("z", var_name(25));
+    try std.testing.expectEqualStrings("aa", var_name(26));
+    try std.testing.expectEqualStrings("ab", var_name(27));
+    try std.testing.expectEqualStrings("zz", var_name(701));
+    try std.testing.expectEqualStrings("aaa", var_name(702));
+}
+
 /// A use-chain node linking a consuming Op to the Var it reads.
 pub const Operand = struct {
     value: *Var,
@@ -1268,6 +1309,12 @@ pub const FunctionBuilder = struct {
 // ============================================================================
 // Tests
 // ============================================================================
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("tests/eval.zig");
+    _ = @import("tests/grad_check.zig");
+}
 
 test "FunctionBuilder reshape validation" {
     var program = Program.init(std.testing.allocator);

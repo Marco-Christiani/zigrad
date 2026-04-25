@@ -1,9 +1,8 @@
 const std = @import("std");
 
-const backend = @import("../backend/root.zig");
-const Backend = backend.Backend;
+const Backend = @import("../Backend.zig");
 const Tensor = @import("../tensor.zig");
-const TensorTree = @import("../utils/root.zig").Tree(Tensor);
+const TensorTree = @import("../utils.zig").Tree(Tensor);
 
 /// Manages device buffer state across training steps.
 ///

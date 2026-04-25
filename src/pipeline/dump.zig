@@ -2,12 +2,12 @@ const std = @import("std");
 
 const pass = @import("pass.zig");
 const pr = @import("../pr/pr.zig");
-const pr_dump = @import("../pr/dump.zig");
+const zxpr = @import("../pr/zxpr.zig");
 const hlo_decode = @import("../c/xla/hlo_decode.zig");
 
-pub const DumpTarget = pr_dump.OutputTarget;
-pub const DumpSpec = pr_dump.DumpSpec;
-pub const DumpConfig = pr_dump.Config;
+pub const DumpTarget = zxpr.OutputTarget;
+pub const DumpSpec = zxpr.DumpSpec;
+pub const DumpConfig = zxpr.Config;
 
 fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     _ = ctx;
@@ -20,7 +20,7 @@ fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContex
         program: *const pr.Program,
         cfg: DumpConfig,
         fn run(self: @This(), out: *std.Io.Writer) !void {
-            try pr_dump.emit_program(self.program, out, self.cfg);
+            try zxpr.emit_program(self.program, out, self.cfg);
         }
     }{
         .program = program,
@@ -155,7 +155,7 @@ test "emit_program includes entry header and zxpr output" {
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
 
-    try pr_dump.emit_program(&program, &writer_state.writer, .{
+    try zxpr.emit_program(&program, &writer_state.writer, .{
         .target = .stdout,
         .entry_name = "test_main",
         .spec = .{ .zxpr = .{ .mode = .plain } },
@@ -182,7 +182,7 @@ test "emit_program json format" {
     var writer_state = std.Io.Writer.Allocating.init(testing.allocator);
     defer writer_state.deinit();
 
-    try pr_dump.emit_program(&program, &writer_state.writer, .{
+    try zxpr.emit_program(&program, &writer_state.writer, .{
         .target = .stdout,
         .entry_name = "main",
         .spec = .json,

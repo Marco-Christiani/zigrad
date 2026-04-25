@@ -44,11 +44,10 @@ const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
 const lower = @import("../lower.zig");
-const pipeline = @import("../pipeline/root.zig");
-const backend_mod = @import("../backend/root.zig");
-const Backend = backend_mod.Backend;
+const pipeline = @import("../pipeline.zig");
+const Backend = @import("../Backend.zig");
 const Tensor = @import("../tensor.zig");
-const TensorTree = @import("../utils/root.zig").Tree(Tensor);
+const TensorTree = @import("../utils.zig").Tree(Tensor);
 
 /// Typed compiled function wrapper (trace + compile + typed call).
 pub const jit_mod = @import("jit.zig");

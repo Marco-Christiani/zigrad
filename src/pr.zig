@@ -1,4 +1,4 @@
-const core = @import("pr.zig");
+const core = @import("pr/pr.zig");
 
 pub const DType = core.DType;
 pub const Shape = core.Shape;
@@ -46,14 +46,11 @@ pub const validate_program = core.validate_program;
 pub const BuildError = core.BuildError;
 pub const FunctionBuilder = core.FunctionBuilder;
 
-pub const ad = @import("ad.zig");
-pub const dump = @import("dump.zig");
-pub const json = @import("json.zig");
-pub const zxpr = @import("zxpr/root.zig");
-pub const ops = @import("ops/ops.zig");
+pub const ad = @import("pr/ad.zig");
+pub const json = @import("pr/json.zig");
+pub const zxpr = @import("pr/zxpr.zig");
+pub const ops = @import("pr/ops/ops.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
-    // pure tests are not part of public api
-    _ = @import("tests/root.zig");
 }

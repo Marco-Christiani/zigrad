@@ -9,10 +9,9 @@
 const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
-const zxpr = @import("zxpr/root.zig");
+const zxpr = @import("zxpr.zig");
 
 const Writer = std.Io.Writer;
-const var_name = zxpr.var_name;
 
 /// Emit a Function as a JSON graph.
 ///
@@ -73,7 +72,7 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
     try writer.writeAll(",\"returns\":[");
     for (func.returns, 0..) |ret_var, i| {
         if (i > 0) try writer.writeAll(",");
-        try write_json_string(writer, var_name(ret_var.id));
+        try write_json_string(writer, pr.var_name(ret_var.id));
     }
     try writer.writeAll("]");
 
@@ -111,7 +110,7 @@ fn emit_param_node(writer: *Writer, v: *const pr.Var, param_index: usize) !void 
     try op_node_id(writer, "p", param_index);
     try writer.writeAll(",\"kind\":\"param\"");
     try writer.writeAll(",\"label\":");
-    try write_json_string(writer, var_name(v.id));
+    try write_json_string(writer, pr.var_name(v.id));
     try emit_zxpr_field_param(writer, v);
     try writer.writeAll("}");
 }
@@ -129,7 +128,7 @@ fn emit_op_node(writer: *Writer, op: *const pr.Op, op_index: usize) !void {
     // Label: "out_var = prim" (first output for display)
     if (op.outputs.len > 0) {
         try writer.writeAll(",\"label\":\"");
-        try writer.writeAll(var_name(op.outputs[0].id));
+        try writer.writeAll(pr.var_name(op.outputs[0].id));
         try writer.writeAll(" = ");
         try writer.writeAll(@tagName(prim));
         try writer.writeAll("\"");
@@ -184,7 +183,7 @@ fn emit_var_edge(writer: *Writer, v: *const pr.Var, target_op_idx: usize, port: 
 
     // Var identity
     try writer.writeAll(",\"var\":");
-    try write_json_string(writer, var_name(v.id));
+    try write_json_string(writer, pr.var_name(v.id));
 
     // Var type
     try emit_aval_fields(writer, v.aval);

@@ -141,7 +141,7 @@ pub fn main() !void {
         std.log.err("set PJRT_PLUGIN_PATH to a PJRT plugin (.so)", .{});
         return error.MissingPlugin;
     };
-    var pjrt_backend = try zg.backend.pjrt.Backend.init(allocator, plugin_path);
+    var pjrt_backend = try zg.pjrt.Backend.init(allocator, plugin_path);
     defer pjrt_backend.deinit();
     const backend = &pjrt_backend.interface;
     const devs = try backend.get_devices(allocator);

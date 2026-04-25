@@ -3,7 +3,7 @@ const std = @import("std");
 const zg = @import("zigrad");
 const pr = zg.pr;
 const lower = zg.lower;
-const backend = zg.backend;
+const backend = zg.pjrt;
 const config = @import("config.zig");
 
 const DeviceKind = @import("harness.zig").DeviceKind;
@@ -11,9 +11,9 @@ const DeviceKind = @import("harness.zig").DeviceKind;
 /// XLA execution context (cached backend, device, and compiled executables).
 pub const XlaContext = struct {
     allocator: std.mem.Allocator,
-    backend_handle: *backend.pjrt.Backend,
-    device: *const backend.pjrt.Device,
-    compiled_cache: std.StringHashMap(*backend.pjrt.LoadedExecutable),
+    backend_handle: *backend.Backend,
+    device: *const backend.Device,
+    compiled_cache: std.StringHashMap(*backend.LoadedExecutable),
 
     pub fn init(allocator: std.mem.Allocator, device: DeviceKind) !XlaContext {
         const env_var = switch (device) {
@@ -25,10 +25,10 @@ pub const XlaContext = struct {
             .gpu => error.PjrtGpuPluginPathNotSet,
         };
 
-        const backend_handle = try allocator.create(backend.pjrt.Backend);
+        const backend_handle = try allocator.create(backend.Backend);
         errdefer allocator.destroy(backend_handle);
 
-        backend_handle.* = try backend.pjrt.Backend.init(allocator, plugin_path);
+        backend_handle.* = try backend.Backend.init(allocator, plugin_path);
 
         const devices = try backend_handle.get_devices(allocator);
         if (devices.len == 0) return error.NoDevicesFound;
@@ -37,7 +37,7 @@ pub const XlaContext = struct {
             .allocator = allocator,
             .backend_handle = backend_handle,
             .device = &devices[0],
-            .compiled_cache = std.StringHashMap(*backend.pjrt.LoadedExecutable).init(allocator),
+            .compiled_cache = std.StringHashMap(*backend.LoadedExecutable).init(allocator),
         };
     }
 
@@ -108,7 +108,7 @@ pub const XlaContext = struct {
         self: *XlaContext,
         shape: config.Shape,
         dtype: config.DType,
-    ) !*backend.pjrt.LoadedExecutable {
+    ) !*backend.LoadedExecutable {
         var program = pr.Program.init(self.allocator);
         defer program.deinit();
 
@@ -130,7 +130,7 @@ pub const XlaContext = struct {
         );
         defer self.allocator.free(mlir_bytes);
 
-        const executable = try self.allocator.create(backend.pjrt.LoadedExecutable);
+        const executable = try self.allocator.create(backend.LoadedExecutable);
         errdefer self.allocator.destroy(executable);
 
         executable.* = try self.backend_handle.compile(

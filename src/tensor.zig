@@ -22,9 +22,8 @@
 //!  need to switch on backing for basic type queries.
 const std = @import("std");
 const pr = @import("pr/pr.zig");
-const backend_mod = @import("backend/root.zig");
-const Backend = backend_mod.Backend;
-const utils = @import("utils/root.zig");
+const Backend = @import("Backend.zig");
+const utils = @import("utils.zig");
 const HostBuffer = utils.HostBuffer;
 
 const Tensor = @This();

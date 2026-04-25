@@ -4,8 +4,8 @@ const demos = @import("demos.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.pjrt.Backend,
-    device: *const zg.backend.pjrt.Device,
+    backend: *zg.pjrt.Backend,
+    device: *const zg.pjrt.Device,
 ) !void {
     var program = try demos.build_demo_program(allocator);
     defer program.deinit();
@@ -32,9 +32,9 @@ pub fn run(
 
 fn run_demo_executable(
     allocator: std.mem.Allocator,
-    backend: *zg.backend.pjrt.Backend,
-    device: *const zg.backend.pjrt.Device,
-    exe: *zg.backend.pjrt.LoadedExecutable,
+    backend: *zg.pjrt.Backend,
+    device: *const zg.pjrt.Device,
+    exe: *zg.pjrt.LoadedExecutable,
 ) !void {
     // Inputs (A: 2x3, B: 3x2, C: 2x2)
     const A = [_]f32{

@@ -23,7 +23,8 @@ const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
-const BackendInterface = @import("Backend.zig");
+// TODO: is this a boundary violation or is iree incomplete? needs consideration.
+const BackendInterface = @import("../Backend.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const pjrt_types = @import("../c/pjrt/types.zig");

@@ -29,7 +29,7 @@ const std = @import("std");
 const pr = @import("../pr/pr.zig");
 const ad = @import("../pr/ad.zig");
 const ops = @import("../pr/ops/ops.zig");
-const utils = @import("../utils/root.zig");
+const utils = @import("../utils.zig");
 const meta = utils.meta;
 const Tree = utils.Tree;
 
