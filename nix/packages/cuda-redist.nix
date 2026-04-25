@@ -15,7 +15,7 @@
   # CUDA version to resolve from nix/versions.json (e.g. "12.8.1", "12.9.1").
   cudaVersion,
 }: let
-  versionsJson = builtins.fromJSON (builtins.readFile ./versions.json);
+  versionsJson = builtins.fromJSON (builtins.readFile ../versions.json);
 
   availableVersions = builtins.attrNames versionsJson.cuda;
 

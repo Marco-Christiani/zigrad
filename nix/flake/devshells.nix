@@ -54,7 +54,7 @@
       export PATH="${clangdWrapped}/bin:${zigradMlirExtDev}/bin:$PATH"
     '';
 
-    pyShellPkgs = pkgs.callPackage ../pydev.nix {
+    pyShellPkgs = pkgs.callPackage ./pydev.nix {
       inherit system cudaPackages uv2nix;
       "pyproject-nix" = inputs."pyproject-nix";
       "pyproject-build-systems" = inputs."pyproject-build-systems";

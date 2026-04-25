@@ -22,13 +22,13 @@ in {
       then inputs.mpk.packages.${system}.mirage-runtime
       else null;
 
-    zigradSrc = import ../source-filter.nix {
+    zigradSrc = import ../helpers/source-filter.nix {
       inherit (pkgs) lib;
       root = ../..;
     };
 
     inherit
-      (import ../targets.nix {
+      (import ../helpers/targets.nix {
         inherit pkgs cudaPackages gccHost;
         inherit (cudaCfg) cudaArchitectures;
         inherit (pkgs) zig;
@@ -62,13 +62,13 @@ in {
     '';
 
     # LLVM 22 from XLA-pinned sources. Shared by MLIR SDK and TVM.
-    llvm = pkgs.callPackage ../llvm.nix {inherit xlaSrc llvmSrc;};
+    llvm = pkgs.callPackage ../packages/llvm.nix {inherit xlaSrc llvmSrc;};
 
-    xlaMlirStablehloCapiSdk = pkgs.callPackage ../xla-mlir-stablehlo-capi-sdk.nix {
+    xlaMlirStablehloCapiSdk = pkgs.callPackage ../packages/xla-mlir-stablehlo-capi-sdk.nix {
       inherit xlaSrc stablehloSrc llvm;
     };
 
-    zigradMlirExt = pkgs.callPackage ../zigrad-mlir-ext.nix {
+    zigradMlirExt = pkgs.callPackage ../packages/zigrad-mlir-ext.nix {
       inherit xlaMlirStablehloCapiSdk llvm;
       src = let
         fs = lib.fileset;
@@ -85,7 +85,7 @@ in {
         };
     };
 
-    xlaPjrtPlugins = pkgs.callPackage ../xla-pjrt-runtime-bazel.nix {
+    xlaPjrtPlugins = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
       inherit xlaSrc;
       cudaSupport = false;
       cpuMathLibrary = "onednn";
@@ -93,7 +93,7 @@ in {
       depsHash = "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=";
     };
 
-    xlaPjrtPluginsCuda = pkgs.callPackage ../xla-pjrt-runtime-bazel.nix {
+    xlaPjrtPluginsCuda = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
       inherit xlaSrc;
       inherit (cudaCfg) cudaArchitectures cudaVersion;
       cudaSupport = true;
@@ -102,28 +102,28 @@ in {
       depsHash = "sha256-ivbrLtStbE1IW9hTiqyL0KoBdK9IZRPXcDmokH01eCE=";
     };
 
-    cudaRedist = pkgs.callPackage ../cuda-redist.nix {inherit (cudaCfg) cudaVersion;};
+    cudaRedist = pkgs.callPackage ../packages/cuda-redist.nix {inherit (cudaCfg) cudaVersion;};
 
     # TVM with shared LLVM 22 (avoids pass registry conflicts with MLIR SDK).
-    tvm = pkgs.callPackage ../tvm.nix {
+    tvm = pkgs.callPackage ../packages/tvm.nix {
       inherit cudaPackages gccHost llvm;
       inherit (cudaCfg) cudaArchitectures;
       cudaSupport = true;
     };
 
-    tvmCpu = pkgs.callPackage ../tvm.nix {
+    tvmCpu = pkgs.callPackage ../packages/tvm.nix {
       inherit cudaPackages gccHost llvm;
       inherit (cudaCfg) cudaArchitectures;
       cudaSupport = false;
     };
 
     # IREE: BYO-LLVM from iree-org fork (diverges from XLA-pinned llvm).
-    ireeLlvm = pkgs.callPackage ../iree-llvm.nix {inherit ireeLlvmSrc;};
-    ireeCompiler = pkgs.callPackage ../iree-compiler.nix {
+    ireeLlvm = pkgs.callPackage ../packages/iree/llvm.nix {inherit ireeLlvmSrc;};
+    ireeCompiler = pkgs.callPackage ../packages/iree/compiler.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
       withCli = true;
     };
-    ireeRuntime = pkgs.callPackage ../iree-runtime.nix {
+    ireeRuntime = pkgs.callPackage ../packages/iree/runtime.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
     };
 
@@ -208,7 +208,7 @@ in {
       };
     };
 
-    zigrad = pkgs.callPackage ../zigrad.nix {
+    zigrad = pkgs.callPackage ../packages/zigrad.nix {
       inherit zigradSrc;
       version = zigradVersion;
       sdk = sdkProfiles.full-gpu.compile;

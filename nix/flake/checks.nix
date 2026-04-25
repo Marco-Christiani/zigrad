@@ -7,14 +7,14 @@ in {
     config,
     ...
   }: let
-    zigradSrc = import ../source-filter.nix {
+    zigradSrc = import ../helpers/source-filter.nix {
       inherit (pkgs) lib;
       root = ../..;
     };
 
     zigrad = config.packages.zigrad;
 
-    zigradTests = pkgs.callPackage ../zigrad.nix {
+    zigradTests = pkgs.callPackage ../packages/zigrad.nix {
       inherit zigradSrc;
       version = zigradVersion;
       sdk = config.packages.zigrad-sdk-full-gpu-compile;

@@ -74,13 +74,13 @@ in
       postPatch = ''
         ${lib.optionalString useCustomLlvm ''
           # Apply LLVM 22 API compatibility patch
-          patch -p1 < ${./tvm-llvm22.patch}
+          patch -p1 < ${../patches/tvm-llvm22.patch}
         ''}
 
         ${lib.optionalString withPythonBindings ''
           # Enable Python module build in tvm-ffi subproject
           # By default, tvm-ffi skips Python module when used as a subdirectory
-          patch -p1 < ${./tvm-ffi-python.patch}
+          patch -p1 < ${../patches/tvm-ffi-python.patch}
         ''}
       '';
 
