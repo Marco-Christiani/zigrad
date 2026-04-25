@@ -344,7 +344,7 @@ tasks:
   iree:runner:run:
     desc: "Execute a VMFB with the minimal runner"
     deps: [iree:runner:build]
-    cmd: ./zig-out/bin/iree-runner {{.CLI_ARGS | default "demo.vmfb"}}
+    cmd: ./zig-out/bin/iree-runner {{.CLI_ARGS | default "demo.vmfb demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=3x2xf32=2,2,2,2,2,2 --input=2x2xf32=1,2,3,4"}}
 
   # Shim (MLIR dialect/pass development) ======================================
   shim:build:

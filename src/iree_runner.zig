@@ -50,6 +50,10 @@ pub fn main() !void {
         }
     }
 
+    if (input_specs.items.len == 0) {
+        return error.MissingInputs;
+    }
+
     const path = vmfb_path orelse {
         std.debug.print(
             \\usage: iree-runner <vmfb-path> [--function=module.main] [--driver=local-sync] [--input=<spec>...]
