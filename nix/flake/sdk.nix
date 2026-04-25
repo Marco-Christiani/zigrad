@@ -121,8 +121,7 @@ in {
     ireeLlvm = pkgs.callPackage ../iree-llvm.nix {inherit ireeLlvmSrc;};
     ireeCompiler = pkgs.callPackage ../iree-compiler.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
-      # include iree binaries
-      devel = true;
+      withCli = true;
     };
     ireeRuntime = pkgs.callPackage ../iree-runtime.nix {
       inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
@@ -147,7 +146,10 @@ in {
         name = "zigrad-sdk-compile";
         paths =
           [pjrtHeaders xlaProtos]
-          ++ lib.optional f.mlir xlaMlirStablehloCapiSdk
+          # .dev contains headers + full lib closure; needed for build-time
+          #  consumers (zig build, downstream cmake). .out has only the minimal
+          #  DT_NEEDED runtime closure (no headers).
+          ++ lib.optional f.mlir xlaMlirStablehloCapiSdk.dev
           ++ lib.optional f.mlir zigradMlirExt
           ++ lib.optional f.tvm tvm.dev
           ++ lib.optional f.gpu cudaCompileHeaders
@@ -240,6 +242,7 @@ in {
         tvm-cpu = tvmCpu;
         cuda-redist = cudaRedist;
         xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
+        xla-mlir-stablehlo-capi-sdk-dev = xlaMlirStablehloCapiSdk.dev;
         xla-pjrt-plugins = xlaPjrtPlugins;
         xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
         iree-llvm = ireeLlvm;

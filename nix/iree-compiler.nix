@@ -10,7 +10,7 @@
 #   $out/lib/libIREECompiler.so   - stable C embedding API
 #   $out/include/iree/compiler/   - embedding_api.h, loader.h, mlir_interop.h
 #   $out/include/mlir-c/          - MLIR C API headers (re-exported by IREE)
-#   $out/bin/iree-compile         - compiler CLI tool (when devel=true)
+#   $out/bin/iree-compile         - compiler CLI tool (when withCli=true)
 #
 # ## What is built
 #
@@ -47,12 +47,13 @@
   ireeBenchmarkSrc,
   # Pre-built LLVM+Clang+LLD+MLIR from iree-llvm.nix.
   ireeLlvm,
-  ## Install compiler tools (iree-compile, iree-opt, etc.) alongside the library.
-  devel ? false,
+  ## When true, build & install the compiler CLI tools (iree-compile, iree-opt,
+  ##  iree-run-module) into $out/bin alongside the embedding API library.
+  withCli ? false,
 }:
 stdenv.mkDerivation {
   pname = "iree-compiler";
-  version = "iree-${ireeSrc.shortRev or "unknown"}" + lib.optionalString devel "-devel";
+  version = "iree-${ireeSrc.shortRev or "unknown"}" + lib.optionalString withCli "-cli";
 
   # We do our own source setup: copy ireeSrc and inject submodule sources.
   dontUnpack = true;
@@ -167,7 +168,7 @@ stdenv.mkDerivation {
     log "Building libIREECompiler.so"
     ninja -C iree-build iree_compiler_API_SharedImpl
 
-    ${lib.optionalString devel ''
+    ${lib.optionalString withCli ''
       log "Building compiler tools"
       ninja -C iree-build iree-compile iree-opt iree-run-module
     ''}
@@ -198,9 +199,9 @@ stdenv.mkDerivation {
     fi
 
     # -----------------------------------------------------------------------
-    # Tools (devel only).
+    # Tools (only when withCli=true).
     # -----------------------------------------------------------------------
-    ${lib.optionalString devel ''
+    ${lib.optionalString withCli ''
       log "Installing compiler tools"
       mkdir -p "$out/bin"
       for tool in iree-compile iree-opt iree-run-module; do
@@ -244,7 +245,7 @@ stdenv.mkDerivation {
       patchelf --set-rpath "$lib_rpath" "$f" || true
     done
 
-    ${lib.optionalString devel ''
+    ${lib.optionalString withCli ''
       for f in "$out/bin/"*; do
         [ -f "$f" ] && [ -x "$f" ] || continue
         patchelf --set-rpath "$bin_rpath" "$f" 2>/dev/null || true

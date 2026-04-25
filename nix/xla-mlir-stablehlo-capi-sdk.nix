@@ -26,7 +26,6 @@
   stablehloSrc,
   # Pre-built LLVM/MLIR from llvm.nix (shared with TVM).
   llvm,
-  devel ? false,
 }: let
   stablehloPatches = ["temporary.patch"];
 
@@ -67,7 +66,13 @@
 in
   stdenv.mkDerivation {
     pname = "xla-mlir-stablehlo-capi-sdk";
-    version = "xla-${xlaSrc.shortRev or "unknown"}" + lib.optionalString devel "-devel";
+    version = "xla-${xlaSrc.shortRev or "unknown"}";
+
+    # out: headers + minimal (DT_NEEDED) lib closure for runtime use.
+    # dev: full lib closure (all StableHLO + LLVM/MLIR libs) for header
+    #      navigation, linking against extra MLIR libs, debugger symbol
+    #      resolution. Strict superset of `out`'s lib set.
+    outputs = ["out" "dev"];
 
     strictDeps = true;
     dontUnpack = true;
@@ -138,79 +143,79 @@ in
       mkdir -p "$out/include/xla/ffi/api"
       cp -v "${xlaSrc}/xla/ffi/api/"*.h "$out/include/xla/ffi/api/"
 
-      # --- Libraries ---
-      if [ "${lib.boolToString devel}" = "true" ]; then
-        log "Devel mode: copying ALL build artifacts"
-        # All StableHLO build artifacts
-        find stablehlo-build -type f \( -name "*.a" -o -name "*.so*" \) -print -exec cp -v {} "$out/lib/" \;
-        # All LLVM/MLIR libs from pre-built LLVM
-        for f in "${llvm}/lib/"*.so* "${llvm}/lib/"*.a; do
-          [ -f "$f" ] || continue
-          base="$(basename "$f")"
-          [ -f "$out/lib/$base" ] || cp -v "$f" "$out/lib/"
-        done
-      else
-        log "Minimal mode: copying MLIR-C + StablehloCAPI and DT_NEEDED closure"
+      # --- Libraries (out): minimal DT_NEEDED closure for runtime ---
+      log "Copying MLIR-C + StablehloCAPI and DT_NEEDED closure to out"
 
-        # Copy the two root DSOs
-        cp -v "${llvm}/lib/libMLIR-C.so"* "$out/lib/" || true
-        cp -v stablehlo-build/lib/libStablehloCAPI.so* "$out/lib/" || true
+      # Copy the two root DSOs
+      cp -v "${llvm}/lib/libMLIR-C.so"* "$out/lib/" || true
+      cp -v stablehlo-build/lib/libStablehloCAPI.so* "$out/lib/" || true
 
-        # Copy transitive deps from pre-built LLVM and StableHLO build tree.
-        copy_needed_closure() {
-          local search_dirs=("${llvm}/lib" "$PWD/stablehlo-build/lib")
-          local -A seen
-          local queue=("$@")
+      # Copy transitive deps from pre-built LLVM and StableHLO build tree.
+      copy_needed_closure() {
+        local search_dirs=("${llvm}/lib" "$PWD/stablehlo-build/lib")
+        local -A seen
+        local queue=("$@")
 
-          while [ "''${#queue[@]}" -gt 0 ]; do
-            local libpath="''${queue[0]}"
-            queue=("''${queue[@]:1}")
+        while [ "''${#queue[@]}" -gt 0 ]; do
+          local libpath="''${queue[0]}"
+          queue=("''${queue[@]:1}")
 
-            [ -f "$libpath" ] || continue
-            local base="$(basename "$libpath")"
-            if [ -n "''${seen[$base]:-}" ]; then
-              continue
-            fi
-            seen["$base"]=1
+          [ -f "$libpath" ] || continue
+          local base="$(basename "$libpath")"
+          if [ -n "''${seen[$base]:-}" ]; then
+            continue
+          fi
+          seen["$base"]=1
 
-            # Ensure it's present in output
-            if [ ! -f "$out/lib/$base" ]; then
-              cp -v "$libpath" "$out/lib/"
-            fi
+          # Ensure it's present in output
+          if [ ! -f "$out/lib/$base" ]; then
+            cp -v "$libpath" "$out/lib/"
+          fi
 
-            # Enqueue internal deps that we can find in search_dirs
-            while IFS= read -r need; do
-              local found=""
-              for d in "''${search_dirs[@]}"; do
-                if [ -f "$d/$need" ]; then
-                  found="$d/$need"
-                  break
-                fi
-              done
-              if [ -n "$found" ]; then
-                queue+=("$found")
+          # Enqueue internal deps that we can find in search_dirs
+          while IFS= read -r need; do
+            local found=""
+            for d in "''${search_dirs[@]}"; do
+              if [ -f "$d/$need" ]; then
+                found="$d/$need"
+                break
               fi
-            done < <(patchelf --print-needed "$libpath" || true)
-          done
-        }
+            done
+            if [ -n "$found" ]; then
+              queue+=("$found")
+            fi
+          done < <(patchelf --print-needed "$libpath" || true)
+        done
+      }
 
-        mlir_root="$(ls -1 "${llvm}/lib/libMLIR-C.so."* 2>/dev/null | head -n1 || true)"
-        stablehlo_root="$(ls -1 stablehlo-build/lib/libStablehloCAPI.so.* 2>/dev/null | head -n1 || true)"
-        copy_needed_closure "$mlir_root" "$stablehlo_root"
-      fi
+      mlir_root="$(ls -1 "${llvm}/lib/libMLIR-C.so."* 2>/dev/null | head -n1 || true)"
+      stablehlo_root="$(ls -1 stablehlo-build/lib/libStablehloCAPI.so.* 2>/dev/null | head -n1 || true)"
+      copy_needed_closure "$mlir_root" "$stablehlo_root"
 
-      # Files copied from the nix store are read-only; make writable for patchelf.
-      chmod -R u+w "$out/lib"
-
-      # Ensure unversioned linker names exist for the two link-entry DSOs
-      for name in libMLIR-C libStablehloCAPI; do
-        so="$(ls -1 "$out/lib/$name.so."* 2>/dev/null | head -n1 || true)"
-        if [ -n "$so" ]; then
-          ln -sfn "$(basename "$so")" "$out/lib/$name.so"
-        fi
+      # --- Libraries (dev): full closure for header navigation / extra linking ---
+      log "Copying ALL StableHLO + LLVM/MLIR build artifacts to dev"
+      mkdir -p "$dev/lib"
+      find stablehlo-build -type f \( -name "*.a" -o -name "*.so*" \) -exec cp -v {} "$dev/lib/" \;
+      for f in "${llvm}/lib/"*.so* "${llvm}/lib/"*.a; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        [ -f "$dev/lib/$base" ] || cp -v "$f" "$dev/lib/"
       done
 
-      # Patch RUNPATH for all shipped DSOs.
+      # Files copied from the nix store are read-only; make writable for patchelf.
+      chmod -R u+w "$out/lib" "$dev/lib"
+
+      # Ensure unversioned linker names exist for the two link-entry DSOs in both outputs.
+      for libdir in "$out/lib" "$dev/lib"; do
+        for name in libMLIR-C libStablehloCAPI; do
+          so="$(ls -1 "$libdir/$name.so."* 2>/dev/null | head -n1 || true)"
+          if [ -n "$so" ]; then
+            ln -sfn "$(basename "$so")" "$libdir/$name.so"
+          fi
+        done
+      done
+
+      # Patch RUNPATH for all shipped DSOs in both outputs.
       rpath="\$ORIGIN:\$ORIGIN/../runtime/sys/lib:${
         lib.makeLibraryPath [
           zlib
@@ -223,21 +228,25 @@ in
         ]
       }"
 
-      # hard fail on critical ones
-      for f in "$out/lib/"*.so*; do
-        [ -f "$f" ] || continue
-        if ! patchelf --set-rpath "$rpath" "$f"; then
-          case "$(basename "$f")" in
-            libMLIR-C.so*|libStablehloCAPI.so*)
-              log "ERROR: patchelf failed for critical DSO: $f"
-              exit 1
-              ;;
-            *)
-              log "WARNING: patchelf failed for non-critical DSO: $f"
-              ;;
-          esac
-        fi
-      done
+      patch_rpath_in() {
+        local libdir="$1"
+        for f in "$libdir/"*.so*; do
+          [ -f "$f" ] || continue
+          if ! patchelf --set-rpath "$rpath" "$f"; then
+            case "$(basename "$f")" in
+              libMLIR-C.so*|libStablehloCAPI.so*)
+                log "ERROR: patchelf failed for critical DSO: $f"
+                exit 1
+                ;;
+              *)
+                log "WARNING: patchelf failed for non-critical DSO: $f"
+                ;;
+            esac
+          fi
+        done
+      }
+      patch_rpath_in "$out/lib"
+      patch_rpath_in "$dev/lib"
 
       # Sanity check... C API dialect handle function should be present when StablehloCAPI is built properly.
       if [ -f "$out/lib/libStablehloCAPI.so" ]; then

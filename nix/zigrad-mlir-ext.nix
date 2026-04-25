@@ -27,10 +27,10 @@ stdenv.mkDerivation {
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
       -DZG_ENABLE_DEV_TARGETS=ON \
-      -DZG_SDK_INCLUDE=${xlaMlirStablehloCapiSdk}/include \
-      -DZG_SDK_LIB=${xlaMlirStablehloCapiSdk}/lib \
+      -DZG_SDK_INCLUDE=${xlaMlirStablehloCapiSdk.dev}/include \
+      -DZG_SDK_LIB=${xlaMlirStablehloCapiSdk.out}/lib \
       -DZG_LLVM_ROOT=${llvm} \
-      -DZG_INSTALL_RPATH="${xlaMlirStablehloCapiSdk}/lib:${llvm}/lib"
+      -DZG_INSTALL_RPATH="${xlaMlirStablehloCapiSdk.out}/lib:${llvm}/lib"
 
     cmake --build build --target zigrad_dev_tools
   '';

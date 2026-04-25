@@ -24,7 +24,10 @@
   enableCublas ? false,
   enableCudnn ? false,
   enableCutlass ? false,
-  devel ? false,
+  # When true, build & install TVM's Python/FFI bindings. Independent from the
+  #  `out`/`dev` output split: this controls *what gets compiled*, while outputs
+  #  control *which built artifacts go where*.
+  withPythonBindings ? false,
   tvmSrcOverride ? null,
   tvmRev ? "v0.22.0",
   tvmHash ? "sha256-KcHUcblwtqxNofHKofuQHu2d7hIqS9FUvc41OkCVtnY=",
@@ -74,7 +77,7 @@ in
           patch -p1 < ${./tvm-llvm22.patch}
         ''}
 
-        ${lib.optionalString devel ''
+        ${lib.optionalString withPythonBindings ''
           # Enable Python module build in tvm-ffi subproject
           # By default, tvm-ffi skips Python module when used as a subdirectory
           patch -p1 < ${./tvm-ffi-python.patch}
@@ -127,7 +130,7 @@ in
         set(USE_CUBLAS ${boolToCmake enableCublas})
         set(USE_CUDNN ${boolToCmake enableCudnn})
         set(USE_CUTLASS ${boolToCmake enableCutlass})
-        ${lib.optionalString devel "set(TVM_FFI_BUILD_PYTHON_MODULE ON)"}
+        ${lib.optionalString withPythonBindings "set(TVM_FFI_BUILD_PYTHON_MODULE ON)"}
         EOF
 
         ${lib.optionalString cudaEnabled ''
@@ -159,7 +162,7 @@ in
       '';
 
     # Note: we only ship headers + shared libs by default.
-    # Python/ffi bindings are included when devel=true for development/testing.
+    # Python/ffi bindings included when withPythonBindings=true.
     installPhase = ''
       set -euo pipefail
 
@@ -229,9 +232,8 @@ in
         patchelf --set-rpath "$rpath" "$f"
       done
 
-      ${lib.optionalString devel ''
-        # Include Python bindings for development/testing
-        echo "Including Python bindings (devel mode)"
+      ${lib.optionalString withPythonBindings ''
+        echo "Including Python bindings (withPythonBindings=true)"
         mkdir -p $out/python
 
         # Copy main TVM Python package
