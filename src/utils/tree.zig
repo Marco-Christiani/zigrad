@@ -111,6 +111,9 @@ pub fn Tree(comptime Leaf: type) type {
         /// Deinit every leaf, then free tree storage.
         ///
         /// Valid only for owned trees. Views do not own leaf storage.
+        /// TODO: based on usage pattern thus far, we can probably drop this
+        ///  as a separate method and just call the type's declared deinit
+        ///  method, at least by default.
         pub fn deinit_with(self: *Self, comptime deinit_fn: fn (*Leaf) void) void {
             std.debug.assert(self.view == null);
             for (self.leaves) |*leaf| deinit_fn(leaf);
@@ -795,8 +798,8 @@ test "contains, get, and get_const" {
 
     try std.testing.expect(tree.contains("a"));
     try std.testing.expect(!tree.contains("c"));
-    try std.testing.expectEqual(@as(i32, 42), (try tree.get("a")).*);
-    try std.testing.expectEqual(@as(i32, 99), try tree.get_const("b"));
+    try std.testing.expectEqual(@as(i32, 42), try tree.get("a"));
+    try std.testing.expectEqual(@as(i32, 99), try tree.get("b"));
     try std.testing.expectError(error.PathNotFound, tree.get("c"));
 }
 
@@ -865,8 +868,8 @@ test "subtree view with relative paths" {
     defer v.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), v.len());
-    try std.testing.expectEqual(@as(i32, 20), (try v.get("up_proj")).*);
-    try std.testing.expectEqual(@as(i32, 21), (try v.get("down_proj")).*);
+    try std.testing.expectEqual(@as(i32, 20), try v.get("up_proj"));
+    try std.testing.expectEqual(@as(i32, 21), try v.get("down_proj"));
     try std.testing.expectError(error.PathNotFound, v.get("layers.1.mlp.up_proj"));
 }
 
@@ -916,11 +919,11 @@ test "for_each_glob applies wildcard matches" {
         }
     }.f);
 
-    try std.testing.expectEqual(@as(i32, 100), (try tree.get("layers.0.mlp.down_proj")).*);
-    try std.testing.expectEqual(@as(i32, 200), (try tree.get("layers.1.mlp.down_proj")).*);
-    try std.testing.expectEqual(@as(i32, 300), (try tree.get("layers.2.mlp.down_proj")).*);
-    try std.testing.expectEqual(@as(i32, 11), (try tree.get("layers.0.mlp.up_proj")).*);
-    try std.testing.expectEqual(@as(i32, 99), (try tree.get("tail")).*);
+    try std.testing.expectEqual(@as(i32, 100), try tree.get("layers.0.mlp.down_proj"));
+    try std.testing.expectEqual(@as(i32, 200), try tree.get("layers.1.mlp.down_proj"));
+    try std.testing.expectEqual(@as(i32, 300), try tree.get("layers.2.mlp.down_proj"));
+    try std.testing.expectEqual(@as(i32, 11), try tree.get("layers.0.mlp.up_proj"));
+    try std.testing.expectEqual(@as(i32, 99), try tree.get("tail"));
 }
 
 test "glob validation rejects partial wildcard segments" {
