@@ -63,25 +63,8 @@ pub const HostBuffer = struct {
     ///
     /// The returned buffer's data is a read-only view into the mmap'd region.
     /// On `deinit`, the mapping is released via `munmap`.
-    pub fn from_mmap(path: []const u8, shape: BoundedShape, dtype: DType) !HostBuffer {
-        var file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{})
-        else
-            try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const stat = try file.stat();
-        const size: usize = @intCast(stat.size);
-
-        const raw = try std.posix.mmap(
-            null,
-            size,
-            std.posix.PROT.READ,
-            .{ .TYPE = .SHARED },
-            file.handle,
-            0,
-        );
-
+    pub fn init_mmap(path: []const u8, shape: BoundedShape, dtype: DType) !HostBuffer {
+        const raw = try @import("mmap.zig").mmap_file(path);
         return .{
             .backing = .{ .mmap = raw },
             .shape = shape,
@@ -127,12 +110,16 @@ pub const HostBuffer = struct {
         };
     }
 
+    /// heap: host allocation is freed
+    /// mmap: mapping is released via `munmap`.
+    /// borrowed: no-op
     pub fn deinit(self: *HostBuffer) void {
         switch (self.backing) {
             .heap => |h| h.allocator.free(h.data),
-            .mmap => |s| std.posix.munmap(s),
+            .mmap => |s| @import("mmap.zig").munmap(s),
             .borrowed => {},
         }
+        self.* = undefined;
     }
 
     /// Fill buffer with a scalar value. Heap-backed only.

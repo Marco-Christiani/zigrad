@@ -21,7 +21,8 @@ const std = @import("std");
 const pr = @import("pr/pr.zig");
 const backend_mod = @import("backend/root.zig");
 const Backend = backend_mod.Backend;
-const HostBuffer = @import("utils/root.zig").HostBuffer;
+const utils = @import("utils/root.zig");
+const HostBuffer = utils.HostBuffer;
 
 const Tensor = @This();
 
@@ -120,7 +121,7 @@ pub fn host(dtype: pr.DType, shape: []const i64, src: HostSrc) !Tensor {
             }
             break :blk HostBuffer.borrow(bytes, bounded, dtype);
         },
-        .mmap => |path| try HostBuffer.from_mmap(path, bounded, dtype),
+        .mmap => |path| try HostBuffer.init_mmap(path, bounded, dtype),
     };
     return .{ .dtype = dtype, .shape = bounded, .backing = .{ .host = hb } };
 }
@@ -489,11 +490,7 @@ pub fn to_device(self: Tensor, b: *Backend, device: Backend.Device) !Tensor {
 pub fn deinit(self: *Tensor) void {
     switch (self.backing) {
         .device => |d| d.backend.deinit_buffer(d.buffer),
-        .host => |hb| switch (hb.backing) {
-            .heap => |h| h.allocator.free(h.data),
-            .mmap => |s| std.posix.munmap(s),
-            .borrowed => {},
-        },
+        .host => |*hb| hb.deinit(),
         .traced, .abstract => {},
     }
     self.* = undefined;

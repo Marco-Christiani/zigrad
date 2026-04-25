@@ -215,8 +215,8 @@ fn load_safetensors_weights(
     shape_w_out: []const i64,
     shape_b: []const i64,
 ) !void {
-    const data = try mmap_file(path);
-    defer std.posix.munmap(data);
+    const data = try zg.utils.mmap_file(path);
+    defer zg.utils.munmap(data);
 
     var st_file = try stz.SafeTensorsFile.deserialize(data, allocator);
     defer st_file.deinit();
@@ -228,31 +228,6 @@ fn load_safetensors_weights(
     try copy_tensor_f32(w_emb_view, w_emb, shape_w_emb);
     try copy_tensor_f32(w_out_view, w_out, shape_w_out);
     try copy_tensor_f32(b_view, b, shape_b);
-}
-
-/// Memory-map a file read-only.
-///
-/// Returns a page-aligned slice backed by the kernel page cache.
-/// Caller must `std.posix.munmap` when done.
-/// TODO: This is duplicated (eg in llama demo). consider moving into stz or zigrad libs.
-fn mmap_file(path: []const u8) ![]align(std.heap.page_size_min) u8 {
-    var file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{})
-    else
-        try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const stat = try file.stat();
-    const size: usize = @intCast(stat.size);
-
-    return std.posix.mmap(
-        null,
-        size,
-        std.posix.PROT.READ,
-        .{ .TYPE = .SHARED },
-        file.handle,
-        0,
-    );
 }
 
 fn copy_tensor_f32(view: stz.TensorView, out: []f32, expected_shape: []const i64) !void {
