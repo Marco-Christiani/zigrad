@@ -74,11 +74,20 @@ const log = std.log.scoped(.@"zg/frontend");
 // Trace
 // ============================================================================
 
-/// Trace a comptime function against abstract Tensor specs.
+/// Trace a comptime function against Tensor specs.
 ///
-/// Each Tensor leaf in `specs` becomes a traced parameter. Struct/tuple
-///  nesting is preserved -- the function receives the same structure with
-///  traced Tensors in place of abstract ones.
+/// Only `dtype` and `shape` are read from each leaf, so `specs` may
+///  contain Tensors of **any** backing variant. I.e., duck typed, so
+///  `abstract`, `host`, or `device` all work).
+/// In practice you'll pass either:
+/// - A tuple of `Tensor.abstract(...)` values when you haven't loaded
+///    any data yet (the "spec" pattern), this is dtype+shape. Or,
+/// - A tuple of already-loaded host Tensors when you want to skip the
+///    abstract pass entirely, (this is dtype+shape+data).
+///
+/// Each Tensor leaf becomes a traced parameter. Struct/tuple nesting is
+///  preserved, the function receives the same structure with traced
+///  Tensors in place of the spec ones. Ownership of `specs` is not taken.
 ///
 /// The traced function can compose AD transforms internally (e.g. call
 ///  `transforms.value_and_grad`). Whatever it returns becomes the program's

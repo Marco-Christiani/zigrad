@@ -10,8 +10,11 @@
 //! 3. **host**: runtime. CPU-resident data with owned, borrowed, or
 //!     memory-mapped memory. Supports typed access (`as_slice`, `item`)
 //!     and transfer to device (`to_device`).
-//! 4. **abstract**: specification only (dtype + shape, no data). Used to
-//!     define input specs for `frontend.trace`.
+//! 4. **abstract**: an empty tensor not backed by data, specification only
+//!     (dtype + shape, no data). Useful for describing an input spec
+//!     without materializing any data. Note that `frontend.trace` reads
+//!     only `dtype`/`shape` from each leaf, so it accepts **any** backing
+//!     variant -- `abstract` is a convenience, not a requirement.
 //!
 //! All variants carry `dtype` and `shape` as direct fields for uniform access.
 //! In traced mode these are copied from the underlying `Var.aval` at

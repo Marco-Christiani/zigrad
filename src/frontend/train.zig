@@ -28,16 +28,21 @@ const TensorTree = @import("../utils/root.zig").Tree(Tensor);
 /// defer program.deinit();
 /// var exe = try zg.frontend.compile_program(backend, allocator, &program, device, "train_step", .{});
 /// defer backend.deinit_executable(exe);
-/// var state = try TrainState.init(allocator, exe, backend, initial_tensors, .{
-///     .donate_argnums = donate_argnums(@TypeOf(specs), &.{0}),
-/// });
+/// var state = try TrainState.init(
+///     allocator,
+///     exe,
+///     backend,
+///     initial_tensors,
+///     program.output_arity("train_step"),
+///     .{ .non_donatable_input_indices = comptime donate_argnums(@TypeOf(specs), &.{0}) },
+/// );
+/// defer state.deinit(.all);
 /// for (0..num_steps) |_| {
 ///     state.set_batch(batch_tensors);
 ///     const result = try state.step();
 ///     const loss_val = try result.loss.item(f32);
 ///     result.loss.deinit();
 /// }
-/// state.deinit(.all);
 /// ```
 pub const TrainState = struct {
     input_bufs: []Backend.Buffer,
@@ -91,11 +96,13 @@ pub const TrainState = struct {
         opts: InitOpts,
     ) !TrainState {
         const input_bufs = try allocator.alloc(Backend.Buffer, initial_tensors.len);
+        errdefer allocator.free(input_bufs);
         for (input_bufs, initial_tensors) |*slot, t| {
             slot.* = try t.buffer();
         }
 
         const output_bufs = try allocator.alloc(Backend.Buffer, output_arity);
+        errdefer allocator.free(output_bufs);
         const donatable_count = initial_tensors.len - opts.non_donatable_input_indices.len;
 
         return .{
