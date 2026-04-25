@@ -118,11 +118,28 @@
             # cudaSupport = true;
           };
         };
-      in {
-        _module.args = {
-          inherit pkgs cudaCfg;
+
+        # Drift detection: cudaCfg pins two related-but-independent things.
+        #  cudaVersion drives versions.json (cuda-redist tarballs from nvidia).
+        #  cudaPackagesAttr selects a nixpkgs cuda set whose minor version
+        #  floats with the nixpkgs lock. Assert their major.minor agree so a
+        #  silent split (e.g. nixpkgs bumps to 13.x) fails loud at eval time.
+        pkgsCudartVersion = pkgs.${cudaCfg.cudaPackagesAttr}.cuda_cudart.version;
+        cudaVerMM = pkgs.lib.versions.majorMinor cudaCfg.cudaVersion;
+        pkgsCudartVerMM = pkgs.lib.versions.majorMinor pkgsCudartVersion;
+      in
+        assert pkgs.lib.assertMsg
+          (cudaVerMM == pkgsCudartVerMM)
+          ''
+            cudaCfg drift: cudaVersion=${cudaCfg.cudaVersion} (major.minor ${cudaVerMM})
+              disagrees with nixpkgs ${cudaCfg.cudaPackagesAttr}.cuda_cudart.version=${pkgsCudartVersion} (major.minor ${pkgsCudartVerMM}).
+              Update flake.nix cudaCfg or the nixpkgs lock.
+          '';
+        {
+          _module.args = {
+            inherit pkgs cudaCfg;
+          };
+          formatter = pkgs.alejandra;
         };
-        formatter = pkgs.alejandra;
-      };
     };
 }
