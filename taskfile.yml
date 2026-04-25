@@ -184,6 +184,18 @@ tasks:
     desc: Run full flake checks
     cmd: nix flake check {{.CLI_ARGS}}
 
+  op-coverage:
+    desc: Print the op interface coverage matrix (what AD / format / etc each op implements)
+    # `@compileLog` is a hard build failure by design — we swallow the expected
+    # exit code and extract only the coverage rows from the Compile Log block.
+    cmds:
+      - |
+        set +e
+        nix develop -c zig build -Demit-op-coverage=true 2>&1 \
+          | sed -n '/Compile Log Output:/,/^error: the following command/p' \
+          | sed -n 's/@as(\[\]const u8, "\(.*\)"\[0\.\.[0-9]*\])/\1/p; s/@as(\*const \[[0-9]*:0\]u8, "\(.*\)")/\1/p'
+        exit 0
+
   check:tvm-runtime:host:
     desc: Run host integration check for full TVM compiler load
     cmd: nix run .#tvm-runtime-full-compiler-host-check -- {{.CLI_ARGS}}
@@ -580,3 +592,8 @@ tasks:
   #         -fno-emit-bin \
   #         -fno-emit-h \
   #         --name "${RAW_LL/\.ll/}"
+
+  mnist:
+    dir: examples/mnist/
+    cmds:
+      - zig build run
