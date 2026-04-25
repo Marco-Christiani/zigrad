@@ -24,4 +24,8 @@ def Zigrad_KernelCallOp : Zigrad_Op<"kernel_call"> {
   );
 
   let results = (outs Variadic<AnyType>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $inputs `)` attr-dict `:` functional-type($inputs, $outputs)
+  }];
 }
