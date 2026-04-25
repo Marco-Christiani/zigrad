@@ -486,7 +486,7 @@ pub fn to_device(self: Tensor, b: *Backend, device: Backend.Device) !Tensor {
 /// - **host (heap)**: frees the backing allocation.
 /// - **host (mmap)**: unmaps the memory region.
 /// - **host (borrowed)**, **traced**, **abstract**: no-op.
-pub fn deinit(self: Tensor) void {
+pub fn deinit(self: *Tensor) void {
     switch (self.backing) {
         .device => |d| d.backend.deinit_buffer(d.buffer),
         .host => |hb| switch (hb.backing) {
@@ -496,6 +496,7 @@ pub fn deinit(self: Tensor) void {
         },
         .traced, .abstract => {},
     }
+    self.* = undefined;
 }
 
 // ============================================================================

@@ -173,7 +173,7 @@ pub fn main() !void {
             return try Tensor.host(spec.dtype, spec.shape.const_slice(), .{ .alloc = alloc });
         }
     }.f);
-    defer host_tensors.deinit_with(deinit_tensor);
+    defer host_tensors.deinit_with(Tensor.deinit);
 
     // TODO: using synthetic values for now, will need to migrate to real data.
     for (host_tensors.leaves) |t| fill_pattern(t.as_slice(f32));
@@ -198,7 +198,7 @@ pub fn main() !void {
         // call() takes a pointer to inputs. Donated args (params at index 0)
         //  are updated in-place -- their buffers are swapped automatically.
         //  Only non-donated outputs (loss) are returned.
-        const result = try step_fn.call(&inputs);
+        var result = try step_fn.call(&inputs);
 
         const loss_val = try result.loss_val.item(f32);
 
@@ -213,10 +213,6 @@ pub fn main() !void {
     step_fn.deinit_inputs(&inputs);
 
     std.log.info("done", .{});
-}
-
-fn deinit_tensor(t: *Tensor) void {
-    t.*.deinit();
 }
 
 /// Fill a buffer with a simple deterministic pattern.

@@ -4,11 +4,6 @@ const zg = @import("zigrad");
 const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/demos");
 
-// TODO: need to resolve and remove this
-fn deinit_tensor(t: *Tensor) void {
-    t.*.deinit();
-}
-
 /// Demo program: out = (dot(A, B) + C) * C where A: 2x3, B: 3x2, C: 2x2.
 pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     var program = zg.pr.Program.init(allocator);
@@ -71,11 +66,11 @@ pub fn run_demo_executable(
     };
 
     // TODO: in the init path, do we really want to require this sliceAsBytes pattern or just use comptime?
-    const host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
+    var host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
-    const host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
+    var host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
     defer host_b.deinit();
-    const host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
+    var host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
 
     const dev_a = try b.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
@@ -152,7 +147,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
     defer program.deinit();
 
     const fwd = program.functions[0];
-    const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
+    const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
     try program.add_function(vjp);
 
     const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
@@ -183,13 +178,13 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
         1.0, 1.0,
     };
 
-    const host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
+    var host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
-    const host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
+    var host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
     defer host_b.deinit();
-    const host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
+    var host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
-    const host_ct = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&CtOut) });
+    var host_ct = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&CtOut) });
     defer host_ct.deinit();
 
     const dev_a = try backend.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
@@ -383,7 +378,7 @@ pub fn run_train_demo(
             return try Tensor.host(spec.dtype, spec.shape.const_slice(), .{ .alloc = alloc });
         }
     }.f);
-    defer host_tensors.deinit_with(deinit_tensor);
+    defer host_tensors.deinit_with(Tensor.deinit);
 
     // Fill param buffers with pattern, batch input with data
     for (host_tensors.leaves[0..6]) |*buf| fill_pattern(buf.as_slice(f32), 1e-7, 0.0);
@@ -432,7 +427,7 @@ pub fn run_train_demo(
     defer state.deinit(.all);
 
     for (0..warmup_steps) |_| {
-        const result = try state.step();
+        var result = try state.step();
         // Deinit execution event without awaiting. buffer_to_host (called by
         //  item below) chains behind execution internally.
         // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
@@ -444,7 +439,7 @@ pub fn run_train_demo(
     var loop_timer = zg.utils.LoopTimer{ .label = "train-demo", .quiet = quiet };
     for (0..steps) |_| {
         try loop_timer.start_step();
-        const result = try state.step();
+        var result = try state.step();
         // Deinit execution event without awaiting. item() below syncs via
         //  buffer_to_host which chains behind execution.
         // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
@@ -600,11 +595,11 @@ fn run_kernel_provider_demo_executable(
     const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
     const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
 
-    const host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
+    var host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
-    const host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
+    var host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
     defer host_b.deinit();
-    const host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
+    var host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
 
     const dev_a = try backend.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
@@ -659,7 +654,7 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
     defer program.deinit();
 
     const fwd = program.functions[0];
-    const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp");
+    const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
 
     var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
