@@ -55,13 +55,12 @@ pub const TrainDemoOpts = struct {
 
 /// Llama fine-tune demo
 pub const LlamaFtDemoOpts = struct {
-    warmup: ?u32 = null,
-    steps: ?u32 = null,
-    train: bool = false,
-    dtype: ?[]const u8 = null,
-    seq: ?u32 = null,
+    warmup: u32 = 5,
+    steps: u32 = 20,
+    train: bool = true,
+    dtype: []const u8 = "bf16",
+    seq: u32 = 4,
     batch: ?u32 = null,
-    canonical_shapes: bool = false,
     execute_only: bool = false,
     kernel_provider: ?[]const u8 = null,
 };
@@ -105,7 +104,7 @@ pub const setup_cmd: CommandT = .{
         .{
             .name = "quiet",
             .long_name = "quiet",
-            .description = "Reduce output (train-demo/llm-ft-demo)",
+            .description = "Reduce output (train-demo/llm-train)",
             .val = ValueT.ofType(bool, .{
                 .name = "quiet_val",
                 .default_val = false,
@@ -114,7 +113,7 @@ pub const setup_cmd: CommandT = .{
         .{
             .name = "dump_optimized",
             .long_name = "dump-optimized",
-            .description = "Dump backend-optimized program (binary protobuf for XLA); no value=stdout summary, PATH=raw bytes to file",
+            .description = "Dump program produced by backend (HLO for XLA), no value=stdout, PATH=write to file",
             .val = ValueT.ofType([]const u8, .{
                 .name = "dump_optimized_val",
                 .description = "Optional path to write optimized program output",
@@ -229,8 +228,8 @@ pub const setup_cmd: CommandT = .{
             },
         }),
         CommandT.from(TrainDemoOpts, .{
-            .cmd_name = "llm-ft-demo",
-            .cmd_description = "Run a tiny LLM fine-tune demo",
+            .cmd_name = "llm-train",
+            .cmd_description = "Run a small LLM train demo",
             .default_val_opts = true,
             .sub_descriptions = &.{
                 .{ "warmup", "Number of warmup iterations" },
@@ -248,7 +247,6 @@ pub const setup_cmd: CommandT = .{
                 .{ "dtype", "Data type: bf16 or f32" },
                 .{ "seq", "Sequence length" },
                 .{ "batch", "Batch size" },
-                .{ "canonical_shapes", "Use canonical shapes" },
                 .{ "execute_only", "Execute only, skip compilation" },
                 .{ "kernel_provider", "Kernel provider: mirage (enables kernelize pass)" },
             },

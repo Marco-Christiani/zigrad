@@ -24,7 +24,6 @@ pub fn main() !void {
 
     const cache = try zg.Cache.init(.{});
 
-    // Parse args
     var cmd = cli.parse(gpa) catch |err| {
         if (err == error.HelpShown) return;
         std.log.err("failed to parse arguments: {s}", .{@errorName(err)});
@@ -175,18 +174,15 @@ pub fn main() !void {
             const steps = opts.steps orelse 8;
             return demos.run_train_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
-        if (cmd.matchSubCmd("llm-ft-demo")) |sub_cmd| {
+        if (cmd.matchSubCmd("llm-train")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return llm_demo.run_llm_ft_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return llm_demo.run_llm_train_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
-            const opts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
-            const dtype = if (opts.dtype) |d|
-                std.meta.stringToEnum(zg.DType, d) orelse return error.InvalidDType
-            else
-                zg.DType.bf16;
+            const opts: cli.LlamaFtDemoOpts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
+            const dtype = std.meta.stringToEnum(zg.DType, opts.dtype) orelse return error.InvalidDType;
 
             const kernel_provider = if (opts.kernel_provider) |provider_name|
                 std.meta.stringToEnum(llama_demo.LlamaKernelProvider, provider_name) orelse return error.InvalidArgument
@@ -196,9 +192,8 @@ pub fn main() !void {
             const cfg = llama_demo.LlamaDemoConfig{
                 .train = opts.train,
                 .dtype = dtype,
-                .seq = opts.seq orelse 4,
+                .seq = opts.seq,
                 .batch = opts.batch orelse 1,
-                .canonical_shapes = opts.canonical_shapes,
                 .execute_only = opts.execute_only,
                 .kernel_provider = kernel_provider,
             };
@@ -210,8 +205,8 @@ pub fn main() !void {
                 dump_pr_ptr,
                 dump_mlir_ptr,
                 dump_optimized_ptr,
-                opts.warmup orelse 1,
-                opts.steps orelse 4,
+                opts.warmup,
+                opts.steps,
                 quiet,
                 cfg,
                 dump_kernels,

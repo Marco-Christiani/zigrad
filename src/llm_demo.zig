@@ -3,7 +3,7 @@ const zg = @import("zigrad");
 const stz = @import("safetensors_zg");
 const log = std.log.scoped(.@"zg/llm_demo");
 
-pub fn run_llm_ft_demo(
+pub fn run_llm_train_demo(
     allocator: std.mem.Allocator,
     b: *zg.Backend,
     device: zg.Backend.Device,
@@ -153,17 +153,17 @@ pub fn run_llm_ft_demo(
     defer state.deinit(.all);
 
     for (0..warmup_steps) |_| {
-        const result = try state.step();
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        var result = try state.step();
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe
         if (result.event) |ev| b.deinit_event(ev);
         result.loss.deinit();
     }
 
-    var loop_timer = zg.utils.LoopTimer{ .label = "llm-ft-demo", .quiet = quiet };
+    var loop_timer = zg.utils.LoopTimer{ .label = "llm-train", .quiet = quiet };
     for (0..steps) |_| {
         try loop_timer.start_step();
-        const result = try state.step();
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
+        var result = try state.step();
+        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe
         if (result.event) |ev| b.deinit_event(ev);
         loop_timer.mark("dispatch");
 
@@ -232,7 +232,7 @@ fn load_safetensors_weights(
 
 fn copy_tensor_f32(view: stz.TensorView, out: []f32, expected_shape: []const i64) !void {
     if (view.info.dtype != .f32) return error.TensorDtypeMismatch;
-    // Compare shapes across type boundary (safetensors uses usize, PR uses i64)
+    // compare shapes across type boundary (safetensors uses usize, PR uses i64)
     if (view.info.shape.len != expected_shape.len) return error.TensorShapeMismatch;
     for (view.info.shape, expected_shape) |a, b| {
         if (a != @as(usize, @intCast(b))) return error.TensorShapeMismatch;
