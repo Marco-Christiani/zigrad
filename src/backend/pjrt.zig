@@ -334,6 +334,7 @@ pub const Backend = struct {
         .await_event = iface_await_event,
         .serialize_executable = iface_serialize_executable,
         .load_serialized = iface_load_serialized,
+        .get_optimized_program = iface_get_optimized_program,
         .deinit_buffer = iface_deinit_buffer,
         .deinit_event = iface_deinit_event,
         .deinit_executable = iface_deinit_executable,
@@ -440,6 +441,18 @@ pub const Backend = struct {
         const self = promote(iface);
         const exe = self.client.deserialize_and_load(data, null) catch return error.BackendError;
         return self.wrap_executable(exe);
+    }
+
+    fn iface_get_optimized_program(
+        iface: *BackendInterface,
+        exe: BackendInterface.Executable,
+        allocator: std.mem.Allocator,
+    ) BackendInterface.Error!?BackendInterface.OptimizedProgram {
+        const self = promote(iface);
+        const pjrt_exe = unwrap_executable_ptr(exe);
+        const maybe = pjrt_exe.get_optimized_program(self.api, allocator) catch return error.BackendError;
+        const op = maybe orelse return null;
+        return .{ .code = op.code, .format = op.format };
     }
 
     fn iface_get_devices(iface: *BackendInterface, allocator: std.mem.Allocator) BackendInterface.Error![]BackendInterface.Device {

@@ -235,8 +235,18 @@ pub fn compile_program(
     const compile_opts = opts.compile;
     const exe = try backend.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
 
-    if (opts.dump_optimized != null) {
-        log.warn("dump-optimized requires PJRT-specific API; skipped through generic backend", .{});
+    if (opts.dump_optimized) |cfg| {
+        var dump_cfg = cfg;
+        if (dump_cfg.entry_name == null) dump_cfg.entry_name = entry_name;
+        if (try backend.get_optimized_program(exe, allocator)) |opt_prog| {
+            var owned = opt_prog;
+            defer owned.deinit(allocator);
+            pipeline.dump_optimized_program(&dump_cfg, owned.code, owned.format, allocator) catch |err| {
+                log.err("dump-optimized failed: {s}", .{@errorName(err)});
+            };
+        } else {
+            log.warn("dump-optimized: backend does not expose an optimized program", .{});
+        }
     }
 
     return exe;

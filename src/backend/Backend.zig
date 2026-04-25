@@ -48,6 +48,20 @@ pub const VTable = struct {
     serialize_executable: *const fn (b: *Backend, exe: Executable, allocator: std.mem.Allocator) Error![]u8,
     load_serialized: *const fn (b: *Backend, data: []const u8) Error!Executable,
 
+    /// Retrieve the backend's compiled program.
+    ///
+    /// Representation and semantics are backend-specific and may not
+    ///  be supported by all backends.
+    ///
+    /// E.g., IREE's current interface, or a PJRT plugin that does not
+    ///  implement the `PJRT_Executable_OptimizedProgram` API. The
+    ///  returned `code` is backend-defined (XLA: serialized
+    ///  `HloModuleProtoWithConfig`).
+    ///
+    /// Returns `null` if the backend does not expose this.
+    /// Caller owns memory.
+    get_optimized_program: *const fn (b: *Backend, exe: Executable, allocator: std.mem.Allocator) Error!?OptimizedProgram,
+
     // Lifecycle
     deinit_buffer: *const fn (b: *Backend, buf: Buffer) void,
     deinit_event: *const fn (b: *Backend, ev: Event) void,
@@ -55,6 +69,21 @@ pub const VTable = struct {
 
     // Device enumeration
     get_devices: *const fn (b: *Backend, allocator: std.mem.Allocator) Error![]Device,
+};
+
+/// Post-compilation program bytes returned by `get_optimized_program`.
+pub const OptimizedProgram = struct {
+    /// Backend-specific: for XLA/PJRT it is a serialized `HloModuleProtoWithConfig`,
+    ///  decodable via `xla.HloModuleProto`.
+    code: []u8,
+    ///  A short identifier like `"hlo"`, `"mlir_bytecode"`, etc.
+    format: []const u8,
+
+    pub fn deinit(self: *OptimizedProgram, allocator: std.mem.Allocator) void {
+        allocator.free(self.code);
+        allocator.free(self.format);
+        self.* = undefined;
+    }
 };
 
 /// Opaque handle to a buffer as defined by the backend implementation
@@ -143,6 +172,15 @@ pub fn serialize_executable(self: *Backend, exe: Executable, allocator: std.mem.
 
 pub fn load_serialized(self: *Backend, data: []const u8) Error!Executable {
     return self.vtable.load_serialized(self, data);
+}
+
+/// Retrieve the backend-optimized program for an executable (if supported).
+///
+/// Returns `null` when the backend does not support introspection.
+/// The caller owns the returned buffer.
+/// See also: `VTable.get_optimized_program` and `OptimizedProgram`.
+pub fn get_optimized_program(self: *Backend, exe: Executable, allocator: std.mem.Allocator) Error!?OptimizedProgram {
+    return self.vtable.get_optimized_program(self, exe, allocator);
 }
 
 pub fn deinit_buffer(self: *Backend, buf: Buffer) void {
