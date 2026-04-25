@@ -51,6 +51,9 @@ pub const trace = frontend.trace;
 pub const grad = frontend.transforms.make_grad;
 pub const value_and_grad = frontend.transforms.make_value_and_grad;
 
+pub const from_safetensors = utils.safetensors.from_safetensors;
+pub const FromSafetensorsOpts = utils.safetensors.Opts;
+
 test {
     std.testing.refAllDecls(@This());
 }

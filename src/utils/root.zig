@@ -5,6 +5,7 @@ const symbols = @import("symbols.zig");
 const mmap = @import("mmap.zig");
 
 pub const rtti = @import("rtti.zig");
+pub const safetensors = @import("safetensors.zig");
 pub const meta = @import("meta.zig");
 pub const HostBuffer = host_buffer.HostBuffer;
 pub const LoopTimer = loop_timer.LoopTimer;

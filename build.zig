@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
     zigrad_mod.addOptions("build_options", build_options);
     zigrad_mod.addImport("protobuf", protobuf_mod);
     zigrad_mod.addImport("xla_pb", xla_pb_mod);
+    zigrad_mod.addImport("safetensors_zg", safetensors_zg_dep.module("safetensors_zg"));
     zigrad_mod.addIncludePath(b.path("src"));
     zigrad_mod.addIncludePath(.{ .cwd_relative = sdk_include });
 
