@@ -58,7 +58,10 @@ pub fn flatten(comptime Leaf: type, comptime T: type, value: T, out: []Leaf, idx
                 flatten(Leaf, info.child, value[i], out, idx);
             }
         },
-        else => unreachable,
+        else => @compileError(std.fmt.comptimePrint(
+            "{s}: unsupported type `{s}` expected {s}, struct, or array",
+            .{ @src().fn_name, @typeName(T), @typeName(Leaf) },
+        )),
     }
 }
 
@@ -124,7 +127,10 @@ pub fn unflatten(comptime Leaf: type, comptime T: type, leaves: []const Leaf, id
             }
             return result;
         },
-        else => unreachable,
+        else => @compileError(std.fmt.comptimePrint(
+            "{s}: unsupported type `{s}` expected {s}, struct, or array",
+            .{ @src().fn_name, @typeName(T), @typeName(Leaf) },
+        )),
     }
 }
 
@@ -239,6 +245,7 @@ pub fn RuntimeOf(comptime T: type) type {
 ///
 /// Returns a comptime array of string literals.
 pub fn tree_paths(comptime Leaf: type, comptime T: type) [leaf_count(Leaf, T)][]const u8 {
+    @setEvalBranchQuota(100000);
     var result: [leaf_count(Leaf, T)][]const u8 = undefined;
     var idx: usize = 0;
     build_paths(Leaf, T, &result, &idx, "");
