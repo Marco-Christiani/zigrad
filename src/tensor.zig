@@ -272,9 +272,16 @@ pub fn slice(self: Tensor, start_indices: []const i64, limit_indices: []const i6
 
 pub fn concatenate(self: Tensor, others: []const Tensor, axis: i64) !Tensor {
     const b = try self.traced_builder();
-    const a = b.alloc();
-    const operands = try a.alloc(*pr.Var, others.len + 1);
-    errdefer a.free(operands);
+
+    // The `*Var` slice passed to the builder is only read during op
+    //  construction (`emit` copies each pointer into its own operand
+    //  array), so a stack buffer is sufficient and avoids leaving a dead
+    //  allocation in the program arena.
+    var stack: [max_concat_operands]*pr.Var = undefined;
+    const n = others.len + 1;
+    if (n > stack.len) return error.TooManyConcatOperands;
+    const operands = stack[0..n];
+
     operands[0] = try self.traced_var();
     for (others, 0..) |t, i| {
         operands[i + 1] = try t.traced_var();
@@ -282,6 +289,10 @@ pub fn concatenate(self: Tensor, others: []const Tensor, axis: i64) !Tensor {
     const v = try b.concatenate(operands, axis);
     return from_var(b, v);
 }
+
+/// Upper bound on the number of operands per `concatenate` call. Current
+///  demo workloads top out at 3 (rope / loss gather); 16 is comfortable.
+pub const max_concat_operands: usize = 16;
 
 pub fn dot_general(self: Tensor, other: Tensor, params: pr.DotGeneralParams) !Tensor {
     const b = try self.traced_builder();
