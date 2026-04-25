@@ -31,7 +31,7 @@ pub fn check_gradients(
     opts: GradCheckOpts,
 ) GradCheckError!void {
     // 1. Generate VJP function
-    const vjp_func = try ad.vjp(allocator, program, func, "grad_check_vjp");
+    const vjp_func = try ad.vjp(allocator, program, func, "grad_check_vjp", .{});
 
     // 2. Compute analytic gradients
     //    VJP params: [N primals, M cotangents], returns: [N grads]

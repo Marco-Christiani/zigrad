@@ -707,7 +707,7 @@ test "lowering supports vjp matmul demo" {
     }
 
     const fwd = program.functions[0];
-    const vjp_func = try @import("../../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp");
+    const vjp_func = try @import("../../../pr/ad.zig").vjp(std.testing.allocator, &program, fwd, "vjp", .{});
 
     try program.add_function(vjp_func);
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, "vjp", .mlir_bytecode);
