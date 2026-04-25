@@ -6,11 +6,8 @@
   cudaPackages,
   gccHost,
   src,
-  cudaArchitectures,
   zigradExternalSdk,
 }: let
-  cudaArchStr = pkgs.lib.concatStringsSep ";" cudaArchitectures;
-
   colors = {
     yellow = "\\033[33m";
     reset = "\\033[0m";

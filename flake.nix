@@ -90,7 +90,6 @@
     # Project-wide CUDA configuration. Centralized to avoid hardcoding
     # sm_XX or toolkit versions in random places.
     cudaCfg = {
-      cudaArchitectures = ["86"];
       gccHostAttr = "gcc14";
       cudaPackagesAttr = "cudaPackages_12_9";
       cudaVersion = "12.9.1";

@@ -35,7 +35,6 @@ in {
     inherit
       (import ../helpers/targets.nix {
         inherit pkgs cudaPackages gccHost;
-        inherit (cudaCfg) cudaArchitectures;
         inherit (pkgs) zig;
         src = zigradSrc;
         zigradExternalSdk = sdkProfiles.full-gpu.full;
@@ -100,7 +99,7 @@ in {
 
     xlaPjrtPluginsCuda = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
       inherit xlaSrc;
-      inherit (cudaCfg) cudaArchitectures cudaVersion;
+      inherit (cudaCfg) cudaVersion;
       cudaSupport = true;
       cpuMathLibrary = "onednn-thunk";
       cpuNativeTuning = true;
@@ -110,15 +109,16 @@ in {
     cudaRedist = pkgs.callPackage ../packages/cuda-redist.nix {inherit (cudaCfg) cudaVersion;};
 
     # TVM with shared LLVM 22 (avoids pass registry conflicts with MLIR SDK).
+    # cudaArchitectures left at upstream default (no TVM_CUDA_ARCH override);
+    #  TVM compiles kernels via NVRTC at runtime against the actual GPU, so the
+    #  build-time arch hint matters only for AOT paths we don't use.
     tvm = pkgs.callPackage ../packages/tvm.nix {
       inherit cudaPackages gccHost llvm;
-      inherit (cudaCfg) cudaArchitectures;
       cudaSupport = true;
     };
 
     tvmCpu = pkgs.callPackage ../packages/tvm.nix {
       inherit cudaPackages gccHost llvm;
-      inherit (cudaCfg) cudaArchitectures;
       cudaSupport = false;
     };
 
