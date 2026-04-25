@@ -79,6 +79,7 @@ in {
             ../../shim/CMakeLists.txt
             ../../shim/mlir_ext.cc
             ../../shim/zigrad
+            ../../shim/dev
             ../../shim/test
           ];
         };
@@ -245,6 +246,11 @@ in {
         iree-compiler = ireeCompiler;
         iree-runtime = ireeRuntime;
         pjrt-headers = pjrtHeaders;
+        # MLIR extension: production .so under .out (consumed by SDK profiles
+        #  via mkSdk's f.mlir branch), LSP server binary under .dev (consumed
+        #  by the devshell). Single source build, two consumption surfaces.
+        zigrad-mlir-ext = zigradMlirExt;
+        zigrad-mlir-ext-dev = zigradMlirExt.dev;
         gen-clangd = targets.editor.clangd;
         gen-nvim = targets.editor.nvim;
         m4 = targets.zigrad-m4.build;
