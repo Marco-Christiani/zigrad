@@ -191,15 +191,14 @@ in
                 cp -aL "$devdir"/. "$dev/nvvm/libdevice/"
               fi
             done
-            # dev: nvcc + ptxas + nvlink + cicc into bin/.
-            for tool in nvcc ptxas nvlink cicc fatbinary; do
-              for candidate in \
-                  "$tmp_extract"/*/bin/"$tool" \
-                  "$tmp_extract"/*/nvvm/bin/"$tool"; do
-                if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-                  cp -aL "$candidate" "$dev/bin/$tool"
-                  break
-                fi
+            # dev: copy every binary from cuda_nvcc's bin/ + nvvm/bin/.
+            #  nvcc invokes cudafe++, cicc, ptxas, nvlink, fatbinary, bin2c,
+            #  nvprune, etc. as sibling tools; whitelisting risks missing one.
+            for bindir in "$tmp_extract"/*/bin "$tmp_extract"/*/nvvm/bin; do
+              [ -d "$bindir" ] || continue
+              for f in "$bindir"/*; do
+                [ -f "$f" ] && [ -x "$f" ] || continue
+                cp -aL "$f" "$dev/bin/$(basename "$f")"
               done
             done
           ''}
