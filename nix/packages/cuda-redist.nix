@@ -92,6 +92,20 @@ in
     #  manual patchelf --set-rpath silently corrupts.
     buildInputs = [stdenv.cc.cc.lib stdenv.cc.libc zlib];
 
+    # nvshmem ships optional bootstrap/transport plugins for MPI, UCX, OFI,
+    #  Mellanox IB, etc. We don't use any of them; the core nvshmem .so works
+    #  without them. Tell autoPatchelfHook to skip these deps instead of
+    #  failing the build. Mirrors nixpkgs's libnvshmem packaging.
+    autoPatchelfIgnoreMissingDeps = [
+      "libmpi.so.40"
+      "libpmix.so.2"
+      "liboshmem.so.40"
+      "libmlx5.so.1"
+      "libfabric.so.1"
+      "libucs.so.0"
+      "libucp.so.0"
+    ];
+
     installPhase = ''
       set -eo pipefail
       mkdir -p "$out/runtime/sys/lib"
