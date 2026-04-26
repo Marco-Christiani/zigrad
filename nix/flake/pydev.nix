@@ -11,7 +11,7 @@
   lib = pkgs.lib;
 
   workspace = uv2nix.lib.workspace.loadWorkspace {
-    workspaceRoot = ./..;
+    workspaceRoot = ./../..;
   };
 
   overlay = workspace.mkPyprojectOverlay {
