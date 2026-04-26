@@ -76,7 +76,10 @@ in
       outputs = ["out" "dev"];
 
       strictDeps = true;
-      dontStrip = true;
+      # Strip libtvm.so etc. so debug-info path strings (e.g. cmake's CUDA
+      #  include dir from cudaToolkit = cuda-redist.dev) don't leave
+      #  references to dev paths in the runtime closure.
+      dontStrip = false;
 
       postPatch = ''
         ${lib.optionalString useCustomLlvm ''
