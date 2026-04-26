@@ -477,7 +477,7 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
 
     const format: OutputFormat = switch (cfg.encoding) {
         .text => .mlir_text,
-        .bytecode => .mlir_bytecode,
+        .binary => .mlir_bytecode,
     };
 
     // Domain boundary: remap internal lowering errors to pipeline-level LoweringFailed.
@@ -493,7 +493,7 @@ pub fn lower_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
     };
 
     artifact.replace(ctx.allocator, .{
-        .mlir = .{
+        .stablehlo = .{
             .bytes = bytes,
             .encoding = cfg.encoding,
         },
@@ -507,28 +507,26 @@ pub fn lower_pass_with_config(config: *LowerPassConfig) pass.Pass {
         .run_fn = lower_pass,
         .name = "stablehlo_lower",
         .input_kind = .pr,
-        .output_kind = .mlir,
+        .output_kind = .stablehlo,
     };
 }
 
-/// Convenience: lower with encoding preference.
+/// Convenience: lower with encoding preference, returning a fully-formed
+///  StableHLO `Artifact`. Caller owns the artifact and must `deinit` it.
 pub fn lower(
     allocator: std.mem.Allocator,
     program: *const pr.Program,
     entry_name: ?[]const u8,
-    encoding: pass.MlirEncoding,
-) !pass.MlirArtifact {
+    encoding: pass.Encoding,
+) !pass.Artifact {
     const format: OutputFormat = switch (encoding) {
         .text => .mlir_text,
-        .bytecode => .mlir_bytecode,
+        .binary => .mlir_bytecode,
     };
 
     const bytes = try lower_program_to_mlir(allocator, program, entry_name, format);
 
-    return .{
-        .bytes = bytes,
-        .encoding = encoding,
-    };
+    return .{ .stablehlo = .{ .bytes = bytes, .encoding = encoding } };
 }
 
 // ============================================================================
@@ -788,8 +786,8 @@ test "lower pass outlines kernelize-annotated region" {
     defer artifact.deinit(testing.allocator);
 
     // Kernelize-annotated regions are unconditionally outlined.
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "call @main_outlined_0") != null);
 }
 
 test "lower pass outlines dot-add kernelize region" {
@@ -821,8 +819,8 @@ test "lower pass outlines dot-add kernelize region" {
     defer artifact.deinit(testing.allocator);
 
     // Kernelize-annotated region is outlined; ops move to outlined function.
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "call @main_outlined_0") != null);
 }
 
 test "lower pass outlines dot-log kernelize region" {
@@ -853,10 +851,10 @@ test "lower pass outlines dot-log kernelize region" {
     defer artifact.deinit(testing.allocator);
 
     // Kernelize-annotated region is outlined; provider attribute set on callee.
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "zigrad.kernelize.provider") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.dot_general") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.log") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "zigrad.kernelize.provider") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "stablehlo.dot_general") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "stablehlo.log") != null);
 }
 
 test "lower pass outlines near-miss kernelize region" {
@@ -889,8 +887,8 @@ test "lower pass outlines near-miss kernelize region" {
     defer artifact.deinit(testing.allocator);
 
     // Kernelize-annotated region is outlined even for non-standard patterns.
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "main_outlined_0") != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "call @main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "main_outlined_0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "call @main_outlined_0") != null);
 }
 
 test "lower pass produces MLIR artifact" {
@@ -907,15 +905,15 @@ test "lower pass produces MLIR artifact" {
     var ctx = pass.PassContext{
         .allocator = std.testing.allocator,
     };
-    var cfg = LowerPassConfig{ .encoding = .bytecode };
+    var cfg = LowerPassConfig{ .encoding = .binary };
 
     try program.add_function(func);
     var output = pass.Artifact{ .pr = &program };
     try lower_pass(@ptrCast(&cfg), &output, &ctx);
     defer output.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(pass.ArtifactKind.mlir, output.kind());
-    try std.testing.expect(output.mlir.bytes.len > 0);
+    try std.testing.expectEqual(pass.ArtifactKind.stablehlo, output.kind());
+    try std.testing.expect(output.stablehlo.bytes.len > 0);
 }
 
 test "lower pass emits zigrad.kernel_call for custom_call ops (pre-legalize)" {
@@ -939,9 +937,9 @@ test "lower pass emits zigrad.kernel_call for custom_call ops (pre-legalize)" {
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 
-    try testing.expectEqual(pass.ArtifactKind.mlir, artifact.kind());
+    try testing.expectEqual(pass.ArtifactKind.stablehlo, artifact.kind());
 
     // Custom calls are emitted as zigrad.kernel_call (legalize converts to stablehlo.custom_call).
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, zigrad_kernel_call_op_name) != null);
-    try testing.expect(std.mem.indexOf(u8, artifact.mlir.bytes, "stablehlo.custom_call") == null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, zigrad_kernel_call_op_name) != null);
+    try testing.expect(std.mem.indexOf(u8, artifact.stablehlo.bytes, "stablehlo.custom_call") == null);
 }

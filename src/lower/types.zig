@@ -12,11 +12,11 @@ pub const OutputFormat = enum {
 /// Configuration for the StableHLO lowering pass.
 ///
 /// Controls output encoding and entry point selection. The lowering pass
-/// itself is stateless -- it reads a PR program and produces MLIR bytes.
+/// itself is stateless -- it reads a PR program and produces StableHLO bytes.
 pub const LowerPassConfig = struct {
-    /// Wire format for the MLIR output. Bytecode is smaller and faster to
+    /// Wire format for the StableHLO output. Binary is smaller and faster to
     /// parse; text is human-readable (useful with `--dump-mlir`).
-    encoding: pass.MlirEncoding = .bytecode,
+    encoding: pass.Encoding = .binary,
 
     /// Selects which PR function is the compilation entry point.
     /// The selected function is always renamed to "@main" in MLIR output (XLA requirement).

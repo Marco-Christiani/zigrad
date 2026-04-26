@@ -225,14 +225,14 @@ pub fn compile_program(
     defer artifact.deinit(allocator);
 
     // TODO: instead of this, we should extend Backend interface using the Pipeline / Pass pattern
-    //   of declaring supported formats. No reason to mention a specific IM here.
-    const mlir = switch (artifact) {
-        .mlir => |m| m,
+    //   of declaring supported formats. No reason to mention a specific dialect here.
+    const sh = switch (artifact) {
+        .stablehlo => |s| s,
         else => return error.UnexpectedArtifact,
     };
 
     const compile_opts = opts.compile;
-    const exe = try backend.compile(device, mlir.bytes, mlir.encoding == .bytecode, compile_opts);
+    const exe = try backend.compile(device, sh.bytes, sh.encoding, compile_opts);
 
     if (opts.dump_optimized) |cfg| {
         var dump_cfg = cfg;

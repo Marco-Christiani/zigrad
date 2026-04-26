@@ -81,14 +81,12 @@ pub fn run_llm_train_demo(
     const inputs_spec = .{ params_spec, batch_spec };
     const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-
     const train = zg.frontend.train;
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "llm_ft_step");
     defer program.deinit();
 
     const exe = try zg.frontend.compile_program(b, allocator, &program, device, "llm_ft_step", .{
-        .lower = .{ .encoding = lower_encoding },
+        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,

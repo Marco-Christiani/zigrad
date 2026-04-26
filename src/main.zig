@@ -412,7 +412,7 @@ fn iree_subprocess_compiler(
 
 const LowerResult = struct {
     mlir_bytes: []u8,
-    is_bytecode: bool,
+    encoding: zg.pipeline.Encoding,
 };
 
 /// Lower a demo program to MLIR, optionally dumping the text representation.
@@ -421,12 +421,16 @@ fn lower_demo_to_mlir(
     program: *const zg.pr.Program,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !LowerResult {
-    const out_fmt: zg.lower.OutputFormat = if (dump_mlir != null) .mlir_text else .mlir_bytecode;
+    const encoding: zg.pipeline.Encoding = if (dump_mlir != null) .text else .binary;
+    const out_fmt: zg.lower.OutputFormat = switch (encoding) {
+        .text => .mlir_text,
+        .binary => .mlir_bytecode,
+    };
     const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, program, "main", out_fmt);
-    if (dump_mlir != null and out_fmt == .mlir_text) {
+    if (encoding == .text) {
         std.debug.print("--- MLIR ---\n{s}\n--- end ---\n", .{mlir_bytes});
     }
-    return .{ .mlir_bytes = mlir_bytes, .is_bytecode = out_fmt == .mlir_bytecode };
+    return .{ .mlir_bytes = mlir_bytes, .encoding = encoding };
 }
 
 fn run_iree_demo(
@@ -472,8 +476,7 @@ fn run_iree_demo(
     const mlir_bytes = lowered.mlir_bytes;
     defer gpa.free(mlir_bytes);
 
-    const is_bytecode = lowered.is_bytecode;
-    var exe = try backend.compile(device, mlir_bytes, is_bytecode, .{});
+    var exe = try backend.compile(device, mlir_bytes, lowered.encoding, .{});
     defer backend.deinit_executable(&exe);
 
     // Run the matmul demo: A(2x3) x B(3x2) + C(2x2).
@@ -541,8 +544,7 @@ fn run_iree_aot_compile(
     const mlir_bytes = lowered.mlir_bytes;
     defer gpa.free(mlir_bytes);
 
-    const is_bytecode = lowered.is_bytecode;
-    const vmfb = try compiler.compile(gpa, mlir_bytes, is_bytecode);
+    const vmfb = try compiler.compile(gpa, mlir_bytes, lowered.encoding == .binary);
     defer gpa.free(vmfb);
 
     const output_path = opts.output orelse "demo.vmfb";

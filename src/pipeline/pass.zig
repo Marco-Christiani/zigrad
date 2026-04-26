@@ -1,50 +1,58 @@
 //! Pass Pipeline Infrastructure
 //!
 //! This module defines the core abstractions for the pass-based compilation model:
-//!  - `Artifact`: Tagged union representing IR at various stages (PR, IM - eg MLIR)
+//!  - `Artifact`: Tagged union representing a program at various pipeline stages
 //!  - `PassContext`: Shared state threaded through passes
 //!  - `Pass`: Pass metadata + runnable function + optional user config
 //!  - `Pipeline`: Pass sequence with validation and execution
 //!
 //! ## ADR
-//!  - The pipeline operates on PR and IM (MLIR) only. Compilation (IM -> EA) is a
-//!     backend responsibility, called separately after the pipeline completes.
-//!  - Passes declare input/output artifact kinds for validation
-//!  - Artifact kinds are runtime-validated at pass composition
-//!  - PassContext is backend-agnostic. Pass-specific state lives behind Pass.ptr
+//!  - The pipeline carries a program from PR through one or more lowered IRs.
+//!     Compilation to an executable artifact is a backend responsibility,
+//!     called separately after the pipeline completes.
+//!  - Passes declare input/output artifact kinds for validation.
+//!  - Artifact kinds are runtime-validated at pass composition.
+//!  - PassContext is backend-agnostic. Pass-specific state lives behind Pass.ptr.
+//!  - `ArtifactKind` is non-exhaustive so consumer code can extend it with
+//!     additional dialect tags without modifying core. Built-in tags name
+//!     specific dialects (e.g. `stablehlo`), not framework families.
 const std = @import("std");
 const log = std.log.scoped(.@"zg/pipeline");
 
 const pr_mod = @import("../pr/pr.zig");
-const kernel = @import("../kernel.zig");
 
 /// Artifact kinds for pass input/output validation.
-pub const ArtifactKind = enum {
-    /// Zigrad PR (toolchain agnostic)
+///
+/// Non-exhaustive so additional dialect tags can be introduced without
+/// modifying core. Tags name a specific dialect, not a framework.
+pub const ArtifactKind = enum(u32) {
+    /// Zigrad PR (toolchain agnostic).
     pr,
 
-    /// MLIR module bytes (any dialect(s), text or bytecode)
-    mlir,
+    /// Serialized StableHLO. Encoding (text vs binary) is on the payload.
+    stablehlo,
+
+    _,
 };
 
-/// MLIR encoding format
-pub const MlirEncoding = enum {
-    text,
-    bytecode,
-};
+/// Wire-format encoding for serialized IR bytes. Crosses the pipeline ->
+///  backend boundary; backends compile against bytes plus this tag.
+pub const Encoding = enum { text, binary };
 
-/// Artifact: The "IR at some point" in the pipeline.
+/// Artifact: the program at a pipeline stage.
 ///
-/// This is a tagged union representing the various forms that a program
-///  takes as it flows through pipeline passes. The pipeline operates on
-///  PR and MLIR only - compilation to executable artifacts is handled
-///  by the backend after the pipeline completes.
+/// Tagged union over `ArtifactKind`. The pipeline carries one of these
+/// between passes; compilation (IR -> executable) is a backend concern
+/// invoked after the pipeline finishes.
 pub const Artifact = union(ArtifactKind) {
-    /// PR program (Zigrad-owned)
+    /// PR program (Zigrad-owned, borrowed).
     pr: *pr_mod.Program,
 
-    /// MLIR module (serialized bytes)
-    mlir: MlirArtifact,
+    /// Serialized StableHLO bytes plus encoding metadata. Owns `bytes`.
+    stablehlo: struct {
+        bytes: []u8,
+        encoding: Encoding,
+    },
 
     pub fn kind(self: Artifact) ArtifactKind {
         return std.meta.activeTag(self);
@@ -54,7 +62,7 @@ pub const Artifact = union(ArtifactKind) {
     pub fn deinit(self: *Artifact, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .pr => {}, // PR program is borrowed
-            .mlir => |*m| m.deinit(allocator),
+            .stablehlo => |s| allocator.free(s.bytes),
         }
     }
 
@@ -62,23 +70,6 @@ pub const Artifact = union(ArtifactKind) {
     pub fn replace(self: *Artifact, allocator: std.mem.Allocator, next: Artifact) void {
         self.deinit(allocator);
         self.* = next;
-    }
-};
-
-/// MLIR artifact with encoding metadata.
-///
-/// Represents serialized MLIR at some pipeline stage. Passes that transform
-///  MLIR (select, legalize) operate on `bytes` directly - there
-///  is no separate snapshot field.
-/// TODO: rename this, doesnt have to be mlir-specific, and if it can be
-///  text or bytes then calling the field bytes is rather confusing even
-///  though it refers to the data type.
-pub const MlirArtifact = struct {
-    bytes: []u8,
-    encoding: MlirEncoding,
-
-    pub fn deinit(self: *MlirArtifact, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
     }
 };
 
@@ -232,7 +223,7 @@ test "pass chain validation" {
 
     const passes = [_]Pass{
         .{ .ptr = undefined, .run_fn = noop, .name = "validate", .input_kind = .pr, .output_kind = .pr },
-        .{ .ptr = undefined, .run_fn = noop, .name = "lower", .input_kind = .pr, .output_kind = .mlir },
+        .{ .ptr = undefined, .run_fn = noop, .name = "lower", .input_kind = .pr, .output_kind = .stablehlo },
     };
 
     const pipeline = Pipeline{ .passes = &passes };
@@ -246,7 +237,7 @@ test "pass chain validation rejects mismatch" {
 
     const passes = [_]Pass{
         .{ .ptr = undefined, .run_fn = noop, .name = "validate", .input_kind = .pr, .output_kind = .pr },
-        .{ .ptr = undefined, .run_fn = noop, .name = "lower", .input_kind = .mlir, .output_kind = .mlir },
+        .{ .ptr = undefined, .run_fn = noop, .name = "lower", .input_kind = .stablehlo, .output_kind = .stablehlo },
     };
 
     const pipeline = Pipeline{ .passes = &passes };
@@ -265,15 +256,15 @@ test "pipeline run transforms artifacts" {
     const func = try b.finish(&.{x});
     try program.add_function(func);
 
-    const to_mlir = struct {
+    const to_stablehlo = struct {
         fn f(_: *anyopaque, a: *Artifact, ctx: *PassContext) PassError!void {
-            const bytes = try ctx.allocator.dupe(u8, "mlir_output");
-            a.replace(ctx.allocator, .{ .mlir = .{ .bytes = bytes, .encoding = .text } });
+            const bytes = try ctx.allocator.dupe(u8, "stablehlo_output");
+            a.replace(ctx.allocator, .{ .stablehlo = .{ .bytes = bytes, .encoding = .text } });
         }
     }.f;
 
     const passes = [_]Pass{
-        .{ .ptr = undefined, .run_fn = to_mlir, .name = "to_mlir", .input_kind = .pr, .output_kind = .mlir },
+        .{ .ptr = undefined, .run_fn = to_stablehlo, .name = "to_stablehlo", .input_kind = .pr, .output_kind = .stablehlo },
     };
 
     var ctx = PassContext{ .allocator = testing.allocator };
@@ -282,7 +273,7 @@ test "pipeline run transforms artifacts" {
     defer artifact.deinit(testing.allocator);
 
     switch (artifact) {
-        .mlir => |m| try testing.expectEqualStrings("mlir_output", m.bytes),
+        .stablehlo => |s| try testing.expectEqualStrings("stablehlo_output", s.bytes),
         else => return error.ArtifactKindMismatch,
     }
 }

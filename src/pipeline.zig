@@ -1,11 +1,12 @@
 //! Entrypoint for pass pipeline infrastructure.
 //!
-//! The pipeline is a chain of passes that transform artifacts from PR through
-//!  to IM (MLIR). Compilation from IM to executable artifacts is a backend
-//!  responsibility, the pipeline conventionally ends at an IM ready to be
-//!  compiled by a backend toolchain.
+//! The pipeline is a chain of passes that transform a program from PR
+//!  through one or more lowered IRs. Compilation to an executable is a
+//!  backend responsibility; the pipeline conventionally ends at an IR
+//!  ready to be compiled by a backend toolchain.
 //!
-//! MLIR-specific passes (select, legalize) live in `lower/mlir/`.
+//! Dialect-specific passes live alongside their lowering (e.g. `lower/mlir/`
+//!  for MLIR-side passes that operate on `.stablehlo` artifacts).
 //!
 //! See `pass` for more.
 const pass = @import("pipeline/pass.zig");
@@ -13,8 +14,7 @@ const pass = @import("pipeline/pass.zig");
 // Re-export pass types
 pub const Artifact = pass.Artifact;
 pub const ArtifactKind = pass.ArtifactKind;
-pub const MlirArtifact = pass.MlirArtifact;
-pub const MlirEncoding = pass.MlirEncoding;
+pub const Encoding = pass.Encoding;
 pub const PassContext = pass.PassContext;
 pub const Pass = pass.Pass;
 pub const PassError = pass.PassError;

@@ -223,7 +223,6 @@ pub fn run_llama_ft_demo(
     //  for concision, but could be done equivalently).
     const inputs_spec = .{ host_params, host_batch };
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
 
     // Mirage kernel provider: tune -> store -> pass to compile_cfg.
     const MirageDispatch = if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void;
@@ -268,7 +267,7 @@ pub fn run_llama_ft_demo(
     const use_mirage_loss = cfg.kernel_provider != null;
 
     const compile_opts: zg.frontend.CompileOpts = .{
-        .lower = .{ .encoding = lower_encoding },
+        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
         .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
         .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,

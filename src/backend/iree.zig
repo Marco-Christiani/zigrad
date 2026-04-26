@@ -17,6 +17,7 @@
 //! `Event` is a no-op sentinel (local-sync is fully synchronous).
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
+const pass = @import("../pipeline/pass.zig");
 const iree_compiler = @import("../c/iree/compiler.zig");
 const rt = @import("../c/iree/runtime.zig");
 const log = std.log.scoped(.@"zg/iree_backend");
@@ -155,8 +156,8 @@ pub const Backend = struct {
     pub fn compile(
         self: *Backend,
         device: *const Device,
-        mlir_bytes: []const u8,
-        is_bytecode: bool,
+        ir_bytes: []const u8,
+        encoding: pass.Encoding,
         opts: CompileOptions,
     ) !LoadedExecutable {
         const cmp = self.compiler orelse {
@@ -165,7 +166,7 @@ pub const Backend = struct {
         };
 
         // Phase 1: MLIR -> VMFB.
-        const vmfb = try cmp.compile(self.allocator, mlir_bytes, is_bytecode);
+        const vmfb = try cmp.compile(self.allocator, ir_bytes, encoding == .binary);
         errdefer self.allocator.free(vmfb);
 
         log.debug("VMFB size: {d} bytes", .{vmfb.len});

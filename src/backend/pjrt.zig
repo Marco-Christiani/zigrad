@@ -23,6 +23,7 @@ const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../kernel.zig");
+const pass = @import("../pipeline/pass.zig");
 // TODO: is this a boundary violation or is iree incomplete? needs consideration.
 const BackendInterface = @import("../Backend.zig");
 const plugin = @import("../c/pjrt/plugin.zig");
@@ -147,21 +148,19 @@ pub const Backend = struct {
     // Compilation (MLIR -> EA)
     // ========================================================================
 
-    /// Compile MLIR bytes to a loaded executable.
+    /// Compile StableHLO bytes to a loaded executable.
     ///
-    /// This is the core compilation entry point. The MLIR should be in
-    /// StableHLO dialect (text or bytecode format).
+    /// `encoding` selects the wire format (text vs binary).
     pub fn compile(
         self: *Backend,
         device: *const Device,
-        mlir_bytes: []const u8,
-        is_bytecode: bool,
+        ir_bytes: []const u8,
+        encoding: pass.Encoding,
         options: CompileOptions,
     ) !LoadedExecutable {
-        const format_tag: []const u8 = if (is_bytecode) "bytecode" else "text";
         log.info("compile: {d:.1}KB {s}, platform={s}", .{
-            @as(f64, @floatFromInt(mlir_bytes.len)) / 1024.0,
-            format_tag,
+            @as(f64, @floatFromInt(ir_bytes.len)) / 1024.0,
+            @tagName(encoding),
             @tagName(self.platform),
         });
 
@@ -170,8 +169,11 @@ pub const Backend = struct {
         const compile_opts_pb = try build_compile_options_proto(self.allocator, options);
         defer self.allocator.free(compile_opts_pb);
 
-        const format: pjrt_types.ProgramFormat = if (is_bytecode) .mlir_bytecode else .mlir_text;
-        const executable = try self.client.compile(device, format, mlir_bytes, compile_opts_pb);
+        const format: pjrt_types.ProgramFormat = switch (encoding) {
+            .binary => .mlir_bytecode,
+            .text => .mlir_text,
+        };
+        const executable = try self.client.compile(device, format, ir_bytes, compile_opts_pb);
 
         if (timer) |*t| {
             const elapsed_ns = t.read();
@@ -187,11 +189,11 @@ pub const Backend = struct {
     pub fn compile_serialized(
         self: *Backend,
         device: *const Device,
-        mlir_bytes: []const u8,
-        is_bytecode: bool,
+        ir_bytes: []const u8,
+        encoding: pass.Encoding,
         options: CompileOptions,
     ) ![]u8 {
-        var exe = try self.compile(device, mlir_bytes, is_bytecode, options);
+        var exe = try self.compile(device, ir_bytes, encoding, options);
         defer exe.deinit(self.api);
         return exe.serialize(self.api, self.allocator);
     }
@@ -346,10 +348,10 @@ pub const Backend = struct {
         return @fieldParentPtr("interface", iface);
     }
 
-    fn iface_compile(iface: *BackendInterface, device: BackendInterface.Device, mlir: []const u8, is_bytecode: bool, opts: BackendInterface.CompileOptions) BackendInterface.Error!BackendInterface.Executable {
+    fn iface_compile(iface: *BackendInterface, device: BackendInterface.Device, ir_bytes: []const u8, encoding: pass.Encoding, opts: BackendInterface.CompileOptions) BackendInterface.Error!BackendInterface.Executable {
         const self = promote(iface);
         const pjrt_device = unwrap_device(device);
-        const exe = self.compile(&pjrt_device, mlir, is_bytecode, opts) catch return error.BackendError;
+        const exe = self.compile(&pjrt_device, ir_bytes, encoding, opts) catch return error.BackendError;
         return wrap_executable(self, exe);
     }
 

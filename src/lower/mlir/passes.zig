@@ -14,7 +14,6 @@ const mlir = @import("../../c/mlir/mlir.zig");
 const pass = @import("../../pipeline/pass.zig");
 const MlirSession = @import("session.zig").MlirSession;
 const Writer = std.Io.Writer;
-const MlirArtifact = pass.MlirArtifact;
 const PassError = pass.PassError;
 const Pass = pass.Pass;
 const PassContext = pass.PassContext;
@@ -31,19 +30,23 @@ pub const zigrad_kernel_select_pipeline: [:0]const u8 = "canonicalize,cse,func.f
 ///  This function handles parsing, pipeline execution, verification, and
 ///  re-serialization.
 ///
-/// The artifact encoding is preserved across the transformation.
+/// Requires the artifact's current arm to be `.stablehlo`. The encoding is
+///  preserved across the transformation.
 /// TODO: consider if this is clear as a method.
 pub fn run_pipeline_on_artifact(
     allocator: std.mem.Allocator,
     session: MlirSession,
-    mlir_artifact: *pass.MlirArtifact,
+    artifact: *Artifact,
     pipeline_str: [:0]const u8,
 ) PassError!void {
+    if (artifact.kind() != .stablehlo) return error.ArtifactKindMismatch;
+    const sh = &artifact.stablehlo;
+
     const ctx = session.ctx;
 
-    var module = mlir.Module.parse_bytes(ctx, mlir_artifact.bytes) catch {
-        log.err("failed to parse MLIR artifact ({s} encoding, {d} bytes)", .{
-            @tagName(mlir_artifact.encoding), mlir_artifact.bytes.len,
+    var module = mlir.Module.parse_bytes(ctx, sh.bytes) catch {
+        log.err("failed to parse stablehlo artifact ({s} encoding, {d} bytes)", .{
+            @tagName(sh.encoding), sh.bytes.len,
         });
         return error.InvalidMlir;
     };
@@ -70,8 +73,8 @@ pub fn run_pipeline_on_artifact(
     var writer_state = Writer.Allocating.init(allocator);
     defer writer_state.deinit();
 
-    switch (mlir_artifact.encoding) {
-        .bytecode => module.op().write_bytecode(&writer_state.writer) catch |e| switch (e) {
+    switch (sh.encoding) {
+        .binary => module.op().write_bytecode(&writer_state.writer) catch |e| switch (e) {
             inline else => |ee| @panic("Serialization failed got " ++ @errorName(ee) ++ " in run_pipeline_on_artifact()."),
         },
         .text => module.op().print(&writer_state.writer, .{}) catch |e| switch (e) {
@@ -80,8 +83,8 @@ pub fn run_pipeline_on_artifact(
     }
 
     const new_bytes = try writer_state.toOwnedSlice();
-    allocator.free(mlir_artifact.bytes);
-    mlir_artifact.bytes = new_bytes;
+    allocator.free(sh.bytes);
+    sh.bytes = new_bytes;
 }
 
 // ============================================================================
@@ -105,8 +108,8 @@ pub const MlirSelectPass = struct {
             .ptr = undefined,
             .run_fn = run_impl,
             .name = "mlir_kernel_select",
-            .input_kind = .mlir,
-            .output_kind = .mlir,
+            .input_kind = .stablehlo,
+            .output_kind = .stablehlo,
         };
     }
 
@@ -115,7 +118,7 @@ pub const MlirSelectPass = struct {
         artifact: *Artifact,
         ctx: *PassContext,
     ) PassError!void {
-        if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
+        if (artifact.kind() != .stablehlo) return error.ArtifactKindMismatch;
         // TODO: this is a misleading error but stems from a shortcoming in our interface design,
         //  see comments in pass.zig for ideas to fix this.
         var session = MlirSession.init() catch |e| {
@@ -124,6 +127,6 @@ pub const MlirSelectPass = struct {
         };
         defer session.deinit();
         session.load_dialect("stablehlo");
-        try run_pipeline_on_artifact(ctx.allocator, session, &artifact.mlir, zigrad_kernel_select_pipeline);
+        try run_pipeline_on_artifact(ctx.allocator, session, artifact, zigrad_kernel_select_pipeline);
     }
 };

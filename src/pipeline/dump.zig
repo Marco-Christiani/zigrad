@@ -32,12 +32,12 @@ fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContex
 
 fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
     _ = ctx;
-    if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
+    if (artifact.kind() != .stablehlo) return error.ArtifactKindMismatch;
 
     const cfg: *DumpConfig = @ptrCast(@alignCast(ptr));
 
-    const mlir = artifact.mlir;
-    if (mlir.encoding != .text) return error.ValidationFailed;
+    const sh = artifact.stablehlo;
+    if (sh.encoding != .text) return error.ValidationFailed;
 
     const task = struct {
         bytes: []const u8,
@@ -46,7 +46,7 @@ fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
             try emit_mlir(out, self.bytes, self.entry);
         }
     }{
-        .bytes = mlir.bytes,
+        .bytes = sh.bytes,
         .entry = cfg.entry_name,
     };
 
@@ -68,8 +68,8 @@ pub fn dump_mlir_pass_with_config(config: *DumpConfig) pass.Pass {
         .ptr = @ptrCast(config),
         .run_fn = dump_mlir_pass,
         .name = "dump_mlir",
-        .input_kind = .mlir,
-        .output_kind = .mlir,
+        .input_kind = .stablehlo,
+        .output_kind = .stablehlo,
     };
 }
 

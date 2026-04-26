@@ -20,6 +20,7 @@
 const std = @import("std");
 const pr = @import("pr/pr.zig");
 const kernel = @import("kernel.zig");
+const pass = @import("pipeline/pass.zig");
 const utils = @import("utils.zig");
 const host_buffer = utils.host_buffer;
 const Tree = utils.Tree;
@@ -30,8 +31,7 @@ vtable: *const VTable,
 
 pub const VTable = struct {
     // Compilation
-    // TODO: this signature is leaking across abs boundary
-    compile: *const fn (b: *Backend, device: Device, mlir: []const u8, is_bytecode: bool, opts: CompileOptions) Error!Executable,
+    compile: *const fn (b: *Backend, device: Device, ir_bytes: []const u8, encoding: pass.Encoding, opts: CompileOptions) Error!Executable,
 
     // Buffer management
     buffer_from_host: *const fn (b: *Backend, device: Device, data: []const u8, dtype: pr.DType, shape: []const i64) Error!Buffer,
@@ -127,9 +127,8 @@ pub const Error = error{
     Unexpected,
 };
 
-// TODO: this signature is leaking across abs boundary
-pub fn compile(self: *Backend, device: Device, mlir: []const u8, is_bytecode: bool, opts: CompileOptions) Error!Executable {
-    return self.vtable.compile(self, device, mlir, is_bytecode, opts);
+pub fn compile(self: *Backend, device: Device, ir_bytes: []const u8, encoding: pass.Encoding, opts: CompileOptions) Error!Executable {
+    return self.vtable.compile(self, device, ir_bytes, encoding, opts);
 }
 
 pub fn buffer_from_host(self: *Backend, device: Device, data: []const u8, dtype: pr.DType, shape: []const i64) Error!Buffer {

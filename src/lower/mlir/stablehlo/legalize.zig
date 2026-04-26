@@ -32,8 +32,8 @@ pub const StablehloLegalizePass = struct {
             .ptr = undefined,
             .run_fn = run_impl,
             .name = "stablehlo_legalize",
-            .input_kind = .mlir,
-            .output_kind = .mlir,
+            .input_kind = .stablehlo,
+            .output_kind = .stablehlo,
         };
     }
 
@@ -42,13 +42,13 @@ pub const StablehloLegalizePass = struct {
         artifact: *pass_mod.Artifact,
         ctx: *pass_mod.PassContext,
     ) pass_mod.PassError!void {
-        if (artifact.kind() != .mlir) return error.ArtifactKindMismatch;
+        if (artifact.kind() != .stablehlo) return error.ArtifactKindMismatch;
         var session = MlirSession.init() catch |e| {
             log.err("MLIR context initialization failed: {s}", .{@errorName(e)});
             return error.InvalidMlir;
         };
         defer session.deinit();
         session.load_dialect("stablehlo");
-        try mlir_passes.run_pipeline_on_artifact(ctx.allocator, session, &artifact.mlir, stablehlo_legalize_pipeline);
+        try mlir_passes.run_pipeline_on_artifact(ctx.allocator, session, artifact, stablehlo_legalize_pipeline);
     }
 };

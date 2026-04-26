@@ -126,9 +126,8 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backe
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     const exe = zg.frontend.compile_program(backend, allocator, &program, device, "main", .{
-        .lower = .{ .encoding = lower_encoding },
+        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
@@ -150,9 +149,8 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
     try program.add_function(vjp);
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
     const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "main_vjp", .{
-        .lower = .{ .encoding = lower_encoding },
+        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
@@ -335,14 +333,12 @@ pub fn run_train_demo(
     const inputs_spec = .{ params_spec, batch_spec };
     const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-
     const train = zg.frontend.train;
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "train_step");
     defer program.deinit();
 
     const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "train_step", .{
-        .lower = .{ .encoding = lower_encoding },
+        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
         .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
@@ -554,14 +550,12 @@ pub fn run_kernel_provider_demo(
     var program = try build_kernelized_demo_program(allocator, provider_names);
     defer program.deinit();
 
-    const lower_encoding: zg.pipeline.MlirEncoding = if (dump_mlir != null) .text else .bytecode;
-
     // tune -> store -> compile
     var tune_result = try zg.tune.tune(allocator, &program, providers, .{});
     defer tune_result.deinit();
 
     const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "main", .{
-        .lower = .{ .encoding = lower_encoding },
+        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .kernel_store = &tune_result.store,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
