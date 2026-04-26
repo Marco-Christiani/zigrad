@@ -249,9 +249,14 @@ in
       # - Include LLVM library in rpath so libtvm.so finds libLLVM.so.
       # - Always include LLVM's runtime deps (zlib, ncurses, libxml2).
       # - Note: libcuda.so.1 is provided by the driver and resolved via autoAddDriverRunpath or LD_LIBRARY_PATH.
+      # Use cudaRuntime (cuda-redist.out's flat lib symlink farm) for the
+      #  rpath, NOT cudaToolkit (= cuda-redist.dev). cudaToolkit is a build-time
+      #  artifact (headers + nvcc + static .a archives). Pointing libtvm.so's
+      #  rpath at it would drag dev into the runtime closure unnecessarily.
       rpath="\$ORIGIN:${lib.makeLibraryPath (
         [stdenv.cc.cc.lib zlib ncurses libxml2 llvmLib]
-        ++ lib.optionals cudaEnabled [cudaToolkit]
+        ++ lib.optional (cudaEnabled && cudaRuntime != null) cudaRuntime
+        ++ lib.optional (cudaEnabled && cudaRuntime == null) cudaToolkit
       )}"
       for f in $out/lib/*.so*; do
         [ -e "$f" ] || continue

@@ -117,7 +117,7 @@ in {
       #  the runtime layout instead of cudaToolkit (= cuda-redist.dev). Keeps
       #  dev (with its build-time .a files and unused link-time .so) out of
       #  TVM's runtime closure.
-      cudaRuntime = cudaRedist;
+      cudaRuntime = cudaRedist.out;
       cudaSupport = true;
     };
 
