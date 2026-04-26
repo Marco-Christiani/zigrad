@@ -98,7 +98,7 @@ in {
       cudaSupport = true;
       cpuMathLibrary = "onednn-thunk";
       cpuNativeTuning = true;
-      depsHash = "sha256-ivbrLtStbE1IW9hTiqyL0KoBdK9IZRPXcDmokH01eCE=";
+      depsHash = "sha256-nOcNUVt5HFO8eC2C9Ubjjwn1dnKnCuWZISZcrhbczd0=";
     };
 
     cudaRedist = pkgs.callPackage ../packages/cuda-redist.nix {inherit (cudaCfg) cudaVersion;};
