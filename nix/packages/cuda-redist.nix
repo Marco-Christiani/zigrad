@@ -66,8 +66,27 @@
 
   fetched = builtins.mapAttrs fetchComponent components;
 
-  hasNvcc = components ? cuda_nvcc;
   hasNccl = components ? nccl && components.nccl.kind == "wheel";
+
+  # Link-time allowlist for $dev/lib. Anything not listed is shipped only in
+  #  $out (runtime layout) and must be loaded via LD_LIBRARY_PATH or the
+  #  consumer's runtime rpath. Keeps $dev small (~500MB instead of ~14GiB).
+  #
+  # Includes:
+  # - libcudart + static deps (cmake's CUDA toolchain probe links -lcudart
+  #   -lcudart_static -lcudadevrt; libculibos is a cudart_static internal dep).
+  # - libnvrtc family (runtime kernel compilation; cmake probes for it).
+  # - stubs/libcuda.so (build-time stub for the driver; real driver loaded at
+  #   runtime via NixOS's /run/opengl-driver).
+  devLinkTimeLibPattern = lib.concatStringsSep "|" [
+    "libcudart.so*"
+    "libcudart_static.a"
+    "libcudadevrt.a"
+    "libculibos.a"
+    "libnvrtc.so*"
+    "libnvrtc-builtins.so*"
+    "libnvJitLink.so*"
+  ];
 in
   stdenv.mkDerivation {
     pname = "cuda-redist";
@@ -126,20 +145,25 @@ in
         done
       }
 
-      # Helper: copy shared (.so*) and static (.a) libs from a component's
-      #  extract dir, plus lib/stubs/. Static libs are needed at link time
-      #  for things like libcudart_static.a and libcudadevrt.a (cmake's CUDA
-      #  test program links them by default).
+      # Helper: copy link-time libs (whitelisted) and stubs from a component's
+      #  extract dir. Runtime-only libs (cudnn, cublas, cufft, cusparse,
+      #  nvshmem, libcusolver, ...) are NOT shipped in dev — consumers load
+      #  them via LD_LIBRARY_PATH or rpath against the SDK's runtime profile.
+      #  Keeps dev's closure ~30x smaller than copying everything.
       copy_libs_to_dev() {
         local extract_root="$1"
         for libdir in "$extract_root"/*/lib "$extract_root"/*/lib64; do
           [ -d "$libdir" ] || continue
           for f in "$libdir"/*.so* "$libdir"/*.a; do
             [ -e "$f" ] || continue
-            cp -aL "$f" "$dev/lib/"
+            local base="$(basename "$f")"
+            case "$base" in
+              ${devLinkTimeLibPattern}) cp -aL "$f" "$dev/lib/" ;;
+            esac
           done
+          # Stubs are always small + always needed at link time (libcuda.so).
           if [ -d "$libdir/stubs" ]; then
-            for f in "$libdir/stubs"/*.so* "$libdir/stubs"/*.a; do
+            for f in "$libdir/stubs"/*.so*; do
               [ -e "$f" ] || continue
               cp -aL "$f" "$dev/lib/stubs/"
             done
@@ -232,26 +256,32 @@ in
 
       chmod -R u+w "$out/runtime" "$dev"
 
-      # Sanity checks.
+      # Sanity checks: assert specific critical files. Counting .so* is fragile
+      #  with the dev-side whitelist (only ~12 versioned files expected).
       out_so_count="$(find "$out/runtime/nvidia" -type f -name '*.so*' | wc -l)"
-      dev_so_count="$(find "$dev/lib" -maxdepth 1 -type f -name '*.so*' | wc -l)"
-      echo "[cuda-redist] out: $out_so_count DSOs, dev: $dev_so_count DSOs"
+      echo "[cuda-redist] out runtime: $out_so_count DSOs"
       if [ "$out_so_count" -lt 10 ]; then
         echo "ERROR: expected >=10 out DSOs, got $out_so_count" >&2
         exit 1
       fi
-      if [ "$dev_so_count" -lt 10 ]; then
-        echo "ERROR: expected >=10 dev DSOs, got $dev_so_count" >&2
+      missing=()
+      for required in \
+          "$dev/bin/nvcc" \
+          "$dev/bin/cudafe++" \
+          "$dev/nvvm/bin/cicc" \
+          "$dev/lib/libcudart.so" \
+          "$dev/lib/libcudart_static.a" \
+          "$dev/lib/libcudadevrt.a" \
+          "$dev/lib/libnvrtc.so" \
+          "$dev/lib/stubs/libcuda.so"; do
+        [ -e "$required" ] || missing+=("$required")
+      done
+      if [ "''${#missing[@]}" -gt 0 ]; then
+        echo "ERROR: dev output missing critical files:" >&2
+        printf '  %s\n' "''${missing[@]}" >&2
         exit 1
       fi
-      if [ ! -x "$dev/bin/nvcc" ]; then
-        echo "ERROR: expected $dev/bin/nvcc to be present and executable" >&2
-        exit 1
-      fi
-      if [ ! -f "$dev/lib/stubs/libcuda.so" ]; then
-        echo "ERROR: expected $dev/lib/stubs/libcuda.so to be present" >&2
-        exit 1
-      fi
+      echo "[cuda-redist] dev: critical files present"
     '';
 
     meta = {
