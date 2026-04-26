@@ -29,6 +29,12 @@
   # When true: RelWithDebInfo, retain DWARF, don't strip.
   # When false (default, production): Release, NDEBUG, stripped.
   withDebugSymbols ? false,
+  # IREE's LLVM is mostly compiler infra; native tuning rarely matters here.
+  #  Threaded for completeness.
+  withNativeTuning ? false,
+  enableLto ? false,
+  extraCxxFlags ? [],
+  extraLdFlags ? [],
 }:
 stdenv.mkDerivation {
   pname = "iree-llvm";
@@ -116,7 +122,12 @@ stdenv.mkDerivation {
     # Embed the Nix store rpath at build time so tools run from the build tree.
     "-DCMAKE_BUILD_RPATH=${lib.makeLibraryPath [stdenv.cc.cc.lib zlib zstd]}"
     "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON"
-  ];
+  ]
+  ++ lib.optional enableLto "-DLLVM_ENABLE_LTO=Thin"
+  ++ (let
+    cxxFlags = (lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags;
+  in lib.optional (cxxFlags != []) "-DCMAKE_CXX_FLAGS=${lib.concatStringsSep " " cxxFlags}")
+  ++ lib.optional (extraLdFlags != []) "-DCMAKE_SHARED_LINKER_FLAGS=${lib.concatStringsSep " " extraLdFlags}";
 
   postInstall = ''
     set -euo pipefail

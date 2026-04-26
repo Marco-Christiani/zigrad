@@ -29,6 +29,12 @@
   # When true: RelWithDebInfo, retain DWARF, don't strip.
   # When false (default, production): Release, NDEBUG, stripped.
   withDebugSymbols ? false,
+  # Native CPU codegen. StablehloCAPI is mostly compiler infra; native tuning
+  #  has small impact. Threaded for completeness.
+  withNativeTuning ? false,
+  enableLto ? false,
+  extraCxxFlags ? [],
+  extraLdFlags ? [],
 }: let
   stablehloPatches = ["temporary.patch"];
 
@@ -110,13 +116,18 @@ in
       set -euo pipefail
 
       mkdir -p stablehlo-build
+      cxxFlags="${lib.concatStringsSep " " ((lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags)}"
+      ldFlags="${lib.concatStringsSep " " extraLdFlags}"
       cmake -S ${patchedStablehloSrc} -B stablehlo-build -G Ninja \
         -DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"} \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
         -DMLIR_DIR="${llvm}/lib/cmake/mlir" \
-        -DLLVM_DIR="${llvm}/lib/cmake/llvm"
+        -DLLVM_DIR="${llvm}/lib/cmake/llvm" \
+        ${lib.optionalString enableLto "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON"} \
+        ''${cxxFlags:+-DCMAKE_CXX_FLAGS="$cxxFlags"} \
+        ''${ldFlags:+-DCMAKE_SHARED_LINKER_FLAGS="$ldFlags"}
 
       ninja -C stablehlo-build StablehloCAPI
 

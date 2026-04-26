@@ -28,6 +28,18 @@
   # When true: build with RelWithDebInfo, retain DWARF, don't strip.
   # When false (default, production): Release, NDEBUG, stripped.
   withDebugSymbols ? false,
+  # Emit native CPU instructions in LLVM's own libraries. Off by default
+  #  even when buildCfg sets it true — LLVM ships portable libs for every
+  #  consumer (TVM, our SDK), so non-portable codegen here would force
+  #  consumers onto the same CPU family. Tooling (llc, opt) can still
+  #  detect host features at runtime via -mcpu=native.
+  withNativeTuning ? false,
+  # Link-time optimization. LLVM with LTO is HUGE build cost (~2-3x) for
+  #  small TVM/SDK gains since LLVM is mostly compiler infra, not hot path.
+  #  Off by default. Wire opt-in.
+  enableLto ? false,
+  extraCxxFlags ? [],
+  extraLdFlags ? [],
 }: let
   llvmPatches = ["build.patch" "mathextras.patch" "toolchains.patch" "zstd.patch" "lit_test.patch"];
   llvmIgnoredPatches = ["generated.patch"];
@@ -85,7 +97,10 @@ in
       libffi
     ];
 
-    cmakeFlags = [
+    cmakeFlags = let
+      cxxFlags = (lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags;
+      ldFlags = extraLdFlags;
+    in [
       "-DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"}"
       "-DBUILD_SHARED_LIBS=ON"
       "-DLLVM_ENABLE_PROJECTS=mlir;clang;polly"
@@ -101,7 +116,10 @@ in
       "-DLLVM_INSTALL_UTILS=ON"
       "-DCMAKE_BUILD_RPATH=${lib.makeLibraryPath [stdenv.cc.cc.lib zlib zstd]}"
       "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON"
-    ];
+    ]
+    ++ lib.optional enableLto "-DLLVM_ENABLE_LTO=Thin"
+    ++ lib.optional (cxxFlags != []) "-DCMAKE_CXX_FLAGS=${lib.concatStringsSep " " cxxFlags}"
+    ++ lib.optional (ldFlags != []) "-DCMAKE_SHARED_LINKER_FLAGS=${lib.concatStringsSep " " ldFlags}";
 
     cmakeDir = "../llvm";
 

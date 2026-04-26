@@ -46,6 +46,12 @@
   # When true: RelWithDebInfo, retain DWARF, don't strip.
   # When false (default, production): Release, NDEBUG, stripped.
   withDebugSymbols ? false,
+  # IREE runtime IS the hot path — kernel dispatch, HAL submission, etc.
+  #  Native tuning meaningfully helps here.
+  withNativeTuning ? false,
+  enableLto ? false,
+  extraCxxFlags ? [],
+  extraLdFlags ? [],
 }:
 stdenv.mkDerivation {
   pname = "iree-runtime";
@@ -139,7 +145,12 @@ stdenv.mkDerivation {
       -DIREE_ENABLE_CPUINFO=OFF \
       -DIREE_ENABLE_LIBBACKTRACE=OFF \
       \
-      -DCMAKE_INSTALL_PREFIX="$out"
+      -DCMAKE_INSTALL_PREFIX="$out" \
+      ${lib.optionalString enableLto "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON"} \
+      ${let
+        cxxFlags = (lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags;
+      in lib.optionalString (cxxFlags != []) "-DCMAKE_CXX_FLAGS='${lib.concatStringsSep " " cxxFlags}'"} \
+      ${lib.optionalString (extraLdFlags != []) "-DCMAKE_SHARED_LINKER_FLAGS='${lib.concatStringsSep " " extraLdFlags}'"}
 
     # -----------------------------------------------------------------------
     # Build runtime static archives.

@@ -12,10 +12,17 @@ in {
     buildCfg,
     ...
   }: let
-    # Threaded into every long-running derivation so a single flag flips
-    #  the entire SDK between production (stripped, Release, NDEBUG) and
-    #  debug (DWARF retained, RelWithDebInfo) build modes.
-    inherit (buildCfg) withDebugSymbols;
+    # Threaded into every long-running derivation. See ./flake.nix buildCfg
+    #  for full semantics + ./website/nuxt-content/content/2.building/.
+    inherit (buildCfg)
+      withDebugSymbols
+      withNativeTuning
+      cudaArchitectures
+      enableLto
+      extraCxxFlags
+      extraLdFlags
+      extraBazelFlags
+      ;
     inherit (inputs) xlaSrc llvmSrc stablehloSrc;
     inherit (inputs) ireeSrc ireeLlvmSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc;
     inherit (pkgs) lib;
@@ -66,12 +73,17 @@ in {
     '';
 
     # LLVM 22 from XLA-pinned sources. Shared by MLIR SDK and TVM.
+    # Native tuning OFF for LLVM specifically — it ships portable libs that
+    #  every consumer (TVM, our SDK) loads, and non-portable codegen here
+    #  forces all consumers onto the same CPU family.
     llvm = pkgs.callPackage ../packages/llvm.nix {
-      inherit xlaSrc llvmSrc withDebugSymbols;
+      inherit xlaSrc llvmSrc withDebugSymbols enableLto extraCxxFlags extraLdFlags;
+      withNativeTuning = false;
     };
 
     xlaMlirStablehloCapiSdk = pkgs.callPackage ../packages/xla-mlir-stablehlo-capi-sdk.nix {
-      inherit xlaSrc stablehloSrc llvm withDebugSymbols;
+      inherit xlaSrc stablehloSrc llvm withDebugSymbols enableLto extraCxxFlags extraLdFlags;
+      withNativeTuning = false;  # compiler infra, not hot path
     };
 
     zigradMlirExt = pkgs.callPackage ../packages/zigrad-mlir-ext.nix {
@@ -92,19 +104,20 @@ in {
     };
 
     xlaPjrtPlugins = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
-      inherit xlaSrc withDebugSymbols;
+      inherit xlaSrc withDebugSymbols enableLto extraBazelFlags;
       cudaSupport = false;
       cpuMathLibrary = "onednn";
-      cpuNativeTuning = true;
+      cpuNativeTuning = withNativeTuning;
       depsHash = "sha256-vpI+i27sWrNS/qeICNav8lZJHcGsnx+C+e58oAyd3oE=";
     };
 
     xlaPjrtPluginsCuda = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
-      inherit xlaSrc withDebugSymbols;
+      inherit xlaSrc withDebugSymbols enableLto extraBazelFlags;
       inherit (cudaCfg) cudaVersion;
+      inherit cudaArchitectures;
       cudaSupport = true;
       cpuMathLibrary = "onednn-thunk";
-      cpuNativeTuning = true;
+      cpuNativeTuning = withNativeTuning;
       depsHash = "sha256-nOcNUVt5HFO8eC2C9Ubjjwn1dnKnCuWZISZcrhbczd0=";
     };
 
@@ -118,7 +131,11 @@ in {
     #  TVM compiles kernels via NVRTC at runtime against the actual GPU, so the
     #  build-time arch hint matters only for AOT paths we don't use.
     tvm = pkgs.callPackage ../packages/tvm.nix {
-      inherit cudaToolkit gccHost llvm withDebugSymbols;
+      inherit
+        cudaToolkit gccHost llvm
+        withDebugSymbols withNativeTuning enableLto
+        cudaArchitectures extraCxxFlags extraLdFlags
+        ;
       # cuda-redist.out has a flat lib/ symlink farm pointing into the runtime
       #  layout; passing it as cudaRuntime makes libtvm.so's rpath reference
       #  the runtime layout instead of cudaToolkit (= cuda-redist.dev). Keeps
@@ -129,20 +146,33 @@ in {
     };
 
     tvmCpu = pkgs.callPackage ../packages/tvm.nix {
-      inherit gccHost llvm withDebugSymbols;
+      inherit
+        gccHost llvm
+        withDebugSymbols withNativeTuning enableLto
+        extraCxxFlags extraLdFlags
+        ;
       cudaSupport = false;
     };
 
     # IREE: BYO-LLVM from iree-org fork (diverges from XLA-pinned llvm).
     ireeLlvm = pkgs.callPackage ../packages/iree/llvm.nix {
-      inherit ireeLlvmSrc withDebugSymbols;
+      inherit ireeLlvmSrc withDebugSymbols enableLto extraCxxFlags extraLdFlags;
+      withNativeTuning = false;  # compiler infra, like xla's llvm
     };
     ireeCompiler = pkgs.callPackage ../packages/iree/compiler.nix {
-      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm withDebugSymbols;
+      inherit
+        ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm
+        withDebugSymbols enableLto extraCxxFlags extraLdFlags
+        ;
+      withNativeTuning = false;  # compile-time tool, perf-insensitive
       withCli = true;
     };
     ireeRuntime = pkgs.callPackage ../packages/iree/runtime.nix {
-      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm withDebugSymbols;
+      inherit
+        ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm
+        withDebugSymbols withNativeTuning enableLto
+        extraCxxFlags extraLdFlags
+        ;
     };
 
     # SDK compositor: feature flags -> { compile, runtime, full }.

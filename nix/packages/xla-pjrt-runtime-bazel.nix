@@ -33,6 +33,12 @@
   # When true: pass --copt=-g to bazel, retain DWARF, don't strip.
   # When false (default, production): bazel -c opt only, stripped.
   withDebugSymbols ? false,
+  # LTO via bazel: --features=thin_lto. Currently passed but XLA's bazel
+  #  rules may reject it depending on the target; if so, bazel just warns.
+  enableLto ? false,
+  # Extra build flags appended to bazelBuildFlags. Use for one-off
+  #  experiments (e.g. ["--copt=-funroll-loops"]).
+  extraBazelFlags ? [],
   ...
 }: let
   cudaVersionChecked =
@@ -397,7 +403,12 @@ in
         ++ lib.optionals withDebugSymbols [
           "--copt=-g"
           "--strip=never"
-        ];
+        ]
+        ++ lib.optionals enableLto [
+          "--copt=-flto=thin"
+          "--linkopt=-flto=thin"
+        ]
+        ++ extraBazelFlags;
 
       inherit bazelTargets;
 

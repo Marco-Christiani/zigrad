@@ -38,6 +38,13 @@
   # When true: RelWithDebInfo, retain DWARF, don't strip.
   # When false (default, production): Release, NDEBUG, stripped.
   withDebugSymbols ? false,
+  # Native CPU codegen for TVM's host-side runtime. Default true for TVM
+  #  specifically — it ships fused/lowered kernels and benefits notably
+  #  from native tuning on the build host.
+  withNativeTuning ? false,
+  enableLto ? false,
+  extraCxxFlags ? [],
+  extraLdFlags ? [],
   tvmSrcOverride ? null,
   tvmRev ? "v0.22.0",
   tvmHash ? "sha256-KcHUcblwtqxNofHKofuQHu2d7hIqS9FUvc41OkCVtnY=",
@@ -156,6 +163,13 @@ in
         set(USE_CUDNN ${boolToCmake enableCudnn})
         set(USE_CUTLASS ${boolToCmake enableCutlass})
         ${lib.optionalString withPythonBindings "set(TVM_FFI_BUILD_PYTHON_MODULE ON)"}
+        ${lib.optionalString enableLto "set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)"}
+        ${lib.optionalString (withNativeTuning || extraCxxFlags != []) ''
+          set(CMAKE_CXX_FLAGS "${lib.concatStringsSep " " ((lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags)} \''${CMAKE_CXX_FLAGS}")
+        ''}
+        ${lib.optionalString (extraLdFlags != []) ''
+          set(CMAKE_SHARED_LINKER_FLAGS "${lib.concatStringsSep " " extraLdFlags} \''${CMAKE_SHARED_LINKER_FLAGS}")
+        ''}
         EOF
 
         ${lib.optionalString cudaEnabled ''
