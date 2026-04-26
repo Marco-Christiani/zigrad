@@ -17,6 +17,7 @@
 *.tar
 *.zip
 *.local.*
+*.local/
 
 # paths
 zig-out
@@ -51,9 +52,25 @@ artifacts/
 !website/nuxt-content/shiki-grammars/*.json
 !website/**/*.svg
 !website/*/*.json
+scripts/bazel-log-parser.zig
+scripts/bench_tvm_attention.sh
+scripts/bench_xla_flags.sh
+scripts/build_tvm_filter.sh
+scripts/check_bzl_logs.py
+scripts/check_compile_options.py
+scripts/check_cpu_client_options.py
+scripts/check_device_count.py
+scripts/check_jax_backend_type.py
+scripts/check_jax_config.py
+scripts/check_xla_flags.py
+scripts/compare_xla_flags.sh
+scripts/parse_xla_tool_paths.py
 shim/build
 shim/build-mlir
 *.mlir
 !shim/test/*.mlir
 *.ll
 tools/decode_hlo
+
+# Per-user buildCfg overrides; see local-build-cfg.example.nix.
+local-build-cfg.nix

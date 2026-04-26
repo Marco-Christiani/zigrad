@@ -96,50 +96,48 @@
     };
 
     # Build-time policy. Threaded into every long-running C++/bazel derivation.
-    #  Defaults reflect a development build that maximizes runtime performance
-    #  at the cost of binary portability. For redistributable artifacts,
-    #  override withNativeTuning=false and cudaArchitectures=[]/[fat].
-    #  See the Building section of the docs site for full knob documentation
-    #  and concrete use-case recipes.
-    buildCfg = {
-      # ---- Debug / production switch -----------------------------------
-      # When true: cmake RelWithDebInfo, bazel --copt=-g --strip=never, dontStrip.
-      # Default false = production: Release, NDEBUG, stripped.
-      withDebugSymbols = false;
-
-      # ---- CPU codegen -------------------------------------------------
-      # Emit non-portable native CPU instructions (-march=native -mavx2 -mfma).
-      # Massive perf win on the build host, but binaries won't run on older or
-      # different CPU families. False for distribution; true for dev/benchmarks.
-      withNativeTuning = true;
-
-      # ---- CUDA codegen ------------------------------------------------
-      # GPU compute capabilities to compile for. Empty = upstream defaults
-      # (XLA: fat sm_60..sm_90; TVM: cmake "all-major"). Pin to your dev GPU
-      # for max perf + faster builds: e.g. ["86"] for Ampere consumer (RTX 30,
-      # A10), ["89"] for Ada (RTX 40), ["90"] for Hopper (H100), or a list
-      # ["80" "86" "89" "90"] for portable-fat.
-      cudaArchitectures = [];
-
-      # ---- LTO (opt-in) ------------------------------------------------
-      # Link-time optimization. Adds ~30-50% to build time for a 5-10% runtime
-      # gain on the inner-loop kernels. Build-system support varies; we plumb
-      # the flag through and rely on bazel/cmake to honor it.
-      enableLto = false;
-
-      # ---- Escape hatches for experimentation --------------------------
-      # Appended to CMAKE_CXX_FLAGS for cmake-driven builds.
-      # Examples: ["-mllvm" "-polly"], ["-funroll-loops"], ["-fno-plt"].
-      extraCxxFlags = [];
-
-      # Appended to CMAKE_EXE_LINKER_FLAGS / CMAKE_SHARED_LINKER_FLAGS.
-      # Examples: ["-Wl,--gc-sections"], ["-fuse-ld=mold"].
-      extraLdFlags = [];
-
-      # Appended to xla-pjrt's bazelBuildFlags.
-      # Examples: ["--copt=-funroll-loops"], ["--config=monolithic"].
-      extraBazelFlags = [];
-    };
+    #
+    #  PROJECT DEFAULTS ARE PORTABLE. `nix build .#<sdk-profile>` (pure)
+    #  produces a redistributable artifact: no native CPU tuning, upstream
+    #  fat CUDA arch list (every supported sm_XX), stripped, NDEBUG, no LTO.
+    #  Suitable for github release tarballs, binary caches consumed by
+    #  anyone, and CI.
+    #
+    #  PER-USER OVERRIDES live in ./local-build-cfg.nix (gitignored).
+    #  Copy ./local-build-cfg.example.nix to start. To apply the override:
+    #
+    #    nix build --impure .#<sdk-profile>
+    #
+    #  The --impure flag is required so the flake can read the user's
+    #  current working directory for the file (flake source is otherwise
+    #  the locked git tree, which excludes untracked files). Default builds
+    #  WITHOUT --impure stay hermetic and reproduce the project defaults.
+    #
+    #  See the Building section of the docs site for the full knob reference
+    #  and use-case recipes.
+    buildCfg = let
+      base = {
+        withDebugSymbols  = false;   # stripped, NDEBUG (production)
+        withNativeTuning  = false;   # portable: no -march=native
+        cudaArchitectures = [];      # upstream fat list
+        enableLto         = false;   # opt-in via local override or release tooling
+        extraCxxFlags     = [];
+        extraLdFlags      = [];
+        extraBazelFlags   = [];
+      };
+      # Read PWD from env (only populated under --impure). When pure, this
+      #  evaluates to "" and the localFile branch is short-circuited to {}.
+      pwd = builtins.getEnv "PWD";
+      localFile =
+        if pwd != ""
+        then "${pwd}/local-build-cfg.nix"
+        else null;
+      localOverrides =
+        if localFile != null && builtins.pathExists localFile
+        then import localFile
+        else {};
+    in
+      base // localOverrides;
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       systems = [

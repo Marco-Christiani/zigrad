@@ -29,7 +29,8 @@ env:
   PJRT_GPU_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
   PJRT_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
   # Perf default: enable the fusion block-level rewriter so XLA can emit Triton softmax fusions.
-  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_RUNTIME_SDK_ROOT}}/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true {{.XLA_FLAGS_EXTRA}}"
+  # XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_RUNTIME_SDK_ROOT}}/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true {{.XLA_FLAGS_EXTRA}}"
+  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_RUNTIME_SDK_ROOT}}/runtime/nvidia  {{.XLA_FLAGS_EXTRA}}"
   # intentionally unset this
   NIX_CFLAGS_COMPILE: ""
 
@@ -58,21 +59,28 @@ tasks:
     silent: true
     internal: true
   sdk:
-    desc: Build full SDK (compile + runtime) and reload direnv
+    desc: Build full SDK (compile + runtime) and reload direnv. Applies local-build-cfg.nix if present (via --impure).
     cmds:
-      - nix build .#zigrad-sdk-full-gpu --print-out-paths {{.CLI_ARGS}}
+      - nix build --impure .#zigrad-sdk-full-gpu --print-out-paths {{.CLI_ARGS}}
       - direnv reload
       - task: task_timer
         vars:
           start_time: "{{ now | unixEpoch }}"
 
   sdk:compile:
-    desc: Build compile-time SDK profile (headers/libs)
-    cmd: nix build .#zigrad-sdk-full-gpu-compile --print-out-paths {{.CLI_ARGS}}
+    desc: Build compile-time SDK profile (headers/libs). Honors local-build-cfg.nix via --impure.
+    cmd: nix build --impure .#zigrad-sdk-full-gpu-compile --print-out-paths {{.CLI_ARGS}}
 
   sdk:runtime:
-    desc: Build runtime SDK profile (PJRT plugins + TVM DSOs + CUDA redist)
-    cmd: nix build .#zigrad-sdk-full-gpu-runtime --print-out-paths {{.CLI_ARGS}}
+    desc: Build runtime SDK profile (PJRT plugins + TVM DSOs + CUDA redist). Honors local-build-cfg.nix via --impure.
+    cmd: nix build --impure .#zigrad-sdk-full-gpu-runtime --print-out-paths {{.CLI_ARGS}}
+
+  sdk:redist:
+    desc: |
+      Build redistributable SDK runtime artifact. Hermetic — ignores local-build-cfg.nix.
+      Project defaults apply: portable (no native tuning, fat CUDA arch list, stripped, NDEBUG).
+      Output is suitable for github releases and binary cache distribution.
+    cmd: nix build .#zigrad-sdk-full-gpu-runtime --out-link result-redist --print-out-paths {{.CLI_ARGS}}
 
   check-sdk:
     cmd:
@@ -290,7 +298,7 @@ tasks:
           exit 1
         fi
         PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" \
-          XLA_FLAGS="--xla_gpu_cuda_data_dir=$ZG_EXTERNAL_SDK_ROOT/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
+          XLA_FLAGS="--xla_gpu_cuda_data_dir=$ZG_EXTERNAL_SDK_ROOT/runtime/nvidia --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
           ./zig-out/bin/zigrad {{.CLI_ARGS}}
 
   custom-call:neg:
@@ -581,17 +589,6 @@ tasks:
       TRIALS: '{{.TRIALS | default "64"}}'
     cmds:
       - scripts/bench_tvm_attention.sh --shape={{.SHAPE}} --trials={{.TRIALS}}
-  # polly:zig:
-  #   cmds:
-  #     - zig build -Doptimize=ReleaseFast
-  #     -
-  #       exe.getEmittedLlvmIr
-  #       zig build-exe "$ZIG_SOURCE" \
-  #         -OReleaseFast \
-  #         -femit-llvm-ir \
-  #         -fno-emit-bin \
-  #         -fno-emit-h \
-  #         --name "${RAW_LL/\.ll/}"
 
   mnist:
     dir: examples/mnist/
