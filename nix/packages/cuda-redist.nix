@@ -247,6 +247,20 @@ in
         rm -rf "$tmp_extract"
       '')}
 
+      # Flat lib/ symlink farm in $out so consumers can rpath against a single
+      #  directory (vs walking $ORIGIN/../../../nvidia/<comp>/lib for each comp,
+      #  which the PJRT plugin does but is awkward for general consumers like
+      #  TVM). Symlinks point back into the per-component runtime tree;
+      #  autoPatchelfHook treats the dir literally for rpath insertion.
+      mkdir -p "$out/lib"
+      for sodir in "$out"/runtime/nvidia/*/lib; do
+        [ -d "$sodir" ] || continue
+        for so in "$sodir"/*.so*; do
+          [ -e "$so" ] || continue
+          ln -sf "$so" "$out/lib/$(basename "$so")"
+        done
+      done
+
       # autoPatchelfHook (in fixupPhase) handles RPATHs and interpreters for
       #  every ELF across $out and $dev. It scans NEEDED entries, resolves
       #  against buildInputs and same-derivation outputs, and rewrites RPATH
@@ -273,7 +287,9 @@ in
           "$dev/lib/libcudart_static.a" \
           "$dev/lib/libcudadevrt.a" \
           "$dev/lib/libnvrtc.so" \
-          "$dev/lib/stubs/libcuda.so"; do
+          "$dev/lib/stubs/libcuda.so" \
+          "$out/lib/libcudart.so" \
+          "$out/lib/libnvrtc.so"; do
         [ -e "$required" ] || missing+=("$required")
       done
       if [ "''${#missing[@]}" -gt 0 ]; then
