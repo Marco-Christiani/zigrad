@@ -191,15 +191,13 @@ in
                 cp -aL "$devdir"/. "$dev/nvvm/libdevice/"
               fi
             done
-            # dev: copy every binary from cuda_nvcc's bin/ + nvvm/bin/.
-            #  nvcc invokes cudafe++, cicc, ptxas, nvlink, fatbinary, bin2c,
-            #  nvprune, etc. as sibling tools; whitelisting risks missing one.
+            # dev: mirror cuda_nvcc's bin/ (and nvvm/bin/) into $dev/bin
+            #  wholesale. Beyond the executables (cudafe++, cicc, ptxas, etc.),
+            #  nvcc also references non-executable support files like
+            #  bin/crt/link.stub during device-side relocatable linking.
             for bindir in "$tmp_extract"/*/bin "$tmp_extract"/*/nvvm/bin; do
               [ -d "$bindir" ] || continue
-              for f in "$bindir"/*; do
-                [ -f "$f" ] && [ -x "$f" ] || continue
-                cp -aL "$f" "$dev/bin/$(basename "$f")"
-              done
+              cp -aLr "$bindir"/. "$dev/bin/"
             done
           ''}
 
