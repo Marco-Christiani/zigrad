@@ -191,13 +191,18 @@ in
                 cp -aL "$devdir"/. "$dev/nvvm/libdevice/"
               fi
             done
-            # dev: mirror cuda_nvcc's bin/ (and nvvm/bin/) into $dev/bin
-            #  wholesale. Beyond the executables (cudafe++, cicc, ptxas, etc.),
-            #  nvcc also references non-executable support files like
-            #  bin/crt/link.stub during device-side relocatable linking.
-            for bindir in "$tmp_extract"/*/bin "$tmp_extract"/*/nvvm/bin; do
-              [ -d "$bindir" ] || continue
-              cp -aLr "$bindir"/. "$dev/bin/"
+            # dev: mirror cuda_nvcc's layout exactly. nvcc invokes cicc via
+            #  path-relative discovery ($nvcc_dir/../nvvm/bin/cicc), so
+            #  flattening nvvm/bin into bin/ breaks nvcc. Keep them separate.
+            #  Also includes non-executable support files (bin/crt/link.stub).
+            mkdir -p "$dev/nvvm/bin"
+            for srcbin in "$tmp_extract"/*/bin; do
+              [ -d "$srcbin" ] || continue
+              cp -aLr "$srcbin"/. "$dev/bin/"
+            done
+            for srcnvvm in "$tmp_extract"/*/nvvm/bin; do
+              [ -d "$srcnvvm" ] || continue
+              cp -aLr "$srcnvvm"/. "$dev/nvvm/bin/"
             done
           ''}
 
