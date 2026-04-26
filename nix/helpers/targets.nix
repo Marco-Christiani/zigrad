@@ -3,7 +3,7 @@
 {
   pkgs,
   zig,
-  cudaPackages,
+  cudaToolkit,
   gccHost,
   src,
   zigradExternalSdk,
@@ -73,9 +73,9 @@ in {
         CompileFlags:
           CompilationDatabase: build
           Add:
-            - -I${cudaPackages.cudatoolkit}/include
+            - -I${cudaToolkit}/include
             - -xcuda
-            - --cuda-path=${cudaPackages.cudatoolkit}
+            - --cuda-path=${cudaToolkit}
             - --no-cuda-version-check
           Remove:
             - -forward-unknown-to-host-compiler

@@ -34,7 +34,7 @@ in {
 
     inherit
       (import ../helpers/targets.nix {
-        inherit pkgs cudaPackages gccHost;
+        inherit pkgs cudaToolkit gccHost;
         inherit (pkgs) zig;
         src = zigradSrc;
         zigradExternalSdk = sdkProfiles.full-gpu.full;
@@ -58,11 +58,6 @@ in {
       cp ${xlaSrc}/xla/xla_data.proto $out/proto/xla/
       cp ${xlaSrc}/xla/service/hlo.proto $out/proto/xla/service/
       cp ${xlaSrc}/xla/service/metrics.proto $out/proto/xla/service/
-    '';
-
-    cudaCompileHeaders = pkgs.runCommand "cuda-compile-headers" {} ''
-      mkdir -p "$out/include"
-      cp -as ${cudaPackages.cudatoolkit}/include/. "$out/include/"
     '';
 
     # LLVM 22 from XLA-pinned sources. Shared by MLIR SDK and TVM.
@@ -107,18 +102,21 @@ in {
     };
 
     cudaRedist = pkgs.callPackage ../packages/cuda-redist.nix {inherit (cudaCfg) cudaVersion;};
+    # Cudatoolkit-style layout (bin/nvcc, include/, lib/, lib/stubs/) for
+    #  build-time consumers. Production-path: never uses pkgs.cudaPackages.
+    cudaToolkit = cudaRedist.dev;
 
     # TVM with shared LLVM 22 (avoids pass registry conflicts with MLIR SDK).
     # cudaArchitectures left at upstream default (no TVM_CUDA_ARCH override);
     #  TVM compiles kernels via NVRTC at runtime against the actual GPU, so the
     #  build-time arch hint matters only for AOT paths we don't use.
     tvm = pkgs.callPackage ../packages/tvm.nix {
-      inherit cudaPackages gccHost llvm;
+      inherit cudaToolkit gccHost llvm;
       cudaSupport = true;
     };
 
     tvmCpu = pkgs.callPackage ../packages/tvm.nix {
-      inherit cudaPackages gccHost llvm;
+      inherit gccHost llvm;
       cudaSupport = false;
     };
 
@@ -157,7 +155,10 @@ in {
           ++ lib.optional f.mlir xlaMlirStablehloCapiSdk.dev
           ++ lib.optional f.mlir zigradMlirExt
           ++ lib.optional f.tvm tvm.dev
-          ++ lib.optional f.gpu cudaCompileHeaders
+          # cuda-redist's dev output supplies headers + nvcc + lib + stubs in a
+          #  cudatoolkit-style layout. Replaces the prior cudaCompileHeaders
+          #  thin wrapper around pkgs.cudaPackages.cudatoolkit/include.
+          ++ lib.optional f.gpu cudaToolkit
           ++ lib.optional f.iree ireeCompiler
           ++ lib.optional f.iree ireeRuntime
           ++ lib.optional hasMirage mirageRuntime
@@ -246,6 +247,7 @@ in {
         tvm-dev = tvm.dev;
         tvm-cpu = tvmCpu;
         cuda-redist = cudaRedist;
+        cuda-redist-dev = cudaRedist.dev;
         xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
         xla-mlir-stablehlo-capi-sdk-dev = xlaMlirStablehloCapiSdk.dev;
         xla-pjrt-plugins = xlaPjrtPlugins;

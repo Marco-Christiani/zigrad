@@ -100,7 +100,7 @@
           pyShellPkgs.out.env
           // sdkEnv
           // {
-            CUDA_HOME = "${cudaPackages.cudatoolkit}";
+            CUDA_HOME = "${config.packages.cuda-redist.dev}";
             # NVRTC include paths for nix-compatible CUDA compilation
             NIX_GLIBC_INCLUDE = "${pkgs.stdenv.cc.libc.dev}/include";
             NIX_GCC_INCLUDE = "${pkgs.stdenv.cc.cc}/lib/gcc/${pkgs.stdenv.hostPlatform.config}/${pkgs.lib.getVersion pkgs.stdenv.cc.cc}/include";

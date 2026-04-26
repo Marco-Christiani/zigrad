@@ -17,7 +17,9 @@
   ncurses,
   libxml2,
   autoAddDriverRunpath,
-  cudaPackages ? null,
+  # cudatoolkit-style layout (bin/nvcc, include/, lib/, lib/stubs/libcuda.so).
+  #  Provided by cuda-redist.dev; passed in by sdk.nix.
+  cudaToolkit ? null,
   gccHost ? null,
   cudaSupport ? true,
   cudaArchitectures ? [],
@@ -36,7 +38,7 @@
     if v
     then "ON"
     else "OFF";
-  cudaEnabled = cudaSupport && cudaPackages != null;
+  cudaEnabled = cudaSupport && cudaToolkit != null;
   cudaArchStr = lib.concatStringsSep ";" cudaArchitectures;
 
   # When llvm is provided, use shared LLVM to match the SDK's LLVM 22.
@@ -60,7 +62,7 @@
         fetchSubmodules = true;
       };
 in
-  assert lib.assertMsg (!cudaSupport || cudaPackages != null) "tvm: cudaSupport=true requires cudaPackages";
+  assert lib.assertMsg (!cudaSupport || cudaToolkit != null) "tvm: cudaSupport=true requires cudaToolkit";
   assert lib.assertMsg (llvm != null || llvmPackages != null) "tvm: requires either llvm or llvmPackages";
     stdenv.mkDerivation {
       pname = "tvm";
@@ -106,7 +108,7 @@ in
         ncurses   # provides libtinfo
         libxml2
       ] ++ lib.optionals cudaEnabled [
-        cudaPackages.cudatoolkit
+        cudaToolkit
       ];
 
       # Note: Using `.` (current dir) for cmake -S because postPatch patches the source in-place
@@ -135,10 +137,10 @@ in
 
         ${lib.optionalString cudaEnabled ''
           cat >> build/config.cmake <<EOF
-          set(CUDAToolkit_ROOT "${cudaPackages.cudatoolkit}")
-          set(CUDA_TOOLKIT_ROOT_DIR "${cudaPackages.cudatoolkit}")
-          set(CMAKE_CUDA_COMPILER "${cudaPackages.cudatoolkit}/bin/nvcc")
-          set(CUDA_CUDA_LIBRARY "${cudaPackages.cudatoolkit}/lib/stubs/libcuda.so")
+          set(CUDAToolkit_ROOT "${cudaToolkit}")
+          set(CUDA_TOOLKIT_ROOT_DIR "${cudaToolkit}")
+          set(CMAKE_CUDA_COMPILER "${cudaToolkit}/bin/nvcc")
+          set(CUDA_CUDA_LIBRARY "${cudaToolkit}/lib/stubs/libcuda.so")
           EOF
 
           ${lib.optionalString (cudaArchitectures != []) ''
@@ -225,7 +227,7 @@ in
       # - Note: libcuda.so.1 is provided by the driver and resolved via autoAddDriverRunpath or LD_LIBRARY_PATH.
       rpath="\$ORIGIN:${lib.makeLibraryPath (
         [stdenv.cc.cc.lib zlib ncurses libxml2 llvmLib]
-        ++ lib.optionals cudaEnabled [cudaPackages.cudatoolkit]
+        ++ lib.optionals cudaEnabled [cudaToolkit]
       )}"
       for f in $out/lib/*.so*; do
         [ -e "$f" ] || continue
