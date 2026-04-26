@@ -172,6 +172,16 @@ in
           copy_headers "$tmp_extract"
 
           ${lib.optionalString (dir == "cuda_nvcc") ''
+            # dev: mirror cuda_nvcc's tarball layout 1:1. nvcc and friends use
+            #  path-relative discovery for sibling tools (cicc at nvvm/bin/,
+            #  link.stub at bin/crt/, libnvvm.so at nvvm/lib64/, etc.). Easier
+            #  to mirror the whole subtree than to enumerate each consumer.
+            for srctop in "$tmp_extract"/*/; do
+              [ -d "$srctop/bin" ] || continue
+              cp -aLr "$srctop/bin"/. "$dev/bin/"
+              [ -d "$srctop/nvvm" ] && cp -aLr "$srctop/nvvm"/. "$dev/nvvm/"
+            done
+
             # out: ptxas + nvlink in their existing component-keyed layout.
             mkdir -p "$out/runtime/nvidia/cuda_nvcc/bin" "$out/runtime/nvidia/bin"
             for tool in ptxas nvlink; do
@@ -183,26 +193,12 @@ in
                 fi
               done
             done
-            # libdevice bitcode (out + dev).
-            for devdir in "$tmp_extract"/*/nvvm/libdevice; do
-              if [ -d "$devdir" ]; then
+            # out: libdevice bitcode (used by NVRTC at runtime).
+            for libdev in "$tmp_extract"/*/nvvm/libdevice; do
+              if [ -d "$libdev" ]; then
                 mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
-                cp -aL "$devdir"/. "$out/runtime/nvidia/nvvm/libdevice/"
-                cp -aL "$devdir"/. "$dev/nvvm/libdevice/"
+                cp -aL "$libdev"/. "$out/runtime/nvidia/nvvm/libdevice/"
               fi
-            done
-            # dev: mirror cuda_nvcc's layout exactly. nvcc invokes cicc via
-            #  path-relative discovery ($nvcc_dir/../nvvm/bin/cicc), so
-            #  flattening nvvm/bin into bin/ breaks nvcc. Keep them separate.
-            #  Also includes non-executable support files (bin/crt/link.stub).
-            mkdir -p "$dev/nvvm/bin"
-            for srcbin in "$tmp_extract"/*/bin; do
-              [ -d "$srcbin" ] || continue
-              cp -aLr "$srcbin"/. "$dev/bin/"
-            done
-            for srcnvvm in "$tmp_extract"/*/nvvm/bin; do
-              [ -d "$srcnvvm" ] || continue
-              cp -aLr "$srcnvvm"/. "$dev/nvvm/bin/"
             done
           ''}
 
