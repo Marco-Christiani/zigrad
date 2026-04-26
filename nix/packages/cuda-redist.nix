@@ -23,6 +23,7 @@
   stdenv,
   fetchurl,
   patchelf,
+  autoPatchelfHook,
   file,
   zlib,
   unzip,
@@ -81,7 +82,15 @@ in
     #  disable the hook to keep our placement.
     setOutputFlags = false;
 
-    nativeBuildInputs = [patchelf file] ++ lib.optionals hasNccl [unzip];
+    nativeBuildInputs =
+      [patchelf autoPatchelfHook file]
+      ++ lib.optionals hasNccl [unzip];
+
+    # autoPatchelfHook scans every ELF in $out and $dev, resolves NEEDED libs
+    #  against buildInputs, and rewrites RPATH without breaking version_r.
+    #  Required for nvcc et al. which encode GLIBC version requirements that
+    #  manual patchelf --set-rpath silently corrupts.
+    buildInputs = [stdenv.cc.cc.lib stdenv.cc.libc zlib];
 
     installPhase = ''
       set -eo pipefail
@@ -200,43 +209,12 @@ in
         rm -rf "$tmp_extract"
       '')}
 
-      # ---- RPATHs ----------------------------------------------------------
-
-      # out: libs find siblings via $ORIGIN, sys libs via 3-up-then-sys-lib.
-      echo "[cuda-redist] patching RPATHs on out runtime DSOs"
-      find "$out/runtime/nvidia" -type f -name '*.so*' | while read -r so; do
-        patchelf --set-rpath '$ORIGIN:$ORIGIN/../../../sys/lib' "$so" || true
-      done
-
-      # dev: flat lib/, all DSOs find siblings via $ORIGIN.
-      echo "[cuda-redist] patching RPATHs on dev libs"
-      find "$dev/lib" -maxdepth 1 -type f -name '*.so*' | while read -r so; do
-        patchelf --set-rpath '$ORIGIN' "$so" || true
-      done
-      # stubs find their parent lib/ via $ORIGIN/..
-      find "$dev/lib/stubs" -type f -name '*.so*' 2>/dev/null | while read -r so; do
-        patchelf --set-rpath '$ORIGIN/..' "$so" || true
-      done
-
-      # Patch interpreter + rpath on out's tools (existing behavior).
-      out_tool_rpath='${lib.makeLibraryPath [stdenv.cc.cc stdenv.cc.libc zlib]}'
-      for tool in "$out/runtime/nvidia/cuda_nvcc/bin"/* "$out/runtime/nvidia/bin"/*; do
-        [ -f "$tool" ] || continue
-        if file -L "$tool" 2>/dev/null | grep -q 'ELF '; then
-          patchelf --set-interpreter "${stdenv.cc.bintools.dynamicLinker}" "$tool" || true
-          patchelf --set-rpath "$out_tool_rpath" "$tool" || true
-        fi
-      done
-
-      # dev tools: nvcc et al. need to find $dev/lib siblings + system libs.
-      dev_tool_rpath="\$ORIGIN/../lib:${lib.makeLibraryPath [stdenv.cc.cc stdenv.cc.libc zlib]}"
-      for tool in "$dev/bin"/*; do
-        [ -f "$tool" ] || continue
-        if file -L "$tool" 2>/dev/null | grep -q 'ELF '; then
-          patchelf --set-interpreter "${stdenv.cc.bintools.dynamicLinker}" "$tool" || true
-          patchelf --set-rpath "$dev_tool_rpath" "$tool" || true
-        fi
-      done
+      # autoPatchelfHook (in fixupPhase) handles RPATHs and interpreters for
+      #  every ELF across $out and $dev. It scans NEEDED entries, resolves
+      #  against buildInputs and same-derivation outputs, and rewrites RPATH
+      #  without corrupting versioned-symbol requirements (which manual
+      #  patchelf was breaking on nvcc, surfacing as
+      #  "undefined symbol: , version GLIBC_2.2.5" at runtime).
 
       chmod -R u+w "$out/runtime" "$dev"
 
