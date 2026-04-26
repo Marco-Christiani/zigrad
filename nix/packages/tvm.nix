@@ -133,7 +133,7 @@ in
       # Note: Using `.` (current dir) for cmake -S because postPatch patches the source in-place
       # and using ${src} would reference the unpatched original source in the nix store.
       configurePhase = ''
-        set -euo pipefail
+        set -eo pipefail
 
         mkdir -p build
         cp cmake/config.cmake build/config.cmake
@@ -193,7 +193,7 @@ in
     # Note: we only ship headers + shared libs by default.
     # Python/ffi bindings included when withPythonBindings=true.
     installPhase = ''
-      set -euo pipefail
+      set -eo pipefail
 
       mkdir -p $out/lib $dev/include
 
