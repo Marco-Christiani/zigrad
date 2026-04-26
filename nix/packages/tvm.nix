@@ -98,6 +98,10 @@ in
       llvmDev  # Provides llvm-config (either custom LLVM or llvmPackages.llvm.dev)
     ] ++ lib.optionals cudaEnabled [
       autoAddDriverRunpath  # automatically patches rpath to include /run/opengl-driver for libcuda.so
+      # nvcc invokes cudafe++/cicc/ptxas/etc. as bare command names via PATH.
+      #  cudaToolkit must be in nativeBuildInputs so its bin/ lands on PATH
+      #  during build (buildInputs only contributes library paths).
+      cudaToolkit
     ];
 
       buildInputs = [
