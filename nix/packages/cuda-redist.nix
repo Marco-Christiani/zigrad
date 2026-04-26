@@ -126,18 +126,20 @@ in
         done
       }
 
-      # Helper: copy lib/*.so* and lib/stubs/*.so* from a component's extract dir.
-      # Populates $dev/lib (flat) + $dev/lib/stubs.
+      # Helper: copy shared (.so*) and static (.a) libs from a component's
+      #  extract dir, plus lib/stubs/. Static libs are needed at link time
+      #  for things like libcudart_static.a and libcudadevrt.a (cmake's CUDA
+      #  test program links them by default).
       copy_libs_to_dev() {
         local extract_root="$1"
         for libdir in "$extract_root"/*/lib "$extract_root"/*/lib64; do
           [ -d "$libdir" ] || continue
-          for f in "$libdir"/*.so*; do
+          for f in "$libdir"/*.so* "$libdir"/*.a; do
             [ -e "$f" ] || continue
             cp -aL "$f" "$dev/lib/"
           done
           if [ -d "$libdir/stubs" ]; then
-            for f in "$libdir/stubs"/*.so*; do
+            for f in "$libdir/stubs"/*.so* "$libdir/stubs"/*.a; do
               [ -e "$f" ] || continue
               cp -aL "$f" "$dev/lib/stubs/"
             done
