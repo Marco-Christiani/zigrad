@@ -12,8 +12,9 @@ in {
     buildCfg,
     ...
   }: let
-    # Threaded into every long-running derivation. See ./flake.nix buildCfg
-    #  for full semantics + ./website/nuxt-content/content/2.building/.
+    # Threaded into every long-running derivation. See flake.nix buildCfg
+    #  for inline semantics; the docs site Building section has use-case
+    #  recipes (distribution, native-tuned, debug, etc.).
     inherit (buildCfg)
       withDebugSymbols
       withNativeTuning

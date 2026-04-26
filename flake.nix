@@ -96,10 +96,10 @@
     };
 
     # Build-time policy. Threaded into every long-running C++/bazel derivation.
-    #  Defaults reflect a workstation-class development build that maximizes
-    #  runtime performance at the cost of binary portability. For redistributable
-    #  artifacts, override withNativeTuning=false and cudaArchitectures=[]/[fat].
-    #  See website/nuxt-content/content/2.building/ for full knob documentation
+    #  Defaults reflect a development build that maximizes runtime performance
+    #  at the cost of binary portability. For redistributable artifacts,
+    #  override withNativeTuning=false and cudaArchitectures=[]/[fat].
+    #  See the Building section of the docs site for full knob documentation
     #  and concrete use-case recipes.
     buildCfg = {
       # ---- Debug / production switch -----------------------------------
