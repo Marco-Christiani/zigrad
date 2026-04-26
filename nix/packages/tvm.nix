@@ -143,11 +143,19 @@ in
           set(CUDA_CUDA_LIBRARY "${cudaToolkit}/lib/stubs/libcuda.so")
           EOF
 
-          ${lib.optionalString (cudaArchitectures != []) ''
-            cat >> build/config.cmake <<EOF
-            set(CMAKE_CUDA_ARCHITECTURES "${cudaArchStr}")
-            EOF
-          ''}
+          # CMake 4.x requires CMAKE_CUDA_ARCHITECTURES set before
+          #  enable_language(CUDA). Use the caller's pin if provided, else
+          #  cmake's "all-major" sentinel which compiles for representative
+          #  archs across recent generations. TVM doesn't AOT-compile CUDA
+          #  itself (kernels go through NVRTC at runtime), so this only
+          #  affects cmake's toolchain probe, not the produced artifact.
+          cat >> build/config.cmake <<EOF
+          set(CMAKE_CUDA_ARCHITECTURES "${
+            if cudaArchitectures != []
+            then cudaArchStr
+            else "all-major"
+          }")
+          EOF
 
           ${lib.optionalString (gccHost != null) ''
             cat >> build/config.cmake <<EOF
