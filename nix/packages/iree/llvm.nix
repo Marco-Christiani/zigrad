@@ -26,6 +26,9 @@
   binutils,
   # Flake source input: iree-org/llvm-project fork.
   ireeLlvmSrc,
+  # When true: RelWithDebInfo, retain DWARF, don't strip.
+  # When false (default, production): Release, NDEBUG, stripped.
+  withDebugSymbols ? false,
 }:
 stdenv.mkDerivation {
   pname = "iree-llvm";
@@ -37,7 +40,7 @@ stdenv.mkDerivation {
   src = ireeLlvmSrc;
 
   strictDeps = true;
-  dontStrip = true;
+  dontStrip = withDebugSymbols;
 
   # System libs appear in both lists: nativeBuildInputs so that native build
   # tools compiled during the cmake build (e.g. mlir-linalg-ods-yaml-gen,
@@ -66,7 +69,7 @@ stdenv.mkDerivation {
   cmakeDir = "../llvm";
 
   cmakeFlags = [
-    "-DCMAKE_BUILD_TYPE=Release"
+    "-DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"}"
 
     # Enable all needed sub-projects in a single build.
     # mlir is our addition to IREE's llvm_config.cmake (which only lists clang;lld).
@@ -135,6 +138,9 @@ stdenv.mkDerivation {
       [ -x "$f" ] && [ -f "$f" ] || continue
       patchelf --set-rpath "$rpath" "$f" 2>/dev/null || true
     done
+
+    # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+    set +u
   '';
 
   meta = {

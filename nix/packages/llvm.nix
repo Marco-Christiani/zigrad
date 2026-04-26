@@ -25,6 +25,9 @@
   # Flake source inputs (replacing lockFile).
   xlaSrc,
   llvmSrc,
+  # When true: build with RelWithDebInfo, retain DWARF, don't strip.
+  # When false (default, production): Release, NDEBUG, stripped.
+  withDebugSymbols ? false,
 }: let
   llvmPatches = ["build.patch" "mathextras.patch" "toolchains.patch" "zstd.patch" "lit_test.patch"];
   llvmIgnoredPatches = ["generated.patch"];
@@ -58,7 +61,7 @@ in
     src = patchedLlvmSrc;
 
     strictDeps = true;
-    dontStrip = true;
+    dontStrip = withDebugSymbols;
 
     nativeBuildInputs = [
       cmake
@@ -83,7 +86,7 @@ in
     ];
 
     cmakeFlags = [
-      "-DCMAKE_BUILD_TYPE=Release"
+      "-DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"}"
       "-DBUILD_SHARED_LIBS=ON"
       "-DLLVM_ENABLE_PROJECTS=mlir;clang;polly"
       # Include NVPTX for TVM CUDA code generation

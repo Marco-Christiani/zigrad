@@ -9,8 +9,13 @@ in {
     pkgs,
     system,
     cudaCfg,
+    buildCfg,
     ...
   }: let
+    # Threaded into every long-running derivation so a single flag flips
+    #  the entire SDK between production (stripped, Release, NDEBUG) and
+    #  debug (DWARF retained, RelWithDebInfo) build modes.
+    inherit (buildCfg) withDebugSymbols;
     inherit (inputs) xlaSrc llvmSrc stablehloSrc;
     inherit (inputs) ireeSrc ireeLlvmSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc;
     inherit (pkgs) lib;
@@ -61,10 +66,12 @@ in {
     '';
 
     # LLVM 22 from XLA-pinned sources. Shared by MLIR SDK and TVM.
-    llvm = pkgs.callPackage ../packages/llvm.nix {inherit xlaSrc llvmSrc;};
+    llvm = pkgs.callPackage ../packages/llvm.nix {
+      inherit xlaSrc llvmSrc withDebugSymbols;
+    };
 
     xlaMlirStablehloCapiSdk = pkgs.callPackage ../packages/xla-mlir-stablehlo-capi-sdk.nix {
-      inherit xlaSrc stablehloSrc llvm;
+      inherit xlaSrc stablehloSrc llvm withDebugSymbols;
     };
 
     zigradMlirExt = pkgs.callPackage ../packages/zigrad-mlir-ext.nix {
@@ -85,7 +92,7 @@ in {
     };
 
     xlaPjrtPlugins = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
-      inherit xlaSrc;
+      inherit xlaSrc withDebugSymbols;
       cudaSupport = false;
       cpuMathLibrary = "onednn";
       cpuNativeTuning = true;
@@ -93,7 +100,7 @@ in {
     };
 
     xlaPjrtPluginsCuda = pkgs.callPackage ../packages/xla-pjrt-runtime-bazel.nix {
-      inherit xlaSrc;
+      inherit xlaSrc withDebugSymbols;
       inherit (cudaCfg) cudaVersion;
       cudaSupport = true;
       cpuMathLibrary = "onednn-thunk";
@@ -111,7 +118,7 @@ in {
     #  TVM compiles kernels via NVRTC at runtime against the actual GPU, so the
     #  build-time arch hint matters only for AOT paths we don't use.
     tvm = pkgs.callPackage ../packages/tvm.nix {
-      inherit cudaToolkit gccHost llvm;
+      inherit cudaToolkit gccHost llvm withDebugSymbols;
       # cuda-redist.out has a flat lib/ symlink farm pointing into the runtime
       #  layout; passing it as cudaRuntime makes libtvm.so's rpath reference
       #  the runtime layout instead of cudaToolkit (= cuda-redist.dev). Keeps
@@ -122,18 +129,20 @@ in {
     };
 
     tvmCpu = pkgs.callPackage ../packages/tvm.nix {
-      inherit gccHost llvm;
+      inherit gccHost llvm withDebugSymbols;
       cudaSupport = false;
     };
 
     # IREE: BYO-LLVM from iree-org fork (diverges from XLA-pinned llvm).
-    ireeLlvm = pkgs.callPackage ../packages/iree/llvm.nix {inherit ireeLlvmSrc;};
+    ireeLlvm = pkgs.callPackage ../packages/iree/llvm.nix {
+      inherit ireeLlvmSrc withDebugSymbols;
+    };
     ireeCompiler = pkgs.callPackage ../packages/iree/compiler.nix {
-      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
+      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm withDebugSymbols;
       withCli = true;
     };
     ireeRuntime = pkgs.callPackage ../packages/iree/runtime.nix {
-      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm;
+      inherit ireeSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc ireeLlvm withDebugSymbols;
     };
 
     # SDK compositor: feature flags -> { compile, runtime, full }.

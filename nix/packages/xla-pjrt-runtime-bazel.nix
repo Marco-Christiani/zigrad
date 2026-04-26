@@ -30,6 +30,9 @@
   cpuMathLibrary ? "eigen",
   # Emit -march=native -mavx2 -mfma for both target and host.
   cpuNativeTuning ? false,
+  # When true: pass --copt=-g to bazel, retain DWARF, don't strip.
+  # When false (default, production): bazel -c opt only, stripped.
+  withDebugSymbols ? false,
   ...
 }: let
   cudaVersionChecked =
@@ -385,11 +388,16 @@ in
         "--enable_bzlmod=false"
       ];
 
-      bazelBuildFlags = [
-        "-c"
-        "opt"
-        "--nofetch"
-      ];
+      bazelBuildFlags =
+        [
+          "-c"
+          "opt"
+          "--nofetch"
+        ]
+        ++ lib.optionals withDebugSymbols [
+          "--copt=-g"
+          "--strip=never"
+        ];
 
       inherit bazelTargets;
 
@@ -492,6 +500,9 @@ in
             head -n 120 tensorflow.bazelrc > "$out/runtime/logs/bazelrc-head.txt" || true
             grep -nE '^(common|build):' tensorflow.bazelrc > "$out/runtime/logs/bazelrc-configs.txt" || true
           fi
+
+          # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+          set +u
         '';
 
         meta = {
@@ -503,7 +514,7 @@ in
           platforms = lib.platforms.linux;
         };
 
-        dontStrip = true;
+        dontStrip = withDebugSymbols;
       };
 
       fetchAttrs = {

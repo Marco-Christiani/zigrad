@@ -43,6 +43,9 @@
   ireeBenchmarkSrc,
   # Pre-built LLVM+Clang+LLD+MLIR from iree-llvm.nix.
   ireeLlvm,
+  # When true: RelWithDebInfo, retain DWARF, don't strip.
+  # When false (default, production): Release, NDEBUG, stripped.
+  withDebugSymbols ? false,
 }:
 stdenv.mkDerivation {
   pname = "iree-runtime";
@@ -51,7 +54,7 @@ stdenv.mkDerivation {
   # We do our own source setup: copy ireeSrc and inject submodule sources.
   dontUnpack = true;
   dontConfigure = true;
-  dontStrip = true;
+  dontStrip = withDebugSymbols;
 
   strictDeps = true;
 
@@ -109,7 +112,7 @@ stdenv.mkDerivation {
     mkdir -p iree-build
 
     cmake -S iree-src -B iree-build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"} \
       \
       -DIREE_BUILD_BUNDLED_LLVM=OFF \
       -DLLVM_DIR="${ireeLlvm}/lib/cmake/llvm" \
@@ -156,6 +159,9 @@ stdenv.mkDerivation {
     fi
 
     log "Build phase complete"
+
+    # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+    set +u
   '';
 
   installPhase = ''
@@ -234,6 +240,9 @@ stdenv.mkDerivation {
         fi
 
         log "Installation complete"
+
+        # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+        set +u
   '';
 
   meta = {

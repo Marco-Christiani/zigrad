@@ -94,6 +94,13 @@
       cudaPackagesAttr = "cudaPackages_12_9";
       cudaVersion = "12.9.1";
     };
+
+    # Build-time policy. Affects every long-running C++/bazel derivation.
+    #  Flip withDebugSymbols=true for debug builds (RelWithDebInfo, retain
+    #  DWARF, no strip). Default false = production: Release, NDEBUG, stripped.
+    buildCfg = {
+      withDebugSymbols = false;
+    };
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       systems = [
@@ -136,7 +143,7 @@
           '';
         {
           _module.args = {
-            inherit pkgs cudaCfg;
+            inherit pkgs cudaCfg buildCfg;
           };
           formatter = pkgs.alejandra;
         };

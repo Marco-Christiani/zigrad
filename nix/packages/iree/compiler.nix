@@ -50,6 +50,9 @@
   ## When true, build & install the compiler CLI tools (iree-compile, iree-opt,
   ##  iree-run-module) into $out/bin alongside the embedding API library.
   withCli ? false,
+  # When true: RelWithDebInfo, retain DWARF, don't strip.
+  # When false (default, production): Release, NDEBUG, stripped.
+  withDebugSymbols ? false,
 }:
 stdenv.mkDerivation {
   pname = "iree-compiler";
@@ -58,7 +61,7 @@ stdenv.mkDerivation {
   # We do our own source setup: copy ireeSrc and inject submodule sources.
   dontUnpack = true;
   dontConfigure = true;
-  dontStrip = true;
+  dontStrip = withDebugSymbols;
   dontPatchELF = true;
 
   strictDeps = true;
@@ -124,7 +127,7 @@ stdenv.mkDerivation {
     mkdir -p iree-build
 
     cmake -S iree-src -B iree-build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"} \
       \
       -DIREE_BUILD_BUNDLED_LLVM=OFF \
       -DLLVM_DIR="${ireeLlvm}/lib/cmake/llvm" \
@@ -172,6 +175,9 @@ stdenv.mkDerivation {
       log "Building compiler tools"
       ninja -C iree-build iree-compile iree-opt iree-run-module
     ''}
+
+    # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+    set +u
   '';
 
   installPhase = ''
@@ -268,6 +274,9 @@ stdenv.mkDerivation {
     fi
 
     log "Installation complete"
+
+    # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+    set +u
   '';
 
   meta = {

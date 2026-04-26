@@ -35,6 +35,9 @@
   #  `out`/`dev` output split: this controls *what gets compiled*, while outputs
   #  control *which built artifacts go where*.
   withPythonBindings ? false,
+  # When true: RelWithDebInfo, retain DWARF, don't strip.
+  # When false (default, production): Release, NDEBUG, stripped.
+  withDebugSymbols ? false,
   tvmSrcOverride ? null,
   tvmRev ? "v0.22.0",
   tvmHash ? "sha256-KcHUcblwtqxNofHKofuQHu2d7hIqS9FUvc41OkCVtnY=",
@@ -78,8 +81,9 @@ in
       strictDeps = true;
       # Strip libtvm.so etc. so debug-info path strings (e.g. cmake's CUDA
       #  include dir from cudaToolkit = cuda-redist.dev) don't leave
-      #  references to dev paths in the runtime closure.
-      dontStrip = false;
+      #  references to dev paths in the runtime closure. Flip via
+      #  withDebugSymbols=true if you need DWARF for backtraces.
+      dontStrip = withDebugSymbols;
 
       postPatch = ''
         ${lib.optionalString useCustomLlvm ''
@@ -140,7 +144,7 @@ in
         chmod u+w build/config.cmake
 
         cat >> build/config.cmake <<EOF
-        set(CMAKE_BUILD_TYPE RelWithDebInfo)
+        set(CMAKE_BUILD_TYPE ${if withDebugSymbols then "RelWithDebInfo" else "Release"})
         set(CMAKE_CXX_STANDARD 17)
         set(USE_LLVM "${llvmConfigCmd}")
         set(HIDE_PRIVATE_SYMBOLS ON)

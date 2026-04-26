@@ -26,6 +26,9 @@
   stablehloSrc,
   # Pre-built LLVM/MLIR from llvm.nix (shared with TVM).
   llvm,
+  # When true: RelWithDebInfo, retain DWARF, don't strip.
+  # When false (default, production): Release, NDEBUG, stripped.
+  withDebugSymbols ? false,
 }: let
   stablehloPatches = ["temporary.patch"];
 
@@ -77,7 +80,7 @@ in
     strictDeps = true;
     dontUnpack = true;
     dontConfigure = true;
-    dontStrip = true;
+    dontStrip = withDebugSymbols;
 
     nativeBuildInputs = [
       cmake
@@ -108,7 +111,7 @@ in
 
       mkdir -p stablehlo-build
       cmake -S ${patchedStablehloSrc} -B stablehlo-build -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"} \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
@@ -116,6 +119,10 @@ in
         -DLLVM_DIR="${llvm}/lib/cmake/llvm"
 
       ninja -C stablehlo-build StablehloCAPI
+
+      # Restore -u to default so fixupPhase's strip-hook doesn't trip on its
+      #  own unset variable references when stripping kicks in.
+      set +u
     '';
 
     installPhase = ''
@@ -256,6 +263,9 @@ in
       fi
 
       log "SDK installation complete"
+
+      # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+      set +u
     '';
 
     meta = {
