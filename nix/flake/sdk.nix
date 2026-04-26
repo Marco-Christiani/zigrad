@@ -112,6 +112,12 @@ in {
     #  build-time arch hint matters only for AOT paths we don't use.
     tvm = pkgs.callPackage ../packages/tvm.nix {
       inherit cudaToolkit gccHost llvm;
+      # cuda-redist.out has a flat lib/ symlink farm pointing into the runtime
+      #  layout; passing it as cudaRuntime makes libtvm.so's rpath reference
+      #  the runtime layout instead of cudaToolkit (= cuda-redist.dev). Keeps
+      #  dev (with its build-time .a files and unused link-time .so) out of
+      #  TVM's runtime closure.
+      cudaRuntime = cudaRedist;
       cudaSupport = true;
     };
 

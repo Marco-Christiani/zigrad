@@ -17,9 +17,14 @@
   ncurses,
   libxml2,
   autoAddDriverRunpath,
-  # cudatoolkit-style layout (bin/nvcc, include/, lib/, lib/stubs/libcuda.so).
-  #  Provided by cuda-redist.dev; passed in by sdk.nix.
+  # Build-time CUDA toolkit (cudatoolkit-style layout: bin/nvcc, include/,
+  #  link-time libs in lib/, lib/stubs/libcuda.so). From cuda-redist.dev.
   cudaToolkit ? null,
+  # Runtime CUDA layout, pulled into buildInputs so autoPatchelfHook resolves
+  #  libtvm.so's NEEDED libs (libcudart, libcuda, libnvrtc) against this path
+  #  and the resulting rpath references runtime artifacts only — keeps
+  #  cudaToolkit (build-time) out of TVM's runtime closure. From cuda-redist.out.
+  cudaRuntime ? null,
   gccHost ? null,
   cudaSupport ? true,
   cudaArchitectures ? [],
@@ -111,9 +116,16 @@ in
         zlib
         ncurses   # provides libtinfo
         libxml2
-      ] ++ lib.optionals cudaEnabled [
-        cudaToolkit
-      ];
+      ] ++ lib.optionals cudaEnabled (
+        # Order matters: cudaRuntime FIRST so autoPatchelfHook resolves NEEDED
+        #  libs (libcudart, libcuda, libnvrtc) against the runtime layout,
+        #  baking that path into libtvm.so's rpath. cudaToolkit second so
+        #  build-time linking still has access to its libs (cudaRuntime is a
+        #  symlink farm into the same files, but cudaToolkit also has the
+        #  static .a archives that cmake's CUDA probe needs).
+        lib.optional (cudaRuntime != null) cudaRuntime
+        ++ [cudaToolkit]
+      );
 
       # Note: Using `.` (current dir) for cmake -S because postPatch patches the source in-place
       # and using ${src} would reference the unpatched original source in the nix store.
