@@ -133,7 +133,7 @@ in
       # Note: Using `.` (current dir) for cmake -S because postPatch patches the source in-place
       # and using ${src} would reference the unpatched original source in the nix store.
       configurePhase = ''
-        set -eo pipefail
+        set -euo pipefail
 
         mkdir -p build
         cp cmake/config.cmake build/config.cmake
@@ -184,6 +184,11 @@ in
         ''}
 
         cmake -S . -B build -G Ninja
+
+        # Restore -u to default before phase exits so it doesn't leak into
+        #  later phases (e.g. fixupPhase's strip-hook references an exit_code
+        #  that's unset on some paths and would fail under -u).
+        set +u
       '';
 
       buildPhase = ''
@@ -193,7 +198,7 @@ in
     # Note: we only ship headers + shared libs by default.
     # Python/ffi bindings included when withPythonBindings=true.
     installPhase = ''
-      set -eo pipefail
+      set -euo pipefail
 
       mkdir -p $out/lib $dev/include
 
@@ -301,6 +306,10 @@ in
         # Make bindings writable for any post-install modifications
         chmod -R u+w $out/python
       ''}
+
+      # Restore -u to default so fixupPhase's strip-hook (which references an
+      #  exit_code variable unset on some paths) doesn't trip.
+      set +u
     '';
 
       meta = {
