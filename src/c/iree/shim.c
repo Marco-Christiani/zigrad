@@ -32,6 +32,14 @@ bool zg_iree_status_is_ok(iree_status_t status) {
   return iree_status_is_ok(status);
 }
 
+// Returns the iree_status_code_t for `status` without freeing it. Mirrors
+// the `iree_status_code` macro, exposed here so Zig callers can peek at a
+// status code (to recognize expected sentinels such as OUT_OF_RANGE) without
+// taking the macro dependency.
+uint32_t zg_iree_status_code(iree_status_t status) {
+  return (uint32_t)iree_status_code(status);
+}
+
 // ---------------------------------------------------------------------------
 // HAL helpers (macros / generated inlines).
 // ---------------------------------------------------------------------------

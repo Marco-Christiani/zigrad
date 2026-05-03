@@ -259,9 +259,9 @@ pub const Backend = struct {
             for (collected.items) |*b| self.deinit_buffer(b);
         }
 
-        while (rt.call_pop_buffer_view_output(&call)) |view| {
+        while (try rt.call_pop_buffer_view_output(&call)) |view| {
             try collected.append(allocator, .{ .view = view });
-        } else |_| {}
+        }
 
         const outputs = try collected.toOwnedSlice(allocator);
         errdefer {
@@ -305,7 +305,10 @@ pub const Backend = struct {
 
         // Copy each output into the caller-provided destination buffer.
         for (outputs) |dst| {
-            const src_view = try rt.call_pop_buffer_view_output(&call);
+            const src_view = (try rt.call_pop_buffer_view_output(&call)) orelse {
+                log.err("execute_into: missing output (call returned fewer than {d} buffers)", .{outputs.len});
+                return error.MissingOutput;
+            };
             defer rt.buffer_view_release(src_view);
             try copy_buffer_view(self.allocator, src_view, dst.view);
         }

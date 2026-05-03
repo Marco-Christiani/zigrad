@@ -232,7 +232,15 @@ pub extern "c" fn iree_allocator_free(allocator: Allocator, ptr: ?*anyopaque) vo
 pub extern "c" fn zg_iree_allocator_system() Allocator;
 pub extern "c" fn zg_iree_allocator_null() Allocator;
 pub extern "c" fn zg_iree_status_is_ok(status: Status) bool;
+pub extern "c" fn zg_iree_status_code(status: Status) u32;
 pub extern "c" fn zg_iree_hal_element_bit_count(element_type: HalElementType) HostSize;
+
+/// Subset of `iree_status_code_t` that callers want to recognize without
+///  routing through the logging `check()` path. Values match the upstream
+///  enum (see `iree/base/status.h`).
+pub const STATUS_OK: u32 = 0;
+pub const STATUS_NOT_FOUND: u32 = 5;
+pub const STATUS_OUT_OF_RANGE: u32 = 11;
 
 /// Wrap `iree_runtime_instance_options_initialize` +
 ///  `_use_all_available_drivers` + `_create`. Hides the options struct (whose

@@ -71,8 +71,20 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingArgument;
     };
 
-    // Read VMFB.
-    const vmfb = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(256 * 1024 * 1024));
+    // Read VMFB. Resolve absolute paths via openFileAbsolute (Dir.cwd-relative
+    //  variants assert non-absolute paths), otherwise read relative to CWD.
+    const vmfb = blk: {
+        var file = if (std.fs.path.isAbsolute(path))
+            try std.Io.Dir.openFileAbsolute(io, path, .{})
+        else
+            try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        const len = try file.length(io);
+        const buf = try gpa.alloc(u8, @intCast(len));
+        errdefer gpa.free(buf);
+        _ = try file.readPositionalAll(io, buf, 0);
+        break :blk buf;
+    };
     defer gpa.free(vmfb);
 
     log.info("loaded {d} bytes from {s}", .{ vmfb.len, path });
@@ -119,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.flush() catch @panic("Flush failed");
 
     var output_index: usize = 0;
-    while (rt.call_pop_buffer_view_output(&call)) |out_view| : (output_index += 1) {
+    while (try rt.call_pop_buffer_view_output(&call)) |out_view| : (output_index += 1) {
         defer rt.buffer_view_release(out_view);
 
         const elem_type = rt.buffer_view_element_type(out_view);
@@ -134,8 +146,6 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("output[{d}]: [", .{output_index});
         try print_typed_values(stdout, elem_type, buf, byte_count);
         try stdout.writeAll("]\n");
-    } else |_| {
-        // empty-list pop returns an error, terminating the loop normally
     }
 
     if (output_index == 0) {

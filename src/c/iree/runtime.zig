@@ -176,11 +176,26 @@ pub fn call_push_buffer_view_input(call: *Call, view: *HalBufferView) !void {
 }
 
 /// Pop the next buffer view off the call outputs list.
-///  Ownership transfers to the caller, who must call `buffer_view_release`.
-pub fn call_pop_buffer_view_output(call: *Call) !*HalBufferView {
+///
+/// Returns `null` when the list is empty (the empty-list pop is the supported
+///  iteration terminator and is not an error). For non-empty pops, ownership
+///  of the returned view transfers to the caller, who must call
+///  `buffer_view_release`. Other status codes are logged and propagated as
+///  `error.IreeError`.
+pub fn call_pop_buffer_view_output(call: *Call) !?*HalBufferView {
     var out: ?*HalBufferView = null;
-    try check(types.iree_runtime_call_outputs_pop_front_buffer_view(call, &out));
-    return out orelse error.NullBufferView;
+    const status = types.iree_runtime_call_outputs_pop_front_buffer_view(call, &out);
+    if (types.zg_iree_status_is_ok(status)) {
+        return out orelse error.NullBufferView;
+    }
+    const code = types.zg_iree_status_code(status);
+    if (code == types.STATUS_OUT_OF_RANGE or code == types.STATUS_NOT_FOUND) {
+        types.iree_status_free(status);
+        return null;
+    }
+    // Real failure, fall through to the logging path.
+    try check(status);
+    unreachable;
 }
 
 // ---------------------------------------------------------------------------
