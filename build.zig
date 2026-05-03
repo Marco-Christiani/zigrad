@@ -86,7 +86,11 @@ pub fn build(b: *std.Build) void {
     //  Each TranslateC step produces a private module that we import into
     //  `zigrad_mod` under a stable name; the matching `src/c/*.zig` wrapper
     //  swaps `@cImport` for `@import("c-foo")`.
-    var c_iree_mod: ?*std.Build.Module = null;
+    //
+    // IREE is the exception. Its headers contain bitfield structs and
+    //  sizeof-based alignas expressions translate-c rejects, so the binding
+    //  is hand-written in `src/c/iree/types.zig` and validated by the
+    //  layout test in `src/c/iree/abi_test.zig`.
     {
         const c_pjrt = b.addTranslateC(.{
             .root_source_file = b.path("src/c/pjrt/headers.h"),
@@ -141,18 +145,6 @@ pub fn build(b: *std.Build) void {
             zigrad_mod.addImport("c-nvrtc", c_nvrtc.createModule());
         }
 
-        if (use_iree) {
-            const c_iree = b.addTranslateC(.{
-                .root_source_file = b.path("src/c/iree/iree_zig.h"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            });
-            c_iree.addIncludePath(.{ .cwd_relative = sdk_include });
-            const mod = c_iree.createModule();
-            zigrad_mod.addImport("c-iree", mod);
-            c_iree_mod = mod;
-        }
     }
 
     const exe = b.addExecutable(.{
@@ -264,16 +256,14 @@ pub fn build(b: *std.Build) void {
 
     // Minimal IREE VMFB runner (no zigrad, no MLIR/PJRT).
     if (use_iree) {
-        const iree_runner_mod = b.createModule(.{
-            .root_source_file = b.path("src/iree_runner.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        if (c_iree_mod) |m| iree_runner_mod.addImport("c-iree", m);
         const iree_runner = b.addExecutable(.{
             .name = "iree-runner",
-            .root_module = iree_runner_mod,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/iree_runner.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
         });
         iree_runner.root_module.addIncludePath(b.path("src"));
         iree_runner.root_module.addIncludePath(.{ .cwd_relative = sdk_include });

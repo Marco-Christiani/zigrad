@@ -1,20 +1,16 @@
-// IREE C API shim -- wraps static inline functions and macros that Zig's
-// @cImport cannot translate.  Compiled as a .c object alongside the Zig code.
+// IREE C API shim. Wraps static inline functions, macros, and bitfield-
+// bearing structs that Zig's translate-c (and `@cImport`) cannot translate.
+// Compiled as a .c object alongside the Zig bindings in `types.zig`.
 //
 // Must be compiled with -DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
 // (matching the IREE cmake default) so that iree_allocator_system() is defined.
 
+#include <stddef.h>
+
 #include "iree/runtime/api.h"
 #include "iree/hal/api.h"
 #include "iree/vm/api.h"
-#include "iree/vm/ref.h"
 #include "iree/base/api.h"
-
-// IREE's installed buffer_view.h does not expand the VM type adapter macros,
-// so we declare them here to get iree_hal_buffer_view_deref (static inline)
-// and iree_hal_buffer_view_retain_ref (extern, defined in the runtime archive).
-IREE_VM_DECLARE_TYPE_ADAPTERS(iree_hal_buffer_view,
-                              iree_hal_buffer_view_t);
 
 // ---------------------------------------------------------------------------
 // Allocator helpers (static inline in allocator.h).
@@ -45,22 +41,11 @@ iree_host_size_t zg_iree_hal_element_bit_count(
   return iree_hal_element_bit_count(element_type);
 }
 
-// iree_hal_buffer_view_deref: inline VM ref cast.
-iree_hal_buffer_view_t* zg_iree_hal_buffer_view_deref(iree_vm_ref_t ref) {
-  return iree_hal_buffer_view_deref(ref);
-}
-
-// iree_hal_buffer_view_retain_ref: inline VM ref retain + wrap.
-iree_vm_ref_t zg_iree_hal_buffer_view_retain_ref(
-    iree_hal_buffer_view_t* view) {
-  return iree_hal_buffer_view_retain_ref(view);
-}
-
 // ---------------------------------------------------------------------------
 // Buffer mapping helpers.
 //
-// iree_hal_buffer_mapping_t contains bitfields which @cImport translates to
-// an opaque type.  These wrappers handle the mapping/unmapping in C.
+// iree_hal_buffer_mapping_t contains bitfields which translate-c emits as
+// opaque, so the entire map/copy/unmap dance lives in C.
 // ---------------------------------------------------------------------------
 
 iree_status_t zg_iree_hal_buffer_read(iree_hal_buffer_t* buffer,
@@ -91,4 +76,139 @@ iree_status_t zg_iree_hal_buffer_write(iree_hal_buffer_t* buffer,
                              : src_len;
   memcpy(mapping.contents.data, src, len);
   return iree_hal_buffer_unmap_range(&mapping);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle helpers: hide IREE's options structs so the Zig binding never
+// has to mirror their layout.
+// ---------------------------------------------------------------------------
+
+iree_status_t zg_iree_runtime_instance_create_all_drivers(
+    iree_runtime_instance_t** out_instance) {
+  iree_runtime_instance_options_t options;
+  iree_runtime_instance_options_initialize(&options);
+  iree_runtime_instance_options_use_all_available_drivers(&options);
+  return iree_runtime_instance_create(&options, iree_allocator_system(),
+                                       out_instance);
+}
+
+iree_status_t zg_iree_runtime_session_create_with_device_default(
+    iree_runtime_instance_t* instance, iree_hal_device_t* device,
+    iree_runtime_session_t** out_session) {
+  iree_runtime_session_options_t options;
+  iree_runtime_session_options_initialize(&options);
+  return iree_runtime_session_create_with_device(
+      instance, &options, device, iree_allocator_system(), out_session);
+}
+
+iree_status_t zg_iree_runtime_instance_try_create_default_device(
+    iree_runtime_instance_t* instance, iree_string_view_t driver_name,
+    iree_hal_device_t** out_device) {
+  return iree_runtime_instance_try_create_default_device(instance, driver_name,
+                                                          out_device);
+}
+
+// ---------------------------------------------------------------------------
+// Buffer view allocation: hide iree_hal_buffer_params_t and its companion
+// flag constants behind a single shim that bakes in zigrad's defaults.
+// ---------------------------------------------------------------------------
+
+iree_status_t zg_iree_buffer_view_allocate_device_local_copy(
+    iree_hal_device_t* device, const iree_hal_dim_t* shape,
+    iree_host_size_t shape_rank, iree_hal_element_type_t element_type,
+    const uint8_t* src, iree_host_size_t src_len,
+    iree_hal_buffer_view_t** out_view) {
+  iree_hal_buffer_params_t params = {
+      .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+      .access = IREE_HAL_MEMORY_ACCESS_ALL,
+      .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
+      .queue_affinity = IREE_HAL_QUEUE_AFFINITY_ANY,
+      .min_alignment = 0,
+  };
+  iree_const_byte_span_t bytes = {.data = src, .data_length = src_len};
+  return iree_hal_buffer_view_allocate_buffer_copy(
+      device, iree_hal_device_allocator(device), shape_rank, shape,
+      element_type, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params, bytes,
+      out_view);
+}
+
+// ---------------------------------------------------------------------------
+// ABI layout probes for `src/c/iree/abi_test.zig`. Each probe returns a
+// concrete sizeof / alignof / offsetof against the SDK headers we link at
+// build time, so layout drift in the IREE C API surfaces as a Zig test
+// failure rather than a hard-to-diagnose runtime crash.
+// ---------------------------------------------------------------------------
+
+iree_host_size_t zg_abi_sizeof_iree_string_view_t(void) {
+  return sizeof(iree_string_view_t);
+}
+iree_host_size_t zg_abi_alignof_iree_string_view_t(void) {
+  return _Alignof(iree_string_view_t);
+}
+iree_host_size_t zg_abi_offsetof_iree_string_view_t_data(void) {
+  return offsetof(iree_string_view_t, data);
+}
+iree_host_size_t zg_abi_offsetof_iree_string_view_t_size(void) {
+  return offsetof(iree_string_view_t, size);
+}
+
+iree_host_size_t zg_abi_sizeof_iree_const_byte_span_t(void) {
+  return sizeof(iree_const_byte_span_t);
+}
+iree_host_size_t zg_abi_alignof_iree_const_byte_span_t(void) {
+  return _Alignof(iree_const_byte_span_t);
+}
+iree_host_size_t zg_abi_offsetof_iree_const_byte_span_t_data(void) {
+  return offsetof(iree_const_byte_span_t, data);
+}
+iree_host_size_t zg_abi_offsetof_iree_const_byte_span_t_data_length(void) {
+  return offsetof(iree_const_byte_span_t, data_length);
+}
+
+iree_host_size_t zg_abi_sizeof_iree_allocator_t(void) {
+  return sizeof(iree_allocator_t);
+}
+iree_host_size_t zg_abi_alignof_iree_allocator_t(void) {
+  return _Alignof(iree_allocator_t);
+}
+iree_host_size_t zg_abi_offsetof_iree_allocator_t_self(void) {
+  return offsetof(iree_allocator_t, self);
+}
+iree_host_size_t zg_abi_offsetof_iree_allocator_t_ctl(void) {
+  return offsetof(iree_allocator_t, ctl);
+}
+
+iree_host_size_t zg_abi_sizeof_iree_vm_function_t(void) {
+  return sizeof(iree_vm_function_t);
+}
+iree_host_size_t zg_abi_alignof_iree_vm_function_t(void) {
+  return _Alignof(iree_vm_function_t);
+}
+iree_host_size_t zg_abi_offsetof_iree_vm_function_t_module(void) {
+  return offsetof(iree_vm_function_t, module);
+}
+iree_host_size_t zg_abi_offsetof_iree_vm_function_t_linkage(void) {
+  return offsetof(iree_vm_function_t, linkage);
+}
+iree_host_size_t zg_abi_offsetof_iree_vm_function_t_ordinal(void) {
+  return offsetof(iree_vm_function_t, ordinal);
+}
+
+iree_host_size_t zg_abi_sizeof_iree_runtime_call_t(void) {
+  return sizeof(iree_runtime_call_t);
+}
+iree_host_size_t zg_abi_alignof_iree_runtime_call_t(void) {
+  return _Alignof(iree_runtime_call_t);
+}
+iree_host_size_t zg_abi_offsetof_iree_runtime_call_t_session(void) {
+  return offsetof(iree_runtime_call_t, session);
+}
+iree_host_size_t zg_abi_offsetof_iree_runtime_call_t_function(void) {
+  return offsetof(iree_runtime_call_t, function);
+}
+iree_host_size_t zg_abi_offsetof_iree_runtime_call_t_inputs(void) {
+  return offsetof(iree_runtime_call_t, inputs);
+}
+iree_host_size_t zg_abi_offsetof_iree_runtime_call_t_outputs(void) {
+  return offsetof(iree_runtime_call_t, outputs);
 }

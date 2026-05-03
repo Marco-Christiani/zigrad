@@ -108,22 +108,18 @@ pub fn main(init: std.process.Init) !void {
     log.info("executed", .{});
 
     for (input_views.items) |view| {
-        try rt.list_push_buffer_view(rt.call_inputs(&call), view);
+        try rt.call_push_buffer_view_input(&call, view);
     }
 
     try rt.call_invoke(&call);
-
-    // Print outputs.
-    const out_list = rt.call_outputs(&call);
-    const n_out = rt.list_size(out_list);
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch @panic("Flush failed");
 
-    for (0..n_out) |i| {
-        const out_view = try rt.list_get_buffer_view(out_list, i);
+    var output_index: usize = 0;
+    while (rt.call_pop_buffer_view_output(&call)) |out_view| : (output_index += 1) {
         defer rt.buffer_view_release(out_view);
 
         const elem_type = rt.buffer_view_element_type(out_view);
@@ -135,12 +131,14 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(buf);
         try rt.buffer_view_to_host(out_view, buf);
 
-        try stdout.print("output[{d}]: [", .{i});
+        try stdout.print("output[{d}]: [", .{output_index});
         try print_typed_values(stdout, elem_type, buf, byte_count);
         try stdout.writeAll("]\n");
+    } else |_| {
+        // empty-list pop returns an error, terminating the loop normally
     }
 
-    if (n_out == 0) {
+    if (output_index == 0) {
         try stdout.writeAll("(no outputs)\n");
     }
 }
@@ -151,10 +149,10 @@ pub fn main(init: std.process.Init) !void {
 
 /// Supported element types for printing and parsing, mapped to Zig types.
 const element_type_map = .{
-    .{ rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32, f32 },
-    .{ rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64, f64 },
-    .{ rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32, i32 },
-    .{ rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64, i64 },
+    .{ rt.HAL_ELEMENT_TYPE_FLOAT_32, f32 },
+    .{ rt.HAL_ELEMENT_TYPE_FLOAT_64, f64 },
+    .{ rt.HAL_ELEMENT_TYPE_SINT_32, i32 },
+    .{ rt.HAL_ELEMENT_TYPE_SINT_64, i64 },
 };
 
 fn print_typed_values(writer: anytype, elem_type: rt.HalElementType, buf: []const u8, byte_count: usize) !void {
@@ -205,10 +203,10 @@ const DTypeInfo = struct {
 
 fn parse_dtype(s: []const u8) ?DTypeInfo {
     const map = std.StaticStringMap(DTypeInfo).initComptime(.{
-        .{ "f32", DTypeInfo{ .element_type = rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32, .byte_width = 4 } },
-        .{ "f64", DTypeInfo{ .element_type = rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64, .byte_width = 8 } },
-        .{ "i32", DTypeInfo{ .element_type = rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32, .byte_width = 4 } },
-        .{ "i64", DTypeInfo{ .element_type = rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64, .byte_width = 8 } },
+        .{ "f32", DTypeInfo{ .element_type = rt.HAL_ELEMENT_TYPE_FLOAT_32, .byte_width = 4 } },
+        .{ "f64", DTypeInfo{ .element_type = rt.HAL_ELEMENT_TYPE_FLOAT_64, .byte_width = 8 } },
+        .{ "i32", DTypeInfo{ .element_type = rt.HAL_ELEMENT_TYPE_SINT_32, .byte_width = 4 } },
+        .{ "i64", DTypeInfo{ .element_type = rt.HAL_ELEMENT_TYPE_SINT_64, .byte_width = 8 } },
     });
     return map.get(s);
 }

@@ -244,25 +244,29 @@ pub const Backend = struct {
         var call = try rt.call_init(exe.session, exe.function);
         defer rt.call_deinit(&call);
 
-        // Push inputs (each retains an extra ref; the call's list holds it).
         for (inputs) |buf| {
-            try rt.list_push_buffer_view(rt.call_inputs(&call), buf.view);
+            try rt.call_push_buffer_view_input(&call, buf.view);
         }
 
         try rt.call_invoke(&call);
 
-        // Collect outputs.
-        const out_list = rt.call_outputs(&call);
-        const n_out = rt.list_size(out_list);
-        const outputs = try allocator.alloc(Buffer, n_out);
+        // Collect outputs by popping until empty. The output list size isn't
+        //  exposed by the runtime API we bind, but each call has a known result
+        //  arity; collect into a list and resize.
+        var collected: std.ArrayList(Buffer) = .empty;
+        defer collected.deinit(allocator);
+        errdefer {
+            for (collected.items) |*b| self.deinit_buffer(b);
+        }
+
+        while (rt.call_pop_buffer_view_output(&call)) |view| {
+            try collected.append(allocator, .{ .view = view });
+        } else |_| {}
+
+        const outputs = try collected.toOwnedSlice(allocator);
         errdefer {
             for (outputs) |*b| self.deinit_buffer(b);
             allocator.free(outputs);
-        }
-
-        for (0..n_out) |i| {
-            const view = try rt.list_get_buffer_view(out_list, i);
-            outputs[i] = .{ .view = view };
         }
 
         return .{
@@ -294,15 +298,14 @@ pub const Backend = struct {
         defer rt.call_deinit(&call);
 
         for (inputs) |raw| {
-            try rt.list_push_buffer_view(rt.call_inputs(&call), raw.view);
+            try rt.call_push_buffer_view_input(&call, raw.view);
         }
 
         try rt.call_invoke(&call);
 
         // Copy each output into the caller-provided destination buffer.
-        const out_list = rt.call_outputs(&call);
-        for (outputs, 0..) |dst, i| {
-            const src_view = try rt.list_get_buffer_view(out_list, i);
+        for (outputs) |dst| {
+            const src_view = try rt.call_pop_buffer_view_output(&call);
             defer rt.buffer_view_release(src_view);
             try copy_buffer_view(self.allocator, src_view, dst.view);
         }
@@ -363,17 +366,17 @@ pub const Backend = struct {
 /// Map a PR DType to the IREE HAL element type constant.
 fn dtype_to_element_type(dtype: pr.DType) rt.HalElementType {
     return switch (dtype) {
-        .f16 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_16,
-        .bf16 => rt.c.IREE_HAL_ELEMENT_TYPE_BFLOAT_16,
-        .f32 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-        .f64 => rt.c.IREE_HAL_ELEMENT_TYPE_FLOAT_64,
-        .i8 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_8,
-        .u8 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_8,
-        .i32 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_32,
-        .i64 => rt.c.IREE_HAL_ELEMENT_TYPE_SINT_64,
-        .u32 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_32,
-        .u64 => rt.c.IREE_HAL_ELEMENT_TYPE_UINT_64,
-        .bool => rt.c.IREE_HAL_ELEMENT_TYPE_BOOL_8,
+        .f16 => rt.HAL_ELEMENT_TYPE_FLOAT_16,
+        .bf16 => rt.HAL_ELEMENT_TYPE_BFLOAT_16,
+        .f32 => rt.HAL_ELEMENT_TYPE_FLOAT_32,
+        .f64 => rt.HAL_ELEMENT_TYPE_FLOAT_64,
+        .i8 => rt.HAL_ELEMENT_TYPE_SINT_8,
+        .u8 => rt.HAL_ELEMENT_TYPE_UINT_8,
+        .i32 => rt.HAL_ELEMENT_TYPE_SINT_32,
+        .i64 => rt.HAL_ELEMENT_TYPE_SINT_64,
+        .u32 => rt.HAL_ELEMENT_TYPE_UINT_32,
+        .u64 => rt.HAL_ELEMENT_TYPE_UINT_64,
+        .bool => rt.HAL_ELEMENT_TYPE_BOOL_8,
     };
 }
 
@@ -392,4 +395,8 @@ fn copy_buffer_view(
 
     try rt.buffer_view_to_host(src, tmp);
     try rt.buffer_view_from_host(dst, tmp);
+}
+
+test {
+    _ = @import("../c/iree/runtime.zig");
 }

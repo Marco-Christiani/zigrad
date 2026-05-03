@@ -1,82 +1,79 @@
-//! IREE Runtime C API bindings.
+//! IREE Runtime C API bindings (Zig-side).
 //!
-//! Thin wrappers around `iree/runtime/api.h` (which transitively includes
-//!  the HAL, VM, and base C APIs). libIREERuntime.so is linked at build time
-//!  when `-Diree-backend=true`.
+//! Thin wrappers over `./types.zig`, which hand-declares the IREE C ABI
+//!  surface zigrad uses. We do not run translate-c on IREE because the
+//!  upstream headers contain bitfield-bearing structs and `sizeof()`-based
+//!  alignment expressions that translate-c cannot process. `types.zig`'s
+//!  ABI test (`abi_test.zig`) protects the kept value-type layouts from
+//!  upstream drift.
 //!
-//! Several IREE C API functions are `static inline` or macros that Zig's
-//!  `@cImport` cannot translate.  These are wrapped in `src/c/iree/shim.c`
-//!  and accessed here via `@cImport("iree_zig.h")` or `extern` declarations.
+//! libIREERuntime.so (linked from `libiree_runtime_unified.a`) is linked at
+//!  build time when `-Diree-backend=true`. The C-side helpers in `shim.c`
+//!  cover anything Zig cannot express directly.
 //!
 //! Error handling: IREE returns `iree_status_t`, non-OK statuses are
 //!  converted to Zig errors and logged before propagation.
 const std = @import("std");
+const types = @import("types.zig");
 const log = std.log.scoped(.@"zg/iree_runtime");
 
-pub const c = @import("c-iree");
-
 // Re-export commonly used types for callers.
-pub const Instance = c.iree_runtime_instance_t;
-pub const Session = c.iree_runtime_session_t;
-pub const Call = c.iree_runtime_call_t;
-pub const HalDevice = c.iree_hal_device_t;
-pub const HalAllocator = c.iree_hal_allocator_t;
-pub const HalBuffer = c.iree_hal_buffer_t;
-pub const HalBufferView = c.iree_hal_buffer_view_t;
-pub const VmList = c.iree_vm_list_t;
-pub const VmFunction = c.iree_vm_function_t;
-pub const VmRef = c.iree_vm_ref_t;
-pub const Status = c.iree_status_t;
-pub const HalDim = c.iree_hal_dim_t;
-pub const HalElementType = c.iree_hal_element_type_t;
-pub const HalBufferParams = c.iree_hal_buffer_params_t;
-// HalBufferMapping omitted: bitfields make it opaque to @cImport.
-// Buffer read/write is handled via shim functions in shim.c.
-pub const Allocator = c.iree_allocator_t;
+pub const Instance = types.Instance;
+pub const Session = types.Session;
+pub const Call = types.RuntimeCall;
+pub const HalDevice = types.HalDevice;
+pub const HalAllocator = types.HalAllocator;
+pub const HalBuffer = types.HalBuffer;
+pub const HalBufferView = types.HalBufferView;
+pub const VmFunction = types.VmFunction;
+pub const Status = types.Status;
+pub const HalDim = types.HalDim;
+pub const HalElementType = types.HalElementType;
+pub const Allocator = types.Allocator;
 
-// ---------------------------------------------------------------------------
-// Shim externs -- wrappers for static inline / macro functions that @cImport
-// cannot translate.  Implementations live in shim.c.
-// ---------------------------------------------------------------------------
-
-extern fn zg_iree_allocator_system() callconv(.c) Allocator;
-extern fn zg_iree_allocator_null() callconv(.c) Allocator;
-extern fn zg_iree_status_is_ok(status: Status) callconv(.c) bool;
-extern fn zg_iree_hal_element_bit_count(element_type: HalElementType) callconv(.c) usize;
-extern fn zg_iree_hal_buffer_view_deref(ref: VmRef) callconv(.c) ?*HalBufferView;
-extern fn zg_iree_hal_buffer_view_retain_ref(view: *HalBufferView) callconv(.c) VmRef;
-extern fn zg_iree_hal_buffer_read(buffer: *HalBuffer, dst: [*]u8, dst_len: usize) callconv(.c) Status;
-extern fn zg_iree_hal_buffer_write(buffer: *HalBuffer, src: [*]const u8, src_len: usize) callconv(.c) Status;
+/// Element-type constants for callers that need to name types directly
+///  (e.g. dtype dispatch in callers).
+pub const HAL_ELEMENT_TYPE_BOOL_8 = types.HAL_ELEMENT_TYPE_BOOL_8;
+pub const HAL_ELEMENT_TYPE_SINT_8 = types.HAL_ELEMENT_TYPE_SINT_8;
+pub const HAL_ELEMENT_TYPE_UINT_8 = types.HAL_ELEMENT_TYPE_UINT_8;
+pub const HAL_ELEMENT_TYPE_SINT_32 = types.HAL_ELEMENT_TYPE_SINT_32;
+pub const HAL_ELEMENT_TYPE_UINT_32 = types.HAL_ELEMENT_TYPE_UINT_32;
+pub const HAL_ELEMENT_TYPE_SINT_64 = types.HAL_ELEMENT_TYPE_SINT_64;
+pub const HAL_ELEMENT_TYPE_UINT_64 = types.HAL_ELEMENT_TYPE_UINT_64;
+pub const HAL_ELEMENT_TYPE_FLOAT_16 = types.HAL_ELEMENT_TYPE_FLOAT_16;
+pub const HAL_ELEMENT_TYPE_FLOAT_32 = types.HAL_ELEMENT_TYPE_FLOAT_32;
+pub const HAL_ELEMENT_TYPE_FLOAT_64 = types.HAL_ELEMENT_TYPE_FLOAT_64;
+pub const HAL_ELEMENT_TYPE_BFLOAT_16 = types.HAL_ELEMENT_TYPE_BFLOAT_16;
 
 // ---------------------------------------------------------------------------
 // Status checking.
 // ---------------------------------------------------------------------------
 
-/// Check an IREE status; return a Zig error (and log the message) on failure.
+/// Check an IREE status, return a Zig error (and log the message) on failure.
 pub fn check(status: Status) !void {
-    if (zg_iree_status_is_ok(status)) return;
+    if (types.zg_iree_status_is_ok(status)) return;
 
-    // iree_status_to_string allocates; pass the system allocator by pointer.
-    var alloc = zg_iree_allocator_system();
+    // iree_status_to_string allocates, pass the system allocator by pointer.
+    var alloc = types.zg_iree_allocator_system();
     var msg_ptr: [*c]u8 = null;
-    var msg_len: c.iree_host_size_t = 0;
-    if (c.iree_status_to_string(status, &alloc, &msg_ptr, &msg_len)) {
+    var msg_len: types.HostSize = 0;
+    if (types.iree_status_to_string(status, &alloc, &msg_ptr, &msg_len)) {
         log.err("iree status: {s}", .{msg_ptr[0..msg_len]});
-        c.iree_allocator_free(alloc, msg_ptr);
+        types.iree_allocator_free(alloc, msg_ptr);
     } else {
         log.err("iree status: (could not format message)", .{});
     }
-    c.iree_status_free(status);
+    types.iree_status_free(status);
     return error.IreeError;
 }
 
 /// Wrap a Zig slice as an `iree_string_view_t`.
-pub fn sv(s: []const u8) c.iree_string_view_t {
+pub fn sv(s: []const u8) types.StringView {
     return .{ .data = s.ptr, .size = s.len };
 }
 
 /// Wrap a Zig slice as an `iree_const_byte_span_t`.
-pub fn span(s: []const u8) c.iree_const_byte_span_t {
+pub fn span(s: []const u8) types.ConstByteSpan {
     return .{ .data = s.ptr, .data_length = s.len };
 }
 
@@ -85,20 +82,14 @@ pub fn span(s: []const u8) c.iree_const_byte_span_t {
 // ---------------------------------------------------------------------------
 
 /// Create an IREE runtime instance with all available HAL drivers registered.
-///
-/// Caller must call `instance_release` when done.
 pub fn instance_create() !*Instance {
-    var opts: c.iree_runtime_instance_options_t = undefined;
-    c.iree_runtime_instance_options_initialize(&opts);
-    c.iree_runtime_instance_options_use_all_available_drivers(&opts);
-
     var out: ?*Instance = null;
-    try check(c.iree_runtime_instance_create(&opts, zg_iree_allocator_system(), &out));
+    try check(types.zg_iree_runtime_instance_create_all_drivers(&out));
     return out.?;
 }
 
 pub fn instance_release(instance: *Instance) void {
-    c.iree_runtime_instance_release(instance);
+    types.iree_runtime_instance_release(instance);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +99,7 @@ pub fn instance_release(instance: *Instance) void {
 /// Create the default HAL device for `driver_name` (e.g. "local-sync").
 pub fn create_default_device(instance: *Instance, driver_name: []const u8) !*HalDevice {
     var out: ?*HalDevice = null;
-    try check(c.iree_runtime_instance_try_create_default_device(
+    try check(types.zg_iree_runtime_instance_try_create_default_device(
         instance,
         sv(driver_name),
         &out,
@@ -117,7 +108,7 @@ pub fn create_default_device(instance: *Instance, driver_name: []const u8) !*Hal
 }
 
 pub fn device_release(device: *HalDevice) void {
-    c.iree_hal_device_release(device);
+    types.iree_hal_device_release(device);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,22 +117,17 @@ pub fn device_release(device: *HalDevice) void {
 
 /// Create a session bound to `device`.
 pub fn session_create(instance: *Instance, device: *HalDevice) !*Session {
-    var opts: c.iree_runtime_session_options_t = undefined;
-    c.iree_runtime_session_options_initialize(&opts);
-
     var out: ?*Session = null;
-    try check(c.iree_runtime_session_create_with_device(
+    try check(types.zg_iree_runtime_session_create_with_device_default(
         instance,
-        &opts,
         device,
-        zg_iree_allocator_system(),
         &out,
     ));
     return out.?;
 }
 
 pub fn session_release(session: *Session) void {
-    c.iree_runtime_session_release(session);
+    types.iree_runtime_session_release(session);
 }
 
 /// Append a VMFB module from a caller-managed memory slice.
@@ -149,17 +135,17 @@ pub fn session_release(session: *Session) void {
 /// Precondition: `vmfb` must outlive `session` (the session borrows the bytes
 /// without copying when a null allocator is used).
 pub fn session_append_module(session: *Session, vmfb: []const u8) !void {
-    try check(c.iree_runtime_session_append_bytecode_module_from_memory(
+    try check(types.iree_runtime_session_append_bytecode_module_from_memory(
         session,
         span(vmfb),
-        zg_iree_allocator_null(),
+        types.zg_iree_allocator_null(),
     ));
 }
 
-/// Look up a function by its unqualified name (e.g. `"main"`).
+/// Look up a function by its fully-qualified name (e.g. `"module.main"`).
 pub fn session_lookup_function(session: *Session, name: []const u8) !VmFunction {
     var func: VmFunction = undefined;
-    try check(c.iree_runtime_session_lookup_function(session, sv(name), &func));
+    try check(types.iree_runtime_session_lookup_function(session, sv(name), &func));
     return func;
 }
 
@@ -167,52 +153,34 @@ pub fn session_lookup_function(session: *Session, name: []const u8) !VmFunction 
 // Call lifecycle.
 // ---------------------------------------------------------------------------
 
-/// Initialize a reusable call object.  Caller must call `call_deinit`.
+/// Initialize a reusable call object. Caller must call `call_deinit`.
 pub fn call_init(session: *Session, function: VmFunction) !Call {
     var call: Call = undefined;
-    try check(c.iree_runtime_call_initialize(session, function, &call));
+    try check(types.iree_runtime_call_initialize(session, function, &call));
     return call;
 }
 
 pub fn call_deinit(call: *Call) void {
-    c.iree_runtime_call_deinitialize(call);
+    types.iree_runtime_call_deinitialize(call);
 }
 
 /// Invoke the call synchronously.
 pub fn call_invoke(call: *Call) !void {
-    try check(c.iree_runtime_call_invoke(call, 0));
+    try check(types.iree_runtime_call_invoke(call, 0));
 }
 
-pub fn call_inputs(call: *Call) *VmList {
-    return c.iree_runtime_call_inputs(call).?;
+/// Push a buffer view onto the call inputs list. The list retains a new
+///  reference on the view, ownership of the caller's reference is unchanged.
+pub fn call_push_buffer_view_input(call: *Call, view: *HalBufferView) !void {
+    try check(types.iree_runtime_call_inputs_push_back_buffer_view(call, view));
 }
 
-pub fn call_outputs(call: *Call) *VmList {
-    return c.iree_runtime_call_outputs(call).?;
-}
-
-// ---------------------------------------------------------------------------
-// VM list helpers (input/output passing).
-// ---------------------------------------------------------------------------
-
-pub fn list_size(list: *VmList) usize {
-    return c.iree_vm_list_size(list);
-}
-
-/// Push `view` into `list`, retaining a new reference on the view.
-pub fn list_push_buffer_view(list: *VmList, view: *HalBufferView) !void {
-    var ref: VmRef = zg_iree_hal_buffer_view_retain_ref(view);
-    try check(c.iree_vm_list_push_ref_move(list, &ref));
-}
-
-/// Get a buffer view from `list` at `index`.
-///
-/// Returns a retained reference -- caller must call `buffer_view_release`.
-pub fn list_get_buffer_view(list: *VmList, index: usize) !*HalBufferView {
-    var ref: VmRef = std.mem.zeroes(VmRef);
-    try check(c.iree_vm_list_get_ref_retain(list, index, &ref));
-    const view = zg_iree_hal_buffer_view_deref(ref) orelse return error.NullBufferView;
-    return view;
+/// Pop the next buffer view off the call outputs list.
+///  Ownership transfers to the caller, who must call `buffer_view_release`.
+pub fn call_pop_buffer_view_output(call: *Call) !*HalBufferView {
+    var out: ?*HalBufferView = null;
+    try check(types.iree_runtime_call_outputs_pop_front_buffer_view(call, &out));
+    return out orelse error.NullBufferView;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,62 +196,55 @@ pub fn buffer_view_create_from_host(
     element_type: HalElementType,
     shape: []const HalDim,
 ) !*HalBufferView {
-    const params: HalBufferParams = .{
-        .type = c.IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-        .usage = c.IREE_HAL_BUFFER_USAGE_DEFAULT,
-        .access = c.IREE_HAL_MEMORY_ACCESS_ALL,
-        .queue_affinity = c.IREE_HAL_QUEUE_AFFINITY_ANY,
-        .min_alignment = 0,
-    };
-
     var out: ?*HalBufferView = null;
-    try check(c.iree_hal_buffer_view_allocate_buffer_copy(
+    try check(types.zg_iree_buffer_view_allocate_device_local_copy(
         device,
-        c.iree_hal_device_allocator(device),
-        shape.len,
         shape.ptr,
+        shape.len,
         element_type,
-        c.IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
-        params,
-        span(data),
+        data.ptr,
+        data.len,
         &out,
     ));
     return out.?;
 }
 
 pub fn buffer_view_retain(view: *HalBufferView) void {
-    c.iree_hal_buffer_view_retain(view);
+    types.iree_hal_buffer_view_retain(view);
 }
 
 pub fn buffer_view_release(view: *HalBufferView) void {
-    c.iree_hal_buffer_view_release(view);
+    types.iree_hal_buffer_view_release(view);
 }
 
 /// Return the number of elements in `view`.
 pub fn buffer_view_element_count(view: *HalBufferView) usize {
-    return c.iree_hal_buffer_view_element_count(view);
+    return types.iree_hal_buffer_view_element_count(view);
 }
 
 /// Return the element type of `view`.
 pub fn buffer_view_element_type(view: *HalBufferView) HalElementType {
-    return c.iree_hal_buffer_view_element_type(view);
+    return types.iree_hal_buffer_view_element_type(view);
 }
 
-/// Copy buffer view contents to host slice `dst`.
-///
-/// Maps the buffer for read, copies, and unmaps.
+/// Copy buffer view contents to host slice `dst`. Maps the buffer for read,
+///  copies, and unmaps.
 pub fn buffer_view_to_host(view: *HalBufferView, dst: []u8) !void {
-    const buf = c.iree_hal_buffer_view_buffer(view);
-    try check(zg_iree_hal_buffer_read(buf.?, dst.ptr, dst.len));
+    const buf = types.iree_hal_buffer_view_buffer(view) orelse return error.NullBuffer;
+    try check(types.zg_iree_hal_buffer_read(buf, dst.ptr, dst.len));
 }
 
 /// Write host bytes `src` into a pre-existing buffer view (must be CPU-accessible).
 pub fn buffer_view_from_host(view: *HalBufferView, src: []const u8) !void {
-    const buf = c.iree_hal_buffer_view_buffer(view);
-    try check(zg_iree_hal_buffer_write(buf.?, src.ptr, src.len));
+    const buf = types.iree_hal_buffer_view_buffer(view) orelse return error.NullBuffer;
+    try check(types.zg_iree_hal_buffer_write(buf, src.ptr, src.len));
 }
 
 /// Return byte width for a HAL element type (integer division of bit_count / 8).
 pub fn element_byte_width(etype: HalElementType) usize {
-    return zg_iree_hal_element_bit_count(etype) / 8;
+    return types.zg_iree_hal_element_bit_count(etype) / 8;
+}
+
+test {
+    _ = @import("abi_test.zig");
 }

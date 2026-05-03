@@ -291,8 +291,10 @@ fn write_temp_file(
 ) ![]const u8 {
     // Try up to a few times with exclusive creation to avoid collisions.
     for (0..8) |_| {
+        const ts = std.Io.Timestamp.now(io, .awake);
+        const ns: i128 = ts.nanoseconds;
         const path = std.fmt.bufPrint(path_buf, "/tmp/zigrad-iree-{x}{s}", .{
-            @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
+            @as(u64, @truncate(@as(u128, @bitCast(ns)))),
             suffix,
         }) catch return error.PathTooLong;
 
@@ -301,7 +303,7 @@ fn write_temp_file(
             return err;
         };
         defer file.close(io);
-        try file.writeAll(io, data);
+        try file.writeStreamingAll(io, data);
         return path;
     }
     return error.TempFileCollision;
