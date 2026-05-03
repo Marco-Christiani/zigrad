@@ -155,6 +155,7 @@ pub const Backend = struct {
     /// Precondition: backend was initialized with a compiler.
     pub fn compile(
         self: *Backend,
+        io: std.Io,
         device: *const Device,
         ir_bytes: []const u8,
         encoding: pass.Encoding,
@@ -166,7 +167,7 @@ pub const Backend = struct {
         };
 
         // Phase 1: MLIR -> VMFB.
-        const vmfb = try cmp.compile(self.allocator, ir_bytes, encoding == .binary);
+        const vmfb = try cmp.compile(io, self.allocator, ir_bytes, encoding == .binary);
         errdefer self.allocator.free(vmfb);
 
         log.debug("VMFB size: {d} bytes", .{vmfb.len});

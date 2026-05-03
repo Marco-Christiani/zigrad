@@ -18,6 +18,7 @@ in {
       inherit zigradSrc;
       version = zigradVersion;
       sdk = config.packages.zigrad-sdk-full-gpu-compile;
+      cudaHome = config.packages.cuda-redist-dev;
       optimize = "ReleaseSafe";
       runTests = true;
     };

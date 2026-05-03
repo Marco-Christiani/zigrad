@@ -58,13 +58,14 @@ pub const JitOpts = struct {
 ///  Call `deinit()` when done.
 pub fn jit(
     comptime func: anytype,
+    io: std.Io,
     allocator: std.mem.Allocator,
     backend: *Backend,
     device: Backend.Device,
     specs: anytype,
     comptime opts: JitOpts,
 ) !Compiled(func, @TypeOf(specs), opts) {
-    return Compiled(func, @TypeOf(specs), opts).init(allocator, backend, device, specs);
+    return Compiled(func, @TypeOf(specs), opts).init(io, allocator, backend, device, specs);
 }
 
 /// Typed compiled function. Parameterized by the traced function, spec tuple
@@ -164,7 +165,9 @@ pub fn Compiled(
         var donated_indices: [opts.donate.len]usize = undefined;
         for (donate_maps, 0..) |dm, i| donated_indices[i] = dm.ret_field_idx;
 
-        var fields: [kept_field_count]std.builtin.Type.StructField = undefined;
+        var field_names: [kept_field_count][:0]const u8 = undefined;
+        var field_types: [kept_field_count]type = undefined;
+        var field_attrs: [kept_field_count]std.builtin.Type.StructField.Attributes = undefined;
         var idx: usize = 0;
         for (ret_info.fields, 0..) |field, fi| {
             var is_donated = false;
@@ -175,23 +178,14 @@ pub fn Compiled(
                 }
             }
             if (!is_donated) {
-                fields[idx] = .{
-                    .name = field.name,
-                    .type = field.type,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(field.type),
-                };
+                field_names[idx] = field.name;
+                field_types[idx] = field.type;
+                field_attrs[idx] = .{ .@"align" = @alignOf(field.type) };
                 idx += 1;
             }
         }
 
-        break :blk @Type(.{ .@"struct" = .{
-            .layout = .auto,
-            .fields = &fields,
-            .decls = &.{},
-            .is_tuple = false,
-        } });
+        break :blk @Struct(.auto, null, &field_names, &field_types, &field_attrs);
     };
 
     return struct {
@@ -211,6 +205,7 @@ pub fn Compiled(
         output_tensors: [kept_output_count]Tensor,
 
         pub fn init(
+            io: std.Io,
             allocator: std.mem.Allocator,
             backend_: *Backend,
             device: Backend.Device,
@@ -239,6 +234,7 @@ pub fn Compiled(
 
             const exe = try frontend.compile_program(
                 backend_,
+                io,
                 allocator,
                 &program,
                 device,

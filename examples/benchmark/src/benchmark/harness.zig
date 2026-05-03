@@ -26,6 +26,7 @@ const syms = zg.utils.Symbols.unicode;
 
 /// Benchmark harness for matmul implementations.
 pub const Harness = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     config: BenchmarkConfig,
     results: std.ArrayList(BenchmarkResult),
@@ -41,14 +42,15 @@ pub const Harness = struct {
     tvm_cpu_cache: std.StringHashMap(*tvm_module.TunedModule),
     tvm_gpu_cache: std.StringHashMap(*tvm_module.TunedModule),
 
-    pub fn init(allocator: std.mem.Allocator, cfg: BenchmarkConfig) !Harness {
+    pub fn init(io: std.Io, environ: *const std.process.Environ.Map, allocator: std.mem.Allocator, cfg: BenchmarkConfig) !Harness {
         const results = try std.ArrayList(BenchmarkResult).initCapacity(allocator, 16);
         return Harness{
+            .io = io,
             .allocator = allocator,
             .config = cfg,
             .results = results,
             .rng = std.Random.DefaultPrng.init(cfg.seed),
-            .cache = try Cache.init(.{}),
+            .cache = try Cache.init(io, environ, .{}),
             .tvm_cpu_cache = std.StringHashMap(*tvm_module.TunedModule).init(allocator),
             .tvm_gpu_cache = std.StringHashMap(*tvm_module.TunedModule).init(allocator),
         };
@@ -130,13 +132,13 @@ pub const Harness = struct {
     }
 
     fn tune_tvm_shape(self: *Harness, shape: Shape, target_kind: tvm_tir.TargetKind, opts: TuneOpts) !void {
-        const tvm_cache = try self.cache.subdir("tvm", .{});
+        const tvm_cache = try self.cache.subdir(self.io, "tvm", .{});
 
         const key = tvm_module.matmul_cache_key(target_kind, shape.m, shape.n, shape.k);
 
         if (opts.retune) {
-            const work = try tvm_cache.subdir(key.slice(), .{ .create = false });
-            std.fs.cwd().deleteTree(work.path()) catch {};
+            const work = try tvm_cache.subdir(self.io, key.slice(), .{ .create = false });
+            std.Io.Dir.cwd().deleteTree(self.io, work.path()) catch {};
             log.info("retune: cleared {s}", .{work.path()});
         }
 
@@ -156,15 +158,15 @@ pub const Harness = struct {
         const tensor_shapes = try self.allocator.dupe([]const i64, &[_][]const i64{ shape_a, shape_b, shape_c });
         defer self.allocator.free(tensor_shapes);
 
-        const work_cache = try tvm_cache.subdir(key.slice(), .{});
+        const work_cache = try tvm_cache.subdir(self.io, key.slice(), .{});
 
-        try tvm_tune.tune(self.allocator, ir_mod, target, target_kind, tensor_shapes, .{
+        try tvm_tune.tune(self.io, self.allocator, ir_mod, target, target_kind, tensor_shapes, .{
             .work_cache = work_cache,
             .max_trials = opts.max_trials,
             .trials_per_iter = opts.trials_per_iter,
         });
 
-        const update = try tvm_module.update_cache_from_work_dir(self.allocator, tvm_cache, work_cache, key.slice(), target_kind);
+        const update = try tvm_module.update_cache_from_work_dir(self.io, self.allocator, tvm_cache, work_cache, key.slice(), target_kind);
 
         log.info("tuned: {any} ({s}), best candidate {d} ({d:.2} us)", .{
             shape, @tagName(target_kind), update.best_candidate, update.best_time_us,
@@ -250,11 +252,11 @@ pub const Harness = struct {
         for (0..self.config.bench_iters) |i| {
             @memset(c, @as(T, 0));
 
-            const start = std.time.nanoTimestamp();
+            const start = std.Io.Timestamp.now(self.io, .awake);
             try self.run_kernel(T, impl, shape, a, b, c);
-            const end = std.time.nanoTimestamp();
+            const elapsed = start.untilNow(self.io, .awake);
 
-            times[i] = @as(f64, @floatFromInt(end - start)) / 1000.0;
+            times[i] = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1000.0;
         }
 
         const median_us = stats.median(times);
@@ -341,14 +343,14 @@ pub const Harness = struct {
                 .cpu => .cpu,
                 .gpu => .cuda,
             };
-            const tvm_cache = try self.cache.subdir("tvm", .{});
+            const tvm_cache = try self.cache.subdir(self.io, "tvm", .{});
 
             const key = tvm_module.matmul_cache_key(target_kind, shape.m, shape.n, shape.k);
 
             const module = try self.allocator.create(tvm_module.TunedModule);
             errdefer self.allocator.destroy(module);
 
-            module.* = try tvm_module.load_cached(self.allocator, tvm_cache, key.slice(), target_kind) orelse
+            module.* = try tvm_module.load_cached(self.io, self.allocator, tvm_cache, key.slice(), target_kind) orelse
                 return error.NoTuningRecords;
 
             const owned_key = try self.allocator.dupe(u8, cache_key);
@@ -384,7 +386,7 @@ pub const Harness = struct {
     /// Print benchmark results in a human-readable table format.
     pub fn print_results(self: *const Harness) !void {
         var buffer: [8192]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&buffer);
+        var stdout_writer = std.Io.File.stdout().writer(self.io, &buffer);
         const writer = &stdout_writer.interface;
 
         const header_sep = "\n" ++ "=" ** 60 ++ "\n";

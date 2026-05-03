@@ -123,21 +123,22 @@ fn train_step(params: Params, batch: Batch) !struct { loss_val: Tensor, updated:
 // Main
 // ============================================================================
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // --- Parse args ---
     var steps: usize = 100;
-    var args = std.process.args();
-    _ = args.next(); // skip program name
-    while (args.next()) |arg| {
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
+    for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--steps=")) {
             steps = try std.fmt.parseInt(usize, arg["--steps=".len..], 10);
         }
     }
 
     // --- Backend ---
-    const plugin_path = std.posix.getenv("PJRT_PLUGIN_PATH") orelse {
+    const plugin_path = init.environ_map.get("PJRT_PLUGIN_PATH") orelse {
         std.log.err("set PJRT_PLUGIN_PATH to a PJRT plugin (.so)", .{});
         return error.MissingPlugin;
     };
@@ -155,6 +156,7 @@ pub fn main() !void {
     std.log.info("compiling train_step...", .{});
     var step_fn = try zg.jit(
         train_step,
+        io,
         allocator,
         backend,
         device,

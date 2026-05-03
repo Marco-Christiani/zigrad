@@ -30,9 +30,13 @@ pub const Api = struct {
     /// Load API from dlopen handle
     pub fn init(handle: *anyopaque, get_api_fn: *const fn () callconv(.c) ?*const c.PJRT_Api) !Api {
         const pjrt_api = get_api_fn() orelse return error.GetApiFailed;
+        // C-FFI boundary: read trace toggle via libc env. Threading
+        //  `Environ.Map` to a dlopen-handle constructor would force every
+        //  PJRT plugin loader to also pass it through; not worth it for one
+        //  diagnostic flag.
         const trace_execute = blk: {
-            const env = std.posix.getenv("ZG_PJRT_TRACE_EXECUTE") orelse break :blk false;
-            const val = std.mem.sliceTo(env, 0);
+            const env_ptr = std.c.getenv("ZG_PJRT_TRACE_EXECUTE") orelse break :blk false;
+            const val = std.mem.span(env_ptr);
             if (val.len == 0) break :blk false;
             break :blk !std.mem.eql(u8, val, "0");
         };

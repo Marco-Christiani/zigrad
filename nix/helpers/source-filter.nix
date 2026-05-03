@@ -10,5 +10,6 @@ in
       (root + /build.zig)
       (root + /build.zig.zon)
       (root + /src)
+      (root + /tools)
     ];
   }

@@ -26,22 +26,14 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     return program;
 }
 
-pub fn write_bytes_to_path(path: []const u8, bytes: []const u8) !void {
-    var file = if (std.fs.path.isAbsolute(path))
-        try std.fs.createFileAbsolute(path, .{ .truncate = true })
-    else
-        try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
+pub fn write_bytes_to_path(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, bytes);
 }
 
-pub fn read_bytes_from_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{})
-    else
-        try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    return file.readToEndAlloc(allocator, std.math.maxInt(usize));
+pub fn read_bytes_from_path(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
 }
 
 pub fn run_demo_executable(
@@ -114,7 +106,7 @@ pub fn run_demo_executable(
     log.info("OK: demo output matches expected", .{});
 }
 
-pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_custom_call_negative(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -126,7 +118,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backe
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    const exe = zg.frontend.compile_program(backend, allocator, &program, device, "main", .{
+    const exe = zg.frontend.compile_program(backend, io, allocator, &program, device, "main", .{
         .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
@@ -141,7 +133,7 @@ pub fn run_custom_call_negative(allocator: std.mem.Allocator, backend: *zg.Backe
     return error.UnexpectedSuccess;
 }
 
-pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
     var program = try build_demo_program(allocator);
     defer program.deinit();
 
@@ -149,7 +141,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
     try program.add_function(vjp);
 
-    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "main_vjp", .{
+    const exe = try zg.frontend.compile_program(backend, io, allocator, &program, device, "main_vjp", .{
         .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
@@ -250,6 +242,7 @@ pub fn run_vjp_demo(allocator: std.mem.Allocator, backend: *zg.Backend, device: 
 }
 
 pub fn run_train_demo(
+    io: std.Io,
     allocator: std.mem.Allocator,
     backend: *zg.Backend,
     device: zg.Backend.Device,
@@ -337,7 +330,7 @@ pub fn run_train_demo(
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "train_step");
     defer program.deinit();
 
-    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "train_step", .{
+    const exe = try zg.frontend.compile_program(backend, io, allocator, &program, device, "train_step", .{
         .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
@@ -432,7 +425,7 @@ pub fn run_train_demo(
         result.loss.deinit();
     }
 
-    var loop_timer = zg.utils.LoopTimer{ .label = "train-demo", .quiet = quiet };
+    var loop_timer = zg.utils.LoopTimer{ .io = io, .label = "train-demo", .quiet = quiet };
     for (0..steps) |_| {
         try loop_timer.start_step();
         var result = try state.step();
@@ -469,6 +462,8 @@ pub fn run_train_demo(
 /// `KernelStore`, `KernelizePass` rewrites annotated regions, and the
 /// backend dispatches via `DispatchRegistry` at execute time.
 pub fn run_kernel_provider_demo(
+    io: std.Io,
+    environ: *const std.process.Environ.Map,
     allocator: std.mem.Allocator,
     pjrt_backend: *zg.pjrt.Backend,
     device: zg.Backend.Device,
@@ -480,7 +475,7 @@ pub fn run_kernel_provider_demo(
     const backend = &pjrt_backend.interface;
     try pjrt_backend.register_kernel_dispatcher();
 
-    const demo_cache = try zg.Cache.init(.{});
+    const demo_cache = try zg.Cache.init(io, environ, .{});
 
     // --- TVM setup (requires TVM headers in SDK) ---
     var tvm_dispatch: if (zg.build_options.has_tvm) zg.tvm.dispatch.TvmDispatchState else void = undefined;
@@ -497,6 +492,7 @@ pub fn run_kernel_provider_demo(
         const target_kind: zg.tvm.tir.TargetKind = if (pjrt_backend.is_cuda()) .cuda else .cpu;
         tvm_dispatch = zg.tvm.dispatch.TvmDispatchState.init(allocator, demo_cache);
         tvm_impl = .{
+            .io = io,
             .allocator = allocator,
             .target_kind = target_kind,
             .cache = demo_cache,
@@ -551,10 +547,10 @@ pub fn run_kernel_provider_demo(
     defer program.deinit();
 
     // tune -> store -> compile
-    var tune_result = try zg.tune.tune(allocator, &program, providers, .{});
+    var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{});
     defer tune_result.deinit();
 
-    const exe = try zg.frontend.compile_program(backend, allocator, &program, device, "main", .{
+    const exe = try zg.frontend.compile_program(backend, io, allocator, &program, device, "main", .{
         .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .kernel_store = &tune_result.store,
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
@@ -643,7 +639,11 @@ pub const KernelProviderDemoKind = enum {
     mirage,
 };
 
-pub fn print_pr(allocator: std.mem.Allocator) !void {
+pub fn print_pr(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+) !void {
     var program = try build_demo_program(allocator);
     defer program.deinit();
 
@@ -651,19 +651,28 @@ pub fn print_pr(allocator: std.mem.Allocator) !void {
     const vjp_func = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
 
     var stdout_buffer: [8192]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
+    const tc = truecolor_from_env(environ);
     try stdout.writeAll("=== Forward ===\n");
-    try zg.pr.zxpr.emit(fwd, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{}));
+    try zg.pr.zxpr.emit(fwd, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
     try stdout.writeAll("\n=== VJP ===\n");
-    try zg.pr.zxpr.emit(vjp_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{}));
+    try zg.pr.zxpr.emit(vjp_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
+}
+
+/// Returns true when `ZG_TRUECOLOR` is set to a non-empty value. Library
+///  styling code must not read process state itself; callers with `environ`
+///  in scope decide and pass the flag in.
+fn truecolor_from_env(environ: *const std.process.Environ.Map) bool {
+    const v = environ.get("ZG_TRUECOLOR") orelse return false;
+    return v.len > 0;
 }
 
 /// Enumerate TVM FFI global functions.
 /// Writes available operations to stdout.
-pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
+pub fn dump_tvm_ffi_symbols(io: std.Io, allocator: std.mem.Allocator) !void {
     if (comptime !zg.build_options.has_tvm) {
         log.err("TVM FFI symbol dump requires TVM support (headers not found in SDK)", .{});
         return error.TvmUnavailable;
@@ -680,7 +689,7 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
 
     // Print with category headers
     var stdout_buf: [16384]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
@@ -701,7 +710,13 @@ pub fn dump_tvm_ffi_symbols(allocator: std.mem.Allocator) !void {
     }
 }
 
-pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.style.Palette) !void {
+pub fn print_tvm_kernelize_pr(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+    sweep_palettes: bool,
+    palette: ?zg.pr.zxpr.style.Palette,
+) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -732,20 +747,21 @@ pub fn print_tvm_kernelize_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     const func = program.functions[0];
 
     var stdout_buffer: [8192]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
+    const tc = truecolor_from_env(environ);
     if (sweep_palettes) {
         const palettes = [_]zg.pr.zxpr.style.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
         for (palettes) |pal| {
             try stdout.print("=== Kernelize(TVM subgraph) [{s}] ===\n", .{@tagName(pal)});
-            try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal }));
+            try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal, .truecolor_auto = tc }));
             try stdout.writeAll("\n");
         }
     } else {
         try stdout.writeAll("=== Kernelize(TVM subgraph) ===\n");
-        try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = palette }));
+        try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = palette, .truecolor_auto = tc }));
     }
 }
 
@@ -892,7 +908,13 @@ fn fill_targets(
 ///
 /// Builds simplified attention compute: Q @ K^T -> scale -> softmax -> @ V
 /// with region annotations to visualize what would be lowered.
-pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool, palette: ?zg.pr.zxpr.style.Palette) !void {
+pub fn print_tvm_attention_pr(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+    sweep_palettes: bool,
+    palette: ?zg.pr.zxpr.style.Palette,
+) !void {
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -954,18 +976,19 @@ pub fn print_tvm_attention_pr(allocator: std.mem.Allocator, sweep_palettes: bool
     const func = program.functions[0];
 
     var stdout_buffer: [16384]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch @panic("Flush failed");
 
+    const tc = truecolor_from_env(environ);
     if (sweep_palettes) {
         const palettes = [_]zg.pr.zxpr.style.Palette{ .default, .alt, .nord, .gruvbox_material, .flat_dark, .catppuccin, .tokyonight };
         for (palettes) |pal| {
             try stdout.print("\n==== Palette: {s} ====\n", .{@tagName(pal)});
-            try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal }));
+            try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal, .truecolor_auto = tc }));
         }
     } else {
         const pal = palette orelse .default;
-        try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal }));
+        try zg.pr.zxpr.emit(func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .palette = pal, .truecolor_auto = tc }));
     }
 }

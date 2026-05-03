@@ -13,11 +13,7 @@
 const std = @import("std");
 const log = std.log.scoped(.@"zg/iree_runtime");
 
-pub const c = @cImport({
-    // iree_zig.h forces the GCC atomics path (plain int32_t typedefs)
-    // to avoid _Atomic qualifiers that Zig's C translator cannot handle.
-    @cInclude("c/iree/iree_zig.h");
-});
+pub const c = @import("c-iree");
 
 // Re-export commonly used types for callers.
 pub const Instance = c.iree_runtime_instance_t;

@@ -58,6 +58,7 @@ const TuneCandidate = struct {
 /// `CompileOpts.kernel_store` and `result.dispatch_registry` to
 /// `ExecuteOptions.dispatch_registry`. Providers are finalized before return.
 pub fn tune(
+    io: std.Io,
     allocator: std.mem.Allocator,
     program: *const pr.Program,
     providers: []const kernel.KernelProvider,
@@ -69,7 +70,7 @@ pub fn tune(
     var dispatch_registry = kernel.DispatchRegistry.init(allocator);
     errdefer dispatch_registry.deinit();
 
-    var timer = std.time.Timer.start() catch null;
+    const tune_start = std.Io.Timestamp.now(io, .awake);
 
     var total_compiled: usize = 0;
     var total_dedup: usize = 0;
@@ -94,14 +95,12 @@ pub fn tune(
         provider.finalize();
     }
 
-    if (timer) |*t| {
-        log.info("tuning completed: {d} compiled, {d} dedup, {d} negative in {d:.2}ms", .{
-            total_compiled, total_dedup, total_negative, ns_to_ms(t.read()),
-        });
-    }
+    log.info("tuning completed: {d} compiled, {d} dedup, {d} negative in {d:.2}ms", .{
+        total_compiled, total_dedup, total_negative, ns_to_ms(@intCast(tune_start.untilNow(io, .awake).toNanoseconds())),
+    });
 
     if (opts.dump_results) {
-        dump_store_summary(&store);
+        dump_store_summary(io, &store);
     }
 
     return .{
@@ -237,9 +236,9 @@ fn is_region_nested(region: pr.Region, candidates: []const TuneCandidate) bool {
     return false;
 }
 
-fn dump_store_summary(store: *const kernel.KernelStore) void {
+fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
     var buf: [4096]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&buf);
+    var writer = std.Io.File.stdout().writer(io, &buf);
     const out = &writer.interface;
 
     out.writeAll("\n=== Tuning Summary ===\n") catch return;
@@ -282,7 +281,7 @@ test tune {
     const func = try b.finish(&.{x});
     try program.add_function(func);
 
-    var result = try tune(testing.allocator, &program, &.{}, .{});
+    var result = try tune(std.testing.io, testing.allocator, &program, &.{}, .{});
     defer result.deinit();
 
     // No regions -> no decisions.

@@ -20,6 +20,15 @@
 #define IREE_COMPILER_GCC 1
 #endif
 
+// Zig 0.16 translate-c cannot evaluate `sizeof(long double)` at translation
+// time, so it rejects `iree_alignas(iree_max_align_t)` in loop_inline.h with
+// "requested alignment is not a power of 2". Include alignment.h first to
+// let it set up its other macros, then override `iree_max_align_t` to the
+// known x86_64-Linux long-double size (16) before loop_inline.h consumes it.
+#include "iree/base/alignment.h"
+#undef iree_max_align_t
+#define iree_max_align_t 16
+
 #include "iree/runtime/api.h"
 #include "iree/hal/api.h"
 #include "iree/vm/api.h"

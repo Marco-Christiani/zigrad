@@ -31,15 +31,15 @@ pub const Cache = struct {
     };
 
     /// Initialize a cache rooted at the given path, `ZG_CACHE_DIR`, or `/tmp/zigrad-cache`.
-    pub fn init(opts: InitOptions) !Cache {
+    pub fn init(io: std.Io, environ_map: *const std.process.Environ.Map, opts: InitOptions) !Cache {
         const root: []const u8 = opts.root orelse
-            std.posix.getenv("ZG_CACHE_DIR") orelse
+            environ_map.get("ZG_CACHE_DIR") orelse
             "/tmp/zigrad-cache";
         if (root.len >= std.fs.max_path_bytes) return error.NameTooLong;
         var self: Cache = .{ .buf = undefined, .len = root.len };
         @memcpy(self.buf[0..root.len], root);
         if (opts.create) {
-            std.fs.cwd().makePath(self.path()) catch |err| {
+            std.Io.Dir.cwd().createDirPath(io, self.path()) catch |err| {
                 log.err("failed to create cache root '{s}': {s}", .{ self.path(), @errorName(err) });
                 return err;
             };
@@ -62,10 +62,10 @@ pub const Cache = struct {
     }
 
     /// Append a path segment, optionally creating the resulting directory.
-    pub fn subdir(self: Cache, name: []const u8, opts: Options) !Cache {
+    pub fn subdir(self: Cache, io: std.Io, name: []const u8, opts: Options) !Cache {
         const result = try self.join(name);
         if (opts.create) {
-            std.fs.cwd().makePath(result.path()) catch |err| {
+            std.Io.Dir.cwd().createDirPath(io, result.path()) catch |err| {
                 log.err("failed to create dir '{s}': {s}", .{ result.path(), @errorName(err) });
                 return err;
             };
@@ -87,12 +87,16 @@ pub const Cache = struct {
 };
 
 test Cache {
+    const io = std.testing.io;
+    var environ: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environ.deinit();
+
     // init with explicit root (no env var dependency)
-    const cache = try Cache.init(.{ .root = "/tmp/zigrad-cache-test" });
+    const cache = try Cache.init(io, &environ, .{ .root = "/tmp/zigrad-cache-test" });
     try std.testing.expectEqualStrings("/tmp/zigrad-cache-test", cache.path());
 
     // subdir composes
-    const tvm = try cache.subdir("tvm", .{});
+    const tvm = try cache.subdir(io, "tvm", .{});
     try std.testing.expectEqualStrings("/tmp/zigrad-cache-test/tvm", tvm.path());
 
     // join composes without creating dirs
@@ -100,7 +104,7 @@ test Cache {
     try std.testing.expectEqualStrings("/tmp/zigrad-cache-test/tvm/index.json", idx.path());
 
     // chain
-    const deep = try (try cache.subdir("tvm", .{})).join("abc123");
+    const deep = try (try cache.subdir(io, "tvm", .{})).join("abc123");
     try std.testing.expectEqualStrings("/tmp/zigrad-cache-test/tvm/abc123", deep.path());
 
     // dirZ

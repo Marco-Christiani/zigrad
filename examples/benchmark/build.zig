@@ -68,8 +68,8 @@ pub fn build(b: *std.Build) void {
 
 fn resolve_absolute(b: *std.Build, path: []const u8) []const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
-    const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch @panic("realpathAlloc failed");
-    return std.fs.path.join(b.allocator, &.{ cwd_abs, path }) catch @panic("path join failed");
+    const build_root = b.build_root.path orelse ".";
+    return std.fs.path.join(b.allocator, &.{ build_root, path }) catch @panic("path join failed");
 }
 
 fn sdk_has(b: *std.Build, sdk_root_abs: []const u8, sub_path: []const []const u8) bool {
@@ -77,6 +77,6 @@ fn sdk_has(b: *std.Build, sdk_root_abs: []const u8, sub_path: []const []const u8
     parts[0] = sdk_root_abs;
     for (sub_path, 0..) |p, i| parts[i + 1] = p;
     const header_path = std.fs.path.join(b.allocator, parts[0 .. sub_path.len + 1]) catch return false;
-    std.fs.accessAbsolute(header_path, .{}) catch return false;
+    std.Io.Dir.cwd().access(b.graph.io, header_path, .{}) catch return false;
     return true;
 }

@@ -9,7 +9,7 @@ const c = @import("c.zig");
 const log = std.log.scoped(.@"zg/tvm_api");
 
 // ============================================================================
-// Value — Zig wrapper for TVMFFIAny
+// Value - Zig wrapper for TVMFFIAny
 // ============================================================================
 
 /// Zig-side representation of a TVM value. Every TVM FFI call takes and
@@ -120,7 +120,7 @@ pub const Value = struct {
 };
 
 // ============================================================================
-// ObjectHandle — refcounted TVM object
+// ObjectHandle - refcounted TVM object
 // ============================================================================
 
 /// Refcounted TVM object handle. Base building block for all typed wrappers.
@@ -145,7 +145,7 @@ pub const ObjectHandle = struct {
 };
 
 // ============================================================================
-// Comptime helpers — generate boilerplate for ObjectHandle-based types
+// Comptime helpers - generate boilerplate for ObjectHandle-based types
 // ============================================================================
 
 /// Comptime generators for ObjectHandle-based TVM types. Adapted from the
@@ -272,25 +272,28 @@ pub fn ensure_loaded(allocator: std.mem.Allocator, opts: EnsureLoadedOpts) !void
 /// Find libtvm.so by locating libtvm_ffi.so in /proc/self/maps and
 /// looking in the same directory.
 fn find_tvm_lib_path(allocator: std.mem.Allocator) !?[]const u8 {
-    const maps_file = std.fs.openFileAbsolute("/proc/self/maps", .{}) catch return null;
-    defer maps_file.close();
+    // Read /proc/self/maps directly via raw posix to avoid threading `io`
+    //  through every caller of `ensure_loaded`. The file is process-local
+    //  and small enough that loading it whole is fine.
+    const fd = std.posix.openat(std.posix.AT.FDCWD, "/proc/self/maps", .{ .ACCMODE = .RDONLY }, 0) catch return null;
+    defer _ = std.posix.system.close(fd);
 
+    var contents: std.ArrayList(u8) = .empty;
+    defer contents.deinit(allocator);
     var read_buf: [8192]u8 = undefined;
-    var file_reader = maps_file.reader(&read_buf);
-    const reader = &file_reader.interface;
-
     while (true) {
-        const line = reader.takeDelimiter('\n') catch break;
-        if (line == null) break;
-        const l = line.?;
-        if (std.mem.indexOf(u8, l, "libtvm_ffi.so")) |_| {
-            if (std.mem.indexOf(u8, l, "/")) |path_start| {
-                const path = l[path_start..];
-                if (std.mem.lastIndexOf(u8, path, "/")) |slash| {
-                    return try std.fmt.allocPrint(allocator, "{s}/libtvm.so", .{path[0..slash]});
-                }
-            }
-        }
+        const n = std.posix.read(fd, &read_buf) catch break;
+        if (n == 0) break;
+        try contents.appendSlice(allocator, read_buf[0..n]);
+    }
+
+    var it = std.mem.splitScalar(u8, contents.items, '\n');
+    while (it.next()) |l| {
+        if (std.mem.indexOf(u8, l, "libtvm_ffi.so") == null) continue;
+        const path_start = std.mem.indexOf(u8, l, "/") orelse continue;
+        const path = l[path_start..];
+        const slash = std.mem.lastIndexOf(u8, path, "/") orelse continue;
+        return try std.fmt.allocPrint(allocator, "{s}/libtvm.so", .{path[0..slash]});
     }
     return null;
 }
@@ -341,7 +344,7 @@ pub fn get_global(allocator: std.mem.Allocator, name: []const u8) TvmError!c.TVM
 ///
 /// Critical: pre-initializes `out` to Value.none() before the call.
 /// TVM's SafeCallImpl checks `result->type_index < kTVMFFIStaticObjectBegin`
-/// BEFORE executing — uninitialized memory causes spurious CHECK failures.
+/// BEFORE executing - uninitialized memory causes spurious CHECK failures.
 pub fn call(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const c.TVMFFIAny, out: *c.TVMFFIAny) TvmError!void {
     out.* = Value.none().raw;
     const arg_ptr = if (args.len == 0) null else @constCast(args.ptr);
@@ -546,7 +549,7 @@ pub fn make_tvm_string(s: []const u8) TvmError!Value {
 }
 
 // ============================================================================
-// Array — TVM runtime Array wrapper (tvm/ffi/container/array.h)
+// Array - TVM runtime Array wrapper (tvm/ffi/container/array.h)
 // ============================================================================
 
 /// Typed wrapper for TVM's `ffi.Array`.
@@ -594,7 +597,7 @@ pub const Array = struct {
 };
 
 // ============================================================================
-// Map — TVM runtime Map wrapper (tvm/ffi/container/map.h)
+// Map - TVM runtime Map wrapper (tvm/ffi/container/map.h)
 // ============================================================================
 
 /// Typed wrapper for TVM's `ffi.Map`.

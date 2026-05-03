@@ -968,7 +968,7 @@ test "render ascii tree" {
     var tree = try Tree(i32).from(allocator, Model{ .a = 1, .b = .{ .c = 2, .d = 3 } });
     defer tree.deinit();
 
-    var out = std.io.Writer.Allocating.init(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
 
     try tree.render(&out.writer, .{ .symbols = .ascii });

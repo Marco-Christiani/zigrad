@@ -213,22 +213,20 @@ pub fn RuntimeOf(comptime T: type) type {
         .@"struct" => |info| {
             for (info.fields) |field| {
                 if (field.is_comptime) {
-                    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-                    for (info.fields, 0..) |f, i| {
-                        fields[i] = .{
-                            .name = f.name,
-                            .type = f.type,
-                            .default_value_ptr = null,
-                            .is_comptime = false,
-                            .alignment = f.alignment,
-                        };
+                    if (info.is_tuple) {
+                        var field_types: [info.fields.len]type = undefined;
+                        for (info.fields, 0..) |f, i| field_types[i] = f.type;
+                        return @Tuple(&field_types);
                     }
-                    return @Type(.{ .@"struct" = .{
-                        .layout = info.layout,
-                        .fields = &fields,
-                        .decls = &.{},
-                        .is_tuple = info.is_tuple,
-                    } });
+                    var field_names: [info.fields.len][:0]const u8 = undefined;
+                    var field_types: [info.fields.len]type = undefined;
+                    var field_attrs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+                    for (info.fields, 0..) |f, i| {
+                        field_names[i] = f.name;
+                        field_types[i] = f.type;
+                        field_attrs[i] = .{ .@"align" = f.alignment };
+                    }
+                    return @Struct(info.layout, null, &field_names, &field_types, &field_attrs);
                 }
             }
             return T;

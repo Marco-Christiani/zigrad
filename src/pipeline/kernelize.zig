@@ -101,7 +101,7 @@ pub const KernelizePass = struct {
 
         if (self.dump_kernels and entries.items.len > 0) {
             var buf: [8192]u8 = undefined;
-            var stdout_writer = std.fs.File.stdout().writer(&buf);
+            var stdout_writer = std.Io.File.stdout().writer(ctx.io, &buf);
             const out = &stdout_writer.interface;
             dump_kernel_entries(out, entries.items) catch {};
             out.flush() catch {};
@@ -317,9 +317,9 @@ pub const KernelizePass = struct {
 /// matching input/output dtypes and dims. This is the deduplication criterion
 /// used by `tune()` and the lookup key consulted by `KernelizePass`.
 pub fn compute_kernel_signature(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
-    var buf = try std.ArrayList(u8).initCapacity(allocator, 128);
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    const w = &aw.writer;
 
     for (desc.ops, 0..) |op, oi| {
         if (oi > 0) try w.writeByte(';');
@@ -336,7 +336,7 @@ pub fn compute_kernel_signature(allocator: std.mem.Allocator, desc: kernel.Regio
         }
     }
 
-    return buf.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 fn write_aval_key(w: anytype, aval: pr.Aval) !void {
@@ -358,25 +358,25 @@ fn write_aval_key(w: anytype, aval: pr.Aval) !void {
 // ============================================================================
 
 fn build_ops_str(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
-    var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    const w = &aw.writer;
     for (desc.ops, 0..) |op, i| {
         if (i > 0) try w.writeByte('+');
         try w.writeAll(@tagName(op.prim()));
     }
-    return buf.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 fn build_shape_str(allocator: std.mem.Allocator, desc: kernel.RegionDescriptor) ![]const u8 {
-    var buf = try std.ArrayList(u8).initCapacity(allocator, 64);
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    const w = &aw.writer;
     for (desc.inputs, 0..) |in_var, i| {
         if (i > 0) try w.writeByte('x');
         try write_aval_key(w, in_var.aval);
     }
-    return buf.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 fn dump_kernel_entries(out: *std.Io.Writer, entries: []const KernelEntry) !void {
@@ -435,7 +435,7 @@ test "kernelize pass rewrites profitable region from store" {
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     // Region should be rewritten to custom_call.
@@ -476,7 +476,7 @@ test "kernelize pass skips negative decision" {
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     // Region should be left unchanged (negative decision).
@@ -511,7 +511,7 @@ test "kernelize pass skips absent key" {
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     // Region should be left unchanged (absent key).
@@ -559,7 +559,7 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
@@ -610,7 +610,7 @@ test "kernelize pass same-shape regions share store decision" {
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     // Both regions must have been rewritten to custom_call.
@@ -658,7 +658,7 @@ test "kernelize pass different-shape regions need separate decisions" {
     };
 
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     // Only region_small should be rewritten; region_large has no store decision.
@@ -700,7 +700,7 @@ test "kernelize pass skips rewriting when rewrite_regions is false" {
 
     const before_op_prim = program.functions[0].ops[0].prim();
     var artifact = pass_mod.Artifact{ .pr = &program };
-    var ctx = pass_mod.PassContext{ .allocator = testing.allocator };
+    var ctx = pass_mod.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &ctx);
 
     // Ops should be unchanged when rewrite_regions is false.

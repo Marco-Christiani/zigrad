@@ -85,12 +85,13 @@ pub fn matmul_cache_key(target_kind: TargetKind, m: i64, n: i64, k: i64) CacheKe
 }
 
 pub fn cache_lookup(
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !?CacheEntry {
-    var index = try read_cache_index(allocator, base_cache);
+    var index = try read_cache_index(io, allocator, base_cache);
     defer deinit_cache_index(allocator, &index);
 
     for (index.entries) |entry| {
@@ -108,11 +109,12 @@ pub fn cache_lookup(
 }
 
 pub fn cache_update(
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_cache: Cache,
     entry: CacheEntry,
 ) !void {
-    var index = try read_cache_index(allocator, base_cache);
+    var index = try read_cache_index(io, allocator, base_cache);
     defer deinit_cache_index(allocator, &index);
 
     for (index.entries) |*existing| {
@@ -122,7 +124,7 @@ pub fn cache_update(
             existing.key = try allocator.dupe(u8, entry.key);
             existing.artifact_path = try allocator.dupe(u8, entry.artifact_path);
             existing.best_time_us = entry.best_time_us;
-            return write_cache_index(allocator, base_cache, &index);
+            return write_cache_index(io, allocator, base_cache, &index);
         }
     }
 
@@ -136,11 +138,11 @@ pub fn cache_update(
     };
     allocator.free(index.entries);
     index.entries = entries;
-    return write_cache_index(allocator, base_cache, &index);
+    return write_cache_index(io, allocator, base_cache, &index);
 }
 
-pub fn best_candidate_from_records(allocator: std.mem.Allocator, work_cache: Cache) !RankedCandidate {
-    const candidates = try find_ranked_candidates(allocator, work_cache);
+pub fn best_candidate_from_records(io: std.Io, allocator: std.mem.Allocator, work_cache: Cache) !RankedCandidate {
+    const candidates = try find_ranked_candidates(io, allocator, work_cache);
     defer allocator.free(candidates);
     return candidates[0];
 }
@@ -158,13 +160,14 @@ pub const UpdateResult = struct {
 };
 
 pub fn update_cache_from_work_dir(
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_cache: Cache,
     work_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !UpdateResult {
-    const best = try best_candidate_from_records(allocator, work_cache);
+    const best = try best_candidate_from_records(io, allocator, work_cache);
 
     var candidate_name_buf: [64]u8 = undefined;
     const candidate_name = std.fmt.bufPrint(&candidate_name_buf, "candidate_{d}.so", .{best.idx}) catch unreachable;
@@ -172,7 +175,8 @@ pub fn update_cache_from_work_dir(
 
     const stable = try stable_artifact_path(work_cache, key);
 
-    std.fs.cwd().copyFile(candidate.path(), std.fs.cwd(), stable.path(), .{}) catch |err| {
+    const cwd = std.Io.Dir.cwd();
+    cwd.copyFile(candidate.path(), cwd, stable.path(), io, .{ .replace = true }) catch |err| {
         return err;
     };
 
@@ -182,7 +186,7 @@ pub fn update_cache_from_work_dir(
         .artifact_path = stable.path(),
         .best_time_us = best.time_secs * 1e6,
     };
-    try cache_update(allocator, base_cache, entry);
+    try cache_update(io, allocator, base_cache, entry);
 
     return .{
         .stable_path = stable,
@@ -192,19 +196,20 @@ pub fn update_cache_from_work_dir(
 }
 
 pub fn load_cached(
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !?TunedModule {
-    const cached = try cache_lookup(allocator, base_cache, key, target_kind);
+    const cached = try cache_lookup(io, allocator, base_cache, key, target_kind);
     if (cached == null) return null;
     defer {
         allocator.free(cached.?.key);
         allocator.free(cached.?.artifact_path);
     }
 
-    std.fs.cwd().access(cached.?.artifact_path, .{}) catch return null;
+    std.Io.Dir.cwd().access(io, cached.?.artifact_path, .{}) catch return null;
     const path_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{cached.?.artifact_path}, 0);
     defer allocator.free(path_z);
     var module = try RuntimeModule.load_from_file(allocator, path_z);
@@ -223,8 +228,8 @@ pub fn load_cached(
 ///
 /// Parses tuning_record.json to find the fastest candidate, then loads
 /// the corresponding .so file and returns a handle to the main function.
-pub fn load(allocator: std.mem.Allocator, opts: LoadOpts) !TunedModule {
-    const candidates = try find_ranked_candidates(allocator, opts.work_cache);
+pub fn load(io: std.Io, allocator: std.mem.Allocator, opts: LoadOpts) !TunedModule {
+    const candidates = try find_ranked_candidates(io, allocator, opts.work_cache);
     defer allocator.free(candidates);
 
     const best = candidates[0];
@@ -247,24 +252,21 @@ pub const RankedCandidate = struct {
 /// Parse tuning_record.json and return candidates ranked by speed (fastest first).
 ///
 /// Only includes candidates whose .so file exists on disk.
-fn find_ranked_candidates(allocator: std.mem.Allocator, work_cache: Cache) ![]RankedCandidate {
+fn find_ranked_candidates(io: std.Io, allocator: std.mem.Allocator, work_cache: Cache) ![]RankedCandidate {
     const record_file = try work_cache.join("tuning_record.json");
     const record_path = record_file.path();
 
-    const file = std.fs.cwd().openFile(record_path, .{}) catch |err| {
-        log.err("failed to open tuning records at {s}: {s}", .{ record_path, @errorName(err) });
+    const contents = std.Io.Dir.cwd().readFileAlloc(io, record_path, allocator, .unlimited) catch |err| {
+        log.err("failed to read tuning records at {s}: {s}", .{ record_path, @errorName(err) });
         return error.NoTuningRecords;
     };
-    defer file.close();
+    defer allocator.free(contents);
 
-    const file_size = try file.getEndPos();
-    if (file_size == 0) {
+    if (contents.len == 0) {
         log.err("empty tuning records file: {s}", .{record_path});
         return error.NoTuningRecords;
     }
-    const contents = try allocator.alloc(u8, file_size);
-    defer allocator.free(contents);
-    const bytes_read = try file.readAll(contents);
+    const bytes_read = contents.len;
 
     var candidates = std.ArrayList(RankedCandidate).empty;
     defer candidates.deinit(allocator);
@@ -284,7 +286,7 @@ fn find_ranked_candidates(allocator: std.mem.Allocator, work_cache: Cache) ![]Ra
                 continue;
             };
 
-            std.fs.cwd().access(candidate.path(), .{}) catch {
+            std.Io.Dir.cwd().access(io, candidate.path(), .{}) catch {
                 log.debug("skipping candidate {d}: .so not found", .{line_num});
                 line_num += 1;
                 continue;
@@ -360,24 +362,19 @@ fn load_candidate(allocator: std.mem.Allocator, work_cache: Cache, candidate_idx
     };
 }
 
-fn read_cache_index(allocator: std.mem.Allocator, base_cache: Cache) !CacheIndex {
+fn read_cache_index(io: std.Io, allocator: std.mem.Allocator, base_cache: Cache) !CacheIndex {
     const idx_file = try base_cache.join("index.json");
     const path = idx_file.path();
 
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const contents = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return .{ .entries = try allocator.alloc(CacheEntry, 0) },
         else => return err,
     };
-    defer file.close();
-
-    const file_size = try file.getEndPos();
-    if (file_size == 0) return .{ .entries = try allocator.alloc(CacheEntry, 0) };
-
-    const contents = try allocator.alloc(u8, file_size);
     defer allocator.free(contents);
-    const bytes_read = try file.readAll(contents);
 
-    const parsed = try std.json.parseFromSlice(CacheIndex, allocator, contents[0..bytes_read], .{
+    if (contents.len == 0) return .{ .entries = try allocator.alloc(CacheEntry, 0) };
+
+    const parsed = try std.json.parseFromSlice(CacheIndex, allocator, contents, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
@@ -404,7 +401,7 @@ fn read_cache_index(allocator: std.mem.Allocator, base_cache: Cache) !CacheIndex
     };
 }
 
-fn write_cache_index(allocator: std.mem.Allocator, base_cache: Cache, index: *CacheIndex) !void {
+fn write_cache_index(io: std.Io, allocator: std.mem.Allocator, base_cache: Cache, index: *CacheIndex) !void {
     const idx_file = try base_cache.join("index.json");
     const path = idx_file.path();
 
@@ -412,7 +409,7 @@ fn write_cache_index(allocator: std.mem.Allocator, base_cache: Cache, index: *Ca
     const bytes = try std.json.Stringify.valueAlloc(allocator, index.*, .{});
     defer allocator.free(bytes);
 
-    const old_bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch null;
+    const old_bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch null;
     if (old_bytes) |old| {
         defer allocator.free(old);
         if (std.mem.eql(u8, old, bytes)) return;
@@ -423,9 +420,9 @@ fn write_cache_index(allocator: std.mem.Allocator, base_cache: Cache, index: *Ca
     const final_bytes = try std.json.Stringify.valueAlloc(allocator, index.*, .{});
     defer allocator.free(final_bytes);
 
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(final_bytes);
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, final_bytes);
 }
 
 fn deinit_cache_index(allocator: std.mem.Allocator, index: *CacheIndex) void {

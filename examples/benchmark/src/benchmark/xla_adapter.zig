@@ -16,14 +16,15 @@ pub const XlaContext = struct {
     compiled_cache: std.StringHashMap(*backend.LoadedExecutable),
 
     pub fn init(allocator: std.mem.Allocator, device: DeviceKind) !XlaContext {
-        const env_var = switch (device) {
+        const env_var: [*:0]const u8 = switch (device) {
             .cpu => "PJRT_CPU_PLUGIN_PATH",
             .gpu => "PJRT_GPU_PLUGIN_PATH",
         };
-        const plugin_path = std.posix.getenv(env_var) orelse return switch (device) {
+        const env_ptr = std.c.getenv(env_var) orelse return switch (device) {
             .cpu => error.PjrtCpuPluginPathNotSet,
             .gpu => error.PjrtGpuPluginPathNotSet,
         };
+        const plugin_path = std.mem.span(env_ptr);
 
         const backend_handle = try allocator.create(backend.Backend);
         errdefer allocator.destroy(backend_handle);
@@ -136,7 +137,7 @@ pub const XlaContext = struct {
         executable.* = try self.backend_handle.compile(
             self.device,
             mlir_bytes,
-            true,
+            .binary,
             .{},
         );
 

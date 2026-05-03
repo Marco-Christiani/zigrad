@@ -210,12 +210,13 @@ pub const Compiler = struct {
     /// Caller owns the returned slice; free with `allocator.free`.
     pub fn compile(
         self: *const Compiler,
+        io: std.Io,
         allocator: std.mem.Allocator,
         mlir_bytes: []const u8,
         is_bytecode: bool,
     ) ![]u8 {
         return switch (self.mode) {
-            .subprocess => |cfg| compile_subprocess(allocator, cfg, mlir_bytes, is_bytecode),
+            .subprocess => |cfg| compile_subprocess(io, allocator, cfg, mlir_bytes, is_bytecode),
             .dlopen => |s| compile_dlopen(&s, allocator, mlir_bytes, is_bytecode),
         };
     }
@@ -226,6 +227,7 @@ pub const Compiler = struct {
 // ---------------------------------------------------------------------------
 
 fn compile_subprocess(
+    io: std.Io,
     allocator: std.mem.Allocator,
     cfg: Compiler.SubprocessConfig,
     mlir_bytes: []const u8,
@@ -237,12 +239,12 @@ fn compile_subprocess(
     var tmp_input_path: [std.fs.max_path_bytes]u8 = undefined;
     var tmp_output_path: [std.fs.max_path_bytes]u8 = undefined;
 
-    const in_path = try write_temp_file(mlir_bytes, suffix, &tmp_input_path);
-    defer std.fs.cwd().deleteFile(in_path) catch {};
+    const in_path = try write_temp_file(io, mlir_bytes, suffix, &tmp_input_path);
+    defer std.Io.Dir.cwd().deleteFile(io, in_path) catch {};
 
     // Build output path by replacing suffix.
     const out_path = try make_output_path(in_path, &tmp_output_path);
-    defer std.fs.cwd().deleteFile(out_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
 
     // Build argv: iree-compile <flags...> <input> -o <output>
     var argv = std.ArrayList([]const u8).empty;
@@ -255,13 +257,17 @@ fn compile_subprocess(
 
     log.debug("iree-compile: {d} bytes MLIR -> {s}", .{ mlir_bytes.len, out_path });
 
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stderr_behavior = .Inherit;
-    const term = try child.spawnAndWait();
-    switch (term) {
-        .Exited => |code| {
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv.items,
+        .expand_arg0 = .expand,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| {
             if (code != 0) {
-                log.err("iree-compile exited with code {d}", .{code});
+                log.err("iree-compile exited with code {d}: {s}", .{ code, result.stderr });
                 return error.CompileFailed;
             }
         },
@@ -272,12 +278,13 @@ fn compile_subprocess(
     }
 
     // Read the VMFB output file.
-    const vmfb = try std.fs.cwd().readFileAlloc(allocator, out_path, 256 * 1024 * 1024);
+    const vmfb = try std.Io.Dir.cwd().readFileAlloc(io, out_path, allocator, .limited(256 * 1024 * 1024));
     log.debug("compile: {d} bytes MLIR -> {d} bytes VMFB", .{ mlir_bytes.len, vmfb.len });
     return vmfb;
 }
 
 fn write_temp_file(
+    io: std.Io,
     data: []const u8,
     suffix: []const u8,
     path_buf: *[std.fs.max_path_bytes]u8,
@@ -289,12 +296,12 @@ fn write_temp_file(
             suffix,
         }) catch return error.PathTooLong;
 
-        const file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| {
+        var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| {
             if (err == error.PathAlreadyExists) continue;
             return err;
         };
-        defer file.close();
-        try file.writeAll(data);
+        defer file.close(io);
+        try file.writeAll(io, data);
         return path;
     }
     return error.TempFileCollision;

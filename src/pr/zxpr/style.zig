@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Writer = std.Io.Writer;
-const tty = std.Io.tty;
+const Terminal = std.Io.Terminal;
 
 pub const Symbols = struct {
     region_start: []const u8,
@@ -42,10 +42,10 @@ pub const Rgb = struct {
 
 pub const RoleColor = struct {
     const Self = @This();
-    ansi: tty.Color,
+    ansi: Terminal.Color,
     rgb: ?Rgb = null,
 
-    fn init(ansi: tty.Color, value: ?Rgb) Self {
+    fn init(ansi: Terminal.Color, value: ?Rgb) Self {
         return .{ .ansi = ansi, .rgb = value };
     }
 };
@@ -75,10 +75,14 @@ pub const Theme = struct {
 pub const Config = struct {
     symbols: Symbols = Symbols.ascii(),
     color_mode: ColorMode = .never,
-    tty_config: ?tty.Config = null,
+    tty_config: ?Terminal.Mode = null,
     theme: Theme = Theme.default(),
     shape_format: ShapeFormat = .dtype_suffix,
     include_dtype_attrs: bool = false,
+    /// When `color_mode == .auto`, opt in to 24-bit RGB escapes. Callers
+    ///  that read this from an env var (e.g. `ZG_TRUECOLOR`) own the lookup
+    ///  via `RuntimeEnv.environ`; the styler does not read process state.
+    truecolor_auto: bool = false,
 };
 
 pub const ConfigMode = enum {
@@ -89,11 +93,12 @@ pub const ConfigMode = enum {
 pub const ConfigOpts = struct {
     symbols: ?Symbols = null,
     color_mode: ?ColorMode = null,
-    tty_config: ?tty.Config = null,
+    tty_config: ?Terminal.Mode = null,
     palette: ?Palette = null,
     theme: ?Theme = null,
     shape_format: ?ShapeFormat = null,
     include_dtype_attrs: ?bool = null,
+    truecolor_auto: ?bool = null,
 };
 
 pub const ShapeFormat = enum {
@@ -110,10 +115,13 @@ pub fn config(mode: ConfigMode, opts: ConfigOpts) Config {
             .shape_format = .dtype_suffix,
             .include_dtype_attrs = false,
         },
+        // Without an io handle here we cannot run runtime detection, so
+        //  default to escape-codes mode. Callers wanting real detection
+        //  should supply a pre-detected `Terminal.Mode` via `opts.tty_config`.
         .auto_stdout => .{
             .symbols = Symbols.unicode(),
             .color_mode = .auto,
-            .tty_config = tty.Config.detect(std.fs.File.stdout()),
+            .tty_config = .escape_codes,
             .theme = Theme.default(),
             .shape_format = .dtype_suffix,
             .include_dtype_attrs = false,
@@ -127,6 +135,7 @@ pub fn config(mode: ConfigMode, opts: ConfigOpts) Config {
     if (opts.theme) |theme| cfg.theme = theme;
     if (opts.shape_format) |shape_format| cfg.shape_format = shape_format;
     if (opts.include_dtype_attrs) |include_dtype_attrs| cfg.include_dtype_attrs = include_dtype_attrs;
+    if (opts.truecolor_auto) |truecolor_auto| cfg.truecolor_auto = truecolor_auto;
 
     return cfg;
 }
@@ -268,10 +277,10 @@ pub const Styler = struct {
                 return;
             }
         }
-        const conf = self.active_tty_config();
-        try tty.Config.setColor(conf, self.writer, color.ansi);
+        const term: Terminal = .{ .writer = self.writer, .mode = self.active_tty_config() };
+        try term.setColor(color.ansi);
         try self.writer.writeAll(text);
-        try tty.Config.setColor(conf, self.writer, .reset);
+        try term.setColor(.reset);
     }
 
     fn write_truecolor(self: *Styler, rgb_value: Rgb) !void {
@@ -293,13 +302,13 @@ pub const Styler = struct {
         if (!self.supports_truecolor()) return false;
         if (self.cfg.color_mode == .truecolor) return true;
         if (self.cfg.color_mode != .auto) return false;
-        var buf: [128]u8 = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(&buf);
-        return std.process.hasNonEmptyEnvVar(fba.allocator(), "ZG_TRUECOLOR") catch false;
+        return self.cfg.truecolor_auto;
     }
 
-    fn active_tty_config(self: *Styler) tty.Config {
-        const conf = self.cfg.tty_config orelse tty.Config.detect(std.fs.File.stdout());
+    fn active_tty_config(self: *Styler) Terminal.Mode {
+        // If unset, assume escape-codes (most terminals). Real TTY detection
+        //  needs an io handle and should be supplied via `opts.tty_config`.
+        const conf = self.cfg.tty_config orelse .escape_codes;
         if (self.cfg.color_mode != .always) return conf;
         return switch (conf) {
             .no_color => .escape_codes,

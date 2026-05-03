@@ -25,7 +25,7 @@
     .fingerprint = 0x48e4161bdc5871da, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -33,21 +33,28 @@
     // internet connectivity.
     .dependencies = .{
         .safetensors_zg = .{
-            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#15787b35b541a4493630ec383750242eef422b64",
-            .hash = "safetensors_zg-0.0.1-dRXUiGDtAAAS8GBHZT5IfFha7hG6KXCtVUuUxB-ob4Jc",
+            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#9cc91a16eb93e86f9953e24410065d77968f6578",
+            .hash = "safetensors_zg-0.0.1-dRXUiNvtAADkooBkmhGsycmgwajaskWj3MiB6feJBMUS",
         },
         .cova = .{
-            .url = "git+https://github.com/Marco-Christiani/cova#dd159f1ce6d1ee45a39e2999b0944894ed02ec2a",
-            .hash = "cova-0.10.1-_OE4R_fhBABRyLixvgKSbSh6G3JUVSA3MYqYwUGVuaxH",
+            .url = "git+https://github.com/Marco-Christiani/cova#919ca89145a801a3f278cba2641e1d39e1859761",
+            .hash = "cova-0.10.1-_OE4R2j0BADMJ-wKl1l_-07Z2XDulhqFqHiciaX4dPR2",
         },
         .protobuf = .{
-            .path = "reference/zig-protobuf",
+            // Upstream 5.0.0 (`Arwalk/zig-protobuf` 1f6cb06) is 0.16-clean
+            //  except for one missing `@setEvalBranchQuota` line on the
+            //  generic `deinit`. Marco-Christiani fork branch
+            //  `zig-0.16-eval-quota` is upstream + that single commit.
+            //  Switch to upstream once that one-liner is merged.
+            .url = "git+https://github.com/Marco-Christiani/zig-protobuf#ce3735fa4ee099a6c767ac87301ffdeb5c484a40",
+            .hash = "protobuf-5.0.0-0e82ahSVKACt8CYbD8lZ3nG0HwxsAzx0DMnwUH15DPiT",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "tools",
         // For example...
         //"LICENSE",
         //"README.md",

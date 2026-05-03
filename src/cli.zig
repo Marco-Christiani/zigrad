@@ -270,17 +270,22 @@ pub const setup_cmd: CommandT = .{
     },
 };
 
-/// Parse command-line arguments and return initialized command
-pub fn parse(allocator: std.mem.Allocator) !CommandT {
+/// Parse command-line arguments and return initialized command. Caller owns
+///  the returned pointer and must call `cmd.deinit()` to release the
+///  command's arena. `cmd.deinit()` invokes `destroy(self)` on the pointer,
+///  which is why parse returns `*CommandT` (heap-allocated) rather than a
+///  value copy.
+pub fn parse(env: zg.RuntimeEnv, args: std.process.Args) !*CommandT {
+    const allocator = env.allocator;
     const cmd_ptr = try setup_cmd.init(allocator, .{});
     errdefer cmd_ptr.deinit();
 
-    var args_iter = try cova.ArgIteratorGeneric.init(allocator);
+    var args_iter = try cova.ArgIteratorGeneric.init(args, allocator);
     defer args_iter.deinit();
 
-    var stdout_file = std.fs.File.stdout();
+    var stdout_file = std.Io.File.stdout();
     var stdout_buf: [8192]u8 = undefined;
-    var stdout_writer = stdout_file.writer(stdout_buf[0..]);
+    var stdout_writer = stdout_file.writer(env.io, stdout_buf[0..]);
     const stdout = &stdout_writer.interface;
 
     cova.parseArgs(&args_iter, CommandT, cmd_ptr, stdout, .{
@@ -291,7 +296,7 @@ pub fn parse(allocator: std.mem.Allocator) !CommandT {
         else => return err,
     };
 
-    return cmd_ptr.*;
+    return cmd_ptr;
 }
 
 const GlobalOptsResult = struct {
@@ -302,10 +307,13 @@ const GlobalOptsResult = struct {
     quiet: bool = false,
 };
 
-/// Extract global options from parsed command
+/// Extract global options from parsed command. The map returned by
+///  `getOpts` is allocated against cova's internal arena (owned by the
+///  Command), so we don't deinit it here. Arena cleanup happens when
+///  the Command itself is deinitialized.
 pub fn get_global_opts(cmd: *const CommandT, allocator: std.mem.Allocator) !GlobalOptsResult {
-    var opts = try cmd.getOpts(.{});
-    defer opts.deinit(allocator);
+    _ = allocator;
+    const opts = try cmd.getOpts(.{});
 
     var result: GlobalOptsResult = .{};
 

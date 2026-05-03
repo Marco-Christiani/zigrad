@@ -1,7 +1,7 @@
 //! TVM compilation orchestration.
 //!
 //! Combines TIR lowering, target-specific builds, host/device splitting,
-//! and linking into shared libraries. No single TVM subsystem owns this —
+//! and linking into shared libraries. No single TVM subsystem owns this -
 //! it's our pipeline that ties `tvm/tir/`, `tvm/target/`, and `tvm/runtime/`
 //! together.
 const std = @import("std");
@@ -261,19 +261,23 @@ fn filter_by_calling_conv(
 // ============================================================================
 
 /// Link .o files into a .so via `zig cc -shared`.
-pub fn link_to_shared(allocator: std.mem.Allocator, obj_paths: []const []const u8, so_path: []const u8) !void {
+pub fn link_to_shared(io: std.Io, allocator: std.mem.Allocator, obj_paths: []const []const u8, so_path: []const u8) !void {
     var argv_list = std.ArrayList([]const u8).empty;
     defer argv_list.deinit(allocator);
     try argv_list.appendSlice(allocator, &.{ "zig", "cc", "-shared", "-fPIC", "-o", so_path });
     try argv_list.appendSlice(allocator, obj_paths);
 
-    var child = std.process.Child.init(argv_list.items, allocator);
-    const term = try child.spawnAndWait();
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv_list.items,
+        .expand_arg0 = .expand,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    switch (term) {
-        .Exited => |code| {
+    switch (result.term) {
+        .exited => |code| {
             if (code != 0) {
-                log.err("linker exited with code {d}", .{code});
+                log.err("linker exited with code {d}: {s}", .{ code, result.stderr });
                 return error.TvmCallFailed;
             }
         },

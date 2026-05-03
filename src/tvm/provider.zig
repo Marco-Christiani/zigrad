@@ -18,6 +18,7 @@ const TargetKind = tir.TargetKind;
 const log = std.log.scoped(.@"zg/tvm_provider");
 
 pub const TvmProvider = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     target_kind: TargetKind,
     cache: Cache,
@@ -100,12 +101,12 @@ pub const TvmProvider = struct {
         const shape_c = [_]i64{ matmul.m, matmul.n };
         const shapes: [3][]const i64 = .{ &shape_a, &shape_b, &shape_c };
 
-        const tvm_cache = self.cache.subdir("tvm", .{}) catch
+        const tvm_cache = self.cache.subdir(self.io, "tvm", .{}) catch
             return error.OutOfMemory;
 
         const key = tuned_module.matmul_cache_key(self.target_kind, matmul.m, matmul.n, matmul.k);
 
-        if (load_cached_kernel(allocator, tvm_cache, key.slice(), self.target_kind) catch null) |cached| {
+        if (load_cached_kernel(self.io, allocator, tvm_cache, key.slice(), self.target_kind) catch null) |cached| {
             return .{
                 .provider_name = "tvm",
                 .data = cached,
@@ -113,10 +114,10 @@ pub const TvmProvider = struct {
             };
         }
 
-        const work_cache = tvm_cache.subdir(key.slice(), .{}) catch
+        const work_cache = tvm_cache.subdir(self.io, key.slice(), .{}) catch
             return error.OutOfMemory;
 
-        tune_mod.tune(allocator, ir_mod, target, self.target_kind, &shapes, .{
+        tune_mod.tune(self.io, allocator, ir_mod, target, self.target_kind, &shapes, .{
             .work_cache = work_cache,
             .max_trials = self.max_trials,
             .trials_per_iter = self.trials_per_iter,
@@ -137,6 +138,7 @@ pub const TvmProvider = struct {
         };
 
         const update = tuned_module.update_cache_from_work_dir(
+            self.io,
             allocator,
             tvm_cache,
             work_cache,
@@ -150,7 +152,7 @@ pub const TvmProvider = struct {
             },
         };
 
-        const so_bytes = std.fs.cwd().readFileAlloc(allocator, update.stable_path.path(), 100 * 1024 * 1024) catch |err| switch (err) {
+        const so_bytes = std.Io.Dir.cwd().readFileAlloc(self.io, update.stable_path.path(), allocator, .limited(100 * 1024 * 1024)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 log.err("failed to read {s}: {s}", .{ update.stable_path.path(), @errorName(err) });
@@ -224,18 +226,19 @@ fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
 }
 
 fn load_cached_kernel(
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_cache: Cache,
     key: []const u8,
     target_kind: TargetKind,
 ) !?[]u8 {
-    const cached = try tuned_module.cache_lookup(allocator, base_cache, key, target_kind);
+    const cached = try tuned_module.cache_lookup(io, allocator, base_cache, key, target_kind);
     if (cached == null) return null;
     defer {
         allocator.free(cached.?.key);
         allocator.free(cached.?.artifact_path);
     }
 
-    std.fs.cwd().access(cached.?.artifact_path, .{}) catch return null;
-    return std.fs.cwd().readFileAlloc(allocator, cached.?.artifact_path, 100 * 1024 * 1024) catch null;
+    std.Io.Dir.cwd().access(io, cached.?.artifact_path, .{}) catch return null;
+    return std.Io.Dir.cwd().readFileAlloc(io, cached.?.artifact_path, allocator, .limited(100 * 1024 * 1024)) catch null;
 }

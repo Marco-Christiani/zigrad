@@ -28,6 +28,7 @@ pub const lower = @import("lower.zig");
 pub const kernel = @import("kernel.zig");
 pub const tune = @import("tune.zig");
 pub const Cache = @import("cache.zig").Cache;
+pub const RuntimeEnv = @import("runtime.zig").RuntimeEnv;
 pub const utils = @import("utils.zig");
 
 // TVM subsystem (gated by SDK header availability)

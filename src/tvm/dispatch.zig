@@ -25,7 +25,9 @@ const TvmDispatchEntry = struct {
 /// passed to them as the `dispatch_ctx` pointer. The `dispatch` method
 /// conforms to `kernel.DispatchFn`.
 pub const TvmDispatchState = struct {
-    cache_mutex: std.Thread.Mutex = .{},
+    // TVM kernel dispatch is single-threaded today. If multi-threaded
+    //  dispatch becomes necessary, wrap with `std.Io.Mutex` (which would
+    //  require threading `io` through the entire dispatch hot path).
     cache: std.StringHashMap(TvmDispatchEntry),
     allocator: std.mem.Allocator,
     artifact_cache: Cache,
@@ -71,18 +73,13 @@ pub const TvmDispatchState = struct {
         try tvm_api.ensure_loaded(std.heap.c_allocator, .{});
 
         var entry: TvmDispatchEntry = undefined;
-        {
-            self.cache_mutex.lock();
-            defer self.cache_mutex.unlock();
-
-            if (self.cache.get(kernel_key)) |cached| {
-                entry = cached;
-            } else {
-                const loaded = try load_dispatch_entry(self.artifact_cache, kernel_key, artifact_data);
-                const cache_key = try self.allocator.dupe(u8, kernel_key);
-                try self.cache.put(cache_key, loaded);
-                entry = loaded;
-            }
+        if (self.cache.get(kernel_key)) |cached| {
+            entry = cached;
+        } else {
+            const loaded = try load_dispatch_entry(self.artifact_cache, kernel_key, artifact_data);
+            const cache_key = try self.allocator.dupe(u8, kernel_key);
+            try self.cache.put(cache_key, loaded);
+            entry = loaded;
         }
 
         if (ctx.platform == .cuda) {
@@ -173,13 +170,36 @@ fn load_dispatch_entry(artifact_cache: Cache, kernel_key: []const u8, artifact_d
     const hash = std.hash.Wyhash.hash(0, kernel_key);
     var name_buf: [128]u8 = undefined;
     const filename = try std.fmt.bufPrint(&name_buf, "{x}.so", .{hash});
-    const dispatch_cache = try artifact_cache.subdir("tvm/dispatch", .{});
+    // Dispatch hot path: use raw posix to avoid threading `io` through
+    //  every kernel invocation. `subdir` similarly forgoes its `create=true`
+    //  feature here (the dir is created at warm-up by the provider).
+    var dispatch_cache = try artifact_cache.join("tvm/dispatch");
     var resolved = try dispatch_cache.join(filename);
     const path = resolved.pathZ();
 
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(artifact_data);
+    // Ensure the dispatch dir exists (mode 0o755). Use libc mkdir directly
+    //  to avoid threading io through dispatch hot path.
+    const dir_path_z = dispatch_cache.pathZ();
+    if (std.c.mkdir(dir_path_z, 0o755) != 0) {
+        const errno = std.posix.errno(@as(c_int, -1));
+        if (errno != .EXIST) return error.MkdirFailed;
+    }
+
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+    }, 0o644);
+    defer _ = std.posix.system.close(fd);
+    var written: usize = 0;
+    while (written < artifact_data.len) {
+        const slice = artifact_data[written..];
+        const n_signed: isize = std.posix.system.write(fd, slice.ptr, slice.len);
+        if (n_signed < 0) return error.WriteFailed;
+        const n: usize = @intCast(n_signed);
+        if (n == 0) return error.WriteFailed;
+        written += n;
+    }
 
     var module = try tvm_runtime.RuntimeModule.load_from_file(std.heap.c_allocator, path);
     errdefer module.deinit();

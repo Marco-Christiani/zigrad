@@ -11,12 +11,7 @@ const log = std.log.scoped(.@"zg/mirage_cffi");
 // Types from C headers
 // ---------------------------------------------------------------------------
 
-const C = @cImport({
-    @cInclude("mirage/c/types.h");
-    @cInclude("mirage/c/graph.h");
-    @cInclude("mirage/c/source.h");
-    @cInclude("mirage/c/ir.h");
-});
+const C = @import("c-mirage");
 
 // Re-export C types under cleaner names.
 
@@ -87,7 +82,7 @@ pub const Epilogue = C.mirage_epilogue_t;
 // types.h
 const FnStatusString = *const fn (MirageStatus) callconv(.c) [*:0]const u8;
 
-// graph.h — graph building
+// graph.h - graph building
 const FnGraphCreate = *const fn (*?*MirageGraph) callconv(.c) MirageStatus;
 const FnGraphDestroy = *const fn (?*MirageGraph) callconv(.c) void;
 const FnGraphNewInput = *const fn (?*MirageGraph, *const TensorSpec, *MirageTensor) callconv(.c) MirageStatus;
@@ -98,12 +93,12 @@ const FnGraphReduction = *const fn (?*MirageGraph, MirageTensor, i32, i32, *Mira
 const FnGraphRmsNorm = *const fn (?*MirageGraph, MirageTensor, i32, *MirageTensor) callconv(.c) MirageStatus;
 const FnGraphMarkOutput = *const fn (?*MirageGraph, MirageTensor) callconv(.c) MirageStatus;
 
-// graph.h — device
+// graph.h - device
 const FnDeviceCreate = *const fn (i32, *?*MirageDevice) callconv(.c) MirageStatus;
 const FnDeviceDestroy = *const fn (?*MirageDevice) callconv(.c) void;
 const FnDeviceMemInfo = *const fn (?*const MirageDevice, *usize, *usize) callconv(.c) MirageStatus;
 
-// graph.h — search
+// graph.h - search
 const FnSearch = *const fn (?*MirageDevice, ?*const MirageGraph, ?*const SearchOptions, *?*MirageSearchResult) callconv(.c) MirageStatus;
 const FnSearchResultDestroy = *const fn (?*MirageSearchResult) callconv(.c) void;
 const FnSearchResultCount = *const fn (?*const MirageSearchResult) callconv(.c) usize;
@@ -124,7 +119,7 @@ const FnSourceKernelMeta = *const fn (?*const MirageSource, usize, *KernelMeta) 
 const FnSourceKernelNumArgs = *const fn (?*const MirageSource, usize) callconv(.c) usize;
 const FnSourceKernelArg = *const fn (?*const MirageSource, usize, usize, *KernelArg) callconv(.c) MirageStatus;
 
-// ir.h — kernel graph walk
+// ir.h - kernel graph walk
 const FnIrNumOps = *const fn (?*const MirageGraph) callconv(.c) usize;
 const FnIrOpType = *const fn (?*const MirageGraph, usize) callconv(.c) KnOpType;
 const FnIrOpNumInputs = *const fn (?*const MirageGraph, usize) callconv(.c) usize;
@@ -133,7 +128,7 @@ const FnIrOpInput = *const fn (?*const MirageGraph, usize, usize) callconv(.c) M
 const FnIrOpOutput = *const fn (?*const MirageGraph, usize, usize) callconv(.c) MirageTensor;
 const FnIrTensorSpec = *const fn (?*const MirageGraph, MirageTensor, *TensorSpec) callconv(.c) MirageStatus;
 
-// ir.h — threadblock graph
+// ir.h - threadblock graph
 const FnIrOpTbgraph = *const fn (?*const MirageGraph, usize, *?*const MirageTBGraph) callconv(.c) MirageStatus;
 const FnIrTbgraphGridDim = *const fn (?*const MirageTBGraph, *[3]u32) callconv(.c) void;
 const FnIrTbgraphBlockDim = *const fn (?*const MirageTBGraph, *[3]u32) callconv(.c) void;
@@ -228,7 +223,7 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     // types.h
     fn_status_string = try load_symbol(FnStatusString, handle, "mirage_status_string");
 
-    // graph.h — graph building
+    // graph.h - graph building
     fn_graph_create = try load_symbol(FnGraphCreate, handle, "mirage_graph_create");
     fn_graph_destroy = try load_symbol(FnGraphDestroy, handle, "mirage_graph_destroy");
     fn_graph_new_input = try load_symbol(FnGraphNewInput, handle, "mirage_graph_new_input");
@@ -239,12 +234,12 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_graph_rms_norm = load_symbol_optional(FnGraphRmsNorm, handle, "mirage_graph_rms_norm");
     fn_graph_mark_output = try load_symbol(FnGraphMarkOutput, handle, "mirage_graph_mark_output");
 
-    // graph.h — device
+    // graph.h - device
     fn_device_create = try load_symbol(FnDeviceCreate, handle, "mirage_device_create");
     fn_device_destroy = try load_symbol(FnDeviceDestroy, handle, "mirage_device_destroy");
     fn_device_mem_info = load_symbol_optional(FnDeviceMemInfo, handle, "mirage_device_mem_info");
 
-    // graph.h — search
+    // graph.h - search
     fn_search = try load_symbol(FnSearch, handle, "mirage_search");
     fn_search_result_destroy = try load_symbol(FnSearchResultDestroy, handle, "mirage_search_result_destroy");
     fn_search_result_count = try load_symbol(FnSearchResultCount, handle, "mirage_search_result_count");
@@ -265,7 +260,7 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_source_kernel_num_args = try load_symbol(FnSourceKernelNumArgs, handle, "mirage_source_kernel_num_args");
     fn_source_kernel_arg = try load_symbol(FnSourceKernelArg, handle, "mirage_source_kernel_arg");
 
-    // ir.h — kernel graph walk
+    // ir.h - kernel graph walk
     fn_ir_num_ops = try load_symbol(FnIrNumOps, handle, "mirage_ir_num_ops");
     fn_ir_op_type = try load_symbol(FnIrOpType, handle, "mirage_ir_op_type");
     fn_ir_op_num_inputs = try load_symbol(FnIrOpNumInputs, handle, "mirage_ir_op_num_inputs");
@@ -274,7 +269,7 @@ pub fn ensure_loaded(handle: *anyopaque) LoadError!void {
     fn_ir_op_output = try load_symbol(FnIrOpOutput, handle, "mirage_ir_op_output");
     fn_ir_tensor_spec = try load_symbol(FnIrTensorSpec, handle, "mirage_ir_tensor_spec");
 
-    // ir.h — threadblock graph
+    // ir.h - threadblock graph
     fn_ir_op_tbgraph = try load_symbol(FnIrOpTbgraph, handle, "mirage_ir_op_tbgraph");
     fn_ir_tbgraph_grid_dim = try load_symbol(FnIrTbgraphGridDim, handle, "mirage_ir_tbgraph_grid_dim");
     fn_ir_tbgraph_block_dim = try load_symbol(FnIrTbgraphBlockDim, handle, "mirage_ir_tbgraph_block_dim");
@@ -301,7 +296,7 @@ pub fn mirage_status_string(status: MirageStatus) [*:0]const u8 {
     return f(status);
 }
 
-// graph.h — graph building
+// graph.h - graph building
 
 pub fn mirage_graph_create(out: *?*MirageGraph) MirageStatus {
     const f = fn_graph_create orelse return status_internal_error;
@@ -348,7 +343,7 @@ pub fn mirage_graph_mark_output(graph: ?*MirageGraph, tensor: MirageTensor) Mira
     return f(graph, tensor);
 }
 
-// graph.h — device
+// graph.h - device
 
 pub fn mirage_device_create(ordinal: i32, out: *?*MirageDevice) MirageStatus {
     const f = fn_device_create orelse return status_internal_error;
@@ -369,7 +364,7 @@ pub fn mirage_device_mem_info() ?struct { free: usize, total: usize } {
     return .{ .free = free, .total = total };
 }
 
-// graph.h — search
+// graph.h - search
 
 pub fn mirage_search(device: ?*MirageDevice, graph: ?*const MirageGraph, options: ?*const SearchOptions, out: *?*MirageSearchResult) MirageStatus {
     const f = fn_search orelse return status_internal_error;
@@ -448,7 +443,7 @@ pub fn mirage_source_kernel_meta(source: ?*const MirageSource, index: usize, out
     return f(source, index, out);
 }
 
-// source.h — kernel argument mapping
+// source.h - kernel argument mapping
 
 pub fn mirage_source_kernel_num_args(source: ?*const MirageSource, kernel_index: usize) usize {
     const f = fn_source_kernel_num_args orelse return 0;
@@ -460,7 +455,7 @@ pub fn mirage_source_kernel_arg(source: ?*const MirageSource, kernel_index: usiz
     return f(source, kernel_index, arg_index, out);
 }
 
-// ir.h — kernel graph walk
+// ir.h - kernel graph walk
 
 pub fn mirage_ir_num_ops(graph: ?*const MirageGraph) usize {
     const f = fn_ir_num_ops orelse return 0;
@@ -497,7 +492,7 @@ pub fn mirage_ir_tensor_spec(graph: ?*const MirageGraph, tensor: MirageTensor, o
     return f(graph, tensor, out);
 }
 
-// ir.h — threadblock graph
+// ir.h - threadblock graph
 
 pub fn mirage_ir_op_tbgraph(graph: ?*const MirageGraph, op_index: usize, out: *?*const MirageTBGraph) MirageStatus {
     const f = fn_ir_op_tbgraph orelse return status_internal_error;

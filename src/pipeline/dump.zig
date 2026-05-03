@@ -10,7 +10,6 @@ pub const DumpSpec = zxpr.DumpSpec;
 pub const DumpConfig = zxpr.Config;
 
 fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
-    _ = ctx;
     if (artifact.kind() != .pr) return error.ArtifactKindMismatch;
 
     const cfg: *DumpConfig = @ptrCast(@alignCast(ptr));
@@ -27,11 +26,10 @@ fn dump_pr_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContex
         .cfg = cfg.*,
     };
 
-    with_writer(cfg, task) catch return error.ValidationFailed;
+    with_writer(ctx.io, cfg, task) catch return error.ValidationFailed;
 }
 
 fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassContext) pass.PassError!void {
-    _ = ctx;
     if (artifact.kind() != .stablehlo) return error.ArtifactKindMismatch;
 
     const cfg: *DumpConfig = @ptrCast(@alignCast(ptr));
@@ -50,7 +48,7 @@ fn dump_mlir_pass(ptr: *anyopaque, artifact: *pass.Artifact, ctx: *pass.PassCont
         .entry = cfg.entry_name,
     };
 
-    with_writer(cfg, task) catch return error.ValidationFailed;
+    with_writer(ctx.io, cfg, task) catch return error.ValidationFailed;
 }
 
 pub fn dump_pr_pass_with_config(config: *DumpConfig) pass.Pass {
@@ -86,7 +84,7 @@ fn emit_mlir(out: *std.Io.Writer, bytes: []const u8, entry: ?[]const u8) !void {
 ///
 /// Attempts to decode the protobuf bytes into human-readable HLO text first.
 /// On decode failure, falls back to a size summary (stdout) or raw bytes (file).
-pub fn dump_optimized_program(config: *const DumpConfig, code: []const u8, format: []const u8, allocator: std.mem.Allocator) !void {
+pub fn dump_optimized_program(io: std.Io, config: *const DumpConfig, code: []const u8, format: []const u8, allocator: std.mem.Allocator) !void {
     const task = struct {
         code: []const u8,
         format: []const u8,
@@ -112,27 +110,24 @@ pub fn dump_optimized_program(config: *const DumpConfig, code: []const u8, forma
         .allocator = allocator,
     };
 
-    try with_writer(config, task);
+    try with_writer(io, config, task);
 }
 
-fn with_writer(config: *const DumpConfig, task: anytype) !void {
+fn with_writer(io: std.Io, config: *const DumpConfig, task: anytype) !void {
     var buffer: [8192]u8 = undefined;
 
     switch (config.target) {
         .stdout => {
-            var stdout_writer = std.fs.File.stdout().writer(&buffer);
+            var stdout_writer = std.Io.File.stdout().writer(io, &buffer);
             const out = &stdout_writer.interface;
             try task.run(out);
             try out.flush();
         },
         .file => |path| {
-            var file = if (std.fs.path.isAbsolute(path))
-                try std.fs.createFileAbsolute(path, .{ .truncate = true })
-            else
-                try std.fs.cwd().createFile(path, .{ .truncate = true });
-            defer file.close();
+            var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+            defer file.close(io);
 
-            var file_writer = file.writer(&buffer);
+            var file_writer = file.writer(io, &buffer);
             const out = &file_writer.interface;
             try task.run(out);
             try out.flush();

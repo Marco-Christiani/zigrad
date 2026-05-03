@@ -75,9 +75,84 @@ pub fn build(b: *std.Build) void {
     // TODO: should be exposed as a build option so consumers can set it in their build,
     //  supporting the env var fallback is debatably acceptable, but we should be
     //  consistent about policy wrt the sdk root.
-    if (std.posix.getenv("CUDA_HOME")) |cuda_home| {
-        const cuda_include = b.fmt("{s}/include", .{cuda_home});
+    const cuda_include_opt: ?[]const u8 = if (b.graph.environ_map.get("CUDA_HOME")) |cuda_home|
+        b.fmt("{s}/include", .{cuda_home})
+    else
+        null;
+    if (cuda_include_opt) |cuda_include|
         zigrad_mod.addIncludePath(.{ .cwd_relative = cuda_include });
+
+    // C API translation (replaces former @cImport sites in src/c/*).
+    //  Each TranslateC step produces a private module that we import into
+    //  `zigrad_mod` under a stable name; the matching `src/c/*.zig` wrapper
+    //  swaps `@cImport` for `@import("c-foo")`.
+    var c_iree_mod: ?*std.Build.Module = null;
+    {
+        const c_pjrt = b.addTranslateC(.{
+            .root_source_file = b.path("src/c/pjrt/headers.h"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        c_pjrt.addIncludePath(.{ .cwd_relative = sdk_include });
+        zigrad_mod.addImport("c-pjrt", c_pjrt.createModule());
+
+        if (use_mlir) {
+            const c_mlir = b.addTranslateC(.{
+                .root_source_file = b.path("src/c/mlir/headers.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            c_mlir.addIncludePath(.{ .cwd_relative = sdk_include });
+            zigrad_mod.addImport("c-mlir", c_mlir.createModule());
+        }
+
+        if (use_tvm) {
+            const c_tvm = b.addTranslateC(.{
+                .root_source_file = b.path("src/c/tvm/headers.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            c_tvm.addIncludePath(.{ .cwd_relative = sdk_include });
+            zigrad_mod.addImport("c-tvm", c_tvm.createModule());
+        }
+
+        if (use_mirage) {
+            const c_mirage = b.addTranslateC(.{
+                .root_source_file = b.path("src/c/mirage/headers.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            c_mirage.addIncludePath(.{ .cwd_relative = sdk_include });
+            zigrad_mod.addImport("c-mirage", c_mirage.createModule());
+        }
+
+        if (cuda_include_opt) |cuda_include| {
+            const c_nvrtc = b.addTranslateC(.{
+                .root_source_file = b.path("src/c/nvrtc_headers.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            c_nvrtc.addIncludePath(.{ .cwd_relative = cuda_include });
+            zigrad_mod.addImport("c-nvrtc", c_nvrtc.createModule());
+        }
+
+        if (use_iree) {
+            const c_iree = b.addTranslateC(.{
+                .root_source_file = b.path("src/c/iree/iree_zig.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            c_iree.addIncludePath(.{ .cwd_relative = sdk_include });
+            const mod = c_iree.createModule();
+            zigrad_mod.addImport("c-iree", mod);
+            c_iree_mod = mod;
+        }
     }
 
     const exe = b.addExecutable(.{
@@ -146,10 +221,17 @@ pub fn build(b: *std.Build) void {
     const docs_web_step = b.step("docs-web", "Emit Zig autodocs and sync website/nuxt-content/public/api");
     docs_web_step.dependOn(&sync_autodoc_to_web.step);
 
-    // CLI completion + manpage gen
-    const gen_completions = add_cli_gen_step(b, cova_dep, exe);
-    gen_completions.step.dependOn(&exe.step);
-    b.getInstallStep().dependOn(&gen_completions.step);
+    // CLI completion + manpage gen. Runs the built binary at build time,
+    //  which fails inside hermetic sandboxes (e.g. nix) where the default
+    //  ELF interpreter path is unavailable. Producing completions is
+    //  packaging metadata and not part of the runtime build, so it is gated
+    //  behind a flag that nix turns off.
+    const gen_cli_meta = b.option(bool, "gen-cli-meta", "Generate shell completions and manpages (runs the built exe)") orelse true;
+    if (gen_cli_meta) {
+        const gen_completions = add_cli_gen_step(b, cova_dep, exe);
+        gen_completions.step.dependOn(&exe.step);
+        b.getInstallStep().dependOn(&gen_completions.step);
+    }
 
     // HLO protobuf decode tool (standalone, no SDK dependencies).
     // Reuses protobuf_mod, xla_pb_mod hoisted above.
@@ -182,14 +264,16 @@ pub fn build(b: *std.Build) void {
 
     // Minimal IREE VMFB runner (no zigrad, no MLIR/PJRT).
     if (use_iree) {
+        const iree_runner_mod = b.createModule(.{
+            .root_source_file = b.path("src/iree_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        if (c_iree_mod) |m| iree_runner_mod.addImport("c-iree", m);
         const iree_runner = b.addExecutable(.{
             .name = "iree-runner",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/iree_runner.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            }),
+            .root_module = iree_runner_mod,
         });
         iree_runner.root_module.addIncludePath(b.path("src"));
         iree_runner.root_module.addIncludePath(.{ .cwd_relative = sdk_include });
@@ -208,7 +292,7 @@ fn add_cli_gen_step(
     // Cova's generator.zig requires three option modules (`md_config_opts`,
     // `tab_complete_config`, `help_docs_config`, `arg_template_config`). When
     // `provided: true`, `optsToConf` reads EVERY field from the config struct out
-    // of the options module -- so it must have all fields. When `provided: false`,
+    // of the options module, so it must have all fields. When `provided: false`,
     // it returns null immediately and no fields are read.
     const cova_gen_exe = b.addExecutable(.{
         .name = "zigrad_completion_generator",
@@ -334,7 +418,7 @@ fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8) void {
     // flatcc archives (IREE's FlatBuffer dependency).
     for ([_][]const u8{ "libflatcc_parsing.a", "libflatcc_runtime.a" }) |name| {
         const path = b.fmt("{s}/{s}", .{ sdk_lib, name });
-        if (std.fs.cwd().access(path, .{})) |_| {
+        if (std.Io.Dir.cwd().access(b.graph.io, path, .{})) |_| {
             mod.addObjectFile(.{ .cwd_relative = path });
         } else |_| {}
     }
@@ -349,46 +433,27 @@ fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8) void {
 }
 
 fn sdk_has_mlir(b: *std.Build, sdk_root: []const u8) bool {
-    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
-        break :blk sdk_root;
-    } else blk: {
-        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
-        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
-    };
-    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mlir-c", "IR.h" });
-    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    const header_path = b.pathJoin(&.{ sdk_root, "include", "mlir-c", "IR.h" });
+    std.Io.Dir.cwd().access(b.graph.io, header_path, .{}) catch return false;
     return true;
 }
 
 fn sdk_has_tvm(b: *std.Build, sdk_root: []const u8) bool {
-    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
-        break :blk sdk_root;
-    } else blk: {
-        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
-        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
-    };
-    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "tvm", "ffi", "c_api.h" });
-    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    const header_path = b.pathJoin(&.{ sdk_root, "include", "tvm", "ffi", "c_api.h" });
+    std.Io.Dir.cwd().access(b.graph.io, header_path, .{}) catch return false;
     return true;
 }
 
 fn sdk_has_mirage(b: *std.Build, sdk_root: []const u8) bool {
-    const sdk_root_abs = if (std.fs.path.isAbsolute(sdk_root)) blk: {
-        break :blk sdk_root;
-    } else blk: {
-        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch return false;
-        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, sdk_root }) catch return false;
-    };
-    const header_path = b.pathJoin(&.{ sdk_root_abs, "include", "mirage", "c", "types.h" });
-    if (std.fs.accessAbsolute(header_path, .{})) |_| {} else |_| return false;
+    const header_path = b.pathJoin(&.{ sdk_root, "include", "mirage", "c", "types.h" });
+    std.Io.Dir.cwd().access(b.graph.io, header_path, .{}) catch return false;
     return true;
 }
 
 fn resolve_absolute_path(b: *std.Build, path: []const u8) []const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
-
-    const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch @panic("realpathAlloc failed");
-    return std.fs.path.join(b.allocator, &.{ cwd_abs, path }) catch @panic("path join failed");
+    const build_root = b.build_root.path orelse ".";
+    return std.fs.path.join(b.allocator, &.{ build_root, path }) catch @panic("path join failed");
 }
 
 fn add_runtime_bundle(
@@ -431,12 +496,7 @@ fn add_runtime_bundle(
     if (!install_runtime_link) return;
 
     // Dev convenience: symlink `zig-out/runtime` -> runtime_root
-    const runtime_root_abs = if (std.fs.path.isAbsolute(runtime_root)) blk: {
-        break :blk runtime_root;
-    } else blk: {
-        const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch @panic("realpathAlloc failed");
-        break :blk std.fs.path.join(b.allocator, &.{ cwd_abs, runtime_root }) catch @panic("path join failed");
-    };
+    const runtime_root_abs = resolve_absolute_path(b, runtime_root);
     const link_step = b.addSystemCommand(&[_][]const u8{
         "bash",
         "-lc",

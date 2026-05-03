@@ -172,6 +172,7 @@ pub const CompileOpts = struct {
 ///  kernelization or custom pass chains, assemble the pipeline manually.
 pub fn compile_program(
     backend: *Backend,
+    io: std.Io,
     allocator: std.mem.Allocator,
     program: *pr.Program,
     device: Backend.Device,
@@ -219,7 +220,7 @@ pub fn compile_program(
     }
 
     const pipeline_run = pipeline.Pipeline{ .passes = passes.items };
-    var ctx = pipeline.PassContext{ .allocator = allocator };
+    var ctx = pipeline.PassContext{ .allocator = allocator, .io = io };
 
     var artifact = try pipeline_run.run(.{ .pr = program }, &ctx);
     defer artifact.deinit(allocator);
@@ -240,7 +241,7 @@ pub fn compile_program(
         if (try backend.get_optimized_program(exe, allocator)) |opt_prog| {
             var owned = opt_prog;
             defer owned.deinit(allocator);
-            pipeline.dump_optimized_program(&dump_cfg, owned.code, owned.format, allocator) catch |err| {
+            pipeline.dump_optimized_program(io, &dump_cfg, owned.code, owned.format, allocator) catch |err| {
                 log.err("dump-optimized failed: {s}", .{@errorName(err)});
             };
         } else {

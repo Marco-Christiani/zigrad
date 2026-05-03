@@ -86,7 +86,12 @@ pub const Backend = struct {
     /// Initialize the backend by loading a PJRT plugin.
     ///
     /// The plugin_path should point to a PJRT plugin DSO (e.g., CPU or GPU plugin).
-    pub fn init(allocator: std.mem.Allocator, plugin_path: []const u8) !Backend {
+    /// `environ` is consulted for `ZG_CPU_DEVICE_COUNT` when the CPU plugin is loaded.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        environ: *const std.process.Environ.Map,
+        plugin_path: []const u8,
+    ) !Backend {
         const api_ptr = try allocator.create(pjrt_api.Api);
         errdefer allocator.destroy(api_ptr);
 
@@ -98,7 +103,7 @@ pub const Backend = struct {
 
         const is_cpu_plugin = std.mem.endsWith(u8, plugin_path, "pjrt_c_api_cpu_plugin.so");
         var client = if (is_cpu_plugin) blk: {
-            const env_count = cpu_device_count_from_env();
+            const env_count = cpu_device_count_from_env(environ);
             if (env_count) |count| break :blk try pjrt_types.Client.create_cpu_with_device_count(api_ptr, count);
             break :blk try pjrt_types.Client.create(api_ptr);
         } else try pjrt_types.Client.create(api_ptr);
@@ -164,8 +169,9 @@ pub const Backend = struct {
             @tagName(self.platform),
         });
 
-        var timer = std.time.Timer.start() catch null;
-
+        // TODO: Compile timing was previously logged via std.time.Timer. That
+        //  API is gone in 0.16 and we don't have an `io` here, so the timing
+        //  log is dropped. Can be re-added if io is plumbed through Backend.
         const compile_opts_pb = try build_compile_options_proto(self.allocator, options);
         defer self.allocator.free(compile_opts_pb);
 
@@ -174,13 +180,6 @@ pub const Backend = struct {
             .text => .mlir_text,
         };
         const executable = try self.client.compile(device, format, ir_bytes, compile_opts_pb);
-
-        if (timer) |*t| {
-            const elapsed_ns = t.read();
-            log.info("compile completed in {d:.2}ms", .{
-                @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms)),
-            });
-        }
 
         return executable;
     }
@@ -1115,9 +1114,8 @@ fn make_ffi_error(frame: *c.XLA_FFI_CallFrame, message: [:0]const u8, code: c.XL
     return create_error(&args);
 }
 
-fn cpu_device_count_from_env() ?usize {
-    const env = std.posix.getenv("ZG_CPU_DEVICE_COUNT") orelse return null;
-    const text = std.mem.sliceTo(env, 0);
+fn cpu_device_count_from_env(environ: *const std.process.Environ.Map) ?usize {
+    const text = environ.get("ZG_CPU_DEVICE_COUNT") orelse return null;
     if (text.len == 0) return null;
     return std.fmt.parseInt(usize, text, 10) catch null;
 }
@@ -1157,9 +1155,9 @@ fn dtype_to_buffer_type(dtype: pr.DType) pjrt_types.BufferType {
 
 /// Build a minimal CompileOptionsProto for PJRT (protobuf wire format).
 fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOptions) ![]u8 {
-    var build_opts = try std.ArrayList(u8).initCapacity(allocator, 16);
-    defer build_opts.deinit(allocator);
-    const b = build_opts.writer(allocator);
+    var build_aw: std.Io.Writer.Allocating = .init(allocator);
+    defer build_aw.deinit();
+    const b = &build_aw.writer;
 
     // ExecutableBuildOptionsProto:
     //   int64 num_replicas = 4;
@@ -1169,17 +1167,19 @@ fn build_compile_options_proto(allocator: std.mem.Allocator, options: CompileOpt
     try b.writeByte((5 << 3) | 0);
     try write_varint(b, options.num_partitions);
 
-    var out = try std.ArrayList(u8).initCapacity(allocator, 32);
-    errdefer out.deinit(allocator);
-    const w = out.writer(allocator);
+    const build_bytes = build_aw.writer.buffered();
+
+    var out_aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out_aw.deinit();
+    const w = &out_aw.writer;
 
     // CompileOptionsProto:
     //   ExecutableBuildOptionsProto executable_build_options = 3;
     try w.writeByte((3 << 3) | 2);
-    try write_varint(w, build_opts.items.len);
-    try w.writeAll(build_opts.items);
+    try write_varint(w, build_bytes.len);
+    try w.writeAll(build_bytes);
 
-    return out.toOwnedSlice(allocator);
+    return try out_aw.toOwnedSlice();
 }
 
 test "dispatch_error_to_ffi returns null when frame has no API" {

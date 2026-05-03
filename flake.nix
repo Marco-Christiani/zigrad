@@ -1,10 +1,16 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # zig 0.16 added in bbbf018e74b80af4a4692a4b3fca8e91bb0ed7ee
+    nixpkgs.url = "github:NixOS/nixpkgs/bbbf018e74b80af4a4692a4b3fca8e91bb0ed7ee";
 
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
+
+    zig-overlay = {
+      url = "github:mitchellh/zig-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
 
     mirage-src = {
@@ -87,6 +93,54 @@
   };
 
   outputs = inputs @ {flake-parts, ...}: let
+    zigOverlay = final: prev: {
+      zig = inputs.zig-overlay.packages.${prev.stdenv.hostPlatform.system}."0.16.0";
+      zls = prev.stdenvNoCC.mkDerivation (finalAttrs: {
+        pname = "zls";
+        version = "0.16.0";
+
+        src = let
+          assets = {
+            x86_64-linux = {
+              url = "https://github.com/zigtools/zls/releases/download/${finalAttrs.version}/zls-x86_64-linux.tar.xz";
+              hash = "sha256-3tbVYqC4buh4sd33D/qyeXzjzco7AtYHdUj51W3/lrY=";
+            };
+            aarch64-linux = {
+              url = "https://github.com/zigtools/zls/releases/download/${finalAttrs.version}/zls-aarch64-linux.tar.xz";
+              hash = "sha256-QwzSk9IB63CuJRnbyWyFS/h5G433/JOS6NLcloCivtc=";
+            };
+          };
+          asset =
+            assets.${prev.stdenvNoCC.hostPlatform.system}
+            or (throw "zls-bin: unsupported system ${prev.stdenvNoCC.hostPlatform.system}");
+        in
+          prev.fetchurl asset;
+
+        sourceRoot = ".";
+
+        installPhase = ''
+          runHook preInstall
+
+          install -Dm755 zls "$out/bin/zls"
+          install -Dm644 README.md "$out/share/doc/zls/README.md"
+          install -Dm644 LICENSE "$out/share/licenses/zls/LICENSE"
+
+          runHook postInstall
+        '';
+
+        meta = {
+          description = "Zig LSP implementation and Zig language server";
+          mainProgram = "zls";
+          homepage = "https://github.com/zigtools/zls";
+          license = prev.lib.licenses.mit;
+          platforms = [
+            "x86_64-linux"
+            "aarch64-linux"
+          ];
+        };
+      });
+    };
+
     # Project-wide CUDA configuration. Centralized to avoid hardcoding
     # sm_XX or toolkit versions in random places.
     cudaCfg = {
@@ -117,13 +171,13 @@
     #  and use-case recipes.
     buildCfg = let
       base = {
-        withDebugSymbols  = false;   # stripped, NDEBUG (production)
-        withNativeTuning  = false;   # portable: no -march=native
-        cudaArchitectures = [];      # upstream fat list
-        enableLto         = false;   # opt-in via local override or release tooling
-        extraCxxFlags     = [];
-        extraLdFlags      = [];
-        extraBazelFlags   = [];
+        withDebugSymbols = false; # stripped, NDEBUG (production)
+        withNativeTuning = false; # portable: no -march=native
+        cudaArchitectures = []; # upstream fat list
+        enableLto = false; # opt-in via local override or release tooling
+        extraCxxFlags = [];
+        extraLdFlags = [];
+        extraBazelFlags = [];
       };
       # Read PWD from env (only populated under --impure). When pure, this
       #  evaluates to "" and the localFile branch is short-circuited to {}.
@@ -154,6 +208,7 @@
       perSystem = {system, ...}: let
         pkgs = import inputs.nixpkgs {
           inherit system;
+          overlays = [zigOverlay];
           config = {
             allowUnfree = true;
             # note to self: avoid enabling cudaSupport globally unless you need nixpkgs packages to flip CUDA paths.
@@ -172,13 +227,12 @@
         pkgsCudartVerMM = pkgs.lib.versions.majorMinor pkgsCudartVersion;
       in
         assert pkgs.lib.assertMsg
-          (cudaVerMM == pkgsCudartVerMM)
-          ''
-            cudaCfg drift: cudaVersion=${cudaCfg.cudaVersion} (major.minor ${cudaVerMM})
-              disagrees with nixpkgs ${cudaCfg.cudaPackagesAttr}.cuda_cudart.version=${pkgsCudartVersion} (major.minor ${pkgsCudartVerMM}).
-              Update flake.nix cudaCfg or the nixpkgs lock.
-          '';
-        {
+        (cudaVerMM == pkgsCudartVerMM)
+        ''
+          cudaCfg drift: cudaVersion=${cudaCfg.cudaVersion} (major.minor ${cudaVerMM})
+            disagrees with nixpkgs ${cudaCfg.cudaPackagesAttr}.cuda_cudart.version=${pkgsCudartVersion} (major.minor ${pkgsCudartVerMM}).
+            Update flake.nix cudaCfg or the nixpkgs lock.
+        ''; {
           _module.args = {
             inherit pkgs cudaCfg buildCfg;
           };

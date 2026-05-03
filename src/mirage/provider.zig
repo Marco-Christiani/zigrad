@@ -310,6 +310,11 @@ pub const MirageProvider = struct {
 /// (SIGABRT from the assert), the parent detects this via `waitpid` and
 /// returns false. The parent then re-transpiles the same deterministic graph
 /// when it is confirmed safe.
+///
+/// Uses raw posix `fork`/`dup2`/`waitpid` because the canary semantics need
+///  direct kernel-level fork to share the parent's address space (the C++
+///  state inside libmirage is not re-creatable from `std.process.run`). An
+///  `io`-threaded variant of `fork` does not exist.
 fn probe_transpile_safe(graph: ?*const mirage.RawGraph) bool {
     const pid = std.posix.fork() catch |err| {
         log.warn("fork failed for transpile probe: {}", .{err});

@@ -451,10 +451,10 @@ fn scalar_min_bytes(dtype: pr.DType) []const u8 {
         .bf16 => std.mem.asBytes(&pr.DType.bf16.encode(f32, -std.math.inf(f32))),
         .f32 => std.mem.asBytes(&@as(f32, -std.math.inf(f32))),
         .f64 => std.mem.asBytes(&@as(f64, -std.math.inf(f64))),
-        .i8 => std.mem.asBytes(&std.math.minInt(i8)),
+        .i8 => std.mem.asBytes(&@as(i8, std.math.minInt(i8))),
         .u8 => std.mem.asBytes(&@as(u8, 0)),
-        .i32 => std.mem.asBytes(&std.math.minInt(i32)),
-        .i64 => std.mem.asBytes(&std.math.minInt(i64)),
+        .i32 => std.mem.asBytes(&@as(i32, std.math.minInt(i32))),
+        .i64 => std.mem.asBytes(&@as(i64, std.math.minInt(i64))),
         .u32 => std.mem.asBytes(&@as(u32, 0)),
         .u64 => std.mem.asBytes(&@as(u64, 0)),
         .bool => std.mem.asBytes(&@as(bool, false)),
@@ -678,7 +678,7 @@ test "lowering supports multi-output custom_call boundary" {
     };
 
     var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try kp.pass().run(&artifact, &pass_ctx);
 
     const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
@@ -780,7 +780,7 @@ test "lower pass outlines kernelize-annotated region" {
 
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
@@ -813,7 +813,7 @@ test "lower pass outlines dot-add kernelize region" {
 
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
@@ -845,7 +845,7 @@ test "lower pass outlines dot-log kernelize region" {
 
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
@@ -881,7 +881,7 @@ test "lower pass outlines near-miss kernelize region" {
 
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
 
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
@@ -904,6 +904,7 @@ test "lower pass produces MLIR artifact" {
 
     var ctx = pass.PassContext{
         .allocator = std.testing.allocator,
+        .io = std.testing.io,
     };
     var cfg = LowerPassConfig{ .encoding = .binary };
 
@@ -933,7 +934,7 @@ test "lower pass emits zigrad.kernel_call for custom_call ops (pre-legalize)" {
     // Lower pass is baseline - no legalize.
     var cfg = LowerPassConfig{ .encoding = .text };
     var artifact = pass.Artifact{ .pr = &program };
-    var pass_ctx = pass.PassContext{ .allocator = testing.allocator };
+    var pass_ctx = pass.PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     try lower_pass(@ptrCast(&cfg), &artifact, &pass_ctx);
     defer artifact.deinit(testing.allocator);
 

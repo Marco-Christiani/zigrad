@@ -12,6 +12,13 @@ const nvrtc = @import("../c/nvrtc.zig");
 
 const log = std.log.scoped(.@"zg/nvrtc_callback");
 
+/// Borrowed env-var lookup via libc. Returned slice is owned by the
+///  process environ block. Do not free or store across env mutations.
+fn getenv(name: [*:0]const u8) ?[]const u8 {
+    const v = std.c.getenv(name) orelse return null;
+    return std.mem.span(v);
+}
+
 /// Register the NVRTC compilation callback with TVM.
 /// This must be called during initialization, before any CUDA compilation.
 pub fn register(allocator: std.mem.Allocator) !void {
@@ -92,7 +99,7 @@ fn nvrtc_compile_callback(
     // strip problematic includes nvrtc cant handle
     // tvm generates #include <cuda.h> and #include <cstdint>, but nvrtc doesnt need them
     // (cuda.h brings in stdlib.h which causes issues, cstdint is C++ STL)
-    var filtered_code = std.ArrayList(u8){};
+    var filtered_code: std.ArrayList(u8) = .empty;
     defer filtered_code.deinit(allocator);
 
     var lines = std.mem.splitSequence(u8, original_code, "\n");
@@ -119,7 +126,7 @@ fn nvrtc_compile_callback(
         return -1;
     };
 
-    // Return PTX as a TVM String object (not kTVMFFIRawStr — TVM must own the data).
+    // Return PTX as a TVM String object (not kTVMFFIRawStr - TVM must own the data).
     const str_val = api.make_tvm_string(ptx) catch {
         log.err("failed to create TVM string from PTX", .{});
         return -1;
@@ -135,13 +142,13 @@ fn compile_with_nvrtc(
     code: []const u8,
     arch: []const u8,
 ) ![]const u8 {
-    const cuda_path = std.posix.getenv("CUDA_HOME") orelse std.posix.getenv("CUDA_PATH") orelse {
+    const cuda_path = getenv("CUDA_HOME") orelse getenv("CUDA_PATH") orelse {
         log.err("CUDA_HOME or CUDA_PATH must be set", .{});
         return error.CudaPathNotSet;
     };
 
     // build nvrtc compile options
-    var options: std.ArrayList([]const u8) = .{};
+    var options: std.ArrayList([]const u8) = .empty;
     defer options.deinit(allocator);
 
     // cuda cpp stdlib headers
@@ -162,7 +169,7 @@ fn compile_with_nvrtc(
 
     // glibc C headers from NIX_GLIBC_INCLUDE.
     // TODO: add a fallback path (e.g. /usr/include) for non-Nix environments.
-    if (std.posix.getenv("NIX_GLIBC_INCLUDE")) |glibc_include| {
+    if (getenv("NIX_GLIBC_INCLUDE")) |glibc_include| {
         const glibc_path = try std.fmt.allocPrint(
             allocator,
             "--include-path={s}",
@@ -173,7 +180,7 @@ fn compile_with_nvrtc(
 
     // GCC builtin headers from NIX_GCC_INCLUDE.
     // TODO: add a fallback path for non-Nix environments.
-    if (std.posix.getenv("NIX_GCC_INCLUDE")) |gcc_include| {
+    if (getenv("NIX_GCC_INCLUDE")) |gcc_include| {
         const gcc_path = try std.fmt.allocPrint(
             allocator,
             "--include-path={s}",

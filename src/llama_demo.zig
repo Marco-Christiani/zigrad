@@ -160,7 +160,9 @@ fn loss_fn_with_options(
 }
 
 pub fn run_llama_ft_demo(
+    io: std.Io,
     allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
     b: *zg.Backend,
     device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
@@ -182,8 +184,7 @@ pub fn run_llama_ft_demo(
 
     // Open weights
     const default_path = "./weights/llama-3.2-1b-instruct/model.safetensors";
-    const weights_path = std.process.getEnvVarOwned(allocator, "ZG_LLAMA_SAFETENSORS_PATH") catch default_path;
-    defer if (!std.mem.eql(u8, weights_path, default_path)) allocator.free(weights_path);
+    const weights_path: []const u8 = environ.get("ZG_LLAMA_SAFETENSORS_PATH") orelse default_path;
 
     const mmap_data = zg.utils.mmap_file(weights_path) catch |err| {
         log.err("failed to mmap checkpoint at '{s}': {s}", .{ weights_path, @errorName(err) });
@@ -285,7 +286,7 @@ pub fn run_llama_ft_demo(
         else
             try zg.trace(loss_fn, allocator, inputs_spec, "llama_ft_step"));
     defer program.deinit();
-    const exe = try zg.frontend.compile_program(b, allocator, &program, device, "llama_ft_step", compile_opts);
+    const exe = try zg.frontend.compile_program(b, io, allocator, &program, device, "llama_ft_step", compile_opts);
     defer b.deinit_executable(exe);
 
     const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
@@ -330,7 +331,7 @@ pub fn run_llama_ft_demo(
 
     const loss_dtype: zg.DType = if (upcast_loss) .f32 else host_dtype;
 
-    var loop_timer = zg.utils.LoopTimer{ .label = "llama-ft-demo", .quiet = quiet };
+    var loop_timer = zg.utils.LoopTimer{ .io = io, .label = "llama-ft-demo", .quiet = quiet };
 
     if (train_mode) {
         // TrainState takes ownership of `dev_tree`'s leaves (donated inputs

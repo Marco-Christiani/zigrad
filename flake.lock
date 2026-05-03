@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "flake-compat": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1696426674,
+        "narHash": "sha256-kvjfFW7WAETZlt09AgDn1MrtKzP7t90Vf7vypd3OL1U=",
+        "owner": "edolstra",
+        "repo": "flake-compat",
+        "rev": "0f9255e01c2351cc7d116c072cb317785dd33b33",
+        "type": "github"
+      },
+      "original": {
+        "owner": "edolstra",
+        "repo": "flake-compat",
+        "type": "github"
+      }
+    },
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
@@ -160,17 +176,17 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1772624091,
-        "narHash": "sha256-QKyJ0QGWBn6r0invrMAK8dmJoBYWoOWy7lN+UHzW1jc=",
+        "lastModified": 1776186156,
+        "narHash": "sha256-v8wLxSxCdlFOG/S7MAO6WWDnlCrY4veChmVOfXk0ZCs=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "80bdc1e5ce51f56b19791b52b2901187931f5353",
+        "rev": "bbbf018e74b80af4a4692a4b3fca8e91bb0ed7ee",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
-        "ref": "nixos-unstable",
         "repo": "nixpkgs",
+        "rev": "bbbf018e74b80af4a4692a4b3fca8e91bb0ed7ee",
         "type": "github"
       }
     },
@@ -286,7 +302,8 @@
         "pyproject-nix": "pyproject-nix_2",
         "stablehloSrc": "stablehloSrc",
         "uv2nix": "uv2nix_2",
-        "xlaSrc": "xlaSrc"
+        "xlaSrc": "xlaSrc",
+        "zig-overlay": "zig-overlay"
       }
     },
     "stablehloSrc": {
@@ -303,6 +320,22 @@
         "owner": "openxla",
         "repo": "stablehlo",
         "rev": "1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f",
+        "type": "github"
+      }
+    },
+    "systems": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
         "type": "github"
       }
     },
@@ -368,6 +401,28 @@
         "owner": "openxla",
         "repo": "xla",
         "rev": "913ae2eaa3cb88971003592a90959685a78c9e30",
+        "type": "github"
+      }
+    },
+    "zig-overlay": {
+      "inputs": {
+        "flake-compat": "flake-compat",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "systems": "systems"
+      },
+      "locked": {
+        "lastModified": 1777683612,
+        "narHash": "sha256-DHPp9PuiqmxllnclVgO3OC6MRc3bG76yoN08LiPHWG8=",
+        "owner": "mitchellh",
+        "repo": "zig-overlay",
+        "rev": "6fb3336370447af7f3359bd0a47adcbf995fe5ac",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mitchellh",
+        "repo": "zig-overlay",
         "type": "github"
       }
     }

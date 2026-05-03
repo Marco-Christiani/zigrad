@@ -21,32 +21,29 @@ fn dl_err_msg() []const u8 {
     return std.mem.span(p);
 }
 
+/// C-FFI boundary: PJRT plugin loader reads diagnostic toggles via libc.
+/// `Environ.Map` is not threaded into the dlopen constructor; the borrowed
+///  slice points into the libc environ block.
+fn getenv_borrow(name: [*:0]const u8) ?[]const u8 {
+    const v = std.c.getenv(name) orelse return null;
+    return std.mem.span(v);
+}
+
 fn debug_enabled() bool {
-    const allocator = std.heap.page_allocator;
-    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DEBUG")) |val| {
-        defer allocator.free(val);
-        if (val.len == 0) return false;
-        return val[0] != '0';
-    } else |_| {
-        return false;
-    }
+    const val = getenv_borrow("ZG_PJRT_DEBUG") orelse return false;
+    if (val.len == 0) return false;
+    return val[0] != '0';
 }
 
 fn dlclose_enabled() bool {
-    const allocator = std.heap.page_allocator;
-    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_SKIP_DLCLOSE")) |val| {
-        defer allocator.free(val);
+    if (getenv_borrow("ZG_PJRT_SKIP_DLCLOSE")) |val| {
         if (val.len == 0) return false;
         if (val[0] != '0') return false;
-    } else |_| {}
-
-    if (std.process.getEnvVarOwned(allocator, "ZG_PJRT_DLCLOSE")) |val| {
-        defer allocator.free(val);
-        if (val.len == 0) return false;
-        return val[0] != '0';
-    } else |_| {
-        return false;
     }
+
+    const val = getenv_borrow("ZG_PJRT_DLCLOSE") orelse return false;
+    if (val.len == 0) return false;
+    return val[0] != '0';
 }
 
 fn log_dladdr(label: []const u8, addr: *const anyopaque) void {
@@ -304,9 +301,11 @@ pub fn get_plugin_path(allocator: std.mem.Allocator, backend_name: []const u8) !
         ch.* = std.ascii.toUpper(ch.*);
     }
 
-    if (std.process.getEnvVarOwned(allocator, env_var)) |path| {
-        return path;
-    } else |_| {
+    const env_var_z = try allocator.dupeZ(u8, env_var);
+    defer allocator.free(env_var_z);
+    if (getenv_borrow(env_var_z.ptr)) |path| {
+        return try allocator.dupe(u8, path);
+    } else {
         // Fall back to default paths
         const default_name = try std.fmt.allocPrint(
             allocator,

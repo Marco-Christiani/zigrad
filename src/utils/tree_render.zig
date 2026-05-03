@@ -139,7 +139,7 @@ test "render ascii tree" {
     const allocator = std.testing.allocator;
     const paths = [_][]const u8{ "a", "b.c", "b.d" };
 
-    var out = std.io.Writer.Allocating.init(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
 
     try render(allocator, &paths, &out.writer, .{ .symbols = Symbols.ascii });
@@ -160,7 +160,7 @@ test "render unicode tree" {
     const allocator = std.testing.allocator;
     const paths = [_][]const u8{ "a", "b.c", "b.d" };
 
-    var out = std.io.Writer.Allocating.init(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
 
     try render(allocator, &paths, &out.writer, .{ .symbols = Symbols.unicode });

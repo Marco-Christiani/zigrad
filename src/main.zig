@@ -19,12 +19,13 @@ pub const std_options = std.Options{
     },
 };
 
-pub fn main() !void {
-    const gpa = std.heap.smp_allocator;
+pub fn main(init: std.process.Init) !void {
+    const env = zg.RuntimeEnv.from_init(init);
+    const gpa = env.allocator;
 
-    const cache = try zg.Cache.init(.{});
+    const cache = try zg.Cache.init(env.io, env.environ, .{});
 
-    var cmd = cli.parse(gpa) catch |err| {
+    const cmd = cli.parse(env, init.minimal.args) catch |err| {
         if (err == error.HelpShown) return;
         std.log.err("failed to parse arguments: {s}", .{@errorName(err)});
         return err;
@@ -32,7 +33,7 @@ pub fn main() !void {
     defer cmd.deinit();
 
     // Extract global opts
-    var global_opts = try cli.get_global_opts(&cmd, gpa);
+    var global_opts = try cli.get_global_opts(cmd, gpa);
     const dump_pr_ptr = if (global_opts.dump_pr) |*cfg| cfg else null;
     const dump_mlir_ptr = if (global_opts.dump_mlir) |*cfg| cfg else null;
     const dump_optimized_ptr = if (global_opts.dump_optimized) |*cfg| cfg else null;
@@ -41,19 +42,19 @@ pub fn main() !void {
 
     // Commands that dont require PJRT backend
     if (cmd.matchSubCmd("print-pr")) |_| {
-        return demos.print_pr(gpa);
+        return demos.print_pr(env.io, gpa, env.environ);
     }
     if (cmd.matchSubCmd("tvm-zxpr")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.TvmZxprOpts, .{});
         const sweep = opts.sweep_palettes;
         const palette = if (opts.palette) |p| std.meta.stringToEnum(zg.pr.zxpr.style.Palette, p) else null;
-        return demos.print_tvm_kernelize_pr(gpa, sweep, palette);
+        return demos.print_tvm_kernelize_pr(env.io, gpa, env.environ, sweep, palette);
     }
     if (cmd.matchSubCmd("tvm-attention-zxpr")) |_| {
-        return demos.print_tvm_attention_pr(gpa, false, null);
+        return demos.print_tvm_attention_pr(env.io, gpa, env.environ, false, null);
     }
     if (cmd.matchSubCmd("tvm-dump-symbols")) |_| {
-        return demos.dump_tvm_ffi_symbols(gpa);
+        return demos.dump_tvm_ffi_symbols(env.io, gpa);
     }
     if (cmd.matchSubCmd("tvm-check-compiler-load")) |_| {
         if (comptime !build_options.has_tvm) return require_tvm();
@@ -69,7 +70,7 @@ pub fn main() !void {
 
         const target_kind: zg.tvm.tir.TargetKind = if (opts.cuda or opts.gpu) .cuda else .cpu;
 
-        const tvm_cache = try cache.subdir("tvm", .{});
+        const tvm_cache = try cache.subdir(env.io, "tvm", .{});
 
         try zg.tvm.ffi.ensure_loaded(gpa, .{});
         const m: i64 = @intCast(shape.m);
@@ -91,15 +92,15 @@ pub fn main() !void {
         defer gpa.free(tensor_shapes);
 
         const key = zg.tvm.module.matmul_cache_key(target_kind, m, n, k);
-        const work_cache = try tvm_cache.subdir(key.slice(), .{});
+        const work_cache = try tvm_cache.subdir(env.io, key.slice(), .{});
 
-        try zg.tvm.tune.tune(gpa, ir_mod, target, target_kind, tensor_shapes, .{
+        try zg.tvm.tune.tune(env.io, gpa, ir_mod, target, target_kind, tensor_shapes, .{
             .work_cache = work_cache,
             .max_trials = opts.trials orelse 64,
             .trials_per_iter = opts.trials_per_iter orelse 16,
         });
 
-        _ = try zg.tvm.module.update_cache_from_work_dir(gpa, tvm_cache, work_cache, key.slice(), target_kind);
+        _ = try zg.tvm.module.update_cache_from_work_dir(env.io, gpa, tvm_cache, work_cache, key.slice(), target_kind);
         return;
     }
     if (cmd.matchSubCmd("tvm-run")) |sub_cmd| {
@@ -109,12 +110,12 @@ pub fn main() !void {
         const shape = try parse_shape(opts.shape orelse "128x128x128");
         const target_kind: zg.tvm.tir.TargetKind = if (opts.cuda or opts.gpu) .cuda else .cpu;
 
-        return run_tvm_demo(gpa, @intCast(shape.m), @intCast(shape.n), @intCast(shape.k), target_kind, cache);
+        return run_tvm_demo(env.io, gpa, @intCast(shape.m), @intCast(shape.n), @intCast(shape.k), target_kind, cache);
     }
     // IREE backend commands.
     if (cmd.matchSubCmd("iree-aot-demo")) |_| {
         if (comptime build_options.has_iree and build_options.has_mlir) {
-            return run_iree_demo(gpa, dump_pr_ptr, dump_mlir_ptr);
+            return run_iree_demo(env.io, gpa, env.environ, dump_pr_ptr, dump_mlir_ptr);
         }
         std.log.err("iree-aot-demo requires building with -Diree-backend=true -Dmlir=true", .{});
         return error.IreeBackendDisabled;
@@ -122,20 +123,19 @@ pub fn main() !void {
     if (cmd.matchSubCmd("iree-aot-compile")) |sub_cmd| {
         if (comptime build_options.has_iree and build_options.has_mlir) {
             const opts = try sub_cmd.to(cli.IreeAotCompileOpts, .{});
-            return run_iree_aot_compile(gpa, opts, dump_mlir_ptr);
+            return run_iree_aot_compile(env.io, gpa, env.environ, opts, dump_mlir_ptr);
         }
         std.log.err("iree-aot-compile requires building with -Diree-backend=true -Dmlir=true", .{});
         return error.IreeBackendDisabled;
     }
 
     // Commands that require PJRT backend
-    const plugin_path = std.process.getEnvVarOwned(gpa, "PJRT_PLUGIN_PATH") catch |err| {
-        std.log.err("PJRT_PLUGIN_PATH not set ({s})", .{@errorName(err)});
-        return err;
+    const plugin_path = env.environ.get("PJRT_PLUGIN_PATH") orelse {
+        std.log.err("PJRT_PLUGIN_PATH not set", .{});
+        return error.PjrtPluginPathNotSet;
     };
-    defer gpa.free(plugin_path);
 
-    var pjrt_backend = try zg.pjrt.Backend.init(gpa, plugin_path);
+    var pjrt_backend = try zg.pjrt.Backend.init(gpa, env.environ, plugin_path);
     defer pjrt_backend.deinit();
     const b = &pjrt_backend.interface;
 
@@ -158,27 +158,27 @@ pub fn main() !void {
     // Commands that require MLIR lowering
     if (comptime build_options.has_mlir) {
         if (cmd.matchSubCmd("custom-call-neg")) |_| {
-            return demos.run_custom_call_negative(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
+            return demos.run_custom_call_negative(env.io, gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
         if (cmd.matchSubCmd("kernel-provider-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.KernelProviderDemoOpts, .{});
             const provider_list = try parse_provider_kinds(opts.provider orelse "tvm");
-            return demos.run_kernel_provider_demo(gpa, &pjrt_backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice());
+            return demos.run_kernel_provider_demo(env.io, env.environ, gpa, &pjrt_backend, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, provider_list.slice());
         }
         if (cmd.matchSubCmd("vjp-demo")) |_| {
-            return demos.run_vjp_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
+            return demos.run_vjp_demo(env.io, gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr);
         }
         if (cmd.matchSubCmd("train-demo")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return demos.run_train_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return demos.run_train_demo(env.io, gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llm-train")) |sub_cmd| {
             const opts = try sub_cmd.to(cli.TrainDemoOpts, .{});
             const warmup_steps = opts.warmup orelse 0;
             const steps = opts.steps orelse 8;
-            return llm_demo.run_llm_train_demo(gpa, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
+            return llm_demo.run_llm_train_demo(env.io, gpa, env.environ, b, device, dump_pr_ptr, dump_mlir_ptr, dump_optimized_ptr, warmup_steps, steps, quiet);
         }
         if (cmd.matchSubCmd("llama-ft-demo")) |sub_cmd| {
             const opts: cli.LlamaFtDemoOpts = try sub_cmd.to(cli.LlamaFtDemoOpts, .{});
@@ -199,7 +199,9 @@ pub fn main() !void {
             };
 
             return llama_demo.run_llama_ft_demo(
+                env.io,
                 gpa,
+                env.environ,
                 b,
                 device,
                 dump_pr_ptr,
@@ -223,12 +225,12 @@ pub fn main() !void {
             const mlir_bytes = try zg.lower.lower_program_to_mlir(gpa, &program, "main", .mlir_bytecode);
             defer gpa.free(mlir_bytes);
 
-            const exe = try b.compile(device, mlir_bytes, true, .{});
+            const exe = try b.compile(device, mlir_bytes, .binary, .{});
             defer b.deinit_executable(exe);
             const serialized = try b.serialize_executable(exe, gpa);
             defer gpa.free(serialized);
 
-            try demos.write_bytes_to_path(opts.path, serialized);
+            try demos.write_bytes_to_path(env.io, opts.path, serialized);
             std.log.info("wrote JIT cache artifact: {d} bytes -> {s}", .{ serialized.len, opts.path });
             return;
         }
@@ -238,7 +240,7 @@ pub fn main() !void {
     if (cmd.matchSubCmd("jit-cache-run")) |sub_cmd| {
         const opts = try sub_cmd.to(cli.JitCacheOpts, .{});
 
-        const serialized = try demos.read_bytes_from_path(gpa, opts.path);
+        const serialized = try demos.read_bytes_from_path(env.io, gpa, opts.path);
         defer gpa.free(serialized);
 
         const exe = try b.load_serialized(serialized);
@@ -261,6 +263,7 @@ fn require_tvm() error{TvmUnavailable} {
 }
 
 fn run_tvm_demo(
+    io: std.Io,
     gpa: std.mem.Allocator,
     M: i64,
     N: i64,
@@ -271,11 +274,11 @@ fn run_tvm_demo(
     const tvm_runtime = zg.tvm.runtime;
     const dlpack_mod = zg.tvm.dlpack;
 
-    const tvm_cache = try artifact_cache.subdir("tvm", .{});
+    const tvm_cache = try artifact_cache.subdir(io, "tvm", .{});
     const key = zg.tvm.module.matmul_cache_key(target_kind, M, N, K);
 
     try zg.tvm.ffi.ensure_loaded(gpa, .{});
-    const tuned = try zg.tvm.module.load_cached(gpa, tvm_cache, key.slice(), target_kind) orelse return error.NoTuningRecords;
+    const tuned = try zg.tvm.module.load_cached(io, gpa, tvm_cache, key.slice(), target_kind) orelse return error.NoTuningRecords;
     var tuned_mut = tuned;
     defer tuned_mut.deinit();
 
@@ -290,7 +293,7 @@ fn run_tvm_demo(
     for (b, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.1;
     @memset(result, 0);
 
-    var timer = try std.time.Timer.start();
+    const start = std.Io.Timestamp.now(io, .awake);
 
     switch (target_kind) {
         .cpu => {
@@ -350,8 +353,8 @@ fn run_tvm_demo(
         },
     }
 
-    const elapsed = timer.read();
-    const ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    const elapsed = start.untilNow(io, .awake);
+    const ms = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1_000_000.0;
     std.log.info("TVM matmul {d}x{d}x{d} ({s}): {d:.3} ms", .{ M, N, K, @tagName(target_kind), ms });
 
     var expected: f32 = 0;
@@ -387,9 +390,9 @@ fn parse_provider_kinds(s: []const u8) !ProviderKindList {
 }
 
 /// Read an environment variable, falling back to `default` if unset.
-/// Caller owns the returned slice.
-fn iree_env(gpa: std.mem.Allocator, comptime key: []const u8, default: []const u8) ![]u8 {
-    return std.process.getEnvVarOwned(gpa, key) catch try gpa.dupe(u8, default);
+/// Returns a borrowed slice owned by `environ` or `default` (a static literal).
+fn iree_env(environ: *const std.process.Environ.Map, comptime key: []const u8, default: []const u8) []const u8 {
+    return environ.get(key) orelse default;
 }
 
 /// Build a subprocess Compiler with the standard IREE flags.
@@ -434,23 +437,21 @@ fn lower_demo_to_mlir(
 }
 
 fn run_iree_demo(
+    io: std.Io,
     gpa: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
     dump_pr: ?*zg.pipeline.DumpConfig,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
-    const compiler_exe = try iree_env(gpa, "IREE_COMPILE_EXE", "iree-compile");
-    defer gpa.free(compiler_exe);
-
-    const driver = try iree_env(gpa, "IREE_HAL_DRIVER", "local-sync");
-    defer gpa.free(driver);
+    const compiler_exe = iree_env(environ, "IREE_COMPILE_EXE", "iree-compile");
+    const driver = iree_env(environ, "IREE_HAL_DRIVER", "local-sync");
 
     // TECH DEBT: subprocess mode works around LLVM 22/23 version conflict
     // between libMLIR-C.so and libIREECompiler.so. See compiler.zig docstring.
     // TECH DEBT: vmvx (interpreter) until nix IREE compiler ships lld for llvm-cpu.
     var flag_buf: [128]u8 = undefined;
     var iree_flags: [2][]const u8 = undefined;
-    const target_backend = try iree_env(gpa, "IREE_TARGET_BACKEND", "vmvx");
-    defer gpa.free(target_backend);
+    const target_backend = iree_env(environ, "IREE_TARGET_BACKEND", "vmvx");
     const compiler = iree_subprocess_compiler(compiler_exe, target_backend, &flag_buf, &iree_flags) catch
         return error.BackendNameTooLong;
     var backend = try zg.iree.Backend.init(gpa, compiler, driver);
@@ -476,7 +477,7 @@ fn run_iree_demo(
     const mlir_bytes = lowered.mlir_bytes;
     defer gpa.free(mlir_bytes);
 
-    var exe = try backend.compile(device, mlir_bytes, lowered.encoding, .{});
+    var exe = try backend.compile(io, device, mlir_bytes, lowered.encoding, .{});
     defer backend.deinit_executable(&exe);
 
     // Run the matmul demo: A(2x3) x B(3x2) + C(2x2).
@@ -523,13 +524,13 @@ fn run_iree_demo(
 }
 
 fn run_iree_aot_compile(
+    io: std.Io,
     gpa: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
     opts: cli.IreeAotCompileOpts,
     dump_mlir: ?*zg.pipeline.DumpConfig,
 ) !void {
-    const compiler_exe = try iree_env(gpa, "IREE_COMPILE_EXE", "iree-compile");
-    defer gpa.free(compiler_exe);
-
+    const compiler_exe = iree_env(environ, "IREE_COMPILE_EXE", "iree-compile");
     const target_backend = opts.backend orelse "vmvx";
 
     var flag_buf: [128]u8 = undefined;
@@ -544,11 +545,11 @@ fn run_iree_aot_compile(
     const mlir_bytes = lowered.mlir_bytes;
     defer gpa.free(mlir_bytes);
 
-    const vmfb = try compiler.compile(gpa, mlir_bytes, lowered.encoding == .binary);
+    const vmfb = try compiler.compile(io, gpa, mlir_bytes, lowered.encoding == .binary);
     defer gpa.free(vmfb);
 
     const output_path = opts.output orelse "demo.vmfb";
-    try demos.write_bytes_to_path(output_path, vmfb);
+    try demos.write_bytes_to_path(io, output_path, vmfb);
     std.log.info("wrote {d} bytes VMFB -> {s}", .{ vmfb.len, output_path });
 }
 

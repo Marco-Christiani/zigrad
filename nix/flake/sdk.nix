@@ -74,7 +74,7 @@ in {
     '';
 
     # LLVM 22 from XLA-pinned sources. Shared by MLIR SDK and TVM.
-    # Native tuning OFF for LLVM specifically — it ships portable libs that
+    # Native tuning OFF for LLVM specifically - it ships portable libs that
     #  every consumer (TVM, our SDK) loads, and non-portable codegen here
     #  forces all consumers onto the same CPU family.
     llvm = pkgs.callPackage ../packages/llvm.nix {
@@ -119,7 +119,7 @@ in {
       cudaSupport = true;
       cpuMathLibrary = "onednn-thunk";
       cpuNativeTuning = withNativeTuning;
-      depsHash = "sha256-nOcNUVt5HFO8eC2C9Ubjjwn1dnKnCuWZISZcrhbczd0=";
+      depsHash = "sha256-rlCmWXjU8qo+r3Li/PyDx8UsQSfjbFXXwfbCykffxug=";
     };
 
     cudaRedist = pkgs.callPackage ../packages/cuda-redist.nix {inherit (cudaCfg) cudaVersion;};
@@ -190,6 +190,7 @@ in {
         }
         // features;
       hasMirage = f.mirage && mirageRuntime != null;
+      hasMkl = f.mkl && pkgs.stdenv.hostPlatform.isx86_64;
     in rec {
       compile = pkgs.symlinkJoin {
         name = "zigrad-sdk-compile";
@@ -208,7 +209,7 @@ in {
           ++ lib.optional f.iree ireeCompiler
           ++ lib.optional f.iree ireeRuntime
           ++ lib.optional hasMirage mirageRuntime
-          ++ lib.optional f.mkl pkgs.mkl;
+          ++ lib.optional hasMkl pkgs.mkl;
       };
 
       runtime = pkgs.symlinkJoin {
@@ -264,6 +265,7 @@ in {
       inherit zigradSrc;
       version = zigradVersion;
       sdk = sdkProfiles.full-gpu.compile;
+      cudaHome = cudaRedist.dev;
       optimize = "ReleaseFast";
     };
 

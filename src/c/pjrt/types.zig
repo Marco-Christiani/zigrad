@@ -563,14 +563,10 @@ pub const LoadedExecutable = struct {
         inputs: []const Buffer,
         execute_context: ?*c.PJRT_ExecuteContext,
     ) !ExecuteResult {
+        // TODO: Per-stage timing was driven by std.time.Timer. That API is gone
+        //  in 0.16 and execute() does not have an `io` handle. Tracing now
+        //  emits aggregate logs without per-stage breakdown.
         const trace = api.trace_execute;
-        var timer: std.time.Timer = undefined;
-        var prep_ns: u64 = 0;
-        var call_ns: u64 = 0;
-        var wrap_ns: u64 = 0;
-        if (trace) {
-            timer = try std.time.Timer.start();
-        }
 
         const num_outputs = self.num_outputs;
 
@@ -612,15 +608,7 @@ pub const LoadedExecutable = struct {
         args.device_complete_events = @ptrCast(&device_events);
         args.execute_device = null;
 
-        if (trace) {
-            prep_ns = timer.lap();
-        }
-
         try api.call("PJRT_LoadedExecutable_Execute", &args);
-
-        if (trace) {
-            call_ns = timer.lap();
-        }
 
         const outputs = try allocator.alloc(Buffer, num_outputs);
         for (outputs, 0..) |*buf, i| {
@@ -631,14 +619,9 @@ pub const LoadedExecutable = struct {
 
         const event = if (device_events[0]) |ev| Event{ .pjrt_event = ev } else null;
         if (trace) {
-            wrap_ns = timer.lap();
-            const ns_per_ms = std.time.ns_per_ms;
-            const prep_ms = @as(f64, @floatFromInt(prep_ns)) / ns_per_ms;
-            const call_ms = @as(f64, @floatFromInt(call_ns)) / ns_per_ms;
-            const wrap_ms = @as(f64, @floatFromInt(wrap_ns)) / ns_per_ms;
             log.info(
-                "pjrt execute: inputs={d} outputs={d} prep_ms={d:.3} call_ms={d:.3} wrap_ms={d:.3}",
-                .{ inputs.len, num_outputs, prep_ms, call_ms, wrap_ms },
+                "pjrt execute: inputs={d} outputs={d}",
+                .{ inputs.len, num_outputs },
             );
         }
         return .{ .outputs = outputs, .device_complete_event = event };

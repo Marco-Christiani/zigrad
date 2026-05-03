@@ -27,18 +27,19 @@ pub const LoopTimer = struct {
 
     const Phase = struct { name: []const u8, ns: u64 };
 
+    io: std.Io,
     label: []const u8,
     quiet: bool = false,
     total_ns: u64 = 0,
     step_count: usize = 0,
     // per-step scratch
-    timer: std.time.Timer = undefined,
+    last_mark: std.Io.Timestamp = .zero,
     phases: [max_phases]Phase = undefined,
     phase_count: usize = 0,
 
     /// Begin timing a new step. Resets phase counter and starts the clock.
     pub fn start_step(self: *LoopTimer) !void {
-        self.timer = try std.time.Timer.start();
+        self.last_mark = std.Io.Timestamp.now(self.io, .awake);
         self.phase_count = 0;
     }
 
@@ -46,8 +47,11 @@ pub const LoopTimer = struct {
     /// named phase. Up to `max_phases` (8) marks per step.
     pub fn mark(self: *LoopTimer, name: []const u8) void {
         std.debug.assert(self.phase_count < max_phases);
-        self.phases[self.phase_count] = .{ .name = name, .ns = self.timer.lap() };
+        const now = std.Io.Timestamp.now(self.io, .awake);
+        const elapsed_ns: u64 = @intCast(self.last_mark.durationTo(now).toNanoseconds());
+        self.phases[self.phase_count] = .{ .name = name, .ns = elapsed_ns };
         self.phase_count += 1;
+        self.last_mark = now;
     }
 
     /// Finalize the current step. Accumulates total time, increments step
@@ -70,15 +74,14 @@ pub const LoopTimer = struct {
 
     fn log_step(self: *const LoopTimer, step_ns: u64, loss: ?f32) void {
         var buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        var w: std.Io.Writer = .fixed(&buf);
         w.print("{s} step {d}:", .{ self.label, self.step_count }) catch return;
         if (loss) |l| w.print(" loss={d:.6}", .{l}) catch return;
         for (self.phases[0..self.phase_count]) |p| {
             w.print(" {s}={d:.3}ms", .{ p.name, ns_to_ms(p.ns) }) catch return;
         }
         w.print(" total={d:.3}ms", .{ns_to_ms(step_ns)}) catch return;
-        log.info("{s}", .{fbs.getWritten()});
+        log.info("{s}", .{w.buffered()});
     }
 
     fn ns_to_ms(ns: u64) f64 {

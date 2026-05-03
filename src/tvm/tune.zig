@@ -36,6 +36,7 @@ pub const TuneOpts = struct {
 /// Passed as userdata to builder/runner callbacks via TVM's
 ///  TVMFFIFunctionCreate self pointer.
 const TuneState = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     target: Target,
     target_kind: TargetKind,
@@ -54,6 +55,7 @@ const TuneState = struct {
 ///  compiles TIR candidates to .so artifacts, the runner callback loads and
 ///  benchmarks them. Results are persisted to a JSON store in work_dir.
 pub fn tune(
+    io: std.Io,
     allocator: std.mem.Allocator,
     ir_mod: IRModule,
     target: Target,
@@ -67,11 +69,11 @@ pub fn tune(
         nvrtc_callback.register(allocator) catch |err| {
             log.warn("failed to register NVRTC callback: {s}", .{@errorName(err)});
         };
-        try load_cuda_intrinsics(allocator);
+        try load_cuda_intrinsics(io, allocator);
     }
 
     const work_dir = opts.work_cache.path();
-    std.fs.cwd().makePath(work_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, work_dir) catch {};
 
     try register_cpu_count(allocator);
 
@@ -108,13 +110,14 @@ pub fn tune(
 
     // Seed build_counter from persisted state so incremental tuning
     // doesn't overwrite previous candidates.
-    const persisted = read_tune_state(allocator, opts.work_cache);
+    const persisted = read_tune_state(io, allocator, opts.work_cache);
     const initial_counter = persisted.next_candidate;
     if (initial_counter > 0) {
         log.info("resuming from candidate {d} (found {d} existing)", .{ initial_counter, initial_counter });
     }
 
     var state = TuneState{
+        .io = io,
         .allocator = allocator,
         .target = target,
         .target_kind = kind,
@@ -176,7 +179,7 @@ pub fn tune(
     };
 
     // Persist build counter so the next run continues from where we left off.
-    write_tune_state(allocator, opts.work_cache, .{
+    write_tune_state(io, allocator, opts.work_cache, .{
         .next_candidate = @atomicLoad(u32, &state.build_counter, .seq_cst),
     });
 
@@ -256,7 +259,7 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
         };
         const so_path = so.pathZ();
 
-        built_mod.export_shared(allocator, so_path, state.target_kind) catch {
+        built_mod.export_shared(state.io, allocator, so_path, state.target_kind) catch {
             try results_list.append(allocator, try make_builder_error(allocator, "export failed"));
             continue;
         };
@@ -367,6 +370,7 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
 /// Benchmark a compiled kernel function. Returns median time in seconds.
 fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
     const allocator = state.allocator;
+    const io = state.io;
     const dev_type: dlpack.DeviceType = switch (state.target_kind) {
         .cpu => .cpu,
         .cuda => .cuda,
@@ -408,10 +412,10 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
     const num_runs: usize = 5;
     var times: [5]f64 = std.mem.zeroes([5]f64);
     for (0..num_runs) |run_idx| {
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Timestamp.now(io, .awake);
         _ = try api.call_handle(allocator, func, call_args);
-        const end = std.time.nanoTimestamp();
-        times[run_idx] = @as(f64, @floatFromInt(end - start)) / 1e9;
+        const elapsed = start.untilNow(io, .awake);
+        times[run_idx] = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1e9;
     }
     std.mem.sort(f64, &times, {}, std.sort.asc(f64));
     return times[num_runs / 2];
@@ -430,24 +434,24 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
 /// Safe to call multiple times (only loads once).
 var cuda_intrinsics_loaded: bool = false;
 
-fn load_cuda_intrinsics(allocator: std.mem.Allocator) !void {
+fn load_cuda_intrinsics(io: std.Io, allocator: std.mem.Allocator) !void {
     if (cuda_intrinsics_loaded) return;
 
     const intrinsics_dir = "artifacts/cuda_intrinsics";
-    var dir = std.fs.cwd().openDir(intrinsics_dir, .{ .iterate = true }) catch |err| {
+    var dir = std.Io.Dir.cwd().openDir(io, intrinsics_dir, .{ .iterate = true }) catch |err| {
         log.err("failed to open {s}: {s}", .{ intrinsics_dir, @errorName(err) });
         log.err("run: python3 scripts/generate_cuda_intrinsics.py", .{});
         return err;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var loaded_count: usize = 0;
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
 
-        const json_data = dir.readFileAlloc(allocator, entry.name, 1_000_000) catch |err| {
+        const json_data = dir.readFileAlloc(io, entry.name, allocator, .limited(1_000_000)) catch |err| {
             log.warn("failed to read {s}: {s}", .{ entry.name, @errorName(err) });
             continue;
         };
@@ -493,9 +497,9 @@ const PersistedTuneState = struct {
     next_candidate: u32 = 0,
 };
 
-fn read_tune_state(allocator: std.mem.Allocator, work_cache: Cache) PersistedTuneState {
+fn read_tune_state(io: std.Io, allocator: std.mem.Allocator, work_cache: Cache) PersistedTuneState {
     const state_file = work_cache.join("state.json") catch return .{};
-    const bytes = std.fs.cwd().readFileAlloc(allocator, state_file.path(), 4096) catch return .{};
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, state_file.path(), allocator, .limited(4096)) catch return .{};
     defer allocator.free(bytes);
     const parsed = std.json.parseFromSlice(PersistedTuneState, allocator, bytes, .{
         .ignore_unknown_fields = true,
@@ -504,14 +508,14 @@ fn read_tune_state(allocator: std.mem.Allocator, work_cache: Cache) PersistedTun
     return parsed.value;
 }
 
-fn write_tune_state(allocator: std.mem.Allocator, work_cache: Cache, state: PersistedTuneState) void {
+fn write_tune_state(io: std.Io, allocator: std.mem.Allocator, work_cache: Cache, state: PersistedTuneState) void {
     const state_file = work_cache.join("state.json") catch return;
     const path = state_file.path();
     const bytes = std.json.Stringify.valueAlloc(allocator, state, .{}) catch return;
     defer allocator.free(bytes);
-    const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
-    defer file.close();
-    file.writeAll(bytes) catch {};
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return;
+    defer file.close(io);
+    file.writeStreamingAll(io, bytes) catch {};
 }
 
 fn make_noop_callback() !Value {

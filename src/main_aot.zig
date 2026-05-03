@@ -19,7 +19,7 @@ pub fn run(
     defer allocator.free(mlir_bytes);
 
     // Compile, serialize, then reload -- exercises the AOT round-trip.
-    const serialized = try backend.compile_serialized(device, mlir_bytes, true, .{});
+    const serialized = try backend.compile_serialized(device, mlir_bytes, .binary, .{});
     defer allocator.free(serialized);
 
     var loaded = try backend.load_serialized_executable(serialized, null);

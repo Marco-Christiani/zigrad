@@ -6,17 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const c = @cImport({
-    @cInclude("mlir-c/IR.h");
-    @cInclude("mlir-c/BuiltinTypes.h");
-    @cInclude("mlir-c/BuiltinAttributes.h");
-    @cInclude("mlir-c/Dialect/Func.h");
-    @cInclude("mlir-c/Pass.h");
-    @cInclude("mlir-c/Transforms.h");
-    @cInclude("stablehlo/integrations/c/StablehloDialect.h");
-    @cInclude("stablehlo/integrations/c/StablehloAttributes.h");
-    @cInclude("stablehlo/integrations/c/StablehloTypes.h");
-});
+pub const c = @import("c-mlir");
 
 const log = std.log.scoped(.@"zg/mlir");
 
@@ -29,13 +19,16 @@ const ShimHandle = struct {
     register_passes: ZgRegisterPassesFn,
 };
 
+/// NOTE: The MLIR shim is initialized lazily once per process. Zigrad lowering
+///  drives MLIR work on a single thread. If multi-threaded init becomes
+///  necessary, wrap with `std.Io.Mutex` (would require threading `io` through
+///  the session init chain).
 const ShimState = union(enum) {
     uninitialized,
     unavailable,
     loaded: ShimHandle,
 };
 
-var shim_mutex: std.Thread.Mutex = .{};
 var shim_state: ShimState = .uninitialized;
 var shim_passes_registered: bool = false;
 
@@ -73,9 +66,6 @@ pub fn register_passes(comptime passes: []const u8) void {
 }
 
 pub fn register_zigrad_extensions(ctx: Context) Error!void {
-    shim_mutex.lock();
-    defer shim_mutex.unlock();
-
     switch (shim_state) {
         .uninitialized => {
             const loaded = load_shim_locked() orelse {
@@ -136,30 +126,28 @@ fn load_shim_locked() ?ShimHandle {
 }
 
 fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
-    // Targeted override for development or non-standard layouts.
-    if (std.process.getEnvVarOwned(allocator, "ZG_MLIR_SHIM_PATH")) |shim_path| {
-        return shim_path;
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
+    // Targeted override for development or non-standard layouts. Uses libc
+    //  getenv since the shim load happens deep in MLIR session init without
+    //  a threaded environ map.
+    if (std.c.getenv("ZG_MLIR_SHIM_PATH")) |shim_path_ptr| {
+        return try allocator.dupe(u8, std.mem.span(shim_path_ptr));
     }
 
     // Local dev build fallback.
     if (path_exists("shim/build/libzigrad_mlir_ext.so")) {
-        return try std.fs.cwd().realpathAlloc(allocator, "shim/build/libzigrad_mlir_ext.so");
+        return try allocator.dupe(u8, "shim/build/libzigrad_mlir_ext.so");
     }
 
     // Bare soname: resolved via RUNPATH ($ORIGIN/../lib) or system linker.
     return try allocator.dupe(u8, "libzigrad_mlir_ext.so");
 }
 
+/// C-FFI boundary: shim discovery uses raw posix because the MLIR session
+///  init path does not carry an `io` handle. A path probe before `dlopen` is
+///  not user-observable I/O.
 fn path_exists(path: []const u8) bool {
-    if (std.fs.path.isAbsolute(path)) {
-        std.fs.accessAbsolute(path, .{}) catch return false;
-        return true;
-    }
-
-    std.fs.cwd().access(path, .{}) catch return false;
+    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
+    _ = std.posix.system.close(fd);
     return true;
 }
 
@@ -301,7 +289,7 @@ pub const PassManager = struct {
 
     pub fn run_on_op(self: *PassManager, op: Operation) error{InvalidMlir}!void {
         if (c.mlirPassManagerRunOnOp(self._inner, op._inner).value == 0) {
-            return Error.InvalidMlir;
+            return error.InvalidMlir;
         }
     }
 };
@@ -321,7 +309,7 @@ pub const OpPassManager = struct {
             &_mlir_passpipeline_error,
             null,
         ).value == 0) {
-            return Error.OutOfMemory;
+            return error.OutOfMemory;
         }
     }
 };

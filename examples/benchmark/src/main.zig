@@ -35,12 +35,27 @@ const log = std.log.scoped(.benchmark);
 
 const Subcommand = enum { run, tune };
 
-pub fn main() !void {
-    const gpa = std.heap.smp_allocator;
+/// Minimal positional iterator over argv. The 0.15-era
+///  `std.process.argsWithAllocator` is gone in 0.16; programs receive args
+///  via `std.process.Init.minimal.args.toSlice(alloc)`.
+const ArgvIterator = struct {
+    argv: []const [:0]const u8,
+    idx: usize = 0,
+    fn next(self: *ArgvIterator) ?[:0]const u8 {
+        if (self.idx >= self.argv.len) return null;
+        const a = self.argv[self.idx];
+        self.idx += 1;
+        return a;
+    }
+};
 
-    var args_iter = try std.process.argsWithAllocator(gpa);
-    defer args_iter.deinit();
-    _ = args_iter.next(); // skip argv[0]
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    const argv = try init.minimal.args.toSlice(gpa);
+    defer gpa.free(argv);
+    var args_iter: ArgvIterator = .{ .argv = argv, .idx = 1 };
 
     var shapes = std.ArrayList(benchmark.Shape).empty;
     defer shapes.deinit(gpa);
@@ -121,7 +136,7 @@ pub fn main() !void {
         .bench_iters = iters,
     };
 
-    var harness_inst = try benchmark.Harness.init(gpa, cfg);
+    var harness_inst = try benchmark.Harness.init(io, init.environ_map, gpa, cfg);
     defer harness_inst.deinit();
 
     switch (subcmd) {
@@ -196,10 +211,9 @@ fn print_usage() void {
         \\  Cache dir: set ZG_CACHE_DIR env var (default: /tmp/zigrad-cache)
         \\
     ;
-    var buf: [4096]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&buf);
-    writer.interface.writeAll(usage) catch {};
-    writer.interface.flush() catch {};
+    _ = std.Io.File.stdout(); // suppress unused param warning if any
+    // Usage is printed to stderr to avoid threading io into print_usage.
+    std.debug.print("{s}", .{usage});
 }
 
 test {

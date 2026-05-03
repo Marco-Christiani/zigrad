@@ -1,14 +1,7 @@
 //! Centralized C imports for PJRT
 //!
 //! Multiple @cImport calls create incompatible types, so we centralize here.
-pub const c = @cImport({
-    @cDefine("_GNU_SOURCE", "1");
-    @cInclude("dlfcn.h");
-    @cInclude("xla/pjrt/c/pjrt_c_api.h");
-    @cInclude("xla/pjrt/c/pjrt_c_api_gpu_extension.h");
-    @cInclude("xla/pjrt/c/pjrt_c_api_ffi_extension.h");
-    @cInclude("xla/ffi/api/c_api.h");
-});
+pub const c = @import("c-pjrt");
 
 // Re-export commonly used types
 pub const PJRT_Api = c.PJRT_Api;

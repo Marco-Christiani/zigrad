@@ -2,13 +2,12 @@ const std = @import("std");
 const xla = @import("xla_pb");
 const hlo_decode = @import("hlo_decode");
 
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
 
     if (args.len < 2) {
         std.debug.print("usage: decode_hlo <file.pb>\n", .{});
@@ -16,20 +15,13 @@ pub fn main() !void {
     }
 
     const path = args[1];
-    const bytes = blk: {
-        var file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{})
-        else
-            try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        break :blk try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    };
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(bytes);
 
     std.debug.print("read {d} bytes from {s}\n\n", .{ bytes.len, path });
 
     var buffer: [8192]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &buffer);
     const out = &stdout_writer.interface;
 
     // Try HloModuleProtoWithConfig first (format from --dump-optimized),

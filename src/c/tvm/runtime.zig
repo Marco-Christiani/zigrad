@@ -66,7 +66,7 @@ pub const RuntimeModule = struct {
     ///
     /// For CPU: writes a single .o and links to .so.
     /// For CUDA: writes host .o + device .o (packed LLVM blob), then links both.
-    pub fn export_shared(self: RuntimeModule, allocator: std.mem.Allocator, so_path: [:0]const u8, kind: TargetKind) !void {
+    pub fn export_shared(self: RuntimeModule, io: std.Io, allocator: std.mem.Allocator, so_path: [:0]const u8, kind: TargetKind) !void {
         const compile_mod = @import("compile.zig");
 
         const obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.host.o", .{so_path}, 0);
@@ -76,7 +76,7 @@ pub const RuntimeModule = struct {
 
         switch (kind) {
             .cpu => {
-                try compile_mod.link_to_shared(allocator, &.{obj_path}, so_path);
+                try compile_mod.link_to_shared(io, allocator, &.{obj_path}, so_path);
             },
             .cuda => {
                 const devc_obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.devc.o", .{so_path}, 0);
@@ -86,7 +86,7 @@ pub const RuntimeModule = struct {
                 defer pack_mod.deinit();
                 try pack_mod.write_to_file(allocator, devc_obj_path, "o");
 
-                try compile_mod.link_to_shared(allocator, &.{ obj_path, devc_obj_path }, so_path);
+                try compile_mod.link_to_shared(io, allocator, &.{ obj_path, devc_obj_path }, so_path);
             },
         }
         log.info("exported {s}", .{so_path});

@@ -35,6 +35,7 @@
       (with pkgs; [
         zig
         zls
+        zon2nix
         go-task
         nodejs_22
         binutils

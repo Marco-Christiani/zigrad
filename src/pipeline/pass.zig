@@ -79,6 +79,7 @@ pub const Artifact = union(ArtifactKind) {
 /// resources without needing to thread them explicitly.
 pub const PassContext = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
 };
 
 /// Pass execution errors
@@ -115,6 +116,9 @@ pub const PassError = error{
 
     /// Duplicate kernel key while registering provider artifact.
     DuplicateKey,
+
+    /// Failure inside a `std.Io.Writer` (e.g. the Allocating variant).
+    WriteFailed,
 
     /// Missing required context (e.g., no backend session)
     MissingContext,
@@ -164,29 +168,25 @@ pub const Pipeline = struct {
             return error.ArtifactKindMismatch;
         }
 
-        var pipeline_timer = std.time.Timer.start() catch null;
+        const pipeline_start = std.Io.Timestamp.now(ctx.io, .awake);
 
         var current = initial;
         errdefer current.deinit(ctx.allocator);
         for (self.passes) |p| {
             if (current.kind() != p.input_kind) return error.ArtifactKindMismatch;
 
-            var pass_timer = std.time.Timer.start() catch null;
+            const pass_start = std.Io.Timestamp.now(ctx.io, .awake);
             try p.run(&current, ctx);
-            if (pass_timer) |*t| {
-                log.info("pass '{s}' completed in {d:.2}ms", .{
-                    p.name, ns_to_ms(t.read()),
-                });
-            }
+            log.info("pass '{s}' completed in {d:.2}ms", .{
+                p.name, ns_to_ms(@intCast(pass_start.untilNow(ctx.io, .awake).toNanoseconds())),
+            });
 
             if (current.kind() != p.output_kind) return error.ArtifactKindMismatch;
         }
 
-        if (pipeline_timer) |*t| {
-            log.info("pipeline completed: {d} passes in {d:.2}ms", .{
-                self.passes.len, ns_to_ms(t.read()),
-            });
-        }
+        log.info("pipeline completed: {d} passes in {d:.2}ms", .{
+            self.passes.len, ns_to_ms(@intCast(pipeline_start.untilNow(ctx.io, .awake).toNanoseconds())),
+        });
 
         return current;
     }
@@ -267,7 +267,7 @@ test "pipeline run transforms artifacts" {
         .{ .ptr = undefined, .run_fn = to_stablehlo, .name = "to_stablehlo", .input_kind = .pr, .output_kind = .stablehlo },
     };
 
-    var ctx = PassContext{ .allocator = testing.allocator };
+    var ctx = PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     const pipeline = Pipeline{ .passes = &passes };
     var artifact = try pipeline.run(.{ .pr = &program }, &ctx);
     defer artifact.deinit(testing.allocator);

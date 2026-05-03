@@ -36,6 +36,6 @@ pub fn build(b: *std.Build) void {
 
 fn resolve_absolute(b: *std.Build, path: []const u8) []const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
-    const cwd_abs = std.fs.cwd().realpathAlloc(b.allocator, ".") catch @panic("realpathAlloc failed");
-    return std.fs.path.join(b.allocator, &.{ cwd_abs, path }) catch @panic("path join failed");
+    const build_root = b.build_root.path orelse ".";
+    return std.fs.path.join(b.allocator, &.{ build_root, path }) catch @panic("path join failed");
 }

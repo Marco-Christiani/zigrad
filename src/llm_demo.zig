@@ -4,7 +4,9 @@ const stz = @import("safetensors_zg");
 const log = std.log.scoped(.@"zg/llm_demo");
 
 pub fn run_llm_train_demo(
+    io: std.Io,
     allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
     b: *zg.Backend,
     device: zg.Backend.Device,
     dump_pr: ?*zg.pipeline.DumpConfig,
@@ -85,7 +87,7 @@ pub fn run_llm_train_demo(
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "llm_ft_step");
     defer program.deinit();
 
-    const exe = try zg.frontend.compile_program(b, allocator, &program, device, "llm_ft_step", .{
+    const exe = try zg.frontend.compile_program(b, io, allocator, &program, device, "llm_ft_step", .{
         .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
         .dump_pr = if (dump_pr) |cfg| cfg.* else null,
         .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
@@ -104,8 +106,7 @@ pub fn run_llm_train_demo(
     var host_y = try Tensor.host(.f32, &.{ bs, vocab }, .{ .alloc = allocator });
     defer host_y.deinit();
 
-    if (std.process.getEnvVarOwned(allocator, "ZG_LLM_SAFETENSORS_PATH")) |path| {
-        defer allocator.free(path);
+    if (environ.get("ZG_LLM_SAFETENSORS_PATH")) |path| {
         try load_safetensors_weights(
             allocator,
             path,
@@ -119,7 +120,7 @@ pub fn run_llm_train_demo(
         if (!quiet) {
             log.info("Loaded weights from {s}", .{path});
         }
-    } else |_| {
+    } else {
         log.warn("Using synthetic weights (set ZG_LLM_SAFETENSORS_PATH to use a specific checkpoint)", .{});
         fill_pattern(host_w_emb.as_slice(f32), 1e-3, 0.0);
         fill_pattern(host_w_out.as_slice(f32), 1e-3, 0.0);
@@ -157,7 +158,7 @@ pub fn run_llm_train_demo(
         result.loss.deinit();
     }
 
-    var loop_timer = zg.utils.LoopTimer{ .label = "llm-train", .quiet = quiet };
+    var loop_timer = zg.utils.LoopTimer{ .io = io, .label = "llm-train", .quiet = quiet };
     for (0..steps) |_| {
         try loop_timer.start_step();
         var result = try state.step();

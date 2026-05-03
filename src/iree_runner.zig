@@ -22,12 +22,9 @@ const rt = @import("c/iree/runtime.zig");
 
 const log = std.log.scoped(.@"zg/iree_runner");
 
-pub fn main() !void {
-    const gpa = std.heap.smp_allocator;
-
-    var args = try std.process.argsWithAllocator(gpa);
-    defer args.deinit();
-    _ = args.next(); // skip argv[0]
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const gpa = init.gpa;
 
     var vmfb_path: ?[]const u8 = null;
     var function_name: []const u8 = "module.main";
@@ -35,7 +32,14 @@ pub fn main() !void {
     var input_specs = std.ArrayList([]const u8).empty;
     defer input_specs.deinit(gpa);
 
-    while (args.next()) |arg| {
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
+
+    var args_iter = init.minimal.args.iterate();
+    _ = args_iter.next(); // skip argv[0]
+    while (args_iter.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--function=")) {
             function_name = arg["--function=".len..];
         } else if (std.mem.startsWith(u8, arg, "--driver=")) {
@@ -43,7 +47,7 @@ pub fn main() !void {
         } else if (std.mem.startsWith(u8, arg, "--input=")) {
             try input_specs.append(gpa, arg["--input=".len..]);
         } else if (std.mem.startsWith(u8, arg, "-")) {
-            std.debug.print("unknown option: {s}\n", .{arg});
+            try stderr.print("unknown option: {s}\n", .{arg});
             return error.UnknownOption;
         } else {
             vmfb_path = arg;
@@ -55,7 +59,7 @@ pub fn main() !void {
     }
 
     const path = vmfb_path orelse {
-        std.debug.print(
+        try stderr.writeAll(
             \\usage: iree-runner <vmfb-path> [--function=module.main] [--driver=local-sync] [--input=<spec>...]
             \\
             \\  Input spec format: <dim0>x<dim1>x...x<dtype>[=v0,v1,...]
@@ -63,19 +67,12 @@ pub fn main() !void {
             \\
             \\  Example: iree-runner demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=2x2xf32=2,2,2,2
             \\
-        , .{});
+        );
         return error.MissingArgument;
     };
 
     // Read VMFB.
-    const vmfb = blk: {
-        var file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{})
-        else
-            try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        break :blk try file.readToEndAlloc(gpa, 256 * 1024 * 1024);
-    };
+    const vmfb = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(256 * 1024 * 1024));
     defer gpa.free(vmfb);
 
     log.info("loaded {d} bytes from {s}", .{ vmfb.len, path });
@@ -121,7 +118,7 @@ pub fn main() !void {
     const n_out = rt.list_size(out_list);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch @panic("Flush failed");
 

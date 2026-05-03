@@ -1289,18 +1289,18 @@ pub fn stablehlo_version_from_compatibility_requirement(requirement: c.MlirStabl
         var buf: [32]u8 = undefined;
 
         fn call(req: c.MlirStablehloCompatibilityRequirement) []u8 {
-            var stream = std.io.fixedBufferStream(&buf);
-            var context = .{ .writer = stream.writer() };
+            var w: std.Io.Writer = .fixed(&buf);
+            var context = .{ .writer = &w };
             const WriterContext = @TypeOf(context);
 
             c.stablehlo_version_from_compatibility_requirement(req, (struct {
                 pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.c) void {
                     const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-                    _ = inner_ctx.writer.write(mlir.from_string_ref(mlir_str)) catch unreachable;
+                    inner_ctx.writer.writeAll(mlir.from_string_ref(mlir_str)) catch unreachable;
                 }
             }).callback, &context);
 
-            return buf[0..stream.pos];
+            return w.buffered();
         }
     };
 

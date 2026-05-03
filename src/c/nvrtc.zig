@@ -4,9 +4,7 @@ const std = @import("std");
 
 const log = std.log.scoped(.@"zg/nvrtc_cffi");
 
-const Impl = @cImport({
-    @cInclude("nvrtc.h");
-});
+const Impl = @import("c-nvrtc");
 
 pub const nvrtcProgram = Impl.nvrtcProgram;
 pub const nvrtcResult = Impl.nvrtcResult;

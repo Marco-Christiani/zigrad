@@ -7,9 +7,7 @@ const std = @import("std");
 
 const log = std.log.scoped(.@"zg/tvm_cffi");
 
-const c = @cImport({
-    @cInclude("tvm/ffi/c_api.h");
-});
+const c = @import("c-tvm");
 
 pub const TVMFFIAny = c.TVMFFIAny;
 pub const TVMFFIObjectHandle = c.TVMFFIObjectHandle;

@@ -77,10 +77,37 @@ tasks:
 
   sdk:redist:
     desc: |
-      Build redistributable SDK runtime artifact. Hermetic — ignores local-build-cfg.nix.
+      Build redistributable SDK runtime artifact. Hermetic (ignores local-build-cfg.nix).
       Project defaults apply: portable (no native tuning, fat CUDA arch list, stripped, NDEBUG).
-      Output is suitable for github releases and binary cache distribution.
     cmd: nix build .#zigrad-sdk-full-gpu-runtime --out-link result-redist --print-out-paths {{.CLI_ARGS}}
+
+  sdk:away:
+    desc: Schedule full expensive SDK build while away
+    vars:
+      MemoryMax: 50G # avoid oom kill
+    cmd: |
+      systemd-run --user \
+        --unit=zigrad-build \
+        --on-calendar='07:00' \
+        --working-directory={{.TASKFILE_DIR}} \
+        --property=MemoryMax={{.MemoryMax}} \
+        -- bash -c 'nix build --impure --max-jobs 1 --cores 60 .#zigrad-sdk-full-gpu > /tmp/zigrad-build.log 2>&1'
+      echo "Scheduled. Status: systemctl --user status zigrad-build.timer"
+
+  sdk:background:
+    desc: Build SDK in leaving system usable by capping resource usage
+    vars:
+      CPUWeight: 50
+      MemoryMax: 45G
+      Nice: 5
+      IOWeight: 100 # this is default btw, lower in case of issues
+    cmd: |
+      systemd-run --user --scope \
+        --property=CPUWeight={{.CPUWeight}} \
+        --property=MemoryMax={{.MemoryMax}} \
+        --property=Nice={{.Nice}} \
+        --property=IOWeight={{.IOWeight}} \
+        -- nix build --impure --max-jobs 1 --cores 48 .#zigrad-sdk-full-gpu
 
   check-sdk:
     cmd:
@@ -194,7 +221,7 @@ tasks:
 
   op-coverage:
     desc: Print the op interface coverage matrix (what AD / format / etc each op implements)
-    # `@compileLog` is a hard build failure by design — we swallow the expected
+    # `@compileLog` is a hard build failure by design - we swallow the expected
     # exit code and extract only the coverage rows from the Compile Log block.
     cmds:
       - |
