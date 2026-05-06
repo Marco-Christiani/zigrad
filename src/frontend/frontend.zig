@@ -151,7 +151,7 @@ pub fn trace(
 ///
 /// Controls kernelization, lowering, and diagnostic dump points.
 /// The pipeline is a pass chain:
-///  `[dump_pr] -> [kernelize(store)] -> validate -> lower -> legalize -> [dump_mlir]`
+///  `[dump_pr] -> [kernelize(store)] -> lower -> legalize -> [dump_mlir]`
 pub const CompileOpts = struct {
     lower: lower.LowerPassConfig = .{},
     /// Pre-computed tuning decisions. When set, the pipeline adds a
@@ -162,11 +162,14 @@ pub const CompileOpts = struct {
     dump_optimized: ?pipeline.DumpConfig = null,
     dump_kernels: bool = false,
     compile: Backend.CompileOptions = .{},
+    /// Runner verifier policy. `null` selects the default. Pass `.never`
+    /// to skip verification.
+    verifier_policy: ?pipeline.VerifierPolicy = null,
 };
 
 /// Assemble and run the compilation pipeline, then compile via backend.
 ///
-/// Pipeline: `[dump_pr] -> [kernelize(store)] -> validate -> lower -> legalize -> [dump_mlir]`
+/// Pipeline: `[dump_pr] -> [kernelize(store)] -> lower -> legalize -> [dump_mlir]`
 ///
 /// This is a convenience for the common PR-level path. For MLIR-level
 ///  kernelization or custom pass chains, assemble the pipeline manually.
@@ -205,7 +208,6 @@ pub fn compile_program(
         try passes.append(allocator, kernelize_state.?.pass());
     }
 
-    try passes.append(allocator, pipeline.validate_pass);
     // TODO: this highlights one of the other issues with this function where it crosses abstraction
     //   boundary an directly biases a lowering path. Introduces a hard dependency that, in reality,
     //   we abstracted over.
@@ -222,7 +224,10 @@ pub fn compile_program(
     const pipeline_run = pipeline.Pipeline{ .passes = passes.items };
     var ctx = pipeline.PassContext{ .allocator = allocator, .io = io };
 
-    var artifact = try pipeline_run.run(.{ .pr = program }, &ctx);
+    const run_opts = pipeline.RunOptions{
+        .verifier_policy = opts.verifier_policy orelse pipeline.VerifierPolicy.default,
+    };
+    var artifact = try pipeline_run.run(.{ .pr = program }, &ctx, run_opts);
     defer artifact.deinit(allocator);
 
     // TODO: instead of this, we should extend Backend interface using the Pipeline / Pass pattern

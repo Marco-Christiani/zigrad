@@ -19,6 +19,8 @@ pub const PassContext = pass.PassContext;
 pub const Pass = pass.Pass;
 pub const PassError = pass.PassError;
 pub const Pipeline = pass.Pipeline;
+pub const RunOptions = pass.RunOptions;
+pub const VerifierPolicy = pass.VerifierPolicy;
 
 const dump = @import("pipeline/dump.zig");
 pub const DumpConfig = dump.DumpConfig;
@@ -30,9 +32,6 @@ pub const dump_optimized_program = dump.dump_optimized_program;
 
 pub const kernelize = @import("pipeline/kernelize.zig");
 pub const KernelizePass = kernelize.KernelizePass;
-
-const validate_mod = @import("pipeline/validate.zig");
-pub const validate_pass = validate_mod.validate_pass;
 
 test {
     @import("std").testing.refAllDecls(@This());

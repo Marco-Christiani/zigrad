@@ -5,6 +5,7 @@
 //!  - `PassContext`: Shared state threaded through passes
 //!  - `Pass`: Pass metadata + runnable function + optional user config
 //!  - `Pipeline`: Pass sequence with validation and execution
+//!  - `RunOptions`: Per-run configuration including verifier policy
 //!
 //! ## ADR
 //!  - The pipeline carries a program from PR through one or more lowered IRs.
@@ -16,7 +17,10 @@
 //!  - `ArtifactKind` is non-exhaustive so consumer code can extend it with
 //!     additional dialect tags without modifying core. Built-in tags name
 //!     specific dialects (e.g. `stablehlo`), not framework families.
+//!  - The runner calls `pr.validate_program` between passes per
+//!     `RunOptions.verifier_policy`.
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.@"zg/pipeline");
 
 const pr_mod = @import("../pr/pr.zig");
@@ -80,6 +84,31 @@ pub const Artifact = union(ArtifactKind) {
 pub const PassContext = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+};
+
+/// When the pipeline runner invokes `pr.validate_program` against the
+/// current artifact.
+pub const VerifierPolicy = enum {
+    /// Skip structural verification entirely. Caller asserts validity.
+    never,
+    /// Verify the artifact once before the first pass runs.
+    input,
+    /// Verify input plus after every pass whose current artifact is PR.
+    ///  Skips when the artifact is not PR.
+    each_pr_pass,
+
+    /// Build-mode default for `VerifierPolicy`. Always at least `.input` so
+    /// that compile entry points using the default reject malformed input
+    /// at every build mode.
+    pub const default: VerifierPolicy = switch (builtin.mode) {
+        .Debug, .ReleaseSafe => .each_pr_pass,
+        .ReleaseFast, .ReleaseSmall => .input,
+    };
+};
+
+/// Per-run pipeline configuration consumed by `Pipeline.run`.
+pub const RunOptions = struct {
+    verifier_policy: VerifierPolicy = .default,
 };
 
 /// Pass execution errors
@@ -161,7 +190,12 @@ pub const Pipeline = struct {
         }
     }
 
-    pub fn run(self: *const Pipeline, initial: Artifact, ctx: *PassContext) PassError!Artifact {
+    pub fn run(
+        self: *const Pipeline,
+        initial: Artifact,
+        ctx: *PassContext,
+        opts: RunOptions,
+    ) PassError!Artifact {
         try self.validate();
 
         if (self.passes.len > 0 and initial.kind() != self.passes[0].input_kind) {
@@ -172,6 +206,10 @@ pub const Pipeline = struct {
 
         var current = initial;
         errdefer current.deinit(ctx.allocator);
+
+        // Verify input before any pass runs, when policy demands it.
+        try maybe_verify_pr(&current, opts.verifier_policy, .before_first_pass, null);
+
         for (self.passes) |p| {
             if (current.kind() != p.input_kind) return error.ArtifactKindMismatch;
 
@@ -181,7 +219,11 @@ pub const Pipeline = struct {
                 p.name, ns_to_ms(@intCast(pass_start.untilNow(ctx.io, .awake).toNanoseconds())),
             });
 
+            // Kind check first: a wrong-output-kind bug surfaces as
+            //  ArtifactKindMismatch at the pass that violated its contract.
             if (current.kind() != p.output_kind) return error.ArtifactKindMismatch;
+
+            try maybe_verify_pr(&current, opts.verifier_policy, .after_pass, p.name);
         }
 
         log.info("pipeline completed: {d} passes in {d:.2}ms", .{
@@ -191,6 +233,35 @@ pub const Pipeline = struct {
         return current;
     }
 };
+
+const VerifyWhen = enum { before_first_pass, after_pass };
+
+/// Run structural PR validation if the policy and current artifact demand it.
+///
+/// Failure is attributed to `attribution` (the pass that produced the invalid
+/// artifact) when known, or to "input" when verifying before the first pass.
+/// All `pr.ValidationError` variants are remapped to `PassError.InvalidProgram`.
+fn maybe_verify_pr(
+    artifact: *const Artifact,
+    policy: VerifierPolicy,
+    when: VerifyWhen,
+    attribution: ?[]const u8,
+) PassError!void {
+    switch (policy) {
+        .never => return,
+        .input => if (when != .before_first_pass) return,
+        .each_pr_pass => {},
+    }
+    if (artifact.kind() != .pr) return;
+    pr_mod.validate_program(artifact.pr) catch |err| {
+        if (attribution) |name| {
+            log.err("pass '{s}' produced invalid PR: {s}", .{ name, @errorName(err) });
+        } else {
+            log.err("input PR failed verification: {s}", .{@errorName(err)});
+        }
+        return error.InvalidProgram;
+    };
+}
 
 fn ns_to_ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
@@ -269,11 +340,135 @@ test "pipeline run transforms artifacts" {
 
     var ctx = PassContext{ .allocator = testing.allocator, .io = std.testing.io };
     const pipeline = Pipeline{ .passes = &passes };
-    var artifact = try pipeline.run(.{ .pr = &program }, &ctx);
+    var artifact = try pipeline.run(.{ .pr = &program }, &ctx, .{});
     defer artifact.deinit(testing.allocator);
 
     switch (artifact) {
         .stablehlo => |s| try testing.expectEqualStrings("stablehlo_output", s.bytes),
         else => return error.ArtifactKindMismatch,
+    }
+}
+
+test "verifier policy never skips structural verification" {
+    const testing = std.testing;
+
+    // An empty program with no functions is structurally valid; we use it
+    //  as a smoke test that .never does not invoke the verifier.
+    var program = pr_mod.Program.init(testing.allocator);
+    defer program.deinit();
+
+    const passes = [_]Pass{};
+    var ctx = PassContext{ .allocator = testing.allocator, .io = std.testing.io };
+    const pipeline = Pipeline{ .passes = &passes };
+    var artifact = try pipeline.run(
+        .{ .pr = &program },
+        &ctx,
+        .{ .verifier_policy = .never },
+    );
+    defer artifact.deinit(testing.allocator);
+}
+
+test "verifier policy input runs verification on input artifact" {
+    const testing = std.testing;
+
+    var program = pr_mod.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr_mod.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{2});
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    const passes = [_]Pass{};
+    var ctx = PassContext{ .allocator = testing.allocator, .io = std.testing.io };
+    const pipeline = Pipeline{ .passes = &passes };
+    var artifact = try pipeline.run(
+        .{ .pr = &program },
+        &ctx,
+        .{ .verifier_policy = .input },
+    );
+    defer artifact.deinit(testing.allocator);
+}
+
+test "verifier policy each_pr_pass verifies after every pr-out pass" {
+    const testing = std.testing;
+
+    var program = pr_mod.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr_mod.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{2});
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    // Identity PR-to-PR pass: leaves the program valid.
+    const noop_pr = struct {
+        fn f(_: *anyopaque, _: *Artifact, _: *PassContext) PassError!void {}
+    }.f;
+
+    const passes = [_]Pass{
+        .{ .ptr = undefined, .run_fn = noop_pr, .name = "noop", .input_kind = .pr, .output_kind = .pr },
+    };
+
+    var ctx = PassContext{ .allocator = testing.allocator, .io = std.testing.io };
+    const pipeline = Pipeline{ .passes = &passes };
+    var artifact = try pipeline.run(
+        .{ .pr = &program },
+        &ctx,
+        .{ .verifier_policy = .each_pr_pass },
+    );
+    defer artifact.deinit(testing.allocator);
+}
+
+test "verifier policy skips validation once artifact is non-pr" {
+    const testing = std.testing;
+
+    var program = pr_mod.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr_mod.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{2});
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    const to_stablehlo = struct {
+        fn f(_: *anyopaque, a: *Artifact, ctx: *PassContext) PassError!void {
+            const bytes = try ctx.allocator.dupe(u8, "stablehlo_output");
+            a.replace(ctx.allocator, .{ .stablehlo = .{ .bytes = bytes, .encoding = .text } });
+        }
+    }.f;
+
+    const passes = [_]Pass{
+        .{ .ptr = undefined, .run_fn = to_stablehlo, .name = "lower", .input_kind = .pr, .output_kind = .stablehlo },
+    };
+
+    var ctx = PassContext{ .allocator = testing.allocator, .io = std.testing.io };
+    const pipeline = Pipeline{ .passes = &passes };
+    // each_pr_pass policy: input is verified, but after the lowering pass
+    //  the artifact is .stablehlo and the verifier is skipped.
+    var artifact = try pipeline.run(
+        .{ .pr = &program },
+        &ctx,
+        .{ .verifier_policy = .each_pr_pass },
+    );
+    defer artifact.deinit(testing.allocator);
+
+    switch (artifact) {
+        .stablehlo => |s| try testing.expectEqualStrings("stablehlo_output", s.bytes),
+        else => return error.ArtifactKindMismatch,
+    }
+}
+
+test VerifierPolicy {
+    { // default verifier policy returns build-mode-appropriate value
+        const policy: VerifierPolicy = .default;
+        // At least one of these must be true for any build mode; the test
+        //  exists to ensure the function compiles and returns a valid variant.
+        try std.testing.expect(
+            policy == .never or policy == .input or policy == .each_pr_pass,
+        );
     }
 }

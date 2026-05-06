@@ -40,8 +40,7 @@ const xla_api_version_typed_ffi: i64 = 4;
 /// At the pass boundary, this entire set is remapped to
 ///  `PassError.LoweringFailed` with a log line.
 ///
-/// Callers that want upfront validation should run `validate_pass` before
-///  lowering. Lowering assumes valid PR input.
+/// Lowering assumes structurally valid PR input.
 pub const LowerError = mlir.Error || std.Io.Writer.Error || error{InvalidProgram};
 
 /// Callback type for dialect-specific op translation.
