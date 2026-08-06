@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./website/nuxt-content/public/api/zg-logo.svg" width=350>
+  <img src="./assets/zg-logo.svg" width=350>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 Zigrad is a deep learning and ML compiler framework. Rather than tying you to a single runtime, Zigrad lowers your program to [MLIR](https://mlir.llvm.org/) and dispatches through pluggable backends and kernel providers, giving you a clear path from high-level model definition to hardware-optimized execution.
 
 <p align="center">
-  <img src="./website/nuxt-content/app/components/zigrad-pipeline.svg" width=700>
+  <img src="./assets/zigrad-pipeline.svg" width=700>
 </p>
 
 ## Features

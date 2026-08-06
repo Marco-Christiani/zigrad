@@ -82,9 +82,9 @@
        STYLES
        ============================================================ -->
   <style>
-    /* Fallback values for standalone rendering (e.g. GitHub README).
-       svg:root only matches when the SVG is the document root, so these
-       do not interfere when the SVG is rendered inline via vite-svg-loader. */
+    /* Fallback values for standalone rendering such as a GitHub README.
+       svg:root only matches when the SVG is the document root. The parent
+       component supplies the variables when the SVG is embedded inline. */
     svg:root {
       --diagram-bg: #f1f5f9;
       --diagram-glow: #bfdbfe;

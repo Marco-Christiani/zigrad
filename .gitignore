@@ -3,6 +3,7 @@
 *.so
 *.png
 *.svg
+!assets/*.svg
 *.d2
 *.log
 .*vim*
