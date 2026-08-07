@@ -1,7 +1,7 @@
 # nix/xla-mlir-stablehlo-capi-sdk.nix
 #
 # Builds the StableHLO C API against a pre-built LLVM/MLIR (from llvm.nix).
-# Sources are provided as flake inputs (xlaSrc, stablehloSrc).
+# Sources come from the demand-driven external dependency snapshot.
 # XLA patches for StableHLO are applied from xlaSrc/third_party/.
 {
   lib,
@@ -21,8 +21,9 @@
   libffi,
   lld,
   binutils,
-  # Flake source inputs.
+  # Source inputs.
   xlaSrc,
+  xlaRevision,
   stablehloSrc,
   # Pre-built LLVM/MLIR from llvm.nix (shared with TVM).
   llvm,
@@ -74,7 +75,7 @@
 in
   stdenv.mkDerivation {
     pname = "xla-mlir-stablehlo-capi-sdk";
-    version = "xla-${xlaSrc.shortRev or "unknown"}";
+    version = "xla-${builtins.substring 0 7 xlaRevision}";
 
     # out: headers + minimal (DT_NEEDED) lib closure for runtime use.
     # dev: full lib closure (all StableHLO + LLVM/MLIR libs) for header

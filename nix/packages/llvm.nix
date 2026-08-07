@@ -22,6 +22,7 @@
   # Source inputs.
   xlaSrc,
   llvmSrc,
+  llvmRevision,
   # Retain debug information in a RelWithDebInfo build.
   withDebugSymbols ? false,
   # Emit host-specific CPU instructions in LLVM libraries.
@@ -61,7 +62,7 @@
 in
   stdenv.mkDerivation {
     pname = "llvm";
-    version = "22.0git-${llvmSrc.shortRev or "unknown"}";
+    version = "22.0git-${builtins.substring 0 7 llvmRevision}";
 
     src = patchedLlvmSrc;
 

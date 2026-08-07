@@ -1,0 +1,73 @@
+{
+  "iree": {
+    "hash": "sha256-1DxBnX2ZTZqnU6NUHxGBnBnl0b7Kl+6ygTKKDyMNQQw=",
+    "owner": "iree-org",
+    "repo": "iree",
+    "rev": "776210bd36896f8ca14288637592a9d5cebfcea1",
+    "type": "github"
+  },
+  "iree_benchmark": {
+    "hash": "sha256-Mm4pG7zMB00iof32CxreoNBFnduPZTMp3reHMCIAFPQ=",
+    "owner": "google",
+    "repo": "benchmark",
+    "rev": "192ef10025eb2c4cdd392bc502f0c852196baa48",
+    "type": "github"
+  },
+  "iree_flatcc": {
+    "hash": "sha256-umZ9TvNYDZtF/mNwQUGuhAGve0kPw7uXkaaQX0EzkBY=",
+    "owner": "dvidelabs",
+    "repo": "flatcc",
+    "rev": "9362cd00f0007d8cbee7bff86e90fb4b6b227ff3",
+    "type": "github"
+  },
+  "iree_llvm": {
+    "hash": "sha256-bEGgQ5ODu0qNkhj4XLVPx7M+RnWpWOmWSp1yC2Hb95Q=",
+    "owner": "iree-org",
+    "repo": "llvm-project",
+    "rev": "c95bd0bba5be9710292ce3a29832b67a0e33f887",
+    "type": "github"
+  },
+  "iree_stablehlo": {
+    "hash": "sha256-6pc9A54vjDEafYXSAIT0gxss7LNfNTATZnOGzGiM0FI=",
+    "owner": "iree-org",
+    "repo": "stablehlo",
+    "rev": "6fabd27b15885179a3b6a601ea1e4171f2ed2c91",
+    "type": "github"
+  },
+  "llvm": {
+    "hash": "sha256-kt+SJeJe0vbDQjAw20PgC9iURhcq3IrruNLYLYND9n0=",
+    "owner": "llvm",
+    "repo": "llvm-project",
+    "rev": "8f264586d7521b0e305ca7bb78825aa3382ffef7",
+    "type": "github"
+  },
+  "mirage": {
+    "hash": "sha256-1AXdzUkXUmW3tqsEBYgF+GlMrDuKsK7oYL3Y/mf22C0=",
+    "source_root": "mirage-ffe38dff251017cdddeb1891cc808b43e7f51f25",
+    "url": "https://github.com/mirage-project/mirage/archive/ffe38dff251017cdddeb1891cc808b43e7f51f25.tar.gz",
+    "rev": "ffe38dff251017cdddeb1891cc808b43e7f51f25",
+    "type": "url"
+  },
+  "stablehlo": {
+    "hash": "sha256-QfX+k/BWBTtBT2gq5wcNyz098w7cmQnFgwlepeS5aBs=",
+    "owner": "openxla",
+    "repo": "stablehlo",
+    "rev": "1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f",
+    "type": "github"
+  },
+  "tvm": {
+    "fetch_submodules": true,
+    "hash": "sha256-KcHUcblwtqxNofHKofuQHu2d7hIqS9FUvc41OkCVtnY=",
+    "owner": "apache",
+    "repo": "tvm",
+    "rev": "v0.22.0",
+    "type": "github"
+  },
+  "xla": {
+    "hash": "sha256-pvZ3ARzv/fjPYVcq5wrH3tH1kgU88dFp7Q1w1lA8H2c=",
+    "owner": "openxla",
+    "repo": "xla",
+    "rev": "913ae2eaa3cb88971003592a90959685a78c9e30",
+    "type": "github"
+  }
+}

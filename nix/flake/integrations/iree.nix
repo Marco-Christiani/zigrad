@@ -1,7 +1,9 @@
 {
   pkgs,
   ireeSrc,
+  ireeRevision,
   ireeLlvmSrc,
+  ireeLlvmRevision,
   ireeStablehloSrc,
   ireeFlatccSrc,
   ireeBenchmarkSrc,
@@ -12,12 +14,13 @@
   extraLdFlags,
 }: let
   ireeLlvm = pkgs.callPackage ../../packages/iree/llvm.nix {
-    inherit ireeLlvmSrc withDebugSymbols enableLto extraCxxFlags extraLdFlags;
+    inherit ireeLlvmSrc ireeLlvmRevision withDebugSymbols enableLto extraCxxFlags extraLdFlags;
     withNativeTuning = false;
   };
   ireeCompiler = pkgs.callPackage ../../packages/iree/compiler.nix {
     inherit
       ireeSrc
+      ireeRevision
       ireeStablehloSrc
       ireeFlatccSrc
       ireeBenchmarkSrc
@@ -32,6 +35,7 @@
   ireeRuntime = pkgs.callPackage ../../packages/iree/runtime.nix {
     inherit
       ireeSrc
+      ireeRevision
       ireeStablehloSrc
       ireeFlatccSrc
       ireeBenchmarkSrc

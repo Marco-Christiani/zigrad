@@ -3,8 +3,10 @@
   perSystem = {
     pkgs,
     config,
+    cudaCfg,
     ...
   }: let
+    externalSources = import ../external-sources.nix {inherit pkgs;};
     cudaToolkit = config.packages.cuda-redist-dev;
     genClangd = pkgs.writeShellScriptBin "gen-clangd" ''
       set -euo pipefail
@@ -66,22 +68,47 @@
       '';
     };
 
-    resolveVersions = pkgs.writeShellApplication {
-      name = "resolve-versions";
-      runtimeInputs = [pkgs.git pkgs.python3];
+    updateCudaCatalog = pkgs.writeShellApplication {
+      name = "update-cuda-catalog";
+      runtimeInputs = [pkgs.python3];
       text = ''
-        exec python3 ${../../scripts/resolve-versions.py} "$@"
+        export PYTHONPATH=${../../scripts}
+        exec python3 ${../../scripts/update_cuda_catalog.py} \
+          --xla-src ${externalSources.xla.src} \
+          --cuda-version ${cudaCfg.cudaVersion} \
+          --cudnn-version ${cudaCfg.cudnnVersion} \
+          --nvshmem-version ${cudaCfg.nvshmemVersion} \
+          --nccl-version ${cudaCfg.ncclVersion} \
+          "$@"
+      '';
+    };
+
+    checkDependencySnapshot = pkgs.writeShellApplication {
+      name = "check-dependency-snapshot";
+      runtimeInputs = [pkgs.python3];
+      text = ''
+        export PYTHONPATH=${../../scripts}
+        exec python3 ${../../scripts/check_dependency_snapshot.py} \
+          --repo "$PWD" \
+          --xla-src ${externalSources.xla.src} \
+          "$@"
       '';
     };
   in {
     packages = {
+      check-dependency-snapshot = checkDependencySnapshot;
       check-sdk = checkSdk;
       gen-clangd = genClangd;
       gen-nvim = genNvim;
-      resolve-versions = resolveVersions;
+      update-cuda-catalog = updateCudaCatalog;
     };
 
     apps = {
+      check-dependency-snapshot = {
+        type = "app";
+        program = "${checkDependencySnapshot}/bin/check-dependency-snapshot";
+        meta.description = "Validate the external dependency snapshot";
+      };
       gen-clangd = {
         type = "app";
         program = "${genClangd}/bin/gen-clangd";
@@ -102,10 +129,10 @@
         program = "${checkSdk}/bin/check-sdk";
         meta.description = "Inspect external input ELF dependencies";
       };
-      resolve-versions = {
+      update-cuda-catalog = {
         type = "app";
-        program = "${resolveVersions}/bin/resolve-versions";
-        meta.description = "Resolve a candidate external dependency set";
+        program = "${updateCudaCatalog}/bin/update-cuda-catalog";
+        meta.description = "Update exact CUDA redistributable catalog entries";
       };
     };
   };

@@ -1,7 +1,7 @@
 # nix/flake/devshells.nix
 #
 # Development shells for fast iteration with relaxed hermeticity.
-{inputs, ...}: {
+{
   perSystem = {
     pkgs,
     config,
@@ -9,6 +9,7 @@
     zigradBuildConfigurations,
     ...
   }: let
+    externalSources = import ../external-sources.nix {inherit pkgs;};
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
 
@@ -82,8 +83,8 @@
         #  to runtimepath to get LLVM's official syntax/indent/ftplugin/ftdetect
         #  files for .mlir/.ll/.td (handles StableHLO-style assembly that the
         #  community tree-sitter grammar chokes on).
-        ZG_MLIR_VIM_RT = "${inputs.llvmSrc}/mlir/utils/vim";
-        ZG_LLVM_VIM_RT = "${inputs.llvmSrc}/llvm/utils/vim";
+        ZG_MLIR_VIM_RT = "${externalSources.llvm.src}/mlir/utils/vim";
+        ZG_LLVM_VIM_RT = "${externalSources.llvm.src}/llvm/utils/vim";
       };
   in {
     devShells = {

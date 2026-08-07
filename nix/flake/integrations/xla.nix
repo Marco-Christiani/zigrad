@@ -2,8 +2,11 @@
   pkgs,
   lib,
   cudaCfg,
+  cudaRuntime,
+  mkCudaPackage,
   cudaArchitectures,
   xlaSrc,
+  xlaRevision,
   stablehloSrc,
   llvm,
   withDebugSymbols,
@@ -13,6 +16,20 @@
   extraLdFlags,
   extraBazelFlags,
 }: let
+  xlaCudaRuntime = mkCudaPackage {
+    componentNames = [
+      "cuda_cupti"
+      "cuda_nvcc"
+      "cudnn"
+      "libcublas"
+      "libcufft"
+      "libcusparse"
+      "libnvshmem"
+      "nccl"
+    ];
+    componentDependencies = [cudaRuntime];
+    nameSuffix = "-xla-runtime";
+  };
   # PJRT + XLA FFI headers are a pure source copy.
   pjrtHeaders = pkgs.runCommand "pjrt-xla-ffi-headers" {} ''
     mkdir -p $out/include/xla/pjrt/c $out/include/xla/ffi/api
@@ -30,7 +47,7 @@
   '';
 
   xlaMlirStablehloCapiSdk = pkgs.callPackage ../../packages/xla-mlir-stablehlo-capi-sdk.nix {
-    inherit xlaSrc stablehloSrc llvm withDebugSymbols enableLto extraCxxFlags extraLdFlags;
+    inherit xlaSrc xlaRevision stablehloSrc llvm withDebugSymbols enableLto extraCxxFlags extraLdFlags;
     withNativeTuning = false;
   };
 
@@ -52,7 +69,7 @@
   };
 
   xlaPjrtPlugins = pkgs.callPackage ../../packages/xla-pjrt-runtime-bazel.nix {
-    inherit xlaSrc withDebugSymbols enableLto extraBazelFlags;
+    inherit xlaSrc xlaRevision withDebugSymbols enableLto extraBazelFlags;
     cudaSupport = false;
     cpuMathLibrary = "onednn";
     cpuNativeTuning = withNativeTuning;
@@ -60,7 +77,7 @@
   };
 
   xlaPjrtPluginsCuda = pkgs.callPackage ../../packages/xla-pjrt-runtime-bazel.nix {
-    inherit xlaSrc withDebugSymbols enableLto extraBazelFlags cudaArchitectures;
+    inherit xlaSrc xlaRevision withDebugSymbols enableLto extraBazelFlags cudaArchitectures;
     inherit (cudaCfg) cudaVersion;
     cudaSupport = true;
     cpuMathLibrary = "onednn-thunk";
@@ -75,6 +92,7 @@ in {
     xlaPjrtPlugins
     xlaPjrtPluginsCuda
     xlaProtos
+    xlaCudaRuntime
     zigradMlirExt
     ;
 }

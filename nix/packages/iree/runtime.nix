@@ -14,6 +14,7 @@
   ncurses,
   libffi,
   ireeSrc,
+  ireeRevision,
   ireeStablehloSrc,
   ireeFlatccSrc,
   ireeBenchmarkSrc,
@@ -28,7 +29,7 @@
 }:
 stdenv.mkDerivation {
   pname = "iree-runtime";
-  version = "iree-${ireeSrc.shortRev or "unknown"}";
+  version = "iree-${builtins.substring 0 7 ireeRevision}";
 
   # Source assembly happens in `buildPhase` because each submodule is pinned.
   dontUnpack = true;

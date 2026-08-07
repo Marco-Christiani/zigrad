@@ -10,6 +10,7 @@
   enableLto,
   extraCxxFlags,
   extraLdFlags,
+  source,
 }: let
   tvm = pkgs.callPackage ../../packages/tvm.nix {
     inherit
@@ -24,6 +25,8 @@
       extraLdFlags
       ;
     inherit cudaRuntime;
+    inherit (source) src;
+    version = source.rev;
     cudaSupport = true;
   };
   tvmFullDev = pkgs.callPackage ../../packages/tvm.nix {
@@ -39,6 +42,8 @@
       extraLdFlags
       ;
     inherit cudaRuntime;
+    inherit (source) src;
+    version = source.rev;
     cudaSupport = true;
     withPythonBindings = true;
   };
@@ -52,6 +57,8 @@
       extraCxxFlags
       extraLdFlags
       ;
+    inherit (source) src;
+    version = source.rev;
     cudaSupport = false;
   };
 in {

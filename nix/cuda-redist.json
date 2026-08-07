@@ -206,42 +206,5 @@
       "nccl_version": "2.27.7",
       "nvshmem_version": "3.2.5"
     }
-  },
-  "generated_at_utc": "2026-03-08T01:09:16.037196+00:00",
-  "iree": {
-    "commit": "776210bd36896f8ca14288637592a9d5cebfcea1",
-    "llvm": {
-      "commit": "c95bd0bba5be9710292ce3a29832b67a0e33f887",
-      "url": "github:iree-org/llvm-project/c95bd0bba5be9710292ce3a29832b67a0e33f887"
-    },
-    "stablehlo": {
-      "commit": "6fabd27b15885179a3b6a601ea1e4171f2ed2c91",
-      "url": "github:iree-org/stablehlo/6fabd27b15885179a3b6a601ea1e4171f2ed2c91"
-    }
-  },
-  "xla": {
-    "commit": "913ae2eaa3cb88971003592a90959685a78c9e30",
-    "cuda_defaults": {
-      "cuda": "12.9.1",
-      "cudnn": "9.8.0",
-      "nvshmem": "3.2.5"
-    },
-    "llvm": {
-      "commit": "8f264586d7521b0e305ca7bb78825aa3382ffef7",
-      "hash_sri": "sha256-V4TEr5TKuma8jEYOB+Ii91Hk9MnbnEWzpo/1U3nPWH0=",
-      "sha256_hex": "5784c4af94caba66bc8c460e07e222f751e4f4c9db9c45b3a68ff55379cf587d",
-      "urls": [
-        "https://storage.googleapis.com/mirror.tensorflow.org/github.com/llvm/llvm-project/archive/8f264586d7521b0e305ca7bb78825aa3382ffef7.tar.gz",
-        "https://github.com/llvm/llvm-project/archive/8f264586d7521b0e305ca7bb78825aa3382ffef7.tar.gz"
-      ]
-    },
-    "stablehlo": {
-      "commit": "1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f",
-      "hash_sri": "sha256-gYyVGtC6CsbCbT7QH+2Pmg5cqT9a7TUAX3Xw+vEb37A=",
-      "sha256_hex": "818c951ad0ba0ac6c26d3ed01fed8f9a0e5ca93f5aed35005f75f0faf11bdfb0",
-      "urls": [
-        "https://github.com/openxla/stablehlo/archive/1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f.zip"
-      ]
-    }
   }
 }

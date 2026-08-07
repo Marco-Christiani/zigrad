@@ -1,7 +1,6 @@
 {
   lib,
   stdenv,
-  fetchFromGitHub,
   cmake,
   ninja,
   python3,
@@ -45,9 +44,8 @@
   enableLto ? false,
   extraCxxFlags ? [],
   extraLdFlags ? [],
-  tvmSrcOverride ? null,
-  tvmRev ? "v0.22.0",
-  tvmHash ? "sha256-KcHUcblwtqxNofHKofuQHu2d7hIqS9FUvc41OkCVtnY=",
+  src,
+  version,
 }: let
   boolToCmake = v:
     if v
@@ -71,25 +69,12 @@
     if useCustomLlvm
     then "${llvm}/bin/llvm-config" # Shared linking
     else "${llvmPackages.llvm.dev}/bin/llvm-config --link-static"; # Static isolation
-
-  src =
-    if tvmSrcOverride != null
-    then tvmSrcOverride
-    else
-      fetchFromGitHub {
-        owner = "apache";
-        repo = "tvm";
-        rev = tvmRev;
-        hash = tvmHash;
-        fetchSubmodules = true;
-      };
 in
   assert lib.assertMsg (!cudaSupport || cudaToolkit != null) "tvm: cudaSupport=true requires cudaToolkit";
   assert lib.assertMsg (llvm != null || llvmPackages != null) "tvm: requires either llvm or llvmPackages";
     stdenv.mkDerivation {
       pname = "tvm";
-      version = tvmRev;
-      inherit src;
+      inherit src version;
       outputs = ["out" "dev"];
 
       strictDeps = true;

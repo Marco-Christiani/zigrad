@@ -16,25 +16,25 @@
   # Valid values: "cuda12" | "cuda13"
   pjrtCudaTrack ? null,
   cudaArchitectures ? null,
-  # XLA source (flake input).
+  # XLA source and its selected revision.
   xlaSrc,
+  xlaRevision,
   depsHash,
   # CPU math library for the PJRT CPU plugin.
   #   "eigen"        - Eigen + XNNPACK only (default).
   #   "onednn"       - open-source oneDNN v3.7.3, JIT contraction kernel, threadpool.
   #   "onednn-thunk" - onednn + compiler rewrites eligible ops to oneDNN thunks (dev branch).
   #   "onednn-omp"   - same as "onednn" but uses OpenMP (libiomp5) instead of threadpool.
-  #                    Note: the old proprietary MKL-ML BLAS blobs have been removed from XLA;
-  #                    this variant only differs in threading model. Threadpool is generally
-  #                    preferred (avoids oversubscription with Eigen's threadpool).
+  #                    This variant differs only in threading model. Threadpool avoids
+  #                    oversubscription with Eigen's threadpool.
   cpuMathLibrary ? "eigen",
   # Emit -march=native -mavx2 -mfma for both target and host.
   cpuNativeTuning ? false,
   # When true: pass --copt=-g to bazel, retain DWARF, don't strip.
   # When false (default, production): bazel -c opt only, stripped.
   withDebugSymbols ? false,
-  # LTO via bazel: --features=thin_lto. Currently passed but XLA's bazel
-  #  rules may reject it depending on the target; if so, bazel just warns.
+  # LTO uses Bazel's --features=thin_lto. Some XLA targets reject the feature
+  #  with a warning.
   enableLto ? false,
   # Extra build flags appended to bazelBuildFlags. Use for one-off
   #  experiments (e.g. ["--copt=-funroll-loops"]).
@@ -114,7 +114,7 @@
   # -- oneDNN flags --------------------------------------------------------
   # build_with_mkl:          compile oneDNN sources, set XLA_ONEDNN / ENABLE_ONEDNN_V3 macros.
   # enable_mkl:              activate runtime paths (ENABLE_MKL). Without this, oneDNN compiles but is inert.
-  # build_with_mkl_opensource: exclude proprietary MKL-ML blobs; only open-source oneDNN.
+  # build_with_mkl_opensource: include only open-source oneDNN.
   # build_with_openmp:       oneDNN uses OpenMP (links libiomp5). Omit -> threadpool.
   # build_with_onednn_async: async thunk runtime (ENABLE_ONEDNN_ASYNC). Required for
   #                          IsOneDnnCompatible() -> compiler rewrites ops to __onednn$* custom calls.
@@ -148,9 +148,7 @@
         ${asyncFlags}
       '';
 
-      # OpenMP threading variant. Only differs from "onednn" in threading model
-      # (libiomp5 vs Eigen threadpool). The old proprietary MKL-ML BLAS blobs
-      # have been removed from XLA; intel_binary_blob now just provides libiomp5.
+      # OpenMP uses libiomp5 instead of the Eigen threadpool.
       "onednn-omp" = ''
         ${onednnBaseFlags}
         build --define=build_with_openmp=true
@@ -414,7 +412,7 @@ in
 
       buildAttrs = {
         pname = "xla-pjrt-plugins";
-        version = "xla-${xlaSrc.shortRev or "unknown"}";
+        version = "xla-${builtins.substring 0 7 xlaRevision}";
         src = xlaSrc;
 
         nativeBuildInputs = [
@@ -502,7 +500,7 @@ in
 
           # Provenance
           cat > "$out/runtime/PROVENANCE.json" <<EOF
-          ${builtins.toJSON {xla-rev = xlaSrc.rev or xlaSrc.shortRev or "unknown";}}
+          ${builtins.toJSON {xla-rev = xlaRevision;}}
           EOF
           mkdir -p "$out/runtime/logs"
           cp -v ./bazel-config.json "$out/runtime/BAZEL_CONFIG.json"

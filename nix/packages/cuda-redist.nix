@@ -1,7 +1,7 @@
 # nix/packages/cuda-redist.nix
 #
-# Pure-fetch derivation that downloads CUDA redistributable tarballs from NVIDIA's CDN
-#  and assembles two layouts:
+# Assembles selected CUDA redistributable components into runtime and development
+#  layouts. Callers choose the component set and which layout receives files.
 #
 #  out (runtime layout, composed into CUDA runtime closures):
 #    $out/runtime/nvidia/<component>/lib/*.so*
@@ -9,15 +9,13 @@
 #    $out/runtime/nvidia/nvvm/libdevice/
 #    $out/runtime/sys/lib/{libstdc++.so.6,libgcc_s.so.1,libz.so.1}
 #
-#  dev (cudatoolkit-style layout, consumed by build-time tooling - tvm, zig
-#  build, devshell):
+#  dev (CUDA toolkit layout consumed by TVM, Zig builds, and development shells):
 #    $dev/bin/{nvcc,ptxas,nvlink,cicc}
 #    $dev/include/             - flat header tree from all components
 #    $dev/lib/*.so*            - flat lib tree
 #    $dev/lib/stubs/libcuda.so - driver stub for sandbox link
 #    $dev/nvvm/libdevice/
 #
-# Decoupled from the Bazel build - these are pre-built NVIDIA binaries.
 {
   lib,
   stdenv,
@@ -27,31 +25,22 @@
   file,
   zlib,
   unzip,
-  # CUDA version to resolve from nix/versions.json (e.g. "12.8.1", "12.9.1").
+  # CUDA version recorded in nix/cuda-redist.json.
   cudaVersion,
+  componentNames,
+  includeDevelopmentFiles ? false,
+  includeRuntimeFiles ? true,
+  includeSystemRuntime ? false,
+  componentDependencies ? [],
+  nameSuffix ? "",
 }: let
-  versionsJson = builtins.fromJSON (builtins.readFile ../versions.json);
-
-  availableVersions = builtins.attrNames versionsJson.cuda;
-
-  # Find the best matching version: try exact match first, then prefix match
-  # picking the newest patch release via semantic version comparison.
-  resolvedVersion = let
-    exact = versionsJson.cuda.${cudaVersion} or null;
-    prefixMatches = builtins.filter (v: lib.hasPrefix cudaVersion v) availableVersions;
-    bestPrefix =
-      if builtins.length prefixMatches > 0
-      then builtins.head (builtins.sort (a: b: lib.versionOlder b a) prefixMatches)
-      else null;
-  in
-    if exact != null
-    then cudaVersion
-    else if bestPrefix != null
-    then bestPrefix
-    else throw "CUDA version ${cudaVersion} not found in nix/versions.json. Available: ${builtins.concatStringsSep ", " availableVersions}";
-
-  cudaEntry = versionsJson.cuda.${resolvedVersion};
-  components = cudaEntry.components;
+  catalog = builtins.fromJSON (builtins.readFile ../cuda-redist.json);
+  availableVersions = builtins.attrNames catalog.cuda;
+  cudaEntry =
+    catalog.cuda.${cudaVersion}
+    or (throw "CUDA version ${cudaVersion} not found in nix/cuda-redist.json. Available: ${builtins.concatStringsSep ", " availableVersions}");
+  missingComponents = builtins.filter (name: !(builtins.hasAttr name cudaEntry.components)) componentNames;
+  components = lib.getAttrs componentNames cudaEntry.components;
 
   fetchComponent = name: comp:
     fetchurl {
@@ -67,16 +56,27 @@
   fetched = builtins.mapAttrs fetchComponent components;
 
   hasNccl = components ? nccl && components.nccl.kind == "wheel";
+  hasComponent = name: builtins.elem name componentNames;
+  developmentRequiredFiles =
+    lib.optionals (hasComponent "cuda_nvcc") [
+      "$dev/bin/nvcc"
+      "$dev/bin/cudafe++"
+      "$dev/nvvm/bin/cicc"
+    ]
+    ++ lib.optionals (hasComponent "cuda_cudart") [
+      "$dev/lib/libcudart.so"
+      "$dev/lib/libcudart_static.a"
+      "$dev/lib/libcudadevrt.a"
+      "$dev/lib/stubs/libcuda.so"
+    ]
+    ++ lib.optional (hasComponent "cuda_nvrtc") "$dev/lib/libnvrtc.so"
+    ++ lib.optional (hasComponent "cuda_cccl") "$dev/include/nv/target";
 
-  # Link-time allowlist for $dev/lib. Anything not listed is shipped only in
-  #  $out (runtime layout) and must be loaded via LD_LIBRARY_PATH or the
-  #  consumer's runtime rpath. Keeps $dev small (~500MB instead of ~14GiB).
+  # Link-time allowlist for $dev/lib. Runtime libraries outside this set remain
+  #  in the runtime output selected by the caller.
   #
-  # Includes:
-  # - libcudart and static dependencies used by CMake's CUDA toolchain probe
-  # - libnvrtc family used for runtime kernel compilation
-  # - stubs/libcuda.so, the build-time driver stub, with the real driver loaded at
-  #   runtime via NixOS's /run/opengl-driver).
+  # This set covers CMake's CUDA probe, NVRTC compilation, and the driver stub
+  #  used for sandboxed linking.
   devLinkTimeLibPattern = lib.concatStringsSep "|" [
     "libcudart.so*"
     "libcudart_static.a"
@@ -87,221 +87,190 @@
     "libnvJitLink.so*"
   ];
 in
-  stdenv.mkDerivation {
-    pname = "cuda-redist";
-    version = cudaVersion;
+  assert lib.assertMsg
+  (missingComponents == [])
+  "CUDA ${cudaVersion} lacks components: ${builtins.concatStringsSep ", " missingComponents}";
+    stdenv.mkDerivation {
+      pname = "cuda-redist${nameSuffix}";
+      version = cudaVersion;
 
-    outputs = ["out" "dev"];
+      outputs = ["out" "dev"];
 
-    dontUnpack = true;
-    # The dev output ships nvcc and headers via `bin/` + `include/` at output
-    #  root, which the stdenv multi-output hook would otherwise relocate. We
-    #  populate $dev directly with the canonical cudatoolkit-style layout, so
-    #  disable the hook to keep our placement.
-    setOutputFlags = false;
+      dontUnpack = true;
+      # The dev output ships nvcc and headers via `bin/` + `include/` at output
+      #  root, which the stdenv multi-output hook would otherwise relocate. We
+      #  populate $dev directly with the canonical cudatoolkit-style layout, so
+      #  disable the hook to keep our placement.
+      setOutputFlags = false;
 
-    nativeBuildInputs =
-      [patchelf autoPatchelfHook file]
-      ++ lib.optionals hasNccl [unzip];
+      nativeBuildInputs =
+        [patchelf autoPatchelfHook file]
+        ++ lib.optionals hasNccl [unzip];
 
-    # autoPatchelfHook scans every ELF in $out and $dev, resolves NEEDED libs
-    #  against buildInputs, and rewrites RPATH without breaking version_r.
-    #  Required for nvcc et al. which encode GLIBC version requirements that
-    #  manual patchelf --set-rpath silently corrupts.
-    buildInputs = [stdenv.cc.cc.lib stdenv.cc.libc zlib];
+      # autoPatchelfHook owns interpreter and RPATH updates for the packaged
+      #  NVIDIA binaries so versioned symbol requirements remain intact.
+      buildInputs = [stdenv.cc.cc.lib stdenv.cc.libc zlib] ++ componentDependencies;
 
-    # nvshmem ships optional bootstrap and transport plugins.
-    #
-    # The runtime closure uses none of these plugins. Ignore their dependencies
-    #  while retaining the core nvshmem library.
-    autoPatchelfIgnoreMissingDeps = [
-      "libmpi.so.40"
-      "libpmix.so.2"
-      "liboshmem.so.40"
-      "libmlx5.so.1"
-      "libfabric.so.1"
-      "libucs.so.0"
-      "libucp.so.0"
-    ];
+      # nvshmem ships optional bootstrap and transport plugins.
+      #
+      # The runtime closure uses none of these plugins. Ignore their dependencies
+      #  while retaining the core nvshmem library.
+      autoPatchelfIgnoreMissingDeps = [
+        "libmpi.so.40"
+        "libpmix.so.2"
+        "liboshmem.so.40"
+        "libmlx5.so.1"
+        "libfabric.so.1"
+        "libucs.so.0"
+        "libucp.so.0"
+      ];
 
-    installPhase = ''
-      set -eo pipefail
-      mkdir -p "$out/runtime/sys/lib"
-      mkdir -p "$dev/bin" "$dev/include" "$dev/lib/stubs" "$dev/nvvm"
+      installPhase = ''
+        set -eo pipefail
+        mkdir -p "$out/runtime/nvidia" "$out/lib"
+        mkdir -p "$dev/bin" "$dev/include" "$dev/lib/stubs" "$dev/nvvm"
 
-      # System libs (self-contained runtime layout in out only).
-      cp -v ${stdenv.cc.cc.lib}/lib/libstdc++.so.6 "$out/runtime/sys/lib/"
-      cp -v ${stdenv.cc.cc.lib}/lib/libgcc_s.so.1 "$out/runtime/sys/lib/"
-      cp -v ${zlib}/lib/libz.so.1 "$out/runtime/sys/lib/"
+        ${lib.optionalString includeSystemRuntime ''
+          mkdir -p "$out/runtime/sys/lib"
+          cp -v ${stdenv.cc.cc.lib}/lib/libstdc++.so.6 "$out/runtime/sys/lib/"
+          cp -v ${stdenv.cc.cc.lib}/lib/libgcc_s.so.1 "$out/runtime/sys/lib/"
+          cp -v ${zlib}/lib/libz.so.1 "$out/runtime/sys/lib/"
+        ''}
 
-      # Helper: copy headers from a component's extracted include/ dir into $dev/include.
-      # Tarballs ship include/ at <topdir>/include or <topdir>/include/<header>.
-      copy_headers() {
-        local extract_root="$1"
-        for incdir in "$extract_root"/*/include; do
-          [ -d "$incdir" ] || continue
-          cp -aLr "$incdir/." "$dev/include/"
-        done
-      }
-
-      # Helper: copy link-time libs (whitelisted) and stubs from a component's
-      #  extract dir. Runtime-only libs (cudnn, cublas, cufft, cusparse,
-      #  nvshmem, libcusolver, ...) are not shipped in dev. Consumers load
-      #  them through LD_LIBRARY_PATH or an installed runtime search path.
-      #  Keeps dev's closure ~30x smaller than copying everything.
-      copy_libs_to_dev() {
-        local extract_root="$1"
-        for libdir in "$extract_root"/*/lib "$extract_root"/*/lib64; do
-          [ -d "$libdir" ] || continue
-          for f in "$libdir"/*.so* "$libdir"/*.a; do
-            [ -e "$f" ] || continue
-            local base="$(basename "$f")"
-            case "$base" in
-              ${devLinkTimeLibPattern}) cp -aL "$f" "$dev/lib/" ;;
-            esac
+        # NVIDIA tarballs place headers below a single archive root.
+        copy_headers() {
+          local extract_root="$1"
+          for incdir in "$extract_root"/*/include; do
+            [ -d "$incdir" ] || continue
+            cp -aLr "$incdir/." "$dev/include/"
           done
-          # Stubs are always small + always needed at link time (libcuda.so).
-          if [ -d "$libdir/stubs" ]; then
-            for f in "$libdir/stubs"/*.so*; do
+        }
+
+        # Development outputs contain link-time libraries and the driver stub.
+        copy_libs_to_dev() {
+          local extract_root="$1"
+          for libdir in "$extract_root"/*/lib "$extract_root"/*/lib64; do
+            [ -d "$libdir" ] || continue
+            for f in "$libdir"/*.so* "$libdir"/*.a; do
               [ -e "$f" ] || continue
-              cp -aL "$f" "$dev/lib/stubs/"
+              local base="$(basename "$f")"
+              case "$base" in
+                ${devLinkTimeLibPattern}) cp -aL "$f" "$dev/lib/" ;;
+              esac
             done
-          fi
-        done
-      }
-
-      # Extract each tarball component once and populate both outputs.
-      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: comp: let
-        src = fetched.${name};
-        dir = comp.runtime_dir;
-      in
-        lib.optionalString (comp.kind == "tarball") ''
-          echo "[cuda-redist] extracting ${name} (${dir})"
-          tmp_extract="$(mktemp -d)"
-          tar -xf "${src}" -C "$tmp_extract"
-
-          ${lib.optionalString (dir != "cuda_nvcc") ''
-            # out: keyed runtime/nvidia/<dir>/lib/ layout (all components except nvcc).
-            mkdir -p "$out/runtime/nvidia/${dir}/lib"
-            for libdir in "$tmp_extract"/*/lib "$tmp_extract"/*/lib64; do
-              [ -d "$libdir" ] || continue
-              for f in "$libdir"/*.so*; do
+            # The driver stub is required for sandboxed linking.
+            if [ -d "$libdir/stubs" ]; then
+              for f in "$libdir/stubs"/*.so*; do
                 [ -e "$f" ] || continue
-                cp -aL "$f" "$out/runtime/nvidia/${dir}/lib/"
+                cp -aL "$f" "$dev/lib/stubs/"
               done
-            done
-          ''}
+            fi
+          done
+        }
 
-          # dev: flat lib + headers from every component (incl. cuda_nvcc).
-          copy_libs_to_dev "$tmp_extract"
-          copy_headers "$tmp_extract"
+        # Extract each tarball component once and populate both outputs.
+        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: comp: let
+          src = fetched.${name};
+          dir = comp.runtime_dir;
+        in
+          lib.optionalString (comp.kind == "tarball") ''
+            echo "[cuda-redist] extracting ${name} (${dir})"
+            tmp_extract="$(mktemp -d)"
+            tar -xf "${src}" -C "$tmp_extract"
 
-          ${lib.optionalString (dir == "cuda_nvcc") ''
-            # dev: mirror cuda_nvcc's tarball layout 1:1. nvcc and friends use
-            #  path-relative discovery for sibling tools (cicc at nvvm/bin/,
-            #  link.stub at bin/crt/, libnvvm.so at nvvm/lib64/, etc.). Easier
-            #  to mirror the whole subtree than to enumerate each consumer.
-            for srctop in "$tmp_extract"/*/; do
-              [ -d "$srctop/bin" ] || continue
-              cp -aLr "$srctop/bin"/. "$dev/bin/"
-              [ -d "$srctop/nvvm" ] && cp -aLr "$srctop/nvvm"/. "$dev/nvvm/"
-            done
-
-            # out: ptxas + nvlink in their existing component-keyed layout.
-            mkdir -p "$out/runtime/nvidia/cuda_nvcc/bin" "$out/runtime/nvidia/bin"
-            for tool in ptxas nvlink; do
-              for candidate in "$tmp_extract"/*/bin/"$tool"; do
-                if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-                  cp -aL "$candidate" "$out/runtime/nvidia/cuda_nvcc/bin/$tool"
-                  cp -aL "$candidate" "$out/runtime/nvidia/bin/$tool"
-                  break
-                fi
+            ${lib.optionalString (includeRuntimeFiles && dir != "cuda_nvcc") ''
+              # Runtime libraries retain their component directory.
+              mkdir -p "$out/runtime/nvidia/${dir}/lib"
+              for libdir in "$tmp_extract"/*/lib "$tmp_extract"/*/lib64; do
+                [ -d "$libdir" ] || continue
+                for f in "$libdir"/*.so*; do
+                  [ -e "$f" ] || continue
+                  cp -aL "$f" "$out/runtime/nvidia/${dir}/lib/"
+                done
               done
-            done
-            # out: libdevice bitcode (used by NVRTC at runtime).
-            for libdev in "$tmp_extract"/*/nvvm/libdevice; do
-              if [ -d "$libdev" ]; then
-                mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
-                cp -aL "$libdev"/. "$out/runtime/nvidia/nvvm/libdevice/"
-              fi
-            done
-          ''}
+            ''}
 
+            ${lib.optionalString includeDevelopmentFiles ''
+              copy_libs_to_dev "$tmp_extract"
+              copy_headers "$tmp_extract"
+            ''}
+
+            ${lib.optionalString (dir == "cuda_nvcc") ''
+              ${lib.optionalString includeDevelopmentFiles ''
+                # nvcc discovers sibling tools and libraries by relative path.
+                for srctop in "$tmp_extract"/*/; do
+                  [ -d "$srctop/bin" ] || continue
+                  cp -aLr "$srctop/bin"/. "$dev/bin/"
+                  [ -d "$srctop/nvvm" ] && cp -aLr "$srctop/nvvm"/. "$dev/nvvm/"
+                done
+              ''}
+
+              ${lib.optionalString includeRuntimeFiles ''
+                mkdir -p "$out/runtime/nvidia/cuda_nvcc/bin" "$out/runtime/nvidia/bin"
+                for tool in ptxas nvlink; do
+                  for candidate in "$tmp_extract"/*/bin/"$tool"; do
+                    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+                      cp -aL "$candidate" "$out/runtime/nvidia/cuda_nvcc/bin/$tool"
+                      cp -aL "$candidate" "$out/runtime/nvidia/bin/$tool"
+                      break
+                    fi
+                  done
+                done
+                for libdev in "$tmp_extract"/*/nvvm/libdevice; do
+                  if [ -d "$libdev" ]; then
+                    mkdir -p "$out/runtime/nvidia/nvvm/libdevice"
+                    cp -aL "$libdev"/. "$out/runtime/nvidia/nvvm/libdevice/"
+                  fi
+                done
+              ''}
+            ''}
+
+            rm -rf "$tmp_extract"
+          '')
+        components)}
+
+        ${lib.optionalString hasNccl (let
+          src = fetched.nccl;
+        in ''
+          # XLA distributes its selected NCCL artifact as a Python wheel.
+          echo "[cuda-redist] extracting nccl from wheel"
+          ${lib.optionalString includeRuntimeFiles ''mkdir -p "$out/runtime/nvidia/nccl/lib"''}
+          tmp_extract="$(mktemp -d)"
+          unzip -q "${src}" -d "$tmp_extract"
+          find "$tmp_extract" -name '*.so*' -type f | while read -r f; do
+            ${lib.optionalString includeRuntimeFiles ''cp -aL "$f" "$out/runtime/nvidia/nccl/lib/"''}
+            ${lib.optionalString includeDevelopmentFiles ''cp -aL "$f" "$dev/lib/"''}
+          done
           rm -rf "$tmp_extract"
-        '')
-      components)}
+        '')}
 
-      ${lib.optionalString hasNccl (let
-        src = fetched.nccl;
-      in ''
-        # NCCL: extract from wheel (zip), populate both outputs.
-        echo "[cuda-redist] extracting nccl from wheel"
-        mkdir -p "$out/runtime/nvidia/nccl/lib"
-        tmp_extract="$(mktemp -d)"
-        unzip -q "${src}" -d "$tmp_extract"
-        find "$tmp_extract" -name '*.so*' -type f | while read -r f; do
-          cp -aL "$f" "$out/runtime/nvidia/nccl/lib/"
-          cp -aL "$f" "$dev/lib/"
+        # The flat library view gives general consumers one runtime search path.
+        #  Component directories remain available for integration-specific RPATHs.
+        mkdir -p "$out/lib"
+        for sodir in "$out"/runtime/nvidia/*/lib; do
+          [ -d "$sodir" ] || continue
+          for so in "$sodir"/*.so*; do
+            [ -e "$so" ] || continue
+            ln -sf "$so" "$out/lib/$(basename "$so")"
+          done
         done
-        rm -rf "$tmp_extract"
-      '')}
 
-      # Flat lib/ symlink farm in $out so consumers can rpath against a single
-      #  directory (vs walking $ORIGIN/../../../nvidia/<comp>/lib for each comp,
-      #  which the PJRT plugin does but is awkward for general consumers like
-      #  TVM). Symlinks point back into the per-component runtime tree.
-      #  autoPatchelfHook treats the dir literally for rpath insertion.
-      mkdir -p "$out/lib"
-      for sodir in "$out"/runtime/nvidia/*/lib; do
-        [ -d "$sodir" ] || continue
-        for so in "$sodir"/*.so*; do
-          [ -e "$so" ] || continue
-          ln -sf "$so" "$out/lib/$(basename "$so")"
-        done
-      done
+        chmod -R u+w "$out/runtime" "$dev"
 
-      # autoPatchelfHook (in fixupPhase) handles RPATHs and interpreters for
-      #  every ELF across $out and $dev. It scans NEEDED entries, resolves
-      #  against buildInputs and same-derivation outputs, and rewrites RPATH
-      #  without corrupting versioned-symbol requirements (which manual
-      #  patchelf was breaking on nvcc, surfacing as
-      #  "undefined symbol: , version GLIBC_2.2.5" at runtime).
+        ${lib.optionalString includeDevelopmentFiles ''
+          missing=()
+          for required in ${builtins.concatStringsSep " " developmentRequiredFiles}; do
+            [ -e "$required" ] || missing+=("$required")
+          done
+          if [ "''${#missing[@]}" -gt 0 ]; then
+            printf 'missing CUDA development file: %s\n' "''${missing[@]}" >&2
+            exit 1
+          fi
+        ''}
+      '';
 
-      chmod -R u+w "$out/runtime" "$dev"
-
-      # Sanity checks: assert specific critical files. Counting .so* is fragile
-      #  with the dev-side whitelist (only ~12 versioned files expected).
-      out_so_count="$(find "$out/runtime/nvidia" -type f -name '*.so*' | wc -l)"
-      echo "[cuda-redist] out runtime: $out_so_count DSOs"
-      if [ "$out_so_count" -lt 10 ]; then
-        echo "ERROR: expected >=10 out DSOs, got $out_so_count" >&2
-        exit 1
-      fi
-      missing=()
-      for required in \
-          "$dev/bin/nvcc" \
-          "$dev/bin/cudafe++" \
-          "$dev/nvvm/bin/cicc" \
-          "$dev/lib/libcudart.so" \
-          "$dev/lib/libcudart_static.a" \
-          "$dev/lib/libcudadevrt.a" \
-          "$dev/lib/libnvrtc.so" \
-          "$dev/lib/stubs/libcuda.so" \
-          "$dev/include/nv/target" \
-          "$out/lib/libcudart.so" \
-          "$out/lib/libnvrtc.so"; do
-        [ -e "$required" ] || missing+=("$required")
-      done
-      if [ "''${#missing[@]}" -gt 0 ]; then
-        echo "ERROR: dev output missing critical files:" >&2
-        printf '  %s\n' "''${missing[@]}" >&2
-        exit 1
-      fi
-      echo "[cuda-redist] dev: critical files present"
-    '';
-
-    meta = {
-      description = "CUDA redistributable runtime + cudatoolkit-style dev (${cudaVersion})";
-      platforms = lib.platforms.linux;
-    };
-  }
+      meta = {
+        description = "Selected CUDA redistributable components (${cudaVersion})";
+        platforms = lib.platforms.linux;
+      };
+    }

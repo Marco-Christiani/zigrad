@@ -1,6 +1,7 @@
 # exts
 *.json
 !src/c/mirage/adapter/CMakePresets.json
+!nix/external-sources.json
 *.so
 *.png
 *.svg

@@ -24,9 +24,20 @@ in {
       extraLdFlags
       extraBazelFlags
       ;
-    inherit (inputs) xlaSrc llvmSrc stablehloSrc;
-    inherit (inputs) ireeSrc ireeLlvmSrc ireeStablehloSrc ireeFlatccSrc ireeBenchmarkSrc;
     inherit (pkgs) lib;
+    externalSources = import ../external-sources.nix {inherit pkgs;};
+    xlaSrc = externalSources.xla.src;
+    xlaRevision = externalSources.xla.rev;
+    llvmSrc = externalSources.llvm.src;
+    llvmRevision = externalSources.llvm.rev;
+    stablehloSrc = externalSources.stablehlo.src;
+    ireeSrc = externalSources.iree.src;
+    ireeRevision = externalSources.iree.rev;
+    ireeLlvmSrc = externalSources.iree_llvm.src;
+    ireeLlvmRevision = externalSources.iree_llvm.rev;
+    ireeStablehloSrc = externalSources.iree_stablehlo.src;
+    ireeFlatccSrc = externalSources.iree_flatcc.src;
+    ireeBenchmarkSrc = externalSources.iree_benchmark.src;
 
     zigradSrc = import ../helpers/source-filter.nix {
       inherit (pkgs) lib;
@@ -44,13 +55,20 @@ in {
     cuda = import ./integrations/cuda.nix {
       inherit pkgs cudaCfg;
     };
-    inherit (cuda) cudaRedist cudaToolkit gccHost;
+    inherit
+      (cuda)
+      cudaRuntime
+      cudaToolkit
+      gccHost
+      mkCudaPackage
+      ;
 
     llvm = import ./compiler-support/llvm.nix {
       inherit
         pkgs
         xlaSrc
         llvmSrc
+        llvmRevision
         withDebugSymbols
         enableLto
         extraCxxFlags
@@ -63,8 +81,11 @@ in {
         pkgs
         lib
         cudaCfg
+        cudaRuntime
+        mkCudaPackage
         cudaArchitectures
         xlaSrc
+        xlaRevision
         stablehloSrc
         llvm
         withDebugSymbols
@@ -81,6 +102,7 @@ in {
       xlaMlirStablehloCapiSdk
       xlaPjrtPlugins
       xlaPjrtPluginsCuda
+      xlaCudaRuntime
       xlaProtos
       zigradMlirExt
       ;
@@ -89,7 +111,6 @@ in {
       inherit
         pkgs
         lib
-        cudaToolkit
         gccHost
         cudaArchitectures
         withDebugSymbols
@@ -98,7 +119,9 @@ in {
         extraCxxFlags
         extraLdFlags
         ;
-      cudaRuntime = cudaRedist.out;
+      inherit cudaRuntime cudaToolkit mkCudaPackage;
+      cudaVersion = cudaCfg.cudaVersion;
+      source = externalSources.mirage;
     };
     inherit (mirageParts) mirage mirageAdapter mirageRustLibs;
 
@@ -115,7 +138,8 @@ in {
         extraCxxFlags
         extraLdFlags
         ;
-      cudaRuntime = cudaRedist.out;
+      inherit cudaRuntime;
+      source = externalSources.tvm;
     };
     inherit (tvmParts) tvm tvmCpu tvmFullDev;
 
@@ -123,7 +147,9 @@ in {
       inherit
         pkgs
         ireeSrc
+        ireeRevision
         ireeLlvmSrc
+        ireeLlvmRevision
         ireeStablehloSrc
         ireeFlatccSrc
         ireeBenchmarkSrc
@@ -146,7 +172,7 @@ in {
       inherit cudaArchitectures;
       parts = {
         inherit
-          cudaRedist
+          cudaRuntime
           cudaToolkit
           ireeCompiler
           ireeRuntime
@@ -160,6 +186,7 @@ in {
           xlaMlirStablehloCapiSdk
           xlaPjrtPlugins
           xlaPjrtPluginsCuda
+          xlaCudaRuntime
           xlaProtos
           ;
       };
@@ -206,8 +233,9 @@ in {
         tvm-dev = tvm.dev;
         tvm-cpu = tvmCpu;
         tvm-full-dev = tvmFullDev.dev;
-        cuda-redist = cudaRedist;
-        cuda-redist-dev = cudaRedist.dev;
+        cuda-redist = cudaRuntime;
+        cuda-redist-dev = cudaToolkit;
+        cuda-redist-xla-runtime = xlaCudaRuntime;
         xla-mlir-stablehlo-capi-sdk = xlaMlirStablehloCapiSdk;
         xla-mlir-stablehlo-capi-sdk-dev = xlaMlirStablehloCapiSdk.dev;
         xla-pjrt-plugins = xlaPjrtPlugins;

@@ -3,6 +3,8 @@
   lib,
   cudaToolkit,
   cudaRuntime,
+  cudaVersion,
+  mkCudaPackage,
   gccHost,
   cudaArchitectures,
   withDebugSymbols,
@@ -10,22 +12,28 @@
   enableLto,
   extraCxxFlags,
   extraLdFlags,
+  source,
 }: let
-  mirageRevision = "ffe38dff251017cdddeb1891cc808b43e7f51f25";
-  mirageSourceRoot = "mirage-${mirageRevision}";
-  mirageSrc = pkgs.fetchurl {
-    name = "mirage-${mirageRevision}.tar.gz";
-    url = "https://github.com/mirage-project/mirage/archive/${mirageRevision}.tar.gz";
-    hash = "sha256-1AXdzUkXUmW3tqsEBYgF+GlMrDuKsK7oYL3Y/mf22C0=";
+  mirageCudaHeaders = mkCudaPackage {
+    componentNames = ["libcublas"];
+    includeDevelopmentFiles = true;
+    includeRuntimeFiles = false;
+    nameSuffix = "-mirage-headers";
+  };
+  mirageCudaToolkit = pkgs.symlinkJoin {
+    name = "cuda-mirage-toolkit-${cudaVersion}";
+    paths = [
+      cudaToolkit
+      mirageCudaHeaders.dev
+    ];
   };
   mirageRustLibs = pkgs.callPackage ../../packages/mirage-rust-libs.nix {
-    src = mirageSrc;
-    sourceRoot = mirageSourceRoot;
+    inherit (source) src;
+    sourceRoot = source.source_root;
     lockFile = ../../locks/mirage-Cargo.lock;
   };
   mirage = pkgs.callPackage ../../packages/mirage.nix {
     inherit
-      cudaToolkit
       gccHost
       mirageRustLibs
       cudaArchitectures
@@ -36,13 +44,13 @@
       extraLdFlags
       ;
     inherit cudaRuntime;
-    src = mirageSrc;
-    sourceRoot = mirageSourceRoot;
-    revision = mirageRevision;
+    cudaToolkit = mirageCudaToolkit;
+    inherit (source) src;
+    sourceRoot = source.source_root;
+    revision = source.rev;
   };
   mirageAdapter = pkgs.callPackage ../../packages/mirage-adapter.nix {
     inherit
-      cudaToolkit
       gccHost
       mirage
       withDebugSymbols
@@ -51,6 +59,7 @@
       extraLdFlags
       ;
     inherit cudaRuntime;
+    cudaToolkit = mirageCudaToolkit;
     src = let
       fs = lib.fileset;
     in

@@ -20,7 +20,7 @@
     "cuda-runtime" = {
       requires = ["cuda-driver"];
       compile = [];
-      runtime = [parts.cudaRedist];
+      runtime = [parts.cudaRuntime];
       features.withCudaRuntime = true;
     };
 
@@ -69,7 +69,10 @@
         "pjrt-api"
       ];
       compile = [];
-      runtime = [parts.xlaPjrtPluginsCuda];
+      runtime = [
+        parts.xlaCudaRuntime
+        parts.xlaPjrtPluginsCuda
+      ];
       features = {};
       conflicts = ["pjrt-cpu"];
     };

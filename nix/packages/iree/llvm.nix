@@ -15,6 +15,7 @@
   lld,
   binutils,
   ireeLlvmSrc,
+  ireeLlvmRevision,
   # Retain debug information in a RelWithDebInfo build.
   withDebugSymbols ? false,
   # Native tuning has limited effect on these compiler libraries.
@@ -25,7 +26,7 @@
 }:
 stdenv.mkDerivation {
   pname = "iree-llvm";
-  version = "iree-llvm-${ireeLlvmSrc.shortRev or "unknown"}";
+  version = "iree-llvm-${builtins.substring 0 7 ireeLlvmRevision}";
 
   # Build the required projects in one LLVM CMake graph.
   src = ireeLlvmSrc;

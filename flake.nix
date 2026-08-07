@@ -17,50 +17,6 @@
       url = "github:mitchellh/zig-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    # Source pins.
-    #
-    # Update with: nix flake update --impure --update-input xla-src (etc.)
-    #
-    # LLVM and StableHLO commits are derived from XLA's third_party/.
-    # after updating xla-src, check third_party/llvm/workspace.bzl
-    # and third_party/stablehlo/workspace.bzl for new commits.
-    xlaSrc = {
-      url = "github:openxla/xla/913ae2eaa3cb88971003592a90959685a78c9e30";
-      flake = false;
-    };
-
-    llvmSrc = {
-      url = "github:llvm/llvm-project/8f264586d7521b0e305ca7bb78825aa3382ffef7";
-      flake = false;
-    };
-
-    stablehloSrc = {
-      url = "github:openxla/stablehlo/1ef9e390b5295e676d2b864fe1924bc2f3f4cf0f";
-      flake = false;
-    };
-
-    # IREE and its pinned source dependencies.
-    ireeSrc = {
-      url = "github:iree-org/iree/776210bd36896f8ca14288637592a9d5cebfcea1";
-      flake = false;
-    };
-    ireeLlvmSrc = {
-      url = "github:iree-org/llvm-project/c95bd0bba5be9710292ce3a29832b67a0e33f887";
-      flake = false;
-    };
-    ireeStablehloSrc = {
-      url = "github:iree-org/stablehlo/6fabd27b15885179a3b6a601ea1e4171f2ed2c91";
-      flake = false;
-    };
-    ireeFlatccSrc = {
-      url = "github:dvidelabs/flatcc/9362cd00f0007d8cbee7bff86e90fb4b6b227ff3";
-      flake = false;
-    };
-    ireeBenchmarkSrc = {
-      url = "github:google/benchmark/192ef10025eb2c4cdd392bc502f0c852196baa48";
-      flake = false;
-    };
   };
 
   outputs = inputs @ {
@@ -121,6 +77,9 @@
       gccHostAttr = "gcc14";
       cudaPackagesAttr = "cudaPackages_12_9";
       cudaVersion = "12.9.1";
+      cudnnVersion = "9.8.0";
+      ncclVersion = "2.27.7";
+      nvshmemVersion = "3.2.5";
     };
 
     # Build options threaded into external source derivations.
@@ -188,11 +147,9 @@
         };
         treefmt = treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
 
-        # cudaCfg pins two independently versioned inputs.
-        #  cudaVersion drives versions.json (cuda-redist tarballs from nvidia).
-        #  cudaPackagesAttr selects a nixpkgs cuda set whose minor version
-        #  floats with the nixpkgs lock. Assert their major.minor agree so a
-        #  version mismatch fails during evaluation.
+        # cudaCfg owns NVIDIA artifact versions and the nixpkgs toolkit used by
+        #  repository tools. Assert that both CUDA selections have the same
+        #  major and minor version.
         pkgsCudartVersion = pkgs.${cudaCfg.cudaPackagesAttr}.cuda_cudart.version;
         cudaVerMM = pkgs.lib.versions.majorMinor cudaCfg.cudaVersion;
         pkgsCudartVerMM = pkgs.lib.versions.majorMinor pkgsCudartVersion;
