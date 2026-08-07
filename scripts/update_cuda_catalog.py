@@ -16,7 +16,7 @@ from dependency_metadata import (
     ComponentKind,
     ComponentSpec,
     CudaComponent,
-    XlaCudaMetadata,
+    XlaMetadata,
     hex_sha256_to_sri,
 )
 
@@ -168,7 +168,7 @@ def main() -> None:
         format="%(levelname)s: %(message)s",
     )
 
-    xla = XlaCudaMetadata(arguments.xla_src)
+    xla = XlaMetadata(arguments.xla_src)
     catalog = read_catalog(arguments.catalog)
     resolver = CudaCatalogResolver()
     nccl = xla.nccl_wheel(arguments.cuda_version)

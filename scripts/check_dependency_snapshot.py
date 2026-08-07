@@ -12,7 +12,7 @@ from typing import Any
 
 from dependency_metadata import (
     COMPONENT_SPECS,
-    XlaCudaMetadata,
+    XlaMetadata,
     llvm_version,
     quoted_assignment,
 )
@@ -71,7 +71,7 @@ def check_xla(repo: Path, source: Path, snapshot: dict[str, Any]) -> None:
 
     selection = cuda_selection(repo / "flake.nix")
     cuda_version = selection["cudaVersion"]
-    defaults = XlaCudaMetadata(source).defaults("pjrt_cuda12")
+    defaults = XlaMetadata(source).defaults("pjrt_cuda12")
     if cuda_version != defaults.cuda:
         raise CheckFailure(
             f"cudaCfg selects {cuda_version}, but XLA pjrt_cuda12 selects {defaults.cuda}",

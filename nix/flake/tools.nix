@@ -98,7 +98,10 @@
 
     planDependencies = pkgs.writeShellApplication {
       name = "plan-dependencies";
-      runtimeInputs = [pkgs.python3];
+      runtimeInputs = [
+        pkgs.git
+        pkgs.python3
+      ];
       text = ''
         export PYTHONPATH=${../../scripts}
         exec python3 ${../../scripts/plan_dependencies.py} \

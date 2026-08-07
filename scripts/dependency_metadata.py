@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from enum import StrEnum, auto
 from pathlib import Path
+from typing import cast
 
 
 class ComponentKind(StrEnum):
@@ -31,6 +32,12 @@ class CudaDefaults:
     cuda: str
     cudnn: str
     nvshmem: str
+
+
+@dataclass(frozen=True)
+class SourceRequirement:
+    revision: str
+    archive_hash_sri: str
 
 
 @dataclass(frozen=True)
@@ -98,11 +105,11 @@ def fetch_text(url: str, timeout_seconds: float = 30.0) -> str:
         headers={"User-Agent": "zigrad-dependency-metadata/1.0"},
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return response.read().decode("utf-8")
+        return cast("bytes", response.read()).decode("utf-8")
 
 
-class XlaCudaMetadata:
-    """Read CUDA requirements and artifact metadata from an XLA source tree."""
+class XlaMetadata:
+    """Read dependency requirements from an XLA source tree."""
 
     def __init__(self, source: Path) -> None:
         self.source = source
@@ -111,6 +118,27 @@ class XlaCudaMetadata:
         return quoted_assignment(
             self.source / "third_party/llvm/workspace.bzl",
             "LLVM_COMMIT",
+        )
+
+    def llvm_requirement(self) -> SourceRequirement:
+        return self._source_requirement(
+            self.source / "third_party/llvm/workspace.bzl",
+            "LLVM",
+        )
+
+    def stablehlo_requirement(self) -> SourceRequirement:
+        return self._source_requirement(
+            self.source / "third_party/stablehlo/workspace.bzl",
+            "STABLEHLO",
+        )
+
+    @staticmethod
+    def _source_requirement(path: Path, prefix: str) -> SourceRequirement:
+        return SourceRequirement(
+            revision=quoted_assignment(path, f"{prefix}_COMMIT"),
+            archive_hash_sri=hex_sha256_to_sri(
+                quoted_assignment(path, f"{prefix}_SHA256"),
+            ),
         )
 
     def defaults(self, bazel_config: str) -> CudaDefaults:

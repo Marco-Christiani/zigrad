@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dependency_planner import (
     Candidate,
@@ -11,6 +12,8 @@ from dependency_planner import (
     plan_configuration,
     select_candidate,
 )
+from dependency_proposal import CandidateSource, propose_configuration
+from dependency_schema import IntegrationRoot
 
 
 class DependencyPlannerTest(unittest.TestCase):
@@ -151,6 +154,159 @@ class DependencyPlannerTest(unittest.TestCase):
         result = evaluate_requirement(requirement, candidate, "llvm-exact")
 
         self.assertFalse(result.satisfied)
+
+    def test_iree_candidate_revision_must_be_materialized(self) -> None:
+        manifest = {
+            "iree": {
+                "packageName": "zigrad-iree",
+                "compatibility": [
+                    {
+                        "group": "iree-build-llvm",
+                        "consumer": "iree",
+                        "requirement": "iree-llvm",
+                        "isolation": "out-of-process",
+                    },
+                ],
+            },
+        }
+
+        plan = plan_configuration(
+            "iree",
+            manifest,
+            self.snapshot,
+            self.xla,
+            self.llvm,
+            self.tvm,
+            self.iree_llvm,
+            "iree-next",
+        )
+
+        self.assertFalse(plan["compatible"])
+        self.assertEqual(
+            plan["groups"][0]["candidate"]["revision"],
+            "iree-next",
+        )
+
+    def test_xla_candidate_derives_companion_changes(self) -> None:
+        self.write(
+            self.xla / "third_party/llvm/workspace.bzl",
+            '\n'.join(
+                (
+                    'LLVM_COMMIT = "llvm-next"',
+                    f'LLVM_SHA256 = "{"1" * 64}"',
+                ),
+            ),
+        )
+        self.write(
+            self.xla / "third_party/stablehlo/workspace.bzl",
+            '\n'.join(
+                (
+                    'STABLEHLO_COMMIT = "stablehlo-next"',
+                    f'STABLEHLO_SHA256 = "{"2" * 64}"',
+                ),
+            ),
+        )
+        self.write(
+            self.xla / "tensorflow.bazelrc",
+            (
+                'build:pjrt_cuda12 --repo_env=HERMETIC_CUDA_VERSION="12.9.1" '
+                '--repo_env=HERMETIC_CUDNN_VERSION="9.8.0" '
+                '--repo_env=HERMETIC_NVSHMEM_VERSION="3.2.5"\n'
+            ),
+        )
+        snapshot = {
+            **self.snapshot,
+            "xla": {"rev": "xla-current", "hash": "xla-hash"},
+            "stablehlo": {"rev": "stablehlo-current", "hash": "stablehlo-hash"},
+        }
+        manifest = {
+            "xla": {
+                "packageName": "zigrad-xla",
+                "resolved": ["stablehlo-mlir"],
+            },
+        }
+        candidate = CandidateSource(IntegrationRoot.xla, self.xla, "xla-next")
+
+        proposal = propose_configuration(
+            "xla",
+            manifest,
+            snapshot,
+            {IntegrationRoot.xla: candidate},
+        )
+
+        changed = {
+            (entry["source"], entry["field"]): entry
+            for entry in proposal["changes"]
+        }
+        self.assertEqual(changed[("llvm", "rev")]["proposed"], "llvm-next")
+        self.assertEqual(
+            changed[("stablehlo", "rev")]["proposed"],
+            "stablehlo-next",
+        )
+        self.assertIsNone(changed[("xla", "hash")]["proposed"])
+        self.assertFalse(proposal["complete"])
+        self.assertEqual(proposal["constraints"]["xla"]["cuda"]["cuda"], "12.9.1")
+        self.assertEqual(
+            proposal["constraints"]["xla"]["companions"]["llvm"]["revision"],
+            "llvm-next",
+        )
+
+    def test_iree_candidate_derives_gitlink_changes(self) -> None:
+        snapshot = {
+            **self.snapshot,
+            "iree": {"rev": "iree-current", "hash": "iree-hash"},
+            "iree_benchmark": {"rev": "benchmark-current", "hash": "hash"},
+            "iree_flatcc": {"rev": "flatcc-current", "hash": "hash"},
+            "iree_stablehlo": {"rev": "stablehlo-current", "hash": "hash"},
+        }
+        manifest = {
+            "iree": {
+                "packageName": "zigrad-iree",
+                "resolved": ["iree"],
+            },
+        }
+        candidate = CandidateSource(
+            IntegrationRoot.iree,
+            self.root / "iree",
+            "iree-next",
+        )
+        revisions = iter(
+            ("benchmark-next", "flatcc-next", "iree-exact", "stablehlo-next"),
+        )
+
+        with patch("dependency_proposal.gitlink_revision", side_effect=revisions):
+            proposal = propose_configuration(
+                "iree",
+                manifest,
+                snapshot,
+                {IntegrationRoot.iree: candidate},
+            )
+
+        changed_revisions = {
+            entry["source"]: entry["proposed"]
+            for entry in proposal["changes"]
+            if entry["field"] == "rev"
+        }
+        self.assertEqual(changed_revisions["iree_benchmark"], "benchmark-next")
+        self.assertEqual(changed_revisions["iree_flatcc"], "flatcc-next")
+        self.assertEqual(changed_revisions["iree_stablehlo"], "stablehlo-next")
+
+    def test_candidate_must_be_demanded_by_configuration(self) -> None:
+        manifest = {
+            "core": {
+                "packageName": "zigrad",
+                "resolved": [],
+            },
+        }
+        candidate = CandidateSource(IntegrationRoot.tvm, self.tvm, "tvm-next")
+
+        with self.assertRaisesRegex(ValueError, "does not demand candidate roots"):
+            propose_configuration(
+                "core",
+                manifest,
+                self.snapshot,
+                {IntegrationRoot.tvm: candidate},
+            )
 
 
 if __name__ == "__main__":

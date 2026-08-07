@@ -7,7 +7,7 @@
   patch,
   # Standard nixpkgs LLVM (used when llvm is null)
   llvmPackages ? null,
-  # LLVM 22 built from XLA-pinned sources for integration ABI compatibility.
+  # Shared LLVM used when TVM loads with other compiler integrations.
   llvm ? null,
   pkg-config,
   git,
