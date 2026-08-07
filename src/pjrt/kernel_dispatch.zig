@@ -321,9 +321,9 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
     };
 
     switch (decision) {
-        .profitable => |art| {
+        .profitable => |stored| {
             const dreg = lookup_dispatch_registry_new_from_context(frame);
-            return dispatch_from_store(frame, art, dreg, kernel_key);
+            return dispatch_from_store(frame, stored, dreg, kernel_key);
         },
         .negative => {
             return make_ffi_error(frame, "zigrad kernel dispatch: store has negative decision for key", c.XLA_FFI_Error_Code_NOT_FOUND);
@@ -334,13 +334,13 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
 /// Dispatch from store-based path: resolve provider dispatch function from DispatchRegistry.
 fn dispatch_from_store(
     frame: *c.XLA_FFI_CallFrame,
-    art: kernel.StoredArtifact,
+    stored: kernel.ProfitableDecision,
     dreg: ?*const kernel.DispatchRegistry,
     kernel_key: []const u8,
 ) ?*c.XLA_FFI_Error {
-    const dispatch_entry = if (dreg) |reg| reg.get(art.provider_name) else null;
+    const dispatch_entry = if (dreg) |reg| reg.get(stored.provider_name) else null;
     if (dispatch_entry == null) {
-        log.err("store dispatch: no dispatch entry for provider '{s}'", .{art.provider_name});
+        log.err("store dispatch: no dispatch entry for provider '{s}'", .{stored.provider_name});
         return make_ffi_error(frame, "zigrad kernel dispatch: provider not in dispatch registry", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
     }
     const entry = dispatch_entry.?;
@@ -348,11 +348,11 @@ fn dispatch_from_store(
     return execute_dispatch(
         frame,
         kernel_key,
-        art.workspace_bytes,
-        art.workspace_alignment,
+        stored.artifact.workspace_bytes,
+        stored.artifact.workspace_alignment,
         entry.dispatch_fn,
         entry.dispatch_ctx,
-        art.data,
+        stored.artifact.data,
     );
 }
 

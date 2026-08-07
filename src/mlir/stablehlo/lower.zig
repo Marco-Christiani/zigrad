@@ -663,11 +663,9 @@ test "lowering supports multi-output custom_call" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(decision_key, .{
-        .provider_name = "mock",
+    try store.put_profitable(decision_key, "mock", .{
         .data = "mock",
-        .target_name = "mock_multi",
-    });
+    }, .copy);
 
     var kp = kernelize.KernelizePass{
         .store = &store,

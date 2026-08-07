@@ -48,7 +48,7 @@ pub const MirageProvider = struct {
         };
     }
 
-    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
         _ = ptr;
         return try compile(desc, selected_device, allocator);
     }
@@ -57,7 +57,7 @@ pub const MirageProvider = struct {
         desc: region_view.RegionView,
         selected_device: device.Device,
         allocator: std.mem.Allocator,
-    ) kernel.CompileError!kernel.KernelArtifact {
+    ) kernel.CompileError!kernel.Artifact {
         if (!selected_device.platform.eql(.cuda)) return error.Unsupported;
         if (desc.ops.len > max_region_eqns) {
             log.debug(
@@ -88,7 +88,7 @@ pub const MirageProvider = struct {
         desc: mlir_types.MlirKernelDescriptor,
         selected_device: device.Device,
         allocator: std.mem.Allocator,
-    ) kernel.CompileError!kernel.KernelArtifact {
+    ) kernel.CompileError!kernel.Artifact {
         if (!selected_device.platform.eql(.cuda)) return error.Unsupported;
         if (desc.outputs.len != 1) return error.Unsupported;
 
@@ -207,7 +207,7 @@ pub const MirageProvider = struct {
         selected_device: device.Device,
         allocator: std.mem.Allocator,
         graph: *mirage.Graph,
-    ) kernel.CompileError!kernel.KernelArtifact {
+    ) kernel.CompileError!kernel.Artifact {
         const mirage_device = mirage.Device.init(selected_device.ordinal) catch |err|
             return map_mirage_api_error(err);
         defer mirage_device.deinit();
@@ -307,9 +307,7 @@ pub const MirageProvider = struct {
         };
 
         return .{
-            .provider_name = "mirage",
             .data = artifact_data,
-            .target_name = try allocator.dupe(u8, target_name),
             .workspace_bytes = buf_size,
             .workspace_alignment = workspace_alignment,
         };

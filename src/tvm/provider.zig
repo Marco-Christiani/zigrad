@@ -1,6 +1,6 @@
 //! TVM kernel provider.
 //!
-//! The provider accepts PR matrix-multiply regions and emits KernelArtifact
+//! The provider accepts PR matrix-multiply regions and emits kernel artifacts
 //!  values through MetaSchedule autotuning. TVM C types remain internal.
 const std = @import("std");
 
@@ -26,7 +26,7 @@ pub const TvmProvider = struct {
 
     /// Shared dispatch state owning the TVM module cache.
     ///
-    /// The state must outlive all KernelArtifacts produced by this provider.
+    /// The state must outlive all artifacts produced by this provider.
     dispatch_state: *TvmDispatchState,
 
     /// Inputs required to initialize a TVM provider.
@@ -71,7 +71,7 @@ pub const TvmProvider = struct {
         };
     }
 
-    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
         const self: *TvmProvider = @ptrCast(@alignCast(ptr));
         return try self.compile(desc, selected_device, allocator);
     }
@@ -85,7 +85,7 @@ pub const TvmProvider = struct {
         desc: region_view.RegionView,
         selected_device: device.Device,
         allocator: std.mem.Allocator,
-    ) kernel.CompileError!kernel.KernelArtifact {
+    ) kernel.CompileError!kernel.Artifact {
         if (!self.compile_config.target.accepts(selected_device)) {
             return error.Unsupported;
         }
@@ -109,7 +109,7 @@ pub const TvmProvider = struct {
                 return error.CompileFailed;
             },
         };
-        if (cached) |artifact| return try make_kernel_artifact(allocator, artifact);
+        if (cached) |artifact| return make_kernel_artifact(artifact);
 
         const result = mm.tune(
             self.io,
@@ -157,7 +157,7 @@ pub const TvmProvider = struct {
             desc.name, result.best_candidate, result.best_time_us, artifact.bytes.len,
         });
 
-        return try make_kernel_artifact(allocator, artifact);
+        return make_kernel_artifact(artifact);
     }
 };
 
@@ -198,14 +198,8 @@ fn validate_matmul_region(desc: region_view.RegionView) ?mm.Shape {
     return .{ .m = m, .n = n, .k = k };
 }
 
-fn make_kernel_artifact(
-    allocator: std.mem.Allocator,
-    artifact: mm.CachedArtifact,
-) error{OutOfMemory}!kernel.KernelArtifact {
-    errdefer allocator.free(artifact.bytes);
+fn make_kernel_artifact(artifact: mm.CachedArtifact) kernel.Artifact {
     return .{
-        .provider_name = "tvm",
         .data = artifact.bytes,
-        .target_name = try allocator.dupe(u8, artifact.key.slice()),
     };
 }

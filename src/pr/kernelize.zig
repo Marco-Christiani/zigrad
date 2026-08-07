@@ -201,22 +201,25 @@ pub const KernelizePass = struct {
             };
 
             switch (decision) {
-                .profitable => |art| {
+                .profitable => |stored| {
                     try rewrites.append(temp_allocator, .{
                         .region = candidate.region,
-                        .provider_name = art.provider_name,
+                        .provider_name = stored.provider_name,
                         .inputs = try temp_allocator.dupe(*pr.Var, desc.inputs),
                         .outputs = try temp_allocator.dupe(*pr.Var, desc.outputs),
                         .kernel_key = try temp_allocator.dupe(u8, decision_key.bytes),
                     });
-                    log.debug("store: profitable decision for region '{s}' -> '{s}'", .{ candidate.region.name, art.target_name });
+                    log.debug("store: profitable decision for region '{s}' via provider '{s}'", .{
+                        candidate.region.name,
+                        stored.provider_name,
+                    });
 
                     if (entries) |e| {
                         const ops_str = build_ops_str(entries_alloc, desc) catch "";
                         const shape = build_shape_str(entries_alloc, desc) catch "";
                         e.append(entries_alloc, .{
                             .name = candidate.region.name,
-                            .provider = art.provider_name,
+                            .provider = stored.provider_name,
                             .ops = ops_str,
                             .shape = shape,
                             .outcome = .compiled,
@@ -427,11 +430,9 @@ test "kernelize pass rewrites profitable region from store" {
     defer store.deinit();
     const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
     defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, .{
-        .provider_name = "mock",
+    try store.put_profitable(decision_key, "mock", .{
         .data = "stored_kernel_data",
-        .target_name = "test_region",
-    });
+    }, .copy);
 
     var kp = KernelizePass{
         .store = &store,
@@ -542,11 +543,9 @@ test "kernelize pass does not reuse another provider decision" {
     defer testing.allocator.free(other_key.bytes);
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(other_key, .{
-        .provider_name = "other",
+    try store.put_profitable(other_key, "other", .{
         .data = "payload",
-        .target_name = "other_artifact",
-    });
+    }, .copy);
 
     var kernelize = KernelizePass{
         .store = &store,
@@ -592,11 +591,9 @@ test "kernelize pass rewrites multi-output region to custom_call" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(decision_key, .{
-        .provider_name = "mock",
+    try store.put_profitable(decision_key, "mock", .{
         .data = "mock_kernel_data",
-        .target_name = "multi_out",
-    });
+    }, .copy);
 
     var kp = KernelizePass{
         .store = &store,
@@ -644,11 +641,9 @@ test "kernelize pass same-shape regions share store decision" {
     defer store.deinit();
     const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
     defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, .{
-        .provider_name = "mock",
+    try store.put_profitable(decision_key, "mock", .{
         .data = "payload",
-        .target_name = "region_a",
-    });
+    }, .copy);
 
     var kp = KernelizePass{
         .store = &store,
@@ -693,11 +688,9 @@ test "kernelize pass different-shape regions need separate decisions" {
     defer store.deinit();
     const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
     defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, .{
-        .provider_name = "mock",
+    try store.put_profitable(decision_key, "mock", .{
         .data = "payload",
-        .target_name = "region_small",
-    });
+    }, .copy);
 
     var kp = KernelizePass{
         .store = &store,

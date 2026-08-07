@@ -232,19 +232,13 @@ pub const DispatchFn = *const fn (
     ctx: DispatchContext,
 ) DispatchError!void;
 
-/// Kernel-provider compilation result.
+/// Portable kernel-provider artifact.
 ///
 /// It contains no runtime pointers. The dispatch registry resolves the provider
 ///  when execution reaches the corresponding custom call.
-pub const KernelArtifact = struct {
-    /// Provider name borrowed from `KernelProvider`.
-    provider_name: []const u8,
-
-    /// Opaque kernel data released by `deinit`.
+pub const Artifact = struct {
+    /// Opaque kernel data allocated with the provider compilation allocator.
     data: []const u8,
-
-    /// Custom-call target name released by `deinit`.
-    target_name: []const u8,
 
     /// Workspace bytes required at dispatch time.
     ///
@@ -258,12 +252,20 @@ pub const KernelArtifact = struct {
     ///  nonzero.
     workspace_alignment: usize = 1,
 
-    /// Release the kernel data and target name.
-    pub fn deinit(self: *KernelArtifact, allocator: std.mem.Allocator) void {
+    /// Release artifact data with the provider compilation allocator.
+    pub fn deinit(self: *Artifact, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
-        allocator.free(self.target_name);
         self.* = undefined;
     }
+};
+
+/// Profitable provider decision and its portable artifact.
+pub const ProfitableDecision = struct {
+    /// Provider selected for this decision.
+    provider_name: []const u8,
+
+    /// Artifact returned by the selected provider.
+    artifact: Artifact,
 };
 
 /// Failures exposed by kernel-provider compilation.
@@ -294,7 +296,7 @@ pub const KernelProvider = struct {
     ptr: *anyopaque,
 
     /// Compile one PR region for the selected device.
-    compile_fn: *const fn (ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!KernelArtifact,
+    compile_fn: *const fn (ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact,
 
     /// Optional release hook for compilation-only provider resources.
     finalize_fn: ?*const fn (ptr: *anyopaque) void = null,
@@ -314,7 +316,7 @@ pub const KernelProvider = struct {
     dispatch_ctx: ?TypedPtr = null,
 
     /// Compile one region for the selected device.
-    pub fn compile(self: KernelProvider, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!KernelArtifact {
+    pub fn compile(self: KernelProvider, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact {
         return try self.compile_fn(self.ptr, desc, selected_device, allocator);
     }
 
@@ -328,15 +330,15 @@ pub const KernelProvider = struct {
     }
 };
 
-/// Compiled artifact stored in a `KernelStore`.
-///
-/// The store copies every slice and releases the copies from `deinit`.
-pub const StoredArtifact = struct {
-    provider_name: []const u8,
-    data: []const u8,
-    target_name: []const u8,
-    workspace_bytes: usize = 0,
-    workspace_alignment: usize = 1,
+/// Artifact-data handling for `KernelStore.put_profitable`.
+pub const ArtifactStorage = enum {
+    /// Copy artifact data into the store.
+    copy,
+
+    /// Transfer artifact data allocated by the store allocator.
+    ///
+    /// The call consumes `artifact.data`, including when insertion fails.
+    take,
 };
 
 /// Result of one provider decision.
@@ -344,7 +346,7 @@ pub const StoredArtifact = struct {
 /// Absence from the store means the provider did not evaluate the key.
 pub const Decision = union(enum) {
     /// Provider supplied an artifact for this key.
-    profitable: StoredArtifact,
+    profitable: ProfitableDecision,
 
     /// Provider declined this key with the recorded reason.
     negative: []const u8,
@@ -369,15 +371,14 @@ pub const KernelStore = struct {
         return self.decisions.allocator;
     }
 
-    /// Release every decision and copied slice.
+    /// Release every stored decision allocation.
     pub fn deinit(self: *KernelStore) void {
         var it = self.decisions.iterator();
         while (it.next()) |entry| {
             switch (entry.value_ptr.*) {
-                .profitable => |art| {
-                    self.decisions.allocator.free(art.data);
-                    self.decisions.allocator.free(art.target_name);
-                    self.decisions.allocator.free(art.provider_name);
+                .profitable => |stored| {
+                    self.decisions.allocator.free(stored.artifact.data);
+                    self.decisions.allocator.free(stored.provider_name);
                 },
                 .negative => |reason| {
                     self.decisions.allocator.free(reason);
@@ -389,22 +390,35 @@ pub const KernelStore = struct {
     }
 
     /// Record a profitable tuning decision.
-    pub fn put_profitable(self: *KernelStore, decision_key: DecisionKey, artifact: StoredArtifact) Allocator.Error!void {
+    ///
+    /// The store always copies the decision key and provider name. `storage`
+    ///  controls whether it copies or consumes the artifact data.
+    pub fn put_profitable(
+        self: *KernelStore,
+        decision_key: DecisionKey,
+        provider_name: []const u8,
+        artifact: Artifact,
+        storage: ArtifactStorage,
+    ) Allocator.Error!void {
+        errdefer if (storage == .take) self.decisions.allocator.free(artifact.data);
+
         const owned_key = try self.decisions.allocator.dupe(u8, decision_key.bytes);
         errdefer self.decisions.allocator.free(owned_key);
-        const owned_name = try self.decisions.allocator.dupe(u8, artifact.provider_name);
+        const owned_name = try self.decisions.allocator.dupe(u8, provider_name);
         errdefer self.decisions.allocator.free(owned_name);
-        const owned_data = try self.decisions.allocator.dupe(u8, artifact.data);
-        errdefer self.decisions.allocator.free(owned_data);
-        const owned_target = try self.decisions.allocator.dupe(u8, artifact.target_name);
-        errdefer self.decisions.allocator.free(owned_target);
+        const owned_data = switch (storage) {
+            .copy => try self.decisions.allocator.dupe(u8, artifact.data),
+            .take => artifact.data,
+        };
+        errdefer if (storage == .copy) self.decisions.allocator.free(owned_data);
 
         try self.decisions.put(owned_key, .{ .profitable = .{
             .provider_name = owned_name,
-            .data = owned_data,
-            .target_name = owned_target,
-            .workspace_bytes = artifact.workspace_bytes,
-            .workspace_alignment = artifact.workspace_alignment,
+            .artifact = .{
+                .data = owned_data,
+                .workspace_bytes = artifact.workspace_bytes,
+                .workspace_alignment = artifact.workspace_alignment,
+            },
         } });
     }
 
@@ -436,7 +450,7 @@ pub const KernelStore = struct {
 ///
 /// Populated before execution begins, typically by `tune()`.
 ///
-/// The execution integration resolves `StoredArtifact.provider_name` through
+/// The execution integration resolves `ProfitableDecision.provider_name` through
 ///  this table. `dispatch_ctx` carries its type through `TypedPtr`.
 pub const DispatchEntry = struct {
     dispatch_fn: DispatchFn,
@@ -488,16 +502,16 @@ pub const DispatchRegistry = struct {
     ) PrepareError!void {
         var decisions = store.decisions.iterator();
         while (decisions.next()) |decision| {
-            const artifact = switch (decision.value_ptr.*) {
+            const stored = switch (decision.value_ptr.*) {
                 .profitable => |value| value,
                 .negative => continue,
             };
-            const entry = self.get(artifact.provider_name) orelse
+            const entry = self.get(stored.provider_name) orelse
                 return error.ProviderNotRegistered;
             const prepare_fn = entry.prepare_fn orelse continue;
             try prepare_fn(
                 entry.dispatch_ctx,
-                artifact.data,
+                stored.artifact.data,
                 decision.key_ptr.*,
                 ctx,
             );
@@ -602,26 +616,42 @@ test "kernel store put and get profitable" {
     var store = KernelStore.init(testing.allocator);
     defer store.deinit();
 
-    try store.put_profitable(key, .{
-        .provider_name = "mirage",
+    try store.put_profitable(key, "mirage", .{
         .data = "compiled_kernel_bytes",
-        .target_name = "zigrad.kernel.matmul_0",
         .workspace_bytes = 4096,
         .workspace_alignment = 128,
-    });
+    }, .copy);
 
     const decision = store.get(key) orelse return error.TestUnexpectedResult;
     switch (decision) {
-        .profitable => |art| {
-            try testing.expectEqualStrings("mirage", art.provider_name);
-            try testing.expectEqualStrings("compiled_kernel_bytes", art.data);
-            try testing.expectEqualStrings("zigrad.kernel.matmul_0", art.target_name);
-            try testing.expectEqual(@as(usize, 4096), art.workspace_bytes);
-            try testing.expectEqual(@as(usize, 128), art.workspace_alignment);
+        .profitable => |stored| {
+            try testing.expectEqualStrings("mirage", stored.provider_name);
+            try testing.expectEqualStrings("compiled_kernel_bytes", stored.artifact.data);
+            try testing.expectEqual(@as(usize, 4096), stored.artifact.workspace_bytes);
+            try testing.expectEqual(@as(usize, 128), stored.artifact.workspace_alignment);
         },
         .negative => return error.TestUnexpectedResult,
     }
     try testing.expect(store.is_profitable(key));
+}
+
+test "kernel store takes artifact data without copying" {
+    const testing = std.testing;
+    const key = DecisionKey{ .bytes = "kp-test:take" };
+    const data = try testing.allocator.dupe(u8, "compiled_kernel_bytes");
+    const data_ptr = data.ptr;
+
+    var store = KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable(key, "test", .{
+        .data = data,
+    }, .take);
+
+    const decision = store.get(key) orelse return error.TestUnexpectedResult;
+    switch (decision) {
+        .profitable => |stored| try testing.expectEqual(data_ptr, stored.artifact.data.ptr),
+        .negative => return error.TestUnexpectedResult,
+    }
 }
 
 test "kernel store put and get negative" {
@@ -764,11 +794,9 @@ test "dispatch registry prepares profitable artifacts" {
 
     var store = KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(.{ .bytes = "kp-test:prepare" }, .{
-        .provider_name = "test",
+    try store.put_profitable(.{ .bytes = "kp-test:prepare" }, "test", .{
         .data = "compiled_kernel_bytes",
-        .target_name = "test_kernel",
-    });
+    }, .copy);
     try store.put_negative(.{ .bytes = "kp-test:negative" }, "unsupported");
 
     var state: State = .{};
@@ -789,11 +817,9 @@ test "dispatch registry requires providers for stored artifacts" {
 
     var store = KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(.{ .bytes = "kp-test:missing-provider" }, .{
-        .provider_name = "missing",
+    try store.put_profitable(.{ .bytes = "kp-test:missing-provider" }, "missing", .{
         .data = "compiled_kernel_bytes",
-        .target_name = "test_kernel",
-    });
+    }, .copy);
 
     var registry = DispatchRegistry.init(testing.allocator);
     defer registry.deinit();

@@ -177,7 +177,7 @@ fn tune_function(
         }
 
         // Invoke provider.
-        var compiled = candidate.provider.compile(desc, selected_device, allocator) catch |err| switch (err) {
+        const compiled = candidate.provider.compile(desc, selected_device, allocator) catch |err| switch (err) {
             error.Unsupported => {
                 stats.negative += 1;
                 log.debug("provider '{s}' cannot handle region '{s}', recording negative", .{
@@ -193,18 +193,16 @@ fn tune_function(
                 return err;
             },
         };
-        defer compiled.deinit(allocator);
 
         stats.compiled += 1;
 
         // Record profitable decision.
-        try store.put_profitable(decision_key, .{
-            .provider_name = compiled.provider_name,
-            .data = compiled.data,
-            .target_name = compiled.target_name,
-            .workspace_bytes = compiled.workspace_bytes,
-            .workspace_alignment = compiled.workspace_alignment,
-        });
+        try store.put_profitable(
+            decision_key,
+            candidate.provider_name,
+            compiled,
+            .take,
+        );
 
         // Register dispatch from provider (idempotent).
         try register_provider_dispatch(dispatch_registry, candidate.provider);
@@ -270,9 +268,12 @@ fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
     var it = store.decisions.iterator();
     while (it.next()) |entry| {
         switch (entry.value_ptr.*) {
-            .profitable => |art| {
-                out.print("  [+] {s} -> {s} ({d} bytes, ws={d})\n", .{
-                    entry.key_ptr.*, art.target_name, art.data.len, art.workspace_bytes,
+            .profitable => |stored| {
+                out.print("  [+] {s}: provider={s}, bytes={d}, ws={d}\n", .{
+                    entry.key_ptr.*,
+                    stored.provider_name,
+                    stored.artifact.data.len,
+                    stored.artifact.workspace_bytes,
                 }) catch return;
             },
             .negative => |reason| {
@@ -308,15 +309,13 @@ const TestProvider = struct {
         _: region_view.RegionView,
         _: device.Device,
         allocator: std.mem.Allocator,
-    ) kernel.CompileError!kernel.KernelArtifact {
+    ) kernel.CompileError!kernel.Artifact {
         const self: *TestProvider = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         if (self.unsupported) return error.Unsupported;
 
         return .{
-            .provider_name = self.name,
             .data = try allocator.dupe(u8, self.name),
-            .target_name = try allocator.dupe(u8, self.name),
         };
     }
 };
