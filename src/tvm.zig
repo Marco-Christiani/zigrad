@@ -1,18 +1,39 @@
-// High-level modules
-pub const module = @import("tvm/module.zig");
-pub const provider = @import("tvm/provider.zig");
-pub const dispatch = @import("tvm/dispatch.zig");
-pub const tune = @import("tvm/tune.zig");
+//! Public surface for the optional TVM integration.
+//!
+//! Translated declarations, DLPack ABI values, packed-call values, and TVM
+//!  object wrappers remain implementation details.
 
-// C binding subsystem re-exports (named to match TVM namespaces)
-// TODO: should consider keeping these under a c namespace so reaching in here is explicit, maybe dont export these here at all? Could have a zg.c namespace.
-pub const tir = @import("c/tvm/tir.zig");
-pub const runtime = @import("c/tvm/runtime.zig");
-pub const ffi = @import("c/tvm/api.zig");
-pub const meta_schedule = @import("c/tvm/meta_schedule.zig");
-pub const compile = @import("c/tvm/compile.zig");
-pub const dlpack = @import("c/dlpack.zig");
+const config = @import("tvm/config.zig");
+const matmul = @import("tvm/matmul.zig");
+
+pub const runtime = @import("tvm/runtime.zig");
+pub const TargetKind = config.TargetKind;
+pub const CompileConfig = config.CompileConfig;
+
+pub const MatmulShape = matmul.Shape;
+pub const TuneOptions = matmul.TuneOptions;
+pub const TuneResult = matmul.TuneResult;
+pub const tune_matmul = matmul.tune;
+pub const CachedMatmul = matmul.CachedMatmul;
+
+pub const Provider = @import("tvm/provider.zig").TvmProvider;
+pub const DispatchState = @import("tvm/dispatch.zig").TvmDispatchState;
 
 test {
     @import("std").testing.refAllDecls(@This());
+}
+
+test "public TVM surface excludes raw integration namespaces" {
+    const testing = @import("std").testing;
+    try testing.expect(!@hasDecl(@This(), "ffi"));
+    try testing.expect(!@hasDecl(@This(), "dlpack"));
+    try testing.expect(!@hasDecl(@This(), "tir"));
+    try testing.expect(!@hasDecl(@This(), "meta_schedule"));
+    try testing.expect(!@hasDecl(@This(), "compile"));
+    try testing.expect(!@hasDecl(@This(), "artifact"));
+
+    switch (@typeInfo(CachedMatmul)) {
+        .@"opaque" => {},
+        else => return error.CachedMatmulMustRemainOpaque,
+    }
 }

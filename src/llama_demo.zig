@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const demo_support = @import("demo_support.zig");
 const stz = @import("safetensors_zg");
 
 const llama_model = @import("llama_model.zig");
@@ -8,7 +9,8 @@ const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/llama-ft-demo");
 
 /// Create an iota tensor from a traced tensor's builder.
-/// TODO: missing method?
+///
+/// TODO(api): Expose this operation through `Tensor`.
 fn iota_from(t: Tensor, out_dtype: zg.DType, out_dims: []const i64, iota_dim: i64) !Tensor {
     const b = t.backing.traced.builder;
     return Tensor.from_var(b, try b.iota(out_dtype, out_dims, iota_dim));
@@ -18,10 +20,9 @@ const num_layers: usize = 16;
 
 /// Per-attention-head dimension.
 ///
-/// Hardcoded for LLaMA 3.2-1B so when loading a different checkpoint,
-///  change this constant
+/// This value matches the LLaMA 3.2-1B checkpoint used by the demo.
 ///
-/// TODO: longer term, read it from the shipped `config.json`
+/// TODO(example): Read model dimensions from the checkpoint configuration.
 const head_dim: i64 = 64;
 
 /// Concrete llama params type used throughout this demo. Every field path
@@ -39,7 +40,7 @@ const BatchSpec = struct {
 };
 
 pub const LlamaKernelProvider = enum {
-    // TODO: add tvm kp
+    // TODO(kernel-provider): Add TVM after the Llama recipe uses the shared store path.
     mirage,
 };
 
@@ -65,22 +66,22 @@ fn loss_fn_mirage(params: LlamaParams, batch: BatchSpec) !Tensor {
 const TrainStepResult = struct { loss_val: Tensor, updated: LlamaParams };
 
 fn train_step_fn(params: LlamaParams, batch: BatchSpec) !TrainStepResult {
-    var vg = try zg.frontend.transforms.value_and_grad(loss_fn, .{ params, batch });
+    var vg = try zg.transforms.value_and_grad(loss_fn, .{ params, batch });
     defer vg.deinit();
     return try sgd_step(params, &vg, 1e-4);
 }
 
 fn train_step_fn_mirage(params: LlamaParams, batch: BatchSpec) !TrainStepResult {
-    var vg = try zg.frontend.transforms.value_and_grad(loss_fn_mirage, .{ params, batch });
+    var vg = try zg.transforms.value_and_grad(loss_fn_mirage, .{ params, batch });
     defer vg.deinit();
     return try sgd_step(params, &vg, 1e-4);
 }
 
-fn sgd_step(params: LlamaParams, vg: *zg.frontend.transforms.ValueAndGrad, lr: f32) !TrainStepResult {
+fn sgd_step(params: LlamaParams, vg: *zg.transforms.ValueAndGrad, lr: f32) !TrainStepResult {
     var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
     defer params_tree.deinit();
-    const optim = zg.frontend.optim.SGD{ .lr = lr };
-    var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.frontend.optim.SGD.update);
+    const optim = zg.optim.SGD{ .lr = lr };
+    var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.optim.SGD.update);
     defer updated.deinit();
     return .{
         .loss_val = vg.value,
@@ -160,20 +161,17 @@ fn loss_fn_with_options(
 }
 
 pub fn run_llama_ft_demo(
-    io: std.Io,
-    allocator: std.mem.Allocator,
+    context: *demo_support.PjrtContext,
     environ: *const std.process.Environ.Map,
-    b: *zg.Backend,
-    device: zg.Backend.Device,
-    dump_pr: ?*zg.pipeline.DumpConfig,
-    dump_mlir: ?*zg.pipeline.DumpConfig,
-    dump_optimized: ?*zg.pipeline.DumpConfig,
+    operations: demo_support.PjrtOperations,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
     cfg: LlamaDemoConfig,
-    dump_kernels: bool,
 ) !void {
+    const io = context.compilation.io;
+    const allocator = context.compilation.allocator;
+    const executor = &context.execution.interface;
     const train_mode = cfg.train;
     const model_dtype: zg.DType = cfg.dtype;
     const host_dtype: zg.DType = model_dtype;
@@ -224,7 +222,6 @@ pub fn run_llama_ft_demo(
     //  for concision, but could be done equivalently).
     const inputs_spec = .{ host_params, host_batch };
 
-
     // Mirage kernel provider: tune -> store -> pass to compile_cfg.
     const MirageDispatch = if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void;
     const MirageProviderT = if (zg.build_options.has_mirage) zg.mirage.provider.MirageProvider else void;
@@ -235,45 +232,42 @@ pub fn run_llama_ft_demo(
     };
 
     var mirage_provider_impl: ?MirageProviderT = null;
-    var mirage_providers: [1]zg.kernel.KernelProvider = undefined;
+    var mirage_providers: [1]zg.pr.kernel.KernelProvider = undefined;
 
-    // TODO: Mirage currently only works via MLIR-level patterns (select pass),
-    // which is not wired into compile_program. Store-based PR-level Mirage
-    // kernelization requires region annotations in the frontend model.
-    // For now, the mirage provider path is disabled until MLIR pipeline
-    // assembly is supported or PR-level annotations are added.
+    // TODO(mirage): Connect Mirage selection through either the disconnected
+    //  MLIR operation or PR region annotations.
     if (cfg.kernel_provider) |provider| {
         switch (provider) {
             .mirage => {
                 if (comptime !zg.build_options.has_mirage) {
-                    log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
+                    log.err("mirage provider requested but binary was built without the Mirage integration", .{});
                     return error.MirageUnavailable;
                 }
-                mirage_dispatch_state = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
-                mirage_provider_impl = .{
-                    .allocator = allocator,
-                    .dispatch_state = &mirage_dispatch_state.?,
+                const mirage_config = zg.mirage.config.Config.from_environ(environ) catch |err| {
+                    log.err("Mirage configuration failed: {s}", .{@errorName(err)});
+                    return err;
                 };
+                mirage_dispatch_state = zg.mirage.dispatch.MirageDispatchState.init(
+                    allocator,
+                    mirage_config.compile,
+                );
+                mirage_provider_impl = try zg.mirage.provider.MirageProvider.init(
+                    &mirage_dispatch_state.?,
+                    .{ .runtime = mirage_config.runtime },
+                );
                 mirage_providers = .{mirage_provider_impl.?.kernel_provider()};
 
-                // TODO: Mirage currently MLIR-level pattern matching, not PR-level store. This path is now
-                //  a placeholder while KP system is being redesigned, will wired up again later.
+                // TODO(kernel-provider): Connect the Llama recipe to the shared
+                //  PR tuning store.
                 log.warn("mirage kernel provider not yet supported via store-based path; ignoring", .{});
             },
         }
     }
 
-    const train = zg.frontend.train;
-    // TODO: Fix this later when KP starts stabilizing
+    const train = zg.train;
+    // TODO(kernel-provider): Remove this alternate loss once provider selection
+    //  operates on the shared PR recipe.
     const use_mirage_loss = cfg.kernel_provider != null;
-
-    const compile_opts: zg.frontend.CompileOpts = .{
-        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
-        .dump_pr = if (dump_pr) |dump_cfg| dump_cfg.* else null,
-        .dump_mlir = if (dump_mlir) |dump_cfg| dump_cfg.* else null,
-        .dump_optimized = if (dump_optimized) |dump_cfg| dump_cfg.* else null,
-        .dump_kernels = dump_kernels,
-    };
 
     var program = if (train_mode)
         (if (use_mirage_loss)
@@ -286,10 +280,15 @@ pub fn run_llama_ft_demo(
         else
             try zg.trace(loss_fn, allocator, inputs_spec, "llama_ft_step"));
     defer program.deinit();
-    const exe = try zg.frontend.compile_program(b, io, allocator, &program, device, "llama_ft_step", compile_opts);
-    defer b.deinit_executable(exe);
+    var exe = try demo_support.compile_pjrt(
+        context,
+        &program,
+        "llama_ft_step",
+        operations,
+    );
+    defer exe.deinit();
 
-    const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
+    const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
     // Fill batch leaves with synthetic inputs.
     const token_seed = [_]usize{ 128000, 128009, 128001, 128008 };
@@ -318,10 +317,9 @@ pub fn run_llama_ft_demo(
     defer host_tree.deinit_with(Tensor.deinit);
 
     // Transfer host -> device.
-    const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
-    var dev_tree = try host_tree.map(Tensor, UploadCtx{ .b = b, .d = device }, struct {
-        fn f(ctx: UploadCtx, t: Tensor) anyerror!Tensor {
-            return t.to_device(ctx.b, ctx.d);
+    var dev_tree = try host_tree.map(Tensor, executor, struct {
+        fn f(selected: *zg.Executor, tensor: Tensor) (zg.Executor.Error || error{UnsupportedAval})!Tensor {
+            return try tensor.to_device(selected);
         }
     }.f);
 
@@ -334,15 +332,14 @@ pub fn run_llama_ft_demo(
     var loop_timer = zg.utils.LoopTimer{ .io = io, .label = "llama-ft-demo", .quiet = quiet };
 
     if (train_mode) {
-        // TrainState takes ownership of `dev_tree`'s leaves (donated inputs
-        //  are swapped in place); we free only the tree's array/path storage.
+        // TrainState.deinit releases the leaf buffers after donation swaps.
+        // This scope releases only the tree arrays and paths.
         defer dev_tree.deinit();
 
         // Set up state as a convenience for training
         var state = try train.TrainState.init(
             allocator,
             exe,
-            b,
             dev_tree.leaves,
             program.output_arity("llama_ft_step"),
             .{ .non_donatable_input_indices = donate, .loss_dtype = loss_dtype },
@@ -351,10 +348,11 @@ pub fn run_llama_ft_demo(
 
         for (0..warmup_steps) |_| {
             var result = try state.step();
-            // Do not await the execution event as buffer_to_host internally chains behind the execution.
-            // Also, deinit only the event handle.
-            // TODO: this expose a bit of an annoying aspect of the API
-            if (result.event) |ev| b.deinit_event(ev);
+            // The loss transfer depends on execution, so the execution event
+            //  can be released without an explicit wait.
+            //
+            // TODO(execution): Encapsulate dependent transfer and event release.
+            if (result.event) |completion| executor.release_event(completion);
             _ = try result.loss.item(f32);
             result.loss.deinit();
         }
@@ -367,13 +365,13 @@ pub fn run_llama_ft_demo(
         for (0..steps) |_| {
             try loop_timer.start_step();
             var result = try state.step();
-            // deinit execution event without awaiting, the transfer event from buffer_to_host
-            //  captures the full dependency.
-            // TODO: this expose a bit of an annoying aspect of the API
-            defer if (result.event) |ev| b.deinit_event(ev);
+            // The loss transfer captures the execution dependency.
+            //
+            // TODO(execution): Encapsulate dependent transfer and event release.
+            defer if (result.event) |completion| executor.release_event(completion);
             loop_timer.mark("dispatch");
 
-            // .item() implies a sync, so we dont need an explicit barrier
+            // Reading a scalar waits for its transfer.
             const loss: ?f32 = if (quiet or execute_only) null else try result.loss.item(f32);
             loop_timer.mark("sync+read");
 
@@ -390,26 +388,25 @@ pub fn run_llama_ft_demo(
 
         defer dev_tree.deinit_with(Tensor.deinit);
 
-        // Extract raw buffers for direct execute_into calls.
-        // TODO: consider a better api for this use case
-        const input_bufs = try allocator.alloc(zg.Backend.Buffer, dev_tree.leaves.len);
-        defer allocator.free(input_bufs);
-        for (input_bufs, dev_tree.leaves) |*slot, t| {
+        const input_buffers = try allocator.alloc(zg.Executor.Buffer, dev_tree.leaves.len);
+        defer allocator.free(input_buffers);
+        for (input_buffers, dev_tree.leaves) |*slot, t| {
             slot.* = try t.buffer();
         }
 
-        var output_bufs: [1]zg.Backend.Buffer = undefined;
+        var output_buffers: [1]zg.Executor.Buffer = undefined;
 
         for (0..warmup_steps) |_| {
-            const ev = try b.execute_into(fwd_exe, input_bufs, &output_bufs, null, .{});
-            defer if (ev) |e| b.deinit_event(e);
-            // read to warm up the DMA path otherwise first timed step pays a ~65ms lazy-init penalty
-            // TODO: again, if we standardize on execute_into working with buffers directly then
-            //  it would make sense to provide a api for this, so a .item() method, then update
-            //  Tensor.item appropriately. its already implemented, just a matter of splitting,
-            //  except the difference is that this is device buffer backed by an opaque handle.
-            var loss_tensor = Tensor.from_buffer(b, output_bufs[0], loss_dtype, &.{});
-            // .item() implies a sync, so we dont need an explicit barrier
+            const event = try executor.invoke(
+                fwd_exe,
+                input_buffers,
+                &output_buffers,
+                .{},
+            );
+            defer if (event) |completion| executor.release_event(completion);
+            // Read the result to exercise host transfer before the timed loop.
+            var loss_tensor = Tensor.from_buffer(executor, output_buffers[0], loss_dtype, &.{});
+            // `item` synchronizes the transfer.
             _ = try loss_tensor.item(f32);
             loss_tensor.deinit();
         }
@@ -421,11 +418,16 @@ pub fn run_llama_ft_demo(
 
         for (0..steps) |_| {
             try loop_timer.start_step();
-            const event = try b.execute_into(fwd_exe, input_bufs, &output_bufs, null, .{});
-            defer if (event) |ev| b.deinit_event(ev);
+            const event = try executor.invoke(
+                fwd_exe,
+                input_buffers,
+                &output_buffers,
+                .{},
+            );
+            defer if (event) |completion| executor.release_event(completion);
             loop_timer.mark("dispatch");
 
-            var loss_tensor = Tensor.from_buffer(b, output_bufs[0], loss_dtype, &.{});
+            var loss_tensor = Tensor.from_buffer(executor, output_buffers[0], loss_dtype, &.{});
             // .item() implies a sync, so we dont need an explicit barrier
             const loss: ?f32 = if (quiet or execute_only) null else try loss_tensor.item(f32);
             loop_timer.mark("sync+read");
@@ -443,7 +445,7 @@ pub fn run_llama_ft_demo(
     log.info("OK", .{});
 }
 
-/// TODO: this doesnt really belong here
+/// TODO(profiling): Move NVTX integration into a reusable optional module.
 const NvtxRange = struct {
     lib: std.DynLib,
     push_fn: *const fn ([*:0]const u8) callconv(.c) c_int,
@@ -466,7 +468,7 @@ const NvtxRange = struct {
     }
 
     pub fn push(self: *NvtxRange, label: [:0]const u8) !void {
-        // TODO: when this is moved and built out, need proper error checking/mapping
+        // TODO(profiling): Map NVTX return codes to a specific error set.
         _ = self.push_fn(label);
     }
 

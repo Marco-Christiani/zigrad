@@ -25,22 +25,20 @@ fn format_unary_elementwise(writer: *types.Writer, op: *const pr.Op, _: void) ty
     }
 }
 
-// =========================================================================
 // Exp
-// =========================================================================
 
 pub const exp = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_unary_elementwise(error.ExpTypeMismatch, op);
+        return try validate_unary_elementwise(error.ExpTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.ExpTypeMismatch, inputs);
+        return try infer_unary_elementwise(error.ExpTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -69,22 +67,20 @@ pub const exp = struct {
     pub const format = format_unary_elementwise;
 };
 
-// =========================================================================
 // Log
-// =========================================================================
 
 pub const log = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_unary_elementwise(error.LogTypeMismatch, op);
+        return try validate_unary_elementwise(error.LogTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.LogTypeMismatch, inputs);
+        return try infer_unary_elementwise(error.LogTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -113,9 +109,7 @@ pub const log = struct {
     pub const format = format_unary_elementwise;
 };
 
-// =========================================================================
-// Convert
-// =========================================================================
+// Conversion operation.
 
 pub const convert = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -135,7 +129,7 @@ pub const convert = struct {
         return .{ .tensor = .{ .dtype = out_dtype, .shape = operand.shape } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, out_dtype: pr.DType) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -167,22 +161,20 @@ pub const convert = struct {
     }
 };
 
-// =========================================================================
 // Rsqrt
-// =========================================================================
 
 pub const rsqrt = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_unary_elementwise(error.RsqrtTypeMismatch, op);
+        return try validate_unary_elementwise(error.RsqrtTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.RsqrtTypeMismatch, inputs);
+        return try infer_unary_elementwise(error.RsqrtTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -227,22 +219,20 @@ pub const rsqrt = struct {
     pub const format = format_unary_elementwise;
 };
 
-// =========================================================================
 // Logistic (sigmoid)
-// =========================================================================
 
 pub const logistic = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_unary_elementwise(error.LogisticTypeMismatch, op);
+        return try validate_unary_elementwise(error.LogisticTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_unary_elementwise(error.LogisticTypeMismatch, inputs);
+        return try infer_unary_elementwise(error.LogisticTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;

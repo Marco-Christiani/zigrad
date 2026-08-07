@@ -7,12 +7,12 @@
 //! ```zxpr
 //! zxpr main {
 //!   ; params (2)
-//!   a: 2x3<f32>
-//!   b: 3x2<f32>
+//!   %0: 2x3<f32>
+//!   %1: 3x2<f32>
 //!   ; body (1 ops)
 //!   let
-//!     c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp
-//!   in c
+//!     %2: 2x2<f32> = dot[contracting=([1], [0]), K=3](%0, %1)  ; vjp
+//!   in %2
 //! }
 //! ```
 const std = @import("std");
@@ -46,7 +46,7 @@ pub fn emit(self: *Self) !void {
 
     try self.styler.write_keyword("zxpr");
     try w.writeAll(" ");
-    try self.styler.write_var_name(self.func.name);
+    try self.styler.write_identifier(self.func.name);
     try w.writeAll(" {\n");
 
     // Parameters section
@@ -79,7 +79,8 @@ pub fn emit(self: *Self) !void {
             while (open_len > 0) {
                 const ri = open_stack[open_len - 1];
                 const region = self.func.regions[ri];
-                if (op_idx >= region.op_start + region.op_len) {
+                const end_idx = region_end_index(self.func, region) orelse 0;
+                if (op_idx > end_idx) {
                     open_len -= 1;
                     try self.emit_region_end(open_len);
                 } else break;
@@ -87,7 +88,8 @@ pub fn emit(self: *Self) !void {
 
             // Open regions that start at this op
             for (self.func.regions, 0..) |region, ri| {
-                if (region.op_start == op_idx) {
+                const start_idx = region_start_index(self.func, region) orelse continue;
+                if (start_idx == op_idx) {
                     // Check not already open
                     var already = false;
                     for (open_stack[0..open_len]) |oi| {
@@ -129,7 +131,7 @@ pub fn emit(self: *Self) !void {
         try w.writeAll(" ");
         for (self.func.returns, 0..) |ret_var, i| {
             if (i > 0) try w.writeAll(", ");
-            try self.emit_var_name(ret_var);
+            try self.emit_value_id(ret_var);
         }
         try w.writeAll("\n");
     }
@@ -137,12 +139,22 @@ pub fn emit(self: *Self) !void {
     try w.writeAll("}\n");
 }
 
-fn emit_var_name(self: *Self, v: *const pr.Var) !void {
-    try self.styler.write_var_name(pr.var_name(v.id));
+fn region_start_index(func: pr.Function, region: pr.Region) ?usize {
+    if (region.op_ids.len == 0) return null;
+    return func.op_index_by_id(region.op_ids[0]);
+}
+
+fn region_end_index(func: pr.Function, region: pr.Region) ?usize {
+    if (region.op_ids.len == 0) return null;
+    return func.op_index_by_id(region.op_ids[region.op_ids.len - 1]);
+}
+
+fn emit_value_id(self: *Self, v: *const pr.Var) !void {
+    try self.styler.write_value_id(v.id);
 }
 
 pub fn emit_var_with_type(self: *Self, v: *const pr.Var) !void {
-    try self.emit_var_name(v);
+    try self.emit_value_id(v);
     try self.writer.writeAll(": ");
     try self.emit_type(v.aval);
 }
@@ -194,7 +206,7 @@ pub fn emit_binding(self: *Self, op: *const pr.Op) !void {
     // Inputs as function args
     for (op.inputs, 0..) |operand, i| {
         if (i > 0) try self.writer.writeAll(", ");
-        try self.emit_var_name(operand.value);
+        try self.emit_value_id(operand.value);
     }
 
     try self.writer.writeAll(")");

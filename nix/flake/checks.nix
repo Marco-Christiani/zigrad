@@ -1,40 +1,57 @@
 # nix/flake/checks.nix
-{inputs, ...}: let
-  zigradVersion = inputs.self.shortRev or inputs.self.dirtyShortRev or "dev";
-in {
+{
   perSystem = {
     pkgs,
     config,
     ...
   }: let
-    zigradSrc = import ../helpers/source-filter.nix {
-      inherit (pkgs) lib;
-      root = ../..;
-    };
-
     zigrad = config.packages.zigrad;
+    zigradXlaCpu = config.packages.zigrad-xla-cpu;
+    zigradIreeCpu = config.packages.zigrad-iree-cpu;
+    zigradTvmCpu = config.packages.zigrad-tvm-cpu;
+    zigradDevCuda = config.packages.zigrad-dev-cuda;
 
-    zigradTests = pkgs.callPackage ../packages/zigrad.nix {
-      inherit zigradSrc;
-      version = zigradVersion;
-      sdk = config.packages.zigrad-sdk-full-gpu-compile;
-      cudaHome = config.packages.cuda-redist-dev;
+    zigradTests = zigrad.override {
       optimize = "ReleaseSafe";
       runTests = true;
     };
 
-    checkTvmRuntimeFullFfi =
-      pkgs.runCommand "check-zigrad-tvm-runtime-full-ffi" {
+    zigradXlaCpuTests = zigradXlaCpu.override {
+      optimize = "ReleaseSafe";
+      runTests = true;
+    };
+
+    zigradIreeCpuTests = zigradIreeCpu.override {
+      optimize = "ReleaseSafe";
+      runTests = true;
+    };
+
+    zigradTvmCpuTests = zigradTvmCpu.override {
+      optimize = "ReleaseSafe";
+      runTests = true;
+    };
+
+    zigradDevCudaTests = zigradDevCuda.override {
+      optimize = "ReleaseSafe";
+      runTests = true;
+    };
+
+    zigradTvmCpuCompileOnly = zigradTvmCpu.override {
+      runtimeInputs = null;
+      runtimeEnv = {};
+      runtimeLibraryPaths = [];
+    };
+
+    checkTvmRuntimePresent =
+      pkgs.runCommand "check-zigrad-tvm-runtime-present" {
         nativeBuildInputs = [
-          zigrad
+          zigradTvmCpu
         ];
       } ''
         set -euo pipefail
         export HOME="$TMPDIR"
-        runtime_root="${config.packages.zigrad-sdk-full-gpu-runtime}"
-        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
 
-        ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/tvm-symbols.txt"
+        ${zigradTvmCpu}/bin/zigrad tvm symbols > "$TMPDIR/tvm-symbols.txt"
         test -s "$TMPDIR/tvm-symbols.txt"
 
         mkdir -p "$out"
@@ -44,16 +61,14 @@ in {
     checkTvmRuntimeNoTvm =
       pkgs.runCommand "check-zigrad-tvm-runtime-no-tvm" {
         nativeBuildInputs = [
-          zigrad
+          zigradTvmCpuCompileOnly
         ];
       } ''
         set -euo pipefail
         export HOME="$TMPDIR"
-        runtime_root="${config.packages.zigrad-sdk-minimal-runtime}"
-        export LD_LIBRARY_PATH="$runtime_root/lib:$runtime_root/runtime/sys/lib:$runtime_root/runtime/nvidia/nvrtc/lib:$runtime_root/runtime/nvidia/nvjitlink/lib"
 
-        if ${zigrad}/bin/zigrad tvm-dump-symbols > "$TMPDIR/stdout.txt" 2> "$TMPDIR/stderr.txt"; then
-          echo "expected tvm-dump-symbols to fail without TVM runtime libraries" >&2
+        if ${zigradTvmCpuCompileOnly}/bin/zigrad tvm symbols > "$TMPDIR/stdout.txt" 2> "$TMPDIR/stderr.txt"; then
+          echo "expected 'tvm symbols' to fail without TVM runtime libraries" >&2
           exit 1
         fi
 
@@ -69,9 +84,19 @@ in {
   in {
     checks = {
       zigrad-build = zigrad;
+      zigrad-autodoc = config.packages.zigrad-autodoc;
       zigrad-unit-tests = zigradTests;
-      tvm-runtime-full-ffi = checkTvmRuntimeFullFfi;
-      tvm-runtime-no-tvm = checkTvmRuntimeNoTvm;
+      zigrad-build-configurations = config.packages.zigrad-build-configurations;
+    };
+
+    packages = {
+      zigrad-unit-tests = zigradTests;
+      zigrad-xla-cpu-unit-tests = zigradXlaCpuTests;
+      zigrad-iree-cpu-unit-tests = zigradIreeCpuTests;
+      zigrad-tvm-cpu-unit-tests = zigradTvmCpuTests;
+      zigrad-dev-cuda-unit-tests = zigradDevCudaTests;
+      zigrad-tvm-runtime-check = checkTvmRuntimePresent;
+      zigrad-tvm-runtime-missing-check = checkTvmRuntimeNoTvm;
     };
   };
 }

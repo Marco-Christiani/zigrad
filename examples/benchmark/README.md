@@ -20,20 +20,26 @@ Shorthands: `all`, `all-cpu`, `all-gpu`.
 | Flag | Notes |
 |------|-------|
 | `--dtype=f32` | Default. All implementations supported. |
-| `--dtype=f16` | IEEE half-precision. BLAS returns error (MKL has no f16 sgemm). |
+| `--dtype=f16` | IEEE half-precision. Supported by Zig and XLA. |
 
-## Prerequisites
+## Enter the development environment
 
-- Zigrad devshell or otherwise valid SDK bundle with `ZG_EXTERNAL_SDK_ROOT` pointing to SDK with MLIR, TVM, and/or MKL headers
-- For TVM benchmarks: populated cache (use `zigrad tvm-tune`)
-- For XLA benchmarks: `PJRT_CPU_PLUGIN_PATH` or `PJRT_GPU_PLUGIN_PATH` (handled automatically when using devshell)
+From the Zigrad repository root:
+
+```sh
+nix develop --impure
+```
+
+The devshell sets `ZG_EXTERNAL_SDK_ROOT`, the TVM runtime paths, and the CPU and
+ GPU PJRT plugin paths. A direct Zig workflow outside the devshell must provide
+ an equivalent SDK with `-Dsdk=<path>` or `ZG_EXTERNAL_SDK_ROOT`.
 
 ## Build
 
 ```sh
 cd examples/benchmark
 zig build
-# If needed, explicitly specify  -Dsdk=<path-to-sdk-root> (must have been built with tvm, mkl, xla, etc support)
+zig build test --summary all
 ```
 
 ## Run
@@ -45,9 +51,6 @@ zig build run -- --impls=zig_naive --shapes=128x128x128
 # Compare naive vs BLAS (f32)
 zig build run -- --impls=zig_naive,blas --shapes=128x128x128,256x256x256
 
-# Run tuning as desired, can be incremental
-zig build run -- tune --impls=tvm_cpu --shapes=128x128x128 --trials=64 --trials-per-iter=16
-
 # All CPU implementations
 zig build run -- --impls=all-cpu --shapes=512x512x512 --iters=50
 
@@ -58,29 +61,28 @@ zig build run -- --impls=all-gpu --shapes=1024x1024x1024
 zig build run -- --impls=all --shapes=256x256x256
 ```
 
+Select the XLA plugin for the implementation being measured:
+
+```sh
+PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" zig build run -- \
+  --impls=xla_cpu --shapes=128x128x128
+
+PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" zig build run -- \
+  --impls=xla_gpu --shapes=128x128x128
+```
+
+TVM execution requires a target-specific tuning record. Run tuning from the
+ Zigrad repository root before starting the benchmark:
+
+```sh
+nix run --impure .#zigrad-dev-cuda -- tvm tune \
+  --shape 128x128x128 --trials 64 --trials-per-iter 16 --cpu
+```
+
+Use `--gpu` for the CUDA target. Tuning and execution share
+ `ZG_CACHE_DIR`, which defaults to `/tmp/zigrad-cache`.
+
 ## Output
 
-Prints a table per shape with median time (us), GFLOP/s, and speedup vs naive baseline, followed by a summary of best-performing implementations.
-
-Example:
-
-```
-============================================================
-Matmul Benchmark Results (f32)
-============================================================
-
-Shape: .{ .m = 128, .n = 128, .k = 128 }
-
-Implementation            Median (us)    GFLOP/s    vs Naive
----------------------------------------------------------
-✓ blas                        360.20      11.64   105.16×
-✓ zig_naive                 37877.33       0.11     1.00×
-✓ tvm_cpu                      18.52     226.47  2045.21×
-✓ xla_cpu                      70.41      59.57   537.97×
-
-============================================================
-Summary
-============================================================
-Best overall: tvm_cpu (226.47 GFLOP/s)
-Best hand-rolled: zig_naive (0.11 GFLOP/s)
-```
+The benchmark prints median time, GFLOP/s, correctness status, and speedup
+ relative to the naive Zig result when that implementation is selected.

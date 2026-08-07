@@ -31,22 +31,20 @@ fn format_binary_elementwise(writer: *types.Writer, op: *const pr.Op, _: void) t
     }
 }
 
-// ============================================================================
 // Add
-// ============================================================================
 
 pub const add = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_binary_elementwise(error.AddTypeMismatch, op);
+        return try validate_binary_elementwise(error.AddTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_binary_elementwise(error.AddTypeMismatch, inputs);
+        return try infer_binary_elementwise(error.AddTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -75,22 +73,20 @@ pub const add = struct {
     pub const format = format_binary_elementwise;
 };
 
-// ============================================================================
 // Subtract
-// ============================================================================
 
 pub const subtract = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_binary_elementwise(error.SubtractTypeMismatch, op);
+        return try validate_binary_elementwise(error.SubtractTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_binary_elementwise(error.SubtractTypeMismatch, inputs);
+        return try infer_binary_elementwise(error.SubtractTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -122,22 +118,20 @@ pub const subtract = struct {
     pub const format = format_binary_elementwise;
 };
 
-// ============================================================================
 // Multiply
-// ============================================================================
 
 pub const multiply = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_binary_elementwise(error.MultiplyTypeMismatch, op);
+        return try validate_binary_elementwise(error.MultiplyTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_binary_elementwise(error.MultiplyTypeMismatch, inputs);
+        return try infer_binary_elementwise(error.MultiplyTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -177,22 +171,20 @@ pub const multiply = struct {
     pub const format = format_binary_elementwise;
 };
 
-// =========================================================================
 // Divide
-// =========================================================================
 
 pub const divide = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_binary_elementwise(error.DivideTypeMismatch, op);
+        return try validate_binary_elementwise(error.DivideTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_binary_elementwise(error.DivideTypeMismatch, inputs);
+        return try infer_binary_elementwise(error.DivideTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -242,22 +234,20 @@ pub const divide = struct {
     pub const format = format_binary_elementwise;
 };
 
-// ============================================================================
 // Maximum
-// ============================================================================
 
 pub const maximum = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
     pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
-        return validate_binary_elementwise(error.MaximumTypeMismatch, op);
+        return try validate_binary_elementwise(error.MaximumTypeMismatch, op);
     }
 
     pub fn infer_output(_: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
-        return infer_binary_elementwise(error.MaximumTypeMismatch, inputs);
+        return try infer_binary_elementwise(error.MaximumTypeMismatch, inputs);
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -289,9 +279,7 @@ pub const maximum = struct {
     pub const format = format_binary_elementwise;
 };
 
-// ============================================================================
-// Helpers
-// ============================================================================
+// Helpers.
 
 /// Zero scalar broadcast to match `tensor`'s shape and dtype.
 /// Handles rank-0 (scalar) tensors by skipping the broadcast.

@@ -1,0 +1,239 @@
+//! Lifecycle for the optional IREE runtime.
+//!
+//! Raw IREE types remain under `src/c/iree`. This module exposes synchronous
+//!  execution through type-erased handles.
+
+const std = @import("std");
+const abi = @import("iree_abi");
+const RuntimeConfig = @import("config.zig").RuntimeConfig;
+
+const log = std.log.scoped(.@"zg/iree_runtime");
+
+/// Element types accepted by the current IREE buffer API.
+pub const ElementType = abi.ElementType;
+
+/// Failures exposed by the IREE runtime integration.
+pub const Error = abi.Error;
+
+/// IREE buffer view released with `deinit`.
+pub const Buffer = struct {
+    /// Type-erased integration handle.
+    _handle: *anyopaque,
+
+    /// Release this buffer view.
+    pub fn deinit(self: *Buffer) void {
+        abi.buffer_view_release(buffer_view(self));
+        self.* = undefined;
+    }
+
+    /// Copy this buffer's contents into host memory.
+    pub fn read(self: *const Buffer, destination: []u8) Error!void {
+        try abi.buffer_view_to_host(buffer_view(self), destination);
+    }
+
+    /// Return the number of logical elements in this buffer.
+    pub fn element_count(self: *const Buffer) usize {
+        return abi.buffer_view_element_count(buffer_view(self));
+    }
+
+    /// Return this buffer's element type when Zigrad supports it.
+    pub fn element_type(self: *const Buffer) Error!ElementType {
+        return try abi.buffer_view_element_type(buffer_view(self));
+    }
+};
+
+/// Results from one synchronous invocation.
+pub const Invocation = struct {
+    /// Output buffers in function-result order.
+    outputs: []Buffer,
+
+    /// Allocator used to free the output slice.
+    allocator: std.mem.Allocator,
+
+    /// Release every output buffer and the containing slice.
+    pub fn deinit(self: *Invocation) void {
+        for (self.outputs) |*output| output.deinit();
+        self.allocator.free(self.outputs);
+        self.* = undefined;
+    }
+};
+
+const ExecutableState = struct {
+    session: *abi.SessionHandle,
+    function: *abi.FunctionHandle,
+    bytecode: []u8,
+    allocator: std.mem.Allocator,
+};
+
+/// One loaded VMFB and its resolved entry function.
+///
+/// `deinit` releases the VMFB bytes. Call it before releasing the `Runtime`
+///  that loaded this executable.
+pub const Executable = struct {
+    /// Type-erased IREE state.
+    _state: *anyopaque,
+
+    /// Release the session and VMFB bytes.
+    pub fn deinit(self: *Executable) void {
+        const state = executable_state(self);
+        abi.function_release(state.function);
+        abi.session_release(state.session);
+        state.allocator.free(state.bytecode);
+        state.allocator.destroy(state);
+        self.* = undefined;
+    }
+
+    /// Invoke this executable synchronously with borrowed input buffers.
+    pub fn invoke(
+        self: *Executable,
+        allocator: std.mem.Allocator,
+        inputs: []const Buffer,
+    ) Error!Invocation {
+        const state = executable_state(self);
+        const call = try abi.call_init(allocator, state.session, state.function);
+        defer abi.call_deinit(call);
+
+        for (inputs) |*input| {
+            try abi.call_push_buffer_view_input(call, buffer_view(input));
+        }
+        try abi.call_invoke(call);
+
+        var outputs: std.ArrayList(Buffer) = .empty;
+        defer outputs.deinit(allocator);
+        errdefer for (outputs.items) |*output| output.deinit();
+
+        while (try abi.call_pop_buffer_view_output(call)) |view| {
+            errdefer abi.buffer_view_release(view);
+            try outputs.append(allocator, .{ ._handle = view });
+        }
+
+        return .{
+            .outputs = try outputs.toOwnedSlice(allocator),
+            .allocator = allocator,
+        };
+    }
+};
+
+const RuntimeState = struct {
+    instance: *abi.InstanceHandle,
+    device: *abi.DeviceHandle,
+    allocator: std.mem.Allocator,
+};
+
+/// One configured IREE runtime instance and its synchronous HAL device.
+pub const Runtime = struct {
+    /// Type-erased IREE state.
+    _state: *anyopaque,
+
+    /// Create a runtime and one device from explicit configuration.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: RuntimeConfig,
+    ) Error!Runtime {
+        const instance = try abi.instance_create();
+        errdefer abi.instance_release(instance);
+
+        const device = try abi.create_default_device(instance, config.driver);
+        errdefer abi.device_release(device);
+
+        const state = try allocator.create(RuntimeState);
+        state.* = .{
+            .instance = instance,
+            .device = device,
+            .allocator = allocator,
+        };
+
+        log.info("initialized IREE driver '{s}'", .{config.driver});
+        return .{ ._state = state };
+    }
+
+    /// Release this runtime's device and instance.
+    ///
+    /// All buffers and executables created by this runtime must already be
+    ///  released.
+    pub fn deinit(self: *Runtime) void {
+        const state = runtime_state(self);
+        abi.device_release(state.device);
+        abi.instance_release(state.instance);
+        state.allocator.destroy(state);
+        self.* = undefined;
+    }
+
+    /// Load VMFB bytes and resolve one fully qualified entry function.
+    ///
+    /// On success, `Executable.deinit` releases `bytecode`. The caller remains
+    ///  responsible for it when loading fails.
+    pub fn load(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+        bytecode: []u8,
+        entry_name: []const u8,
+    ) Error!Executable {
+        const runtime = runtime_state(self);
+        const session = try abi.session_create(runtime.instance, runtime.device);
+        errdefer abi.session_release(session);
+
+        try abi.session_append_module(session, bytecode);
+        const function = try abi.session_lookup_function(
+            allocator,
+            session,
+            entry_name,
+        );
+        errdefer abi.function_release(function);
+
+        const state = try allocator.create(ExecutableState);
+        state.* = .{
+            .session = session,
+            .function = function,
+            .bytecode = bytecode,
+            .allocator = allocator,
+        };
+        return .{ ._state = state };
+    }
+
+    /// Create a device buffer by copying row-major host data.
+    pub fn create_buffer(
+        self: *Runtime,
+        data: []const u8,
+        element_type: ElementType,
+        shape: []const i64,
+    ) Error!Buffer {
+        const view = try abi.buffer_view_create_from_host(
+            runtime_state(self).device,
+            data,
+            element_type,
+            shape,
+        );
+        return .{ ._handle = view };
+    }
+};
+
+fn buffer_view(buffer: *const Buffer) *abi.BufferHandle {
+    return @ptrCast(@alignCast(buffer._handle));
+}
+
+fn executable_state(executable: *const Executable) *ExecutableState {
+    return @ptrCast(@alignCast(executable._state));
+}
+
+fn runtime_state(runtime: *const Runtime) *RuntimeState {
+    return @ptrCast(@alignCast(runtime._state));
+}
+
+test "ElementType reports storage widths" {
+    try std.testing.expectEqual(@as(usize, 1), ElementType.i8.byte_width());
+    try std.testing.expectEqual(@as(usize, 2), ElementType.f16.byte_width());
+    try std.testing.expectEqual(@as(usize, 4), ElementType.f32.byte_width());
+    try std.testing.expectEqual(@as(usize, 8), ElementType.i64.byte_width());
+}
+
+test "IREE API does not export external declarations" {
+    try std.testing.expect(!@hasDecl(abi, "Allocator"));
+    try std.testing.expect(!@hasDecl(abi, "Status"));
+    try std.testing.expect(!@hasDecl(abi, "VmFunction"));
+    try std.testing.expect(!@hasDecl(abi, "RuntimeCall"));
+    try std.testing.expect(!@hasDecl(abi, "HalDevice"));
+    try std.testing.expect(!@hasDecl(abi, "HalBufferView"));
+    try std.testing.expect(!@hasDecl(abi, "HalElementType"));
+    try std.testing.expect(!@hasDecl(abi, "HalDim"));
+}

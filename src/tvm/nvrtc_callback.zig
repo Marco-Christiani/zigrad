@@ -1,48 +1,123 @@
-//! NVRTC compilation callback for TVM
+//! NVRTC compilation callback for TVM.
 //!
-//! Registers tvm_callback_cuda_compile to provide custom NVRTC compilation with:
-//! - Nix-aware include path logic (CUDA, glibc, gcc builtins)
-//! - Filtering of problematic includes (#include <cuda.h>, #include <cstdint>)
-//!    that TVM generates but NVRTC can't compile in JIT mode
+//! Registers `tvm_callback_cuda_compile` and adapts TVM-generated CUDA source
+//!  to the shared Zigrad NVRTC compiler.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const api = @import("../c/tvm/api.zig");
 const c = @import("../c/tvm/c.zig");
-const nvrtc = @import("../c/nvrtc.zig");
+const cuda_nvrtc = @import("../cuda/nvrtc.zig");
 
-const log = std.log.scoped(.@"zg/nvrtc_callback");
+const log = std.log.scoped(.@"zg/tvm_nvrtc");
 
-/// Borrowed env-var lookup via libc. Returned slice is owned by the
-///  process environ block. Do not free or store across env mutations.
-fn getenv(name: [*:0]const u8) ?[]const u8 {
-    const v = std.c.getenv(name) orelse return null;
-    return std.mem.span(v);
-}
+pub const RegisterError = std.mem.Allocator.Error || error{
+    NvrtcLoadFailed,
+    TvmFfiError,
+};
+
+const CallbackState = struct {
+    library_path: []u8,
+    toolkit_root: []u8,
+    glibc_include_dir: ?[]u8,
+    gcc_include_dir: ?[]u8,
+    gpu_arch: []u8,
+
+    fn create(input: cuda_nvrtc.Config, gpu_arch: []const u8) std.mem.Allocator.Error!*CallbackState {
+        const allocator = std.heap.c_allocator;
+        const self = try allocator.create(CallbackState);
+        errdefer allocator.destroy(self);
+
+        self.library_path = try allocator.dupe(u8, input.library_path);
+        errdefer allocator.free(self.library_path);
+
+        self.toolkit_root = try allocator.dupe(u8, input.toolkit_root);
+        errdefer allocator.free(self.toolkit_root);
+
+        self.glibc_include_dir = null;
+        self.gcc_include_dir = null;
+        self.gpu_arch = undefined;
+
+        if (input.glibc_include_dir) |path| {
+            self.glibc_include_dir = try allocator.dupe(u8, path);
+        }
+        errdefer if (self.glibc_include_dir) |path| allocator.free(path);
+
+        if (input.gcc_include_dir) |path| {
+            self.gcc_include_dir = try allocator.dupe(u8, path);
+        }
+        errdefer if (self.gcc_include_dir) |path| allocator.free(path);
+
+        self.gpu_arch = try allocator.dupe(u8, gpu_arch);
+        return self;
+    }
+
+    const Snapshot = struct {
+        config: cuda_nvrtc.Config,
+        gpu_arch: []const u8,
+    };
+
+    fn snapshot(self: *const CallbackState) Snapshot {
+        return .{
+            .config = .{
+                .library_path = self.library_path,
+                .toolkit_root = self.toolkit_root,
+                .glibc_include_dir = self.glibc_include_dir,
+                .gcc_include_dir = self.gcc_include_dir,
+            },
+            .gpu_arch = self.gpu_arch,
+        };
+    }
+
+    fn destroy(self: *CallbackState) void {
+        const allocator = std.heap.c_allocator;
+        allocator.free(self.library_path);
+        allocator.free(self.toolkit_root);
+        if (self.glibc_include_dir) |path| allocator.free(path);
+        if (self.gcc_include_dir) |path| allocator.free(path);
+        allocator.free(self.gpu_arch);
+        allocator.destroy(self);
+    }
+};
 
 /// Register the NVRTC compilation callback with TVM.
-/// This must be called during initialization, before any CUDA compilation.
-pub fn register(allocator: std.mem.Allocator) !void {
-    nvrtc.ensure_loaded() catch {
+///
+/// Registration must precede TVM CUDA compilation.
+pub fn register(
+    allocator: std.mem.Allocator,
+    config: cuda_nvrtc.Config,
+    gpu_arch: []const u8,
+) RegisterError!void {
+    cuda_nvrtc.ensure_available(config) catch {
         log.err("failed to load NVRTC runtime", .{});
         return error.NvrtcLoadFailed;
     };
 
-    const func_val = api.create_packed_func(null, &nvrtc_compile_callback, null) catch {
+    const state = try CallbackState.create(config, gpu_arch);
+    var state_owned = true;
+    errdefer if (state_owned) state.destroy();
+
+    const func_val = api.create_packed_func(
+        state,
+        &nvrtc_compile_callback,
+        &destroy_callback_state,
+    ) catch {
         log.err("failed to create NVRTC callback function", .{});
         return error.TvmFfiError;
     };
+    state_owned = false;
+    defer func_val.decref();
     const func_handle = func_val.as_object() orelse {
         log.err("NVRTC callback function has no object handle", .{});
         return error.TvmFfiError;
     };
 
-    api.set_global("tvm_callback_cuda_compile", func_handle, false) catch {
+    api.set_global("tvm_callback_cuda_compile", func_handle, true) catch {
         log.err("failed to register tvm_callback_cuda_compile", .{});
         return error.TvmFfiError;
     };
     log.info("registered tvm_callback_cuda_compile callback", .{});
 
-    // Verify we can retrieve the callback
     const verify_handle = api.get_global(allocator, "tvm_callback_cuda_compile") catch {
         log.err("failed to verify callback registration", .{});
         return error.TvmFfiError;
@@ -51,31 +126,34 @@ pub fn register(allocator: std.mem.Allocator) !void {
     log.info("verified: callback is retrievable", .{});
 }
 
+fn destroy_callback_state(handle: ?*anyopaque) callconv(.c) void {
+    const state: *CallbackState = @ptrCast(@alignCast(handle orelse return));
+    state.destroy();
+}
+
 /// Callback function called by TVM when compiling CUDA code.
 ///
-/// TVM passes two arguments via the generic FFI convention:
-///   args[0] = CUDA source code (string), args[1] = Target object.
-/// On success, writes the compiled PTX string into ret[0] and returns 0.
-/// On failure, returns -1.
+/// TVM supplies the CUDA source and target through its packed-call convention.
+/// The callback writes PTX into `ret` and returns zero on success.
 fn nvrtc_compile_callback(
     handle: ?*anyopaque,
     args: [*c]const c.TVMFFIAny,
     num_args: i32,
     ret: [*c]c.TVMFFIAny,
 ) callconv(.c) c_int {
-    _ = handle;
-    log.info("nvrtc_compile_callback called with {d} args", .{num_args});
+    const state: *const CallbackState = @ptrCast(@alignCast(handle orelse {
+        log.err("NVRTC callback has no configuration", .{});
+        return -1;
+    }));
 
     if (num_args != 2) {
         log.err("nvrtc_compile_callback: expected 2 args, got {d}", .{num_args});
         return -1;
     }
 
-    // extract args
     const code_arg = args[0];
     const target_arg = args[1];
 
-    // get cuda source code
     const code_ptr = code_arg.unnamed_1.v_c_str;
     if (code_ptr == null) {
         log.err("nvrtc_compile_callback: code string is null", .{});
@@ -86,47 +164,53 @@ fn nvrtc_compile_callback(
     const preview_len = @min(original_code.len, 500);
     log.debug("CUDA code preview ({d} bytes total):\n{s}...", .{ original_code.len, original_code[0..preview_len] });
 
-    // Get target and extract arch from it
-    // TODO: For now, use a default architecture, but we need to actually extract arch from target
+    // Target selection is resolved before callback registration.
     _ = target_arg;
-    const arch = "sm_86";
 
-    // thread-local arena for this compilation
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // strip problematic includes nvrtc cant handle
-    // tvm generates #include <cuda.h> and #include <cstdint>, but nvrtc doesnt need them
-    // (cuda.h brings in stdlib.h which causes issues, cstdint is C++ STL)
+    // Remove host includes that this NVRTC source path cannot compile.
+    //
+    // `cuda.h` reaches the host C library, and `cstdint` requires C++ standard
+    //  library headers.
     var filtered_code: std.ArrayList(u8) = .empty;
     defer filtered_code.deinit(allocator);
 
     var lines = std.mem.splitSequence(u8, original_code, "\n");
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-        // skip lines that include cuda.h or cstdint
         if (std.mem.eql(u8, trimmed, "#include <cuda.h>") or
             std.mem.eql(u8, trimmed, "#include <cstdint>"))
         {
             log.debug("Stripped: {s}", .{trimmed});
             continue;
         }
-        filtered_code.appendSlice(allocator, line) catch @panic("OOM");
-        filtered_code.append(allocator, '\n') catch @panic("OOM");
+        filtered_code.appendSlice(allocator, line) catch {
+            log.err("failed to allocate filtered CUDA source", .{});
+            return -1;
+        };
+        filtered_code.append(allocator, '\n') catch {
+            log.err("failed to allocate filtered CUDA source", .{});
+            return -1;
+        };
     }
     const patched_code = filtered_code.items;
 
     const patched_preview_len = @min(patched_code.len, 300);
     log.debug("Filtered code preview ({d} bytes total):\n{s}...", .{ patched_code.len, patched_code[0..patched_preview_len] });
 
-    // compile
-    const ptx = compile_with_nvrtc(allocator, patched_code, arch) catch |err| {
+    const ptx = compile_with_nvrtc(
+        allocator,
+        patched_code,
+        state.snapshot(),
+    ) catch |err| {
         log.err("NVRTC compilation failed: {s}", .{@errorName(err)});
         return -1;
     };
 
-    // Return PTX as a TVM String object (not kTVMFFIRawStr - TVM must own the data).
+    // The TVM string takes responsibility for the returned PTX bytes.
     const str_val = api.make_tvm_string(ptx) catch {
         log.err("failed to create TVM string from PTX", .{});
         return -1;
@@ -135,134 +219,23 @@ fn nvrtc_compile_callback(
     return 0;
 }
 
-/// Compile CUDA source code to PTX using NVRTC injecting the right include paths.
-/// Caller owns the returned string.
+/// Compile CUDA source to PTX with the configured include paths.
+///
+/// The caller frees the returned string.
 fn compile_with_nvrtc(
     allocator: std.mem.Allocator,
     code: []const u8,
-    arch: []const u8,
-) ![]const u8 {
-    const cuda_path = getenv("CUDA_HOME") orelse getenv("CUDA_PATH") orelse {
-        log.err("CUDA_HOME or CUDA_PATH must be set", .{});
-        return error.CudaPathNotSet;
+    snapshot: CallbackState.Snapshot,
+) cuda_nvrtc.CompileError![]const u8 {
+    const defines: []const []const u8 = switch (builtin.cpu.arch) {
+        .x86_64 => &.{"__x86_64__"},
+        else => &.{},
     };
-
-    // build nvrtc compile options
-    var options: std.ArrayList([]const u8) = .empty;
-    defer options.deinit(allocator);
-
-    // cuda cpp stdlib headers
-    const cuda_libcxx_path = try std.fmt.allocPrint(
-        allocator,
-        "--include-path={s}/include/cuda/std/detail/libcxx/include",
-        .{cuda_path},
-    );
-    try options.append(allocator, cuda_libcxx_path);
-
-    // cuda main include dir
-    const cuda_include_path = try std.fmt.allocPrint(
-        allocator,
-        "--include-path={s}/include",
-        .{cuda_path},
-    );
-    try options.append(allocator, cuda_include_path);
-
-    // glibc C headers from NIX_GLIBC_INCLUDE.
-    // TODO: add a fallback path (e.g. /usr/include) for non-Nix environments.
-    if (getenv("NIX_GLIBC_INCLUDE")) |glibc_include| {
-        const glibc_path = try std.fmt.allocPrint(
-            allocator,
-            "--include-path={s}",
-            .{glibc_include},
-        );
-        try options.append(allocator, glibc_path);
-    }
-
-    // GCC builtin headers from NIX_GCC_INCLUDE.
-    // TODO: add a fallback path for non-Nix environments.
-    if (getenv("NIX_GCC_INCLUDE")) |gcc_include| {
-        const gcc_path = try std.fmt.allocPrint(
-            allocator,
-            "--include-path={s}",
-            .{gcc_include},
-        );
-        try options.append(allocator, gcc_path);
-    }
-
-    // arch and defines
-    const arch_flag = try std.fmt.allocPrint(allocator, "--gpu-architecture={s}", .{arch});
-    try options.append(allocator, arch_flag);
-    try options.append(allocator, "--std=c++17"); // TVM-generated CUDA uses C++17 features
-    try options.append(allocator, "-D__x86_64__"); // TODO: derive from target arch instead of hardcoding
-    try options.append(allocator, "-default-device"); // NVRTC JIT requires this to emit device code
-
-    // convert to c strings
-    const c_options = try allocator.alloc([*c]const u8, options.items.len);
-    for (options.items, 0..) |opt, i| {
-        c_options[i] = (try allocator.dupeZ(u8, opt)).ptr;
-    }
-
-    log.debug("Compiling CUDA code with NVRTC ({d} options)", .{c_options.len});
-    for (c_options) |opt| {
-        log.debug("  {s}", .{opt});
-    }
-
-    // create nvrtc program
-    var prog: nvrtc.nvrtcProgram = std.mem.zeroes(nvrtc.nvrtcProgram);
-    const code_z = try allocator.dupeZ(u8, code);
-    const create_result = nvrtc.nvrtcCreateProgram(
-        &prog,
-        code_z.ptr,
-        "default_program",
-        0,
-        null,
-        null,
-    );
-
-    if (create_result != nvrtc.NVRTC_SUCCESS) {
-        log.err("nvrtcCreateProgram failed: {d}", .{create_result});
-        return error.NvrtcCreateProgramFailed;
-    }
-    defer _ = nvrtc.nvrtcDestroyProgram(&prog);
-
-    // compile
-    const compile_result = nvrtc.nvrtcCompileProgram(
-        prog,
-        @intCast(c_options.len),
-        @ptrCast(c_options.ptr),
-    );
-
-    // check compilation log
-    var log_size: usize = 0;
-    _ = nvrtc.nvrtcGetProgramLogSize(prog, &log_size);
-    if (log_size > 1) {
-        const compile_log = try allocator.alloc(u8, log_size);
-        _ = nvrtc.nvrtcGetProgramLog(prog, compile_log.ptr);
-        log.debug("NVRTC log:\n{s}", .{compile_log});
-    }
-
-    if (compile_result != nvrtc.NVRTC_SUCCESS) {
-        log.err("nvrtcCompileProgram failed: {d}", .{compile_result});
-        return error.NvrtcCompileFailed;
-    }
-
-    // get PTX
-    var ptx_size: usize = 0;
-    var ptx_result = nvrtc.nvrtcGetPTXSize(prog, &ptx_size);
-    if (ptx_result != nvrtc.NVRTC_SUCCESS) {
-        log.err("nvrtcGetPTXSize failed: {d}", .{ptx_result});
-        return error.NvrtcGetPtxFailed;
-    }
-
-    const ptx = try allocator.alloc(u8, ptx_size);
-    ptx_result = nvrtc.nvrtcGetPTX(prog, ptx.ptr);
-    if (ptx_result != nvrtc.NVRTC_SUCCESS) {
-        log.err("nvrtcGetPTX failed: {d}", .{ptx_result});
-        return error.NvrtcGetPtxFailed;
-    }
-
-    log.info("NVRTC compilation successful ({d} bytes PTX)", .{ptx_size});
-    // Slice off the null terminator. The caller copies this into a TVM String
-    // object before the arena is freed, so the borrowed slice is safe here.
-    return ptx[0 .. ptx_size - 1];
+    const ptx = try cuda_nvrtc.compile(allocator, code, snapshot.config, .{
+        .gpu_arch = snapshot.gpu_arch,
+        .program_name = "tvm_kernel.cu",
+        .defines = defines,
+    });
+    if (ptx.len == 0) return error.NvrtcGetPtxFailed;
+    return ptx[0 .. ptx.len - 1];
 }

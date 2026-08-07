@@ -1,17 +1,6 @@
-//! Comptime metaprogramming utils.
+//! Comptime operations for nested structs with a designated leaf type.
 //!
-//! Everything here involves no allocation and no runtime state of course.
-//!
-//! Primarily pure type-level operations for walking nested structs with
-//!  a designated leaf type.
-//!
-//! Used by both `Tree` (runtime container) and `jit` (typed compiled
-//!  functions).
-//!
-//! The core pattern: given a leaf type `L` and a struct type `T` whose
-//!  terminal fields are `L`, recursively walk `T` in DFS order.
-//!
-//! TODO: could implement stable ordering here, bad idea in comptime?
+//! `Tree` and callable binding use the same declaration-order DFS traversal.
 const std = @import("std");
 
 /// Count leaves of type `Leaf` in struct type `T` at comptime.
@@ -104,7 +93,7 @@ test flatten {
 
 /// Reconstruct a struct value from a flat leaf array (DFS order).
 ///
-/// Returns `RuntimeOf(T)` so comptime-typed fields (e.g. from module-level
+/// Returns `RuntimeOf(T)` so comptime fields (e.g. from module-level
 /// `const` values in anonymous tuples) can be assigned at runtime.
 pub fn unflatten(comptime Leaf: type, comptime T: type, leaves: []const Leaf, idx: *usize) RuntimeOf(T) {
     if (T == Leaf) {
@@ -150,8 +139,8 @@ test unflatten {
 
 /// Walk a struct value by pointer, calling `f` on each leaf.
 ///
-/// Mutating visitor -- `f` receives `*Leaf` so it can modify or free
-/// leaves in place. For read-only traversal, use `flatten` instead.
+/// `f` receives `*Leaf` and may modify or release leaves in place.
+/// Use `flatten` for read-only traversal.
 pub fn visit(comptime Leaf: type, comptime T: type, target: *T, comptime f: fn (*Leaf) void) void {
     if (T == Leaf) {
         f(target);
@@ -194,20 +183,11 @@ test visit {
 /// Strip `is_comptime` from struct fields so runtime values can be stored.
 ///
 /// Module-level `const` structs passed into anonymous tuples get
-/// comptime-typed fields. `RuntimeOf` produces a version of the type
+/// comptime fields. `RuntimeOf` produces a version of the type
 /// where all fields accept runtime values.
-/// TODO: this is really clever, but I dont like it. ideally, theres just
-///  a way to prevent the fields from being comptime in the first place
-///  since this is creating a different type. Without this, a user just
-///  gets a cryptic error when their code has no obvious issue. The
-///  workaround is to insert some dummy code that takes a reference or
-///  something to prevent the compiler from making fields comptime before
-///  it hits our code (or, I suppose field setting has no bearing on how
-///  zig infers things. no way to tell if its due to ordering or this fact).
-///  I am leaning towards removing this since it also trips up zls, instead
-///  we can raise a compile error that tells the user what to do.
-///  Unfortunately, the effect of this ripples and I think too far. It's why
-///  users need this: `@TypeOf(step_fn).InputType`.
+///
+/// TODO(api): Replace this derived type with a focused compile error if Zig
+///  provides no way to suppress comptime-field inference at the call site.
 pub fn RuntimeOf(comptime T: type) type {
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
@@ -235,9 +215,7 @@ pub fn RuntimeOf(comptime T: type) type {
     }
 }
 
-// ============================================================================
 // Path generation
-// ============================================================================
 
 /// Generate dot-separated paths for all leaves in a struct type.
 ///

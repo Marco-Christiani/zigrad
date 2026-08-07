@@ -18,21 +18,12 @@ vars:
     --no-group
     --no-times
     --filter=':- .rsync-filter'
-  ZG_EXTERNAL_SDK_ROOT: '{{env "ZG_EXTERNAL_SDK_ROOT" | default "./result"}}'
+  ZG_EXTERNAL_SDK_ROOT: '{{env "ZG_EXTERNAL_SDK_ROOT"}}'
   ZG_RUNTIME_SDK_ROOT: '{{env "ZG_RUNTIME_SDK_ROOT" | default .ZG_EXTERNAL_SDK_ROOT}}'
-  XLA_FLAGS_EXTRA: '{{env "ZG_XLA_FLAGS_EXTRA" | default ""}}'
 
 env:
   ZG_EXTERNAL_SDK_ROOT: "{{.ZG_EXTERNAL_SDK_ROOT}}"
   ZG_RUNTIME_SDK_ROOT: "{{.ZG_RUNTIME_SDK_ROOT}}"
-  PJRT_CPU_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so"
-  PJRT_GPU_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-  PJRT_PLUGIN_PATH: "{{.ZG_RUNTIME_SDK_ROOT}}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
-  # Perf default: enable the fusion block-level rewriter so XLA can emit Triton softmax fusions.
-  # XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_RUNTIME_SDK_ROOT}}/runtime/nvidia --xla_gpu_experimental_enable_fusion_block_level_rewriter=true {{.XLA_FLAGS_EXTRA}}"
-  XLA_FLAGS: "--xla_gpu_cuda_data_dir={{.ZG_RUNTIME_SDK_ROOT}}/runtime/nvidia  {{.XLA_FLAGS_EXTRA}}"
-  # intentionally unset this
-  NIX_CFLAGS_COMPILE: ""
 
 dotenv: [".env"]
 # env:
@@ -59,30 +50,16 @@ tasks:
     silent: true
     internal: true
   sdk:
-    desc: Build full SDK (compile + runtime) and reload direnv. Applies local-build-cfg.nix if present (via --impure).
+    desc: Build the broad CUDA external inputs and reload direnv
     cmds:
-      - nix build --impure .#zigrad-sdk-full-gpu --print-out-paths {{.CLI_ARGS}}
+      - nix build --impure .#zigrad-dev-cuda.externalInputs --out-link result --print-out-paths {{.CLI_ARGS}}
       - direnv reload
       - task: task_timer
         vars:
           start_time: "{{ now | unixEpoch }}"
 
-  sdk:compile:
-    desc: Build compile-time SDK profile (headers/libs). Honors local-build-cfg.nix via --impure.
-    cmd: nix build --impure .#zigrad-sdk-full-gpu-compile --print-out-paths {{.CLI_ARGS}}
-
-  sdk:runtime:
-    desc: Build runtime SDK profile (PJRT plugins + TVM DSOs + CUDA redist). Honors local-build-cfg.nix via --impure.
-    cmd: nix build --impure .#zigrad-sdk-full-gpu-runtime --print-out-paths {{.CLI_ARGS}}
-
-  sdk:redist:
-    desc: |
-      Build redistributable SDK runtime artifact. Hermetic (ignores local-build-cfg.nix).
-      Project defaults apply: portable (no native tuning, fat CUDA arch list, stripped, NDEBUG).
-    cmd: nix build .#zigrad-sdk-full-gpu-runtime --out-link result-redist --print-out-paths {{.CLI_ARGS}}
-
   sdk:away:
-    desc: Schedule full expensive SDK build while away
+    desc: Schedule the broad CUDA development build while away
     vars:
       MemoryMax: 50G # avoid oom kill
     cmd: |
@@ -91,11 +68,11 @@ tasks:
         --on-calendar='07:00' \
         --working-directory={{.TASKFILE_DIR}} \
         --property=MemoryMax={{.MemoryMax}} \
-        -- bash -c 'nix build --impure --max-jobs 1 --cores 60 .#zigrad-sdk-full-gpu > /tmp/zigrad-build.log 2>&1'
+        -- bash -c 'nix build --impure --max-jobs 1 --cores 60 .#zigrad-dev-cuda > /tmp/zigrad-build.log 2>&1'
       echo "Scheduled. Status: systemctl --user status zigrad-build.timer"
 
   sdk:background:
-    desc: Build SDK in leaving system usable by capping resource usage
+    desc: Build the broad CUDA configuration with capped resources
     vars:
       CPUWeight: 50
       MemoryMax: 45G
@@ -107,7 +84,7 @@ tasks:
         --property=MemoryMax={{.MemoryMax}} \
         --property=Nice={{.Nice}} \
         --property=IOWeight={{.IOWeight}} \
-        -- nix build --impure --max-jobs 1 --cores 48 .#zigrad-sdk-full-gpu
+        -- nix build --impure --max-jobs 1 --cores 48 .#zigrad-dev-cuda
 
   check-sdk:
     cmd:
@@ -118,106 +95,54 @@ tasks:
       # default args to support overriding completely
       CLI_ARGS: --sdk-root $ZG_EXTERNAL_SDK_ROOT
 
-  _check-env:
-    silent: true
-    internal: true
-    requires:
-      vars:
-        - name: MODE
-          enum: [build, run]
+  check-sdk-root:
+    desc: Check the external input path used by direct development commands
     cmd: |
-      ZG_EXTERNAL_SDK_ROOT=${ZG_EXTERNAL_SDK_ROOT:-'<not-set>'}
-      check_env_path(){
-        local name="$1"
-        local val="${!name}"
-        if ! realpath "$val" > /dev/null 2>&1; then
-          printf "%b[WARNING] $name=$val does not exist%b\n" "{{.YELLOW}}" "{{.RESET}}"
-          return 1
-        else
-          printf "%b[OK] $name=$val%b\n" "{{.GREEN}}" "{{.RESET}}"
-          return 0
-        fi
-      }
-      status=0
-      {{if eq .MODE "build"}}check_env_path "ZG_EXTERNAL_SDK_ROOT" || status=1{{end}}
-      {{if eq .MODE "run"}}check_env_path "PJRT_PLUGIN_PATH" || status=1{{end}}
-      exit $status
-
-  check-env-bt:
-    # silent: true
-    cmd:
-      task: _check-env
-      vars:
-        MODE: build
-
-  check-env-rt:
-    silent: true
-    cmd:
-      task: _check-env
-      vars:
-        MODE: run
-
-  build:
-    deps: [check-env-bt]
-    vars:
-      optimize: ReleaseFast
-    cmd: zig build -Doptimize={{ .optimize }} -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Dinstall-runtime-link=true
-
-  test:
-    cmd: zig build -Doptimize=Debug -Dsdk=$ZG_EXTERNAL_SDK_ROOT test --summary all && echo "[OK] tests passed"
-
-  docs:
-    desc: Emit Zig autodocs to zig-out/autodoc
-    deps: [check-env-bt]
-    cmd: zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT docs
-
-  docs:web:
-    desc: Emit Zig autodocs and sync website/nuxt-content/public/api
-    deps: [check-env-bt]
-    cmd: ./website/nuxt-content/scripts/prepare-zig-autodoc-web.sh
-
-  site:install:
-    desc: Install Nuxt site dependencies
-    dir: website/nuxt-content
-    cmd: npm install
-
-  site:dev:
-    desc: Sync autodocs, then run Nuxt dev server
-    deps: [docs:web]
-    dir: website/nuxt-content
-    cmd: npm run dev
-
-  site:build:
-    desc: Sync autodocs, then build static Nuxt site
-    deps: [docs:web]
-    dir: website/nuxt-content
-    cmd: npx nuxt generate
-
-  deps:zig:refresh:
-    desc: Regenerate nix/build.zig.zon.nix from build.zig.zon
-    cmd: zon2nix build.zig.zon > nix/build.zig.zon.nix
-
-  deps:zig:check:
-    desc: Verify nix/build.zig.zon.nix matches build.zig.zon
-    cmd: |
-      set -euo pipefail
-      tmp="$(mktemp)"
-      trap 'rm -f "$tmp"' EXIT
-      zon2nix build.zig.zon > "$tmp"
-      if ! diff -u nix/build.zig.zon.nix "$tmp"; then
-        echo "Zig deps Nix file is out of date. Run: task deps:zig:refresh" >&2
+      if ! realpath "$ZG_EXTERNAL_SDK_ROOT" >/dev/null 2>&1; then
+        printf "%bZG_EXTERNAL_SDK_ROOT=%s does not exist%b\n" \
+          "{{.YELLOW}}" "$ZG_EXTERNAL_SDK_ROOT" "{{.RESET}}"
         exit 1
       fi
+      printf "%bZG_EXTERNAL_SDK_ROOT=%s%b\n" \
+        "{{.GREEN}}" "$ZG_EXTERNAL_SDK_ROOT" "{{.RESET}}"
+
+  build:
+    desc: Build the integration-free Zigrad package
+    cmd: nix build --impure .#zigrad --out-link result-zigrad {{.CLI_ARGS}}
+
+  test:
+    desc: Run integration-free Zigrad tests
+    cmd: nix build --impure .#zigrad-unit-tests --out-link result-zigrad-tests {{.CLI_ARGS}}
+
+  cli:meta:
+    desc: Build Zigrad with generated completions and manpage
+    cmd: nix build --impure .#zigrad --out-link result-zigrad {{.CLI_ARGS}}
+
+  build:xla-cpu:
+    desc: Build the current XLA execution path for CPU
+    cmd: nix build --impure .#zigrad-xla-cpu --out-link result-zigrad-xla-cpu {{.CLI_ARGS}}
+
+  build:xla-cuda:
+    desc: Build the current XLA execution path for CUDA
+    cmd: nix build --impure .#zigrad-xla-cuda --out-link result-zigrad-xla-cuda {{.CLI_ARGS}}
+
+  build:dev-cuda:
+    desc: Build every current CUDA integration
+    cmd: nix build --impure .#zigrad-dev-cuda --out-link result-zigrad-dev-cuda {{.CLI_ARGS}}
+
+  test:dev-cuda:
+    desc: Run tests with every current CUDA integration compiled
+    cmd: nix build --impure .#zigrad-dev-cuda-unit-tests --out-link result-zigrad-dev-cuda-tests {{.CLI_ARGS}}
 
   test:tvm-runtime-gating:
-    desc: Run flake checks for TVM runtime gating
+    desc: Run explicit TVM runtime gating checks
     cmds:
-      - nix build .#checks.tvm-runtime-full-ffi {{.CLI_ARGS}}
-      - nix build .#checks.tvm-runtime-no-tvm {{.CLI_ARGS}}
+      - nix build --impure .#zigrad-tvm-runtime-check {{.CLI_ARGS}}
+      - nix build --impure .#zigrad-tvm-runtime-missing-check {{.CLI_ARGS}}
 
   check:flake:
     desc: Run full flake checks
-    cmd: nix flake check {{.CLI_ARGS}}
+    cmd: nix flake check --impure {{.CLI_ARGS}}
 
   op-coverage:
     desc: Print the op interface coverage matrix (what AD / format / etc each op implements)
@@ -226,64 +151,49 @@ tasks:
     cmds:
       - |
         set +e
-        nix develop -c zig build -Demit-op-coverage=true 2>&1 \
+        nix develop --impure -c zig build -Demit-op-coverage=true 2>&1 \
           | sed -n '/Compile Log Output:/,/^error: the following command/p' \
           | sed -n 's/@as(\[\]const u8, "\(.*\)"\[0\.\.[0-9]*\])/\1/p; s/@as(\*const \[[0-9]*:0\]u8, "\(.*\)")/\1/p'
         exit 0
 
   check:tvm-runtime:host:
-    desc: Run host integration check for full TVM compiler load
-    cmd: nix run .#tvm-runtime-full-compiler-host-check -- {{.CLI_ARGS}}
+    desc: Check that the packaged TVM compiler can load
+    cmd: nix run --impure .#zigrad-tvm-cpu -- tvm check-load {{.CLI_ARGS}}
 
   run:
-    deps: [build, check-env-rt]
-    cmd: ./zig-out/bin/zigrad {{.CLI_ARGS}}
+    desc: Run the broad CUDA development configuration
+    cmd: nix run --impure .#zigrad-dev-cuda -- {{.CLI_ARGS}}
 
   run:cpu:
-    deps: [build]
-    cmds:
-      - |
-        if [ -z "${PJRT_CPU_PLUGIN_PATH:-}" ]; then
-          echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
-          exit 1
-        fi
-        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" ./zig-out/bin/zigrad {{.CLI_ARGS}}
+    desc: Run the current XLA path with its packaged CPU PJRT plugin
+    cmd: nix run --impure .#zigrad-xla-cpu -- {{.CLI_ARGS}}
+
   run:cpu:dump-hlo:
-    deps: [build]
     vars:
       DUMP_DIR: '{{.DUMP_DIR | default "/tmp/zigrad_hlo_cpu"}}'
-      CLI_ARGS: '{{.CLI_ARGS | default "train-demo 1"}}'
-    cmds:
-      - |
-        if [ -z "${PJRT_CPU_PLUGIN_PATH:-}" ]; then
-          echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
-          exit 1
-        fi
-        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" \
-          XLA_FLAGS="--xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
-          ./zig-out/bin/zigrad {{.CLI_ARGS}}
+      CLI_ARGS: '{{.CLI_ARGS | default "demo train --warmup=1"}}'
+    cmd: >-
+      XLA_FLAGS="--xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*"
+      nix run --impure .#zigrad-xla-cpu -- {{.CLI_ARGS}}
+
   profile:cpu:
     desc: "Collect perf profile for Zigrad CPU train demo"
-    deps: [build]
+    deps: [build:xla-cpu]
     vars:
       PERF_DATA: '{{.PERF_DATA | default "/tmp/zigrad_perf_cpu.data"}}'
-      PROFILE_ARGS: '{{.PROFILE_ARGS | default "train-demo 1"}}'
+      PROFILE_ARGS: '{{.PROFILE_ARGS | default "demo train --warmup=1"}}'
       PERF_DELAY_MS: '{{.PERF_DELAY_MS | default "0"}}'
     cmds:
       - |
-        if [ -z "${PJRT_CPU_PLUGIN_PATH:-}" ]; then
-          echo "PJRT_CPU_PLUGIN_PATH is not set (run inside the devshell)."
-          exit 1
-        fi
-        nix shell nixpkgs#perf -c bash -lc \
-          'env PJRT_PLUGIN_PATH="'"$PJRT_CPU_PLUGIN_PATH"'" perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- ./zig-out/bin/zigrad {{.PROFILE_ARGS}} > /tmp/zigrad_perf_cpu_stdout.log 2>/tmp/zigrad_perf_cpu_stderr.log'
+        nix shell --impure nixpkgs#perf -c bash -lc \
+          'perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- ./result-zigrad-xla-cpu/bin/zigrad {{.PROFILE_ARGS}} > /tmp/zigrad_perf_cpu_stdout.log 2>/tmp/zigrad_perf_cpu_stderr.log'
   profile:cpu:report:
     desc: "Report perf profile for Zigrad CPU train demo"
     vars:
       PERF_DATA: '{{.PERF_DATA | default "/tmp/zigrad_perf_cpu.data"}}'
     cmds:
       - |
-        nix shell nixpkgs#perf -c bash -lc \
+        nix shell --impure nixpkgs#perf -c bash -lc \
           'perf report --stdio -n --percent-limit 1 -i {{.PERF_DATA}} | head -n 80'
   profile:jax:cpu:
     desc: "Collect perf profile for JAX CPU train demo"
@@ -293,105 +203,87 @@ tasks:
       PROFILE_ARGS: '{{.PROFILE_ARGS | default "--warmup 10 --steps 2000"}}'
     cmds:
       - |
-        nix shell nixpkgs#perf -c bash -lc \
-          'JAX_PLATFORMS=cpu perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- /run/current-system/sw/bin/nix develop .#default --command python scripts/jax_train_demo.py {{.PROFILE_ARGS}} > /tmp/jax_perf_cpu_stdout.log 2>/tmp/jax_perf_cpu_stderr.log'
+        nix shell --impure nixpkgs#perf -c bash -lc \
+          'JAX_PLATFORMS=cpu perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- /run/current-system/sw/bin/nix develop --impure .#default --command python scripts/jax_train_demo.py {{.PROFILE_ARGS}} > /tmp/jax_perf_cpu_stdout.log 2>/tmp/jax_perf_cpu_stderr.log'
   profile:jax:cpu:report:
     desc: "Report perf profile for JAX CPU train demo"
     vars:
       PERF_DATA: '{{.PERF_DATA | default "/tmp/jax_perf_cpu.data"}}'
     cmds:
       - |
-        nix shell nixpkgs#perf -c bash -lc \
+        nix shell --impure nixpkgs#perf -c bash -lc \
           'perf report --stdio -n --percent-limit 1 -i {{.PERF_DATA}} | head -n 80'
 
-  run:gpu:
-    deps: [build]
-    cmds:
-      - |
-        if [ -z "${PJRT_GPU_PLUGIN_PATH:-}" ]; then
-          echo "PJRT_GPU_PLUGIN_PATH is not set (run inside the devshell)."
-          exit 1
-        fi
-        PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" ./zig-out/bin/zigrad {{.CLI_ARGS}}
-  run:gpu:dump-hlo:
-    deps: [build]
+  run:cuda:
+    desc: Run the current XLA path with its packaged CUDA PJRT plugin
+    cmd: nix run --impure .#zigrad-xla-cuda -- {{.CLI_ARGS}}
+
+  run:cuda:dump-hlo:
     vars:
-      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/zigrad_hlo_gpu"}}'
-      CLI_ARGS: '{{.CLI_ARGS | default "train-demo 1"}}'
-    cmds:
-      - |
-        if [ -z "${PJRT_GPU_PLUGIN_PATH:-}" ]; then
-          echo "PJRT_GPU_PLUGIN_PATH is not set (run inside the devshell)."
-          exit 1
-        fi
-        PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" \
-          XLA_FLAGS="--xla_gpu_cuda_data_dir=$ZG_EXTERNAL_SDK_ROOT/runtime/nvidia --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*" \
-          ./zig-out/bin/zigrad {{.CLI_ARGS}}
+      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/zigrad_hlo_cuda"}}'
+      CLI_ARGS: '{{.CLI_ARGS | default "demo train --warmup=1"}}'
+    cmd: >-
+      XLA_FLAGS="--xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*"
+      nix run --impure .#zigrad-xla-cuda -- {{.CLI_ARGS}}
 
   custom-call:neg:
     cmd:
       task: run
       vars:
-        CLI_ARGS: custom-call-neg
+        CLI_ARGS: demo custom-call-negative
 
   custom-call:neg:cpu:
     cmd:
       task: run:cpu
       vars:
-        CLI_ARGS: custom-call-neg
+        CLI_ARGS: demo custom-call-negative
 
-  custom-call:neg:gpu:
+  custom-call:neg:cuda:
     cmd:
-      task: run:gpu
+      task: run:cuda
       vars:
-        CLI_ARGS: custom-call-neg
+        CLI_ARGS: demo custom-call-negative
 
   vjp-demo:
     cmd:
       task: run
       vars:
-        CLI_ARGS: vjp-demo
+        CLI_ARGS: demo vjp
 
   vjp-demo:cpu:
     cmd:
       task: run:cpu
       vars:
-        CLI_ARGS: vjp-demo
+        CLI_ARGS: demo vjp
 
-  vjp-demo:gpu:
+  vjp-demo:cuda:
     cmd:
-      task: run:gpu
+      task: run:cuda
       vars:
-        CLI_ARGS: vjp-demo
+        CLI_ARGS: demo vjp
 
   # IREE deployment flow ===========================================================
   iree:build:
-    desc: "Build zigrad with IREE backend enabled"
-    deps: [check-env-bt]
-    cmd: zig build -Diree-backend=true -Dsdk=$ZG_EXTERNAL_SDK_ROOT
+    desc: Build the IREE CPU configuration
+    cmd: nix build --impure .#zigrad-iree-cpu --out-link result-zigrad-iree-cpu {{.CLI_ARGS}}
 
   iree:demo:
     desc: "Run the IREE AOT compile+execute demo (all-in-one)"
-    deps: [iree:build]
-    cmd: |
-      IREE_COMPILE_EXE="${IREE_COMPILE_EXE:-result/bin/iree-compile}" \
-        ./zig-out/bin/zigrad iree-aot-demo {{.CLI_ARGS}}
+    cmd: nix run --impure .#zigrad-iree-cpu -- iree demo {{.CLI_ARGS}}
 
   iree:compile:
     desc: "Compile demo program to VMFB (offline, no runtime needed)"
-    deps: [iree:build]
-    cmd: |
-      IREE_COMPILE_EXE="${IREE_COMPILE_EXE:-result/bin/iree-compile}" \
-        ./zig-out/bin/zigrad iree-aot-compile {{.CLI_ARGS}}
+    cmd: nix run --impure .#zigrad-iree-cpu -- iree compile {{.CLI_ARGS}}
 
   iree:runner:build:
     desc: "Build minimal IREE VMFB runner (ReleaseSmall)"
-    cmd: zig build iree-runner -Diree-backend=true -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Doptimize=ReleaseSmall
+    cmd:
+      task: iree:build
 
   iree:runner:run:
     desc: "Execute a VMFB with the minimal runner"
     deps: [iree:runner:build]
-    cmd: ./zig-out/bin/iree-runner {{.CLI_ARGS | default "demo.vmfb demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=3x2xf32=2,2,2,2,2,2 --input=2x2xf32=1,2,3,4"}}
+    cmd: ./result-zigrad-iree-cpu/bin/iree-runner {{.CLI_ARGS | default "demo.vmfb demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=3x2xf32=2,2,2,2,2,2 --input=2x2xf32=1,2,3,4"}}
 
   # Shim (MLIR dialect/pass development) ======================================
   shim:build:
@@ -437,9 +329,9 @@ tasks:
   python:
     desc: Run a python command in the devshell (in lieu of uv on NixOS). E.g., `task python -- scripts/reference_experiments.py`
     cmds:
-      - nix develop .#default --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
-  jax:dump-hlo:gpu:
-    desc: Run the JAX train demo and dump HLO (GPU).
+      - nix develop --impure .#default --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
+  jax:dump-hlo:cuda:
+    desc: Run the JAX train demo and dump HLO with CUDA.
     vars:
       DUMP_DIR: '{{.DUMP_DIR | default "/tmp/jax_hlo_gpu"}}'
       CLI_ARGS: '{{.CLI_ARGS | default "--warmup=1"}}'
@@ -469,7 +361,7 @@ tasks:
           path: /nix/var/cache/ccache
 
   nix-ccache:
-    cmd: sudo $(which nix) run .#ccache -- --dir /nix/var/cache/ccache {{.CLI_ARGS}}
+    cmd: sudo "$(command -v nix)" run --impure .#ccache -- --dir /nix/var/cache/ccache {{.CLI_ARGS}}
 
   nix-ccache:increase-size:
     cmd:
@@ -589,33 +481,24 @@ tasks:
         {{.RSYNC_BASE}} --dry-run {{.RSYNC_VERBOSE_FLAGS}}  {{.REMOTE}}:/ ./
 
   bench-grid:
+    desc: Tune and compare the maintained matmul benchmark implementations
+    deps: [check-sdk-root]
+    dir: examples/benchmark
     cmds:
       - | # GPU
         shape0=1024x1024x1024
-        time ./zig-out/bin/zigrad tvm-tune --shape=$shape0 --cuda --work-dir=artifacts/tvm_cache/cuda/$shape0 2>&1 | grep -v warning
         shape1=32768x1024x1024
-        time ./zig-out/bin/zigrad tvm-tune --shape=$shape1 --cuda --work-dir=artifacts/tvm_cache/cuda/$shape1 2>&1 | grep -v warning
-        ./zig-out/bin/zigrad benchmark --shapes=$shape0,$shape1 --impls=tvm_gpu,xla_gpu
+        zig build -Dsdk="$ZG_EXTERNAL_SDK_ROOT" run -- \
+          tune --shapes=$shape0,$shape1 --impls=tvm_gpu
+        zig build -Dsdk="$ZG_EXTERNAL_SDK_ROOT" run -- \
+          --shapes=$shape0,$shape1 --impls=tvm_gpu,xla_gpu
       - | # CPU
         shape0=1024x1024x1024
-        time ./zig-out/bin/zigrad tvm-tune --shape=$shape0 --work-dir=artifacts/tvm_cache/cpu/$shape0 2>&1 | grep -v warning
         shape1=32768x1024x1024
-        time ./zig-out/bin/zigrad tvm-tune --shape=$shape1 --work-dir=artifacts/tvm_cache/cpu/$shape1 2>&1 | grep -v warning
-        ./zig-out/bin/zigrad benchmark --shapes=$shape0,$shape1 --impls=tvm_cpu,xla_cpu
-
-  bench-tvm-mkl-attn-block:
-    cmds:
-      - time ./zig-out/bin/zigrad tvm-tune-attention --shape=4x32x2048 --trials=64 --cpu
-      - time ./zig-out/bin/zigrad tvm-run-attention-cpu --shape=4x32x2048
-
-  bench-tvm-mkl-attn:
-    desc: "Benchmark TVM attention with fresh tuning and backup/restore workflow"
-    deps: [build]
-    vars:
-      SHAPE: '{{.SHAPE | default "32x2048x128"}}'
-      TRIALS: '{{.TRIALS | default "64"}}'
-    cmds:
-      - scripts/bench_tvm_attention.sh --shape={{.SHAPE}} --trials={{.TRIALS}}
+        zig build -Dsdk="$ZG_EXTERNAL_SDK_ROOT" run -- \
+          tune --shapes=$shape0,$shape1 --impls=tvm_cpu
+        zig build -Dsdk="$ZG_EXTERNAL_SDK_ROOT" run -- \
+          --shapes=$shape0,$shape1 --impls=tvm_cpu,xla_cpu
 
   mnist:
     dir: examples/mnist/

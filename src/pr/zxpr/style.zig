@@ -53,7 +53,7 @@ pub const RoleColor = struct {
 pub const Theme = struct {
     keyword: RoleColor,
     section: RoleColor,
-    var_name: RoleColor,
+    identifier: RoleColor,
     type_name: RoleColor,
     op_name: RoleColor,
     comment: RoleColor,
@@ -63,7 +63,7 @@ pub const Theme = struct {
         return .{
             .keyword = .{ .ansi = .bright_yellow, .rgb = rgb(0xFF8700) },
             .section = .{ .ansi = .bright_yellow, .rgb = rgb(0xD8A657) },
-            .var_name = .{ .ansi = .white },
+            .identifier = .{ .ansi = .white },
             .type_name = .{ .ansi = .magenta },
             .op_name = .{ .ansi = .green },
             .comment = .{ .ansi = .bright_black, .rgb = rgb(0x565F89) },
@@ -81,7 +81,7 @@ pub const Config = struct {
     include_dtype_attrs: bool = false,
     /// When `color_mode == .auto`, opt in to 24-bit RGB escapes. Callers
     ///  that read this from an env var (e.g. `ZG_TRUECOLOR`) own the lookup
-    ///  via `RuntimeEnv.environ`; the styler does not read process state.
+    ///  via `RuntimeEnv.environ`. The styler does not read process state.
     truecolor_auto: bool = false,
 };
 
@@ -150,7 +150,7 @@ pub fn theme_for_palette(palette: Palette) Theme {
             .keyword = rc(.bright_yellow, rgb(0xFF8700)),
             .section = rc(.bright_yellow, rgb(0xD8A657)),
             // .section = rc(.bright_yellow, rgb(0xFF9E64)),
-            .var_name = rc(.white, rgb(0xECEFF1)),
+            .identifier = rc(.white, rgb(0xECEFF1)),
             .type_name = rc(.bright_magenta, rgb(0xD3869B)),
             // .type_name = rc(.bright_yellow, rgb(0xFF9E64)),
             .op_name = rc(.green, null),
@@ -163,7 +163,7 @@ pub fn theme_for_palette(palette: Palette) Theme {
         .nord => .{
             .keyword = rc(.cyan, rgb(0x88C0D0)),
             .section = rc(.bright_cyan, rgb(0x8FBCBB)),
-            .var_name = rc(.white, rgb(0xE5E9F0)),
+            .identifier = rc(.white, rgb(0xE5E9F0)),
             .type_name = rc(.bright_magenta, rgb(0xB48EAD)),
             .op_name = rc(.bright_green, rgb(0xA3BE8C)),
             .comment = rc(.bright_black, rgb(0x4C566A)),
@@ -172,7 +172,7 @@ pub fn theme_for_palette(palette: Palette) Theme {
         .gruvbox_material => .{
             .keyword = rc(.bright_yellow, rgb(0xD8A657)),
             .section = rc(.bright_red, rgb(0xE78A4E)),
-            .var_name = rc(.white, rgb(0xEBDBB2)),
+            .identifier = rc(.white, rgb(0xEBDBB2)),
             .type_name = rc(.bright_blue, rgb(0x7DAEA3)),
             .op_name = rc(.bright_green, rgb(0xA9B665)),
             .comment = rc(.bright_black, rgb(0x928374)),
@@ -181,7 +181,7 @@ pub fn theme_for_palette(palette: Palette) Theme {
         .flat_dark => .{
             .keyword = rc(.bright_cyan, rgb(0x4FC3F7)),
             .section = rc(.bright_yellow, rgb(0xFFD54F)),
-            .var_name = rc(.white, rgb(0xECEFF1)),
+            .identifier = rc(.white, rgb(0xECEFF1)),
             .type_name = rc(.bright_magenta, rgb(0xCE93D8)),
             .op_name = rc(.bright_green, rgb(0xAED581)),
             .comment = rc(.bright_black, rgb(0x757575)),
@@ -190,7 +190,7 @@ pub fn theme_for_palette(palette: Palette) Theme {
         .catppuccin => .{
             .keyword = rc(.bright_magenta, rgb(0xCBA6F7)),
             .section = rc(.bright_blue, rgb(0x89B4FA)),
-            .var_name = rc(.white, rgb(0xCDD6F4)),
+            .identifier = rc(.white, rgb(0xCDD6F4)),
             .type_name = rc(.bright_yellow, rgb(0xF9E2AF)),
             .op_name = rc(.bright_green, rgb(0xA6E3A1)),
             .comment = rc(.bright_black, rgb(0x6C7086)),
@@ -199,7 +199,7 @@ pub fn theme_for_palette(palette: Palette) Theme {
         .tokyonight => .{
             .keyword = rc(.bright_blue, rgb(0x7AA2F7)),
             .section = rc(.cyan, rgb(0x7DCFFF)),
-            .var_name = rc(.white, rgb(0xC0CAF5)),
+            .identifier = rc(.white, rgb(0xC0CAF5)),
             .type_name = rc(.bright_magenta, rgb(0xBB9AF7)),
             .op_name = rc(.bright_green, rgb(0x9ECE6A)),
             .comment = rc(.bright_black, rgb(0x565F89)),
@@ -232,8 +232,15 @@ pub const Styler = struct {
         try self.write_colored(self.cfg.theme.section, text);
     }
 
-    pub fn write_var_name(self: *Styler, text: []const u8) !void {
-        try self.write_colored(self.cfg.theme.var_name, text);
+    pub fn write_identifier(self: *Styler, text: []const u8) !void {
+        try self.write_colored(self.cfg.theme.identifier, text);
+    }
+
+    pub fn write_value_id(self: *Styler, id: u32) !void {
+        var buf: [16]u8 = undefined;
+        var writer: Writer = .fixed(&buf);
+        try writer.print("%{d}", .{id});
+        try self.write_colored(self.cfg.theme.identifier, writer.buffered());
     }
 
     pub fn write_type_name(self: *Styler, text: []const u8) !void {

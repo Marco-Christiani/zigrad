@@ -1,13 +1,14 @@
 //! TVM kernel dispatch state.
 //!
-//! Owns a cache of loaded TVM runtime modules and provides a dispatch
-//!  function conforming to `kernel.DispatchFn`.
+//! The state caches loaded TVM runtime modules and implements
+//!  `kernel.DispatchFn`.
 const std = @import("std");
-const kernel = @import("../kernel.zig");
+const kernel = @import("../pr/kernel.zig");
 const dlpack = @import("../c/dlpack.zig");
 const tvm_api = @import("../c/tvm/api.zig");
 const tvm_runtime = @import("../c/tvm/runtime.zig");
 const tvm_c = @import("../c/tvm/c.zig");
+const integration_runtime = @import("runtime.zig");
 const Cache = @import("../cache.zig").Cache;
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
@@ -16,26 +17,31 @@ const log = std.log.scoped(.@"zg/tvm_dispatch");
 const TvmDispatchEntry = struct {
     module: tvm_runtime.RuntimeModule,
     main_func: tvm_api.Value,
+
+    fn deinit(self: *TvmDispatchEntry) void {
+        self.main_func.decref();
+        self.module.deinit();
+        self.* = undefined;
+    }
 };
 
-/// Encapsulates TVM dispatch state: a thread-safe cache of loaded
-/// TVM runtime modules keyed by kernel name.
+/// Owns TVM runtime modules loaded for kernel dispatch.
 ///
-/// A single instance is shared across all TVM kernel artifacts and
-/// passed to them as the `dispatch_ctx` pointer. The `dispatch` method
-/// conforms to `kernel.DispatchFn`.
+/// A single instance is shared by its provider's artifacts. Dispatch is
+///  single-threaded until the kernel-provider contract supplies synchronization.
 pub const TvmDispatchState = struct {
-    // TVM kernel dispatch is single-threaded today. If multi-threaded
-    //  dispatch becomes necessary, wrap with `std.Io.Mutex` (which would
-    //  require threading `io` through the entire dispatch hot path).
-    cache: std.StringHashMap(TvmDispatchEntry),
-    allocator: std.mem.Allocator,
+    io: std.Io,
+    cache: std.AutoHashMap(u64, TvmDispatchEntry),
     artifact_cache: Cache,
 
-    pub fn init(allocator: std.mem.Allocator, artifact_cache: Cache) TvmDispatchState {
+    pub fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        artifact_cache: Cache,
+    ) TvmDispatchState {
         return .{
-            .cache = std.StringHashMap(TvmDispatchEntry).init(allocator),
-            .allocator = allocator,
+            .io = io,
+            .cache = std.AutoHashMap(u64, TvmDispatchEntry).init(allocator),
             .artifact_cache = artifact_cache,
         };
     }
@@ -43,9 +49,7 @@ pub const TvmDispatchState = struct {
     pub fn deinit(self: *TvmDispatchState) void {
         var it = self.cache.iterator();
         while (it.next()) |entry| {
-            var module = entry.value_ptr.module;
-            module.deinit();
-            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
         }
         self.cache.deinit();
     }
@@ -67,54 +71,69 @@ pub const TvmDispatchState = struct {
     fn dispatch_impl(
         self: *TvmDispatchState,
         artifact_data: []const u8,
-        kernel_key: []const u8,
+        _: []const u8,
         ctx: kernel.DispatchContext,
     ) !void {
-        try tvm_api.ensure_loaded(std.heap.c_allocator, .{});
+        try integration_runtime.ensure_loaded(.runtime);
 
+        const artifact_hash = std.hash.Wyhash.hash(0, artifact_data);
         var entry: TvmDispatchEntry = undefined;
-        if (self.cache.get(kernel_key)) |cached| {
+        if (self.cache.get(artifact_hash)) |cached| {
             entry = cached;
         } else {
-            const loaded = try load_dispatch_entry(self.artifact_cache, kernel_key, artifact_data);
-            const cache_key = try self.allocator.dupe(u8, kernel_key);
-            try self.cache.put(cache_key, loaded);
+            var loaded = try load_dispatch_entry(
+                self.io,
+                self.artifact_cache,
+                artifact_hash,
+                artifact_data,
+            );
+            errdefer loaded.deinit();
+            try self.cache.put(artifact_hash, loaded);
             entry = loaded;
         }
 
-        if (ctx.platform == .cuda) {
+        if (ctx.device.platform.eql(.cuda)) {
             if (ctx.stream) |stream_ptr| {
-                try configure_cuda_stream(stream_ptr, ctx.device_ordinal);
+                try configure_cuda_stream(stream_ptr, ctx.device.ordinal);
             }
         }
 
-        const device_type: dlpack.DeviceType = if (ctx.platform == .cuda) .cuda else .cpu;
+        const device_type: dlpack.DeviceType = if (ctx.device.platform.eql(.cuda))
+            .cuda
+        else if (ctx.device.platform.eql(.cpu))
+            .cpu
+        else
+            return error.UnsupportedDevice;
 
-        // Build DLPack tensors from BufferDescs and call the TVM function.
         var tvm_args: [16]tvm_api.Value = undefined;
         var tensors: [16]tvm_runtime.Tensor = undefined;
         const total = ctx.inputs.len + ctx.outputs.len;
         if (total > 16) return error.TvmCallFailed;
 
+        var initialized: usize = 0;
+        defer for (tensors[0..initialized]) |*tensor| tensor.deinit();
+
         for (ctx.inputs, 0..) |buf, i| {
-            tensors[i] = try tensor_from_buffer_desc(buf, device_type, ctx.device_ordinal);
+            tensors[i] = try tensor_from_buffer_desc(buf, device_type, ctx.device.ordinal);
+            initialized += 1;
             tvm_args[i] = tensors[i].as_value();
         }
         for (ctx.outputs, 0..) |buf, i| {
             const idx = ctx.inputs.len + i;
-            tensors[idx] = try tensor_from_buffer_desc(buf, device_type, ctx.device_ordinal);
+            tensors[idx] = try tensor_from_buffer_desc(buf, device_type, ctx.device.ordinal);
+            initialized += 1;
             tvm_args[idx] = tensors[idx].as_value();
         }
-        defer for (0..total) |i| tensors[i].deinit();
 
         const func_handle = entry.main_func.as_object() orelse return error.TvmCallFailed;
-        _ = try tvm_api.call_handle(std.heap.c_allocator, func_handle, tvm_args[0..total]);
+        var result = try tvm_api.call_handle(
+            std.heap.c_allocator,
+            func_handle,
+            tvm_args[0..total],
+        );
+        defer result.decref();
     }
 };
-
-// ============================================================================
-// Internal helpers
-// ============================================================================
 
 fn tensor_from_buffer_desc(buf: kernel.BufferDesc, device_type: dlpack.DeviceType, device_id: i32) !tvm_runtime.Tensor {
     const dl_tensor: dlpack.Tensor = .{
@@ -127,7 +146,7 @@ fn tensor_from_buffer_desc(buf: kernel.BufferDesc, device_type: dlpack.DeviceTyp
         .byte_offset = 0,
     };
     const managed = try dlpack.ManagedTensor.heap_borrowing(std.heap.c_allocator, dl_tensor);
-    return tvm_runtime.Tensor.from_dlpack(managed);
+    return try tvm_runtime.Tensor.from_dlpack(managed);
 }
 
 fn kernel_dtype_to_dlpack(dtype: kernel.DType) dlpack.DataType {
@@ -147,11 +166,12 @@ fn kernel_dtype_to_dlpack(dtype: kernel.DType) dlpack.DataType {
 }
 
 fn configure_cuda_stream(stream_ptr: *anyopaque, device_id: i32) !void {
-    _ = try tvm_api.call_global(std.heap.c_allocator, "runtime.TVMSetStream", &.{
+    var result = try tvm_api.call_global(std.heap.c_allocator, "runtime.TVMSetStream", &.{
         tvm_api.Value.int(2), // kDLCUDA
         tvm_api.Value.int(device_id),
         opaque_ptr_value(stream_ptr),
     });
+    defer result.decref();
 }
 
 fn opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
@@ -161,44 +181,27 @@ fn opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
     return .{ .raw = v };
 }
 
-/// TODO: artifact materialization belongs in the provider, not dispatch.
-///  TVM's C API requires a file path (load_from_file), so we write the .so
-///  bytes to disk here as a trampoline. This should move to TvmProvider
-///  during store-population (after tuning), so dispatch receives a path or
-///  pre-loaded handle rather than raw bytes it must write out.
-fn load_dispatch_entry(artifact_cache: Cache, kernel_key: []const u8, artifact_data: []const u8) !TvmDispatchEntry {
-    const hash = std.hash.Wyhash.hash(0, kernel_key);
+// TODO(kernel-provider): Add artifact preparation to the provider contract.
+//
+// TVM loads shared objects by path. Dispatch materializes bytes on first use
+//  until the provider contract can prepare artifacts before the hot path.
+fn load_dispatch_entry(
+    io: std.Io,
+    artifact_cache: Cache,
+    artifact_hash: u64,
+    artifact_data: []const u8,
+) !TvmDispatchEntry {
     var name_buf: [128]u8 = undefined;
-    const filename = try std.fmt.bufPrint(&name_buf, "{x}.so", .{hash});
-    // Dispatch hot path: use raw posix to avoid threading `io` through
-    //  every kernel invocation. `subdir` similarly forgoes its `create=true`
-    //  feature here (the dir is created at warm-up by the provider).
-    var dispatch_cache = try artifact_cache.join("tvm/dispatch");
+    const filename = try std.fmt.bufPrint(&name_buf, "{x}.so", .{artifact_hash});
+    const tvm_cache = try artifact_cache.subdir(io, "tvm", .{});
+    var dispatch_cache = try tvm_cache.subdir(io, "dispatch", .{});
     var resolved = try dispatch_cache.join(filename);
     const path = resolved.pathZ();
 
-    // Ensure the dispatch dir exists (mode 0o755). Use libc mkdir directly
-    //  to avoid threading io through dispatch hot path.
-    const dir_path_z = dispatch_cache.pathZ();
-    if (std.c.mkdir(dir_path_z, 0o755) != 0) {
-        const errno = std.posix.errno(@as(c_int, -1));
-        if (errno != .EXIST) return error.MkdirFailed;
-    }
-
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{
-        .ACCMODE = .WRONLY,
-        .CREAT = true,
-        .TRUNC = true,
-    }, 0o644);
-    defer _ = std.posix.system.close(fd);
-    var written: usize = 0;
-    while (written < artifact_data.len) {
-        const slice = artifact_data[written..];
-        const n_signed: isize = std.posix.system.write(fd, slice.ptr, slice.len);
-        if (n_signed < 0) return error.WriteFailed;
-        const n: usize = @intCast(n_signed);
-        if (n == 0) return error.WriteFailed;
-        written += n;
+    {
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, artifact_data);
     }
 
     var module = try tvm_runtime.RuntimeModule.load_from_file(std.heap.c_allocator, path);

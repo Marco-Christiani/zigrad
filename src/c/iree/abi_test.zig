@@ -1,9 +1,8 @@
 //! Layout-drift defense for the hand-written IREE bindings in `types.zig`.
 //!
 //! Each test compares Zig `@sizeOf`/`@alignOf`/`@offsetOf` against probes
-//!  defined in `shim.c` that read the upstream SDK headers via `sizeof`/
-//!  `_Alignof`/`offsetof`. A mismatch fails the build, surfacing IREE ABI
-//!  drift as a Zig test failure rather than a hard-to-diagnose crash.
+//!  defined in `shim.c` that read the configured headers via `sizeof`/
+//!  `_Alignof`/`offsetof`. A mismatch fails the Zig test.
 const std = @import("std");
 const testing = std.testing;
 const types = @import("types.zig");

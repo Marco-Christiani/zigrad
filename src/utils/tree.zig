@@ -1,12 +1,13 @@
 //! Structured parameter tree with flat storage and fast path lookups.
 //!
 //! `Tree(Leaf)` stores leaves in DFS order with parallel dot-separated paths.
-//! Paths are dot-separated (e.g. `layers.10.mlp.down_proj`).
+//! Paths use dot-separated field and index names such as
+//!  `layers.10.mlp.down_proj`.
 //!
 //! ## Ownership model
 //!
 //! - `Tree` owns its leaf array, path strings, and path index.
-//! - `from_slices` copies inputs - caller retains ownership of the originals.
+//! - `from_slices` copies inputs. The caller retains the originals.
 //! - `subtree`/`subtree_glob` return non-owning views backed by a parent tree.
 //! - Views mutate parent leaves in place and only own view metadata.
 //!
@@ -30,7 +31,7 @@ pub fn Tree(comptime Leaf: type) type {
         const Self = @This();
         const PathIndex = std.StringHashMapUnmanaged(usize);
 
-        // TODO: Replace `parent: *Self` with `root_leaves: []Leaf` and
+        // TODO(tree): Replace `parent: *Self` with `root_leaves: []Leaf` and
         //  `root_paths: []const []const u8` for move-safety. Nested views
         //  should compose indices eagerly at creation.
         const View = struct {
@@ -46,20 +47,13 @@ pub fn Tree(comptime Leaf: type) type {
         index: PathIndex,
         view: ?View = null,
 
-        // ================================================================
-        // Construction / destruction
-        // ================================================================
-
-        /// Build a tree by flattening a typed struct value.
+        /// Build a tree by flattening a struct value.
         ///
         /// Walks `value`'s fields at comptime, collecting leaves and their
         ///  dot-separated paths. The tree owns all allocations.
         pub fn from(allocator: std.mem.Allocator, value: anytype) !Self {
             const T = @TypeOf(value);
-            // NOTE: this could be free, since we know size at comptime but for a large model this
-            //  would mean a non-trivial amount of stack space not acceptable on edge targets. A
-            //  comptime path may make sense, but seems like a premature over-optimization right
-            //  now. The same comments apply to all the functions that allow temp buffers.
+            // Heap allocation keeps large model trees off the stack.
             const count = comptime leaf_count(T);
 
             const leaves = try allocator.alloc(Leaf, count);
@@ -72,7 +66,7 @@ pub fn Tree(comptime Leaf: type) type {
             const owned_paths = try clone_paths(allocator, &comptime_paths);
             errdefer free_paths(allocator, owned_paths);
 
-            return make_owned(Leaf, allocator, leaves, owned_paths);
+            return try make_owned(Leaf, allocator, leaves, owned_paths);
         }
 
         /// Build from pre-existing parallel slices. Data is copied.
@@ -92,7 +86,7 @@ pub fn Tree(comptime Leaf: type) type {
             const paths_copy = try clone_paths(allocator, paths);
             errdefer free_paths(allocator, paths_copy);
 
-            return make_owned(Leaf, allocator, leaves_copy, paths_copy);
+            return try make_owned(Leaf, allocator, leaves_copy, paths_copy);
         }
 
         pub fn deinit(self: *Self) void {
@@ -110,37 +104,28 @@ pub fn Tree(comptime Leaf: type) type {
 
         /// Deinit every leaf, then free tree storage.
         ///
-        /// Valid only for owned trees. Views do not own leaf storage.
-        /// TODO: based on usage pattern thus far, we can probably drop this
-        ///  as a separate method and just call the type's declared deinit
-        ///  method, at least by default.
+        /// Valid only when `view` is null. Views do not store their leaf data.
+        ///
+        /// TODO(api): Decide whether `deinit` should call `Leaf.deinit` by
+        ///  default and remove this separate entry point.
         pub fn deinit_with(self: *Self, comptime deinit_fn: fn (*Leaf) void) void {
             std.debug.assert(self.view == null);
             for (self.leaves) |*leaf| deinit_fn(leaf);
             self.deinit();
         }
 
-        // ================================================================
-        // Comptime helpers (delegate to meta)
-        // ================================================================
-
         /// Count leaves of type `Leaf` in struct type `T` at comptime.
-        /// TODO: Static method - no tree instance needed, doesnt belong here.
         pub fn leaf_count(comptime T: type) comptime_int {
             return meta.leaf_count(Leaf, T);
         }
 
-        // ================================================================
-        // Structural recovery
-        // ================================================================
-
-        /// Reconstruct a typed value from visible leaves.
+        /// Reconstruct a value from visible leaves.
         ///
         /// Inverse of `from`. Reconstruction is positional: leaf order (DFS)
         ///  determines field assignment and path names are not consulted.
         /// When called on a view, this allocates a temporary contiguous leaf
         ///  buffer before unflattening.
-        /// Handles comptime-typed fields via `RuntimeOf`.
+        /// Handles comptime fields via `RuntimeOf`.
         pub fn extract(self: *const Self, comptime T: type) !RuntimeOf(T) {
             const expected = comptime leaf_count(T);
             std.debug.assert(self.len() == expected);
@@ -150,7 +135,6 @@ pub fn Tree(comptime Leaf: type) type {
                 return meta.unflatten(Leaf, T, self.leaves, &idx);
             }
 
-            // View: gather visible leaves into contiguous buffer.
             const tmp = try self.allocator.alloc(Leaf, self.len());
             defer self.allocator.free(tmp);
             for (0..self.len()) |i| {
@@ -160,10 +144,9 @@ pub fn Tree(comptime Leaf: type) type {
             return meta.unflatten(Leaf, T, tmp, &idx);
         }
 
-        /// Flatten a typed value into a leaf array without paths.
+        /// Flatten a value into a leaf array without paths.
         ///
         /// Caller owns the slice.
-        /// TODO: Static method - no tree instance needed, doesnt belong here.
         pub fn flatten(allocator: std.mem.Allocator, value: anytype) ![]Leaf {
             const T = @TypeOf(value);
             const count = comptime leaf_count(T);
@@ -174,7 +157,7 @@ pub fn Tree(comptime Leaf: type) type {
             return leaves;
         }
 
-        /// Reconstruct a typed value from a flat leaf slice (no tree needed).
+        /// Reconstruct a value from a flat leaf slice without a tree.
         ///
         /// Static inverse of `flatten`.
         pub fn unflatten(comptime T: type, leaves: []const Leaf) RuntimeOf(T) {
@@ -184,17 +167,13 @@ pub fn Tree(comptime Leaf: type) type {
             return meta.unflatten(Leaf, T, leaves, &idx);
         }
 
-        // ================================================================
-        // Transforms
-        // ================================================================
-
         /// Map every leaf to a new type, preserving paths.
         ///
         /// `map_fn` receives a context value and a leaf, returning the
         ///  transformed leaf. Use `{}` (void) for context-free transforms.
-        /// TODO: removed the rather clever comptime types here, but it allowed
-        ///  users to not have to make dummy types just to use these functions and
-        ///  frankly I miss that. Goes for all fns accepting callbacks.
+        ///
+        /// TODO(api): Allow context-free callbacks without a dummy context
+        ///  value across tree transformations.
         pub fn map(
             self: *const Self,
             comptime NewLeaf: type,
@@ -212,7 +191,7 @@ pub fn Tree(comptime Leaf: type) type {
             const paths_copy = try self.clone_visible_paths();
             errdefer free_paths(self.allocator, paths_copy);
 
-            return make_owned(NewLeaf, self.allocator, new_leaves, paths_copy);
+            return try make_owned(NewLeaf, self.allocator, new_leaves, paths_copy);
         }
 
         /// Zip two trees and map leaf pairs.
@@ -245,12 +224,10 @@ pub fn Tree(comptime Leaf: type) type {
             const paths_copy = try self.clone_visible_paths();
             errdefer free_paths(self.allocator, paths_copy);
 
-            return make_owned(NewLeaf, self.allocator, new_leaves, paths_copy);
+            return try make_owned(NewLeaf, self.allocator, new_leaves, paths_copy);
         }
 
-        // ================================================================
         // Iteration
-        // ================================================================
 
         /// Visit every leaf with its path.
         pub fn for_each(
@@ -314,9 +291,7 @@ pub fn Tree(comptime Leaf: type) type {
             return acc;
         }
 
-        // ================================================================
         // Runtime path operations
-        // ================================================================
 
         /// Number of visible leaves.
         pub fn len(self: *const Self) usize {
@@ -410,9 +385,7 @@ pub fn Tree(comptime Leaf: type) type {
             return self.make_view(indices, null);
         }
 
-        // ================================================================
         // Printing
-        // ================================================================
 
         /// Write a tree diagram of visible paths.
         ///
@@ -432,9 +405,7 @@ pub fn Tree(comptime Leaf: type) type {
             }
         }
 
-        // ================================================================
         // Internal helpers
-        // ================================================================
 
         fn make_owned(
             comptime L: type,
@@ -442,7 +413,7 @@ pub fn Tree(comptime Leaf: type) type {
             leaves: []L,
             paths: []const []const u8,
         ) !Tree(L) {
-            // caller owns leaves/paths
+            // The caller transfers `leaves` and `paths` to the returned tree.
             var idx_map: std.StringHashMapUnmanaged(usize) = .empty;
             errdefer idx_map.deinit(allocator);
 
@@ -653,9 +624,7 @@ pub fn Tree(comptime Leaf: type) type {
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+// Tests.
 
 test "from and extract round-trip" {
     const allocator = std.testing.allocator;
@@ -684,7 +653,7 @@ test "from and extract round-trip" {
     try std.testing.expectEqual(@as(i64, 64), recovered.batch.x.dim);
 }
 
-test "extract handles comptime-typed tuple fields" {
+test "extract handles comptime tuple fields" {
     const allocator = std.testing.allocator;
 
     const Inner = struct { a: i32, b: i32 };

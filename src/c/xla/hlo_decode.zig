@@ -1,7 +1,6 @@
-//! HLO Protobuf Decoder
+//! Decodes XLA HLO protobuf messages.
 //!
-//! Decodes XLA HLO protobuf bytes into human-readable text.
-//! Used by `dump_optimized_program` (pipeline) and the standalone `decode_hlo` tool.
+//! Used by the PJRT optimized-program dump and the standalone `decode_hlo` tool.
 const std = @import("std");
 const protobuf = @import("protobuf");
 const xla = @import("xla_pb");
@@ -11,11 +10,10 @@ pub const HloModuleProtoWithConfig = xla.HloModuleProtoWithConfig;
 
 /// Decode XLA HLO protobuf bytes and write human-readable text to `out`.
 ///
-/// Tries `HloModuleProtoWithConfig` first (format from `--dump-optimized`),
-/// falls back to plain `HloModuleProto`. Returns `true` on success, `false`
-/// if the bytes could not be decoded (caller should fall back to raw output).
+/// Accepts configured and plain module messages.
+///
+/// Returns `false` when decoding or output fails.
 pub fn decode_and_print(bytes: []const u8, allocator: std.mem.Allocator, out: *std.Io.Writer) bool {
-    // Try HloModuleProtoWithConfig first.
     blk: {
         var reader: std.Io.Reader = .fixed(bytes);
         var with_config = HloModuleProtoWithConfig.decode(&reader, allocator) catch break :blk;
@@ -28,7 +26,6 @@ pub fn decode_and_print(bytes: []const u8, allocator: std.mem.Allocator, out: *s
         }
     }
 
-    // Fall back to plain HloModuleProto.
     var reader: std.Io.Reader = .fixed(bytes);
     var module = HloModuleProto.decode(&reader, allocator) catch return false;
     defer module.deinit(allocator);
@@ -85,7 +82,6 @@ pub fn print_computation(comp: *const xla.HloComputationProto, out: *std.Io.Writ
 pub fn print_instruction(instr: *const xla.HloInstructionProto, out: *std.Io.Writer) !void {
     try out.print("  %{s} = {s}", .{ instr.name, instr.opcode });
 
-    // Print operand references
     if (instr.operand_ids.items.len > 0) {
         try out.print("(", .{});
         for (instr.operand_ids.items, 0..) |id, i| {
@@ -95,13 +91,11 @@ pub fn print_instruction(instr: *const xla.HloInstructionProto, out: *std.Io.Wri
         try out.print(")", .{});
     }
 
-    // Print shape
     if (instr.shape) |*s| {
         try out.print(" : ", .{});
         try print_shape(s, out);
     }
 
-    // Print extra info for specific opcodes
     if (instr.parameter_number != 0 or std.mem.eql(u8, instr.opcode, "parameter")) {
         try out.print(" param={d}", .{instr.parameter_number});
     }
@@ -118,7 +112,7 @@ pub fn print_instruction(instr: *const xla.HloInstructionProto, out: *std.Io.Wri
 }
 
 pub fn print_shape(shape: *const xla.ShapeProto, out: *std.Io.Writer) !void {
-    // tuple_shapes stubbed to raw bytes -- just indicate tuple
+    // TODO(xla-proto): Decode tuple shapes instead of printing a placeholder.
     if (shape.tuple_shapes_raw.len > 0) {
         try out.print("tuple(...)", .{});
         return;

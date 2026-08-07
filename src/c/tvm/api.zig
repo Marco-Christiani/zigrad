@@ -1,20 +1,20 @@
 //! TVM FFI call infrastructure.
 //!
-//! Provides Value (wraps TVMFFIAny), ObjectHandle (refcounted), library
-//! loading (dlopen with RTLD_GLOBAL), and call_global / create_packed_func
-//! helpers. All typed wrappers (tir.zig, runtime.zig, etc.) are built on top of this layer.
+//! Provides values, refcounted object handles, and packed-call helpers.
+//!
+//! Runtime-library lifecycle lives in the top-level TVM integration. Object
+//!  wrappers in this directory build on this raw call layer.
 const std = @import("std");
 const c = @import("c.zig");
 
 const log = std.log.scoped(.@"zg/tvm_api");
 
-// ============================================================================
 // Value - Zig wrapper for TVMFFIAny
-// ============================================================================
 
-/// Zig-side representation of a TVM value. Every TVM FFI call takes and
-/// returns values of this type. Constructors set `type_index` correctly;
-/// accessors check it and return null on type mismatch.
+/// Zig-side representation of a TVM value.
+///
+/// Every TVM FFI call takes and returns values of this type. Constructors set
+///  `type_index`. Accessors check it and return null on type mismatch.
 pub const Value = struct {
     raw: c.TVMFFIAny,
 
@@ -119,11 +119,9 @@ pub const Value = struct {
     }
 };
 
-// ============================================================================
 // ObjectHandle - refcounted TVM object
-// ============================================================================
 
-/// Refcounted TVM object handle. Base building block for all typed wrappers.
+/// Refcounted TVM object handle used by the concrete wrappers below.
 /// On deinit, decrements the TVM-side reference count.
 pub const ObjectHandle = struct {
     ptr: c.TVMFFIObjectHandle,
@@ -144,9 +142,7 @@ pub const ObjectHandle = struct {
     }
 };
 
-// ============================================================================
 // Comptime helpers - generate boilerplate for ObjectHandle-based types
-// ============================================================================
 
 /// Comptime generators for ObjectHandle-based TVM types. Adapted from the
 /// pattern in `src/c/mlir/mlir.zig:helpers`, tailored for TVM's ObjectHandle
@@ -193,114 +189,7 @@ pub const helpers = struct {
     }
 };
 
-// ============================================================================
-// Library loading
-// ============================================================================
-
-const RTLD_NOW: c_int = 0x2;
-const RTLD_GLOBAL: c_int = 0x100;
-extern "c" fn dlopen(filename: [*:0]const u8, flags: c_int) ?*anyopaque;
-extern "c" fn dlerror() ?[*:0]const u8;
-
-var ffi_lib_handle: ?*anyopaque = null;
-var compiler_lib_handle: ?*anyopaque = null;
-
-pub const EnsureLoadedOpts = struct {
-    /// If true, also load the full compiler library (`libtvm.so`).
-    ///
-    /// Set to false for hermetic checks that only require FFI symbol discovery.
-    load_compiler: bool = true,
-};
-
-/// Initialize TVM runtime libraries with RTLD_GLOBAL.
-///
-/// Loads `libtvm_ffi.so` first and resolves typed FFI symbols. Depending on
-/// `opts.load_compiler`, also loads `libtvm.so` (full compiler with TE/codegen).
-pub fn ensure_loaded(allocator: std.mem.Allocator, opts: EnsureLoadedOpts) !void {
-    // libtvm_ffi.so
-    if (ffi_lib_handle == null) {
-        ffi_lib_handle = dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL);
-        if (ffi_lib_handle == null) {
-            ffi_lib_handle = dlopen("libtvm_runtime.so", RTLD_NOW | RTLD_GLOBAL);
-        }
-        if (ffi_lib_handle == null) {
-            if (dlerror()) |err| {
-                log.err("failed to load TVM FFI runtime: {s}", .{std.mem.span(err)});
-            }
-            return error.TvmLoadFailed;
-        }
-        log.info("loaded libtvm_ffi.so with RTLD_GLOBAL", .{});
-    }
-
-    c.ensure_loaded(ffi_lib_handle.?) catch |err| {
-        log.err("failed to resolve TVM FFI symbols: {s}", .{@errorName(err)});
-        return error.TvmLoadFailed;
-    };
-
-    if (!opts.load_compiler) return;
-    if (compiler_lib_handle != null) return;
-
-    const lib_path = try find_tvm_lib_path(allocator);
-    defer if (lib_path) |p| allocator.free(p);
-
-    if (lib_path) |path| {
-        const path_z = try allocator.allocSentinel(u8, path.len, 0);
-        defer allocator.free(path_z);
-        @memcpy(path_z, path);
-
-        compiler_lib_handle = dlopen(path_z, RTLD_NOW | RTLD_GLOBAL);
-        if (compiler_lib_handle == null) {
-            if (dlerror()) |err| {
-                log.err("dlopen({s}) failed: {s}", .{ path, std.mem.span(err) });
-            }
-            return error.TvmLoadFailed;
-        }
-        log.info("loaded libtvm.so (compiler)", .{});
-        return;
-    }
-
-    compiler_lib_handle = dlopen("libtvm.so", RTLD_NOW | RTLD_GLOBAL);
-    if (compiler_lib_handle == null) {
-        if (dlerror()) |err| {
-            log.err("dlopen(libtvm.so) failed: {s}", .{std.mem.span(err)});
-        }
-        return error.TvmLoadFailed;
-    }
-    log.info("loaded libtvm.so (compiler)", .{});
-}
-
-/// Find libtvm.so by locating libtvm_ffi.so in /proc/self/maps and
-/// looking in the same directory.
-fn find_tvm_lib_path(allocator: std.mem.Allocator) !?[]const u8 {
-    // Read /proc/self/maps directly via raw posix to avoid threading `io`
-    //  through every caller of `ensure_loaded`. The file is process-local
-    //  and small enough that loading it whole is fine.
-    const fd = std.posix.openat(std.posix.AT.FDCWD, "/proc/self/maps", .{ .ACCMODE = .RDONLY }, 0) catch return null;
-    defer _ = std.posix.system.close(fd);
-
-    var contents: std.ArrayList(u8) = .empty;
-    defer contents.deinit(allocator);
-    var read_buf: [8192]u8 = undefined;
-    while (true) {
-        const n = std.posix.read(fd, &read_buf) catch break;
-        if (n == 0) break;
-        try contents.appendSlice(allocator, read_buf[0..n]);
-    }
-
-    var it = std.mem.splitScalar(u8, contents.items, '\n');
-    while (it.next()) |l| {
-        if (std.mem.indexOf(u8, l, "libtvm_ffi.so") == null) continue;
-        const path_start = std.mem.indexOf(u8, l, "/") orelse continue;
-        const path = l[path_start..];
-        const slash = std.mem.lastIndexOf(u8, path, "/") orelse continue;
-        return try std.fmt.allocPrint(allocator, "{s}/libtvm.so", .{path[0..slash]});
-    }
-    return null;
-}
-
-// ============================================================================
 // Error handling
-// ============================================================================
 
 pub const TvmError = error{
     TvmCallFailed,
@@ -323,9 +212,7 @@ fn get_last_error_message(allocator: std.mem.Allocator) ![]u8 {
     return try allocator.dupe(u8, msg.data[0..msg.size]);
 }
 
-// ============================================================================
-// Call helpers
-// ============================================================================
+// Call helpers.
 
 /// Look up a TVM global function by name. Caller must DecRef the returned handle.
 pub fn get_global(allocator: std.mem.Allocator, name: []const u8) TvmError!c.TVMFFIObjectHandle {
@@ -360,12 +247,12 @@ pub fn call(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []co
 pub fn call_global(allocator: std.mem.Allocator, func_name: []const u8, args: []const Value) TvmError!Value {
     const func = try get_global(allocator, func_name);
     defer _ = c.TVMFFIObjectDecRef(func);
-    return call_with_values(allocator, func, args);
+    return try call_with_values(allocator, func, args);
 }
 
 /// Call a TVM function handle with Value arguments.
 pub fn call_handle(allocator: std.mem.Allocator, func: c.TVMFFIObjectHandle, args: []const Value) TvmError!Value {
-    return call_with_values(allocator, func, args);
+    return try call_with_values(allocator, func, args);
 }
 
 /// Shared implementation: convert Value args to raw TVMFFIAny and call.
@@ -396,13 +283,9 @@ pub fn set_global(name: []const u8, func_handle: c.TVMFFIObjectHandle, override:
     }
 }
 
-// ============================================================================
 // String helpers
-// ============================================================================
 
-// ============================================================================
 // Packed function creation
-// ============================================================================
 
 /// TVM packed function callback signature.
 pub const PackedFuncCallback = *const fn (
@@ -435,9 +318,7 @@ pub fn create_packed_func(
     return Value.from_object(func_handle, c.kTVMFFIFunction);
 }
 
-// ============================================================================
 // Object reflection
-// ============================================================================
 
 /// Read a named field from a TVM object using the runtime reflection system.
 ///
@@ -548,13 +429,11 @@ pub fn make_tvm_string(s: []const u8) TvmError!Value {
     return .{ .raw = out };
 }
 
-// ============================================================================
 // Array - TVM runtime Array wrapper (tvm/ffi/container/array.h)
-// ============================================================================
 
-/// Typed wrapper for TVM's `ffi.Array`.
+/// Wrapper for TVM's `ffi.Array`.
 ///
-/// Provides typed access to array construction, length, and element access.
+/// Provides array construction, length, and element access.
 /// Owns the underlying TVM object handle and decrements its refcount on deinit.
 pub const Array = struct {
     handle: ObjectHandle,
@@ -587,7 +466,7 @@ pub const Array = struct {
 
     /// Get the element at `idx`.
     pub fn get(self: Array, allocator: std.mem.Allocator, idx: usize) !Value {
-        return call_global(allocator, "ffi.ArrayGetItem", &.{
+        return try call_global(allocator, "ffi.ArrayGetItem", &.{
             self.as_value(), Value.int(@intCast(idx)),
         });
     }
@@ -596,13 +475,11 @@ pub const Array = struct {
     pub const deinit = helpers.deinit(Array);
 };
 
-// ============================================================================
 // Map - TVM runtime Map wrapper (tvm/ffi/container/map.h)
-// ============================================================================
 
-/// Typed wrapper for TVM's `ffi.Map`.
+/// Wrapper for TVM's `ffi.Map`.
 ///
-/// Provides typed access to map construction, size, key existence, and value
+/// Provides map construction, size, key existence, and value
 /// lookup. Owns the underlying TVM object handle and decrements its refcount
 /// on deinit.
 pub const Map = struct {
@@ -641,18 +518,16 @@ pub const Map = struct {
 
     /// Get value by key.
     pub fn get(self: Map, allocator: std.mem.Allocator, key: Value) !Value {
-        return call_global(allocator, "ffi.MapGetItem", &.{ self.as_value(), key });
+        return try call_global(allocator, "ffi.MapGetItem", &.{ self.as_value(), key });
     }
 
     pub const as_value = helpers.as_value(Map);
     pub const deinit = helpers.deinit(Map);
 };
 
-// ============================================================================
 // Node utilities
-// ============================================================================
 
 /// Deserialize a TVM object from its JSON representation.
 pub fn load_json(allocator: std.mem.Allocator, json: [:0]const u8) TvmError!Value {
-    return call_global(allocator, "node.LoadJSON", &.{Value.str(json)});
+    return try call_global(allocator, "node.LoadJSON", &.{Value.str(json)});
 }

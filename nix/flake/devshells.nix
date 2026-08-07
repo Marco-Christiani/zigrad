@@ -7,14 +7,13 @@
     config,
     system,
     cudaCfg,
+    zigradBuildConfigurations,
     ...
   }: let
     inherit (inputs) uv2nix;
 
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
-
-    sdkFull = toString config.packages.zigrad-sdk-full-gpu;
 
     # Wrap clangd so it trusts Nix-store gcc/clang wrappers as drivers.
     # Without --query-driver, clangd refuses to query the compiler used in
@@ -63,62 +62,69 @@
       py-pkgs = pkgs.python312Packages;
     };
 
-    # Shared PJRT plugin selection logic: prefer GPU if available, fall back to CPU.
-    pjrtSelectHook = ''
-      export REPO_ROOT=$(git rev-parse --show-toplevel)
+    integrationEnv = package: let
+      externalInputs = package.externalInputs;
+      externalInputsStr = toString externalInputs;
+      runtimeStr = toString externalInputs.runtime;
+    in
+      package.configuration.runtimeEnv
+      // {
+        ZG_EXTERNAL_SDK_ROOT = externalInputsStr;
+        ZG_RUNTIME_SDK_ROOT = runtimeStr;
+        ZG_ZIG_BUILD_ARGS = package.configuration.zigFeatureFlags;
+        ZG_MIRAGE_RUNTIME_LIBRARY = "${config.packages.mirage}/lib/libmirage_runtime.so";
+        ZG_NLOHMANN_JSON_INCLUDE_DIR = "${pkgs.lib.getDev pkgs.nlohmann_json}/include";
+        PJRT_CPU_PLUGIN_PATH = "${runtimeStr}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
+        PJRT_GPU_PLUGIN_PATH = "${runtimeStr}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
 
-      [[ -f "$PJRT_CPU_PLUGIN_PATH" ]]
-      cpu_plugin_exists=$?
-
-      [[ -f "$PJRT_GPU_PLUGIN_PATH" ]]
-      gpu_plugin_exists=$?
-
-      if (( gpu_plugin_exists == 0 )); then
-        PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH"
-      else
-        PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH"
-      fi
-      export PJRT_PLUGIN_PATH
-    '';
-
-    sdkEnv = {
-      ZG_EXTERNAL_SDK_ROOT = sdkFull;
-      PJRT_CPU_PLUGIN_PATH = "${sdkFull}/runtime/xla/pjrt/c/pjrt_c_api_cpu_plugin.so";
-      PJRT_GPU_PLUGIN_PATH = "${sdkFull}/runtime/xla/pjrt/c/pjrt_c_api_gpu_plugin.so";
-
-      # vim runtime dirs from the LLVM source tree. Editors can append these
-      #  to runtimepath to get LLVM's official syntax/indent/ftplugin/ftdetect
-      #  files for .mlir/.ll/.td (handles StableHLO-style assembly that the
-      #  community tree-sitter grammar chokes on).
-      ZG_MLIR_VIM_RT = "${inputs.llvmSrc}/mlir/utils/vim";
-      ZG_LLVM_VIM_RT = "${inputs.llvmSrc}/llvm/utils/vim";
-    };
+        # vim runtime dirs from the LLVM source tree. Editors can append these
+        #  to runtimepath to get LLVM's official syntax/indent/ftplugin/ftdetect
+        #  files for .mlir/.ll/.td (handles StableHLO-style assembly that the
+        #  community tree-sitter grammar chokes on).
+        ZG_MLIR_VIM_RT = "${inputs.llvmSrc}/mlir/utils/vim";
+        ZG_LLVM_VIM_RT = "${inputs.llvmSrc}/llvm/utils/vim";
+      };
   in {
     devShells = {
       default = pkgs.mkShellNoCC {
-        packages = pyShellPkgs.out.packages ++ baseDevShellPkgs ++ [config.packages.zigrad-sdk-full-gpu];
+        packages = pyShellPkgs.out.packages ++ baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
         env =
           pyShellPkgs.out.env
-          // sdkEnv
-          // {
-            CUDA_HOME = "${config.packages.cuda-redist.dev}";
-            # NVRTC include paths for nix-compatible CUDA compilation
-            NIX_GLIBC_INCLUDE = "${pkgs.stdenv.cc.libc.dev}/include";
-            NIX_GCC_INCLUDE = "${pkgs.stdenv.cc.cc}/lib/gcc/${pkgs.stdenv.hostPlatform.config}/${pkgs.lib.getVersion pkgs.stdenv.cc.cc}/include";
-          };
+          // integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
-          pjrtSelectHook
-          + lspShadowHook
+          lspShadowHook
           + ''
+            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
             # zig is not happy about -fmacro-prefix-map
             unset NIX_CFLAGS_COMPILE
           '';
       };
 
-      pure = pkgs.mkShellNoCC {
-        packages = baseDevShellPkgs ++ [config.packages.zigrad-sdk-full-gpu];
-        env = sdkEnv;
-        shellHook = pjrtSelectHook + lspShadowHook;
+      tvm-python = pkgs.mkShellNoCC {
+        packages = pyShellPkgs.out.packages ++ baseDevShellPkgs ++ [zigradBuildConfigurations.dev-cuda-tvm-python.package];
+        env =
+          pyShellPkgs.out.env
+          // integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python.package;
+        shellHook =
+          lspShadowHook
+          + ''
+            export PYTHONPATH="$ZG_EXTERNAL_SDK_ROOT/python''${PYTHONPATH:+:$PYTHONPATH}"
+            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+            # zig is not happy about -fmacro-prefix-map
+            unset NIX_CFLAGS_COMPILE
+          '';
+      };
+
+      zig = pkgs.mkShellNoCC {
+        packages = baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
+        env = integrationEnv config.packages.zigrad-dev-cuda;
+        shellHook =
+          lspShadowHook
+          + ''
+            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
       };
 
       profiling = pkgs.mkShellNoCC {
@@ -126,14 +132,18 @@
           pyShellPkgs.out.packages
           ++ baseDevShellPkgs
           ++ [
-            config.packages.zigrad-sdk-full-gpu
+            config.packages.zigrad-dev-cuda
             cudaPackages.nsight_systems
             cudaPackages.nsight_compute
           ];
         env =
           pyShellPkgs.out.env
-          // sdkEnv;
-        shellHook = pjrtSelectHook + lspShadowHook;
+          // integrationEnv config.packages.zigrad-dev-cuda;
+        shellHook =
+          lspShadowHook
+          + ''
+            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
       };
     };
   };

@@ -20,7 +20,7 @@ pub const literal = struct {
         return .{ .tensor = .{ .dtype = lit.dtype(), .shape = .{ .dims = &.{} } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, lit: pr.Literal) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, lit: pr.Literal) types.AdError!void {
         const out = try ctx.builder.literal_scalar(lit);
         ctx.set_primal(op.result(0), out);
     }

@@ -6,18 +6,14 @@ const std = @import("std");
 const api = @import("api.zig");
 const c = @import("c.zig");
 const dlpack = @import("../dlpack.zig");
-const tir = @import("tir.zig");
 const Value = api.Value;
 const ObjectHandle = api.ObjectHandle;
 const TvmError = api.TvmError;
-const TargetKind = tir.TargetKind;
 
 const helpers = api.helpers;
 const log = std.log.scoped(.@"zg/tvm_runtime");
 
-// ============================================================================
 // RuntimeModule
-// ============================================================================
 
 pub const RuntimeModule = struct {
     handle: ObjectHandle,
@@ -61,41 +57,9 @@ pub const RuntimeModule = struct {
         const obj = result.as_object() orelse return error.TvmCallFailed;
         return .{ .handle = .{ .ptr = obj } };
     }
-
-    /// Export the module to a shared library (.so).
-    ///
-    /// For CPU: writes a single .o and links to .so.
-    /// For CUDA: writes host .o + device .o (packed LLVM blob), then links both.
-    pub fn export_shared(self: RuntimeModule, io: std.Io, allocator: std.mem.Allocator, so_path: [:0]const u8, kind: TargetKind) !void {
-        const compile_mod = @import("compile.zig");
-
-        const obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.host.o", .{so_path}, 0);
-        defer allocator.free(obj_path);
-
-        try self.write_to_file(allocator, obj_path, "o");
-
-        switch (kind) {
-            .cpu => {
-                try compile_mod.link_to_shared(io, allocator, &.{obj_path}, so_path);
-            },
-            .cuda => {
-                const devc_obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.devc.o", .{so_path}, 0);
-                defer allocator.free(devc_obj_path);
-
-                var pack_mod = try self.pack_imports_to_llvm(allocator);
-                defer pack_mod.deinit();
-                try pack_mod.write_to_file(allocator, devc_obj_path, "o");
-
-                try compile_mod.link_to_shared(io, allocator, &.{ obj_path, devc_obj_path }, so_path);
-            },
-        }
-        log.info("exported {s}", .{so_path});
-    }
 };
 
-// ============================================================================
 // Tensor - DLPack <-> TVM tensor bridge
-// ============================================================================
 
 pub const Tensor = struct {
     handle: ObjectHandle,
@@ -115,7 +79,13 @@ pub const Tensor = struct {
     ///
     /// `shape` must remain valid for the lifetime of the returned tensor
     /// (TVM stores the shape pointer internally).
-    pub fn allocate(allocator: std.mem.Allocator, data: []f32, shape: []i64, device_type: dlpack.DeviceType) TvmError!Tensor {
+    pub fn allocate(
+        allocator: std.mem.Allocator,
+        data: []f32,
+        shape: []i64,
+        device_type: dlpack.DeviceType,
+        device_ordinal: i32,
+    ) TvmError!Tensor {
         // 1. Create Shape object
         var shape_vals: [4]Value = undefined;
         for (shape, 0..) |dim, i| {
@@ -128,7 +98,7 @@ pub const Tensor = struct {
         const tensor_val = try api.call_global(allocator, "runtime.TVMTensorAllocWithScope", &.{
             shape_obj,
             dtype_value(.float, 32),
-            device_value(device_type, 0),
+            device_value(device_type, device_ordinal),
             Value.none(),
         });
 

@@ -1,9 +1,8 @@
-// IREE C API shim. Wraps static inline functions, macros, and bitfield-
-// bearing structs that Zig's translate-c (and `@cImport`) cannot translate.
-// Compiled as a .c object alongside the Zig bindings in `types.zig`.
+// Bridges IREE C constructs that Zig's translate-c cannot represent.
 //
-// Must be compiled with -DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
-// (matching the IREE cmake default) so that iree_allocator_system() is defined.
+// This object is compiled with the Zig bindings in `types.zig`. Defining
+//  IREE_ALLOCATOR_SYSTEM_CTL as iree_allocator_libc_ctl provides
+//  iree_allocator_system().
 
 #include <stddef.h>
 
@@ -12,9 +11,7 @@
 #include "iree/vm/api.h"
 #include "iree/base/api.h"
 
-// ---------------------------------------------------------------------------
-// Allocator helpers (static inline in allocator.h).
-// ---------------------------------------------------------------------------
+// Allocator macro wrappers.
 
 iree_allocator_t zg_iree_allocator_system(void) {
   return iree_allocator_system();
@@ -24,37 +21,27 @@ iree_allocator_t zg_iree_allocator_null(void) {
   return iree_allocator_null();
 }
 
-// ---------------------------------------------------------------------------
-// Status helpers (macros in status.h).
-// ---------------------------------------------------------------------------
+// Status macro wrappers.
 
 bool zg_iree_status_is_ok(iree_status_t status) {
   return iree_status_is_ok(status);
 }
 
-// Returns the iree_status_code_t for `status` without freeing it. Mirrors
-// the `iree_status_code` macro, exposed here so Zig callers can peek at a
-// status code (to recognize expected sentinels such as OUT_OF_RANGE) without
-// taking the macro dependency.
+// Returns the status code without consuming `status`.
+//
+// Zig callers use this to recognize sentinels such as OUT_OF_RANGE.
 uint32_t zg_iree_status_code(iree_status_t status) {
   return (uint32_t)iree_status_code(status);
 }
 
-// ---------------------------------------------------------------------------
-// HAL helpers (macros / generated inlines).
-// ---------------------------------------------------------------------------
+// HAL inline wrappers.
 
 iree_host_size_t zg_iree_hal_element_bit_count(
     iree_hal_element_type_t element_type) {
   return iree_hal_element_bit_count(element_type);
 }
 
-// ---------------------------------------------------------------------------
-// Buffer mapping helpers.
-//
-// iree_hal_buffer_mapping_t contains bitfields which translate-c emits as
-// opaque, so the entire map/copy/unmap dance lives in C.
-// ---------------------------------------------------------------------------
+// Maps buffers whose mapping descriptor is opaque to translate-c.
 
 iree_status_t zg_iree_hal_buffer_read(iree_hal_buffer_t* buffer,
                                        uint8_t* dst,
@@ -86,10 +73,7 @@ iree_status_t zg_iree_hal_buffer_write(iree_hal_buffer_t* buffer,
   return iree_hal_buffer_unmap_range(&mapping);
 }
 
-// ---------------------------------------------------------------------------
-// Lifecycle helpers: hide IREE's options structs so the Zig binding never
-// has to mirror their layout.
-// ---------------------------------------------------------------------------
+// Creates IREE runtime objects without exposing options struct layouts to Zig.
 
 iree_status_t zg_iree_runtime_instance_create_all_drivers(
     iree_runtime_instance_t** out_instance) {
@@ -116,10 +100,7 @@ iree_status_t zg_iree_runtime_instance_try_create_default_device(
                                                           out_device);
 }
 
-// ---------------------------------------------------------------------------
-// Buffer view allocation: hide iree_hal_buffer_params_t and its companion
-// flag constants behind a single shim that bakes in zigrad's defaults.
-// ---------------------------------------------------------------------------
+// Allocates a dense device-local buffer view using Zigrad's runtime defaults.
 
 iree_status_t zg_iree_buffer_view_allocate_device_local_copy(
     iree_hal_device_t* device, const iree_hal_dim_t* shape,
@@ -140,12 +121,9 @@ iree_status_t zg_iree_buffer_view_allocate_device_local_copy(
       out_view);
 }
 
-// ---------------------------------------------------------------------------
-// ABI layout probes for `src/c/iree/abi_test.zig`. Each probe returns a
-// concrete sizeof / alignof / offsetof against the SDK headers we link at
-// build time, so layout drift in the IREE C API surfaces as a Zig test
-// failure rather than a hard-to-diagnose runtime crash.
-// ---------------------------------------------------------------------------
+// Reports ABI layouts from the IREE headers used for linkage.
+//
+// `src/c/iree/abi_test.zig` compares these values with the Zig declarations.
 
 iree_host_size_t zg_abi_sizeof_iree_string_view_t(void) {
   return sizeof(iree_string_view_t);

@@ -2,20 +2,22 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const pr = zg.pr;
-const lower = zg.lower;
-const backend = zg.pjrt;
+const stablehlo_lower = zg.mlir.stablehlo;
+const pjrt = zg.pjrt;
 const config = @import("config.zig");
 
 const DeviceKind = @import("harness.zig").DeviceKind;
 
-/// XLA execution context (cached backend, device, and compiled executables).
+/// XLA execution context with a cache of compiled matmul programs.
 pub const XlaContext = struct {
     allocator: std.mem.Allocator,
-    backend_handle: *backend.Backend,
-    device: *const backend.Device,
-    compiled_cache: std.StringHashMap(*backend.LoadedExecutable),
+    compilation: zg.compilation.Context,
+    client: *pjrt.Client,
+    execution: *pjrt.Execution,
+    backend: pjrt.Backend,
+    compiled_cache: std.StringHashMap(zg.Executor.LoadedProgram),
 
-    pub fn init(allocator: std.mem.Allocator, device: DeviceKind) !XlaContext {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, device: DeviceKind) !XlaContext {
         const env_var: [*:0]const u8 = switch (device) {
             .cpu => "PJRT_CPU_PLUGIN_PATH",
             .gpu => "PJRT_GPU_PLUGIN_PATH",
@@ -26,32 +28,45 @@ pub const XlaContext = struct {
         };
         const plugin_path = std.mem.span(env_ptr);
 
-        const backend_handle = try allocator.create(backend.Backend);
-        errdefer allocator.destroy(backend_handle);
+        const client = try allocator.create(pjrt.Client);
+        errdefer allocator.destroy(client);
 
-        backend_handle.* = try backend.Backend.init(allocator, plugin_path);
+        client.* = try pjrt.Client.init(allocator, plugin_path, .{});
+        errdefer client.deinit();
 
-        const devices = try backend_handle.get_devices(allocator);
+        const devices = try client.get_devices(allocator);
+        defer allocator.free(devices);
         if (devices.len == 0) return error.NoDevicesFound;
 
-        return XlaContext{
+        const execution = try allocator.create(pjrt.Execution);
+        errdefer allocator.destroy(execution);
+        execution.* = try pjrt.Execution.init(client, devices[0], .{});
+
+        return .{
             .allocator = allocator,
-            .backend_handle = backend_handle,
-            .device = &devices[0],
-            .compiled_cache = std.StringHashMap(*backend.LoadedExecutable).init(allocator),
+            .compilation = .{
+                .allocator = allocator,
+                .io = io,
+                .device = execution.interface.device,
+            },
+            .client = client,
+            .execution = execution,
+            .backend = pjrt.Backend.init(execution, .{}),
+            .compiled_cache = std.StringHashMap(zg.Executor.LoadedProgram).init(allocator),
         };
     }
 
     pub fn deinit(self: *XlaContext) void {
         var iter = self.compiled_cache.iterator();
         while (iter.next()) |entry| {
-            self.backend_handle.deinit_executable(entry.value_ptr.*);
-            self.allocator.destroy(entry.value_ptr.*);
+            entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
         }
         self.compiled_cache.deinit();
 
-        self.backend_handle.deinit();
-        self.allocator.destroy(self.backend_handle);
+        self.allocator.destroy(self.execution);
+        self.client.deinit();
+        self.allocator.destroy(self.client);
     }
 
     /// Execute XLA matmul (compiles on-the-fly, caches per shape+dtype).
@@ -64,16 +79,18 @@ pub const XlaContext = struct {
         c: []T,
     ) !void {
         const dtype = comptime config.DType.from_zig_type(T);
-        const cache_key = try std.fmt.allocPrint(self.allocator, "{d}x{d}x{d}_{s}", .{
-            shape.m, shape.n, shape.k, @tagName(dtype),
+        const cache_key = try std.fmt.allocPrint(self.allocator, "{d}x{d}x{d}_{t}", .{
+            shape.m, shape.n, shape.k, dtype,
         });
         defer self.allocator.free(cache_key);
 
         const executable = if (self.compiled_cache.get(cache_key)) |exe|
             exe
         else blk: {
-            const exe = try self.compile_matmul(shape, dtype);
+            var exe = try self.compile_matmul(shape, dtype);
+            errdefer exe.deinit();
             const owned_key = try self.allocator.dupe(u8, cache_key);
+            errdefer self.allocator.free(owned_key);
             try self.compiled_cache.put(owned_key, exe);
             break :blk exe;
         };
@@ -81,35 +98,32 @@ pub const XlaContext = struct {
         var shape_a = [_]i64{ shape.m, shape.k };
         var shape_b = [_]i64{ shape.k, shape.n };
 
-        var dev_a = try self.backend_handle.buffer_from_host(self.device, std.mem.sliceAsBytes(a), dtype.to_pr_dtype(), &shape_a);
-        defer self.backend_handle.deinit_buffer(&dev_a);
+        const executor = &self.execution.interface;
+        const dev_a = try executor.upload(std.mem.sliceAsBytes(a), dtype.to_pr_dtype(), &shape_a);
+        defer executor.release(dev_a);
 
-        var dev_b = try self.backend_handle.buffer_from_host(self.device, std.mem.sliceAsBytes(b), dtype.to_pr_dtype(), &shape_b);
-        defer self.backend_handle.deinit_buffer(&dev_b);
+        const dev_b = try executor.upload(std.mem.sliceAsBytes(b), dtype.to_pr_dtype(), &shape_b);
+        defer executor.release(dev_b);
 
-        const result = try self.backend_handle.execute(executable, self.allocator, &.{ dev_a, dev_b }, .{});
-        defer {
-            for (result.outputs) |*buf| self.backend_handle.deinit_buffer(buf);
-            self.allocator.free(result.outputs);
+        var outputs: [1]zg.Executor.Buffer = undefined;
+        const execute_event = try executor.invoke(executable, &.{ dev_a, dev_b }, &outputs, .{});
+        defer executor.release(outputs[0]);
+        if (execute_event) |event| {
+            defer executor.release_event(event);
+            try executor.wait(event);
         }
 
-        if (result.device_complete_event) |ev| {
-            var device_event = ev;
-            defer self.backend_handle.deinit_event(&device_event);
-            try self.backend_handle.await_event(&device_event);
+        if (try executor.download(outputs[0], std.mem.sliceAsBytes(c))) |event| {
+            defer executor.release_event(event);
+            try executor.wait(event);
         }
-
-        const c_bytes = std.mem.sliceAsBytes(c);
-        var copy_event = try self.backend_handle.buffer_to_host(&result.outputs[0], c_bytes);
-        defer self.backend_handle.deinit_event(&copy_event);
-        try self.backend_handle.await_event(&copy_event);
     }
 
     fn compile_matmul(
         self: *XlaContext,
         shape: config.Shape,
         dtype: config.DType,
-    ) !*backend.LoadedExecutable {
+    ) !zg.Executor.LoadedProgram {
         var program = pr.Program.init(self.allocator);
         defer program.deinit();
 
@@ -123,24 +137,12 @@ pub const XlaContext = struct {
         const func = try builder.finish(&.{c_id});
         try program.add_function(func);
 
-        const mlir_bytes = try lower.lower_program_to_mlir(
-            self.allocator,
-            &program,
-            null,
-            .mlir_bytecode,
-        );
-        defer self.allocator.free(mlir_bytes);
-
-        const executable = try self.allocator.create(backend.LoadedExecutable);
-        errdefer self.allocator.destroy(executable);
-
-        executable.* = try self.backend_handle.compile(
-            self.device,
-            mlir_bytes,
-            .binary,
-            .{},
-        );
-
-        return executable;
+        var pr_flow = zg.compilation.start(&program, &self.compilation);
+        try pr_flow.transform(pr.Validate{});
+        var stablehlo_flow = try pr_flow.lower(stablehlo_lower.Lower{
+            .config = .{ .entry_name = "matmul" },
+        });
+        defer stablehlo_flow.value.deinit(self.allocator);
+        return (try stablehlo_flow.compile(&self.backend.interface)).value;
     }
 };

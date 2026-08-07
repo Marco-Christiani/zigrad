@@ -8,9 +8,7 @@ fn format_compare_params(writer: *types.Writer, cparams: pr.CompareParams) types
     try writer.print("dir={s} type={s}", .{ @tagName(cparams.direction), @tagName(cparams.compare_type) });
 }
 
-// =========================================================================
 // Compare
-// =========================================================================
 
 pub const compare = struct {
     pub const arity = .{ .in = 2, .out = 1 };
@@ -53,7 +51,7 @@ pub const compare = struct {
         return .{ .tensor = .{ .dtype = .bool, .shape = lhs.shape } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, cparams: pr.CompareParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, cparams: pr.CompareParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -70,9 +68,7 @@ pub const compare = struct {
     }
 };
 
-// =========================================================================
 // Select
-// =========================================================================
 
 pub const select = struct {
     pub const arity = .{ .in = 3, .out = 1 };
@@ -102,7 +98,7 @@ pub const select = struct {
         return .{ .tensor = on_true };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 3) return error.UnsupportedEqn;
 
         const cond = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;

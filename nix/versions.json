@@ -2,6 +2,14 @@
   "cuda": {
     "12.8.1": {
       "components": {
+        "cuda_cccl": {
+          "hash_sri": "sha256-B0Dp4B5PFeF8WrjWi7pPjsDra4TtzLpKxFES0tIXTks=",
+          "kind": "tarball",
+          "runtime_dir": "cuda_cccl",
+          "sha256_hex": "0740e9e01e4f15e17c5ab8d68bba4f8ec0eb6b84edccba4ac45112d2d2174e4b",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/linux-x86_64/cuda_cccl-linux-x86_64-12.8.90-archive.tar.xz",
+          "version": "12.8.90"
+        },
         "cuda_cudart": {
           "hash_sri": "sha256-jVZrX+dFxGhC3BaUXPNmhiJ1Nt7NIwLDcr6G2jf6ymg=",
           "kind": "tarball",
@@ -97,6 +105,14 @@
     },
     "12.9.1": {
       "components": {
+        "cuda_cccl": {
+          "hash_sri": "sha256-ixpQlWaelPL5r9dxVTMxTUGBeelFK+YeL95MgqPlQqo=",
+          "kind": "tarball",
+          "runtime_dir": "cuda_cccl",
+          "sha256_hex": "8b1a5095669e94f2f9afd7715533314d418179e9452be61e2fde4c82a3e542aa",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/linux-x86_64/cuda_cccl-linux-x86_64-12.9.27-archive.tar.xz",
+          "version": "12.9.27"
+        },
         "cuda_cudart": {
           "hash_sri": "sha256-H2rULU9TCyS/o1iUzPa3IJ0jVPWRAf1i7EphkqGEzpk=",
           "kind": "tarball",

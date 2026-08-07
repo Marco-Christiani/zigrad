@@ -29,8 +29,7 @@
   # When true: RelWithDebInfo, retain DWARF, don't strip.
   # When false (default, production): Release, NDEBUG, stripped.
   withDebugSymbols ? false,
-  # Native CPU codegen. StablehloCAPI is mostly compiler infra; native tuning
-  #  has small impact. Threaded for completeness.
+  # Native CPU codegen has limited effect on the StableHLO C API library.
   withNativeTuning ? false,
   enableLto ? false,
   extraCxxFlags ? [],
@@ -111,7 +110,7 @@ in
       libffi
     ];
 
-    # Only StableHLO is built here; LLVM/MLIR comes pre-built from llvm.nix.
+    # Build StableHLO against the LLVM and MLIR package supplied above.
     buildPhase = ''
       set -euo pipefail
 
@@ -119,7 +118,11 @@ in
       cxxFlags="${lib.concatStringsSep " " ((lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags)}"
       ldFlags="${lib.concatStringsSep " " extraLdFlags}"
       cmake -S ${patchedStablehloSrc} -B stablehlo-build -G Ninja \
-        -DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"} \
+        -DCMAKE_BUILD_TYPE=${
+        if withDebugSymbols
+        then "RelWithDebInfo"
+        else "Release"
+      } \
         -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DSTABLEHLO_ENABLE_BINDINGS_PYTHON=OFF \
@@ -129,7 +132,9 @@ in
         ''${cxxFlags:+-DCMAKE_CXX_FLAGS="$cxxFlags"} \
         ''${ldFlags:+-DCMAKE_SHARED_LINKER_FLAGS="$ldFlags"}
 
-      ninja -C stablehlo-build StablehloCAPI
+      cmake --build stablehlo-build \
+        --parallel "$NIX_BUILD_CORES" \
+        --target StablehloCAPI
 
       # Restore -u to default so fixupPhase's strip-hook doesn't trip on its
       #  own unset variable references when stripping kicks in.
@@ -157,7 +162,7 @@ in
       mkdir -p "$out/include/xla/pjrt/c"
       cp -v "${xlaSrc}/xla/pjrt/c/"*.h "$out/include/xla/pjrt/c/"
 
-      # XLA FFI C API headers (for typed FFI custom call handlers)
+      # XLA FFI C API headers used by custom-call handlers.
       mkdir -p "$out/include/xla/ffi/api"
       cp -v "${xlaSrc}/xla/ffi/api/"*.h "$out/include/xla/ffi/api/"
 
@@ -220,7 +225,7 @@ in
         [ -f "$dev/lib/$base" ] || cp -v "$f" "$dev/lib/"
       done
 
-      # Files copied from the nix store are read-only; make writable for patchelf.
+      # Make copied libraries writable before patching their ELF metadata.
       chmod -R u+w "$out/lib" "$dev/lib"
 
       # Ensure unversioned linker names exist for the two link-entry DSOs in both outputs.

@@ -44,7 +44,7 @@ const blas = if (build_options.has_mkl) @cImport({
 
 pub const has_blas = build_options.has_mkl;
 
-/// MKL BLAS sgemm. Only supports f32; returns error for other types.
+/// MKL BLAS sgemm. Only supports f32 and errors for other types.
 pub fn blas_gemm(
     comptime T: type,
     m: i64,
@@ -58,7 +58,7 @@ pub fn blas_gemm(
     ldc: usize,
 ) error{ MklUnavailable, UnsupportedDtype }!void {
     if (!has_blas) return error.MklUnavailable;
-    if (T != f32) return error.UnsupportedDtype;
+    if (comptime T != f32) return error.UnsupportedDtype;
     // Safety: T == f32 verified above; cast through erased pointer to satisfy
     // the generic signature while calling the f32-only C function.
     const a_f32: []const f32 = @ptrCast(a);

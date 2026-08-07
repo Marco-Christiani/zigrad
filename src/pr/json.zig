@@ -1,11 +1,8 @@
-//! JSON graph emitter for PR.
+//! PR JSON graph emitter.
 //!
-//! Graph model: nodes = ops (params + equations), edges = vars (typed data flow).
-//!
-//! Each op becomes one node regardless of output count. Each variable
-//!  flowing between ops becomes an edge carrying the var's name, dtype, shape,
-//!  and ZXPR snippet. This matches the PR's SSA structure where variables are
-//!  the named, typed connections between operations.
+//! Parameters and operations become nodes. Consumed variables become data-flow
+//!  edges carrying value identity and type. Nodes also record every result so
+//!  terminal and unused values retain their type information.
 const std = @import("std");
 const pr = @import("pr.zig");
 const ops = @import("ops/ops.zig");
@@ -13,19 +10,16 @@ const zxpr = @import("zxpr.zig");
 
 const Writer = std.Io.Writer;
 
-/// Emit a Function as a JSON graph.
+/// Emit one function as a JSON graph.
 ///
-/// Nodes represent ops (params and equations). Edges represent variables.
-/// A param node has one outgoing var edge per consumer. An op node
-///  has outgoing var edges for each of its output variables.
+/// Parameters and operations are nodes. Each operand use creates an edge from
+///  its defining node.
 pub fn emit(func: pr.Function, writer: *Writer) !void {
     try writer.writeAll("{");
 
-    // "name"
     try writer.writeAll("\"name\":");
     try write_json_string(writer, func.name);
 
-    // "nodes"
     try writer.writeAll(",\"nodes\":[");
     var node_idx: usize = 0;
 
@@ -42,25 +36,21 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
     }
     try writer.writeAll("]");
 
-    // Pre-build var.id -> producer lookup (O(1) per edge instead of O(N) scan).
-    var producer_buf: [4096]u32 = undefined;
-    const map_len = @min(func.var_count, producer_buf.len);
-    const producer_map = producer_buf[0..map_len];
-    buildProducerMap(func, producer_map);
-
-    // "edges" - each variable flowing between ops
+    // A var whose producer cannot be named yields no edge, so the separator is
+    //  written only once an edge is known to be emitted and the array holds no
+    //  holes.
     try writer.writeAll(",\"edges\":[");
     var edge_idx: usize = 0;
     for (func.ops, 0..) |op, oi| {
         for (op.inputs, 0..) |operand, port| {
+            const producer = producer_of(func, operand.value) orelse continue;
             if (edge_idx > 0) try writer.writeAll(",");
-            try emit_var_edge(writer, operand.value, oi, port, producer_map);
+            try emit_var_edge(writer, operand.value, producer, oi, port);
             edge_idx += 1;
         }
     }
     try writer.writeAll("]");
 
-    // "regions"
     try writer.writeAll(",\"regions\":[");
     for (func.regions, 0..) |region, ri| {
         if (ri > 0) try writer.writeAll(",");
@@ -68,11 +58,10 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
     }
     try writer.writeAll("]");
 
-    // "returns"
     try writer.writeAll(",\"returns\":[");
     for (func.returns, 0..) |ret_var, i| {
         if (i > 0) try writer.writeAll(",");
-        try write_json_string(writer, pr.var_name(ret_var.id));
+        try write_value_id(writer, ret_var.id);
     }
     try writer.writeAll("]");
 
@@ -93,11 +82,7 @@ pub fn emit_program(program: *const pr.Program, writer: *Writer) !void {
     try writer.writeAll("]\n");
 }
 
-// ============================================================================
-// Node emitters - nodes represent ops
-// ============================================================================
-
-/// Op node id: "p0", "p1", ... for params; "e0", "e1", ... for ops.
+/// Write a parameter or operation node id.
 fn op_node_id(writer: *Writer, prefix: []const u8, index: usize) !void {
     try writer.writeAll("\"");
     try writer.writeAll(prefix);
@@ -110,7 +95,8 @@ fn emit_param_node(writer: *Writer, v: *const pr.Var, param_index: usize) !void 
     try op_node_id(writer, "p", param_index);
     try writer.writeAll(",\"kind\":\"param\"");
     try writer.writeAll(",\"label\":");
-    try write_json_string(writer, pr.var_name(v.id));
+    try write_value_id(writer, v.id);
+    try emit_outputs(writer, &.{v});
     try emit_zxpr_field_param(writer, v);
     try writer.writeAll("}");
 }
@@ -125,67 +111,66 @@ fn emit_op_node(writer: *Writer, op: *const pr.Op, op_index: usize) !void {
     if (ops.has_vjp(prim)) {
         try writer.writeAll(",\"vjp\":true");
     }
-    // Label: "out_var = prim" (first output for display)
     if (op.outputs.len > 0) {
         try writer.writeAll(",\"label\":\"");
-        try writer.writeAll(pr.var_name(op.outputs[0].id));
+        for (op.outputs, 0..) |out, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.print("%{d}", .{out.id});
+        }
         try writer.writeAll(" = ");
         try writer.writeAll(@tagName(prim));
         try writer.writeAll("\"");
     }
+    try emit_outputs(writer, op.outputs);
     try emit_zxpr_field_op(writer, op);
     try writer.writeAll("}");
 }
 
-// ============================================================================
-// Edge emitter - edges represent variables
-// ============================================================================
-
-/// Packed producer reference: bit 31 selects param (0) or op (1), bits 0..30 hold the index.
-/// `no_producer` sentinel means the var has no known producer.
-const no_producer: u32 = std.math.maxInt(u32);
-const op_flag: u32 = 1 << 31;
-
-fn buildProducerMap(func: pr.Function, map: []u32) void {
-    @memset(map, no_producer);
-    for (func.params, 0..) |param_var, pi| {
-        if (param_var.id < map.len) {
-            map[param_var.id] = @intCast(pi);
-        }
+/// Emit every value defined by one node.
+///
+/// Terminal and unused results have no outgoing edge, so their type information
+///  must remain on the defining node.
+fn emit_outputs(writer: *Writer, outputs: []const *const pr.Var) !void {
+    try writer.writeAll(",\"outputs\":[");
+    for (outputs, 0..) |out, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("{\"var\":");
+        try write_value_id(writer, out.id);
+        try emit_aval_fields(writer, out.aval);
+        try writer.writeAll("}");
     }
-    for (func.ops, 0..) |op, oi| {
-        for (op.outputs) |out_var| {
-            if (out_var.id < map.len) {
-                map[out_var.id] = op_flag | @as(u32, @intCast(oi));
-            }
-        }
-    }
+    try writer.writeAll("]");
 }
 
-fn lookupProducer(map: []const u32, var_id: u32) ?struct { id_prefix: []const u8, index: usize } {
-    if (var_id >= map.len) return null;
-    const encoded = map[var_id];
-    if (encoded == no_producer) return null;
-    return if (encoded & op_flag != 0)
-        .{ .id_prefix = "e", .index = @intCast(encoded & 0x7FFF_FFFF) }
-    else
-        .{ .id_prefix = "p", .index = @intCast(encoded) };
+/// Identify the node that defines a variable.
+///
+/// The producing op comes from `Var.defining_op`. Parameters are located by id
+///  among the function's parameters.
+const Producer = struct { id_prefix: []const u8, index: usize };
+
+fn producer_of(func: pr.Function, v: *const pr.Var) ?Producer {
+    if (v.defining_op) |op| {
+        // Op ids are usually dense positions that index `func.ops` directly.
+        //  The scan handles functions whose ids are not dense.
+        if (op.id < func.ops.len and func.ops[op.id].id == op.id)
+            return .{ .id_prefix = "e", .index = op.id };
+        return .{ .id_prefix = "e", .index = func.op_index_by_id(op.id) orelse return null };
+    }
+    for (func.params, 0..) |param_var, pi|
+        if (param_var.id == v.id) return .{ .id_prefix = "p", .index = pi };
+    return null;
 }
 
-fn emit_var_edge(writer: *Writer, v: *const pr.Var, target_op_idx: usize, port: usize, producer_map: []const u32) !void {
-    const producer = lookupProducer(producer_map, v.id) orelse return;
-
+fn emit_var_edge(writer: *Writer, v: *const pr.Var, producer: Producer, target_op_idx: usize, port: usize) !void {
     try writer.writeAll("{\"source\":");
     try op_node_id(writer, producer.id_prefix, producer.index);
     try writer.writeAll(",\"target\":");
     try op_node_id(writer, "e", target_op_idx);
     try writer.print(",\"port\":{d}", .{port});
 
-    // Var identity
     try writer.writeAll(",\"var\":");
-    try write_json_string(writer, pr.var_name(v.id));
+    try write_value_id(writer, v.id);
 
-    // Var type
     try emit_aval_fields(writer, v.aval);
 
     try writer.writeAll("}");
@@ -206,9 +191,9 @@ fn emit_aval_fields(writer: *Writer, aval: pr.Aval) !void {
     }
 }
 
-// ============================================================================
-// ZXPR snippet embedding
-// ============================================================================
+fn write_value_id(writer: *Writer, id: u32) !void {
+    try writer.print("\"%{d}\"", .{id});
+}
 
 fn emit_zxpr_field_param(writer: *Writer, v: *const pr.Var) !void {
     var buf: [512]u8 = undefined;
@@ -243,17 +228,10 @@ fn emit_zxpr_field_region(writer: *Writer, func: pr.Function, region: pr.Region)
     }
 }
 
-// ============================================================================
-// Params -> JSON attrs
-//
-// Walks the typed Params union and emits format-specific JSON attributes.
-// The exhaustive switch ensures new Params variants cause a compile error.
-// ============================================================================
-
 fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
     var has_attr = false;
+    // Keep this switch exhaustive so every new Params variant defines its JSON form.
     switch (op.params) {
-        // No-param ops
         .add, .subtract, .multiply, .divide, .maximum => {},
         .exp, .log, .rsqrt, .logistic => {},
         .select, .dot => {},
@@ -392,10 +370,6 @@ fn open_attrs(writer: *Writer, has_attr: *bool) !void {
     }
 }
 
-// ============================================================================
-// Region emitter
-// ============================================================================
-
 fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
     try writer.writeAll("{\"name\":");
     try write_json_string(writer, region.name);
@@ -408,14 +382,12 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
         try writer.writeAll(",\"outline\":true");
     }
 
-    // node_ids reference op node ids (e0, e1, ...)
     try writer.writeAll(",\"node_ids\":[");
-    const op_end = region.op_start + region.op_len;
     var first = true;
-    var op_i: u32 = region.op_start;
-    while (op_i < op_end and op_i < func.ops.len) : (op_i += 1) {
+    for (region.op_ids) |op_id| {
+        if (func.op_by_id(op_id) == null) continue;
         if (!first) try writer.writeAll(",");
-        try writer.print("\"e{d}\"", .{op_i});
+        try writer.print("\"e{d}\"", .{op_id});
         first = false;
     }
     try writer.writeAll("]");
@@ -423,10 +395,6 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
     try emit_zxpr_field_region(writer, func, region);
     try writer.writeAll("}");
 }
-
-// ============================================================================
-// JSON primitives
-// ============================================================================
 
 fn write_json_string(writer: *Writer, s: []const u8) !void {
     try writer.writeAll("\"");
@@ -461,20 +429,26 @@ fn emit_i64_array(writer: *Writer, items: []const i64) !void {
     try writer.writeAll("]");
 }
 
-/// JSON literal values. bf16 is widened to f32 for JSON compatibility.
+/// Write one PR literal as JSON.
+///
+/// BF16 values widen to F32. Non-finite floats use the strings `"inf"`, `"-inf"`,
+///  and `"nan"` because JSON has no numeric representation for them.
 fn emit_literal_json(writer: *Writer, lit: pr.Literal) !void {
     switch (lit) {
-        .f16 => |v| try writer.print("{d}", .{pr.DType.f16.decode(f32, v)}),
-        .bf16 => |v| try writer.print("{d}", .{pr.DType.bf16.decode(f32, v)}),
+        .f16 => |v| try emit_float_json(writer, pr.DType.f16.decode(f32, v)),
+        .bf16 => |v| try emit_float_json(writer, pr.DType.bf16.decode(f32, v)),
         .bool => |v| try writer.writeAll(if (v) "true" else "false"),
-        inline .f32, .f64 => |v| try writer.print("{d}", .{v}),
+        inline .f32, .f64 => |v| try emit_float_json(writer, v),
         inline .i8, .u8, .i32, .i64, .u32, .u64 => |v| try writer.print("{d}", .{v}),
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+fn emit_float_json(writer: *Writer, v: anytype) !void {
+    if (std.math.isNan(v)) return try writer.writeAll("\"nan\"");
+    if (std.math.isPositiveInf(v)) return try writer.writeAll("\"inf\"");
+    if (std.math.isNegativeInf(v)) return try writer.writeAll("\"-inf\"");
+    try writer.print("{d}", .{v});
+}
 
 test emit {
     var program = pr.Program.init(std.testing.allocator);
@@ -499,7 +473,7 @@ test emit {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"main\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"nodes\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"edges\":[") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"returns\":[\"c\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"returns\":[\"%2\"]") != null);
 
     // Nodes are ops: params "p0","p1", op "e0"
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"p0\"") != null);
@@ -509,20 +483,20 @@ test emit {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"dot\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"vjp\":true") != null);
 
-    // Param nodes have var-name labels
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"label\":\"a\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"label\":\"b\"") != null);
+    // Param nodes have value-id labels
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"label\":\"%0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"label\":\"%1\"") != null);
 
-    // Edges are vars: carry var name, dtype, shape
+    // Edges are vars: carry value id, dtype, shape
     try std.testing.expect(std.mem.indexOf(u8, result, "\"source\":\"p0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"source\":\"p1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"target\":\"e0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"var\":\"a\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"var\":\"b\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"var\":\"%0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"var\":\"%1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"shape\":[2,3]") != null);
 
     // ZXPR snippets on nodes
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"zxpr\":\"a: 2x3<f32>\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"zxpr\":\"%0: 2x3<f32>\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "dot[contracting") != null);
 }
 
@@ -552,7 +526,7 @@ test "json with regions" {
 
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kernelize\":\"tvm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"tvm-kernel\"") != null);
-    // Region node_ids now reference op nodes (e0, e1)
+    // Region node_ids reference op nodes (e0, e1)
     try std.testing.expect(std.mem.indexOf(u8, result, "\"node_ids\":[\"e0\",\"e1\"]") != null);
 }
 
@@ -580,7 +554,7 @@ test "json with reshape and transpose" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"reshape\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"out_shape\":[6]") != null);
     // Var edges carry type info
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"var\":\"a\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"var\":\"%0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"dtype\":\"f64\"") != null);
 }
 
@@ -605,7 +579,7 @@ test "json with broadcast and literal" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"literal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"broadcast_in_dim\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"broadcast_dims\":[]") != null);
-    // Literal is e0, broadcast is e1; edge from e0 -> e1 carries var "a"
+    // The literal is e0 and the broadcast is e1. Their edge carries value %0.
     try std.testing.expect(std.mem.indexOf(u8, result, "\"source\":\"e0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"target\":\"e1\"") != null);
 }
@@ -653,6 +627,88 @@ test "json output is valid JSON" {
 
     const returns = root.get("returns").?.array;
     try std.testing.expectEqual(1, returns.items.len);
+}
+
+test "every op input yields an edge" {
+    // Counting the edges rather than pattern-matching the text catches the
+    //  whole class: a dropped edge is a dropped data-flow fact whether or not
+    //  the document still parses.
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "flow");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{ 2, 2 });
+    const y = try b.param_tensor(.f32, &.{ 2, 2 });
+    var acc = try b.add(x, y);
+    for (0..8) |_| acc = try b.multiply(acc, y);
+    const func = try b.finish(&.{acc});
+
+    var expected: usize = 0;
+    for (func.ops) |op| expected += op.inputs.len;
+
+    var buf: [16384]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, w.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(expected, parsed.value.object.get("edges").?.array.items.len);
+}
+
+test "a value no op consumes still carries its type" {
+    // The returned product is consumed by nothing, so no edge describes it. A
+    //  reader reconstructing the function needs its shape as much as any
+    //  operand's.
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "terminal");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{ 2, 3 });
+    const y = try b.param_tensor(.f32, &.{ 3, 4 });
+    const out = try b.dot(x, y);
+    const func = try b.finish(&.{out});
+
+    var buf: [4096]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, w.buffered(), .{});
+    defer parsed.deinit();
+
+    const returned = parsed.value.object.get("returns").?.array.items[0].string;
+    var found: ?std.json.Value = null;
+    for (parsed.value.object.get("nodes").?.array.items) |node| {
+        for (node.object.get("outputs").?.array.items) |o| {
+            if (std.mem.eql(u8, o.object.get("var").?.string, returned)) found = o;
+        }
+    }
+    const shape = found.?.object.get("shape").?.array;
+    try std.testing.expectEqual(2, shape.items.len);
+    try std.testing.expectEqual(2, shape.items[0].integer);
+    try std.testing.expectEqual(4, shape.items[1].integer);
+}
+
+test "non-finite literals stay parseable" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "masked");
+    defer b.deinit();
+    const neg_inf = try b.literal_scalar(.{ .f32 = -std.math.inf(f32) });
+    const out = try b.broadcast_in_dim(neg_inf, &.{ 2, 2 }, &.{});
+    const func = try b.finish(&.{out});
+
+    var buf: [4096]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try emit(func, &w);
+
+    const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"value\":\"-inf\"") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result, .{});
+    defer parsed.deinit();
 }
 
 test emit_program {

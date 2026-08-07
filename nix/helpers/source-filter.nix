@@ -9,6 +9,7 @@ in
     fileset = fs.unions [
       (root + /build.zig)
       (root + /build.zig.zon)
+      (root + /assets)
       (root + /src)
       (root + /tools)
     ];

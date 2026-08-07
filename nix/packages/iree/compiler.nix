@@ -1,27 +1,7 @@
-# nix/iree-compiler.nix
+# Builds the IREE compiler CLI against the separately packaged IREE LLVM fork.
 #
-# Builds the IREE compiler using the BYO-LLVM path (-DIREE_BUILD_BUNDLED_LLVM=OFF).
-# Depends on iree-llvm.nix for LLVM+Clang+LLD+MLIR.
-#
-# Required submodules are injected as separate flake inputs and linked into the
-# source tree before the build, keeping the derivation hermetic.
-#
-# Output layout:
-#   $out/lib/libIREECompiler.so   - stable C embedding API
-#   $out/include/iree/compiler/   - embedding_api.h, loader.h, mlir_interop.h
-#   $out/include/mlir-c/          - MLIR C API headers (re-exported by IREE)
-#   $out/bin/iree-compile         - compiler CLI tool (when withCli=true)
-#
-# ## What is built
-#
-# - Compiler only (IREE_BUILD_COMPILER=ON).
-# - StableHLO input dialect (IREE_INPUT_STABLEHLO=ON).
-# - Torch + TOSA input dialects disabled (no torch-mlir submodule needed).
-# - CPU backend (IREE_TARGET_BACKEND_LLVM_CPU=ON).
-# - CPU HAL drivers: local-sync and local-task.
-# - No CUDA backend (IREE_TARGET_BACKEND_CUDA=OFF): avoids nvidia_sdk_download.
-#   CUDA codegen can be layered on once the CPU path is stable.
-# - Tests, samples, Python bindings: all OFF.
+# StableHLO input, CPU and VMVX targets, and local CPU drivers are enabled.
+# Required submodules are explicit source inputs.
 {
   lib,
   stdenv,
@@ -36,22 +16,12 @@
   libffi,
   lld,
   binutils,
-  # Flake source inputs.
-  ## Main IREE repository (without submodules checked out).
   ireeSrc,
-  ## IREE's stablehlo fork (iree-org/stablehlo).
   ireeStablehloSrc,
-  ## flatcc library source (dvidelabs/flatcc).
   ireeFlatccSrc,
-  ## google/benchmark (needed by IREE's threading runtime install target).
   ireeBenchmarkSrc,
-  # Pre-built LLVM+Clang+LLD+MLIR from iree-llvm.nix.
   ireeLlvm,
-  ## When true, build & install the compiler CLI tools (iree-compile, iree-opt,
-  ##  iree-run-module) into $out/bin alongside the embedding API library.
-  withCli ? false,
-  # When true: RelWithDebInfo, retain DWARF, don't strip.
-  # When false (default, production): Release, NDEBUG, stripped.
+  # Retain debug information in a RelWithDebInfo build.
   withDebugSymbols ? false,
   withNativeTuning ? false,
   enableLto ? false,
@@ -60,9 +30,9 @@
 }:
 stdenv.mkDerivation {
   pname = "iree-compiler";
-  version = "iree-${ireeSrc.shortRev or "unknown"}" + lib.optionalString withCli "-cli";
+  version = "iree-${ireeSrc.shortRev or "unknown"}";
 
-  # We do our own source setup: copy ireeSrc and inject submodule sources.
+  # Source assembly happens in `buildPhase` because each submodule is pinned.
   dontUnpack = true;
   dontConfigure = true;
   dontStrip = withDebugSymbols;
@@ -70,9 +40,7 @@ stdenv.mkDerivation {
 
   strictDeps = true;
 
-  # System libs in both lists for the same reason as iree-llvm.nix: native
-  # build tools compiled during cmake (iree-tblgen, etc.) need to find their
-  # shared-library deps at runtime inside the Nix sandbox under strictDeps.
+  # Native IREE build tools load these libraries inside the strict-deps sandbox.
   nativeBuildInputs = [
     cmake
     ninja
@@ -100,17 +68,11 @@ stdenv.mkDerivation {
     set -euo pipefail
     log() { echo "[iree-compiler] $*" >&2; }
 
-    # -----------------------------------------------------------------------
-    # Source tree setup: copy IREE + inject required submodule sources.
-    # -----------------------------------------------------------------------
     log "Copying IREE source tree"
     cp -r ${ireeSrc} iree-src
     chmod -R u+w iree-src
 
-    # Inject required submodules.  cmake expects them at third_party/<name>/.
-    # Remove the empty placeholder dirs that the IREE git tree has for each
-    # submodule; if they exist, cp -r puts the source *inside* them instead
-    # of replacing them, and cmake's CMakeLists.txt existence check fails.
+    # Replace upstream placeholders with the pinned submodule sources.
     log "Injecting submodules"
     rm -rf iree-src/third_party/stablehlo
     cp -r ${ireeStablehloSrc} iree-src/third_party/stablehlo
@@ -124,14 +86,15 @@ stdenv.mkDerivation {
     cp -r ${ireeBenchmarkSrc} iree-src/third_party/benchmark
     chmod -R u+w iree-src/third_party/benchmark
 
-    # -----------------------------------------------------------------------
-    # CMake configure.
-    # -----------------------------------------------------------------------
     log "Configuring IREE"
     mkdir -p iree-build
 
     cmake -S iree-src -B iree-build -G Ninja \
-      -DCMAKE_BUILD_TYPE=${if withDebugSymbols then "RelWithDebInfo" else "Release"} \
+      -DCMAKE_BUILD_TYPE=${
+      if withDebugSymbols
+      then "RelWithDebInfo"
+      else "Release"
+    } \
       \
       -DIREE_BUILD_BUNDLED_LLVM=OFF \
       -DLLVM_DIR="${ireeLlvm}/lib/cmake/llvm" \
@@ -170,22 +133,17 @@ stdenv.mkDerivation {
       -DCMAKE_INSTALL_PREFIX="$out" \
       ${lib.optionalString enableLto "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON"} \
       ${let
-        cxxFlags = (lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags;
-      in lib.optionalString (cxxFlags != []) "-DCMAKE_CXX_FLAGS='${lib.concatStringsSep " " cxxFlags}'"} \
+      cxxFlags = (lib.optionals withNativeTuning ["-march=native" "-mtune=native"]) ++ extraCxxFlags;
+    in
+      lib.optionalString (cxxFlags != []) "-DCMAKE_CXX_FLAGS='${lib.concatStringsSep " " cxxFlags}'"} \
       ${lib.optionalString (extraLdFlags != []) "-DCMAKE_SHARED_LINKER_FLAGS='${lib.concatStringsSep " " extraLdFlags}'"}
 
-    # -----------------------------------------------------------------------
-    # Build the compiler shared library (and optionally tools).
-    # -----------------------------------------------------------------------
-    log "Building libIREECompiler.so"
-    ninja -C iree-build iree_compiler_API_SharedImpl
+    log "Building iree-compile"
+    cmake --build iree-build \
+      --parallel "$NIX_BUILD_CORES" \
+      --target iree_compiler_API_SharedImpl iree-compile
 
-    ${lib.optionalString withCli ''
-      log "Building compiler tools"
-      ninja -C iree-build iree-compile iree-opt iree-run-module
-    ''}
-
-    # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+    # Nix fixup hooks expect unset variables to expand without failure.
     set +u
   '';
 
@@ -193,43 +151,19 @@ stdenv.mkDerivation {
     set -euo pipefail
     log() { echo "[iree-compiler] $*" >&2; }
 
-    mkdir -p "$out/lib" "$out/include"
+    mkdir -p "$out/bin" "$out/lib"
 
-    # -----------------------------------------------------------------------
-    # Library: install libIREECompiler.so.
-    # -----------------------------------------------------------------------
     log "Installing libIREECompiler.so"
     find iree-build -name "libIREECompiler*.so*" -print -exec cp -v {} "$out/lib/" \;
 
-    # -----------------------------------------------------------------------
-    # Headers: IREE C embedding API + MLIR-C headers re-exported by IREE.
-    # -----------------------------------------------------------------------
-    log "Installing IREE C API headers"
-    mkdir -p "$out/include/iree/compiler"
-    cp -v iree-src/compiler/bindings/c/iree/compiler/*.h "$out/include/iree/compiler/"
-
-    log "Installing MLIR-C headers (re-exported by IREE)"
-    if [ -d "${ireeLlvm}/include/mlir-c" ]; then
-      cp -r "${ireeLlvm}/include/mlir-c" "$out/include/mlir-c"
+    log "Installing iree-compile"
+    compiler_bin="$(find iree-build/tools -name iree-compile -type f 2>/dev/null | head -1)"
+    if [ -z "$compiler_bin" ]; then
+      log "ERROR: iree-compile was not produced"
+      exit 1
     fi
+    cp -v "$compiler_bin" "$out/bin/iree-compile"
 
-    # -----------------------------------------------------------------------
-    # Tools (only when withCli=true).
-    # -----------------------------------------------------------------------
-    ${lib.optionalString withCli ''
-      log "Installing compiler tools"
-      mkdir -p "$out/bin"
-      for tool in iree-compile iree-opt iree-run-module; do
-        bin="$(find iree-build/tools -name "$tool" -type f 2>/dev/null | head -1)"
-        if [ -n "$bin" ]; then
-          cp -v "$bin" "$out/bin/$tool"
-        fi
-      done
-    ''}
-
-    # -----------------------------------------------------------------------
-    # Patch RUNPATH on all installed DSOs and binaries.
-    # -----------------------------------------------------------------------
     log "Patching RUNPATH"
     chmod -R u+w "$out/lib"
 
@@ -260,36 +194,30 @@ stdenv.mkDerivation {
       patchelf --set-rpath "$lib_rpath" "$f" || true
     done
 
-    ${lib.optionalString withCli ''
-      for f in "$out/bin/"*; do
-        [ -f "$f" ] && [ -x "$f" ] || continue
-        patchelf --set-rpath "$bin_rpath" "$f" 2>/dev/null || true
-      done
-    ''}
+    patchelf --set-rpath "$bin_rpath" "$out/bin/iree-compile"
 
-    # -----------------------------------------------------------------------
-    # Sanity check: verify the embedding API symbol is exported.
-    # -----------------------------------------------------------------------
     lib_path="$out/lib/libIREECompiler.so"
     if [ -f "$lib_path" ]; then
       if nm -D "$lib_path" 2>/dev/null | grep -q "ireeCompilerGetAPIVersion"; then
         log "OK: ireeCompilerGetAPIVersion found in libIREECompiler.so"
       else
-        log "WARNING: ireeCompilerGetAPIVersion not found -- check symbol export configuration"
+        log "WARNING: ireeCompilerGetAPIVersion not found, check symbol export configuration"
       fi
     else
       log "ERROR: libIREECompiler.so was not produced"
       exit 1
     fi
 
+    "$out/bin/iree-compile" --version
+
     log "Installation complete"
 
-    # Restore -u to default so fixupPhase's strip-hook doesn't trip.
+    # Nix fixup hooks expect unset variables to expand without failure.
     set +u
   '';
 
   meta = {
-    description = "IREE compiler shared library (libIREECompiler.so) with StableHLO + CPU backend";
+    description = "IREE compiler CLI with StableHLO and CPU targets";
     license = lib.licenses.asl20;
   };
 }

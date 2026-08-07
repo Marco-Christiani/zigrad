@@ -1,116 +1,22 @@
-//! Program Representation (PR)
+//! Toolchain-neutral program representation.
 //!
-//! PR is the compiler's core intermediate representation: a toolchain-neutral
-//!  graph of tensor operations. It sits between user-facing tracing (Tensor /
-//!  FunctionBuilder) and target-specific lowering (MLIR / StableHLO).
-//!
-//! ## Key types
-//!
-//!  1. `Program` - top-level container; owns an arena that backs all IR nodes.
-//!  2. `Function` - named function with params, return vars, and a linear op list.
-//!  3. `FunctionBuilder` - mutable builder for constructing a Function:
-//!      `init`, `emit` ops, and `finish` (validates on `finish`).
-//!  4. `Op` - a single operation: typed `Params` union + input `Operand` list +
-//!      output `Var` list.
-//!  5. `Var` - SSA value with an `Aval` (abstract type) and an intrinsic
-//!       doubly-linked use-list.
-//!  6. `Operand` - use-chain node linking a consuming Op to the Var it reads.
-//!
-//! ## Ownership
-//!
-//! All IR nodes (Var, Op, Operand, param slices) are arena-allocated via
-//!  `Program.allocator()`. The arena is freed in bulk by `Program.deinit()`.
-//!  Callers never free individual nodes.
+//! A `Program` arena stores functions, operations, SSA values, operands, and
+//!  parameter slices. `Program.deinit` releases the arena in one operation.
+//! Lowering remains an explicit compilation operation outside PR.
 //!
 //! ## Design invariants
 //!
-//!  - PR is toolchain-neutral
-//!  - Ops are single-output (except `call` / `custom_call` which use
-//!     `emit_with_outputs`).
-//!  - FunctionBuilder validates eagerly on `finish` via the op registry.
-//!  - Slice params (dims, axes, etc.) are duped into the arena by builder
-//!     convenience methods so callers can pass stack/temp slices.
+//! 1. Operations have one result except `call` and `custom_call`.
+//! 2. `FunctionBuilder.finish` validates through the operation registry.
+//! 3. Builder methods copy slice parameters into the program arena.
 const std = @import("std");
 const ops = @import("ops/ops.zig");
 const pr_log = std.log.scoped(.@"zg/pr");
 const Allocator = std.mem.Allocator;
 
-/// Element data type for tensors.
-pub const DType = enum {
-    f16,
-    bf16,
-    f32,
-    f64,
-    i8,
-    u8,
-    i32,
-    i64,
-    u32,
-    u64,
-    bool,
+pub const DType = @import("../dtype.zig").DType;
 
-    pub inline fn size_in_bytes(self: DType) usize {
-        return switch (self) {
-            .bool, .i8, .u8 => 1,
-            .f16, .bf16 => 2,
-            .f32, .i32, .u32 => 4,
-            .f64, .i64, .u64 => 8,
-        };
-    }
-
-    pub fn name(self: DType) []const u8 {
-        return @tagName(self);
-    }
-
-    /// Zig type used to store one element of this dtype in host memory.
-    ///
-    /// Float16 variants (bf16, f16) map to `u16` (bit-pattern storage), not
-    ///  a native float type. Use `encode`/`decode` for value conversion.
-    ///
-    /// Intended for use inside `inline switch` branches where the tag is
-    ///  comptime-known, enabling generic dtype-agnostic code without per-dtype
-    ///  function duplication.
-    pub fn StorageType(comptime self: DType) type {
-        return switch (self) {
-            .f32 => f32,
-            .f64 => f64,
-            .bf16, .f16 => u16,
-            .i8 => i8,
-            .u8 => u8,
-            .i32 => i32,
-            .i64 => i64,
-            .u32 => u32,
-            .u64 => u64,
-            .bool => u8,
-        };
-    }
-
-    /// Convert a float value to this dtype's storage representation.
-    pub inline fn encode(comptime self: DType, comptime T: type, val: T) StorageType(self) {
-        return switch (self) {
-            .f32 => @floatCast(val),
-            .f64 => @floatCast(val),
-            .bf16 => @intCast(@as(u32, @bitCast(@as(f32, @floatCast(val)))) >> 16),
-            .f16 => @bitCast(@as(f16, @floatCast(val))),
-            .i32 => @intFromFloat(val),
-            else => @compileError("encode not supported for " ++ @tagName(self)),
-        };
-    }
-
-    /// Decode this dtype's storage representation to a float type.
-    pub inline fn decode(comptime self: DType, comptime T: type, raw: StorageType(self)) T {
-        return switch (self) {
-            .f32 => @floatCast(raw),
-            .f64 => @floatCast(raw),
-            .bf16 => @floatCast(@as(f32, @bitCast(@as(u32, raw) << 16))),
-            .f16 => @floatCast(@as(f16, @bitCast(raw))),
-            .i32 => @floatFromInt(raw),
-            else => @compileError("decode not supported for " ++ @tagName(self)),
-        };
-    }
-};
-
-/// Heap-backed shape (slice into arena memory).
+/// Shape represented by a dimension slice.
 pub const Shape = struct {
     dims: []const i64,
 
@@ -125,19 +31,16 @@ pub const Shape = struct {
     }
 };
 
-// TODO: centralize this using the root `settings` struct pattern we used before.
+/// Maximum rank stored by `BoundedShape`.
 pub const max_rank = 8;
 
 /// Stack-allocated shape with a fixed maximum rank.
 pub const BoundedShape = struct {
-    /// TODO: use of i64 here looks odd, yes, but third party libs want i64,
-    ///  the remaining concern is us casting to usize, consider i32
-    ///  and cast at boundary...? also, this will ripple. Not worth it rn.
+    /// TODO(shape): Define the dimension scalar and host-index conversion policy.
     buf: [max_rank]i64 = undefined,
-    // TODO: oh yeah we are also wasting a field here tbh. so this could be
-    //  better in many ways, but I wonder if this should exist at all?
-    //  improving this will quickly start to balloon and we would have to
-    //  move it out, so im defering this, its a micro-optimization anyways.
+
+    // TODO(shape): Reevaluate the separate length field against a slice-backed
+    //  representation before changing fixed-capacity shape storage.
     len: usize = 0,
 
     pub fn from_slice(s: []const i64) BoundedShape {
@@ -182,17 +85,16 @@ pub const BoundedShape = struct {
         }
         try writer.writeAll("]");
 
-        return result.toOwnedSlice(allocator);
+        return try result.toOwnedSlice(allocator);
     }
 };
 
 /// Abstract value: the type of a Var without its data.
 ///
 /// ## ADR
-/// Currently only `tensor` (dtype + shape). The union exists so PR can
-///  support non-tensor types in the future without changing the Var layout.
+/// The union leaves room for non-tensor values without changing the `Var`
+///  layout.
 pub const Aval = union(enum) {
-    /// TODO: rename this to reduce confusion
     tensor: Tensor,
 
     /// Extract the tensor type. Exhaustive over Aval variants.
@@ -203,17 +105,17 @@ pub const Aval = union(enum) {
     }
 };
 
-/// Tensor type descriptor (dtype + shape).
+/// PR tensor descriptor containing a data type and shape.
 ///
-/// This is PR's notion of a tensor *type*, not a runtime tensor, so it carries
-///  no data, no device, no buffer.
-/// TODO: rename this to reduce confusion
+/// It carries no data, device, or buffer.
+/// TODO(pr): Rename this descriptor and its `Aval` tag to distinguish them
+///  from runtime tensors.
 pub const Tensor = struct {
     dtype: DType,
     shape: Shape,
 };
 
-/// Typed scalar constant.
+/// Scalar constant keyed by its `DType`.
 /// Float16 variants store the raw u16 bit pattern.
 pub const Literal = union(DType) {
     f16: u16,
@@ -232,7 +134,7 @@ pub const Literal = union(DType) {
         return std.meta.activeTag(self);
     }
 
-    /// Create a typed scalar literal by converting from f64.
+    /// Create a scalar literal by converting from f64.
     pub fn from_f64(value_dtype: DType, value: f64) Literal {
         return switch (value_dtype) {
             .f16 => .{ .f16 = DType.f16.encode(f64, value) },
@@ -245,7 +147,7 @@ pub const Literal = union(DType) {
             .i64 => .{ .i64 = @intFromFloat(value) },
             .u32 => .{ .u32 = @intFromFloat(value) },
             .u64 => .{ .u64 = @intFromFloat(value) },
-            // TODO: what about nan? check on this.
+            // TODO(pr): Define boolean conversion semantics for NaN.
             .bool => .{ .bool = value != 0.0 },
         };
     }
@@ -284,10 +186,6 @@ pub const Prim = enum {
     call,
     custom_call,
 };
-
-// ============================================================================
-// Param Structs
-// ============================================================================
 
 /// Parameters for gather (indexed read from a tensor).
 ///
@@ -412,9 +310,9 @@ pub const CallParams = struct {
     callee: []const u8,
 };
 
-/// Parameters for an opaque backend-dispatched custom_call operation.
+/// Parameters for an opaque runtime-dispatched custom call operation.
 pub const CustomCallParams = struct {
-    /// Backend dispatch key used at runtime (e.g. "zigrad.kernel.matmul_add").
+    /// Dispatch key used at runtime (e.g. "zigrad.kernel.matmul_add").
     target_name: []const u8,
     has_side_effect: bool,
     /// Output types must be provided explicitly (not inferrable from inputs).
@@ -425,12 +323,7 @@ pub const CustomCallParams = struct {
     provider_name: ?[]const u8 = null,
 };
 
-// ============================================================================
-// Params Tagged Union (keyed by Prim)
-// ============================================================================
-
-/// Typed parameter union keyed by Prim. Replaces the heterogeneous `[]const Param`
-/// list and `pr.param(.tag, slice)` linear scan pattern.
+/// Parameter union keyed by `Prim`.
 pub const Params = union(Prim) {
     literal: Literal,
     add: void,
@@ -460,10 +353,6 @@ pub const Params = union(Prim) {
     call: CallParams,
     custom_call: CustomCallParams,
 };
-
-// ============================================================================
-// Core IR Types
-// ============================================================================
 
 /// SSA value with inline type and intrinsic use-list
 ///
@@ -517,47 +406,6 @@ pub const Var = struct {
         self.first_use = null;
     }
 };
-
-/// Generate readable variable name from ID: 0->a, 1->b, ..., 26->aa, etc.
-pub fn var_name(id: u32) []const u8 {
-    const names = comptime blk: {
-        @setEvalBranchQuota(20000);
-        const single = 26;
-        const double = 26 * 26;
-        const triple = 26 * 26 * 26;
-        const total = single + double + triple;
-        var arr: [total][]const u8 = undefined;
-        for (0..total) |i| {
-            if (i < single) {
-                arr[i] = &[_]u8{'a' + @as(u8, @intCast(i))};
-            } else if (i < single + double) {
-                const idx = i - single;
-                const first = 'a' + @as(u8, @intCast(idx / 26));
-                const second = 'a' + @as(u8, @intCast(idx % 26));
-                arr[i] = &[_]u8{ first, second };
-            } else {
-                const idx = i - single - double;
-                const first = 'a' + @as(u8, @intCast(idx / (26 * 26)));
-                const second = 'a' + @as(u8, @intCast((idx / 26) % 26));
-                const third = 'a' + @as(u8, @intCast(idx % 26));
-                arr[i] = &[_]u8{ first, second, third };
-            }
-        }
-        break :blk arr;
-    };
-    if (id < names.len) return names[id];
-    return "???"; // fallback for very large programs
-}
-
-test var_name {
-    try std.testing.expectEqualStrings("a", var_name(0));
-    try std.testing.expectEqualStrings("b", var_name(1));
-    try std.testing.expectEqualStrings("z", var_name(25));
-    try std.testing.expectEqualStrings("aa", var_name(26));
-    try std.testing.expectEqualStrings("ab", var_name(27));
-    try std.testing.expectEqualStrings("zz", var_name(701));
-    try std.testing.expectEqualStrings("aaa", var_name(702));
-}
 
 /// A use-chain node linking a consuming Op to the Var it reads.
 pub const Operand = struct {
@@ -615,6 +463,7 @@ pub const Operand = struct {
 
 /// An operation in the IR.
 pub const Op = struct {
+    id: u32,
     inputs: []Operand,
     outputs: []*Var,
     params: Params,
@@ -640,42 +489,34 @@ pub const Op = struct {
     }
 };
 
-// ============================================================================
-// Annotations & Regions
-// ============================================================================
-
 /// Steering annotation attached to a region of ops.
-/// Does not change semantics -- only compiler hints.
+/// Does not change program semantics. It supplies compiler hints.
 pub const Annotation = struct {
-    /// Request that ops be outlined into a separate call boundary.
+    /// Request that ops be outlined into a separate call.
     outline: bool = false,
     /// Request kernelization by a named provider (e.g. "tvm").
-    /// TODO: consider a rename
+    /// TODO(pr): Name provider steering independently from its current
+    ///  kernelization transform.
     kernelize: ?[]const u8 = null,
 };
 
-/// A contiguous range of ops sharing an annotation.
+/// A named set of PR ops with attached steering metadata.
 /// Materialized at `FunctionBuilder.finish()` from the annotation stack by default.
 pub const Region = struct {
+    id: u32,
     name: []const u8,
     annotation: Annotation,
-    /// Index of the first op in this region.
-    op_start: u32,
-    /// Number of ops in this region.
-    op_len: u32,
+    /// Stable ids of member ops, in program order.
+    op_ids: []const u32,
 };
-
-// ============================================================================
-// Core Data Structures
-// ============================================================================
 
 /// A named function in the program: parameter vars, a linear op sequence,
 ///  return vars, and optional annotation regions.
 ///
 /// Constructed by `FunctionBuilder.finish()`, which validates all ops.
-/// Functions are immutable once built, modification requires rebuilding.
-/// TODO: do we want to stick to the immutable model? after def-use additions,
-///  we effectively have a hybrid model
+/// Rewrites may mutate values and operands after construction.
+/// TODO(pr): Define and enforce the permitted mutation surface after
+///  `FunctionBuilder.finish()`.
 pub const Function = struct {
     name: []const u8,
     params: []*Var,
@@ -687,6 +528,20 @@ pub const Function = struct {
     /// Return regions whose annotation satisfies a predicate.
     pub fn regions_matching(self: Function, predicate: *const fn (Annotation) bool) RegionIterator {
         return .{ .regions = self.regions, .predicate = predicate, .index = 0 };
+    }
+
+    pub fn op_by_id(self: Function, id: u32) ?*Op {
+        for (self.ops) |op| {
+            if (op.id == id) return op;
+        }
+        return null;
+    }
+
+    pub fn op_index_by_id(self: Function, id: u32) ?usize {
+        for (self.ops, 0..) |op, index| {
+            if (op.id == id) return index;
+        }
+        return null;
     }
 };
 
@@ -725,12 +580,13 @@ pub const Program = struct {
         return self.arena.allocator();
     }
 
-    /// NOTE: this is currently out of any hot path, but not ideal design anymore,
-    ///  many call sites use the `functions` field so an update will trigger a refactor
-    ///  but this is likely to land at some point.
-    /// TODO: where do we check for dupe names? it happens, i think pipeline or lowering,
-    ///  but probably add checks around here
-    pub fn add_function(self: *Program, func: Function) Allocator.Error!void {
+    /// Append a function whose name is not already present.
+    pub fn add_function(
+        self: *Program,
+        func: Function,
+    ) (Allocator.Error || error{DuplicateFunctionName})!void {
+        if (self.get_function(func.name) != null) return error.DuplicateFunctionName;
+
         const a = self.allocator();
         const new_items = try a.alloc(Function, self.functions.len + 1);
         @memcpy(new_items[0..self.functions.len], self.functions);
@@ -762,10 +618,6 @@ pub const Program = struct {
         self.arena.deinit();
     }
 };
-
-// ============================================================================
-// Errors
-// ============================================================================
 
 /// Errors from post-construction validation (op registry checks, call
 ///  signature matching, duplicate function names).
@@ -811,10 +663,6 @@ pub const ValidationError = error{
 /// Errors from FunctionBuilder: validation failures (caught eagerly at
 ///  `finish`) plus allocation failures from the program arena.
 pub const BuildError = ValidationError || Allocator.Error;
-
-// ============================================================================
-// Validation
-// ============================================================================
 
 fn same_tensor_signature(a: Tensor, b: Tensor) bool {
     if (a.dtype != b.dtype) return false;
@@ -888,15 +736,12 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     }
 }
 
-// ============================================================================
-// FunctionBuilder
-// ============================================================================
-
 /// Annotation stack entry for tracking active regions during building.
 const RegionEntry = struct {
+    id: u32,
     name: []const u8,
     annotation: Annotation,
-    op_start: u32,
+    start_index: u32,
 };
 
 /// Mutable builder for constructing a Function.
@@ -913,6 +758,8 @@ pub const FunctionBuilder = struct {
     params_list: std.ArrayList(*Var),
     ops_list: std.ArrayList(*Op),
     next_var_id: u32,
+    next_op_id: u32,
+    next_region_id: u32,
     region_stack: std.ArrayList(RegionEntry),
     completed_regions: std.ArrayList(Region),
 
@@ -924,6 +771,8 @@ pub const FunctionBuilder = struct {
             .params_list = try std.ArrayList(*Var).initCapacity(a, 8),
             .ops_list = try std.ArrayList(*Op).initCapacity(a, 16),
             .next_var_id = 0,
+            .next_op_id = 0,
+            .next_region_id = 0,
             .region_stack = try std.ArrayList(RegionEntry).initCapacity(a, 4),
             .completed_regions = try std.ArrayList(Region).initCapacity(a, 4),
         };
@@ -947,6 +796,18 @@ pub const FunctionBuilder = struct {
         return id;
     }
 
+    fn next_op(self: *FunctionBuilder) u32 {
+        const id = self.next_op_id;
+        self.next_op_id += 1;
+        return id;
+    }
+
+    fn next_region(self: *FunctionBuilder) u32 {
+        const id = self.next_region_id;
+        self.next_region_id += 1;
+        return id;
+    }
+
     fn create_var(self: *FunctionBuilder, aval: Aval) BuildError!*Var {
         const a = self.alloc();
         const v = try a.create(Var);
@@ -954,18 +815,17 @@ pub const FunctionBuilder = struct {
         return v;
     }
 
-    // ====================================================================
     // Region API
-    // ====================================================================
 
     /// Push a named annotation region.
     /// Ops emitted after this call belong to this region until pop_region is called.
     pub fn push_region(self: *FunctionBuilder, name: []const u8, annotation: Annotation) BuildError!void {
         const a = self.alloc();
         try self.region_stack.append(a, .{
+            .id = self.next_region(),
             .name = name,
             .annotation = annotation,
-            .op_start = @intCast(self.ops_list.items.len),
+            .start_index = @intCast(self.ops_list.items.len),
         });
     }
 
@@ -974,19 +834,21 @@ pub const FunctionBuilder = struct {
         const a = self.alloc();
         const entry = self.region_stack.pop() orelse return;
         const op_end: u32 = @intCast(self.ops_list.items.len);
-        if (op_end > entry.op_start) {
+        if (op_end > entry.start_index) {
+            const op_ids = try a.alloc(u32, op_end - entry.start_index);
+            for (self.ops_list.items[entry.start_index..op_end], 0..) |op, i| {
+                op_ids[i] = op.id;
+            }
             try self.completed_regions.append(a, .{
+                .id = entry.id,
                 .name = entry.name,
                 .annotation = entry.annotation,
-                .op_start = entry.op_start,
-                .op_len = op_end - entry.op_start,
+                .op_ids = op_ids,
             });
         }
     }
 
-    // ====================================================================
     // Core Emit
-    // ====================================================================
 
     /// Emit a single-output op, inferring the output type via the op registry.
     ///
@@ -1003,7 +865,7 @@ pub const FunctionBuilder = struct {
         const out_slice = try a.alloc(*Var, 1);
         out_slice[0] = out_var;
 
-        op.* = .{ .inputs = operands, .outputs = out_slice, .params = params };
+        op.* = .{ .id = self.next_op(), .inputs = operands, .outputs = out_slice, .params = params };
         out_var.defining_op = op;
 
         for (inputs, 0..) |in_var, i| {
@@ -1035,7 +897,7 @@ pub const FunctionBuilder = struct {
         const operands = try a.alloc(Operand, inputs.len);
         const op = try a.create(Op);
 
-        op.* = .{ .inputs = operands, .outputs = out_vars, .params = params };
+        op.* = .{ .id = self.next_op(), .inputs = operands, .outputs = out_vars, .params = params };
         for (out_vars) |v| v.defining_op = op;
 
         for (inputs, 0..) |in_var, i| {
@@ -1062,7 +924,7 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn literal_scalar(self: *FunctionBuilder, value: Literal) BuildError!*Var {
-        return self.emit(.{ .literal = value }, &.{});
+        return try self.emit(.{ .literal = value }, &.{});
     }
 
     /// Emit a scalar constant of `dtype` from an `f64` value.
@@ -1070,70 +932,66 @@ pub const FunctionBuilder = struct {
     /// Handles dtype-aware conversion from f64. Prefer this over the two-step
     /// `Literal.from_f64` + `literal_scalar` pattern.
     pub fn scalar(self: *FunctionBuilder, dtype: DType, val: f64) BuildError!*Var {
-        return self.literal_scalar(Literal.from_f64(dtype, val));
+        return try self.literal_scalar(Literal.from_f64(dtype, val));
     }
 
     pub fn add(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
-        return self.emit(.{ .add = {} }, &.{ lhs, rhs });
+        return try self.emit(.{ .add = {} }, &.{ lhs, rhs });
     }
 
     pub fn subtract(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
-        return self.emit(.{ .subtract = {} }, &.{ lhs, rhs });
+        return try self.emit(.{ .subtract = {} }, &.{ lhs, rhs });
     }
 
     pub fn multiply(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
-        return self.emit(.{ .multiply = {} }, &.{ lhs, rhs });
+        return try self.emit(.{ .multiply = {} }, &.{ lhs, rhs });
     }
 
     pub fn divide(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
-        return self.emit(.{ .divide = {} }, &.{ lhs, rhs });
+        return try self.emit(.{ .divide = {} }, &.{ lhs, rhs });
     }
 
     pub fn maximum(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
-        return self.emit(.{ .maximum = {} }, &.{ lhs, rhs });
+        return try self.emit(.{ .maximum = {} }, &.{ lhs, rhs });
     }
 
     pub fn exp(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
-        return self.emit(.{ .exp = {} }, &.{operand_var});
+        return try self.emit(.{ .exp = {} }, &.{operand_var});
     }
 
     pub fn log(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
-        return self.emit(.{ .log = {} }, &.{operand_var});
+        return try self.emit(.{ .log = {} }, &.{operand_var});
     }
 
     pub fn rsqrt(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
-        return self.emit(.{ .rsqrt = {} }, &.{operand_var});
+        return try self.emit(.{ .rsqrt = {} }, &.{operand_var});
     }
 
     pub fn logistic(self: *FunctionBuilder, operand_var: *Var) BuildError!*Var {
-        return self.emit(.{ .logistic = {} }, &.{operand_var});
+        return try self.emit(.{ .logistic = {} }, &.{operand_var});
     }
 
     pub fn compare(self: *FunctionBuilder, lhs: *Var, rhs: *Var, cmp: CompareParams) BuildError!*Var {
-        return self.emit(.{ .compare = cmp }, &.{ lhs, rhs });
+        return try self.emit(.{ .compare = cmp }, &.{ lhs, rhs });
     }
 
     pub fn select(self: *FunctionBuilder, cond: *Var, on_true: *Var, on_false: *Var) BuildError!*Var {
-        return self.emit(.{ .select = {} }, &.{ cond, on_true, on_false });
+        return try self.emit(.{ .select = {} }, &.{ cond, on_true, on_false });
     }
 
     pub fn convert(self: *FunctionBuilder, operand_var: *Var, out_dtype: DType) BuildError!*Var {
-        // Short circuit converting to the same dtype is a no-op.
-        // Save callers from needing to guard with `if (a.dtype == b.dtype)` everywhere.
-        // Backend would fold these away anyway, but keeping the IR clean at construction time
-        //  helps denoise IR dumps saves AD passes from walking dead converts if no DCE pass.
         if (operand_var.as_tensor().dtype == out_dtype) return operand_var;
-        return self.emit(.{ .convert = out_dtype }, &.{operand_var});
+        return try self.emit(.{ .convert = out_dtype }, &.{operand_var});
     }
 
     pub fn reduce_max(self: *FunctionBuilder, operand_var: *Var, axes: []const i64) BuildError!*Var {
         const axes_copy = try self.alloc().dupe(i64, axes);
-        return self.emit(.{ .reduce_max = .{ .axes = axes_copy } }, &.{operand_var});
+        return try self.emit(.{ .reduce_max = .{ .axes = axes_copy } }, &.{operand_var});
     }
 
     pub fn gather(self: *FunctionBuilder, operand_var: *Var, indices: *Var, gp: GatherParams) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .gather = .{
+        return try self.emit(.{ .gather = .{
             .slice_sizes = try a.dupe(i64, gp.slice_sizes),
             .offset_dims = try a.dupe(i64, gp.offset_dims),
             .collapsed_slice_dims = try a.dupe(i64, gp.collapsed_slice_dims),
@@ -1144,7 +1002,7 @@ pub const FunctionBuilder = struct {
 
     pub fn scatter(self: *FunctionBuilder, input: *Var, indices: *Var, updates: *Var, sp: ScatterParams) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .scatter = .{
+        return try self.emit(.{ .scatter = .{
             .update_window_dims = try a.dupe(i64, sp.update_window_dims),
             .inserted_window_dims = try a.dupe(i64, sp.inserted_window_dims),
             .scatter_dims_to_operand_dims = try a.dupe(i64, sp.scatter_dims_to_operand_dims),
@@ -1155,7 +1013,7 @@ pub const FunctionBuilder = struct {
 
     pub fn slice(self: *FunctionBuilder, operand_var: *Var, sp: SliceParams) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .slice = .{
+        return try self.emit(.{ .slice = .{
             .start_indices = try a.dupe(i64, sp.start_indices),
             .limit_indices = try a.dupe(i64, sp.limit_indices),
             .strides = try a.dupe(i64, sp.strides),
@@ -1163,12 +1021,12 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn concatenate(self: *FunctionBuilder, operands: []const *Var, axis: i64) BuildError!*Var {
-        return self.emit(.{ .concatenate = .{ .axis = axis } }, operands);
+        return try self.emit(.{ .concatenate = .{ .axis = axis } }, operands);
     }
 
     pub fn dot_general(self: *FunctionBuilder, lhs: *Var, rhs: *Var, dg: DotGeneralParams) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .dot_general = .{
+        return try self.emit(.{ .dot_general = .{
             .lhs_batch_dims = try a.dupe(i64, dg.lhs_batch_dims),
             .rhs_batch_dims = try a.dupe(i64, dg.rhs_batch_dims),
             .lhs_contracting_dims = try a.dupe(i64, dg.lhs_contracting_dims),
@@ -1177,12 +1035,12 @@ pub const FunctionBuilder = struct {
     }
 
     pub fn dot(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
-        return self.emit(.{ .dot = {} }, &.{ lhs, rhs });
+        return try self.emit(.{ .dot = {} }, &.{ lhs, rhs });
     }
 
     pub fn iota(self: *FunctionBuilder, out_dtype: DType, out_dims: []const i64, iota_dim: i64) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .iota = .{
+        return try self.emit(.{ .iota = .{
             .out_shape = try a.dupe(i64, out_dims),
             .out_dtype = out_dtype,
             .dimension = iota_dim,
@@ -1191,37 +1049,38 @@ pub const FunctionBuilder = struct {
 
     pub fn reshape(self: *FunctionBuilder, operand_var: *Var, out_dims: []const i64) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .reshape = .{
+        return try self.emit(.{ .reshape = .{
             .out_shape = try a.dupe(i64, out_dims),
         } }, &.{operand_var});
     }
 
     pub fn broadcast_in_dim(self: *FunctionBuilder, operand_var: *Var, out_dims: []const i64, broadcast_dimensions: []const i64) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .broadcast_in_dim = .{
+        return try self.emit(.{ .broadcast_in_dim = .{
             .out_shape = try a.dupe(i64, out_dims),
             .dimensions = try a.dupe(i64, broadcast_dimensions),
         } }, &.{operand_var});
     }
 
     /// Create a scalar constant of `dtype` with value `val`, broadcast to `dims`.
+    ///
     /// Returns a scalar if `dims` is empty.
     pub fn scalar_broadcast(self: *FunctionBuilder, dtype: DType, dims: []const i64, val: f64) BuildError!*Var {
         const lit = try self.scalar(dtype, val);
         if (dims.len == 0) return lit;
-        return self.broadcast_in_dim(lit, dims, &.{});
+        return try self.broadcast_in_dim(lit, dims, &.{});
     }
 
     pub fn transpose(self: *FunctionBuilder, operand_var: *Var, permutation: []const i64) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .transpose = .{
+        return try self.emit(.{ .transpose = .{
             .permutation = try a.dupe(i64, permutation),
         } }, &.{operand_var});
     }
 
     pub fn reduce_sum(self: *FunctionBuilder, operand_var: *Var, axes: []const i64) BuildError!*Var {
         const a = self.alloc();
-        return self.emit(.{ .reduce_sum = .{
+        return try self.emit(.{ .reduce_sum = .{
             .axes = try a.dupe(i64, axes),
         } }, &.{operand_var});
     }
@@ -1233,16 +1092,16 @@ pub const FunctionBuilder = struct {
         const target_copy = try a.dupe(u8, target);
         const out_avals = try a.alloc(Aval, 1);
         out_avals[0] = out_aval;
-        return self.emit(.{ .custom_call = .{
+        return try self.emit(.{ .custom_call = .{
             .target_name = target_copy,
             .has_side_effect = false,
             .out_avals = out_avals,
         } }, operands);
     }
 
-    /// Emit a multi-output custom_call. Used by kernelize pass.
+    /// Emit a multi-output custom call from explicit output types.
     pub fn custom_call_multi(self: *FunctionBuilder, cc_params: CustomCallParams, inputs: []const *Var) BuildError![]*Var {
-        return self.emit_with_outputs(.{ .custom_call = cc_params }, inputs, cc_params.out_avals);
+        return try self.emit_with_outputs(.{ .custom_call = cc_params }, inputs, cc_params.out_avals);
     }
 
     pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const *Var) BuildError![]*Var {
@@ -1275,20 +1134,17 @@ pub const FunctionBuilder = struct {
         }
 
         const callee_copy = try a.dupe(u8, callee);
-        return self.emit_with_outputs(.{ .call = .{ .callee = callee_copy } }, inputs, out_avals);
+        return try self.emit_with_outputs(.{ .call = .{ .callee = callee_copy } }, inputs, out_avals);
     }
 
-    // ====================================================================
-    // Finish
-    // ====================================================================
-
-    /// Finalize the function: flush open regions, validate all ops, and
-    /// return an immutable Function. The builder should not be used after this
-    /// (call `deinit` to release its working lists).
+    /// Finalize and validate the function.
+    ///
+    /// Open regions are closed before validation.
+    ///
+    /// The builder must not be used again except to call `deinit`.
     pub fn finish(self: *FunctionBuilder, returns: []const *Var) BuildError!Function {
         const a = self.alloc();
 
-        // Flush any remaining open regions
         while (self.region_stack.items.len > 0) {
             try self.pop_region();
         }
@@ -1306,14 +1162,29 @@ pub const FunctionBuilder = struct {
     }
 };
 
-// ============================================================================
-// Tests
-// ============================================================================
+// Tests.
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests/eval.zig");
     _ = @import("tests/grad_check.zig");
+}
+
+test "Program.add_function rejects duplicate names" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    const function = Function{
+        .name = "main",
+        .params = &.{},
+        .returns = &.{},
+        .ops = &.{},
+        .regions = &.{},
+        .var_count = 0,
+    };
+
+    try program.add_function(function);
+    try std.testing.expectError(error.DuplicateFunctionName, program.add_function(function));
 }
 
 test "FunctionBuilder reshape validation" {
@@ -1406,10 +1277,10 @@ test "region push/pop materializes regions" {
     const func = try b.finish(&.{f});
 
     try std.testing.expectEqual(@as(usize, 1), func.regions.len);
+    try std.testing.expectEqual(@as(u32, 0), func.regions[0].id);
     try std.testing.expectEqualStrings("tvm-kernel", func.regions[0].name);
     try std.testing.expectEqualStrings("tvm", func.regions[0].annotation.kernelize.?);
-    try std.testing.expectEqual(@as(u32, 0), func.regions[0].op_start);
-    try std.testing.expectEqual(@as(u32, 2), func.regions[0].op_len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, func.regions[0].op_ids);
 }
 
 test "nested regions" {
@@ -1437,15 +1308,15 @@ test "nested regions" {
 
     try std.testing.expectEqual(@as(usize, 2), func.regions.len);
     // Inner region completed first
+    try std.testing.expectEqual(@as(u32, 1), func.regions[0].id);
     try std.testing.expectEqualStrings("inner", func.regions[0].name);
     try std.testing.expect(func.regions[0].annotation.outline);
-    try std.testing.expectEqual(@as(u32, 1), func.regions[0].op_start);
-    try std.testing.expectEqual(@as(u32, 1), func.regions[0].op_len);
+    try std.testing.expectEqualSlices(u32, &.{1}, func.regions[0].op_ids);
     // Outer region completed second
+    try std.testing.expectEqual(@as(u32, 0), func.regions[1].id);
     try std.testing.expectEqualStrings("outer", func.regions[1].name);
     try std.testing.expectEqualStrings("tvm", func.regions[1].annotation.kernelize.?);
-    try std.testing.expectEqual(@as(u32, 0), func.regions[1].op_start);
-    try std.testing.expectEqual(@as(u32, 3), func.regions[1].op_len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, func.regions[1].op_ids);
 }
 
 test "regions_matching filters by predicate" {
@@ -1527,6 +1398,26 @@ test "use-list basics" {
     _ = try b.finish(&.{w});
 }
 
+test "FunctionBuilder assigns stable op ids" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+
+    const x = try b.param_tensor(.f32, &.{2});
+    const y = try b.param_tensor(.f32, &.{2});
+
+    const z = try b.add(x, y);
+    const w = try b.multiply(z, y);
+    const func = try b.finish(&.{w});
+
+    try std.testing.expectEqual(@as(u32, 0), func.ops[0].id);
+    try std.testing.expectEqual(@as(u32, 1), func.ops[1].id);
+    try std.testing.expectEqual(@as(u32, 0), z.defining_op.?.id);
+    try std.testing.expectEqual(@as(u32, 1), w.defining_op.?.id);
+}
+
 test "Var.replace_all_uses_with" {
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
@@ -1546,10 +1437,4 @@ test "Var.replace_all_uses_with" {
     try std.testing.expect(x.is_unused());
     // y now has the uses that x had plus its original use
     try std.testing.expect(y.has_n_uses(3));
-}
-
-test "no external imports" {
-    // This test verifies at compile time that this module depends only on std.
-    const pr = @This();
-    try std.testing.expect(pr.DType.f32 == .f32);
 }

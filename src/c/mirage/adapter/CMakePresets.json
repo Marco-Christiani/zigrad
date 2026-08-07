@@ -1,0 +1,24 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Mirage adapter development",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CUDAToolkit_ROOT": "$env{ZG_EXTERNAL_SDK_ROOT}",
+        "MIRAGE_INCLUDE_DIR": "$env{ZG_MIRAGE_INCLUDE_DIR}",
+        "MIRAGE_RUNTIME_LIBRARY": "$env{ZG_MIRAGE_RUNTIME_LIBRARY}",
+        "NLOHMANN_JSON_INCLUDE_DIR": "$env{ZG_NLOHMANN_JSON_INCLUDE_DIR}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    }
+  ]
+}

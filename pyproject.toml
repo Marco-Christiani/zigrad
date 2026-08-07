@@ -19,6 +19,7 @@ dependencies = [
     "psutil>=5.9.0",
     "scikit-learn>=1.8.0",
     "flatbuffers>=25.12.19",
+    "pyelftools>=0.32",
 ]
 
 # [tool.uv]

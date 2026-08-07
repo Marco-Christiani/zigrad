@@ -7,9 +7,6 @@ const pr = @import("../pr.zig");
 /// Used for both VJP (reverse-mode) and JVP (forward-mode) transforms.
 /// For VJP: `tangent_map` is null, `cot_map` holds cotangent accumulation.
 /// For JVP: `cot_map` is null, `tangent_map` holds tangent propagation.
-/// TODO: we can likely collapse to a single "dual" field depending on how
-///  this impacts semantics downstream, would want to check this first, but
-///  it seems cleaner from here.
 ///
 /// Maps are indexed by `Var.id` and sized by `func.var_count`.
 pub const AdContext = struct {
@@ -67,14 +64,14 @@ pub fn same_tensor_type(a: pr.Tensor, b: pr.Tensor) bool {
 }
 
 pub const AdError = pr.BuildError || error{
-    /// An op's `vjp_forward` or `jvp` implementation is missing for a primal
-    ///  value that later ops depend on.
+    /// An op cannot reproduce a primal or propagate the active AD value.
     UnsupportedEqn,
     UnsupportedDType,
     /// An index in `VjpOpts.wrt` is out of range for the source function.
     WrtIndexOutOfRange,
-    /// A harvested input has no cotangent (VJP) or output has no tangent (JVP).
-    ///  Typically means an op in the primal chain is missing a `vjp_backward`
-    ///  `jvp` handler, or the harvested var is orphaned.
+    /// A harvested input has no cotangent, or a harvested output has no tangent.
+    ///
+    /// This usually means a primal-chain op lacks its mode-specific propagation
+    ///  handler, or the harvested variable is orphaned.
     MissingDual,
 };

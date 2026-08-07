@@ -19,6 +19,8 @@
 //!   --trials-per-iter=N           Trials per iteration (tune only, default: 16)
 //!   (cache dir controlled via ZG_CACHE_DIR env var, default: /tmp/zigrad-cache)
 const std = @import("std");
+const zg = @import("zigrad");
+const gemm = @import("gemm.zig");
 
 const benchmark = struct {
     const harness = @import("benchmark/harness.zig");
@@ -35,9 +37,7 @@ const log = std.log.scoped(.benchmark);
 
 const Subcommand = enum { run, tune };
 
-/// Minimal positional iterator over argv. The 0.15-era
-///  `std.process.argsWithAllocator` is gone in 0.16; programs receive args
-///  via `std.process.Init.minimal.args.toSlice(alloc)`.
+/// Minimal positional iterator over `std.process.Init.minimal.args`.
 const ArgvIterator = struct {
     argv: []const [:0]const u8,
     idx: usize = 0,
@@ -128,6 +128,14 @@ pub fn main(init: std.process.Init) !void {
     if (shapes.items.len == 0) try shapes.append(gpa, .{ .m = 128, .n = 128, .k = 128 });
     if (impls.items.len == 0) try impls.append(gpa, .zig_naive);
 
+    if (comptime zg.build_options.has_tvm) {
+        const surface: zg.tvm.runtime.Surface = switch (subcmd) {
+            .run => .runtime,
+            .tune => .compiler,
+        };
+        try zg.tvm.runtime.configure(.from_environ(init.environ_map, surface));
+    }
+
     const cfg = benchmark.BenchmarkConfig{
         .shapes = shapes.items,
         .implementations = impls.items,
@@ -165,6 +173,7 @@ fn append_impls(
     });
     if (impl_map.get(name)) |group| {
         for (std.meta.tags(benchmark.Implementation)) |e| {
+            if (!implementation_available(e)) continue;
             const dominated = switch (group) {
                 .all => true,
                 .all_cpu => !e.is_gpu(),
@@ -178,6 +187,13 @@ fn append_impls(
         log.err("unknown implementation: {s}", .{name});
         return error.InvalidArguments;
     }
+}
+
+fn implementation_available(impl: benchmark.Implementation) bool {
+    return switch (impl) {
+        .blas => gemm.has_blas,
+        else => true,
+    };
 }
 
 fn parse_shape(s: []const u8) !benchmark.Shape {
@@ -221,4 +237,18 @@ test {
     _ = @import("benchmark/harness.zig");
     _ = @import("benchmark/stats.zig");
     _ = @import("gemm.zig");
+}
+
+test "all-cpu excludes unavailable implementations" {
+    var implementations = std.ArrayList(benchmark.Implementation).empty;
+    defer implementations.deinit(std.testing.allocator);
+
+    try append_impls(std.testing.allocator, &implementations, "all-cpu");
+    if (!gemm.has_blas) {
+        try std.testing.expect(std.mem.indexOfScalar(
+            benchmark.Implementation,
+            implementations.items,
+            .blas,
+        ) == null);
+    }
 }

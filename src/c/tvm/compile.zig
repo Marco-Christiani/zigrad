@@ -1,9 +1,8 @@
 //! TVM compilation orchestration.
 //!
-//! Combines TIR lowering, target-specific builds, host/device splitting,
-//! and linking into shared libraries. No single TVM subsystem owns this -
-//! it's our pipeline that ties `tvm/tir/`, `tvm/target/`, and `tvm/runtime/`
-//! together.
+//! Combines TIR lowering, target-specific compilation, host/device splitting,
+//!  and linking into shared libraries. Zigrad composes the `tvm/tir/`,
+//!  `tvm/target/`, and `tvm/runtime/` subsystems here.
 const std = @import("std");
 const api = @import("api.zig");
 const c = @import("c.zig");
@@ -13,21 +12,21 @@ const Value = api.Value;
 const IRModule = tir.IRModule;
 const Target = tir.Target;
 const TirPass = tir.TirPass;
-const TargetKind = tir.TargetKind;
+const TargetKind = @import("../../tvm/config.zig").TargetKind;
 const RuntimeModule = runtime.RuntimeModule;
 
 const log = std.log.scoped(.@"zg/tvm_compile");
 
-/// Apply the full TIR lowering pipeline and build for a target.
+/// Apply the TIR lowering recipe and compile for one target.
 ///
-/// Pass ordering follows TVM's default_tir_pipeline (tvm/driver/build_module.py).
-pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: Target, kind: TargetKind) !RuntimeModule {
+/// Pass ordering follows TVM's default_tir_pipeline (tvm/driver/build_module.py, tvm/python/tvm/tir/pipeline.py).
+pub fn lower_and_compile(allocator: std.mem.Allocator, ir_mod: *IRModule, target: Target, kind: TargetKind) !RuntimeModule {
     // Phase 1: Create composite target with host, then bind.
-    // MakePackedAPI requires target->GetHost() to return a valid host target;
-    // without it, the function is returned unchanged and buffer_map is not cleared.
+    // MakePackedAPI requires target->GetHost() to return a valid host target.
+    //  Without it, the function remains unchanged and buffer_map is not cleared.
     var host_target = switch (kind) {
         .cpu => target,
-        .cuda => try Target.create(allocator, .cpu),
+        .cuda => try Target.create(allocator, .cpu, 0),
     };
     defer if (kind == .cuda) host_target.deinit();
 
@@ -54,22 +53,29 @@ pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: 
     ir_mod.apply_pass_optional(allocator, .inject_virtual_thread);
     ir_mod.apply_pass_optional(allocator, .inject_double_buffer);
     ir_mod.apply_pass_optional(allocator, .storage_rewrite);
+    // TODO(tvm): Expose LowerAsyncDMA and HoistIfThenElse as optional passes.
 
+    try ir_mod.apply_pass(allocator, .unroll_loop);
+    try ir_mod.apply_pass(allocator, .renormalize_split_pattern);
     try ir_mod.apply_pass(allocator, .simplify);
     ir_mod.apply_pass_optional(allocator, .remove_no_op);
+    // TODO(tvm): Evaluate RewriteUnsafeSelect and InjectPTXLDG32 for this recipe.
     ir_mod.apply_pass_optional(allocator, .{ .common_subexpr_elim = .{ .enable_cse = true, .enable_equiv = false } });
 
     // Phase 4: Entry function annotation
+    // TODO(tvm): Add target-gated FP8 and VTCM legalization passes.
     ir_mod.apply_pass_optional(allocator, .verify_memory);
     try ir_mod.apply_pass(allocator, .annotate_entry_func);
 
     // Phase 5: CUDA-specific pre-SplitHostDevice
     if (kind == .cuda) {
+        // TODO(tvm): Make global thread synchronization an explicit pass choice.
         ir_mod.apply_pass_optional(allocator, .{ .thread_sync = .{ .scope = "shared" } });
         ir_mod.apply_pass_optional(allocator, .{ .thread_sync = .{ .scope = "shared.dyn" } });
         ir_mod.apply_pass_optional(allocator, .{ .thread_sync = .{ .scope = "warp" } });
         ir_mod.apply_pass_optional(allocator, .infer_fragment);
         ir_mod.apply_pass_optional(allocator, .lower_thread_allreduce);
+        // TODO(tvm): Evaluate PTX async-copy and LDG injection for CUDA targets.
         try ir_mod.apply_pass(allocator, .annotate_device_regions);
     }
 
@@ -79,27 +85,23 @@ pub fn lower_and_build(allocator: std.mem.Allocator, ir_mod: *IRModule, target: 
         ir_mod.apply_pass_optional(allocator, .merge_shared_memory_allocations);
     }
     try ir_mod.apply_pass(allocator, .make_packed_api);
+    // TODO(tvm): Add target-gated FP8 and BF16 storage legalization.
     ir_mod.apply_pass_optional(allocator, .lower_device_kernel_launch);
 
-    // Phase 7: Target-specific finalization and build
+    // Phase 7: Target-specific finalization and compilation
     switch (kind) {
         .cpu => {
-            ir_mod.apply_pass_optional(allocator, .lower_tvm_builtin);
-            ir_mod.apply_pass_optional(allocator, .lower_custom_datatypes);
-            try ir_mod.apply_pass(allocator, .lower_intrin);
-            ir_mod.apply_pass_optional(allocator, .lower_device_storage_access_info);
-            ir_mod.apply_pass_optional(allocator, .combine_context_call);
-
-            return try build_module(allocator, ir_mod.*, target);
+            try finalize_host_module(allocator, ir_mod);
+            return try compile_cpu_module(allocator, ir_mod.*, target);
         },
         .cuda => {
-            return try build_cuda_module(allocator, ir_mod.*, target);
+            return try compile_cuda_module(allocator, ir_mod.*, target);
         },
     }
 }
 
-/// Build a (CPU) RuntimeModule from a lowered IRModule via `target.build.llvm`.
-fn build_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Target) !RuntimeModule {
+/// Compile a CPU runtime module through `target.build.llvm`.
+fn compile_cpu_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Target) !RuntimeModule {
     const result = try api.call_global(allocator, "target.build.llvm", &.{
         ir_mod.as_value(),
         target.as_value(),
@@ -108,13 +110,13 @@ fn build_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Target) 
     return .{ .handle = .{ .ptr = obj } };
 }
 
-/// Build a CUDA RuntimeModule: filter host/device, finalize each, build+link.
-fn build_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Target) !RuntimeModule {
+/// Compile and link the host and device parts of a CUDA runtime module.
+fn compile_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Target) !RuntimeModule {
     // Filter device functions
     var device_mod = try filter_module(allocator, ir_mod, .device);
     defer device_mod.deinit();
 
-    // Device finalization
+    // Device finalization (c.f. finalize_device_passes)
     device_mod.apply_pass_optional(allocator, .lower_warp_memory);
     device_mod.apply_pass_optional(allocator, .simplify);
     device_mod.apply_pass_optional(allocator, .lower_custom_datatypes);
@@ -129,15 +131,9 @@ fn build_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Tar
     var host_mod = try filter_module(allocator, ir_mod, .host);
     defer host_mod.deinit();
 
-    // Host finalization
-    host_mod.apply_pass_optional(allocator, .lower_tvm_builtin);
-    host_mod.apply_pass_optional(allocator, .lower_custom_datatypes);
-    host_mod.apply_pass_optional(allocator, .lower_intrin);
-    host_mod.apply_pass_optional(allocator, .lower_device_storage_access_info);
-    host_mod.apply_pass_optional(allocator, .combine_context_call);
+    try finalize_host_module(allocator, &host_mod);
 
-    // Build host (LLVM)
-    var host_target = try Target.create(allocator, .cpu);
+    var host_target = try Target.create(allocator, .cpu, 0);
     defer host_target.deinit();
     const host_built = try api.call_global(allocator, "target.build.llvm", &.{ host_mod.as_value(), host_target.as_value() });
 
@@ -146,6 +142,14 @@ fn build_cuda_module(allocator: std.mem.Allocator, ir_mod: IRModule, target: Tar
 
     const obj = host_built.as_object() orelse return error.TvmCallFailed;
     return .{ .handle = .{ .ptr = obj } };
+}
+
+fn finalize_host_module(allocator: std.mem.Allocator, ir_mod: *IRModule) !void {
+    ir_mod.apply_pass_optional(allocator, .lower_tvm_builtin);
+    ir_mod.apply_pass_optional(allocator, .lower_custom_datatypes);
+    try ir_mod.apply_pass(allocator, .lower_intrin);
+    ir_mod.apply_pass_optional(allocator, .lower_device_storage_access_info);
+    ir_mod.apply_pass_optional(allocator, .combine_context_call);
 }
 
 const FilterKind = enum { host, device };
@@ -254,37 +258,4 @@ fn filter_by_calling_conv(
     log.debug("filter: calling_conv={d}, is_host={}, want_host={}", .{ calling_conv, is_host, want_host });
     ret.* = Value.boolean(is_host == want_host).raw;
     return 0;
-}
-
-// ============================================================================
-// Linking
-// ============================================================================
-
-/// Link .o files into a .so via `zig cc -shared`.
-pub fn link_to_shared(io: std.Io, allocator: std.mem.Allocator, obj_paths: []const []const u8, so_path: []const u8) !void {
-    var argv_list = std.ArrayList([]const u8).empty;
-    defer argv_list.deinit(allocator);
-    try argv_list.appendSlice(allocator, &.{ "zig", "cc", "-shared", "-fPIC", "-o", so_path });
-    try argv_list.appendSlice(allocator, obj_paths);
-
-    const result = try std.process.run(allocator, io, .{
-        .argv = argv_list.items,
-        .expand_arg0 = .expand,
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| {
-            if (code != 0) {
-                log.err("linker exited with code {d}: {s}", .{ code, result.stderr });
-                return error.TvmCallFailed;
-            }
-        },
-        else => {
-            log.err("linker terminated abnormally", .{});
-            return error.TvmCallFailed;
-        },
-    }
-    log.debug("linked -> {s}", .{so_path});
 }

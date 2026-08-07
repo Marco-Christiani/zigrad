@@ -13,7 +13,7 @@
 
 ---
 
-> 🚧 **Zigrad is under active development.**
+> **Zigrad is under active development.**
 > This is the `modular` rewrite - a ground-up redesign as a compiler-oriented ML framework. APIs and architecture are evolving rapidly.
 
 ---
@@ -36,52 +36,65 @@ Zigrad is a deep learning and ML compiler framework. Rather than tying you to a 
 
 ## Getting Started
 
-> 🚧 **Not user friendly yet**
+> **Not user friendly yet**
 > Actively working on a proper on-ramp for users, this is not a primary concern at the moment.
-> If you have NixOS (or at least Nix), you are in good shape, but know that building these dependencies is rather expensive the first time.
-> On a 64 core threadripper with 64 GB RAM the longest build is XLA which takes around 30-40 minutes for perspective.
->
-> Please check the "roadmap" below user-facing concerns.
+> The external integrations are expensive to build and are not yet a polished user installation path.
 
-Nix is effectively required at present. The build depends on an external SDK (`ZG_EXTERNAL_SDK_ROOT`) and many demos require a PJRT plugin (`PJRT_PLUGIN_PATH`) or equivalent depending on the backend. All dependencies for all scenarios are provided automatically inside the devshell. Outside of it you'll need to set these manually and have compatible versions of the SDK and plugin.
+Nix is the standard build and execution interface. The integration-free package is the default:
 
 ```sh
-# Use either
-# 1. direnv
+nix build --impure .#zigrad
+nix run --impure .#zigrad -- pr print-demo
+nix flake check --impure
+```
+
+Named configurations describe runnable combinations. Each name demands its transitive build and runtime dependencies. Users do not select matching external input fragments or repeat Zig feature flags.
+
+| Package | Included path |
+|---|---|
+| `zigrad` | Integration-free PR tools and tests |
+| `zigrad-xla-cpu` | Current StableHLO, XLA, and PJRT CPU path |
+| `zigrad-xla-cuda` | Current StableHLO, XLA, and PJRT CUDA path |
+| `zigrad-iree-cpu` | Current StableHLO and IREE CPU path |
+| `zigrad-tvm-cpu` | Standalone TVM CPU tuning and execution |
+| `zigrad-tvm-cuda` | Standalone TVM CUDA tuning and execution |
+| `zigrad-tvm-xla-cpu` | TVM specialization on the current XLA CPU path |
+| `zigrad-tvm-xla-cuda` | TVM specialization on the current XLA CUDA path |
+| `zigrad-mirage-xla-cuda` | Mirage specialization on the current XLA CUDA path |
+| `zigrad-dev-cuda` | Every current integration used by the broad development shell |
+
+CUDA configurations require a working NVIDIA host driver. TVM and Mirage
+derive the runtime NVRTC target from the selected device. Restricting
+`cudaArchitectures` in `local-build-cfg.nix` limits upstream package
+compilation to the architectures used on the local system.
+
+For example:
+
+```sh
+nix run --impure .#zigrad-xla-cpu -- demo vjp
+nix run --impure .#zigrad-iree-cpu -- iree demo
+nix run --impure .#zigrad-tvm-cpu -- tvm check-load
+```
+
+The default development shell is intentionally broad:
+
+```sh
 direnv allow
-
-# Or
-# 2. directly
-nix develop
+# or
+nix develop --impure
 ```
 
-### Build and Test
+It exports the composed external input roots and the matching `ZG_ZIG_BUILD_ARGS` for direct Zig iteration. These variables are development interfaces. The `tvm-python` shell adds TVM's Python bindings:
 
 ```sh
-zig build -Doptimize=ReleaseFast -Dsdk=$ZG_EXTERNAL_SDK_ROOT -Dinstall-runtime-link=true
-
-zig build -Dsdk=$ZG_EXTERNAL_SDK_ROOT test
+nix develop --impure .#tvm-python
 ```
 
-### Run a Demo
-
-A few basic XLA Demos
+Zigrad remains buildable without Nix when Zig dependencies are available:
 
 ```sh
-# Reverse-mode AD
-./zig-out/bin/zigrad vjp-demo
-
-# Training
-./zig-out/bin/zigrad train-demo
-
-# Dump intermediate representations
-./zig-out/bin/zigrad --dump-optimized=/tmp/train-demo/dump.hlo --dump-pr=/tmp/train-demo/dump.zxpr --dump-mlir=/tmp/train-demo/dump.mlir train-demo
-```
-
-Train LLAMA with XLA
-
-```sh
-./zig-out/bin/zigrad llama-ft-demo-pr
+zig build
+zig build test --summary all
 ```
 
 ## Architecture
@@ -98,22 +111,6 @@ The pipeline has (generally) four core stages:
 **Backends are runtime-loadable.** PJRT plugins, for example, are loaded at startup via `PJRT_PLUGIN_PATH`. Switching from CPU to GPU requires no recompilation.
 
 **Kernel providers are optional.** A provider (TVM, Mirage) can claim PR subgraphs and produce compiled kernel artifacts invoked at execution time. The baseline lowering path always exists and is always correct.
-
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the full architecture specification.
-
-## Project Layout
-
-```
-src/
-  pr/         Program Representation, AD, op registry
-  frontend/   High-level program builders
-  lower/      PR -> StableHLO/MLIR lowering
-  backend/    PJRT and IREE backends
-  pipeline/   Pass infrastructure
-  c/          All external C API bindings (MLIR, PJRT, TVM, Mirage)
-  tvm/        TVM kernel provider (tuning, dispatch, kernel provider)
-  mirage/     Mirage kernel provider
-```
 
 ## Roadmap
 

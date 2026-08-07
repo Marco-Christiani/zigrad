@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const demo_support = @import("demo_support.zig");
 
 const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/demos");
@@ -38,11 +39,9 @@ pub fn read_bytes_from_path(io: std.Io, allocator: std.mem.Allocator, path: []co
 
 pub fn run_demo_executable(
     allocator: std.mem.Allocator,
-    b: *zg.Backend,
-    device: zg.Backend.Device,
-    exe: zg.Backend.Executable,
+    loaded_program: zg.Executor.LoadedProgram,
 ) !void {
-    // Inputs (A: 2x3, B: 3x2, C: 2x2)
+    const executor = loaded_program.executor;
     const A = [_]f32{
         1.0, 2.0, 3.0,
         4.0, 5.0, 6.0,
@@ -57,7 +56,7 @@ pub fn run_demo_executable(
         2.0, 2.0,
     };
 
-    // TODO: in the init path, do we really want to require this sliceAsBytes pattern or just use comptime?
+    // TODO(api): Decide whether tensor initialization infers byte conversion.
     var host_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .borrow = std.mem.sliceAsBytes(&A) });
     defer host_a.deinit();
     var host_b = try Tensor.host(.f32, &.{ 3, 2 }, .{ .borrow = std.mem.sliceAsBytes(&B) });
@@ -65,27 +64,28 @@ pub fn run_demo_executable(
     var host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
 
-    const dev_a = try b.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
-    defer b.deinit_buffer(dev_a);
-    const dev_b = try b.buffer_from_host(device, host_b.host_data(), .f32, host_b.dims());
-    defer b.deinit_buffer(dev_b);
-    const dev_c = try b.buffer_from_host(device, host_c.host_data(), .f32, host_c.dims());
-    defer b.deinit_buffer(dev_c);
+    const dev_a = try executor.upload(host_a.host_data(), .f32, host_a.dims());
+    defer executor.release(dev_a);
+    const dev_b = try executor.upload(host_b.host_data(), .f32, host_b.dims());
+    defer executor.release(dev_b);
+    const dev_c = try executor.upload(host_c.host_data(), .f32, host_c.dims());
+    defer executor.release(dev_c);
 
-    const result = try b.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, .{});
-    defer {
-        if (result.event) |ev| b.deinit_event(ev);
-        for (result.outputs) |buf| b.deinit_buffer(buf);
-        allocator.free(result.outputs);
-    }
-
-    if (result.outputs.len != 1) return error.UnexpectedOutputs;
+    var outputs: [1]zg.Executor.Buffer = undefined;
+    const event = try executor.invoke(
+        loaded_program,
+        &.{ dev_a, dev_b, dev_c },
+        &outputs,
+        .{},
+    );
+    defer if (event) |completion| executor.release_event(completion);
+    defer executor.release(outputs[0]);
 
     var out_host = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
     defer out_host.deinit();
-    if (try b.buffer_to_host(result.outputs[0], out_host.host_data_mut())) |ev| {
-        defer b.deinit_event(ev);
-        try b.await_event(ev);
+    if (try executor.download(outputs[0], out_host.host_data_mut())) |completion| {
+        defer executor.release_event(completion);
+        try executor.wait(completion);
     }
 
     const out = out_host.as_const_slice(f32);
@@ -106,7 +106,12 @@ pub fn run_demo_executable(
     log.info("OK: demo output matches expected", .{});
 }
 
-pub fn run_custom_call_negative(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_custom_call_negative(
+    context: *demo_support.PjrtContext,
+    operations: demo_support.PjrtOperations,
+) !void {
+    const allocator = context.compilation.allocator;
+
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
 
@@ -118,22 +123,28 @@ pub fn run_custom_call_negative(io: std.Io, allocator: std.mem.Allocator, backen
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    const exe = zg.frontend.compile_program(backend, io, allocator, &program, device, "main", .{
-        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
-        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
-        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
-        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    }) catch |err| {
+    var exe = demo_support.compile_pjrt(
+        context,
+        &program,
+        "main",
+        operations,
+    ) catch |err| {
         log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
     };
-    defer backend.deinit_executable(exe);
+    defer exe.deinit();
 
     log.err("unexpected: custom_call compiled without a handler", .{});
     return error.UnexpectedSuccess;
 }
 
-pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backend, device: zg.Backend.Device, dump_pr: ?*zg.pipeline.DumpConfig, dump_mlir: ?*zg.pipeline.DumpConfig, dump_optimized: ?*zg.pipeline.DumpConfig) !void {
+pub fn run_vjp_demo(
+    context: *demo_support.PjrtContext,
+    operations: demo_support.PjrtOperations,
+) !void {
+    const executor = &context.execution.interface;
+    const allocator = context.compilation.allocator;
+
     var program = try build_demo_program(allocator);
     defer program.deinit();
 
@@ -141,15 +152,14 @@ pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backe
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
     try program.add_function(vjp);
 
-    const exe = try zg.frontend.compile_program(backend, io, allocator, &program, device, "main_vjp", .{
-        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
-        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
-        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
-        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    });
-    defer backend.deinit_executable(exe);
+    var exe = try demo_support.compile_pjrt(
+        context,
+        &program,
+        "main_vjp",
+        operations,
+    );
+    defer exe.deinit();
 
-    // Inputs (A: 2x3, B: 3x2, C: 2x2, cotangent(out): 2x2)
     const A = [_]f32{
         1.0, 2.0, 3.0,
         4.0, 5.0, 6.0,
@@ -163,6 +173,7 @@ pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backe
         2.0, 2.0,
         2.0, 2.0,
     };
+    // The final parameter seeds the 2x2 output cotangent.
     const CtOut = [_]f32{
         1.0, 1.0,
         1.0, 1.0,
@@ -177,23 +188,24 @@ pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backe
     var host_ct = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&CtOut) });
     defer host_ct.deinit();
 
-    const dev_a = try backend.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
-    defer backend.deinit_buffer(dev_a);
-    const dev_b = try backend.buffer_from_host(device, host_b.host_data(), .f32, host_b.dims());
-    defer backend.deinit_buffer(dev_b);
-    const dev_c = try backend.buffer_from_host(device, host_c.host_data(), .f32, host_c.dims());
-    defer backend.deinit_buffer(dev_c);
-    const dev_ct = try backend.buffer_from_host(device, host_ct.host_data(), .f32, host_ct.dims());
-    defer backend.deinit_buffer(dev_ct);
+    const dev_a = try executor.upload(host_a.host_data(), .f32, host_a.dims());
+    defer executor.release(dev_a);
+    const dev_b = try executor.upload(host_b.host_data(), .f32, host_b.dims());
+    defer executor.release(dev_b);
+    const dev_c = try executor.upload(host_c.host_data(), .f32, host_c.dims());
+    defer executor.release(dev_c);
+    const dev_ct = try executor.upload(host_ct.host_data(), .f32, host_ct.dims());
+    defer executor.release(dev_ct);
 
-    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c, dev_ct }, .{});
-    defer {
-        if (result.event) |ev| backend.deinit_event(ev);
-        for (result.outputs) |buf| backend.deinit_buffer(buf);
-        allocator.free(result.outputs);
-    }
-
-    if (result.outputs.len != 3) return error.UnexpectedOutputs;
+    var outputs: [3]zg.Executor.Buffer = undefined;
+    const event = try executor.invoke(
+        exe,
+        &.{ dev_a, dev_b, dev_c, dev_ct },
+        &outputs,
+        .{},
+    );
+    defer if (event) |completion| executor.release_event(completion);
+    defer for (outputs) |output| executor.release(output);
 
     var out_a = try Tensor.host(.f32, &.{ 2, 3 }, .{ .alloc = allocator });
     defer out_a.deinit();
@@ -202,16 +214,16 @@ pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backe
     var out_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
     defer out_c.deinit();
 
-    const ev_a = try backend.buffer_to_host(result.outputs[0], out_a.host_data_mut());
-    defer if (ev_a) |ev| backend.deinit_event(ev);
-    const ev_b = try backend.buffer_to_host(result.outputs[1], out_b.host_data_mut());
-    defer if (ev_b) |ev| backend.deinit_event(ev);
-    const ev_c = try backend.buffer_to_host(result.outputs[2], out_c.host_data_mut());
-    defer if (ev_c) |ev| backend.deinit_event(ev);
+    const ev_a = try executor.download(outputs[0], out_a.host_data_mut());
+    defer if (ev_a) |completion| executor.release_event(completion);
+    const ev_b = try executor.download(outputs[1], out_b.host_data_mut());
+    defer if (ev_b) |completion| executor.release_event(completion);
+    const ev_c = try executor.download(outputs[2], out_c.host_data_mut());
+    defer if (ev_c) |completion| executor.release_event(completion);
 
-    if (ev_a) |ev| try backend.await_event(ev);
-    if (ev_b) |ev| try backend.await_event(ev);
-    if (ev_c) |ev| try backend.await_event(ev);
+    if (ev_a) |completion| try executor.wait(completion);
+    if (ev_b) |completion| try executor.wait(completion);
+    if (ev_c) |completion| try executor.wait(completion);
 
     const got_a = out_a.as_const_slice(f32);
     const got_b = out_b.as_const_slice(f32);
@@ -242,17 +254,16 @@ pub fn run_vjp_demo(io: std.Io, allocator: std.mem.Allocator, backend: *zg.Backe
 }
 
 pub fn run_train_demo(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    backend: *zg.Backend,
-    device: zg.Backend.Device,
-    dump_pr: ?*zg.pipeline.DumpConfig,
-    dump_mlir: ?*zg.pipeline.DumpConfig,
-    dump_optimized: ?*zg.pipeline.DumpConfig,
+    context: *demo_support.PjrtContext,
+    operations: demo_support.PjrtOperations,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
 ) !void {
+    const io = context.compilation.io;
+    const allocator = context.compilation.allocator;
+    const executor = &context.execution.interface;
+
     const ParamsSpec = struct {
         w1: Tensor,
         b1: Tensor,
@@ -291,12 +302,12 @@ pub fn run_train_demo(
         }
 
         fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {
-            var vg = try zg.frontend.transforms.value_and_grad(loss, .{ params, batch });
+            var vg = try zg.transforms.value_and_grad(loss, .{ params, batch });
             defer vg.deinit();
             var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
             defer params_tree.deinit();
-            const optim = zg.frontend.optim.SGD{ .lr = 1e-2 };
-            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.frontend.optim.SGD.update);
+            const optim = zg.optim.SGD{ .lr = 1e-2 };
+            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.optim.SGD.update);
             defer updated.deinit();
             return .{
                 .loss_val = vg.value,
@@ -324,19 +335,19 @@ pub fn run_train_demo(
         .y = Tensor.abstract(.f32, &.{ bs, out_dim }),
     };
     const inputs_spec = .{ params_spec, batch_spec };
-    const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
+    const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
-    const train = zg.frontend.train;
+    const train = zg.train;
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "train_step");
     defer program.deinit();
 
-    const exe = try zg.frontend.compile_program(backend, io, allocator, &program, device, "train_step", .{
-        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
-        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
-        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
-        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    });
-    defer backend.deinit_executable(exe);
+    var exe = try demo_support.compile_pjrt(
+        context,
+        &program,
+        "train_step",
+        operations,
+    );
+    defer exe.deinit();
 
     const true_w1 = try allocator.alloc(f32, @intCast(in_dim * h1));
     defer allocator.free(true_w1);
@@ -358,7 +369,6 @@ pub fn run_train_demo(
     fill_pattern(true_w3, 1e-6, 0.0);
     fill_pattern(true_b3, 1e-6, 0.0);
 
-    // Build host tensors from tree
     var spec_tree = try zg.utils.Tree(Tensor).from(allocator, inputs_spec);
     defer spec_tree.deinit();
 
@@ -369,11 +379,9 @@ pub fn run_train_demo(
     }.f);
     defer host_tensors.deinit_with(Tensor.deinit);
 
-    // Fill param buffers with pattern, batch input with data
     for (host_tensors.leaves[0..6]) |*buf| fill_pattern(buf.as_slice(f32), 1e-7, 0.0);
     fill_inputs(host_tensors.leaves[6].as_slice(f32));
 
-    // Generate targets from true weights
     const scratch1 = try allocator.alloc(f32, @intCast(bs * h1));
     defer allocator.free(scratch1);
     const scratch2 = try allocator.alloc(f32, @intCast(bs * h2));
@@ -396,19 +404,17 @@ pub fn run_train_demo(
         @intCast(out_dim),
     );
 
-    // Upload to device
-    const UploadCtx = struct { b: *zg.Backend, d: zg.Backend.Device };
-    var dev_tree = try host_tensors.map(Tensor, UploadCtx{ .b = backend, .d = device }, struct {
-        fn f(ctx: UploadCtx, t: Tensor) !Tensor {
-            return try t.to_device(ctx.b, ctx.d);
+    var dev_tree = try host_tensors.map(Tensor, executor, struct {
+        fn f(selected: *zg.Executor, tensor: Tensor) !Tensor {
+            return try tensor.to_device(selected);
         }
     }.f);
-    defer dev_tree.deinit(); // array only, tensor ownership managed by TrainState
+    // TrainState releases the device tensors.
+    defer dev_tree.deinit();
 
     var state = try train.TrainState.init(
         allocator,
         exe,
-        backend,
         dev_tree.leaves,
         program.output_arity("train_step"),
         .{ .non_donatable_input_indices = donate },
@@ -417,10 +423,8 @@ pub fn run_train_demo(
 
     for (0..warmup_steps) |_| {
         var result = try state.step();
-        // Deinit execution event without awaiting. buffer_to_host (called by
-        //  item below) chains behind execution internally.
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
-        if (result.event) |ev| backend.deinit_event(ev);
+        // TODO(pjrt): Verify that releasing an unawaited event is valid.
+        if (result.event) |completion| executor.release_event(completion);
         if (!quiet) _ = try result.loss.item(f32);
         result.loss.deinit();
     }
@@ -429,10 +433,8 @@ pub fn run_train_demo(
     for (0..steps) |_| {
         try loop_timer.start_step();
         var result = try state.step();
-        // Deinit execution event without awaiting. item() below syncs via
-        //  buffer_to_host which chains behind execution.
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe.
-        if (result.event) |ev| backend.deinit_event(ev);
+        // TODO(pjrt): Verify that releasing an unawaited event is valid.
+        if (result.event) |completion| executor.release_event(completion);
         loop_timer.mark("dispatch");
 
         const loss: ?f32 = if (quiet) null else try result.loss.item(f32);
@@ -448,83 +450,82 @@ pub fn run_train_demo(
     log.info("OK", .{});
 }
 
-/// End-to-end kernel provider demo.
+/// Tunes, compiles, executes, and verifies the kernel-provider demo.
 ///
-/// Compiles and executes a small matmul program through the kernelization
-///  pipeline. Accepts one or more providers, each gets its own kernelized
-///  region in the program.
-///
-/// TVM requires libtvm in the SDK lib/ directory, Mirage requires the
-///  Mirage shared library. Both can be enabled individually or simultaneously.
-/// Run the kernel provider demo: tune -> store -> compile -> execute.
-///
-/// Always uses the store-based (PR-level) path: `tune()` populates a
-/// `KernelStore`, `KernelizePass` rewrites annotated regions, and the
-/// backend dispatches via `DispatchRegistry` at execute time.
+/// Each selected provider receives an annotated PR region. Tuning populates the
+///  kernel store before PR kernelization and PJRT execution.
 pub fn run_kernel_provider_demo(
-    io: std.Io,
+    context: *demo_support.PjrtContext,
     environ: *const std.process.Environ.Map,
-    allocator: std.mem.Allocator,
-    pjrt_backend: *zg.pjrt.Backend,
-    device: zg.Backend.Device,
-    dump_pr: ?*zg.pipeline.DumpConfig,
-    dump_mlir: ?*zg.pipeline.DumpConfig,
-    dump_optimized: ?*zg.pipeline.DumpConfig,
+    operations: demo_support.PjrtOperations,
     provider_kinds: []const KernelProviderDemoKind,
 ) !void {
-    const backend = &pjrt_backend.interface;
-    try pjrt_backend.register_kernel_dispatcher();
+    const io = context.compilation.io;
+    const allocator = context.compilation.allocator;
+    const client = context.client;
+    const device = context.execution.device;
 
     const demo_cache = try zg.Cache.init(io, environ, .{});
 
-    // --- TVM setup (requires TVM headers in SDK) ---
-    var tvm_dispatch: if (zg.build_options.has_tvm) zg.tvm.dispatch.TvmDispatchState else void = undefined;
-    var tvm_impl: if (zg.build_options.has_tvm) zg.tvm.provider.TvmProvider else void = undefined;
+    var tvm_dispatch: if (zg.build_options.has_tvm) zg.tvm.DispatchState else void = undefined;
+    var tvm_impl: if (zg.build_options.has_tvm) zg.tvm.Provider else void = undefined;
     var has_tvm = false;
 
     if (kind_requested(provider_kinds, .tvm)) {
         if (comptime !zg.build_options.has_tvm) {
-            log.err("tvm provider requested but binary was built without TVM support (headers not found in SDK)", .{});
+            log.err("tvm provider requested but binary was built without the TVM integration", .{});
             return error.TvmUnavailable;
         }
-        try zg.tvm.ffi.ensure_loaded(allocator, .{});
-        try pjrt_backend.require_typed_ffi();
-        const target_kind: zg.tvm.tir.TargetKind = if (pjrt_backend.is_cuda()) .cuda else .cpu;
-        tvm_dispatch = zg.tvm.dispatch.TvmDispatchState.init(allocator, demo_cache);
-        tvm_impl = .{
-            .io = io,
-            .allocator = allocator,
-            .target_kind = target_kind,
-            .cache = demo_cache,
-            .max_trials = 8,
-            .trials_per_iter = 4,
-            .dispatch_state = &tvm_dispatch,
-        };
+        try client.require_typed_ffi();
+        const target_kind: zg.tvm.TargetKind = if (client.is_cuda()) .cuda else .cpu;
+        const compile_config = try zg.tvm.CompileConfig.from_environ(
+            environ,
+            target_kind,
+        );
+        tvm_dispatch = zg.tvm.DispatchState.init(io, allocator, demo_cache);
+        tvm_impl = try zg.tvm.Provider.init(
+            io,
+            demo_cache,
+            &tvm_dispatch,
+            .{
+                .compile = compile_config,
+                .max_trials = 8,
+                .trials_per_iter = 4,
+            },
+        );
         has_tvm = true;
     }
     defer if (zg.build_options.has_tvm and has_tvm) tvm_dispatch.deinit();
 
-    // --- Mirage setup (requires mirage headers in SDK) ---
     var mirage_dispatch: if (zg.build_options.has_mirage) zg.mirage.dispatch.MirageDispatchState else void = undefined;
     var mirage_impl: if (zg.build_options.has_mirage) zg.mirage.provider.MirageProvider else void = undefined;
     var has_mirage = false;
 
     if (kind_requested(provider_kinds, .mirage)) {
         if (comptime !zg.build_options.has_mirage) {
-            log.err("mirage provider requested but binary was built without mirage support (headers not found in SDK)", .{});
+            log.err("mirage provider requested but binary was built without the Mirage integration", .{});
             return error.MirageUnavailable;
         }
-        mirage_dispatch = try zg.mirage.dispatch.MirageDispatchState.init(allocator);
-        mirage_impl = .{
-            .allocator = allocator,
-            .dispatch_state = &mirage_dispatch,
+        const mirage_config = zg.mirage.config.Config.from_environ(environ) catch |err| {
+            log.err("Mirage configuration failed: {s}", .{@errorName(err)});
+            return err;
+        };
+        mirage_dispatch = zg.mirage.dispatch.MirageDispatchState.init(
+            allocator,
+            mirage_config.compile,
+        );
+        mirage_impl = zg.mirage.provider.MirageProvider.init(
+            &mirage_dispatch,
+            .{ .runtime = mirage_config.runtime },
+        ) catch |err| {
+            mirage_dispatch.deinit();
+            return err;
         };
         has_mirage = true;
     }
     defer if (zg.build_options.has_mirage and has_mirage) mirage_dispatch.deinit();
 
-    // Collect providers in requested order.
-    var providers_buf: [2]zg.kernel.KernelProvider = undefined;
+    var providers_buf: [2]zg.pr.kernel.KernelProvider = undefined;
     var n_providers: usize = 0;
     for (provider_kinds) |kind| switch (kind) {
         .tvm => if (zg.build_options.has_tvm and has_tvm) {
@@ -538,7 +539,6 @@ pub fn run_kernel_provider_demo(
     };
     const providers = providers_buf[0..n_providers];
 
-    // Build provider name strings from kinds.
     var pnames_buf: [2][]const u8 = undefined;
     for (provider_kinds, 0..) |kind, i| pnames_buf[i] = @tagName(kind);
     const provider_names = pnames_buf[0..provider_kinds.len];
@@ -546,25 +546,69 @@ pub fn run_kernel_provider_demo(
     var program = try build_kernelized_demo_program(allocator, provider_names);
     defer program.deinit();
 
-    // tune -> store -> compile
-    var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{});
+    var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{
+        .device = context.execution.interface.device,
+    });
     defer tune_result.deinit();
 
-    const exe = try zg.frontend.compile_program(backend, io, allocator, &program, device, "main", .{
-        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
-        .kernel_store = &tune_result.store,
-        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
-        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
-        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    });
-    defer backend.deinit_executable(exe);
+    var report: ?zg.pr.kernelize.Report = if (operations.dump_kernels != null)
+        .init(allocator)
+    else
+        null;
+    defer if (report) |*value| value.deinit();
 
-    const exec_opts: zg.Backend.ExecuteOptions = .{
+    var pr_flow = zg.compilation.start(&program, &context.compilation);
+    try pr_flow.transform(zg.pr.Validate{});
+    if (operations.dump_pr) |selected| {
+        var operation = selected;
+        operation.config.entry_name = operation.config.entry_name orelse "main";
+        try pr_flow.transform(operation);
+    }
+    var kernelize = zg.pr.kernelize.KernelizePass{
+        .store = &tune_result.store,
+        .device = context.execution.interface.device,
+        .report = if (report) |*value| value else null,
+    };
+    try pr_flow.transform(&kernelize);
+    if (report) |*value| {
+        try pr_flow.transform(zg.pr.kernelize.DumpKernels{ .report = value });
+    }
+
+    var stablehlo_flow = try pr_flow.lower(zg.mlir.stablehlo.Lower{
+        .config = .{
+            .entry_name = "main",
+            .encoding = if (operations.dump_stablehlo == null) .binary else .text,
+        },
+    });
+    defer stablehlo_flow.value.deinit(allocator);
+    if (operations.dump_stablehlo) |selected| {
+        var operation = selected;
+        operation.config.entry_name = operation.config.entry_name orelse "main";
+        try stablehlo_flow.transform(operation);
+    }
+
+    var execution = try zg.pjrt.Execution.init(client, device, .{
         .store = &tune_result.store,
         .dispatch_registry = &tune_result.dispatch_registry,
-    };
+    });
+    var backend = zg.pjrt.Backend.init(&execution, context.backend.compiler.options);
+    var executable_flow = try stablehlo_flow.compile(&backend.interface);
+    errdefer executable_flow.value.deinit();
+    if (operations.dump_optimized) |selected| {
+        var operation = selected;
+        operation.execution = &execution;
+        operation.config.entry_name = operation.config.entry_name orelse "main";
+        try executable_flow.transform(operation);
+    }
+    var exe = executable_flow.value;
+    defer exe.deinit();
 
-    return run_kernel_provider_demo_executable(allocator, backend, device, exe, provider_kinds.len, exec_opts);
+    return try run_kernel_provider_demo_executable(
+        allocator,
+        io,
+        exe,
+        provider_kinds.len,
+    );
 }
 
 fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderDemoKind) bool {
@@ -575,12 +619,11 @@ fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderD
 /// Execute the kernel provider demo program and verify results.
 fn run_kernel_provider_demo_executable(
     allocator: std.mem.Allocator,
-    backend: *zg.Backend,
-    device: zg.Backend.Device,
-    exe: zg.Backend.Executable,
+    io: std.Io,
+    loaded_program: zg.Executor.LoadedProgram,
     n_providers: usize,
-    exec_opts: zg.Backend.ExecuteOptions,
 ) !void {
+    const executor = loaded_program.executor;
     const A = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
     const B = [_]f32{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 };
     const C = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
@@ -592,28 +635,33 @@ fn run_kernel_provider_demo_executable(
     var host_c = try Tensor.host(.f32, &.{ 2, 2 }, .{ .borrow = std.mem.sliceAsBytes(&C) });
     defer host_c.deinit();
 
-    const dev_a = try backend.buffer_from_host(device, host_a.host_data(), .f32, host_a.dims());
-    defer backend.deinit_buffer(dev_a);
-    const dev_b = try backend.buffer_from_host(device, host_b.host_data(), .f32, host_b.dims());
-    defer backend.deinit_buffer(dev_b);
-    const dev_c = try backend.buffer_from_host(device, host_c.host_data(), .f32, host_c.dims());
-    defer backend.deinit_buffer(dev_c);
-
-    const result = try backend.execute(exe, allocator, &.{ dev_a, dev_b, dev_c }, exec_opts);
-    defer {
-        if (result.event) |ev| backend.deinit_event(ev);
-        for (result.outputs) |buf| backend.deinit_buffer(buf);
-        allocator.free(result.outputs);
-    }
-
-    if (result.outputs.len != 1) return error.UnexpectedOutputs;
+    const dev_a = try executor.upload(host_a.host_data(), .f32, host_a.dims());
+    defer executor.release(dev_a);
+    const dev_b = try executor.upload(host_b.host_data(), .f32, host_b.dims());
+    defer executor.release(dev_b);
+    const dev_c = try executor.upload(host_c.host_data(), .f32, host_c.dims());
+    defer executor.release(dev_c);
 
     var out_host = try Tensor.host(.f32, &.{ 2, 2 }, .{ .alloc = allocator });
     defer out_host.deinit();
-    if (try backend.buffer_to_host(result.outputs[0], out_host.host_data_mut())) |ev| {
-        defer backend.deinit_event(ev);
-        try backend.await_event(ev);
+
+    const t0 = std.Io.Timestamp.now(io, .awake);
+    var outputs: [1]zg.Executor.Buffer = undefined;
+    const event = try executor.invoke(
+        loaded_program,
+        &.{ dev_a, dev_b, dev_c },
+        &outputs,
+        .{},
+    );
+    defer if (event) |completion| executor.release_event(completion);
+    defer executor.release(outputs[0]);
+
+    if (try executor.download(outputs[0], out_host.host_data_mut())) |completion| {
+        defer executor.release_event(completion);
+        try executor.wait(completion);
     }
+    const dur = t0.untilNow(io, .awake);
+    log.info("Executed dur={f}", .{dur});
 
     // dot(A, B) = [[58, 64], [139, 154]]
     // (n*dot + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]
@@ -662,9 +710,10 @@ pub fn print_pr(
     try zg.pr.zxpr.emit(vjp_func, stdout, zg.pr.zxpr.style.config(.auto_stdout, .{ .truecolor_auto = tc }));
 }
 
-/// Returns true when `ZG_TRUECOLOR` is set to a non-empty value. Library
-///  styling code must not read process state itself; callers with `environ`
-///  in scope decide and pass the flag in.
+/// Returns true when `ZG_TRUECOLOR` is set to a non-empty value.
+///
+/// Library styling code receives the decision from a caller with an explicit
+///  environment map.
 fn truecolor_from_env(environ: *const std.process.Environ.Map) bool {
     const v = environ.get("ZG_TRUECOLOR") orelse return false;
     return v.len > 0;
@@ -672,22 +721,20 @@ fn truecolor_from_env(environ: *const std.process.Environ.Map) bool {
 
 /// Enumerate TVM FFI global functions.
 /// Writes available operations to stdout.
-pub fn dump_tvm_ffi_symbols(io: std.Io, allocator: std.mem.Allocator) !void {
+pub fn dump_tvm_ffi_symbols(io: std.Io, allocator: std.mem.Allocator, load_compiler: bool) !void {
     if (comptime !zg.build_options.has_tvm) {
-        log.err("TVM FFI symbol dump requires TVM support (headers not found in SDK)", .{});
+        log.err("TVM FFI symbol dump requires the opt-in TVM integration", .{});
         return error.TvmUnavailable;
     }
-    const tvm_api = zg.tvm.ffi;
-
-    try tvm_api.ensure_loaded(allocator, .{ .load_compiler = true });
-
-    const names = try tvm_api.list_global_names(allocator);
+    const names = try zg.tvm.runtime.list_global_names(
+        allocator,
+        if (load_compiler) .compiler else .ffi,
+    );
     defer {
         for (names) |n| allocator.free(n);
         allocator.free(names);
     }
 
-    // Print with category headers
     var stdout_buf: [16384]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const out = &stdout_writer.interface;
@@ -783,15 +830,10 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
     }
 }
 
-/// Builds a program for kernel provider demo.
+/// Builds the matmul program used by the kernel-provider demo.
 ///
-/// Inputs:
-///   a (2x3), b (3x2), c (2x2).
-///   One `dot(a,b)` kernelized region per provider, fold-summed into `sum`.
-/// Output:
-///   (sum + c) * c
-/// Expected:
-///   [[116n+4, 128n+4], [278n+4, 308n+4]] where n = provider count
+/// Each provider receives one `dot(a, b)` region. The function returns the
+///  provider results summed with `c`, then multiplied by `c`.
 fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: []const []const u8) !zg.pr.Program {
     var program = zg.pr.Program.init(allocator);
     errdefer program.deinit();
@@ -803,14 +845,14 @@ fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: [
     const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    // Stack-allocate name buffers, names must outlive the builder (used within this function).
-    const first_name = try std.fmt.allocPrint(allocator, "{s}_region_0", .{provider_names[0]});
+    // Region names share the program lifetime of their function references.
+    const first_name = try std.fmt.allocPrint(b.alloc(), "{s}_region_0", .{provider_names[0]});
     try b.push_region(first_name, .{ .kernelize = provider_names[0] });
     var acc_id = try b.dot(a_id, b_id);
     try b.pop_region();
 
     for (provider_names[1..], 1..) |pname, i| {
-        const rn = try std.fmt.allocPrint(allocator, "{s}_region_{d}", .{ pname, i });
+        const rn = try std.fmt.allocPrint(b.alloc(), "{s}_region_{d}", .{ pname, i });
         try b.push_region(rn, .{ .kernelize = pname });
         const dot_id = try b.dot(a_id, b_id);
         try b.pop_region();
@@ -904,10 +946,9 @@ fn fill_targets(
     }
 }
 
-/// Annotated attention pattern demo.
+/// Prints PR for an annotated attention pattern.
 ///
-/// Builds simplified attention compute: Q @ K^T -> scale -> softmax -> @ V
-/// with region annotations to visualize what would be lowered.
+/// The region covers scaled dot-product attention for TVM kernelization.
 pub fn print_tvm_attention_pr(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -921,8 +962,6 @@ pub fn print_tvm_attention_pr(
     var builder = try zg.pr.FunctionBuilder.init(&program, "attention");
     defer builder.deinit();
 
-    // simplified attention: [B, S, D] shapes
-    // Q, K, V: [batch=2, seq=4, head_dim=64]
     const batch: i64 = 2;
     const seq: i64 = 4;
     const head_dim: i64 = 64;
@@ -931,10 +970,10 @@ pub fn print_tvm_attention_pr(
     const k = try Tensor.param(&builder, .f32, &.{ batch, seq, head_dim });
     const v = try Tensor.param(&builder, .f32, &.{ batch, seq, head_dim });
 
-    // entire attention block as a single TVM-kernelizable region
+    // The annotation presents the complete attention block to TVM.
     try builder.push_region("attention", .{ .kernelize = "tvm" });
 
-    // attention scores: Q @ K^T  ->  [B, S, S]
+    // Contracting the head dimension produces [batch, query, key] scores.
     const scores = try q.dot_general(k, .{
         .lhs_batch_dims = &.{0},
         .rhs_batch_dims = &.{0},
@@ -942,16 +981,14 @@ pub fn print_tvm_attention_pr(
         .rhs_contracting_dims = &.{2},
     });
 
-    // scale scores
     const scale_val = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
     const scaled = try scores.mul(try Tensor.constant_like(scores, scale_val));
 
-    // softmax over last dim [S]
     const rank = scaled.rank();
     const axis: i64 = @intCast(rank - 1);
     const max_val = try scaled.reduce_max(&.{axis});
 
-    // broadcast max back to full shape for stability
+    // Subtracting each row maximum stabilizes the softmax exponentials.
     const max_broadcast = try max_val.broadcast_in_dim(scaled.dims(), &.{ 0, 1 });
     const shifted = try scaled.sub(max_broadcast);
     const exp_vals = try shifted.exp();
@@ -959,7 +996,7 @@ pub fn print_tvm_attention_pr(
     const sum_broadcast = try sum_exp.broadcast_in_dim(exp_vals.dims(), &.{ 0, 1 });
     const attn_weights = try exp_vals.div(sum_broadcast);
 
-    // output: attn_weights @ V  ->  [B, S, D]
+    // Contracting the key dimension produces [batch, query, head dimension].
     const out = try attn_weights.dot_general(v, .{
         .lhs_batch_dims = &.{0},
         .rhs_batch_dims = &.{0},

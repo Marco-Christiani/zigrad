@@ -155,7 +155,7 @@ pub const DotPrecision = union(enum) {
             .fast => .DEFAULT,
             .high => .HIGH,
             .highest => .HIGHEST,
-            // When we specify the dot algorithm, we should not specify the precision.
+            // The algorithm attribute supplies its own precision behavior.
             .algorithm => .DEFAULT,
         });
         return precision.as_attr();
@@ -171,21 +171,14 @@ pub const DotPrecision = union(enum) {
 
 pub const DotAlgorithm = struct {
     accumulation: mlir.FloatTypes,
-    // Note stablehlo distinguish between left/right component_count
-    // but all the supported algorithm have the same component_count on both side.
+    // StableHLO accepts separate component counts for each operand.
+    //
+    // Zigrad currently represents algorithms with equal component counts.
     component_count: u8 = 1,
     num_primitive_operations: u8 = 1,
     allow_imprecise_accumulation: bool = false,
 
-    // bf16_6x: each input is decomposed to 3 bf16 components, then 6 dot operations are done on those components, and the result is accumulated in f32.
-    // not sure where this is available.
-    pub const bf16_6x: DotAlgorithm = .{
-        .operand = .bf16,
-        .accumulation = .f32,
-        .component_count = 1,
-        .num_primitive_operations = 6,
-        .allow_imprecise_accumulation = false,
-    };
+    // TODO(stablehlo): Add a validated BF16 six-operation preset.
 
     pub fn as_attr(self: DotAlgorithm, ctx: mlir.Context, tensor_type: mlir.RankedTensorType) mlir.Attribute {
         const elem_type = tensor_type.get_element_type();
@@ -203,8 +196,7 @@ pub const DotAlgorithm = struct {
     }
 };
 
-/// General matrix multiplication "a la Einstein sum"
-/// Note: stablehlo doesn't do type inference for dot_general
+/// Creates a StableHLO `dot_general` operation with an explicit result type.
 pub fn dot_general(
     ctx: mlir.Context,
     lhs: mlir.Value,
@@ -222,7 +214,8 @@ pub fn dot_general(
     const precisions: [2]mlir.Attribute = @splat(opts.precision.precision_attr(ctx));
     const attributes = [3]mlir.AttrTuple{
         .{
-            "dot_dimension_numbers", DotDimensionNumbersAttribute.init(ctx, .{
+            "dot_dimension_numbers",
+            DotDimensionNumbersAttribute.init(ctx, .{
                 .lhs_batching_dimensions = opts.lhs_batching_dimensions,
                 .rhs_batching_dimensions = opts.rhs_batching_dimensions,
                 .lhs_contracting_dimensions = opts.lhs_contracting_dimensions,
@@ -230,7 +223,7 @@ pub fn dot_general(
             }).as_attr(),
         },
         .{ "precision_config", .array(ctx, &precisions) },
-        // keep algorithm as the last attribute so we can omit it when it's not set.
+        // Keeping the optional attribute last makes the prefix slice valid.
         .{ "algorithm", opts.precision.algorithm_attr(ctx, lhs.get_type().as(mlir.RankedTensorType).?) orelse undefined },
     };
     const n_attributes = if (opts.precision == .algorithm) attributes.len else attributes.len - 1;
@@ -735,7 +728,8 @@ pub fn convolution(
             .{ "rhs_dilation", .dense(ctx, .i64, opts.rhs_dilation) },
             .{ "window_reversal", .dense(ctx, .bool, window_reversal[0..opts.window_reversal.len]) },
             .{
-                "dimension_numbers", ConvDimensionNumbersAttribute.init(ctx, .{
+                "dimension_numbers",
+                ConvDimensionNumbersAttribute.init(ctx, .{
                     .input_batch_dimension = opts.input_batch_dimension,
                     .input_feature_dimension = opts.input_feature_dimension,
                     .input_spatial_dimensions = opts.input_spatial_dimensions,
@@ -763,7 +757,7 @@ pub const CustomCallOpts = struct {
         typed_ffi = 4,
     };
 
-    call_target_name: [:0]const u8,
+    call_target_name: []const u8,
     has_side_effect: bool,
     backend_config: ?mlir.Attribute,
     operand_layouts: ?[]const []const usize = null,

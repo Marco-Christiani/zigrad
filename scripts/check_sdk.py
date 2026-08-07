@@ -69,11 +69,6 @@ def resolve_sdk_root(cli_value: Path | None) -> tuple[Path, str]:
             return root, "env:ZG_EXTERNAL_SDK_ROOT"
         die(f"ZG_EXTERNAL_SDK_ROOT is set but does not exist: {root}")
 
-    fallback = Path("./result")
-    if fallback.exists():
-        LOG.warning("ZG_EXTERNAL_SDK_ROOT not set; falling back to ./result")
-        return fallback, "fallback:./result"
-
     die("No SDK root found (use --sdk-root or set ZG_EXTERNAL_SDK_ROOT)")
 
 
@@ -177,7 +172,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--sdk-root",
         type=Path,
-        help="Path to SDK root dir (default: $ZG_EXTERNAL_SDK_ROOT, fallback ./result)",
+        help="Path to SDK root dir (default: $ZG_EXTERNAL_SDK_ROOT)",
     )
 
     ap.add_argument("--verbose", action="store_true")

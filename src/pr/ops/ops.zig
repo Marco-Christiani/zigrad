@@ -1,23 +1,20 @@
-//! Op Registry
+//! Registers op implementations and provides runtime dispatch.
 //!
-//! Central registry for all ops. Provides:
 //! - `OpFor(prim)`: map from `pr.Prim` enum variant to its implementation struct.
-//! - Runtime dispatch helpers (`validate`, `infer_output`, `vjp_forward`, ...)
+//! - Runtime dispatch helpers (`validate`, `infer_output`, `emit_primal`, ...)
 //!
 //! ## Op interface
 //!
 //! Every op implementation is a struct with methods named per `op_methods`
-//!  below. `validate` and `infer_output` are required — missing them fails
-//!  the build via the `validate_op_interface` comptime block. The others
-//!  (`format`, `vjp_forward`, `vjp_backward`, `jvp`) are optional and probed
+//!  below. `validate` and `infer_output` are required. Missing them fails the
+//!  build via the `validate_op_interface` comptime block. The others
+//!  (`format`, `emit_primal`, `vjp_backward`, `jvp`) are optional and probed
 //!  via `@hasDecl` at dispatch time.
 //!
 //! Coverage: build with `-Demit-op-coverage=true` to have the registry
 //!  `@compileLog` a per-op table of which interface methods are implemented.
 //!  Used for tracking AD / lowering coverage without grepping the source.
 //!
-//! NOTE: The contained tests are regression gates for specific ops' AD coverage,
-//!  if an op is updated, these must also be updated.
 const std = @import("std");
 const pr = @import("../pr.zig");
 const build_options = @import("build_options");
@@ -64,13 +61,12 @@ pub fn OpFor(comptime prim: pr.Prim) type {
     };
 }
 
-// ============================================================================
 // Interface spec
-// ============================================================================
 
-/// A single method in the op interface. `required` means the op must implement
-///  it or compilation fails. Optional methods are probed via `@hasDecl` at
-///  dispatch time.
+/// Describes one method in the op interface.
+///
+/// A required method must exist on every op. Optional methods are probed via
+///  `@hasDecl` at dispatch time.
 const MethodSpec = struct {
     name: []const u8,
     required: bool,
@@ -83,7 +79,7 @@ const op_methods: []const MethodSpec = &.{
     .{ .name = "validate", .required = true, .doc = "Op construction sanity check" },
     .{ .name = "infer_output", .required = true, .doc = "Shape/dtype inference" },
     .{ .name = "format", .required = false, .doc = "IR dump formatting" },
-    .{ .name = "vjp_forward", .required = false, .doc = "Primal re-emit for reverse-mode AD" },
+    .{ .name = "emit_primal", .required = false, .doc = "Primal re-emission for AD" },
     .{ .name = "vjp_backward", .required = false, .doc = "Cotangent propagation for reverse-mode AD" },
     .{ .name = "jvp", .required = false, .doc = "Tangent propagation for forward-mode AD" },
 };
@@ -154,15 +150,13 @@ comptime {
     if (build_options.emit_op_coverage) emit_op_coverage_report();
 }
 
-// ============================================================================
 // Dispatch Functions
-// ============================================================================
 
 /// Validate an op using the handler's validate function.
 pub fn validate(op: *const pr.Op) pr.ValidationError!void {
     switch (op.params) {
         inline else => |typed_params, tag| {
-            return OpFor(tag).validate(op, typed_params);
+            return try OpFor(tag).validate(op, typed_params);
         },
     }
 }
@@ -172,32 +166,32 @@ pub fn validate(op: *const pr.Op) pr.ValidationError!void {
 pub fn infer_output(alloc: std.mem.Allocator, params: pr.Params, inputs: []const *pr.Var) pr.BuildError!pr.Aval {
     switch (params) {
         inline else => |typed_params, tag| {
-            return OpFor(tag).infer_output(alloc, inputs, typed_params);
+            return try OpFor(tag).infer_output(alloc, inputs, typed_params);
         },
     }
 }
 
-/// Check if an op supports VJP by providing `vjp_forward` and `vjp_backward`.
+/// Check if an op supports VJP by providing `emit_primal` and `vjp_backward`.
 pub fn has_vjp(prim: pr.Prim) bool {
     return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "vjp_forward") and @hasDecl(OpFor(p), "vjp_backward"),
+        inline else => |p| @hasDecl(OpFor(p), "emit_primal") and @hasDecl(OpFor(p), "vjp_backward"),
     };
 }
 
-/// Check if an op has VJP forward for computing primals.
-pub fn has_vjp_forward(prim: pr.Prim) bool {
+/// Check if an op can emit its primal computation into an AD-derived function.
+pub fn has_emit_primal(prim: pr.Prim) bool {
     return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "vjp_forward"),
+        inline else => |p| @hasDecl(OpFor(p), "emit_primal"),
     };
 }
 
-/// Execute VJP forward pass for an op.
-pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+/// Emit an op's primal computation into an AD-derived function.
+pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
     switch (op.params) {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
-            if (@hasDecl(Handler, "vjp_forward")) {
-                return Handler.vjp_forward(ctx, op, typed_params);
+            if (@hasDecl(Handler, "emit_primal")) {
+                return try Handler.emit_primal(ctx, op, typed_params);
             }
             return error.UnsupportedEqn;
         },
@@ -210,18 +204,18 @@ pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
             if (@hasDecl(Handler, "vjp_backward")) {
-                return Handler.vjp_backward(ctx, op, typed_params);
+                return try Handler.vjp_backward(ctx, op, typed_params);
             }
-            // No backward = zero gradient (e.g., literal)
+            // Missing rules contribute zero for nondifferentiable operations.
             return;
         },
     }
 }
 
-/// Check if an op supports JVP.
+/// Check if an op supports JVP through both required AD hooks.
 pub fn has_jvp(prim: pr.Prim) bool {
     return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "jvp"),
+        inline else => |p| @hasDecl(OpFor(p), "emit_primal") and @hasDecl(OpFor(p), "jvp"),
     };
 }
 
@@ -231,7 +225,7 @@ pub fn jvp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
             if (@hasDecl(Handler, "jvp")) {
-                return Handler.jvp(ctx, op, typed_params);
+                return try Handler.jvp(ctx, op, typed_params);
             }
             return error.UnsupportedEqn;
         },
@@ -244,16 +238,12 @@ pub fn format(writer: *types.Writer, op: *const pr.Op) types.FormatError!void {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
             if (@hasDecl(Handler, "format")) {
-                return Handler.format(writer, op, typed_params);
+                return try Handler.format(writer, op, typed_params);
             }
             return;
         },
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 test "vjp support detection" {
     try std.testing.expect(has_vjp(.add));
@@ -276,7 +266,7 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp(.slice));
     try std.testing.expect(has_vjp(.concatenate));
 
-    try std.testing.expect(has_vjp_forward(.literal));
+    try std.testing.expect(has_emit_primal(.literal));
     try std.testing.expect(!has_vjp(.literal));
 
     try std.testing.expect(has_vjp(.convert));

@@ -4,7 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sdk_root = b.option([]const u8, "sdk", "Path to zigrad external SDK root (include/, lib/, runtime/)") orelse "../../result";
+    const sdk_root = b.option([]const u8, "sdk", "Path to zigrad external SDK root (include/, lib/, runtime/)") orelse
+        b.graph.environ_map.get("ZG_EXTERNAL_SDK_ROOT") orelse
+        std.debug.panic("the benchmark requires -Dsdk or ZG_EXTERNAL_SDK_ROOT", .{});
 
     // Resolve to absolute so the path works from both the example and zigrad contexts.
     const sdk_abs = resolve_absolute(b, sdk_root);
@@ -14,6 +16,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .sdk = @as([]const u8, sdk_abs),
+        .pjrt = true,
+        .mlir = true,
+        .tvm = true,
+        .nvrtc = true,
+        .@"cuda-runtime" = true,
     });
     const zigrad_mod = zigrad_dep.module("zigrad");
 
@@ -59,7 +66,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the benchmark").dependOn(&run_cmd.step);
 
-    // Tests
+    // Tests.
     const tests = b.addTest(.{ .root_module = exe.root_module });
     tests.root_module.addLibraryPath(.{ .cwd_relative = sdk_lib });
     const run_tests = b.addRunArtifact(tests);

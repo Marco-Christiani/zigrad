@@ -3,25 +3,23 @@
 #
 # Each key listed here overrides the project default in flake.nix.
 # Omit a key to inherit the project default. The defaults are
-# deliberately portable — your local file opts into machine-specific
+# deliberately portable. Your local file opts into machine-specific
 # optimizations.
 #
-# To apply: nix build --impure .#<sdk-profile>
+# To apply: nix build --impure .#<configuration>
 #   The --impure flag lets the flake read this file from your working
-#   directory. Without --impure, the project defaults apply (which is
-#   what you want when building distribution artifacts).
+#   directory.
 #
-# Full knob reference: docs site, "Building → Optimization knobs".
+# Full knob reference: docs site, "Building / Optimization knobs".
 {
   # === CUDA architecture pin ==========================================
   #
-  # Compile CUDA only for these GPU compute capabilities. Cuts XLA bazel
-  # build time ~40-60% (one PTX/SASS per kernel vs. the upstream fat list)
-  # and reduces TVM cmake CUDA configure time.
+  # Compile CUDA only for these GPU compute capabilities. This avoids
+  # compiling each supported architecture on a single-GPU workstation.
   #
   # Find your GPU's compute capability:
   #   nvidia-smi --query-gpu=compute_cap --format=csv,noheader
-  # Then map: "8.6" → ["86"], "8.9" → ["89"], "9.0" → ["90"], etc.
+  # Then map "8.6" to ["86"], "8.9" to ["89"], "9.0" to ["90"], etc.
   #
   # Examples:
   #   ["86"]              # RTX 30-series, A10
@@ -36,7 +34,7 @@
   #
   # Emit -march=native -mtune=native and AVX2/FMA for hot-path libs
   # (TVM, IREE runtime, xla-pjrt CPU plugin). Compiler-infra libs (LLVM,
-  # XLA-MLIR, IREE-LLVM) skip this regardless — they're loaded by every
+  # XLA-MLIR, IREE-LLVM) skip this regardless. They're loaded by every
   # consumer and non-portable codegen there would be a problem.
   #
   # Workstation-class build host: turn on for max perf.
@@ -46,16 +44,15 @@
 
   # === Debug build ====================================================
   #
-  # Retain DWARF, build with RelWithDebInfo, don't strip. Closure size
-  # grows roughly 30-50%. Useful for GDB-stepping into libtvm.so or
-  # libIREECompiler.so.
+  # Retain DWARF, build with RelWithDebInfo, and do not strip. Useful for
+  # GDB-stepping into integration libraries such as libtvm.so and
+  #  libIREECompiler.so.
   #
   # withDebugSymbols = true;
 
   # === Link-time optimization (opt-in) ================================
   #
-  # +30-50% build time, 5-10% runtime gain (sometimes regression).
-  # Don't enable without a benchmark workload to A/B against.
+  # Do not enable without a benchmark workload to compare.
   #
   # enableLto = true;
 

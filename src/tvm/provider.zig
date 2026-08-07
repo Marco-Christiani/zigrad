@@ -1,33 +1,63 @@
 //! TVM kernel provider.
 //!
-//! Implements the KernelProvider interface (src/kernel.zig) for TVM.
-//! Handles matmul (dot/dot_general) kernels via MetaSchedule autotuning.
-//! No TVM C types cross this boundary -- only PR types and KernelArtifact.
+//! The provider accepts PR matrix-multiply regions and emits KernelArtifact
+//!  values through MetaSchedule autotuning. TVM C types remain internal.
 const std = @import("std");
-const tir = @import("../c/tvm/tir.zig");
-const tvm_api = @import("../c/tvm/api.zig");
-const tune_mod = @import("tune.zig");
-const tuned_module = @import("module.zig");
-const kernel = @import("../kernel.zig");
-const dispatch_mod = @import("dispatch.zig");
-const pr = @import("../pr/pr.zig");
+
 const Cache = @import("../cache.zig").Cache;
+const device = @import("../device.zig");
+const kernel = @import("../pr/kernel.zig");
+const pr = @import("../pr/pr.zig");
+const region_view = @import("../pr/region_view.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
-const TargetKind = tir.TargetKind;
+const config = @import("config.zig");
+const mm = @import("matmul.zig");
+const tvm_runtime = @import("runtime.zig");
+const TvmDispatchState = @import("dispatch.zig").TvmDispatchState;
 
 const log = std.log.scoped(.@"zg/tvm_provider");
 
 pub const TvmProvider = struct {
     io: std.Io,
-    allocator: std.mem.Allocator,
-    target_kind: TargetKind,
+    compile_config: config.CompileConfig,
     cache: Cache,
     max_trials: u32 = 64,
     trials_per_iter: u32 = 16,
 
     /// Shared dispatch state owning the TVM module cache.
-    /// Must outlive all KernelArtifacts produced by this provider.
-    dispatch_state: *dispatch_mod.TvmDispatchState,
+    ///
+    /// The state must outlive all KernelArtifacts produced by this provider.
+    dispatch_state: *TvmDispatchState,
+
+    /// Inputs required to initialize a TVM provider.
+    pub const InitOptions = struct {
+        /// Target and compiler inputs resolved by application composition.
+        compile: config.CompileConfig,
+
+        /// Maximum measured candidates.
+        max_trials: u32 = 64,
+
+        /// Candidates submitted per tuning iteration.
+        trials_per_iter: u32 = 16,
+    };
+
+    /// Initialize a provider after loading its configured TVM runtime.
+    pub fn init(
+        io: std.Io,
+        cache: Cache,
+        dispatch_state: *TvmDispatchState,
+        options: InitOptions,
+    ) tvm_runtime.Error!TvmProvider {
+        try tvm_runtime.ensure_loaded(.compiler);
+        return .{
+            .io = io,
+            .compile_config = options.compile,
+            .cache = cache,
+            .max_trials = options.max_trials,
+            .trials_per_iter = options.trials_per_iter,
+            .dispatch_state = dispatch_state,
+        };
+    }
 
     /// Return a KernelProvider interface backed by this TvmProvider.
     pub fn kernel_provider(self: *TvmProvider) kernel.KernelProvider {
@@ -35,93 +65,63 @@ pub const TvmProvider = struct {
             .name = "tvm",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
-            .dispatch_fn = &dispatch_mod.TvmDispatchState.dispatch,
+            .dispatch_fn = &TvmDispatchState.dispatch,
             .dispatch_ctx = TypedPtr.init(self.dispatch_state),
         };
     }
 
-    fn compile_impl(ptr: *anyopaque, desc: kernel.RegionDescriptor, _: kernel.CompileContext, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
+    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
         const self: *TvmProvider = @ptrCast(@alignCast(ptr));
-        return self.compile(desc, allocator);
+        return try self.compile(desc, selected_device, allocator);
     }
 
-    /// Compile a region descriptor into a TVM kernel artifact.
+    /// Compile one supported matrix-multiply region into a kernel artifact.
     ///
-    /// Currently supports only single-equation matmul regions (dot or dot_general).
-    /// 1. Validates region shape (single matmul equation).
-    /// 2. Extracts M, N, K from input/output types.
-    /// 3. Builds a matmul IRModule via TE.
-    /// 4. Tunes via MetaSchedule (produces candidate .so files with device code).
-    /// 5. Loads the best candidate .so and returns its bytes as a KernelArtifact.
-    fn compile(self: *TvmProvider, desc: kernel.RegionDescriptor, allocator: std.mem.Allocator) kernel.CompileError!kernel.KernelArtifact {
-        // Validate: single matmul equation
-        const matmul = validate_matmul_region(desc) orelse return error.Unsupported;
+    /// A stable cached artifact is reused when present. A cache miss runs the
+    ///  shared TVM matmul tuner and stores its selected artifact.
+    fn compile(
+        self: *TvmProvider,
+        desc: region_view.RegionView,
+        selected_device: device.Device,
+        allocator: std.mem.Allocator,
+    ) kernel.CompileError!kernel.KernelArtifact {
+        if (!self.compile_config.target.accepts(selected_device)) {
+            return error.Unsupported;
+        }
+        const mm_shape = validate_matmul_region(desc) orelse return error.Unsupported;
 
         log.info("compiling matmul kernel: {s} ({d}x{d}x{d})", .{
-            desc.name, matmul.m, matmul.n, matmul.k,
+            desc.name, mm_shape.m, mm_shape.n, mm_shape.k,
         });
 
-        // Ensure TVM is loaded
-        tvm_api.ensure_loaded(allocator, .{}) catch |err| {
-            log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
-            return if (err == error.OutOfMemory) error.OutOfMemory else error.ProviderLoadFailed;
-        };
-
-        // Build matmul IRModule
-        var ir_mod = tir.build_matmul_tir(allocator, matmul.m, matmul.n, matmul.k) catch |err| switch (err) {
+        const cached = mm.load_artifact(
+            self.io,
+            allocator,
+            self.cache,
+            mm_shape,
+            self.compile_config.target,
+            selected_device,
+        ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.TvmLoadFailed => {
-                log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
-                return error.ProviderLoadFailed;
-            },
-            error.TvmCallFailed, error.TvmFunctionNotFound, error.UnexpectedTvmType => {
-                log.err("TVM API call failed building IRModule: {s}", .{@errorName(err)});
-                return error.ProviderCallFailed;
+            else => {
+                log.err("failed to read the TVM artifact cache: {s}", .{@errorName(err)});
+                return error.CompileFailed;
             },
         };
-        defer ir_mod.deinit();
+        if (cached) |artifact| return try make_kernel_artifact(allocator, artifact);
 
-        // Create target
-        var target = tir.Target.create(allocator, self.target_kind) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.TvmLoadFailed => {
-                log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
-                return error.ProviderLoadFailed;
+        const result = mm.tune(
+            self.io,
+            allocator,
+            self.cache,
+            mm_shape,
+            .{
+                .compile = self.compile_config,
+                .device = selected_device,
+                .max_trials = self.max_trials,
+                .trials_per_iter = self.trials_per_iter,
             },
-            error.TvmCallFailed, error.TvmFunctionNotFound, error.UnexpectedTvmType => {
-                log.err("TVM API call failed creating target: {s}", .{@errorName(err)});
-                return error.ProviderCallFailed;
-            },
-        };
-        defer target.deinit();
-
-        // Tune
-        const shape_a = [_]i64{ matmul.m, matmul.k };
-        const shape_b = [_]i64{ matmul.k, matmul.n };
-        const shape_c = [_]i64{ matmul.m, matmul.n };
-        const shapes: [3][]const i64 = .{ &shape_a, &shape_b, &shape_c };
-
-        const tvm_cache = self.cache.subdir(self.io, "tvm", .{}) catch
-            return error.OutOfMemory;
-
-        const key = tuned_module.matmul_cache_key(self.target_kind, matmul.m, matmul.n, matmul.k);
-
-        if (load_cached_kernel(self.io, allocator, tvm_cache, key.slice(), self.target_kind) catch null) |cached| {
-            return .{
-                .provider_name = "tvm",
-                .data = cached,
-                .target_name = try allocator.dupe(u8, key.slice()),
-            };
-        }
-
-        const work_cache = tvm_cache.subdir(self.io, key.slice(), .{}) catch
-            return error.OutOfMemory;
-
-        tune_mod.tune(self.io, allocator, ir_mod, target, self.target_kind, &shapes, .{
-            .work_cache = work_cache,
-            .max_trials = self.max_trials,
-            .trials_per_iter = self.trials_per_iter,
-        }) catch |err| switch (err) {
+        ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.TvmLoadFailed => {
                 log.err("TVM runtime unavailable: {s}", .{@errorName(err)});
@@ -137,60 +137,37 @@ pub const TvmProvider = struct {
             },
         };
 
-        const update = tuned_module.update_cache_from_work_dir(
+        const artifact = mm.load_artifact(
             self.io,
             allocator,
-            tvm_cache,
-            work_cache,
-            key.slice(),
-            self.target_kind,
+            self.cache,
+            mm_shape,
+            self.compile_config.target,
+            selected_device,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
-                log.err("failed to update kernel cache index: {s}", .{@errorName(err)});
+                log.err("failed to read cached kernel: {s}", .{@errorName(err)});
                 return error.CompileFailed;
             },
-        };
-
-        const so_bytes = std.Io.Dir.cwd().readFileAlloc(self.io, update.stable_path.path(), allocator, .limited(100 * 1024 * 1024)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                log.err("failed to read {s}: {s}", .{ update.stable_path.path(), @errorName(err) });
-                return error.CompileFailed;
-            },
-        };
+        } orelse return error.CompileFailed;
 
         log.info("compiled kernel: {s} (candidate {d}, {d:.2} us, {d} bytes)", .{
-            desc.name, update.best_candidate, update.best_time_us, so_bytes.len,
+            desc.name, result.best_candidate, result.best_time_us, artifact.bytes.len,
         });
 
-        return .{
-            .provider_name = "tvm",
-            .data = so_bytes,
-            .target_name = try allocator.dupe(u8, key.slice()),
-        };
+        return try make_kernel_artifact(allocator, artifact);
     }
 };
 
-// ============================================================================
-// Matmul validation
-// ============================================================================
-
-const MatmulShape = struct {
-    m: i64,
-    n: i64,
-    k: i64,
-};
-
 /// Validate that a region describes a single matmul (dot or dot_general).
-/// Returns the M, N, K dimensions, or null if unsupported.
-fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
-    // Must be exactly one op
+///
+/// Returns the matrix dimensions, or null when the region is unsupported.
+fn validate_matmul_region(desc: region_view.RegionView) ?mm.Shape {
     if (desc.ops.len != 1) return null;
     if (desc.inputs.len != 2 or desc.outputs.len != 1) return null;
     const op = desc.ops[0];
 
-    // Must be dot or dot_general
     switch (op.params) {
         .dot => {},
         .dot_general => |dg| {
@@ -199,46 +176,35 @@ fn validate_matmul_region(desc: kernel.RegionDescriptor) ?MatmulShape {
         else => return null,
     }
 
-    // Must have 2 inputs and 1 output
     if (op.inputs.len != 2 or op.outputs.len != 1) return null;
 
-    // Get types
     const a = op.inputs[0].value.as_tensor();
     const b = op.inputs[1].value.as_tensor();
     const c_tensor = op.outputs[0].as_tensor();
 
-    // Must be rank-2 (matrix)
     if (a.shape.rank() != 2 or b.shape.rank() != 2 or c_tensor.shape.rank() != 2) return null;
 
-    // A[M,K] @ B[K,N] = C[M,N]
     const m = a.shape.dims[0];
     const k = a.shape.dims[1];
     const n = b.shape.dims[1];
 
-    // Validate consistency
     if (b.shape.dims[0] != k) return null;
     if (c_tensor.shape.dims[0] != m or c_tensor.shape.dims[1] != n) return null;
 
-    // Only f32 for now
-    if (a.dtype != .f32 or b.dtype != .f32) return null;
+    if (a.dtype != .f32 or b.dtype != .f32 or c_tensor.dtype != .f32)
+        return null;
 
     return .{ .m = m, .n = n, .k = k };
 }
 
-fn load_cached_kernel(
-    io: std.Io,
+fn make_kernel_artifact(
     allocator: std.mem.Allocator,
-    base_cache: Cache,
-    key: []const u8,
-    target_kind: TargetKind,
-) !?[]u8 {
-    const cached = try tuned_module.cache_lookup(io, allocator, base_cache, key, target_kind);
-    if (cached == null) return null;
-    defer {
-        allocator.free(cached.?.key);
-        allocator.free(cached.?.artifact_path);
-    }
-
-    std.Io.Dir.cwd().access(io, cached.?.artifact_path, .{}) catch return null;
-    return std.Io.Dir.cwd().readFileAlloc(io, cached.?.artifact_path, allocator, .limited(100 * 1024 * 1024)) catch null;
+    artifact: mm.CachedArtifact,
+) error{OutOfMemory}!kernel.KernelArtifact {
+    errdefer allocator.free(artifact.bytes);
+    return .{
+        .provider_name = "tvm",
+        .data = artifact.bytes,
+        .target_name = try allocator.dupe(u8, artifact.key.slice()),
+    };
 }

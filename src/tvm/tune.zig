@@ -6,6 +6,7 @@
 //! Builder and runner callbacks receive provider state through TVM's
 //!  userdata pointer.
 const std = @import("std");
+const device = @import("../device.zig");
 const tir = @import("../c/tvm/tir.zig");
 const runtime = @import("../c/tvm/runtime.zig");
 const ms = @import("../c/tvm/meta_schedule.zig");
@@ -14,21 +15,40 @@ const api = @import("../c/tvm/api.zig");
 const c = @import("../c/tvm/c.zig");
 const dlpack = @import("../c/dlpack.zig");
 const Cache = @import("../cache.zig").Cache;
+const build_options = @import("build_options");
+const config = @import("config.zig");
+const integration_runtime = @import("runtime.zig");
+const export_mod = @import("export.zig");
+const Linker = @import("../toolchain/linker.zig").Linker;
 const Value = api.Value;
 const Array = api.Array;
 const IRModule = tir.IRModule;
 const RuntimeModule = runtime.RuntimeModule;
 const Target = tir.Target;
 const Tensor = runtime.Tensor;
-const TargetKind = tir.TargetKind;
+const TargetKind = @import("config.zig").TargetKind;
 const MetaSchedule = ms.MetaSchedule;
-const nvrtc_callback = @import("nvrtc_callback.zig");
+const nvrtc_callback = if (build_options.has_nvrtc) @import("nvrtc_callback.zig") else struct {};
 
 const log = std.log.scoped(.@"zg/tvm_tune");
 
 pub const TuneOpts = struct {
+    /// Target-specific compiler inputs resolved by application composition.
+    compile: config.CompileConfig,
+
+    /// Device used for candidate compilation and measurement.
+    device: device.Device,
+
+    /// NVRTC architecture resolved from the TVM CUDA target.
+    gpu_arch: ?[]const u8,
+
+    /// Directory containing this workload's tuning state and candidates.
     work_cache: Cache,
+
+    /// Maximum measured candidates.
     max_trials: u32 = 64,
+
+    /// Candidates submitted per tuning iteration.
     trials_per_iter: u32 = 16,
 };
 
@@ -40,6 +60,8 @@ const TuneState = struct {
     allocator: std.mem.Allocator,
     target: Target,
     target_kind: TargetKind,
+    linker: Linker,
+    device_ordinal: i32,
     work_cache: Cache,
     build_counter: u32 = 0,
     /// Counter value at the start of this tuning run (before any new candidates).
@@ -59,16 +81,34 @@ pub fn tune(
     allocator: std.mem.Allocator,
     ir_mod: IRModule,
     target: Target,
-    kind: TargetKind,
     tensor_shapes: []const []const i64,
     opts: TuneOpts,
 ) !void {
-    try api.ensure_loaded(allocator, .{});
+    try integration_runtime.ensure_loaded(.compiler);
+    const kind = opts.compile.target;
 
     if (kind == .cuda) {
-        nvrtc_callback.register(allocator) catch |err| {
-            log.warn("failed to register NVRTC callback: {s}", .{@errorName(err)});
-        };
+        if (comptime build_options.has_nvrtc) {
+            const nvrtc_config = opts.compile.nvrtc orelse {
+                log.err("TVM CUDA tuning requires resolved NVRTC configuration", .{});
+                return error.MissingNvrtcConfig;
+            };
+            const gpu_arch = opts.gpu_arch orelse {
+                log.err("TVM CUDA target has no resolved NVRTC architecture", .{});
+                return error.MissingNvrtcArchitecture;
+            };
+            nvrtc_callback.register(
+                allocator,
+                nvrtc_config,
+                gpu_arch,
+            ) catch |err| {
+                log.err("failed to register NVRTC callback: {s}", .{@errorName(err)});
+                return err;
+            };
+        } else {
+            log.err("TVM CUDA tuning requires the opt-in NVRTC integration", .{});
+            return error.NvrtcDisabled;
+        }
         try load_cuda_intrinsics(io, allocator);
     }
 
@@ -121,6 +161,8 @@ pub fn tune(
         .allocator = allocator,
         .target = target,
         .target_kind = kind,
+        .linker = opts.compile.linker,
+        .device_ordinal = opts.device.ordinal,
         .work_cache = opts.work_cache,
         .build_counter = initial_counter,
         .initial_counter = initial_counter,
@@ -186,9 +228,7 @@ pub fn tune(
     log.info("tuning complete. results: {s}", .{record_path});
 }
 
-// ============================================================================
 // Callbacks
-// ============================================================================
 
 /// Builder callback: compiles TIR candidates to .so artifacts.
 fn build_callback(
@@ -235,19 +275,19 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
             continue;
         };
 
-        // Lower and build
+        // Lower and compile the candidate.
         var ir_mod = IRModule{ .handle = .{ .ptr = mod_val.as_object() orelse {
             try results_list.append(allocator, try make_builder_error(allocator, "mod not an object"));
             continue;
         } }, .type_index = mod_val.raw.type_index };
         ir_mod.handle.incref();
 
-        const built_mod_result = compile.lower_and_build(allocator, &ir_mod, state.target, state.target_kind);
-        var built_mod = built_mod_result catch {
+        const compiled_module_result = compile.lower_and_compile(allocator, &ir_mod, state.target, state.target_kind);
+        var compiled_module = compiled_module_result catch {
             try results_list.append(allocator, try make_builder_error(allocator, "compilation failed"));
             continue;
         };
-        defer built_mod.deinit();
+        defer compiled_module.deinit();
 
         // Export to .so
         const build_id = @atomicRmw(u32, &state.build_counter, .Add, 1, .seq_cst);
@@ -259,7 +299,15 @@ fn build_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result:
         };
         const so_path = so.pathZ();
 
-        built_mod.export_shared(state.io, allocator, so_path, state.target_kind) catch {
+        export_mod.export_shared(
+            compiled_module,
+            state.io,
+            allocator,
+            so_path,
+            state.target_kind,
+            state.linker,
+        ) catch |err| {
+            log.err("candidate {d} export failed: {s}", .{ build_id, @errorName(err) });
             try results_list.append(allocator, try make_builder_error(allocator, "export failed"));
             continue;
         };
@@ -332,7 +380,7 @@ fn run_callback_impl(state: *TuneState, inputs_array_raw: c.TVMFFIAny, result: *
         const artifact_path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{artifact_path_slice}, 0);
         defer allocator.free(artifact_path);
 
-        // Load module and get main function via typed wrappers
+        // Load the candidate and resolve its entry function.
         var loaded = RuntimeModule.load_from_file(allocator, artifact_path) catch {
             try results_list.append(allocator, try make_runner_error(allocator, "load failed"));
             continue;
@@ -376,7 +424,7 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
         .cuda => .cuda,
     };
 
-    // Allocate tensors via typed Tensor wrapper
+    // Allocate the candidate's input tensors.
     var tensors = std.ArrayList(Tensor).empty;
     defer {
         for (tensors.items) |*t| t.deinit();
@@ -394,11 +442,17 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
         const shape_copy = try allocator.dupe(i64, shape);
         defer allocator.free(shape_copy);
 
-        const tensor = try Tensor.allocate(allocator, data, shape_copy, dev_type);
+        const tensor = try Tensor.allocate(
+            allocator,
+            data,
+            shape_copy,
+            dev_type,
+            state.device_ordinal,
+        );
         try tensors.append(allocator, tensor);
     }
 
-    // Build call args from typed Tensor values
+    // Build the packed call arguments.
     var call_args = try allocator.alloc(Value, tensors.items.len);
     defer allocator.free(call_args);
     for (tensors.items, 0..) |t, j| {
@@ -421,9 +475,7 @@ fn benchmark_kernel(state: *TuneState, func: c.TVMFFIObjectHandle) !f64 {
     return times[num_runs / 2];
 }
 
-// ============================================================================
 // CUDA tensor intrinsics
-// ============================================================================
 
 /// Load and register CUDA tensor intrinsics (WMMA, MMA) from pre-serialized
 /// JSON files in `artifacts/cuda_intrinsics/`.
@@ -488,9 +540,7 @@ fn load_cuda_intrinsics(io: std.Io, allocator: std.mem.Allocator) !void {
     cuda_intrinsics_loaded = true;
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
+// Helpers.
 
 /// Persisted per-shape tuning state, stored as `state.json` in the work dir.
 const PersistedTuneState = struct {
@@ -525,7 +575,7 @@ fn make_noop_callback() !Value {
             return 0;
         }
     }.f;
-    return api.create_packed_func(null, noop, null);
+    return try api.create_packed_func(null, noop, null);
 }
 
 fn make_random_cost_model(allocator: std.mem.Allocator) !Value {
@@ -591,7 +641,7 @@ fn make_random_cost_model(allocator: std.mem.Allocator) !Value {
     const as_string_val = try api.create_packed_func(null, as_string, null);
     defer as_string_val.decref();
 
-    return MetaSchedule.py_cost_model(allocator, noop_val, noop_val, noop_val, predict_val, as_string_val);
+    return try MetaSchedule.py_cost_model(allocator, noop_val, noop_val, noop_val, predict_val, as_string_val);
 }
 
 fn register_cpu_count(allocator: std.mem.Allocator) !void {
@@ -615,7 +665,7 @@ fn register_cpu_count(allocator: std.mem.Allocator) !void {
 fn make_builder_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
     const msg_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{msg}, 0);
     defer allocator.free(msg_z);
-    return MetaSchedule.builder_result(allocator, null, msg_z);
+    return try MetaSchedule.builder_result(allocator, null, msg_z);
 }
 
 /// Create a RunnerFuture wrapping a RunnerResult with an error message.
@@ -623,7 +673,7 @@ fn make_runner_error(allocator: std.mem.Allocator, msg: []const u8) !Value {
     const msg_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{msg}, 0);
     defer allocator.free(msg_z);
     const rr = try MetaSchedule.runner_result(allocator, null, msg_z);
-    return MetaSchedule.runner_future(allocator, rr);
+    return try MetaSchedule.runner_future(allocator, rr);
 }
 
 /// Create a RunnerFuture wrapping a RunnerResult with timing data.
@@ -631,5 +681,5 @@ fn make_runner_success(allocator: std.mem.Allocator, run_secs: f64) !Value {
     var run_secs_arr = try Array.from_values(allocator, &.{Value.float(run_secs)});
     defer run_secs_arr.deinit();
     const rr = try MetaSchedule.runner_result(allocator, run_secs_arr.as_value(), null);
-    return MetaSchedule.runner_future(allocator, rr);
+    return try MetaSchedule.runner_future(allocator, rr);
 }

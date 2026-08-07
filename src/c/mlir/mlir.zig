@@ -1,36 +1,13 @@
-//! MLIR Zig Wrapper - Core API
+//! Zig bindings and helpers for the MLIR C API.
 //! Adapted from ZML (https://github.com/zml/zml)
 //! Original Copyright (c) 2024 ZML Contributors
 //! Apache License 2.0
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub const c = @import("c-mlir");
 
 const log = std.log.scoped(.@"zg/mlir");
-
-const ZgRegisterDialectsFn = *const fn (c.MlirContext) callconv(.c) void;
-const ZgRegisterPassesFn = *const fn () callconv(.c) void;
-
-const ShimHandle = struct {
-    lib: std.DynLib,
-    register_dialects: ZgRegisterDialectsFn,
-    register_passes: ZgRegisterPassesFn,
-};
-
-/// NOTE: The MLIR shim is initialized lazily once per process. Zigrad lowering
-///  drives MLIR work on a single thread. If multi-threaded init becomes
-///  necessary, wrap with `std.Io.Mutex` (would require threading `io` through
-///  the session init chain).
-const ShimState = union(enum) {
-    uninitialized,
-    unavailable,
-    loaded: ShimHandle,
-};
-
-var shim_state: ShimState = .uninitialized;
-var shim_passes_registered: bool = false;
 
 test {
     @setEvalBranchQuota(10000);
@@ -40,16 +17,14 @@ test {
 }
 
 pub const Error = error{
-    /// Invalid Mlir was created.
+    /// MLIR rejected or failed to create an object.
     InvalidMlir,
-    /// Another Mlir error. Check the log for more context.
+    /// MLIR reported an error with details in the diagnostic log.
     MlirUnexpected,
-    /// A resource/executor was not found.
+    /// A requested resource or executor was not found.
     NotFound,
     /// Bytecode version incompatibility.
     InvalidMlirBytecodeVersion,
-    /// The zigrad MLIR library could not be loaded.
-    MissingMlirExtension,
 } || std.mem.Allocator.Error;
 
 pub inline fn string_ref(str: []const u8) c.MlirStringRef {
@@ -57,98 +32,12 @@ pub inline fn string_ref(str: []const u8) c.MlirStringRef {
 }
 
 pub inline fn from_string_ref(str: c.MlirStringRef) []const u8 {
-    // Note: mlir.StringRef need not be null terminated.
+    // MLIR string references do not require null termination.
     return str.data[0..str.length];
 }
 
 pub fn register_passes(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
-}
-
-pub fn register_zigrad_extensions(ctx: Context) Error!void {
-    switch (shim_state) {
-        .uninitialized => {
-            const loaded = load_shim_locked() orelse {
-                shim_state = .unavailable;
-                return error.MissingMlirExtension;
-            };
-            shim_state = .{ .loaded = loaded };
-        },
-        .unavailable => return error.MissingMlirExtension,
-        .loaded => {},
-    }
-
-    const handle = switch (shim_state) {
-        .loaded => |loaded| loaded,
-        else => unreachable,
-    };
-
-    handle.register_dialects(ctx._inner);
-
-    if (!shim_passes_registered) {
-        log.info("registering zigrad MLIR extension passes", .{});
-        handle.register_passes();
-        shim_passes_registered = true;
-    }
-}
-
-fn load_shim_locked() ?ShimHandle {
-    const shim_path = resolve_shim_path(std.heap.page_allocator) catch |err| {
-        log.err("failed to resolve MLIR extension shim path: {s}", .{@errorName(err)});
-        return null;
-    } orelse return null;
-    defer std.heap.page_allocator.free(shim_path);
-
-    var lib = std.DynLib.open(shim_path) catch |err| {
-        log.err("failed to open MLIR extension shim '{s}': {s}", .{ shim_path, @errorName(err) });
-        return null;
-    };
-
-    const register_dialects = lib.lookup(ZgRegisterDialectsFn, "zg_register_dialects") orelse {
-        log.err("MLIR extension shim '{s}' missing symbol zg_register_dialects", .{shim_path});
-        lib.close();
-        return null;
-    };
-
-    const register_passes_fn = lib.lookup(ZgRegisterPassesFn, "zg_register_passes") orelse {
-        log.err("MLIR extension shim '{s}' missing symbol zg_register_passes", .{shim_path});
-        lib.close();
-        return null;
-    };
-
-    log.info("loaded MLIR extension shim '{s}'", .{shim_path});
-
-    return .{
-        .lib = lib,
-        .register_dialects = register_dialects,
-        .register_passes = register_passes_fn,
-    };
-}
-
-fn resolve_shim_path(allocator: std.mem.Allocator) !?[]u8 {
-    // Targeted override for development or non-standard layouts. Uses libc
-    //  getenv since the shim load happens deep in MLIR session init without
-    //  a threaded environ map.
-    if (std.c.getenv("ZG_MLIR_SHIM_PATH")) |shim_path_ptr| {
-        return try allocator.dupe(u8, std.mem.span(shim_path_ptr));
-    }
-
-    // Local dev build fallback.
-    if (path_exists("shim/build/libzigrad_mlir_ext.so")) {
-        return try allocator.dupe(u8, "shim/build/libzigrad_mlir_ext.so");
-    }
-
-    // Bare soname: resolved via RUNPATH ($ORIGIN/../lib) or system linker.
-    return try allocator.dupe(u8, "libzigrad_mlir_ext.so");
-}
-
-/// C-FFI boundary: shim discovery uses raw posix because the MLIR session
-///  init path does not carry an `io` handle. A path probe before `dlopen` is
-///  not user-observable I/O.
-fn path_exists(path: []const u8) bool {
-    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
-    _ = std.posix.system.close(fd);
-    return true;
 }
 
 pub fn success_or(res: c.MlirLogicalResult, err: anytype) @TypeOf(err)!void {
@@ -232,9 +121,8 @@ pub const Module = struct {
 
     /// Parse a module from arbitrary bytes (text or bytecode).
     ///
-    /// Unlike `parse`, this accepts `[]const u8` without null-termination,
-    /// which is required for MLIR bytecode (which may contain embedded nulls).
-    /// The MLIR C API auto-detects the format from magic bytes.
+    /// This accepts `[]const u8` because bytecode may contain null bytes. The
+    ///  MLIR C API detects text and bytecode from the input.
     pub fn parse_bytes(ctx: Context, source: []const u8) !Module {
         return Module.wrap_or(
             c.mlirModuleCreateParse(ctx._inner, string_ref(source)),
@@ -284,7 +172,7 @@ pub const PassManager = struct {
         return .{ ._inner = c.mlirPassManagerGetAsOpPassManager(self._inner) };
     }
 
-    // TODO mlirPassManagerEnableIRPrinting
+    // TODO(mlir): Expose `mlirPassManagerEnableIRPrinting`.
     // pub fn enableIRPrinting(self: *PassManager) void {}
 
     pub fn run_on_op(self: *PassManager, op: Operation) error{InvalidMlir}!void {
@@ -366,10 +254,7 @@ pub const Attribute = struct {
         return SpecificAttr.is_a_fn(self._inner);
     }
 
-    // utilities function to built common attributes.
-    // All attributes are upcasted to the Attribute type, making it easier to chain construct,
-    // but losing type information.
-
+    // Attribute constructors erase their concrete wrapper type for composition.
     pub fn null_() Attribute {
         return .wrap(c.mlirAttributeGetNull());
     }
@@ -411,6 +296,7 @@ pub const Attribute = struct {
     }
 
     /// Use a tensor as an attribute.
+    ///
     /// The tensor is specified by dims, dtype and a flat slice of values.
     pub fn dense_elements(ctx: Context, dims: []const i64, comptime dt: DenseElementsAttributeTypes, values: []const dt.ZigType()) Attribute {
         return DenseElementsAttribute(dt).init(.tensor(dims, dt.mlir_type(ctx)), values).as_attr();
@@ -733,8 +619,8 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
         pub fn items(self: Attr) []const dt.ZigType() {
             const raw_bytes: [*]const u8 = c.mlirDenseElementsAttrGetRawData(self._inner) orelse unreachable;
             const ptr: [*]const dt.ZigType() = @ptrCast(@alignCast(raw_bytes));
-            // Note the mlir API returns us the number of elements, not the number of bytes,
-            // that's why we track the element type at comptime to allow items to work.
+            // The C API reports an element count, so the element type remains
+            //  comptime-known when constructing the slice.
             return ptr[0..self.len()];
         }
 
@@ -890,7 +776,7 @@ pub const Operation = struct {
             }
             state.add_attribute(ctx, "operandSegmentSizes", .dense_elements(ctx, &.{@intCast(segments_len)}, .i32, segments_buf[0..segments_len]));
         } else if (args.tt_variadic_operands) |operands_segments| {
-            // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
+            // Triton expects a dense array for `operandSegmentSizes`.
             const MAX_SEGMENTS = 32;
             var segments_buf: [MAX_SEGMENTS]i32 = undefined;
             var segments_len: usize = 0;
@@ -991,10 +877,6 @@ pub const Operation = struct {
         return .{ ._inner = c.mlirOperationGetNextInBlock(self._inner) };
     }
 
-    // pub fn previousInBlock(self: Self) Self {
-    //     return .{ ._inner = c.mlirOperationGetPrevInBlock(self._inner) };
-    // }
-
     pub fn block(self: Self) ?Block {
         return Block.wrap_or(c.mlirOperationGetBlock(self._inner));
     }
@@ -1018,7 +900,7 @@ pub const Operation = struct {
             WriterWithErr.print_callback,
             &writer_with_err,
         );
-        return writer_with_err.check();
+        return try writer_with_err.check();
     }
 
     pub fn write_bytecode_with_config(self: Self, writer: *std.Io.Writer, config: struct {
@@ -1037,11 +919,12 @@ pub const Operation = struct {
             &WriterWithErr.print_callback,
             &writer_with_err,
         ), error.InvalidMlirBytecodeVersion);
-        return writer_with_err.check();
+        return try writer_with_err.check();
     }
 
-    /// Enable a full dump of the IR.
-    /// Usage `std.log.debug("{}", .{ module.op().mlir_formatter(.{}) });
+    /// Return a formatter that prints complete MLIR.
+    ///
+    /// Example: `std.log.debug("{f}", .{module.op().mlir_formatter(.{})});`
     pub fn mlir_formatter(self: Operation, flags: OpPrintingFlags) MlirFormatter {
         return .{ .op = self, .flags = flags };
     }
@@ -1061,7 +944,7 @@ pub const Operation = struct {
 
         var writer_err: WriterWithErr = .{ .writer = writer };
         c.mlirOperationPrintWithFlags(self._inner, pflags, WriterWithErr.print_callback, &writer_err);
-        return writer_err.check();
+        return try writer_err.check();
     }
 
     pub fn verify(self: Self) bool {
@@ -1118,10 +1001,10 @@ pub const Operation = struct {
 
     /// Hash the canonicalized IR, without debug information that can change across builds.
     pub fn hash(op: Operation, hasher: *std.hash.XxHash64) void {
-        // Note: before we where using op.write_bytecode(writer),
-        // but it crashes on some inputs, notably for unused variables.
-        // So we use the text representation of the mlir.
-        // See https://github.com/zml/zml/issues/97.
+        // Text serialization accepts operations with unused values.
+        //
+        // MLIR bytecode serialization can fail for those operations. See
+        //  https://github.com/zml/zml/issues/97.
         const flags = OpPrintingFlags.create(.{ .debug_info = false });
         defer c.mlirOpPrintingFlagsDestroy(flags);
 
@@ -1266,9 +1149,7 @@ pub const Value = struct {
         if (val.is_a_block_argument()) {
             return .{ .block_argument = .{ ._inner = val._inner } };
         }
-        // From MLIR docs:
-        // https://mlir.llvm.org/doxygen/classmlir_1_1Value.html#details
-        // > An SSA value is either a BlockArgument or the result of an operation.
+        // MLIR values are either block arguments or operation results.
         return .null;
     }
 };
@@ -1286,7 +1167,7 @@ pub const BlockArgument = struct {
 
     pub fn format(self: BlockArgument, writer: *std.Io.Writer) !void {
         const value = Value{ ._inner = self._inner };
-        return value.format(writer);
+        return try value.format(writer);
     }
 };
 
@@ -1871,7 +1752,7 @@ pub fn call_print_fn(
 ) std.Io.Writer.Error!void {
     var writer_with_err: WriterWithErr = .{ .writer = writer };
     print_fn(value._inner, &WriterWithErr.print_callback, &writer_with_err);
-    return writer_with_err.check();
+    return try writer_with_err.check();
 }
 
 pub const WriterWithErr = struct {

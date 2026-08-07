@@ -8,20 +8,14 @@
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
 
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     zig-overlay = {
       url = "github:mitchellh/zig-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    mirage-src = {
-      url = "path:/home/marco/Github/mirage-c-api";
-      flake = false;
-    };
-
-    mpk = {
-      url = "path:/home/marco/flakes/mpk";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.mirage-src.follows = "mirage-src";
     };
 
     pyproject-nix = {
@@ -46,9 +40,11 @@
       };
     };
 
-    # Source pins (previously in nix/lock.json).
-    # Update with: nix flake update --update-input xla-src (etc.)
-    # LLVM and StableHLO commits are derived from XLA's third_party/;
+    # Source pins.
+    #
+    # Update with: nix flake update --impure --update-input xla-src (etc.)
+    #
+    # LLVM and StableHLO commits are derived from XLA's third_party/.
     # after updating xla-src, check third_party/llvm/workspace.bzl
     # and third_party/stablehlo/workspace.bzl for new commits.
     xlaSrc = {
@@ -66,10 +62,7 @@
       flake = false;
     };
 
-    # IREE compiler + its BYO-LLVM dependency.
-    # ireeLlvmSrc: iree-org/llvm-project fork that IREE carries patches on top of.
-    # ireeStablehloSrc: iree-org/stablehlo fork (diverges from openxla/stablehlo).
-    # ireeFlatccSrc: flatcc library (IREE VM flatbuffer runtime).
+    # IREE and its pinned source dependencies.
     ireeSrc = {
       url = "github:iree-org/iree/776210bd36896f8ca14288637592a9d5cebfcea1";
       flake = false;
@@ -92,7 +85,11 @@
     };
   };
 
-  outputs = inputs @ {flake-parts, ...}: let
+  outputs = inputs @ {
+    flake-parts,
+    treefmt-nix,
+    ...
+  }: let
     zigOverlay = final: prev: {
       zig = inputs.zig-overlay.packages.${prev.stdenv.hostPlatform.system}."0.16.0";
       zls = prev.stdenvNoCC.mkDerivation (finalAttrs: {
@@ -141,31 +138,26 @@
       });
     };
 
-    # Project-wide CUDA configuration. Centralized to avoid hardcoding
-    # sm_XX or toolkit versions in random places.
+    # Shared CUDA package and target configuration.
     cudaCfg = {
       gccHostAttr = "gcc14";
       cudaPackagesAttr = "cudaPackages_12_9";
       cudaVersion = "12.9.1";
     };
 
-    # Build-time policy. Threaded into every long-running C++/bazel derivation.
+    # Build options threaded into external source derivations.
     #
-    #  PROJECT DEFAULTS ARE PORTABLE. `nix build .#<sdk-profile>` (pure)
-    #  produces a redistributable artifact: no native CPU tuning, upstream
-    #  fat CUDA arch list (every supported sm_XX), stripped, NDEBUG, no LTO.
-    #  Suitable for github release tarballs, binary caches consumed by
-    #  anyone, and CI.
+    #  Project defaults avoid host-specific CPU and CUDA tuning. Named
+    #  configurations decide which packages are demanded. This attrset decides
+    #  how those external packages are compiled.
     #
-    #  PER-USER OVERRIDES live in ./local-build-cfg.nix (gitignored).
+    #  Per-user overrides live in ./local-build-cfg.nix (gitignored).
     #  Copy ./local-build-cfg.example.nix to start. To apply the override:
     #
-    #    nix build --impure .#<sdk-profile>
+    #    nix build --impure .#<configuration>
     #
     #  The --impure flag is required so the flake can read the user's
-    #  current working directory for the file (flake source is otherwise
-    #  the locked git tree, which excludes untracked files). Default builds
-    #  WITHOUT --impure stay hermetic and reproduce the project defaults.
+    #  current working directory for the file.
     #
     #  See the Building section of the docs site for the full knob reference
     #  and use-case recipes.
@@ -179,8 +171,7 @@
         extraLdFlags = [];
         extraBazelFlags = [];
       };
-      # Read PWD from env (only populated under --impure). When pure, this
-      #  evaluates to "" and the localFile branch is short-circuited to {}.
+      # Impure evaluation supplies PWD for the optional local override.
       pwd = builtins.getEnv "PWD";
       localFile =
         if pwd != ""
@@ -200,7 +191,8 @@
       ];
 
       imports = [
-        ./nix/flake/sdk.nix
+        ./nix/flake/integrations.nix
+        ./nix/flake/tools.nix
         ./nix/flake/devshells.nix
         ./nix/flake/checks.nix
       ];
@@ -211,17 +203,18 @@
           overlays = [zigOverlay];
           config = {
             allowUnfree = true;
-            # note to self: avoid enabling cudaSupport globally unless you need nixpkgs packages to flip CUDA paths.
-            # it might have wide-reaching effects on unrelated packages.
+            # TODO(nix): Narrow unfree package acceptance to required inputs.
+            # Enabling cudaSupport globally changes unrelated nixpkgs packages.
             # cudaSupport = true;
           };
         };
+        treefmt = treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
 
-        # Drift detection: cudaCfg pins two related-but-independent things.
+        # cudaCfg pins two independently versioned inputs.
         #  cudaVersion drives versions.json (cuda-redist tarballs from nvidia).
         #  cudaPackagesAttr selects a nixpkgs cuda set whose minor version
         #  floats with the nixpkgs lock. Assert their major.minor agree so a
-        #  silent split (e.g. nixpkgs bumps to 13.x) fails loud at eval time.
+        #  version mismatch fails during evaluation.
         pkgsCudartVersion = pkgs.${cudaCfg.cudaPackagesAttr}.cuda_cudart.version;
         cudaVerMM = pkgs.lib.versions.majorMinor cudaCfg.cudaVersion;
         pkgsCudartVerMM = pkgs.lib.versions.majorMinor pkgsCudartVersion;
@@ -236,7 +229,8 @@
           _module.args = {
             inherit pkgs cudaCfg buildCfg;
           };
-          formatter = pkgs.alejandra;
+          formatter = treefmt.config.build.wrapper;
+          checks.formatting = treefmt.config.build.check inputs.self;
         };
     };
 }

@@ -3,12 +3,13 @@ const std = @import("std");
 
 /// POSIX memory-map `path` read-only (SHARED).
 ///
-/// Returns a page-aligned read-only slice backed by the kernel page cache owned by the caller
-///  who must release it via `std.posix.munmap`.
+/// Returns a page-aligned read-only slice backed by the kernel page cache.
 ///
-/// Uses raw posix for `open`/`lseek`/`mmap` because mmap is itself a posix
-///  primitive without an `io`-threaded equivalent. The fd is opened only
-///  to be passed to mmap, then closed; relative paths resolve against CWD.
+/// The caller releases the slice with `std.posix.munmap`.
+///
+/// Uses POSIX `open`, `lseek`, and `mmap` because no I/O-threaded mmap API is
+///  available. The descriptor closes after mapping. Relative paths resolve
+///  against the current working directory.
 pub fn mmap_file(
     /// Absolute or relative path
     path: []const u8,

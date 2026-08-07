@@ -6,11 +6,9 @@ const std = @import("std");
 const pr = @import("../pr.zig");
 const log = std.log.scoped(.@"zg/eval");
 
-// ============================================================================
 // HostTensor
-// ============================================================================
 
-/// Dense f32 tensor with owned shape and data.
+/// Dense f32 tensor that frees its shape and data from `deinit`.
 pub const HostTensor = struct {
     data: []f32,
     shape: []const i64,
@@ -43,7 +41,7 @@ pub const HostTensor = struct {
     }
 
     pub fn clone(self: HostTensor) !HostTensor {
-        return init_with_data(self.allocator, self.shape, self.data);
+        return try init_with_data(self.allocator, self.shape, self.data);
     }
 
     pub fn rank(self: HostTensor) usize {
@@ -66,9 +64,7 @@ pub const EvalError = error{
     InvalidVar,
 };
 
-// ============================================================================
 // Public API
-// ============================================================================
 
 /// Evaluate a PR function on concrete f32 inputs.
 ///
@@ -137,9 +133,7 @@ pub fn eval(
     return results;
 }
 
-// ============================================================================
 // Op Dispatch
-// ============================================================================
 
 fn get_input(env: []?HostTensor, op: *const pr.Op, idx: usize) EvalError!HostTensor {
     return env[op.operand(idx).id] orelse return error.InvalidVar;
@@ -183,9 +177,7 @@ fn eval_op(
     env[op.result(0).id] = result;
 }
 
-// ============================================================================
 // Op Implementations
-// ============================================================================
 
 fn add_fn(a: f32, b: f32) f32 {
     return a + b;
@@ -889,9 +881,7 @@ fn eval_concatenate(
     return result;
 }
 
-// ============================================================================
 // Indexing Helpers
-// ============================================================================
 
 fn flat_to_multi(flat: usize, shape: []const i64, out: []usize) void {
     var remaining = flat;
@@ -920,9 +910,7 @@ fn multi_to_flat(idx: []const usize, shape: []const i64) usize {
     return flat;
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+// Tests.
 
 const testing = std.testing;
 

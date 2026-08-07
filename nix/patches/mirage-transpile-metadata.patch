@@ -1,0 +1,159 @@
+--- a/include/mirage/transpiler/structs.h
++++ b/include/mirage/transpiler/structs.h
+@@ -16,6 +16,8 @@
+ #pragma once
+
+ #include <algorithm>
++#include <array>
+ #include <cstddef>
++#include <cstdint>
+ #include <vector>
+
+@@ -57,6 +58,27 @@
+
+   // The stride
+   std::vector<size_t> strides;
+ };
++
++enum class KernelArgumentSource {
++  INPUT,
++  OUTPUT,
++  WORKSPACE,
++};
++
++struct KernelArgumentDirective {
++  KernelArgumentSource source;
++
++  // Input/output index or byte offset into the workspace buffer.
++  size_t index_or_offset;
++};
++
++struct KernelDirective {
++  std::string function_name;
++  size_t smem_size;
++  std::array<uint32_t, 3> grid_dim;
++  std::array<uint32_t, 3> block_dim;
++  std::vector<KernelArgumentDirective> arguments;
++};
+
+ // Result returned by the transpiler
+@@ -78,6 +100,9 @@
+
+   // Directives for output tensors
+   std::vector<OutputTensorDirective> output_directives;
++
++  // Exact launch metadata for each generated custom kernel
++  std::vector<KernelDirective> kernel_directives;
+ };
+
+ struct TiledMMA {
+--- a/src/search/search.cc
++++ b/src/search/search.cc
+@@ -122,9 +122,11 @@
+          generated_graphs.size(),
+          elapsed);
+
+-  std::ofstream ofs(checkpoint_filename_);
+-  ofs << json(generated_graphs);
+-  ofs.close();
++  if (!checkpoint_filename_.empty()) {
++    std::ofstream ofs(checkpoint_filename_);
++    ofs << json(generated_graphs);
++    ofs.close();
++  }
+ }
+
+ void KernelGraphGenerator::init_from_ref_graph(
+@@ -177,8 +179,10 @@
+ }
+
+ void KernelGraphGenerator::save_results() const {
+-  std::ofstream ofs(checkpoint_filename_);
+-  ofs << json(generated_graphs);
++  if (!checkpoint_filename_.empty()) {
++    std::ofstream ofs(checkpoint_filename_);
++    ofs << json(generated_graphs);
++  }
+ }
+
+ double KernelGraphGenerator::get_elapsed_time_in_sec() const {
+--- a/src/search/search_c.cc
++++ b/src/search/search_c.cc
+@@ -166,9 +166,7 @@
+   }
+   if (symbolic_graphs.empty()) {
+     search::AbstractExpr::symbolic_expr = true;
+-    char const *result_filename = checkpoint_filename
+-                                      ? checkpoint_filename
+-                                      : "mirage_sso_checkpoint.json";
++    char const *result_filename = checkpoint_filename ? checkpoint_filename : "";
+     search::KernelGraphGenerator gen(
+         *input_graph, config, result_filename, verbose);
+     gen.search_symbolic();
+--- a/src/transpiler/transpiler_kn.cc
++++ b/src/transpiler/transpiler_kn.cc
+@@ -332,6 +332,7 @@
+ TranspileResult Transpiler::transpile_ugraph() {
+   size_t max_smem_size = 0;
+   size_t profiler_buf_size = 0;
++  vector<KernelDirective> kernel_directives;
+   // Generate header
+
+   CodeKeeper header;
+@@ -625,11 +626,26 @@
+         // We make the aggrement that, when calling a custom kernel, the
+         // arguments are in the order of "output_tensors, input_tensors"
+         vector<string> ptr_names;
++        vector<KernelArgumentDirective> argument_directives;
+         for (kn::DTensor const &dtensor :
+              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+           auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
+           exec.e(ptr_code);
+           ptr_names.push_back(ptr_name);
++
++          DTensorMeta const &meta = dtensor_metas.at(dtensor.guid);
++          if (meta.is_input) {
++            argument_directives.push_back(
++                {KernelArgumentSource::INPUT,
++                 static_cast<size_t>(meta.input_idx)});
++          } else if (meta.is_output) {
++            argument_directives.push_back(
++                {KernelArgumentSource::OUTPUT,
++                 static_cast<size_t>(meta.output_idx)});
++          } else {
++            argument_directives.push_back(
++                {KernelArgumentSource::WORKSPACE, meta.addr});
++          }
+         }
+
+         if (config.profiling) {
+@@ -661,6 +677,16 @@
+           max_smem_size = result.smem_size;
+         }
+         profiler_buf_size += result.profiler_buf_size;
++        kernel_directives.push_back(
++            {result.func_name,
++             result.smem_size,
++             {static_cast<uint32_t>(bgraph.grid_dim.x),
++              static_cast<uint32_t>(bgraph.grid_dim.y),
++              static_cast<uint32_t>(bgraph.grid_dim.z)},
++             {static_cast<uint32_t>(bgraph.block_dim.x),
++              static_cast<uint32_t>(bgraph.block_dim.y),
++              static_cast<uint32_t>(bgraph.block_dim.z)},
++             std::move(argument_directives)});
+
+         // Checkings against grid dim and block dim
+         if (config.target_cc <= GPU_CC::B200) {
+@@ -877,8 +903,9 @@
+                          this->d_buf_size,
+                          max_smem_size,
+                          profiler_buf_size,
+-                         output_directives};
++                         output_directives,
++                         kernel_directives};
+ }
+
+ } // namespace transpiler
+-} // namespace mirage
+\ No newline at end of file
++} // namespace mirage

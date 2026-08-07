@@ -32,7 +32,9 @@ stdenv.mkDerivation {
       -DZG_LLVM_ROOT=${llvm} \
       -DZG_INSTALL_RPATH="${xlaMlirStablehloCapiSdk.out}/lib:${llvm}/lib"
 
-    cmake --build build --target zigrad_dev_tools
+    cmake --build build \
+      --parallel "$NIX_BUILD_CORES" \
+      --target zigrad_dev_tools
   '';
 
   checkPhase = ''
@@ -64,7 +66,7 @@ stdenv.mkDerivation {
   installPhase = ''
     set -eo pipefail
 
-    # out: production .so (consumed by SDK profiles).
+    # out: production .so composed into demanding build configurations.
     mkdir -p "$out/lib"
     cp -v build/libzigrad_mlir_ext.so* "$out/lib/"
 

@@ -6,11 +6,9 @@ const pr = @import("../pr.zig");
 const log = std.log.scoped(.@"zg/shape");
 const Tensor = pr.Tensor;
 const Aval = pr.Aval;
-const max_rank: usize = 64;
+const max_rank = pr.max_rank;
 
-// ============================================================================
 // Reshape
-// ============================================================================
 
 pub const reshape = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -52,7 +50,7 @@ pub const reshape = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = rp.out_shape } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -90,9 +88,7 @@ pub const reshape = struct {
     }
 };
 
-// ============================================================================
 // Iota
-// ============================================================================
 
 pub const iota = struct {
     pub const arity = .{ .in = 0, .out = 1 };
@@ -127,13 +123,13 @@ pub const iota = struct {
         return .{ .tensor = .{ .dtype = ip.out_dtype, .shape = .{ .dims = ip.out_shape } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, ip: pr.IotaParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, ip: pr.IotaParams) types.AdError!void {
         const out_tensor = op.result(0).as_tensor();
         const out = try ctx.builder.iota(out_tensor.dtype, out_tensor.shape.dims, ip.dimension);
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: iota is a constant -- zero tangent.
+    /// JVP of iota is a zero tangent.
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.IotaParams) types.AdError!void {
         const out_tensor = op.result(0).as_tensor();
         const z = try ctx.builder.scalar(out_tensor.dtype, 0);
@@ -150,9 +146,7 @@ pub const iota = struct {
     }
 };
 
-// ============================================================================
 // Transpose
-// ============================================================================
 
 pub const transpose = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -184,7 +178,7 @@ pub const transpose = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -224,9 +218,7 @@ pub const transpose = struct {
     }
 };
 
-// ============================================================================
 // Slice
-// ============================================================================
 
 pub const slice = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -245,7 +237,7 @@ pub const slice = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -314,9 +306,7 @@ pub const slice = struct {
     }
 };
 
-// ============================================================================
 // Concatenate
-// ============================================================================
 
 pub const concatenate = struct {
     pub const arity = .{ .in = .any, .out = 1 };
@@ -336,7 +326,7 @@ pub const concatenate = struct {
         return .{ .tensor = .{ .dtype = first.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
         if (op.inputs.len == 0) return error.UnsupportedEqn;
 
         var primals = try ctx.allocator.alloc(*pr.Var, op.inputs.len);
@@ -406,9 +396,7 @@ pub const concatenate = struct {
     }
 };
 
-// ============================================================================
 // Reduce Sum
-// ============================================================================
 
 pub const reduce_sum = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -431,7 +419,7 @@ pub const reduce_sum = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -472,9 +460,7 @@ pub const reduce_sum = struct {
     }
 };
 
-// ============================================================================
 // Reduce Max
-// ============================================================================
 
 pub const reduce_max = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -493,7 +479,7 @@ pub const reduce_max = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -501,7 +487,7 @@ pub const reduce_max = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: d(reduce_max(x, axes)) -- mask-based: select where x==max, pass dx, then sum.
+    /// JVP of reduce_max selects tangents at maximal elements and reduces them.
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
@@ -558,9 +544,7 @@ pub const reduce_max = struct {
     }
 };
 
-// ============================================================================
 // Gather
-// ============================================================================
 
 pub const gather = struct {
     pub const arity = .{ .in = 2, .out = 1 };
@@ -616,7 +600,7 @@ pub const gather = struct {
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -657,9 +641,7 @@ pub const gather = struct {
     }
 };
 
-// ============================================================================
 // Scatter Add
-// ============================================================================
 
 pub const scatter = struct {
     pub const arity = .{ .in = 3, .out = 1 };
@@ -687,9 +669,7 @@ pub const scatter = struct {
     }
 };
 
-// ============================================================================
 // Broadcast In Dim
-// ============================================================================
 
 pub const broadcast_in_dim = struct {
     pub const arity = .{ .in = 1, .out = 1 };
@@ -714,7 +694,7 @@ pub const broadcast_in_dim = struct {
         return .{ .tensor = out_tensor };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -777,10 +757,6 @@ pub const broadcast_in_dim = struct {
     }
 };
 
-// ============================================================================
-// Shared Helpers
-// ============================================================================
-
 fn num_elements(dims: []const i64) usize {
     var n: usize = 1;
     for (dims) |d| n *= @intCast(d);
@@ -802,7 +778,7 @@ fn is_permutation(perm: []const i64, rank: usize) bool {
     return true;
 }
 
-// TODO: why not just make this a method on pr.Shape?
+// TODO(shape): Move common shape formatting onto `pr.Shape`.
 fn format_shape(writer: *types.Writer, dims: []const i64) types.FormatError!void {
     try writer.writeByte('[');
     for (dims, 0..) |d, i| {
@@ -835,7 +811,7 @@ fn validate_broadcast_in_dim_op(operand: Tensor, out: Tensor, broadcast_dimensio
 /// Drops the reduced dimensions, preserving order of the remaining ones.
 fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const i64, axes: []const i64) pr.BuildError![]const i64 {
     const rank = in_dims.len;
-    // TODO: fix these error names
+    // TODO(pr): Give shared shape helpers errors independent of individual ops.
     if (rank > max_rank) return error.ReduceSumTypeMismatch;
     var reduce = [_]bool{false} ** max_rank;
     for (axes) |axis| {

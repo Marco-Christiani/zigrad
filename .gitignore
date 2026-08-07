@@ -1,5 +1,6 @@
 # exts
 *.json
+!src/c/mirage/adapter/CMakePresets.json
 *.so
 *.png
 *.svg
@@ -13,6 +14,7 @@
 *.trace
 *.air.*
 *.lock
+!nix/locks/mirage-Cargo.lock
 *.bak
 *.gz
 *.tar
@@ -38,6 +40,7 @@ vendor/
 reference/
 result
 result-*
+/src/c/mirage/adapter/build/
 
 !docs/architecture.norg
 !docs/roadmap.norg
@@ -50,9 +53,6 @@ artifacts/
 .task/
 
 *.wasm
-!website/nuxt-content/shiki-grammars/*.json
-!website/**/*.svg
-!website/*/*.json
 scripts/bazel-log-parser.zig
 scripts/bench_tvm_attention.sh
 scripts/bench_xla_flags.sh
@@ -73,5 +73,7 @@ shim/build-mlir
 *.ll
 tools/decode_hlo
 
-# Per-user buildCfg overrides; see local-build-cfg.example.nix.
+# Per-user build configuration overrides. See local-build-cfg.example.nix.
 local-build-cfg.nix
+
+zig-pkg

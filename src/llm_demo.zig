@@ -1,21 +1,20 @@
 const std = @import("std");
 const zg = @import("zigrad");
+const demo_support = @import("demo_support.zig");
 const stz = @import("safetensors_zg");
 const log = std.log.scoped(.@"zg/llm_demo");
 
 pub fn run_llm_train_demo(
-    io: std.Io,
-    allocator: std.mem.Allocator,
+    context: *demo_support.PjrtContext,
     environ: *const std.process.Environ.Map,
-    b: *zg.Backend,
-    device: zg.Backend.Device,
-    dump_pr: ?*zg.pipeline.DumpConfig,
-    dump_mlir: ?*zg.pipeline.DumpConfig,
-    dump_optimized: ?*zg.pipeline.DumpConfig,
+    operations: demo_support.PjrtOperations,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
 ) !void {
+    const io = context.compilation.io;
+    const allocator = context.compilation.allocator;
+    const executor = &context.execution.interface;
     const Tensor = zg.Tensor;
 
     const ParamsSpec = struct {
@@ -53,12 +52,12 @@ pub fn run_llm_train_demo(
         }
 
         fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {
-            var vg = try zg.frontend.transforms.value_and_grad(loss, .{ params, batch });
+            var vg = try zg.transforms.value_and_grad(loss, .{ params, batch });
             defer vg.deinit();
             var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
             defer params_tree.deinit();
-            const optim = zg.frontend.optim.SGD{ .lr = 1e-2 };
-            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.frontend.optim.SGD.update);
+            const optim = zg.optim.SGD{ .lr = 1e-2 };
+            var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, optim, zg.optim.SGD.update);
             defer updated.deinit();
             return .{
                 .loss_val = vg.value,
@@ -81,19 +80,19 @@ pub fn run_llm_train_demo(
         .y = Tensor.abstract(.f32, &.{ bs, vocab }),
     };
     const inputs_spec = .{ params_spec, batch_spec };
-    const donate = comptime zg.frontend.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
+    const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 
-    const train = zg.frontend.train;
+    const train = zg.train;
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "llm_ft_step");
     defer program.deinit();
 
-    const exe = try zg.frontend.compile_program(b, io, allocator, &program, device, "llm_ft_step", .{
-        .lower = .{ .encoding = if (dump_mlir != null) .text else .binary },
-        .dump_pr = if (dump_pr) |cfg| cfg.* else null,
-        .dump_mlir = if (dump_mlir) |cfg| cfg.* else null,
-        .dump_optimized = if (dump_optimized) |cfg| cfg.* else null,
-    });
-    defer b.deinit_executable(exe);
+    var exe = try demo_support.compile_pjrt(
+        context,
+        &program,
+        "llm_ft_step",
+        operations,
+    );
+    defer exe.deinit();
 
     var host_w_emb = try Tensor.host(.f32, &.{ vocab, hidden }, .{ .alloc = allocator });
     defer host_w_emb.deinit();
@@ -135,16 +134,15 @@ pub fn run_llm_train_demo(
     fill_one_hot(host_x.as_slice(f32), tokens, vocab);
     fill_one_hot(host_y.as_slice(f32), targets, vocab);
 
-    const dev_w_emb = try host_w_emb.to_device(b, device);
-    const dev_w_out = try host_w_out.to_device(b, device);
-    const dev_b = try host_b.to_device(b, device);
-    const dev_x = try host_x.to_device(b, device);
-    const dev_y = try host_y.to_device(b, device);
+    const dev_w_emb = try host_w_emb.to_device(executor);
+    const dev_w_out = try host_w_out.to_device(executor);
+    const dev_b = try host_b.to_device(executor);
+    const dev_x = try host_x.to_device(executor);
+    const dev_y = try host_y.to_device(executor);
 
     var state = try train.TrainState.init(
         allocator,
         exe,
-        b,
         &.{ dev_w_emb, dev_w_out, dev_b, dev_x, dev_y },
         program.output_arity("llm_ft_step"),
         .{ .non_donatable_input_indices = donate },
@@ -153,8 +151,8 @@ pub fn run_llm_train_demo(
 
     for (0..warmup_steps) |_| {
         var result = try state.step();
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe
-        if (result.event) |ev| b.deinit_event(ev);
+        // TODO(pjrt): Verify that releasing an unawaited event is valid.
+        if (result.event) |completion| executor.release_event(completion);
         result.loss.deinit();
     }
 
@@ -162,8 +160,8 @@ pub fn run_llm_train_demo(
     for (0..steps) |_| {
         try loop_timer.start_step();
         var result = try state.step();
-        // TODO: verify PJRT_Event_Destroy on non-awaited event is spec-safe
-        if (result.event) |ev| b.deinit_event(ev);
+        // TODO(pjrt): Verify that releasing an unawaited event is valid.
+        if (result.event) |completion| executor.release_event(completion);
         loop_timer.mark("dispatch");
 
         const loss: ?f32 = if (quiet) null else try result.loss.item(f32);
@@ -231,7 +229,7 @@ fn load_safetensors_weights(
 
 fn copy_tensor_f32(view: stz.TensorView, out: []f32, expected_shape: []const i64) !void {
     if (view.info.dtype != .f32) return error.TensorDtypeMismatch;
-    // compare shapes across type boundary (safetensors uses usize, PR uses i64)
+    // Compare safetensors usize dimensions with PR i64 dimensions.
     if (view.info.shape.len != expected_shape.len) return error.TensorShapeMismatch;
     for (view.info.shape, expected_shape) |a, b| {
         if (a != @as(usize, @intCast(b))) return error.TensorShapeMismatch;

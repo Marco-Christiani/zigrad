@@ -1,7 +1,7 @@
 //! IREE C API hand-written Zig bindings.
 //!
-//! Replaces `b.addTranslateC` for IREE because the upstream headers contain
-//!  several constructs that translate-c rejects on Zig 0.16: bitfield structs
+//! The upstream IREE headers contain several constructs that translate-c
+//!  rejects on Zig 0.16. Bitfield structs
 //!  (`iree_vm_type_def_t`, `iree_hal_buffer_ref_t`) become `opaque {}` and
 //!  poison every transitively-embedded type, and `iree_alignas(sizeof(long
 //!  double))` cannot be evaluated at translation time. Hand-declaring keeps
@@ -12,34 +12,33 @@
 //! Opaque pointer-only types: callers hold `*T`, never destructure or take
 //!  `@sizeOf`. Layout drift in their fields cannot reach Zig.
 //!
-//! Value-typed structs (`Allocator`, `RuntimeCall`, `VmFunction`, `StringView`,
-//!  `ConstByteSpan`): mirror upstream layout. The `abi_test.zig` build step
+//! Value structs (`Allocator`, `RuntimeCall`, `VmFunction`, `StringView`,
+//!  `ConstByteSpan`) mirror upstream layout. The `abi_test.zig` build step
 //!  asserts size, alignment, and field offsets against C `sizeof`/`_Alignof`/
 //!  `offsetof` shims, so layout drift fails the build.
 //!
 //! Allocation flag constants and `iree_hal_buffer_params_t` are not declared
 //!  here. The `zg_iree_buffer_view_allocate_device_local_copy` shim
-//!  (`shim.c`) takes the same defaults zigrad has always used; if call sites
-//!  ever need different memory/usage/access combinations, expose a small
-//!  zigrad-owned options struct on the shim, never mirror IREE's struct.
+//!  (`shim.c`) applies Zigrad's fixed device-local defaults.
+//!
+//! TODO(iree): Expose a small Zigrad options struct on the shim if call sites
+//!  need different memory, usage, access, or queue combinations.
 const std = @import("std");
 
-// ---------------------------------------------------------------------------
-// Base typedefs.
-// ---------------------------------------------------------------------------
-
-/// IREE's `iree_host_size_t` is `size_t` in the SDK config we ship.
+/// IREE's configured headers define `iree_host_size_t` as `size_t`.
 pub const HostSize = usize;
 
-/// IREE's `iree_device_size_t` is `size_t` in the SDK config we ship.
+/// IREE's configured headers define `iree_device_size_t` as `size_t`.
 pub const DeviceSize = usize;
 
 /// `iree_hal_dim_t` is `iree_device_size_t` upstream.
 pub const HalDim = DeviceSize;
 
-/// `iree_hal_element_type_t` is `uint32_t`. The bit pattern packs a
-///  numerical-type tag in the high byte and the bit count in the low bits
-///  (`(numerical << 24) | bits`); see `element_type_value`.
+/// `iree_hal_element_type_t` is `uint32_t`.
+///
+/// The bit pattern packs a numerical-type tag in the high byte and the bit
+///  count in the low bits (`(numerical << 24) | bits`). See
+///  `element_type_value`.
 pub const HalElementType = u32;
 
 /// `iree_hal_queue_affinity_t` is `uint64_t`.
@@ -49,14 +48,13 @@ pub const HalQueueAffinity = u64;
 pub const RuntimeCallFlags = u32;
 
 /// `iree_status_t` is a pointer typedef (`struct iree_status_handle_t*`).
-///  Status-OK is represented by `null` upstream; non-null carries a
+///
+/// Status-OK is represented by `null` upstream. A non-null value carries a
 ///  reference-counted handle. Use the `zg_iree_status_is_ok` shim to
 ///  preserve macro semantics.
 pub const Status = ?*anyopaque;
 
-// ---------------------------------------------------------------------------
 // Opaque handles. We only hold `*T` and pass to/from the C API.
-// ---------------------------------------------------------------------------
 
 pub const Instance = opaque {};
 pub const Session = opaque {};
@@ -65,9 +63,7 @@ pub const HalAllocator = opaque {};
 pub const HalBuffer = opaque {};
 pub const HalBufferView = opaque {};
 
-// ---------------------------------------------------------------------------
-// Value-typed structs (must match upstream layout exactly).
-// ---------------------------------------------------------------------------
+// Value structs that must match upstream layout exactly.
 
 /// `iree_string_view_t` upstream:
 /// ```c
@@ -130,8 +126,10 @@ pub const VmFunction = extern struct {
 ///   iree_vm_list_t* outputs;
 /// } iree_runtime_call_t;
 /// ```
-/// `iree_vm_list_t*` is opaque to us; we never push/pop into the list
-///  directly because we use `iree_runtime_call_*_buffer_view` helpers.
+/// `iree_vm_list_t*` is opaque to Zigrad.
+///
+/// Calls use `iree_runtime_call_*_buffer_view` helpers instead of accessing
+///  the list directly.
 pub const RuntimeCall = extern struct {
     session: ?*Session,
     function: VmFunction,
@@ -139,9 +137,7 @@ pub const RuntimeCall = extern struct {
     outputs: ?*anyopaque,
 };
 
-// ---------------------------------------------------------------------------
 // Element type encoding.
-// ---------------------------------------------------------------------------
 
 /// Compose an `iree_hal_element_type_t` value from the upstream encoding:
 ///  `(numerical_type << 24) | bits`. Mirrors `IREE_HAL_ELEMENT_TYPE_VALUE`.
@@ -171,9 +167,7 @@ pub const HAL_ELEMENT_TYPE_FLOAT_32 = element_type_value(NumericalType.float_iee
 pub const HAL_ELEMENT_TYPE_FLOAT_64 = element_type_value(NumericalType.float_ieee, 64);
 pub const HAL_ELEMENT_TYPE_BFLOAT_16 = element_type_value(NumericalType.float_brain, 16);
 
-// ---------------------------------------------------------------------------
 // Direct IREE entry points (exported symbols in libiree_runtime_unified.a).
-// ---------------------------------------------------------------------------
 
 pub extern "c" fn iree_runtime_instance_release(instance: *Instance) void;
 pub extern "c" fn iree_hal_device_release(device: *HalDevice) void;
@@ -222,12 +216,10 @@ pub extern "c" fn iree_status_to_string(
 pub extern "c" fn iree_status_free(status: Status) void;
 pub extern "c" fn iree_allocator_free(allocator: Allocator, ptr: ?*anyopaque) void;
 
-// ---------------------------------------------------------------------------
 // Zigrad shim helpers (defined in shim.c). Each replaces an upstream pattern
 //  that translate-c cannot handle (static inline, macro-expanded helper, or
 //  bitfield struct), or hides a multi-step C ritual that would force us to
 //  mirror more types in Zig (options structs, buffer params).
-// ---------------------------------------------------------------------------
 
 pub extern "c" fn zg_iree_allocator_system() Allocator;
 pub extern "c" fn zg_iree_allocator_null() Allocator;
@@ -267,7 +259,7 @@ pub extern "c" fn zg_iree_runtime_instance_try_create_default_device(
 
 /// Allocate a device-local buffer view by copying host bytes. Hides
 ///  `iree_hal_buffer_params_t` and the four memory/usage/access/queue flag
-///  constants; uses the same defaults zigrad's runtime.zig has always used.
+///  constants. The shim applies Zigrad's fixed device-local defaults.
 pub extern "c" fn zg_iree_buffer_view_allocate_device_local_copy(
     device: *HalDevice,
     shape: [*]const HalDim,

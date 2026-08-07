@@ -1,15 +1,17 @@
-//! Zig API for PJRT
+//! PJRT object wrappers that call through `api.zig`.
 //!
-//! These are thin wrappers calling through to api.zig.
+//! Each wrapper exposes explicit destruction for the corresponding C object.
 const std = @import("std");
-const api_mod = @import("api.zig");
-const Api = api_mod.Api;
+const init_args = @import("api.zig").init_args;
+const pjrt_struct_size = @import("api.zig").pjrt_struct_size;
+const Api = @import("api.zig").Api;
+
 const c = @import("c.zig").c;
 
 const log = std.log.scoped(.@"zg/pjrt/types");
 
-// TODO: now that we have proto bindings we can go deeper, not justified now since
-//  we currently do not need much in the way of compilation options.
+// TODO(pjrt): Replace the minimal compile options encoding with generated
+//  protobuf bindings when PJRT compilation exposes more options.
 
 // Hand-crafted minimal CompileOptionsProto
 // Based on proto/xla/pjrt/proto/compile_options.proto
@@ -36,7 +38,7 @@ const minimal_compile_opts = [_]u8{
 
 fn make_named_value_int64(name: []const u8, value: i64) c.PJRT_NamedValue {
     var out: c.PJRT_NamedValue = std.mem.zeroes(c.PJRT_NamedValue);
-    out.struct_size = api_mod.pjrt_struct_size(c.PJRT_NamedValue);
+    out.struct_size = pjrt_struct_size(c.PJRT_NamedValue);
     out.extension_start = null;
     out.name = name.ptr;
     out.name_size = name.len;
@@ -51,11 +53,11 @@ pub const Client = struct {
     pjrt_client: *c.PJRT_Client,
 
     pub fn create(api: *Api) !Client {
-        return create_with_options(api, null);
+        return try create_with_options(api, null);
     }
 
     pub fn create_with_options(api: *Api, create_options: ?[]const c.PJRT_NamedValue) !Client {
-        var args = api_mod.init_args(c.PJRT_Client_Create_Args);
+        var args = init_args(c.PJRT_Client_Create_Args);
         const empty_opts: [0]c.PJRT_NamedValue = .{};
         args.create_options = if (create_options) |opts| opts.ptr else @ptrCast(&empty_opts);
         args.num_options = if (create_options) |opts| opts.len else 0;
@@ -82,18 +84,34 @@ pub const Client = struct {
     pub fn create_cpu_with_device_count(api: *Api, cpu_device_count: usize) !Client {
         const option = make_named_value_int64("cpu_device_count", @intCast(cpu_device_count));
         const options = [_]c.PJRT_NamedValue{option};
-        return create_with_options(api, options[0..]);
+        return try create_with_options(api, options[0..]);
     }
 
     pub fn deinit(self: *Client) void {
-        var args = api_mod.init_args(c.PJRT_Client_Destroy_Args);
+        var args = init_args(c.PJRT_Client_Destroy_Args);
         args.client = self.pjrt_client;
         self.api.call("PJRT_Client_Destroy", &args) catch {};
     }
 
-    /// Returned slice is owned by caller.
+    /// Return the platform name reported by PJRT.
+    ///
+    /// The returned slice remains valid until this client is destroyed.
+    pub fn get_platform_name(self: *const Client) ![]const u8 {
+        var args = init_args(c.PJRT_Client_PlatformName_Args);
+        args.client = self.pjrt_client;
+        args.platform_name = null;
+        args.platform_name_size = 0;
+
+        try self.api.call("PJRT_Client_PlatformName", &args);
+        if (args.platform_name == null or args.platform_name_size == 0) {
+            return error.PjrtReturnedNullPlatformName;
+        }
+        return args.platform_name[0..args.platform_name_size];
+    }
+
+    /// The caller frees the returned slice with `allocator`.
     pub fn get_devices(self: *Client, allocator: std.mem.Allocator) ![]Device {
-        var args = api_mod.init_args(c.PJRT_Client_Devices_Args);
+        var args = init_args(c.PJRT_Client_Devices_Args);
         args.client = self.pjrt_client;
         args.devices = null;
         args.num_devices = 0;
@@ -113,29 +131,17 @@ pub const Client = struct {
 
     pub fn compile(
         self: *Client,
-        device: *const Device,
-        format: ProgramFormat,
+        format: []const u8,
         bytecode: []const u8,
         options: ?[]const u8,
     ) !LoadedExecutable {
-        _ = device; // TODO: use device for target-specific compilation options
-
-        // create PJRT_Program
-        var program = api_mod.init_args(c.PJRT_Program);
+        var program = init_args(c.PJRT_Program);
         program.code = @constCast(bytecode.ptr);
         program.code_size = bytecode.len;
+        program.format = format.ptr;
+        program.format_size = format.len;
 
-        // TODO: audit and document this
-        const format_str = switch (format) {
-            .mlir_text => "mlir",
-            .mlir_bytecode => "mlir",
-            .stablehlo_portable => "mlir",
-        };
-        program.format = format_str.ptr;
-        program.format_size = format_str.len;
-
-        // build args and compile
-        var args = api_mod.init_args(c.PJRT_Client_Compile_Args);
+        var args = init_args(c.PJRT_Client_Compile_Args);
         args.client = self.pjrt_client;
         args.program = &program;
         args.compile_options = if (options) |opts| opts.ptr else &minimal_compile_opts;
@@ -145,11 +151,11 @@ pub const Client = struct {
         try self.api.call("PJRT_Client_Compile", &args);
 
         const executable_ptr = args.executable orelse return error.PjrtReturnedNullExecutable;
-        return LoadedExecutable.init(self.api, executable_ptr);
+        return try LoadedExecutable.init(self.api, executable_ptr);
     }
 
     pub fn get_topology_description(self: *Client) !TopologyDescription {
-        var args = api_mod.init_args(c.PJRT_Client_TopologyDescription_Args);
+        var args = init_args(c.PJRT_Client_TopologyDescription_Args);
         args.client = self.pjrt_client;
         args.topology = null;
 
@@ -166,25 +172,17 @@ pub const Client = struct {
     pub fn compile_aot(
         self: *Client,
         topology: *const TopologyDescription,
-        format: ProgramFormat,
+        format: []const u8,
         bytecode: []const u8,
         options: ?[]const u8,
     ) !Executable {
-        // create PJRT_Program
-        var program = api_mod.init_args(c.PJRT_Program);
+        var program = init_args(c.PJRT_Program);
         program.code = @constCast(bytecode.ptr);
         program.code_size = bytecode.len;
+        program.format = format.ptr;
+        program.format_size = format.len;
 
-        const format_str = switch (format) {
-            .mlir_text => "mlir",
-            .mlir_bytecode => "mlir",
-            .stablehlo_portable => "mlir",
-        };
-        program.format = format_str.ptr;
-        program.format_size = format_str.len;
-
-        // build args and compile
-        var args = api_mod.init_args(c.PJRT_Compile_Args);
+        var args = init_args(c.PJRT_Compile_Args);
         args.topology = topology.pjrt_topology;
         args.program = &program;
         args.compile_options = if (options) |opts| opts.ptr else &minimal_compile_opts;
@@ -205,7 +203,7 @@ pub const Client = struct {
         serialized_executable: []const u8,
         overridden_compile_options: ?[]const u8,
     ) !LoadedExecutable {
-        var args = api_mod.init_args(c.PJRT_Executable_DeserializeAndLoad_Args);
+        var args = init_args(c.PJRT_Executable_DeserializeAndLoad_Args);
         args.client = self.pjrt_client;
         args.serialized_executable = @ptrCast(serialized_executable.ptr);
         args.serialized_executable_size = serialized_executable.len;
@@ -222,7 +220,7 @@ pub const Client = struct {
         try self.api.call("PJRT_Executable_DeserializeAndLoad", &args);
 
         const loaded_ptr = args.loaded_executable orelse return error.PjrtReturnedNullLoadedExecutable;
-        return LoadedExecutable.init(self.api, loaded_ptr);
+        return try LoadedExecutable.init(self.api, loaded_ptr);
     }
 
     pub fn buffer_from_host(
@@ -232,7 +230,7 @@ pub const Client = struct {
         dtype: BufferType,
         shape: []const i64,
     ) !Buffer {
-        var args = api_mod.init_args(c.PJRT_Client_BufferFromHostBuffer_Args);
+        var args = init_args(c.PJRT_Client_BufferFromHostBuffer_Args);
 
         args.client = self.pjrt_client;
         args.data = data.ptr;
@@ -264,7 +262,7 @@ pub const TopologyDescription = struct {
 
     pub fn deinit(self: *TopologyDescription) void {
         if (!self.owned) return;
-        var args = api_mod.init_args(c.PJRT_TopologyDescription_Destroy_Args);
+        var args = init_args(c.PJRT_TopologyDescription_Destroy_Args);
         args.topology = self.pjrt_topology;
         self.api.call("PJRT_TopologyDescription_Destroy", &args) catch {};
     }
@@ -289,7 +287,7 @@ pub const Device = struct {
 
     pub fn get_id(self: *const Device, api: *Api) !i32 {
         // First get the device description
-        var desc_args = api_mod.init_args(c.PJRT_Device_GetDescription_Args);
+        var desc_args = init_args(c.PJRT_Device_GetDescription_Args);
         desc_args.device = self.pjrt_device;
         desc_args.device_description = null;
 
@@ -297,16 +295,25 @@ pub const Device = struct {
         const device_desc = desc_args.device_description orelse return error.PjrtReturnedNullDeviceDescription;
 
         // Then query the ID
-        var args = api_mod.init_args(c.PJRT_DeviceDescription_Id_Args);
+        var args = init_args(c.PJRT_DeviceDescription_Id_Args);
         args.device_description = device_desc;
 
         try api.call("PJRT_DeviceDescription_Id", &args);
         return args.id;
     }
 
+    /// Return the device ordinal local to this process.
+    pub fn get_local_hardware_id(self: *const Device, api: *Api) !i32 {
+        var args = init_args(c.PJRT_Device_LocalHardwareId_Args);
+        args.device = self.pjrt_device;
+
+        try api.call("PJRT_Device_LocalHardwareId", &args);
+        return args.local_hardware_id;
+    }
+
     pub fn get_kind(self: *const Device, api: *Api) ![]const u8 {
         // First get the device description
-        var desc_args = api_mod.init_args(c.PJRT_Device_GetDescription_Args);
+        var desc_args = init_args(c.PJRT_Device_GetDescription_Args);
         desc_args.device = self.pjrt_device;
         desc_args.device_description = null;
 
@@ -314,7 +321,7 @@ pub const Device = struct {
         const device_desc = desc_args.device_description orelse return error.PjrtReturnedNullDeviceDescription;
 
         // Then query the kind
-        var args = api_mod.init_args(c.PJRT_DeviceDescription_Kind_Args);
+        var args = init_args(c.PJRT_DeviceDescription_Kind_Args);
         args.device_description = device_desc;
 
         try api.call("PJRT_DeviceDescription_Kind", &args);
@@ -322,7 +329,7 @@ pub const Device = struct {
     }
 
     pub fn get_memory_stats(self: *const Device, api: *Api) !MemoryStats {
-        var args = api_mod.init_args(c.PJRT_Device_MemoryStats_Args);
+        var args = init_args(c.PJRT_Device_MemoryStats_Args);
         args.device = self.pjrt_device;
 
         try api.call("PJRT_Device_MemoryStats", &args);
@@ -347,13 +354,13 @@ pub const Executable = struct {
     pjrt_executable: *c.PJRT_Executable,
 
     pub fn deinit(self: *Executable, api: *Api) void {
-        var args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+        var args = init_args(c.PJRT_Executable_Destroy_Args);
         args.executable = self.pjrt_executable;
         api.call("PJRT_Executable_Destroy", &args) catch {};
     }
 
     pub fn serialize(self: *Executable, api: *Api, allocator: std.mem.Allocator) ![]u8 {
-        var args = api_mod.init_args(c.PJRT_Executable_Serialize_Args);
+        var args = init_args(c.PJRT_Executable_Serialize_Args);
         args.executable = self.pjrt_executable;
 
         try api.call("PJRT_Executable_Serialize", &args);
@@ -367,7 +374,7 @@ pub const Executable = struct {
         }
 
         const bytes = args.serialized_bytes[0..args.serialized_bytes_size];
-        return allocator.dupe(u8, bytes);
+        return try allocator.dupe(u8, bytes);
     }
 };
 
@@ -390,18 +397,18 @@ pub const LoadedExecutable = struct {
     };
 
     fn query_num_outputs(api: *Api, pjrt_executable: *c.PJRT_LoadedExecutable) !usize {
-        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        var get_exec_args = init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = pjrt_executable;
         get_exec_args.executable = null;
         try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
         const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
-            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            var destroy_args = init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_exec;
             api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
-        var num_outputs_args = api_mod.init_args(c.PJRT_Executable_NumOutputs_Args);
+        var num_outputs_args = init_args(c.PJRT_Executable_NumOutputs_Args);
         num_outputs_args.executable = pjrt_exec;
         try api.call("PJRT_Executable_NumOutputs", &num_outputs_args);
         return num_outputs_args.num_outputs;
@@ -416,26 +423,26 @@ pub const LoadedExecutable = struct {
     }
 
     pub fn deinit(self: *LoadedExecutable, api: *Api) void {
-        var args = api_mod.init_args(c.PJRT_LoadedExecutable_Destroy_Args);
+        var args = init_args(c.PJRT_LoadedExecutable_Destroy_Args);
         args.executable = self.pjrt_executable;
         api.call("PJRT_LoadedExecutable_Destroy", &args) catch {};
     }
 
     pub fn serialize(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator) ![]u8 {
         // Get the underlying PJRT_Executable to serialize
-        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        var get_exec_args = init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
         try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
 
         const pjrt_executable = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
-            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            var destroy_args = init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_executable;
             api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
-        var args = api_mod.init_args(c.PJRT_Executable_Serialize_Args);
+        var args = init_args(c.PJRT_Executable_Serialize_Args);
         args.executable = pjrt_executable;
 
         try api.call("PJRT_Executable_Serialize", &args);
@@ -449,23 +456,23 @@ pub const LoadedExecutable = struct {
         }
 
         const bytes = args.serialized_bytes[0..args.serialized_bytes_size];
-        return allocator.dupe(u8, bytes);
+        return try allocator.dupe(u8, bytes);
     }
 
     pub fn get_compiled_memory_stats(self: *LoadedExecutable, api: *Api) !CompiledMemoryStats {
-        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        var get_exec_args = init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
         try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
 
         const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
-            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            var destroy_args = init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_exec;
             api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
-        var args = api_mod.init_args(c.PJRT_Executable_GetCompiledMemoryStats_Args);
+        var args = init_args(c.PJRT_Executable_GetCompiledMemoryStats_Args);
         args.executable = pjrt_exec;
         try api.call("PJRT_Executable_GetCompiledMemoryStats", &args);
 
@@ -501,26 +508,26 @@ pub const LoadedExecutable = struct {
     /// Format is backend-dependent (XLA: serialized HloModuleProtoWithConfig).
     pub fn get_optimized_program(self: *LoadedExecutable, api: *Api, allocator: std.mem.Allocator) !?OptimizedProgram {
         // Get underlying PJRT_Executable
-        var get_exec_args = api_mod.init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
+        var get_exec_args = init_args(c.PJRT_LoadedExecutable_GetExecutable_Args);
         get_exec_args.loaded_executable = self.pjrt_executable;
         get_exec_args.executable = null;
         try api.call("PJRT_LoadedExecutable_GetExecutable", &get_exec_args);
 
         const pjrt_exec = get_exec_args.executable orelse return error.PjrtReturnedNullExecutable;
         defer {
-            var destroy_args = api_mod.init_args(c.PJRT_Executable_Destroy_Args);
+            var destroy_args = init_args(c.PJRT_Executable_Destroy_Args);
             destroy_args.executable = pjrt_exec;
             api.call("PJRT_Executable_Destroy", &destroy_args) catch {};
         }
 
         // First call: query size (code = null)
-        var program = api_mod.init_args(c.PJRT_Program);
+        var program = init_args(c.PJRT_Program);
         program.code = null;
         program.code_size = 0;
         program.format = null;
         program.format_size = 0;
 
-        var args = api_mod.init_args(c.PJRT_Executable_OptimizedProgram_Args);
+        var args = init_args(c.PJRT_Executable_OptimizedProgram_Args);
         args.executable = pjrt_exec;
         args.program = &program;
 
@@ -563,9 +570,7 @@ pub const LoadedExecutable = struct {
         inputs: []const Buffer,
         execute_context: ?*c.PJRT_ExecuteContext,
     ) !ExecuteResult {
-        // TODO: Per-stage timing was driven by std.time.Timer. That API is gone
-        //  in 0.16 and execute() does not have an `io` handle. Tracing now
-        //  emits aggregate logs without per-stage breakdown.
+        // TODO(pjrt): Accept I/O state here before adding monotonic stage timing.
         const trace = api.trace_execute;
 
         const num_outputs = self.num_outputs;
@@ -586,7 +591,7 @@ pub const LoadedExecutable = struct {
         const output_list: [*c]*c.PJRT_Buffer = @ptrCast(output_ptrs.ptr);
         var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
 
-        var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
+        var execute_opts = init_args(c.PJRT_ExecuteOptions);
         execute_opts.send_callbacks = null;
         execute_opts.recv_callbacks = null;
         execute_opts.num_send_ops = 0;
@@ -598,7 +603,7 @@ pub const LoadedExecutable = struct {
 
         var device_events = [_]?*c.PJRT_Event{null};
 
-        var args = api_mod.init_args(c.PJRT_LoadedExecutable_Execute_Args);
+        var args = init_args(c.PJRT_LoadedExecutable_Execute_Args);
         args.executable = self.pjrt_executable;
         args.options = &execute_opts;
         args.argument_lists = @ptrCast(&input_lists);
@@ -648,27 +653,9 @@ pub const LoadedExecutable = struct {
 
     /// Execute and write output buffer pointers into caller-provided slots.
     ///
-    /// ## C binding nullability
-    ///
-    /// The C API declares `output_lists` as `PJRT_Buffer** const*`, non-nullable on all levels.
-    /// PJRT always writes valid buffer pointers into the caller's array.
-    ///
-    /// However, Zig's translate-c generates the field as `[*c]const [*c]?*PJRT_Buffer`.
-    /// This happens because:
-    ///
-    ///  1. `PJRT_Buffer` is `opaque {}` (C struct with hidden layout).
-    ///  2. `[*c]T` ("C pointer") is inherently nullable -- it allows address 0 -- and is a
-    ///      compromise type for auto-generated code.
-    ///  3. translate-c cannot distinguish nullable from non-nullable C pointers, so all
-    ///      `PJRT_Buffer*` become `?*PJRT_Buffer`.
-    ///
-    /// The recommended practice is to replace `[*c]T` with proper Zig pointer types (`*T`, `[*]T`)
-    ///  in wrapper code. We do exactly that, but instead of editing the generated code this function
-    ///  takes `[]*c.PJRT_Buffer` (non-nullable slice) and `@ptrCast`s to the generated `[*c]?*` type
-    ///  at the FFI boundary. This cast is sound because for bare pointer types, `*T` and `?*T` have
-    ///  identical layout (both pointer-sized, null sentinel).
-    /// This would NOT hold for struct-wrapped pointers: `?struct{*T}` is 16 bytes (separate bool tag).
-    /// Thus, this must be kept in sync with `Backend.Buffer`.
+    /// PJRT writes non-null buffer pointers. Translate-C represents the inner C
+    ///  pointers as optional, so this wrapper accepts non-null Zig pointers and
+    ///  casts only at the generated call site.
     pub fn execute_into_opts_with_context(
         self: *LoadedExecutable,
         api: *Api,
@@ -677,6 +664,13 @@ pub const LoadedExecutable = struct {
         non_donatable_input_indices: ?[]const i64,
         execute_context: ?*c.PJRT_ExecuteContext,
     ) !?Event {
+        comptime {
+            if (@sizeOf(*c.PJRT_Buffer) != @sizeOf(?*c.PJRT_Buffer) or
+                @alignOf(*c.PJRT_Buffer) != @alignOf(?*c.PJRT_Buffer))
+            {
+                @compileError("PJRT buffer pointer optionality changed layout");
+            }
+        }
         if (output_ptrs.len != self.num_outputs) return error.OutputArityMismatch;
 
         const input_list: [*c]*c.PJRT_Buffer = @constCast(input_ptrs.ptr);
@@ -685,7 +679,7 @@ pub const LoadedExecutable = struct {
         const output_list: [*c]*c.PJRT_Buffer = output_ptrs.ptr;
         var output_lists = [_][*c]*c.PJRT_Buffer{output_list};
 
-        var execute_opts = api_mod.init_args(c.PJRT_ExecuteOptions);
+        var execute_opts = init_args(c.PJRT_ExecuteOptions);
         execute_opts.send_callbacks = null;
         execute_opts.recv_callbacks = null;
         execute_opts.num_send_ops = 0;
@@ -702,11 +696,10 @@ pub const LoadedExecutable = struct {
 
         var device_events = [_]?*c.PJRT_Event{null};
 
-        var args = api_mod.init_args(c.PJRT_LoadedExecutable_Execute_Args);
+        var args = init_args(c.PJRT_LoadedExecutable_Execute_Args);
         args.executable = self.pjrt_executable;
         args.options = &execute_opts;
-        // Cast non-nullable zig pointers to the generated [*c]?* types.
-        // See doc comment above for why this is sound.
+        // Translate-C makes the inner C pointers optional in these fields.
         args.argument_lists = @ptrCast(&input_lists);
         args.num_devices = 1;
         args.num_args = input_ptrs.len;
@@ -729,14 +722,14 @@ pub const Buffer = struct {
     pjrt_buffer: *c.PJRT_Buffer,
 
     pub fn deinit(self: *Buffer, api: *Api) void {
-        var args = api_mod.init_args(c.PJRT_Buffer_Destroy_Args);
+        var args = init_args(c.PJRT_Buffer_Destroy_Args);
         args.buffer = self.pjrt_buffer;
         api.call("PJRT_Buffer_Destroy", &args) catch {};
     }
 
-    // Returned slice is owned by caller.
+    /// The caller frees the returned slice with `allocator`.
     pub fn get_dimensions(self: *const Buffer, api: *Api, allocator: std.mem.Allocator) ![]usize {
-        var args = api_mod.init_args(c.PJRT_Buffer_Dimensions_Args);
+        var args = init_args(c.PJRT_Buffer_Dimensions_Args);
         args.buffer = self.pjrt_buffer;
         args.dims = null;
         args.num_dims = 0;
@@ -746,7 +739,6 @@ pub const Buffer = struct {
         const num_dims = args.num_dims;
         const dims_i64 = args.dims orelse return error.PjrtReturnedNullDimensions;
 
-        // Convert from i64 slice to usize slice
         const dims = try allocator.alloc(usize, num_dims);
         for (0..num_dims) |i| {
             dims[i] = @intCast(dims_i64[i]);
@@ -759,7 +751,7 @@ pub const Buffer = struct {
     ///
     /// The returned slice is not allocated and has the lifetime of the buffer.
     pub fn get_dimensions_borrowed(self: *const Buffer, api: *Api) ![]const i64 {
-        var args = api_mod.init_args(c.PJRT_Buffer_Dimensions_Args);
+        var args = init_args(c.PJRT_Buffer_Dimensions_Args);
         args.buffer = self.pjrt_buffer;
         args.dims = null;
         args.num_dims = 0;
@@ -770,15 +762,15 @@ pub const Buffer = struct {
 
     /// Returns the element type of the buffer.
     pub fn get_element_type(self: *const Buffer, api: *Api) !BufferType {
-        var args = api_mod.init_args(c.PJRT_Buffer_ElementType_Args);
+        var args = init_args(c.PJRT_Buffer_ElementType_Args);
         args.buffer = self.pjrt_buffer;
         try api.call("PJRT_Buffer_ElementType", &args);
-        return BufferType.from_c_enum(args.type);
+        return try BufferType.from_c_enum(args.type);
     }
 
     /// Returns the device that owns this buffer.
     pub fn get_device(self: *const Buffer, api: *Api) !Device {
-        var args = api_mod.init_args(c.PJRT_Buffer_Device_Args);
+        var args = init_args(c.PJRT_Buffer_Device_Args);
         args.buffer = self.pjrt_buffer;
         args.device = null;
         try api.call("PJRT_Buffer_Device", &args);
@@ -787,7 +779,7 @@ pub const Buffer = struct {
     }
 
     pub fn to_host(self: *Buffer, api: *Api, dst: []u8) !Event {
-        var args = api_mod.init_args(c.PJRT_Buffer_ToHostBuffer_Args);
+        var args = init_args(c.PJRT_Buffer_ToHostBuffer_Args);
 
         args.src = self.pjrt_buffer;
         args.host_layout = null;
@@ -804,7 +796,7 @@ pub const Buffer = struct {
     }
 
     pub fn ready_event(self: *Buffer, api: *Api) !Event {
-        var args = api_mod.init_args(c.PJRT_Buffer_ReadyEvent_Args);
+        var args = init_args(c.PJRT_Buffer_ReadyEvent_Args);
 
         args.buffer = self.pjrt_buffer;
         args.event = null;
@@ -818,7 +810,7 @@ pub const Buffer = struct {
     }
 
     pub fn is_on_cpu(self: *const Buffer, api: *Api) !bool {
-        var args = api_mod.init_args(c.PJRT_Buffer_IsOnCpu_Args);
+        var args = init_args(c.PJRT_Buffer_IsOnCpu_Args);
         args.buffer = self.pjrt_buffer;
         args.is_on_cpu = false;
         try api.call("PJRT_Buffer_IsOnCpu", &args);
@@ -826,7 +818,7 @@ pub const Buffer = struct {
     }
 
     pub fn unsafe_pointer(self: *const Buffer, api: *Api) !usize {
-        var args = api_mod.init_args(c.PJRT_Buffer_UnsafePointer_Args);
+        var args = init_args(c.PJRT_Buffer_UnsafePointer_Args);
         args.buffer = self.pjrt_buffer;
         args.buffer_pointer = 0;
         try api.call("PJRT_Buffer_UnsafePointer", &args);
@@ -842,39 +834,22 @@ pub const Event = struct {
     pjrt_event: *c.PJRT_Event,
 
     pub fn deinit(self: *Event, api: *Api) void {
-        var args = api_mod.init_args(c.PJRT_Event_Destroy_Args);
+        var args = init_args(c.PJRT_Event_Destroy_Args);
         args.event = self.pjrt_event;
         api.call("PJRT_Event_Destroy", &args) catch {};
     }
 
     pub fn await_(self: *Event, api: *Api) !void {
-        var args = api_mod.init_args(c.PJRT_Event_Await_Args);
+        var args = init_args(c.PJRT_Event_Await_Args);
         args.event = self.pjrt_event;
         try api.call("PJRT_Event_Await", &args);
     }
 
     pub fn is_ready(self: *Event, api: *Api) !bool {
-        var args = api_mod.init_args(c.PJRT_Event_IsReady_Args);
+        var args = init_args(c.PJRT_Event_IsReady_Args);
         args.event = self.pjrt_event;
         try api.call("PJRT_Event_IsReady", &args);
         return args.is_ready;
-    }
-};
-
-// Enums ============================================================================
-
-pub const ProgramFormat = enum {
-    mlir_text,
-    mlir_bytecode,
-    stablehlo_portable,
-
-    pub fn to_c_enum(self: ProgramFormat) c.PJRT_Program_Format {
-        return switch (self) {
-            .mlir_text => c.PJRT_Program_Format_MLIR,
-            .mlir_bytecode => c.PJRT_Program_Format_MLIR_BYTECODE,
-            // TODO: Treating this as bytecode for now, should revisit this
-            .stablehlo_portable => c.PJRT_Program_Format_MLIR_BYTECODE,
-        };
     }
 };
 

@@ -1,16 +1,12 @@
 const std = @import("std");
-
-pub const Emitter = @import("zxpr/Emitter.zig");
-pub const style = @import("zxpr/style.zig");
-const json = @import("json.zig");
-const pr = @import("pr.zig");
-
 const Writer = std.Io.Writer;
 
-pub const OutputTarget = union(enum) {
-    stdout,
-    file: []const u8,
-};
+pub const OutputTarget = @import("../output.zig").Target;
+const json = @import("json.zig");
+const pr = @import("pr.zig");
+const serialize = @import("serialize.zig");
+pub const Emitter = @import("zxpr/Emitter.zig");
+pub const style = @import("zxpr/style.zig");
 
 pub const ZxprMode = enum {
     auto,
@@ -25,6 +21,7 @@ pub const ZxprSpec = struct {
 pub const DumpSpec = union(enum) {
     zxpr: ZxprSpec,
     json,
+    binary,
 };
 
 pub const Config = struct {
@@ -40,6 +37,7 @@ pub const Config = struct {
 pub fn emit_program(program: *const pr.Program, writer: *Writer, cfg: Config) !void {
     switch (cfg.spec) {
         .json => try json.emit_program(program, writer),
+        .binary => try serialize.emit(program, writer),
         .zxpr => |zx| {
             if (cfg.entry_name) |name| {
                 try writer.print("entry: {s}\n", .{name});
@@ -68,7 +66,7 @@ pub fn emit(func: pr.Function, writer: *Writer, cfg: style.Config) !void {
     try emitter.emit();
 }
 
-/// Emit a single param declaration: `a: 2x3<f32>`
+/// Emit a single param declaration: `%0: 2x3<f32>`
 pub fn emit_param_line(v: *const pr.Var, writer: *Writer) !void {
     // Create a minimal emitter just for formatting
     const dummy_func = pr.Function{
@@ -83,7 +81,7 @@ pub fn emit_param_line(v: *const pr.Var, writer: *Writer) !void {
     try emitter.emit_var_with_type(v);
 }
 
-/// Emit a single op binding: `c: 2x2<f32> = dot[contracting=([1], [0]), K=3](a, b)  ; vjp`
+/// Emit a single op binding: `%2: 2x2<f32> = dot[contracting=([1], [0]), K=3](%0, %1)  ; vjp`
 pub fn emit_op_line(op: *const pr.Op, writer: *Writer) !void {
     const dummy_func = pr.Function{
         .name = "",
@@ -101,11 +99,10 @@ pub fn emit_op_line(op: *const pr.Op, writer: *Writer) !void {
 pub fn emit_region_block(func: pr.Function, region: pr.Region, writer: *Writer) !void {
     var emitter = Emitter.init(writer, func, style.config(.plain, .{}));
     try emitter.emit_region_start(0, region);
-    const op_end = region.op_start + region.op_len;
-    var op_i: u32 = region.op_start;
-    while (op_i < op_end and op_i < func.ops.len) : (op_i += 1) {
+    for (region.op_ids) |op_id| {
+        const op = func.op_by_id(op_id) orelse continue;
         try writer.writeAll("  ");
-        try emitter.emit_binding(func.ops[op_i]);
+        try emitter.emit_binding(op);
         try writer.writeAll("\n");
     }
     try emitter.emit_region_end(0);
@@ -134,11 +131,27 @@ test "zxpr format" {
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "zxpr main {") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "; params (2)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "a: 2x3<f32>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "%0: 2x3<f32>") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "let\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "dot[contracting=([1], [0])") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "; vjp") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "in c") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "in %2") != null);
+}
+
+test "zxpr value ids have no rendering ceiling" {
+    const value = pr.Var{
+        .id = std.math.maxInt(u32),
+        .aval = .{ .tensor = .{
+            .dtype = .f32,
+            .shape = .{ .dims = &.{} },
+        } },
+    };
+
+    var buf: [64]u8 = undefined;
+    var writer: Writer = .fixed(&buf);
+    try emit_param_line(&value, &writer);
+
+    try std.testing.expectEqualStrings("%4294967295: f32", writer.buffered());
 }
 
 test "zxpr with transpose shows permutation" {
@@ -185,4 +198,25 @@ test "zxpr kernelize region annotations" {
     const result = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[kernelize=tvm]") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "<") != null);
+}
+
+test "emit_program binary format parses" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{1});
+    const func = try b.finish(&.{x});
+    try program.add_function(func);
+
+    var output_writer: Writer.Allocating = .init(std.testing.allocator);
+    defer output_writer.deinit();
+    try emit_program(&program, &output_writer.writer, .{ .spec = .binary });
+    const bytes = try output_writer.toOwnedSlice();
+    defer std.testing.allocator.free(bytes);
+
+    var parsed = try serialize.parse(std.testing.allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("main", parsed.functions[0].name);
 }

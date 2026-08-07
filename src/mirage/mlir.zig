@@ -1,8 +1,7 @@
-//! Mirage MLIR Kernel Types
+//! MLIR carrier types used by the optional Mirage prototype.
 //!
-//! Provider-specific MLIR descriptor types for Mirage's MLIR-level
-//! kernelization path. These types are internal to the Mirage integration
-//! and not part of the core kernel provider interface.
+//! These types are internal to the Mirage integration and do not participate
+//!  in the kernel-provider contract.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 
@@ -12,7 +11,7 @@ pub const MlirTensorDesc = struct {
     dims: []const usize,
 };
 
-/// Stable operation-pattern identity selected by MLIR kernel passes.
+/// Operation pattern recognized by the Mirage MLIR prototype.
 pub const MlirKernelPattern = enum {
     dot,
     dot_general,
@@ -26,11 +25,7 @@ pub const MlirKernelPattern = enum {
     attention,
 };
 
-/// Provider-neutral descriptor for one selected MLIR kernel call.
-///
-/// This descriptor is intentionally small and stable: it captures only the
-/// information needed to compile known selected carrier patterns without
-/// depending on PR region descriptors.
+/// Descriptor for one Mirage candidate selected through MLIR.
 pub const MlirKernelDescriptor = struct {
     name: []const u8,
     provider_name: []const u8,

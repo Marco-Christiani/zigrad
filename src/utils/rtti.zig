@@ -1,7 +1,7 @@
-//! RTTI for type-safe pointer erasure across internal boundaries.
+//! Runtime identity checks for erased pointers.
 //!
 //! `TypeID` produces a stable runtime identity for a Zig type. `TypedPtr`
-//!  pairs a `TypeID` with a type erased ptr so reconstruction via `cast`
+//!  pairs a `TypeID` with an erased pointer so reconstruction via `cast`
 //!  asserts type identity in debug/safe builds, zero-cost in release.
 
 const std = @import("std");
@@ -44,17 +44,16 @@ pub const TypedPtr = struct {
         };
     }
 
-    /// Reconstruct the concrete pointer. Asserts type identity in
-    ///  debug/safe builds; zero-cost in release.
+    /// Reconstruct the concrete pointer.
+    ///
+    /// Debug and safe builds assert the recorded type identity.
     pub fn cast(self: TypedPtr, comptime T: type) *T {
         std.debug.assert(self.type_id == TypeID.of(T));
         return @ptrCast(@alignCast(self.raw));
     }
 };
 
-// ============================================================================
-// Tests
-// ============================================================================
+// Tests.
 
 test TypeID {
     const A = struct { x: i32 };

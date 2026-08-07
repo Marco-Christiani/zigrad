@@ -1,263 +1,407 @@
-//! IREE Runtime C API bindings (Zig-side).
+//! IREE runtime C ABI adapter.
 //!
-//! Thin wrappers over `./types.zig`, which hand-declares the IREE C ABI
-//!  surface zigrad uses. We do not run translate-c on IREE because the
-//!  upstream headers contain bitfield-bearing structs and `sizeof()`-based
-//!  alignment expressions that translate-c cannot process. `types.zig`'s
-//!  ABI test (`abi_test.zig`) protects the kept value-type layouts from
-//!  upstream drift.
+//! Only this module imports the external declarations. Callers receive opaque
+//!  Zigrad handles, Zig slices, scalars, and `ElementType`. IREE types and status
+//!  values do not appear in its public API.
 //!
-//! libIREERuntime.so (linked from `libiree_runtime_unified.a`) is linked at
-//!  build time when `-Diree-backend=true`. The C-side helpers in `shim.c`
-//!  cover anything Zig cannot express directly.
-//!
-//! Error handling: IREE returns `iree_status_t`, non-OK statuses are
-//!  converted to Zig errors and logged before propagation.
+//! The IREE runtime archive is linked when `-Diree=true`. Helpers in `shim.c`
+//!  cover macros, inline functions, and bitfield-bearing structs that Zig
+//!  cannot call or translate directly.
+
 const std = @import("std");
 const types = @import("types.zig");
-const log = std.log.scoped(.@"zg/iree_runtime");
 
-// Re-export commonly used types for callers.
-pub const Instance = types.Instance;
-pub const Session = types.Session;
-pub const Call = types.RuntimeCall;
-pub const HalDevice = types.HalDevice;
-pub const HalAllocator = types.HalAllocator;
-pub const HalBuffer = types.HalBuffer;
-pub const HalBufferView = types.HalBufferView;
-pub const VmFunction = types.VmFunction;
-pub const Status = types.Status;
-pub const HalDim = types.HalDim;
-pub const HalElementType = types.HalElementType;
-pub const Allocator = types.Allocator;
+const log = std.log.scoped(.@"zg/iree_runtime_abi");
 
-/// Element-type constants for callers that need to name types directly
-///  (e.g. dtype dispatch in callers).
-pub const HAL_ELEMENT_TYPE_BOOL_8 = types.HAL_ELEMENT_TYPE_BOOL_8;
-pub const HAL_ELEMENT_TYPE_SINT_8 = types.HAL_ELEMENT_TYPE_SINT_8;
-pub const HAL_ELEMENT_TYPE_UINT_8 = types.HAL_ELEMENT_TYPE_UINT_8;
-pub const HAL_ELEMENT_TYPE_SINT_32 = types.HAL_ELEMENT_TYPE_SINT_32;
-pub const HAL_ELEMENT_TYPE_UINT_32 = types.HAL_ELEMENT_TYPE_UINT_32;
-pub const HAL_ELEMENT_TYPE_SINT_64 = types.HAL_ELEMENT_TYPE_SINT_64;
-pub const HAL_ELEMENT_TYPE_UINT_64 = types.HAL_ELEMENT_TYPE_UINT_64;
-pub const HAL_ELEMENT_TYPE_FLOAT_16 = types.HAL_ELEMENT_TYPE_FLOAT_16;
-pub const HAL_ELEMENT_TYPE_FLOAT_32 = types.HAL_ELEMENT_TYPE_FLOAT_32;
-pub const HAL_ELEMENT_TYPE_FLOAT_64 = types.HAL_ELEMENT_TYPE_FLOAT_64;
-pub const HAL_ELEMENT_TYPE_BFLOAT_16 = types.HAL_ELEMENT_TYPE_BFLOAT_16;
+/// Failures exposed by the IREE runtime adapter.
+pub const Error = std.mem.Allocator.Error || error{
+    IreeError,
+    NullInstance,
+    NullDevice,
+    NullSession,
+    NullBufferView,
+    NullBuffer,
+    InvalidDimension,
+    UnsupportedElementType,
+};
 
-// ---------------------------------------------------------------------------
-// Status checking.
-// ---------------------------------------------------------------------------
+/// Element types supported by the Zigrad IREE adapter.
+pub const ElementType = enum {
+    bool,
+    i8,
+    u8,
+    i32,
+    u32,
+    i64,
+    u64,
+    f16,
+    bf16,
+    f32,
+    f64,
 
-/// Check an IREE status, return a Zig error (and log the message) on failure.
-pub fn check(status: Status) !void {
-    if (types.zg_iree_status_is_ok(status)) return;
-
-    // iree_status_to_string allocates, pass the system allocator by pointer.
-    var alloc = types.zg_iree_allocator_system();
-    var msg_ptr: [*c]u8 = null;
-    var msg_len: types.HostSize = 0;
-    if (types.iree_status_to_string(status, &alloc, &msg_ptr, &msg_len)) {
-        log.err("iree status: {s}", .{msg_ptr[0..msg_len]});
-        types.iree_allocator_free(alloc, msg_ptr);
-    } else {
-        log.err("iree status: (could not format message)", .{});
+    /// Return the storage width of one element in bytes.
+    pub fn byte_width(self: ElementType) usize {
+        return switch (self) {
+            .bool, .i8, .u8 => 1,
+            .f16, .bf16 => 2,
+            .i32, .u32, .f32 => 4,
+            .i64, .u64, .f64 => 8,
+        };
     }
-    types.iree_status_free(status);
-    return error.IreeError;
+};
+
+/// Opaque handle for one IREE runtime instance.
+pub const InstanceHandle = opaque {};
+
+/// Opaque handle for one IREE HAL device.
+pub const DeviceHandle = opaque {};
+
+/// Opaque handle for one IREE runtime session.
+pub const SessionHandle = opaque {};
+
+/// Opaque handle for one resolved IREE VM function.
+pub const FunctionHandle = opaque {};
+
+/// Opaque handle for one initialized IREE runtime call.
+pub const CallHandle = opaque {};
+
+/// Opaque handle for one IREE HAL buffer view.
+pub const BufferHandle = opaque {};
+
+const FunctionState = struct {
+    allocator: std.mem.Allocator,
+    raw: types.VmFunction,
+};
+
+const CallState = struct {
+    allocator: std.mem.Allocator,
+    raw: types.RuntimeCall,
+};
+
+/// Create an IREE runtime instance with every linked HAL driver registered.
+pub fn instance_create() Error!*InstanceHandle {
+    var instance: ?*types.Instance = null;
+    try check(types.zg_iree_runtime_instance_create_all_drivers(&instance));
+    return instance_handle(instance orelse return error.NullInstance);
 }
 
-/// Wrap a Zig slice as an `iree_string_view_t`.
-pub fn sv(s: []const u8) types.StringView {
-    return .{ .data = s.ptr, .size = s.len };
+/// Release one runtime instance.
+pub fn instance_release(instance: *InstanceHandle) void {
+    types.iree_runtime_instance_release(raw_instance(instance));
 }
 
-/// Wrap a Zig slice as an `iree_const_byte_span_t`.
-pub fn span(s: []const u8) types.ConstByteSpan {
-    return .{ .data = s.ptr, .data_length = s.len };
-}
-
-// ---------------------------------------------------------------------------
-// Instance lifecycle.
-// ---------------------------------------------------------------------------
-
-/// Create an IREE runtime instance with all available HAL drivers registered.
-pub fn instance_create() !*Instance {
-    var out: ?*Instance = null;
-    try check(types.zg_iree_runtime_instance_create_all_drivers(&out));
-    return out.?;
-}
-
-pub fn instance_release(instance: *Instance) void {
-    types.iree_runtime_instance_release(instance);
-}
-
-// ---------------------------------------------------------------------------
-// Device management.
-// ---------------------------------------------------------------------------
-
-/// Create the default HAL device for `driver_name` (e.g. "local-sync").
-pub fn create_default_device(instance: *Instance, driver_name: []const u8) !*HalDevice {
-    var out: ?*HalDevice = null;
+/// Create the default device for one linked HAL driver.
+pub fn create_default_device(
+    instance: *InstanceHandle,
+    driver_name: []const u8,
+) Error!*DeviceHandle {
+    var device: ?*types.HalDevice = null;
     try check(types.zg_iree_runtime_instance_try_create_default_device(
-        instance,
-        sv(driver_name),
-        &out,
+        raw_instance(instance),
+        string_view(driver_name),
+        &device,
     ));
-    return out.?;
+    return device_handle(device orelse return error.NullDevice);
 }
 
-pub fn device_release(device: *HalDevice) void {
-    types.iree_hal_device_release(device);
+/// Release one HAL device.
+pub fn device_release(device: *DeviceHandle) void {
+    types.iree_hal_device_release(raw_device(device));
 }
 
-// ---------------------------------------------------------------------------
-// Session lifecycle.
-// ---------------------------------------------------------------------------
-
-/// Create a session bound to `device`.
-pub fn session_create(instance: *Instance, device: *HalDevice) !*Session {
-    var out: ?*Session = null;
+/// Create a runtime session bound to `device`.
+pub fn session_create(
+    instance: *InstanceHandle,
+    device: *DeviceHandle,
+) Error!*SessionHandle {
+    var session: ?*types.Session = null;
     try check(types.zg_iree_runtime_session_create_with_device_default(
-        instance,
-        device,
-        &out,
+        raw_instance(instance),
+        raw_device(device),
+        &session,
     ));
-    return out.?;
+    return session_handle(session orelse return error.NullSession);
 }
 
-pub fn session_release(session: *Session) void {
-    types.iree_runtime_session_release(session);
+/// Release one runtime session.
+pub fn session_release(session: *SessionHandle) void {
+    types.iree_runtime_session_release(raw_session(session));
 }
 
-/// Append a VMFB module from a caller-managed memory slice.
+/// Append a borrowed VMFB module to `session`.
 ///
-/// Precondition: `vmfb` must outlive `session` (the session borrows the bytes
-/// without copying when a null allocator is used).
-pub fn session_append_module(session: *Session, vmfb: []const u8) !void {
+/// `vmfb` must outlive the session because IREE retains the supplied memory
+///  without copying it.
+pub fn session_append_module(
+    session: *SessionHandle,
+    vmfb: []const u8,
+) Error!void {
     try check(types.iree_runtime_session_append_bytecode_module_from_memory(
-        session,
-        span(vmfb),
+        raw_session(session),
+        byte_span(vmfb),
         types.zg_iree_allocator_null(),
     ));
 }
 
-/// Look up a function by its fully-qualified name (e.g. `"module.main"`).
-pub fn session_lookup_function(session: *Session, name: []const u8) !VmFunction {
-    var func: VmFunction = undefined;
-    try check(types.iree_runtime_session_lookup_function(session, sv(name), &func));
-    return func;
+/// Resolve one fully qualified VM function.
+pub fn session_lookup_function(
+    allocator: std.mem.Allocator,
+    session: *SessionHandle,
+    name: []const u8,
+) Error!*FunctionHandle {
+    const state = try allocator.create(FunctionState);
+    errdefer allocator.destroy(state);
+    state.* = .{
+        .allocator = allocator,
+        .raw = undefined,
+    };
+    try check(types.iree_runtime_session_lookup_function(
+        raw_session(session),
+        string_view(name),
+        &state.raw,
+    ));
+    return @ptrCast(state);
 }
 
-// ---------------------------------------------------------------------------
-// Call lifecycle.
-// ---------------------------------------------------------------------------
-
-/// Initialize a reusable call object. Caller must call `call_deinit`.
-pub fn call_init(session: *Session, function: VmFunction) !Call {
-    var call: Call = undefined;
-    try check(types.iree_runtime_call_initialize(session, function, &call));
-    return call;
+/// Release one resolved VM function handle.
+pub fn function_release(function: *FunctionHandle) void {
+    const state = function_state(function);
+    state.allocator.destroy(state);
 }
 
-pub fn call_deinit(call: *Call) void {
-    types.iree_runtime_call_deinitialize(call);
+/// Initialize a call that must be released with `call_deinit`.
+pub fn call_init(
+    allocator: std.mem.Allocator,
+    session: *SessionHandle,
+    function: *FunctionHandle,
+) Error!*CallHandle {
+    const state = try allocator.create(CallState);
+    errdefer allocator.destroy(state);
+    state.* = .{
+        .allocator = allocator,
+        .raw = undefined,
+    };
+    try check(types.iree_runtime_call_initialize(
+        raw_session(session),
+        function_state(function).raw,
+        &state.raw,
+    ));
+    return @ptrCast(state);
 }
 
-/// Invoke the call synchronously.
-pub fn call_invoke(call: *Call) !void {
-    try check(types.iree_runtime_call_invoke(call, 0));
+/// Deinitialize and release one call.
+pub fn call_deinit(call: *CallHandle) void {
+    const state = call_state(call);
+    types.iree_runtime_call_deinitialize(&state.raw);
+    state.allocator.destroy(state);
 }
 
-/// Push a buffer view onto the call inputs list. The list retains a new
-///  reference on the view, ownership of the caller's reference is unchanged.
-pub fn call_push_buffer_view_input(call: *Call, view: *HalBufferView) !void {
-    try check(types.iree_runtime_call_inputs_push_back_buffer_view(call, view));
+/// Invoke one call synchronously.
+pub fn call_invoke(call: *CallHandle) Error!void {
+    try check(types.iree_runtime_call_invoke(&call_state(call).raw, 0));
 }
 
-/// Pop the next buffer view off the call outputs list.
+/// Append one borrowed buffer to the call input list.
+pub fn call_push_buffer_view_input(
+    call: *CallHandle,
+    buffer: *BufferHandle,
+) Error!void {
+    try check(types.iree_runtime_call_inputs_push_back_buffer_view(
+        &call_state(call).raw,
+        raw_buffer(buffer),
+    ));
+}
+
+/// Pop an output buffer or return `null` when no outputs remain.
 ///
-/// Returns `null` when the list is empty (the empty-list pop is the supported
-///  iteration terminator and is not an error). For non-empty pops, ownership
-///  of the returned view transfers to the caller, who must call
-///  `buffer_view_release`. Other status codes are logged and propagated as
-///  `error.IreeError`.
-pub fn call_pop_buffer_view_output(call: *Call) !?*HalBufferView {
-    var out: ?*HalBufferView = null;
-    const status = types.iree_runtime_call_outputs_pop_front_buffer_view(call, &out);
+/// Release a returned buffer with `buffer_view_release`.
+pub fn call_pop_buffer_view_output(
+    call: *CallHandle,
+) Error!?*BufferHandle {
+    var buffer: ?*types.HalBufferView = null;
+    const status = types.iree_runtime_call_outputs_pop_front_buffer_view(
+        &call_state(call).raw,
+        &buffer,
+    );
     if (types.zg_iree_status_is_ok(status)) {
-        return out orelse error.NullBufferView;
+        return buffer_handle(buffer orelse return error.NullBufferView);
     }
+
     const code = types.zg_iree_status_code(status);
     if (code == types.STATUS_OUT_OF_RANGE or code == types.STATUS_NOT_FOUND) {
         types.iree_status_free(status);
         return null;
     }
-    // Real failure, fall through to the logging path.
     try check(status);
     unreachable;
 }
 
-// ---------------------------------------------------------------------------
-// Buffer view lifecycle.
-// ---------------------------------------------------------------------------
-
-/// Allocate a device buffer view by copying `data` from host memory.
-///
-/// `shape` elements are in IREE's row-major (outermost-first) convention.
+/// Allocate a device buffer by copying row-major host data.
 pub fn buffer_view_create_from_host(
-    device: *HalDevice,
+    device: *DeviceHandle,
     data: []const u8,
-    element_type: HalElementType,
-    shape: []const HalDim,
-) !*HalBufferView {
-    var out: ?*HalBufferView = null;
+    element_type: ElementType,
+    shape: []const i64,
+) Error!*BufferHandle {
+    comptime std.debug.assert(@sizeOf(types.HalDim) == @sizeOf(i64));
+    for (shape) |dimension| {
+        if (dimension < 0) return error.InvalidDimension;
+    }
+    const raw_shape: []const types.HalDim = @ptrCast(shape);
+
+    var buffer: ?*types.HalBufferView = null;
     try check(types.zg_iree_buffer_view_allocate_device_local_copy(
-        device,
-        shape.ptr,
-        shape.len,
-        element_type,
+        raw_device(device),
+        raw_shape.ptr,
+        raw_shape.len,
+        raw_element_type(element_type),
         data.ptr,
         data.len,
-        &out,
+        &buffer,
     ));
-    return out.?;
+    return buffer_handle(buffer orelse return error.NullBufferView);
 }
 
-pub fn buffer_view_retain(view: *HalBufferView) void {
-    types.iree_hal_buffer_view_retain(view);
+/// Release one buffer view.
+pub fn buffer_view_release(buffer: *BufferHandle) void {
+    types.iree_hal_buffer_view_release(raw_buffer(buffer));
 }
 
-pub fn buffer_view_release(view: *HalBufferView) void {
-    types.iree_hal_buffer_view_release(view);
+/// Return the number of logical elements in one buffer.
+pub fn buffer_view_element_count(buffer: *BufferHandle) usize {
+    return types.iree_hal_buffer_view_element_count(raw_buffer(buffer));
 }
 
-/// Return the number of elements in `view`.
-pub fn buffer_view_element_count(view: *HalBufferView) usize {
-    return types.iree_hal_buffer_view_element_count(view);
+/// Return the Zigrad element type of one buffer.
+pub fn buffer_view_element_type(buffer: *BufferHandle) Error!ElementType {
+    return try element_type_from_raw(
+        types.iree_hal_buffer_view_element_type(raw_buffer(buffer)),
+    );
 }
 
-/// Return the element type of `view`.
-pub fn buffer_view_element_type(view: *HalBufferView) HalElementType {
-    return types.iree_hal_buffer_view_element_type(view);
+/// Copy one buffer's contents into host memory.
+pub fn buffer_view_to_host(
+    buffer: *BufferHandle,
+    destination: []u8,
+) Error!void {
+    const raw = types.iree_hal_buffer_view_buffer(raw_buffer(buffer)) orelse
+        return error.NullBuffer;
+    try check(types.zg_iree_hal_buffer_read(
+        raw,
+        destination.ptr,
+        destination.len,
+    ));
 }
 
-/// Copy buffer view contents to host slice `dst`. Maps the buffer for read,
-///  copies, and unmaps.
-pub fn buffer_view_to_host(view: *HalBufferView, dst: []u8) !void {
-    const buf = types.iree_hal_buffer_view_buffer(view) orelse return error.NullBuffer;
-    try check(types.zg_iree_hal_buffer_read(buf, dst.ptr, dst.len));
+fn check(status: types.Status) Error!void {
+    if (types.zg_iree_status_is_ok(status)) return;
+
+    var allocator = types.zg_iree_allocator_system();
+    var message: [*c]u8 = null;
+    var message_len: types.HostSize = 0;
+    if (types.iree_status_to_string(
+        status,
+        &allocator,
+        &message,
+        &message_len,
+    )) {
+        log.err("IREE status: {s}", .{message[0..message_len]});
+        types.iree_allocator_free(allocator, message);
+    } else {
+        log.err("IREE status could not be formatted", .{});
+    }
+    types.iree_status_free(status);
+    return error.IreeError;
 }
 
-/// Write host bytes `src` into a pre-existing buffer view (must be CPU-accessible).
-pub fn buffer_view_from_host(view: *HalBufferView, src: []const u8) !void {
-    const buf = types.iree_hal_buffer_view_buffer(view) orelse return error.NullBuffer;
-    try check(types.zg_iree_hal_buffer_write(buf, src.ptr, src.len));
+fn string_view(value: []const u8) types.StringView {
+    return .{ .data = value.ptr, .size = value.len };
 }
 
-/// Return byte width for a HAL element type (integer division of bit_count / 8).
-pub fn element_byte_width(etype: HalElementType) usize {
-    return types.zg_iree_hal_element_bit_count(etype) / 8;
+fn byte_span(value: []const u8) types.ConstByteSpan {
+    return .{ .data = value.ptr, .data_length = value.len };
+}
+
+fn raw_element_type(element_type: ElementType) types.HalElementType {
+    return switch (element_type) {
+        .bool => types.HAL_ELEMENT_TYPE_BOOL_8,
+        .i8 => types.HAL_ELEMENT_TYPE_SINT_8,
+        .u8 => types.HAL_ELEMENT_TYPE_UINT_8,
+        .i32 => types.HAL_ELEMENT_TYPE_SINT_32,
+        .u32 => types.HAL_ELEMENT_TYPE_UINT_32,
+        .i64 => types.HAL_ELEMENT_TYPE_SINT_64,
+        .u64 => types.HAL_ELEMENT_TYPE_UINT_64,
+        .f16 => types.HAL_ELEMENT_TYPE_FLOAT_16,
+        .bf16 => types.HAL_ELEMENT_TYPE_BFLOAT_16,
+        .f32 => types.HAL_ELEMENT_TYPE_FLOAT_32,
+        .f64 => types.HAL_ELEMENT_TYPE_FLOAT_64,
+    };
+}
+
+fn element_type_from_raw(
+    element_type: types.HalElementType,
+) Error!ElementType {
+    return switch (element_type) {
+        types.HAL_ELEMENT_TYPE_BOOL_8 => .bool,
+        types.HAL_ELEMENT_TYPE_SINT_8 => .i8,
+        types.HAL_ELEMENT_TYPE_UINT_8 => .u8,
+        types.HAL_ELEMENT_TYPE_SINT_32 => .i32,
+        types.HAL_ELEMENT_TYPE_UINT_32 => .u32,
+        types.HAL_ELEMENT_TYPE_SINT_64 => .i64,
+        types.HAL_ELEMENT_TYPE_UINT_64 => .u64,
+        types.HAL_ELEMENT_TYPE_FLOAT_16 => .f16,
+        types.HAL_ELEMENT_TYPE_BFLOAT_16 => .bf16,
+        types.HAL_ELEMENT_TYPE_FLOAT_32 => .f32,
+        types.HAL_ELEMENT_TYPE_FLOAT_64 => .f64,
+        else => error.UnsupportedElementType,
+    };
+}
+
+fn raw_instance(instance: *InstanceHandle) *types.Instance {
+    return @ptrCast(instance);
+}
+
+fn instance_handle(instance: *types.Instance) *InstanceHandle {
+    return @ptrCast(instance);
+}
+
+fn raw_device(device: *DeviceHandle) *types.HalDevice {
+    return @ptrCast(device);
+}
+
+fn device_handle(device: *types.HalDevice) *DeviceHandle {
+    return @ptrCast(device);
+}
+
+fn raw_session(session: *SessionHandle) *types.Session {
+    return @ptrCast(session);
+}
+
+fn session_handle(session: *types.Session) *SessionHandle {
+    return @ptrCast(session);
+}
+
+fn function_state(function: *FunctionHandle) *FunctionState {
+    return @ptrCast(@alignCast(function));
+}
+
+fn call_state(call: *CallHandle) *CallState {
+    return @ptrCast(@alignCast(call));
+}
+
+fn raw_buffer(buffer: *BufferHandle) *types.HalBufferView {
+    return @ptrCast(buffer);
+}
+
+fn buffer_handle(buffer: *types.HalBufferView) *BufferHandle {
+    return @ptrCast(buffer);
+}
+
+test "ElementType reports storage widths" {
+    try std.testing.expectEqual(@as(usize, 1), ElementType.i8.byte_width());
+    try std.testing.expectEqual(@as(usize, 2), ElementType.f16.byte_width());
+    try std.testing.expectEqual(@as(usize, 4), ElementType.f32.byte_width());
+    try std.testing.expectEqual(@as(usize, 8), ElementType.i64.byte_width());
 }
 
 test {

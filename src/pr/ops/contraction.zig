@@ -7,9 +7,7 @@ const Aval = pr.Aval;
 
 const log = std.log.scoped(.@"zg/contraction");
 
-// ============================================================================
 // Dot (Matrix Multiply)
-// ============================================================================
 
 pub const dot = struct {
     pub const arity = .{ .in = 2, .out = 1 };
@@ -41,7 +39,7 @@ pub const dot = struct {
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -92,9 +90,7 @@ pub const dot = struct {
     }
 };
 
-// ============================================================================
 // Dot General
-// ============================================================================
 
 pub const dot_general = struct {
     pub const arity = .{ .in = 2, .out = 1 };
@@ -144,7 +140,7 @@ pub const dot_general = struct {
         return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
     }
 
-    pub fn vjp_forward(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
@@ -413,7 +409,7 @@ fn maybe_batched_matmul_vjp(
     const out_batch = out_batch_buf[0..batch_len];
 
     // d_lhs = out_cot @ rhs^T: contract over N (output's rhs-free dim) with rhs's N dim.
-    // Result is canonical [batch..., M, K]; transpose_to_match permutes to lhs's layout.
+    // The canonical [batch..., M, K] result is permuted to the lhs layout.
     var out_contract_n: [1]i64 = .{out_n_dim};
     var rhs_contract_n: [1]i64 = .{rhs_n_dim};
     const d_lhs_canon = try ctx.builder.dot_general(out_cot, rhs_primal, .{
@@ -426,7 +422,7 @@ fn maybe_batched_matmul_vjp(
     const d_lhs = try transpose_to_match(ctx.builder, d_lhs_canon, lhs_rank, params.lhs_batch_dims, lhs_m_dim, lhs_k_dim, batch_len);
 
     // d_rhs = lhs^T @ out_cot: contract over M (lhs's free dim) with output's M dim.
-    // Result is canonical [batch..., K, N]; transpose_to_match permutes to rhs's layout.
+    // The canonical [batch..., K, N] result is permuted to the rhs layout.
     var lhs_contract_m: [1]i64 = .{lhs_m_dim};
     var out_contract_m: [1]i64 = .{out_m_dim};
     const d_rhs_canon = try ctx.builder.dot_general(lhs_primal, out_cot, .{
@@ -471,7 +467,7 @@ fn collect_other_dims(
         if (index_of_i64(contracting_dims, dim_i64) != null) continue;
         list.appendAssumeCapacity(dim_i64);
     }
-    return list.toOwnedSlice(allocator);
+    return try list.toOwnedSlice(allocator);
 }
 
 fn build_range(allocator: std.mem.Allocator, start: usize, len: usize) ![]i64 {
@@ -559,9 +555,10 @@ fn transpose_to_match_multi(
     return try ctx.builder.transpose(canon, perm);
 }
 
-const max_rank: usize = 64;
+const max_rank = pr.max_rank;
 
-/// Compute dot_general output dimensions following StableHLO semantics:
+/// Compute `dot_general` output dimensions.
+///
 /// `output = [batch_dims..., lhs_other_dims..., rhs_other_dims...]`
 ///
 /// Validates that batch dims agree in size, contracting dims agree in size, and

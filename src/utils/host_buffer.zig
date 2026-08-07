@@ -1,8 +1,8 @@
 //! Host-side buffer with shape and dtype metadata.
 //!
-//! Manages CPU-resident data with owned, borrowed, or memory-mapped backing.
-//! Upload to a device via `backend.Buffer`.
-//! TODO: this isnt a util anymore I suppose, move it.
+//! Manages CPU-resident data with allocated, borrowed, or memory-mapped backing.
+//! `Tensor.to_device` uploads this storage through an `Executor`.
+//! TODO(organization): Move this framework value out of `utils`.
 const std = @import("std");
 const pr = @import("../pr/pr.zig");
 
@@ -72,7 +72,7 @@ pub const HostBuffer = struct {
         };
     }
 
-    /// Wrap an externally-owned byte slice as a non-owning HostBuffer.
+    /// Borrow a byte slice without releasing it from `deinit`.
     ///
     /// The caller is responsible for keeping `bytes` alive for the
     /// lifetime of this HostBuffer. `deinit` does not free the data.
@@ -110,9 +110,9 @@ pub const HostBuffer = struct {
         };
     }
 
-    /// heap: host allocation is freed
-    /// mmap: mapping is released via `munmap`.
-    /// borrowed: no-op
+    /// Release heap and memory-mapped storage.
+    ///
+    /// Borrowed storage remains with its caller.
     pub fn deinit(self: *HostBuffer) void {
         switch (self.backing) {
             .heap => |h| h.allocator.free(h.data),
@@ -131,7 +131,7 @@ pub const HostBuffer = struct {
         }
     }
 
-    /// View buffer as mutable typed slice. Heap-backed only.
+    /// View buffer as mutable elements of `T`. Heap-backed only.
     pub fn as_slice(self: *HostBuffer, comptime T: type) []T {
         return @alignCast(std.mem.bytesAsSlice(T, self.data_mut()));
     }

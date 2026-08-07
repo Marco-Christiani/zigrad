@@ -2,13 +2,8 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const gemm = @import("../gemm.zig");
-const tvm_module = zg.tvm.module;
-const tvm_tir = zg.tvm.tir;
-const tvm_tune = zg.tvm.tune;
-const tvm_ffi = zg.tvm.ffi;
 const config = @import("config.zig");
 const stats = @import("stats.zig");
-const tvm_adapter = @import("tvm_adapter.zig");
 const xla_adapter = @import("xla_adapter.zig");
 const Cache = zg.Cache;
 
@@ -27,32 +22,32 @@ const syms = zg.utils.Symbols.unicode;
 /// Benchmark harness for matmul implementations.
 pub const Harness = struct {
     io: std.Io,
+    environ: *const std.process.Environ.Map,
     allocator: std.mem.Allocator,
     config: BenchmarkConfig,
     results: std.ArrayList(BenchmarkResult),
     rng: std.Random.DefaultPrng,
     cache: Cache,
 
-    // XLA/PJRT contexts (lazy-initialized on first use)
+    // XLA/PJRT contexts initialize on first use.
     xla_cpu_ctx: ?xla_adapter.XlaContext = null,
     xla_gpu_ctx: ?xla_adapter.XlaContext = null,
 
-    // TVM module caches (lazy-initialized per shape/dtype/etc)
-    // TODO: need to work on the hashing logic, dtype+target+etc should all be accounted for
-    tvm_cpu_cache: std.StringHashMap(*tvm_module.TunedModule),
-    tvm_gpu_cache: std.StringHashMap(*tvm_module.TunedModule),
+    // Separate maps make the TVM target part of the cache identity.
+    tvm_cpu_cache: std.AutoHashMap(Shape, *zg.tvm.CachedMatmul),
+    tvm_gpu_cache: std.AutoHashMap(Shape, *zg.tvm.CachedMatmul),
 
     pub fn init(io: std.Io, environ: *const std.process.Environ.Map, allocator: std.mem.Allocator, cfg: BenchmarkConfig) !Harness {
-        const results = try std.ArrayList(BenchmarkResult).initCapacity(allocator, 16);
         return Harness{
             .io = io,
+            .environ = environ,
             .allocator = allocator,
             .config = cfg,
-            .results = results,
-            .rng = std.Random.DefaultPrng.init(cfg.seed),
-            .cache = try Cache.init(io, environ, .{}),
-            .tvm_cpu_cache = std.StringHashMap(*tvm_module.TunedModule).init(allocator),
-            .tvm_gpu_cache = std.StringHashMap(*tvm_module.TunedModule).init(allocator),
+            .results = try .initCapacity(allocator, 16),
+            .rng = .init(cfg.seed),
+            .cache = try .init(io, environ, .{}),
+            .tvm_cpu_cache = .init(allocator),
+            .tvm_gpu_cache = .init(allocator),
         };
     }
 
@@ -62,26 +57,24 @@ pub const Harness = struct {
         if (self.xla_cpu_ctx) |*ctx| ctx.deinit();
         if (self.xla_gpu_ctx) |*ctx| ctx.deinit();
 
-        self.deinit_tvm_cache(&self.tvm_cpu_cache);
-        self.deinit_tvm_cache(&self.tvm_gpu_cache);
+        deinit_tvm_cache(&self.tvm_cpu_cache);
+        deinit_tvm_cache(&self.tvm_gpu_cache);
     }
 
-    fn deinit_tvm_cache(self: *Harness, cache: *std.StringHashMap(*tvm_module.TunedModule)) void {
+    fn deinit_tvm_cache(cache: *std.AutoHashMap(Shape, *zg.tvm.CachedMatmul)) void {
         var iter = cache.iterator();
         while (iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.*.deinit();
-            self.allocator.destroy(entry.value_ptr.*);
         }
         cache.deinit();
     }
 
     /// Run all benchmarks according to the configuration.
     pub fn run(self: *Harness) !void {
-        log.info("starting benchmark suite: {d} shapes x {d} implementations ({s})", .{
+        log.info("starting benchmark suite: {d} shapes x {d} implementations ({t})", .{
             self.config.shapes.len,
             self.config.implementations.len,
-            @tagName(self.config.dtype),
+            self.config.dtype,
         });
 
         for (self.config.shapes) |shape| {
@@ -117,8 +110,6 @@ pub const Harness = struct {
             return;
         }
 
-        try tvm_ffi.ensure_loaded(self.allocator, .{});
-
         if (need_tvm_cpu) {
             for (self.config.shapes) |shape| {
                 try self.tune_tvm_shape(shape, .cpu, opts);
@@ -131,49 +122,34 @@ pub const Harness = struct {
         }
     }
 
-    fn tune_tvm_shape(self: *Harness, shape: Shape, target_kind: tvm_tir.TargetKind, opts: TuneOpts) !void {
-        const tvm_cache = try self.cache.subdir(self.io, "tvm", .{});
+    fn tune_tvm_shape(self: *Harness, shape: Shape, target_kind: zg.tvm.TargetKind, opts: TuneOpts) !void {
+        log.info("tuning: {any} ({t}), {d} trials", .{ shape, target_kind, opts.max_trials });
+        const compile_config = try zg.tvm.CompileConfig.from_environ(
+            self.environ,
+            target_kind,
+        );
+        const result = try zg.tvm.tune_matmul(
+            self.io,
+            self.allocator,
+            self.cache,
+            tvm_shape(shape),
+            .{
+                .compile = compile_config,
+                .device = .{
+                    .platform = if (target_kind == .cuda) .cuda else .cpu,
+                },
+                .retune = opts.retune,
+                .max_trials = opts.max_trials,
+                .trials_per_iter = opts.trials_per_iter,
+            },
+        );
 
-        const key = tvm_module.matmul_cache_key(target_kind, shape.m, shape.n, shape.k);
-
-        if (opts.retune) {
-            const work = try tvm_cache.subdir(self.io, key.slice(), .{ .create = false });
-            std.Io.Dir.cwd().deleteTree(self.io, work.path()) catch {};
-            log.info("retune: cleared {s}", .{work.path()});
-        }
-
-        log.info("tuning: {any} ({s}), {d} trials", .{ shape, @tagName(target_kind), opts.max_trials });
-
-        var ir_mod = try tvm_tir.build_matmul_tir(self.allocator, shape.m, shape.n, shape.k);
-        defer ir_mod.deinit();
-        var target = try tvm_tir.Target.create(self.allocator, target_kind);
-        defer target.deinit();
-
-        const shape_a = try self.allocator.dupe(i64, &[_]i64{ shape.m, shape.k });
-        defer self.allocator.free(shape_a);
-        const shape_b = try self.allocator.dupe(i64, &[_]i64{ shape.k, shape.n });
-        defer self.allocator.free(shape_b);
-        const shape_c = try self.allocator.dupe(i64, &[_]i64{ shape.m, shape.n });
-        defer self.allocator.free(shape_c);
-        const tensor_shapes = try self.allocator.dupe([]const i64, &[_][]const i64{ shape_a, shape_b, shape_c });
-        defer self.allocator.free(tensor_shapes);
-
-        const work_cache = try tvm_cache.subdir(self.io, key.slice(), .{});
-
-        try tvm_tune.tune(self.io, self.allocator, ir_mod, target, target_kind, tensor_shapes, .{
-            .work_cache = work_cache,
-            .max_trials = opts.max_trials,
-            .trials_per_iter = opts.trials_per_iter,
-        });
-
-        const update = try tvm_module.update_cache_from_work_dir(self.io, self.allocator, tvm_cache, work_cache, key.slice(), target_kind);
-
-        log.info("tuned: {any} ({s}), best candidate {d} ({d:.2} us)", .{
-            shape, @tagName(target_kind), update.best_candidate, update.best_time_us,
+        log.info("tuned: {any} ({t}), best candidate {d} ({d:.2} us)", .{
+            shape, target_kind, result.best_candidate, result.best_time_us,
         });
     }
 
-    /// Dispatch to comptime-typed inner function based on configured dtype.
+    /// Dispatch to the inner function selected by the configured dtype.
     fn run_shape(self: *Harness, shape: Shape) !void {
         return switch (self.config.dtype) {
             inline else => |dtype| self.run_shape_typed(dtype.ZigType(), shape),
@@ -197,7 +173,6 @@ pub const Harness = struct {
         fill_random(T, &self.rng, a);
         fill_random(T, &self.rng, b);
 
-        // Reference result via naive gemm for correctness verification
         var reference: ?[]T = null;
         defer if (reference) |ref| self.allocator.free(ref);
 
@@ -239,13 +214,11 @@ pub const Harness = struct {
         c: []T,
         reference: ?[]const T,
     ) !BenchmarkResult {
-        // Warmup
         for (0..self.config.warmup_iters) |_| {
             @memset(c, @as(T, 0));
             try self.run_kernel(T, impl, shape, a, b, c);
         }
 
-        // Measurement
         var times = try self.allocator.alloc(f64, self.config.bench_iters);
         defer self.allocator.free(times);
 
@@ -327,38 +300,46 @@ pub const Harness = struct {
         c: []T,
         device: DeviceKind,
     ) !void {
-        try tvm_ffi.ensure_loaded(self.allocator, .{});
-        const cache_key = try std.fmt.allocPrint(self.allocator, "{d}x{d}x{d}", .{ shape.m, shape.n, shape.k });
-        defer self.allocator.free(cache_key);
+        if (comptime T != f32) return error.UnsupportedDtype;
 
         const mem_cache = switch (device) {
             .cpu => &self.tvm_cpu_cache,
             .gpu => &self.tvm_gpu_cache,
         };
 
-        const tuned = if (mem_cache.get(cache_key)) |module|
+        const tuned = if (mem_cache.get(shape)) |module|
             module
         else blk: {
-            const target_kind: tvm_tir.TargetKind = switch (device) {
+            const target_kind: zg.tvm.TargetKind = switch (device) {
                 .cpu => .cpu,
                 .gpu => .cuda,
             };
-            const tvm_cache = try self.cache.subdir(self.io, "tvm", .{});
-
-            const key = tvm_module.matmul_cache_key(target_kind, shape.m, shape.n, shape.k);
-
-            const module = try self.allocator.create(tvm_module.TunedModule);
-            errdefer self.allocator.destroy(module);
-
-            module.* = try tvm_module.load_cached(self.io, self.allocator, tvm_cache, key.slice(), target_kind) orelse
+            const module = try zg.tvm.CachedMatmul.load(
+                self.io,
+                self.allocator,
+                self.cache,
+                tvm_shape(shape),
+                target_kind,
+                .{
+                    .platform = if (target_kind == .cuda) .cuda else .cpu,
+                },
+            ) orelse
                 return error.NoTuningRecords;
 
-            const owned_key = try self.allocator.dupe(u8, cache_key);
-            try mem_cache.put(owned_key, module);
+            errdefer module.deinit();
+            try mem_cache.put(shape, module);
             break :blk module;
         };
 
-        try tvm_adapter.execute_with_module(T, self.allocator, tuned, shape.m, shape.n, shape.k, a, b, c, device);
+        try tuned.execute(
+            @ptrCast(a),
+            @ptrCast(b),
+            @ptrCast(c),
+        );
+    }
+
+    fn tvm_shape(shape: Shape) zg.tvm.MatmulShape {
+        return .{ .m = shape.m, .n = shape.n, .k = shape.k };
     }
 
     /// Execute XLA/PJRT matmul (compiles on-the-fly, caches per shape).
@@ -377,7 +358,7 @@ pub const Harness = struct {
         };
 
         if (ctx.* == null) {
-            ctx.* = try xla_adapter.XlaContext.init(self.allocator, device);
+            ctx.* = try xla_adapter.XlaContext.init(self.io, self.allocator, device);
         }
 
         try ctx.*.?.execute(T, shape, a, b, c);
@@ -390,7 +371,7 @@ pub const Harness = struct {
         const writer = &stdout_writer.interface;
 
         const header_sep = "\n" ++ "=" ** 60 ++ "\n";
-        try writer.print("{s}Matmul Benchmark Results ({s}){s}", .{ header_sep, @tagName(self.config.dtype), header_sep });
+        try writer.print("{s}Matmul Benchmark Results ({t}){s}", .{ header_sep, self.config.dtype, header_sep });
 
         var seen_shapes = std.AutoHashMap(Shape, void).init(self.allocator);
         defer seen_shapes.deinit();
@@ -489,6 +470,8 @@ fn max_abs_error(comptime T: type, expected: []const T, actual: []const T) f64 {
 
 test "harness: init and deinit" {
     const allocator = std.testing.allocator;
+    var environ: std.process.Environ.Map = .init(allocator);
+    defer environ.deinit();
 
     const cfg = BenchmarkConfig{
         .shapes = &[_]Shape{.{ .m = 4, .n = 4, .k = 4 }},
@@ -496,7 +479,7 @@ test "harness: init and deinit" {
         .bench_iters = 5,
     };
 
-    var harness = try Harness.init(allocator, cfg);
+    var harness = try Harness.init(std.testing.io, &environ, allocator, cfg);
     defer harness.deinit();
 
     try std.testing.expect(harness.results.items.len == 0);

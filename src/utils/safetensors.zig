@@ -9,7 +9,7 @@ pub const Opts = struct {
     dtype: DType,
 };
 
-/// Load a typed struct of `Tensor` leaves from a safetensors file.
+/// Load a struct of `Tensor` leaves from a safetensors file.
 ///
 /// The user declares a struct of type `T` whose field paths mirror
 ///  the safetensors checkpoint key hierarchy. `from_safetensors` walks

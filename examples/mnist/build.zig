@@ -4,13 +4,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sdk_root = b.option([]const u8, "sdk", "Path to Zigrad external SDK root") orelse "../../result";
+    const sdk_root = b.option([]const u8, "sdk", "Path to Zigrad external SDK root") orelse
+        b.graph.environ_map.get("ZG_EXTERNAL_SDK_ROOT") orelse
+        std.debug.panic("MNIST requires -Dsdk or ZG_EXTERNAL_SDK_ROOT", .{});
     const sdk_abs = resolve_absolute(b, sdk_root);
 
     const zigrad_dep = b.dependency("zigrad", .{
         .target = target,
         .optimize = optimize,
         .sdk = sdk_abs,
+        .pjrt = true,
+        .mlir = true,
     });
     const zigrad_mod = zigrad_dep.module("zigrad");
 

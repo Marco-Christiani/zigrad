@@ -3,7 +3,7 @@
 # Pure-fetch derivation that downloads CUDA redistributable tarballs from NVIDIA's CDN
 #  and assembles two layouts:
 #
-#  out (runtime layout, consumed by SDK runtime profiles):
+#  out (runtime layout, composed into CUDA runtime closures):
 #    $out/runtime/nvidia/<component>/lib/*.so*
 #    $out/runtime/nvidia/cuda_nvcc/bin/{ptxas,nvlink}
 #    $out/runtime/nvidia/nvvm/libdevice/
@@ -73,10 +73,9 @@
   #  consumer's runtime rpath. Keeps $dev small (~500MB instead of ~14GiB).
   #
   # Includes:
-  # - libcudart + static deps (cmake's CUDA toolchain probe links -lcudart
-  #   -lcudart_static -lcudadevrt; libculibos is a cudart_static internal dep).
-  # - libnvrtc family (runtime kernel compilation; cmake probes for it).
-  # - stubs/libcuda.so (build-time stub for the driver; real driver loaded at
+  # - libcudart and static dependencies used by CMake's CUDA toolchain probe
+  # - libnvrtc family used for runtime kernel compilation
+  # - stubs/libcuda.so, the build-time driver stub, with the real driver loaded at
   #   runtime via NixOS's /run/opengl-driver).
   devLinkTimeLibPattern = lib.concatStringsSep "|" [
     "libcudart.so*"
@@ -111,10 +110,10 @@ in
     #  manual patchelf --set-rpath silently corrupts.
     buildInputs = [stdenv.cc.cc.lib stdenv.cc.libc zlib];
 
-    # nvshmem ships optional bootstrap/transport plugins for MPI, UCX, OFI,
-    #  Mellanox IB, etc. We don't use any of them; the core nvshmem .so works
-    #  without them. Tell autoPatchelfHook to skip these deps instead of
-    #  failing the build. Mirrors nixpkgs's libnvshmem packaging.
+    # nvshmem ships optional bootstrap and transport plugins.
+    #
+    # The runtime closure uses none of these plugins. Ignore their dependencies
+    #  while retaining the core nvshmem library.
     autoPatchelfIgnoreMissingDeps = [
       "libmpi.so.40"
       "libpmix.so.2"
@@ -147,8 +146,8 @@ in
 
       # Helper: copy link-time libs (whitelisted) and stubs from a component's
       #  extract dir. Runtime-only libs (cudnn, cublas, cufft, cusparse,
-      #  nvshmem, libcusolver, ...) are NOT shipped in dev — consumers load
-      #  them via LD_LIBRARY_PATH or rpath against the SDK's runtime profile.
+      #  nvshmem, libcusolver, ...) are not shipped in dev. Consumers load
+      #  them through LD_LIBRARY_PATH or an installed runtime search path.
       #  Keeps dev's closure ~30x smaller than copying everything.
       copy_libs_to_dev() {
         local extract_root="$1"
@@ -171,7 +170,7 @@ in
         done
       }
 
-      # Extract each tarball component once; populate both outputs.
+      # Extract each tarball component once and populate both outputs.
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: comp: let
         src = fetched.${name};
         dir = comp.runtime_dir;
@@ -250,7 +249,7 @@ in
       # Flat lib/ symlink farm in $out so consumers can rpath against a single
       #  directory (vs walking $ORIGIN/../../../nvidia/<comp>/lib for each comp,
       #  which the PJRT plugin does but is awkward for general consumers like
-      #  TVM). Symlinks point back into the per-component runtime tree;
+      #  TVM). Symlinks point back into the per-component runtime tree.
       #  autoPatchelfHook treats the dir literally for rpath insertion.
       mkdir -p "$out/lib"
       for sodir in "$out"/runtime/nvidia/*/lib; do
@@ -288,6 +287,7 @@ in
           "$dev/lib/libcudadevrt.a" \
           "$dev/lib/libnvrtc.so" \
           "$dev/lib/stubs/libcuda.so" \
+          "$dev/include/nv/target" \
           "$out/lib/libcudart.so" \
           "$out/lib/libnvrtc.so"; do
         [ -e "$required" ] || missing+=("$required")

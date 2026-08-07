@@ -27,23 +27,22 @@ pub const Api = struct {
     pjrt_api: *c.PJRT_Api,
     trace_execute: bool,
 
-    /// Load API from dlopen handle
-    pub fn init(handle: *anyopaque, get_api_fn: *const fn () callconv(.c) ?*const c.PJRT_Api) !Api {
+    pub const InitOptions = struct {
+        /// Trace PJRT execute calls.
+        trace_execute: bool = false,
+    };
+
+    /// Load the API from a dynamic-library handle.
+    pub fn init(
+        handle: *anyopaque,
+        get_api_fn: *const fn () callconv(.c) ?*const c.PJRT_Api,
+        options: InitOptions,
+    ) !Api {
         const pjrt_api = get_api_fn() orelse return error.GetApiFailed;
-        // C-FFI boundary: read trace toggle via libc env. Threading
-        //  `Environ.Map` to a dlopen-handle constructor would force every
-        //  PJRT plugin loader to also pass it through; not worth it for one
-        //  diagnostic flag.
-        const trace_execute = blk: {
-            const env_ptr = std.c.getenv("ZG_PJRT_TRACE_EXECUTE") orelse break :blk false;
-            const val = std.mem.span(env_ptr);
-            if (val.len == 0) break :blk false;
-            break :blk !std.mem.eql(u8, val, "0");
-        };
         return Api{
             .handle = handle,
             .pjrt_api = @constCast(pjrt_api),
-            .trace_execute = trace_execute,
+            .trace_execute = options.trace_execute,
         };
     }
 
@@ -66,7 +65,7 @@ pub const Api = struct {
         return null;
     }
 
-    /// Resolve the PJRT typed-FFI extension from the extension chain.
+    /// Resolve the PJRT FFI extension from the extension chain.
     pub fn ffi_extension(self: *const Api) ?*c.PJRT_FFI {
         const ext = self.find_extension(c.PJRT_Extension_Type_FFI) orelse return null;
         const ffi_ext: *c.PJRT_FFI = @ptrCast(@alignCast(ext));
@@ -86,7 +85,7 @@ pub const Api = struct {
     /// Usage:
     ///   try api.call("PJRT_Client_Create", .{ .client = &client_ptr });
     ///
-    /// TODO: making this typed would improve usability, could comptime generate an enum
+    /// TODO(pjrt): Replace raw error codes with a comptime-generated enum.
     pub fn call(
         self: *Api,
         comptime func_name: []const u8,
@@ -160,6 +159,54 @@ pub fn Out1(comptime T: type) type {
     };
 }
 
+pub const Error = error{
+    /// PJRT_Error_Code_CANCELLED = 1
+    Cancelled,
+    /// PJRT_Error_Code_UNKNOWN = 2
+    UnknownPjrtError,
+    /// PJRT_Error_Code_INVALID_ARGUMENT = 3
+    InvalidArgument,
+
+    /// PJRT_Error_Code_DEADLINE_EXCEEDED = 4
+    DeadlineExceeded,
+
+    /// PJRT_Error_Code_NOT_FOUND = 5
+    NotFound,
+
+    /// PJRT_Error_Code_ALREADY_EXISTS = 6
+    AlreadyExists,
+
+    /// PJRT_Error_Code_PERMISSION_DENIED = 7
+    PermissionDenied,
+
+    /// PJRT_Error_Code_RESOURCE_EXHAUSTED = 8
+    ResourceExhausted,
+
+    /// PJRT_Error_Code_FAILED_PRECONDITION = 9
+    FailedPrecondition,
+
+    /// PJRT_Error_Code_ABORTED = 10
+    Aborted,
+
+    /// PJRT_Error_Code_OUT_OF_RANGE = 11
+    OutOfRange,
+
+    /// PJRT_Error_Code_UNIMPLEMENTED = 12
+    Unimplemented,
+
+    /// PJRT_Error_Code_INTERNAL = 13
+    Internal,
+
+    /// PJRT_Error_Code_UNAVAILABLE = 14
+    Unavailable,
+
+    /// PJRT_Error_Code_DATA_LOSS = 15
+    DataLoss,
+
+    /// PJRT_Error_Code_UNAUTHENTICATED = 16
+    Unauthenticated,
+} || std.mem.Allocator.Error;
+
 /// PJRT Error wrapper with Zig error conversion
 pub const PjrtError = struct {
     api: *Api,
@@ -177,7 +224,7 @@ pub const PjrtError = struct {
         _ = msg_fn(&args);
 
         const msg = args.message[0..args.message_size];
-        return allocator.dupe(u8, msg);
+        return try allocator.dupe(u8, msg);
     }
 
     pub fn get_code(self: PjrtError) !i32 {
@@ -190,8 +237,8 @@ pub const PjrtError = struct {
         return @intCast(args.code);
     }
 
-    pub fn to_zig_error(self: PjrtError) !void {
-        const code = self.get_code() catch return error.UnknownPjrtError;
+    pub fn to_zig_error(self: PjrtError) Error!void {
+        const code = self.get_code() catch return Error.UnknownPjrtError;
         self.deinit();
 
         return switch (code) {
@@ -199,54 +246,54 @@ pub const PjrtError = struct {
             0 => {},
 
             // PJRT_Error_Code_CANCELLED = 1
-            1 => error.Cancelled,
+            1 => Error.Cancelled,
 
             // PJRT_Error_Code_UNKNOWN = 2
-            2 => error.UnknownPjrtError,
+            2 => Error.UnknownPjrtError,
 
             // PJRT_Error_Code_INVALID_ARGUMENT = 3
-            3 => error.InvalidArgument,
+            3 => Error.InvalidArgument,
 
             // PJRT_Error_Code_DEADLINE_EXCEEDED = 4
-            4 => error.DeadlineExceeded,
+            4 => Error.DeadlineExceeded,
 
             // PJRT_Error_Code_NOT_FOUND = 5
-            5 => error.NotFound,
+            5 => Error.NotFound,
 
             // PJRT_Error_Code_ALREADY_EXISTS = 6
-            6 => error.AlreadyExists,
+            6 => Error.AlreadyExists,
 
             // PJRT_Error_Code_PERMISSION_DENIED = 7
-            7 => error.PermissionDenied,
+            7 => Error.PermissionDenied,
 
             // PJRT_Error_Code_RESOURCE_EXHAUSTED = 8
-            8 => error.ResourceExhausted,
+            8 => Error.ResourceExhausted,
 
             // PJRT_Error_Code_FAILED_PRECONDITION = 9
-            9 => error.FailedPrecondition,
+            9 => Error.FailedPrecondition,
 
             // PJRT_Error_Code_ABORTED = 10
-            10 => error.Aborted,
+            10 => Error.Aborted,
 
             // PJRT_Error_Code_OUT_OF_RANGE = 11
-            11 => error.OutOfRange,
+            11 => Error.OutOfRange,
 
             // PJRT_Error_Code_UNIMPLEMENTED = 12
-            12 => error.Unimplemented,
+            12 => Error.Unimplemented,
 
             // PJRT_Error_Code_INTERNAL = 13
-            13 => error.Internal,
+            13 => Error.Internal,
 
             // PJRT_Error_Code_UNAVAILABLE = 14
-            14 => error.Unavailable,
+            14 => Error.Unavailable,
 
             // PJRT_Error_Code_DATA_LOSS = 15
-            15 => error.DataLoss,
+            15 => Error.DataLoss,
 
             // PJRT_Error_Code_UNAUTHENTICATED = 16
-            16 => error.Unauthenticated,
+            16 => Error.Unauthenticated,
 
-            else => error.UnknownPjrtError,
+            else => Error.UnknownPjrtError,
         };
     }
 
