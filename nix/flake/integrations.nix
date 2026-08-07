@@ -30,6 +30,7 @@ in {
     xlaRevision = externalSources.xla.rev;
     llvmSrc = externalSources.llvm.src;
     llvmRevision = externalSources.llvm.rev;
+    llvmVersion = externalSources.llvm.version;
     stablehloSrc = externalSources.stablehlo.src;
     ireeSrc = externalSources.iree.src;
     ireeRevision = externalSources.iree.rev;
@@ -66,9 +67,9 @@ in {
     llvm = import ./compiler-support/llvm.nix {
       inherit
         pkgs
-        xlaSrc
         llvmSrc
         llvmRevision
+        llvmVersion
         withDebugSymbols
         enableLto
         extraCxxFlags

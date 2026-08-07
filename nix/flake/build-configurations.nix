@@ -43,6 +43,14 @@
       compile = [parts.xlaMlirStablehloCapiSdk.dev];
       runtime = [];
       features.withMlir = true;
+      compatibility = [
+        {
+          group = "host-llvm";
+          consumer = "stablehlo-mlir";
+          requirement = "xla-llvm";
+          isolation = "in-process";
+        }
+      ];
     };
 
     "pjrt-api" = {
@@ -82,6 +90,14 @@
       compile = [parts.ireeRuntime];
       runtime = [parts.ireeCompiler];
       features.withIree = true;
+      compatibility = [
+        {
+          group = "iree-build-llvm";
+          consumer = "iree";
+          requirement = "iree-llvm";
+          isolation = "out-of-process";
+        }
+      ];
     };
 
     "tvm-cpu" = {
@@ -89,6 +105,14 @@
       compile = [parts.tvmCpu.dev];
       runtime = [parts.tvmCpu];
       features.withTvm = true;
+      compatibility = [
+        {
+          group = "host-llvm";
+          consumer = "tvm";
+          requirement = "tvm-llvm";
+          isolation = "in-process";
+        }
+      ];
       conflicts = [
         "tvm-cuda"
         "tvm-python-cuda"
@@ -100,6 +124,14 @@
       compile = [parts.tvm.dev];
       runtime = [parts.tvm];
       features.withTvm = true;
+      compatibility = [
+        {
+          group = "host-llvm";
+          consumer = "tvm";
+          requirement = "tvm-llvm";
+          isolation = "in-process";
+        }
+      ];
       conflicts = [
         "tvm-cpu"
         "tvm-python-cuda"
@@ -111,6 +143,14 @@
       compile = [parts.tvmFullDev.dev];
       runtime = [parts.tvmFullDev];
       features.withTvm = true;
+      compatibility = [
+        {
+          group = "host-llvm";
+          consumer = "tvm";
+          requirement = "tvm-llvm";
+          isolation = "in-process";
+        }
+      ];
       conflicts = [
         "tvm-cpu"
         "tvm-cuda"
@@ -343,6 +383,9 @@
       "-Dcuda-runtime=${lib.boolToString featureArgs.withCudaRuntime}"
     ];
     zigFeatureFlags = lib.concatStringsSep " " zigFeatureArgs;
+    compatibility = lib.unique (
+      lib.concatMap (node: (nodeFor node).compatibility or []) resolved
+    );
     runtimeEnv =
       lib.optionalAttrs (has "pjrt-cpu" || has "pjrt-cuda") {
         PJRT_PLUGIN_PATH =
@@ -395,6 +438,7 @@
       passthru = {
         configuration = {
           inherit
+            compatibility
             name
             packageName
             resolved
@@ -416,6 +460,7 @@
     assert lib.assertMsg (conflict == null)
     "Zigrad build configuration '${name}' is invalid: ${conflict}"; {
       inherit
+        compatibility
         featureArgs
         name
         package
@@ -442,6 +487,7 @@
     (_: configuration: {
       inherit
         (configuration)
+        compatibility
         demands
         description
         expose

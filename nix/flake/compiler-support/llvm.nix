@@ -1,16 +1,16 @@
 {
   pkgs,
-  xlaSrc,
   llvmSrc,
   llvmRevision,
+  llvmVersion,
   withDebugSymbols,
   enableLto,
   extraCxxFlags,
   extraLdFlags,
 }:
-# This is the shared LLVM and MLIR toolchain for integrations that must load
-#  into the same process. Its current revision and patch set are XLA-aligned.
+# This is the shared LLVM and MLIR toolchain for integrations that load into
+#  the same process.
 pkgs.callPackage ../../packages/llvm.nix {
-  inherit xlaSrc llvmSrc llvmRevision withDebugSymbols enableLto extraCxxFlags extraLdFlags;
+  inherit llvmSrc llvmRevision llvmVersion withDebugSymbols enableLto extraCxxFlags extraLdFlags;
   withNativeTuning = false;
 }

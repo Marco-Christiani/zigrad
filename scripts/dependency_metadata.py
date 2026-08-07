@@ -60,6 +60,29 @@ COMPONENT_SPECS = (
 )
 
 
+def quoted_assignment(path: Path, name: str) -> str:
+    pattern = re.compile(rf'^\s*{re.escape(name)}\s*=\s*"([^"]+)"\s*$')
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if match := pattern.match(line):
+            return match.group(1)
+    raise ValueError(f"{path} lacks {name}")
+
+
+def llvm_version(source: Path) -> tuple[int, int, int]:
+    cmake_path = source / "cmake/Modules/LLVMVersion.cmake"
+    text = cmake_path.read_text(encoding="utf-8")
+    values: list[int] = []
+    for component in ("MAJOR", "MINOR", "PATCH"):
+        match = re.search(
+            rf"set\(LLVM_VERSION_{component}\s+([0-9]+)\)",
+            text,
+        )
+        if not match:
+            raise ValueError(f"{cmake_path} lacks LLVM_VERSION_{component}")
+        values.append(int(match.group(1)))
+    return values[0], values[1], values[2]
+
+
 def hex_sha256_to_sri(value: str) -> str:
     normalized = value.strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", normalized):
@@ -83,6 +106,12 @@ class XlaCudaMetadata:
 
     def __init__(self, source: Path) -> None:
         self.source = source
+
+    def llvm_revision(self) -> str:
+        return quoted_assignment(
+            self.source / "third_party/llvm/workspace.bzl",
+            "LLVM_COMMIT",
+        )
 
     def defaults(self, bazel_config: str) -> CudaDefaults:
         bazelrc_path = self.source / "tensorflow.bazelrc"

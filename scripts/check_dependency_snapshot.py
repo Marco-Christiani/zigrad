@@ -10,7 +10,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from dependency_metadata import COMPONENT_SPECS, XlaCudaMetadata
+from dependency_metadata import (
+    COMPONENT_SPECS,
+    XlaCudaMetadata,
+    llvm_version,
+    quoted_assignment,
+)
 
 
 class CheckFailure(Exception):
@@ -22,14 +27,6 @@ def source_revision(snapshot: dict[str, Any], source_name: str) -> str:
         return snapshot[source_name]["rev"]
     except KeyError as error:
         raise CheckFailure(f"external-sources.json lacks a revision for {source_name}") from error
-
-
-def bzl_assignment(path: Path, name: str) -> str:
-    pattern = re.compile(rf'^\s*{re.escape(name)}\s*=\s*"([^"]+)"\s*$')
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if match := pattern.match(line):
-            return match.group(1)
-    raise CheckFailure(f"{path} lacks {name}")
 
 
 def cuda_selection(flake_path: Path) -> dict[str, str]:
@@ -62,7 +59,10 @@ def check_xla(repo: Path, source: Path, snapshot: dict[str, Any]) -> None:
         ),
     )
     for path, variable, input_name in relationships:
-        declared = bzl_assignment(path, variable)
+        try:
+            declared = quoted_assignment(path, variable)
+        except ValueError as error:
+            raise CheckFailure(str(error)) from error
         selected = source_revision(snapshot, input_name)
         if declared != selected:
             raise CheckFailure(
@@ -209,12 +209,22 @@ def check_zig_dependencies(repo: Path) -> None:
             )
 
 
+def check_llvm(snapshot: dict[str, Any], source: Path) -> None:
+    selected = snapshot["llvm"].get("version")
+    actual = ".".join(str(component) for component in llvm_version(source))
+    if selected != actual:
+        raise CheckFailure(
+            f"external-sources.json records LLVM {selected}, source reports {actual}",
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Validate the locked Zigrad external dependency snapshot.",
     )
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--xla-src", type=Path, required=True)
+    parser.add_argument("--llvm-src", type=Path, required=True)
     parser.add_argument(
         "--offline",
         action="store_true",
@@ -227,6 +237,7 @@ def main() -> None:
         (repo / "nix/external-sources.json").read_text(encoding="utf-8"),
     )
     check_xla(repo, arguments.xla_src, snapshot)
+    check_llvm(snapshot, arguments.llvm_src)
     if not arguments.offline:
         check_iree(snapshot)
     check_zig_dependencies(repo)

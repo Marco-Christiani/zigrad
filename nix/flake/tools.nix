@@ -91,15 +91,42 @@
         exec python3 ${../../scripts/check_dependency_snapshot.py} \
           --repo "$PWD" \
           --xla-src ${externalSources.xla.src} \
+          --llvm-src ${externalSources.llvm.src} \
           "$@"
       '';
     };
+
+    planDependencies = pkgs.writeShellApplication {
+      name = "plan-dependencies";
+      runtimeInputs = [pkgs.python3];
+      text = ''
+        export PYTHONPATH=${../../scripts}
+        exec python3 ${../../scripts/plan_dependencies.py} \
+          --manifest ${config.packages.zigrad-build-configurations} \
+          --snapshot ${../external-sources.json} \
+          --xla-src ${externalSources.xla.src} \
+          --llvm-src ${externalSources.llvm.src} \
+          --tvm-src ${externalSources.tvm.src} \
+          --iree-llvm-src ${externalSources.iree_llvm.src} \
+          "$@"
+      '';
+    };
+
+    dependencyPlannerTests =
+      pkgs.runCommand "dependency-planner-tests" {
+        nativeBuildInputs = [pkgs.python3];
+      } ''
+        export PYTHONPATH=${../../scripts}
+        python3 ${../../scripts/test_dependency_planner.py}
+        touch "$out"
+      '';
   in {
     packages = {
       check-dependency-snapshot = checkDependencySnapshot;
       check-sdk = checkSdk;
       gen-clangd = genClangd;
       gen-nvim = genNvim;
+      plan-dependencies = planDependencies;
       update-cuda-catalog = updateCudaCatalog;
     };
 
@@ -108,6 +135,11 @@
         type = "app";
         program = "${checkDependencySnapshot}/bin/check-dependency-snapshot";
         meta.description = "Validate the external dependency snapshot";
+      };
+      plan-dependencies = {
+        type = "app";
+        program = "${planDependencies}/bin/plan-dependencies";
+        meta.description = "Explain dependency compatibility for a build configuration";
       };
       gen-clangd = {
         type = "app";
@@ -135,5 +167,7 @@
         meta.description = "Update exact CUDA redistributable catalog entries";
       };
     };
+
+    checks.dependency-planner = dependencyPlannerTests;
   };
 }

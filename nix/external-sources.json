@@ -39,7 +39,8 @@
     "owner": "llvm",
     "repo": "llvm-project",
     "rev": "8f264586d7521b0e305ca7bb78825aa3382ffef7",
-    "type": "github"
+    "type": "github",
+    "version": "22.0.0"
   },
   "mirage": {
     "hash": "sha256-1AXdzUkXUmW3tqsEBYgF+GlMrDuKsK7oYL3Y/mf22C0=",
