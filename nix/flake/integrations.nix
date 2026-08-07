@@ -3,6 +3,7 @@
 # External integration derivations and demand-driven build configurations.
 {inputs, ...}: let
   zigradVersion = inputs.self.shortRev or inputs.self.dirtyShortRev or "dev";
+  zigradRevision = inputs.self.rev or null;
 in {
   perSystem = {
     pkgs,
@@ -34,6 +35,10 @@ in {
 
     zigradAutodoc = pkgs.callPackage ../packages/zigrad-autodoc.nix {
       inherit zigradSrc;
+    };
+    zigradAutodocCandidate = pkgs.callPackage ../packages/zigrad-autodoc-candidate.nix {
+      inherit zigradAutodoc;
+      revision = zigradRevision;
     };
 
     cuda = import ./integrations/cuda.nix {
@@ -185,6 +190,9 @@ in {
 
     packages =
       configurationPackages
+      // lib.optionalAttrs (zigradRevision != null) {
+        zigrad-autodoc-candidate = zigradAutodocCandidate;
+      }
       // {
         mirage-adapter = mirageAdapter;
         mirage-adapter-dev = mirageAdapter.dev;

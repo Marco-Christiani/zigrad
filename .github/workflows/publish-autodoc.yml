@@ -1,0 +1,103 @@
+name: Publish autodoc candidate
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to document
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-autodoc-${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the requested ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.release.tag_name }}
+          fetch-depth: 1
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Build the autodoc candidate
+        run: nix build --impure .#zigrad-autodoc-candidate --out-link candidate
+
+      - name: Read the candidate identity
+        id: candidate
+        run: |
+          set -euo pipefail
+          bundle_id="$(nix eval --impure --raw .#zigrad-autodoc-candidate.bundleId)"
+          test "$bundle_id" = "$(git rev-parse HEAD)"
+          printf 'bundle_id=%s\n' "$bundle_id" >> "$GITHUB_OUTPUT"
+
+      - name: Install publication tools
+        run: |
+          nix build --impure nixpkgs#awscli2 --out-link result-awscli
+          nix build --impure nixpkgs#jq --out-link result-jq
+
+      - name: Publish immutable candidate objects
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          BUNDLE_ID: ${{ steps.candidate.outputs.bundle_id }}
+        run: |
+          set -euo pipefail
+          aws="./result-awscli/bin/aws"
+          jq="./result-jq/bin/jq"
+          prefix="autodoc/v1/bundles/$BUNDLE_ID"
+          manifest="candidate/manifest.json"
+
+          if "$aws" s3api head-object \
+            --bucket "$R2_BUCKET" \
+            --key "$prefix/manifest.json" \
+            --endpoint-url "$R2_ENDPOINT_URL" >/dev/null 2>&1; then
+            "$aws" s3api get-object \
+              --bucket "$R2_BUCKET" \
+              --key "$prefix/manifest.json" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              remote-manifest.json >/dev/null
+            cmp "$manifest" remote-manifest.json
+            echo "Candidate $BUNDLE_ID is already published with the same manifest."
+            exit 0
+          fi
+
+          upload_asset() {
+            key="$1"
+            content_type="$2"
+            name="${key##*/}"
+            "$aws" s3api put-object \
+              --bucket "$R2_BUCKET" \
+              --key "$key" \
+              --body "candidate/$name" \
+              --content-type "$content_type" \
+              --cache-control 'public, max-age=31536000, immutable' \
+              --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
+          }
+
+          while IFS=$'\t' read -r key content_type; do
+            upload_asset "$key" "$content_type"
+          done < <("$jq" -r '.assets | to_entries[] | [.value.key, .value.content_type] | @tsv' "$manifest")
+
+          "$aws" s3api put-object \
+            --bucket "$R2_BUCKET" \
+            --key "$prefix/manifest.json" \
+            --body "$manifest" \
+            --content-type 'application/json; charset=utf-8' \
+            --cache-control 'public, max-age=31536000, immutable' \
+            --endpoint-url "$R2_ENDPOINT_URL" >/dev/null
+
+          echo "Published candidate $BUNDLE_ID. current.json was not changed."
