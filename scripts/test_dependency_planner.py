@@ -10,6 +10,7 @@ from dependency_prefetch import CommandOutput, complete_proposal, prefetch_sourc
 from dependency_planner import (
     Candidate,
     Requirement,
+    RequirementKind,
     evaluate_requirement,
     plan_configuration,
     select_candidate,
@@ -131,8 +132,8 @@ class DependencyPlannerTest(unittest.TestCase):
 
     def test_conflicting_exact_requirements_fail(self) -> None:
         requirements = [
-            Requirement("a", "exact-revision", "a", revision="one"),
-            Requirement("b", "exact-revision", "b", revision="two"),
+            Requirement("a", RequirementKind.exact_revision, "a", revision="one"),
+            Requirement("b", RequirementKind.exact_revision, "b", revision="two"),
         ]
 
         with self.assertRaisesRegex(ValueError, "conflicting exact LLVM revisions"):
@@ -147,7 +148,7 @@ class DependencyPlannerTest(unittest.TestCase):
     def test_minimum_version_can_reject_candidate(self) -> None:
         requirement = Requirement(
             "consumer",
-            "minimum-version",
+            RequirementKind.minimum_version,
             "fixture",
             minimum_version=(23, 0, 0),
         )

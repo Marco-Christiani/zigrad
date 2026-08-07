@@ -6,13 +6,24 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, assert_never
 
 from dependency_metadata import XlaMetadata, llvm_version
-from dependency_schema import BuildManifest, CompatibilityEntry, DependencySnapshot
+from dependency_schema import (
+    BuildManifest,
+    CompatibilityEntry,
+    DependencySnapshot,
+    RequirementAdapter,
+)
 
 Version = tuple[int, int, int]
+
+
+class RequirementKind(StrEnum):
+    exact_revision = "exact-revision"
+    minimum_version = "minimum-version"
 
 
 class CandidateRecord(TypedDict):
@@ -51,7 +62,7 @@ class DependencyPlan(TypedDict):
 @dataclass(frozen=True)
 class Requirement:
     consumer: str
-    kind: str
+    kind: RequirementKind
     authority: str
     revision: str | None = None
     minimum_version: Version | None = None
@@ -88,35 +99,34 @@ def tvm_minimum_llvm(source: Path) -> Version:
 
 
 def requirement_for(
-    name: str,
+    name: RequirementAdapter,
     consumer: str,
     snapshot: DependencySnapshot,
     xla_source: Path,
     tvm_source: Path,
     iree_llvm_revision: str | None,
 ) -> Requirement:
-    if name == "xla-llvm":
+    if name == RequirementAdapter.xla_llvm:
         return Requirement(
             consumer=consumer,
-            kind="exact-revision",
+            kind=RequirementKind.exact_revision,
             revision=XlaMetadata(xla_source).llvm_revision(),
             authority="XLA third_party/llvm/workspace.bzl",
         )
-    if name == "tvm-llvm":
+    if name == RequirementAdapter.tvm_llvm:
         return Requirement(
             consumer=consumer,
-            kind="minimum-version",
+            kind=RequirementKind.minimum_version,
             minimum_version=tvm_minimum_llvm(tvm_source),
             authority="TVM cmake/modules/LLVM.cmake",
         )
-    if name == "iree-llvm":
+    if name == RequirementAdapter.iree_llvm:
         return Requirement(
             consumer=consumer,
-            kind="exact-revision",
+            kind=RequirementKind.exact_revision,
             revision=iree_llvm_revision or snapshot["iree_llvm"]["rev"],
             authority="IREE gitlink checked by check-dependency-snapshot",
         )
-    raise ValueError(f"unknown LLVM requirement adapter {name!r}")
 
 
 def select_candidate(
@@ -134,10 +144,12 @@ def select_candidate(
     exact_revisions = {
         requirement.revision
         for requirement in requirements
-        if requirement.kind == "exact-revision"
+        if requirement.kind == RequirementKind.exact_revision
     }
     if len(exact_revisions) > 1:
-        revisions = ", ".join(sorted(revision for revision in exact_revisions if revision))
+        revisions = ", ".join(
+            sorted(revision for revision in exact_revisions if revision)
+        )
         raise ValueError(f"{group} has conflicting exact LLVM revisions: {revisions}")
 
     if exact_revisions:
@@ -170,7 +182,7 @@ def evaluate_requirement(
                 f"snapshot candidate {available_revision}"
             ),
         )
-    if requirement.kind == "exact-revision":
+    if requirement.kind == RequirementKind.exact_revision:
         satisfied = candidate.revision == requirement.revision
         return RequirementResult(
             requirement=requirement,
@@ -181,7 +193,7 @@ def evaluate_requirement(
                 else f"requires revision {requirement.revision}, selected {candidate.revision}"
             ),
         )
-    if requirement.kind == "minimum-version":
+    if requirement.kind == RequirementKind.minimum_version:
         minimum = requirement.minimum_version or (0, 0, 0)
         satisfied = candidate.version >= minimum
         return RequirementResult(
@@ -192,7 +204,7 @@ def evaluate_requirement(
                 f"{format_version(candidate.version)}"
             ),
         )
-    raise ValueError(f"unknown requirement kind {requirement.kind!r}")
+    return assert_never(requirement.kind)
 
 
 def plan_configuration(

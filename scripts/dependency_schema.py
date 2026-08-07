@@ -20,6 +20,17 @@ class SourceKind(StrEnum):
     url = auto()
 
 
+class RequirementAdapter(StrEnum):
+    iree_llvm = "iree-llvm"
+    tvm_llvm = "tvm-llvm"
+    xla_llvm = "xla-llvm"
+
+
+class Isolation(StrEnum):
+    in_process = "in-process"
+    out_of_process = "out-of-process"
+
+
 class SnapshotEntry(TypedDict):
     type: SourceKind
     rev: str
@@ -38,8 +49,8 @@ type DependencySnapshot = dict[str, SnapshotEntry]
 class CompatibilityEntry(TypedDict):
     consumer: str
     group: str
-    isolation: str
-    requirement: str
+    isolation: Isolation
+    requirement: RequirementAdapter
 
 
 class BuildConfiguration(TypedDict):
@@ -70,6 +81,20 @@ def _read_string(mapping: dict[str, object], field: str, context: str) -> str:
         message = f"expected string {field!r} in {context}"
         raise TypeError(message)
     return value
+
+
+def _read_enum[EnumT: StrEnum](
+    enum_type: type[EnumT],
+    mapping: dict[str, object],
+    field: str,
+    context: str,
+) -> EnumT:
+    value = _read_string(mapping, field, context)
+    try:
+        return enum_type(value)
+    except ValueError as error:
+        message = f"unsupported {field} {value!r} in {context}"
+        raise ValueError(message) from error
 
 
 def _read_string_list(
@@ -162,8 +187,13 @@ def read_manifest(path: Path) -> BuildManifest:
                 {
                     "consumer": _read_string(entry, "consumer", context),
                     "group": _read_string(entry, "group", context),
-                    "isolation": _read_string(entry, "isolation", context),
-                    "requirement": _read_string(entry, "requirement", context),
+                    "isolation": _read_enum(Isolation, entry, "isolation", context),
+                    "requirement": _read_enum(
+                        RequirementAdapter,
+                        entry,
+                        "requirement",
+                        context,
+                    ),
                 },
             )
 
