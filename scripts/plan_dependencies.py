@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from dependency_planner import DependencyPlan, plan_configuration
+from dependency_prefetch import complete_proposal
 from dependency_proposal import (
     ConstraintValue,
     DependencyProposal,
@@ -30,6 +31,7 @@ class _Arguments(Protocol):
     tvm_src: Path
     iree_llvm_src: Path
     candidate: list[tuple[IntegrationRoot, Path]]
+    prefetch: bool
     json: bool
 
 
@@ -57,7 +59,9 @@ def _print_plan(plan: DependencyPlan) -> None:
         _write_line(f"  selection: {candidate['selection']}")
         for requirement in group["requirements"]:
             marker = "ok" if requirement["satisfied"] else "fail"
-            summary = f"  [{marker}] {requirement['consumer']}: {requirement['explanation']}"
+            summary = (
+                f"  [{marker}] {requirement['consumer']}: {requirement['explanation']}"
+            )
             _write_line(summary)
             _write_line(f"       authority: {requirement['authority']}")
         _write_line("  verification: not evaluated by the planner")
@@ -146,6 +150,11 @@ def main() -> None:
         help="derive a proposal from a local XLA, IREE, TVM, or Mirage worktree",
     )
     _ = parser.add_argument("--json", action="store_true")
+    _ = parser.add_argument(
+        "--prefetch",
+        action="store_true",
+        help="prefetch unresolved Nix source hashes without changing the snapshot",
+    )
     arguments = cast("_Arguments", cast("object", parser.parse_args()))
 
     source_paths = {
@@ -171,6 +180,8 @@ def main() -> None:
         snapshot,
         candidates,
     )
+    if arguments.prefetch:
+        proposal = complete_proposal(snapshot, proposal)
     proposed_iree_llvm = next(
         (
             change["proposed"]
@@ -192,12 +203,18 @@ def main() -> None:
     if arguments.json:
         _write_line(
             json.dumps(
-                {"plan": plan, "proposal": proposal}, indent=2, sort_keys=True,
+                {"plan": plan, "proposal": proposal},
+                indent=2,
+                sort_keys=True,
             ),
         )
     else:
         _print_plan(plan)
         _print_proposal(proposal)
+        if proposed_snapshot := proposal.get("snapshot"):
+            _write_line()
+            _write_line("proposed snapshot:")
+            _write_line(json.dumps(proposed_snapshot, indent=2, sort_keys=True))
 
     if not plan["compatible"]:
         raise SystemExit(1)

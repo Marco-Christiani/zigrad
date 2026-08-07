@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import patch
 
+from dependency_prefetch import CommandOutput, complete_proposal, prefetch_source
 from dependency_planner import (
     Candidate,
     Requirement,
@@ -13,7 +15,7 @@ from dependency_planner import (
     select_candidate,
 )
 from dependency_proposal import CandidateSource, propose_configuration
-from dependency_schema import IntegrationRoot
+from dependency_schema import IntegrationRoot, SourceKind
 
 
 class DependencyPlannerTest(unittest.TestCase):
@@ -190,7 +192,7 @@ class DependencyPlannerTest(unittest.TestCase):
     def test_xla_candidate_derives_companion_changes(self) -> None:
         self.write(
             self.xla / "third_party/llvm/workspace.bzl",
-            '\n'.join(
+            "\n".join(
                 (
                     'LLVM_COMMIT = "llvm-next"',
                     f'LLVM_SHA256 = "{"1" * 64}"',
@@ -199,7 +201,7 @@ class DependencyPlannerTest(unittest.TestCase):
         )
         self.write(
             self.xla / "third_party/stablehlo/workspace.bzl",
-            '\n'.join(
+            "\n".join(
                 (
                     'STABLEHLO_COMMIT = "stablehlo-next"',
                     f'STABLEHLO_SHA256 = "{"2" * 64}"',
@@ -235,8 +237,7 @@ class DependencyPlannerTest(unittest.TestCase):
         )
 
         changed = {
-            (entry["source"], entry["field"]): entry
-            for entry in proposal["changes"]
+            (entry["source"], entry["field"]): entry for entry in proposal["changes"]
         }
         self.assertEqual(changed[("llvm", "rev")]["proposed"], "llvm-next")
         self.assertEqual(
@@ -307,6 +308,111 @@ class DependencyPlannerTest(unittest.TestCase):
                 self.snapshot,
                 {IntegrationRoot.tvm: candidate},
             )
+
+    def test_mirage_candidate_updates_revision_bearing_fields(self) -> None:
+        revision = "mirage-current"
+        snapshot = {
+            **self.snapshot,
+            "mirage": {
+                "type": SourceKind.url,
+                "rev": revision,
+                "hash": "mirage-hash",
+                "url": f"https://example.invalid/mirage-{revision}.tar.gz",
+                "source_root": f"mirage-{revision}",
+            },
+        }
+        manifest = {
+            "mirage": {
+                "packageName": "zigrad-mirage",
+                "resolved": ["mirage-cuda"],
+            },
+        }
+        candidate = CandidateSource(
+            IntegrationRoot.mirage,
+            self.root / "mirage",
+            "mirage-next",
+        )
+
+        proposal = propose_configuration(
+            "mirage",
+            manifest,
+            snapshot,
+            {IntegrationRoot.mirage: candidate},
+        )
+        changes = {entry["field"]: entry["proposed"] for entry in proposal["changes"]}
+
+        self.assertEqual(
+            changes["url"], "https://example.invalid/mirage-mirage-next.tar.gz"
+        )
+        self.assertEqual(changes["source_root"], "mirage-mirage-next")
+
+    def test_prefetch_completes_snapshot_without_writing_it(self) -> None:
+        revision = "mirage-current"
+        snapshot = {
+            **self.snapshot,
+            "mirage": {
+                "type": SourceKind.url,
+                "rev": revision,
+                "hash": "mirage-hash",
+                "url": f"https://example.invalid/mirage-{revision}.tar.gz",
+                "source_root": f"mirage-{revision}",
+            },
+        }
+        manifest = {
+            "mirage": {
+                "packageName": "zigrad-mirage",
+                "resolved": ["mirage-cuda"],
+            },
+        }
+        candidate = CandidateSource(
+            IntegrationRoot.mirage,
+            self.root / "mirage",
+            "mirage-next",
+        )
+        proposal = propose_configuration(
+            "mirage",
+            manifest,
+            snapshot,
+            {IntegrationRoot.mirage: candidate},
+        )
+        commands: list[list[str]] = []
+
+        def run(arguments: Sequence[str]) -> CommandOutput:
+            commands.append(list(arguments))
+            return CommandOutput('{"hash":"sha256-prefetched"}', "")
+
+        completed = complete_proposal(snapshot, proposal, run)
+
+        self.assertTrue(completed["complete"])
+        self.assertEqual(completed["snapshot"]["mirage"]["hash"], "sha256-prefetched")
+        self.assertEqual(snapshot["mirage"]["hash"], "mirage-hash")
+        self.assertEqual(
+            commands[0][-1], "https://example.invalid/mirage-mirage-next.tar.gz"
+        )
+
+    def test_submodule_prefetch_uses_fetchgit_hash(self) -> None:
+        entry = {
+            "type": SourceKind.github,
+            "owner": "apache",
+            "repo": "tvm",
+            "rev": "tvm-next",
+            "hash": "tvm-current-hash",
+            "fetch_submodules": True,
+        }
+        commands: list[list[str]] = []
+
+        def run(arguments: Sequence[str]) -> CommandOutput:
+            command = list(arguments)
+            commands.append(command)
+            if command[0] == "nix-prefetch-git":
+                return CommandOutput("", "hash is nix-base32-hash\n")
+            return CommandOutput("sha256-prefetched\n", "")
+
+        fetched_hash = prefetch_source(entry, run)
+
+        self.assertEqual(fetched_hash, "sha256-prefetched")
+        self.assertIn("--fetch-submodules", commands[0])
+        self.assertEqual(commands[1][:3], ["nix", "hash", "convert"])
 
 
 if __name__ == "__main__":

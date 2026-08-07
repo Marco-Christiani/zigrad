@@ -100,6 +100,8 @@
       name = "plan-dependencies";
       runtimeInputs = [
         pkgs.git
+        pkgs.nix
+        pkgs.nix-prefetch-git
         pkgs.python3
       ];
       text = ''

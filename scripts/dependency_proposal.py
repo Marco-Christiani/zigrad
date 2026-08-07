@@ -7,7 +7,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from dependency_metadata import XlaMetadata
 from dependency_schema import (
@@ -46,6 +46,7 @@ class UnresolvedRecord(TypedDict):
 
 
 type ConstraintValue = str | dict[str, "ConstraintValue"]
+type SnapshotField = Literal["hash", "rev", "source_root", "url"]
 
 
 class DependencyProposal(TypedDict):
@@ -57,6 +58,7 @@ class DependencyProposal(TypedDict):
     complete: bool
     unresolved: list[UnresolvedRecord]
     verification: str
+    snapshot: NotRequired[DependencySnapshot]
 
 
 ROOT_NODES: dict[IntegrationRoot, frozenset[str]] = {
@@ -131,16 +133,14 @@ def gitlink_revision(path: Path, relative_path: str) -> str:
 def demanded_roots(configuration: BuildConfiguration) -> set[IntegrationRoot]:
     resolved = set(configuration["resolved"])
     return {
-        name
-        for name, nodes in ROOT_NODES.items()
-        if not resolved.isdisjoint(nodes)
+        name for name, nodes in ROOT_NODES.items() if not resolved.isdisjoint(nodes)
     }
 
 
 def changed_field(
     snapshot: DependencySnapshot,
     source: str,
-    field: Literal["hash", "rev"],
+    field: SnapshotField,
     proposed: str,
     authority: str,
 ) -> ChangeRecord:
@@ -269,6 +269,38 @@ def iree_changes(
     return changes
 
 
+def mirage_changes(
+    candidate: CandidateSource,
+    snapshot: DependencySnapshot,
+) -> list[ChangeRecord]:
+    changes = candidate_root_changes(candidate, snapshot)
+    entry = snapshot[IntegrationRoot.mirage]
+    current_revision = entry["rev"]
+    revision_fields: tuple[
+        tuple[Literal["url", "source_root"], str | None],
+        ...,
+    ] = (
+        ("url", entry.get("url")),
+        ("source_root", entry.get("source_root")),
+    )
+    for field, current in revision_fields:
+        if current is None:
+            continue
+        if current_revision not in current:
+            message = f"Mirage {field} does not contain its selected revision"
+            raise ValueError(message)
+        changes.append(
+            changed_field(
+                snapshot,
+                IntegrationRoot.mirage,
+                field,
+                current.replace(current_revision, candidate.revision),
+                f"Mirage {field} revision substitution",
+            ),
+        )
+    return changes
+
+
 def propose_configuration(
     name: str,
     manifest: BuildManifest,
@@ -283,7 +315,9 @@ def propose_configuration(
     unsupported = set(candidates) - roots
     if unsupported:
         names = ", ".join(sorted(unsupported))
-        raise ValueError(f"configuration {name!r} does not demand candidate roots: {names}")
+        raise ValueError(
+            f"configuration {name!r} does not demand candidate roots: {names}"
+        )
 
     changes: list[ChangeRecord] = []
     constraints: dict[str, dict[str, ConstraintValue]] = {}
@@ -294,6 +328,8 @@ def propose_configuration(
             constraints["xla"] = xla_constraints
         elif candidate_name == IntegrationRoot.iree:
             changes.extend(iree_changes(candidate, snapshot))
+        elif candidate_name == IntegrationRoot.mirage:
+            changes.extend(mirage_changes(candidate, snapshot))
         else:
             changes.extend(candidate_root_changes(candidate, snapshot))
 
