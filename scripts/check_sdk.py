@@ -1,10 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "pyelftools>=0.32",
-# ]
-# ///
+#!/usr/bin/env python3
 
 from __future__ import annotations
 

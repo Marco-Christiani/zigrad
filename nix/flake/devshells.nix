@@ -5,13 +5,10 @@
   perSystem = {
     pkgs,
     config,
-    system,
     cudaCfg,
     zigradBuildConfigurations,
     ...
   }: let
-    inherit (inputs) uv2nix;
-
     cudaPackages = pkgs.${cudaCfg.cudaPackagesAttr};
     gccHost = pkgs.${cudaCfg.gccHostAttr};
 
@@ -36,7 +33,6 @@
         zls
         zon2nix
         go-task
-        nodejs_22
         binutils
         patchelf
         git
@@ -54,13 +50,18 @@
       export PATH="${clangdWrapped}/bin:${zigradMlirExtDev}/bin:$PATH"
     '';
 
-    pyShellPkgs = pkgs.callPackage ./pydev.nix {
-      inherit system cudaPackages uv2nix;
-      "pyproject-nix" = inputs."pyproject-nix";
-      "pyproject-build-systems" = inputs."pyproject-build-systems";
-      py = pkgs.python312;
-      py-pkgs = pkgs.python312Packages;
-    };
+    tvmPython = pkgs.python312.withPackages (pythonPackages:
+      with pythonPackages; [
+        cloudpickle
+        ml-dtypes
+        numpy
+        packaging
+        psutil
+        scipy
+        tornado
+        typing-extensions
+        xgboost
+      ]);
 
     integrationEnv = package: let
       externalInputs = package.externalInputs;
@@ -87,10 +88,8 @@
   in {
     devShells = {
       default = pkgs.mkShellNoCC {
-        packages = pyShellPkgs.out.packages ++ baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
-        env =
-          pyShellPkgs.out.env
-          // integrationEnv config.packages.zigrad-dev-cuda;
+        packages = baseDevShellPkgs ++ [config.packages.zigrad-dev-cuda];
+        env = integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
           lspShadowHook
           + ''
@@ -102,10 +101,8 @@
       };
 
       tvm-python = pkgs.mkShellNoCC {
-        packages = pyShellPkgs.out.packages ++ baseDevShellPkgs ++ [zigradBuildConfigurations.dev-cuda-tvm-python.package];
-        env =
-          pyShellPkgs.out.env
-          // integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python.package;
+        packages = baseDevShellPkgs ++ [tvmPython zigradBuildConfigurations.dev-cuda-tvm-python.package];
+        env = integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python.package;
         shellHook =
           lspShadowHook
           + ''
@@ -129,16 +126,13 @@
 
       profiling = pkgs.mkShellNoCC {
         packages =
-          pyShellPkgs.out.packages
-          ++ baseDevShellPkgs
+          baseDevShellPkgs
           ++ [
             config.packages.zigrad-dev-cuda
             cudaPackages.nsight_systems
             cudaPackages.nsight_compute
           ];
-        env =
-          pyShellPkgs.out.env
-          // integrationEnv config.packages.zigrad-dev-cuda;
+        env = integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
           lspShadowHook
           + ''

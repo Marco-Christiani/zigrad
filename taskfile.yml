@@ -87,10 +87,8 @@ tasks:
         -- nix build --impure --max-jobs 1 --cores 48 .#zigrad-dev-cuda
 
   check-sdk:
-    cmd:
-      task: python
-      vars:
-        CLI_ARGS: scripts/check_sdk.py {{.CLI_ARGS}}
+    desc: Inspect external input ELF dependencies
+    cmd: nix run --impure .#check-sdk -- {{.CLI_ARGS}}
     vars:
       # default args to support overriding completely
       CLI_ARGS: --sdk-root $ZG_EXTERNAL_SDK_ROOT
@@ -195,25 +193,6 @@ tasks:
       - |
         nix shell --impure nixpkgs#perf -c bash -lc \
           'perf report --stdio -n --percent-limit 1 -i {{.PERF_DATA}} | head -n 80'
-  profile:jax:cpu:
-    desc: "Collect perf profile for JAX CPU train demo"
-    vars:
-      PERF_DATA: '{{.PERF_DATA | default "/tmp/jax_perf_cpu.data"}}'
-      PERF_DELAY_MS: '{{.PERF_DELAY_MS | default "0"}}'
-      PROFILE_ARGS: '{{.PROFILE_ARGS | default "--warmup 10 --steps 2000"}}'
-    cmds:
-      - |
-        nix shell --impure nixpkgs#perf -c bash -lc \
-          'JAX_PLATFORMS=cpu perf record -F 99 -g -D {{.PERF_DELAY_MS}} -o {{.PERF_DATA}} -- /run/current-system/sw/bin/nix develop --impure .#default --command python scripts/jax_train_demo.py {{.PROFILE_ARGS}} > /tmp/jax_perf_cpu_stdout.log 2>/tmp/jax_perf_cpu_stderr.log'
-  profile:jax:cpu:report:
-    desc: "Report perf profile for JAX CPU train demo"
-    vars:
-      PERF_DATA: '{{.PERF_DATA | default "/tmp/jax_perf_cpu.data"}}'
-    cmds:
-      - |
-        nix shell --impure nixpkgs#perf -c bash -lc \
-          'perf report --stdio -n --percent-limit 1 -i {{.PERF_DATA}} | head -n 80'
-
   run:cuda:
     desc: Run the current XLA path with its packaged CUDA PJRT plugin
     cmd: nix run --impure .#zigrad-xla-cuda -- {{.CLI_ARGS}}
@@ -324,32 +303,6 @@ tasks:
         --load-dialect-plugin=shim/build/libzigrad_mlir_ext.so \
         --load-pass-plugin=shim/build/libzigrad_mlir_ext.so \
         {{.CLI_ARGS}}
-
-  # Meta Utils =================================================================
-  python:
-    desc: Run a python command in the devshell (in lieu of uv on NixOS). E.g., `task python -- scripts/reference_experiments.py`
-    cmds:
-      - nix develop --impure .#default --command python {{.CLI_ARGS | default "scripts/reference_experiments.py"}}
-  jax:dump-hlo:cuda:
-    desc: Run the JAX train demo and dump HLO with CUDA.
-    vars:
-      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/jax_hlo_gpu"}}'
-      CLI_ARGS: '{{.CLI_ARGS | default "--warmup=1"}}'
-    cmd:
-      task: python
-      vars:
-        CLI_ARGS: >-
-          -c "import os, runpy, sys; os.environ['XLA_FLAGS']='--xla_gpu_cuda_data_dir={{.ZG_EXTERNAL_SDK_ROOT}}/runtime/nvidia --xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*'; sys.argv=['scripts/jax_train_demo.py'] + '{{.CLI_ARGS}}'.split(); runpy.run_path('scripts/jax_train_demo.py', run_name='__main__')"
-  jax:dump-hlo:cpu:
-    desc: Run the JAX train demo and dump HLO (CPU).
-    vars:
-      DUMP_DIR: '{{.DUMP_DIR | default "/tmp/jax_hlo_cpu"}}'
-      CLI_ARGS: '{{.CLI_ARGS | default "--warmup=1"}}'
-    cmd:
-      task: python
-      vars:
-        CLI_ARGS: >-
-          -c "import os, runpy, sys; os.environ['JAX_PLATFORM_NAME']='cpu'; os.environ['XLA_FLAGS']='--xla_dump_to={{.DUMP_DIR}} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*'; sys.argv=['scripts/jax_train_demo.py'] + '{{.CLI_ARGS}}'.split(); runpy.run_path('scripts/jax_train_demo.py', run_name='__main__')"
 
   # Nix ccache -----------------------------------------------------------------
   nix-ccache-setup:

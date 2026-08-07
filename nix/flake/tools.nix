@@ -6,26 +6,6 @@
     ...
   }: let
     cudaToolkit = config.packages.cuda-redist-dev;
-    tex = pkgs.texlive.combine {
-      inherit
-        (pkgs.texlive)
-        scheme-small
-        latexmk
-        microtype
-        footmisc
-        xcolor
-        listings
-        pgf
-        algorithm2e
-        ifoddpage
-        relsize
-        booktabs
-        cleveref
-        enumitem
-        natbib
-        ;
-    };
-
     genClangd = pkgs.writeShellScriptBin "gen-clangd" ''
       set -euo pipefail
 
@@ -74,21 +54,31 @@
       printf 'Wrote %s/.nvim.local.lua\n' "$root"
     '';
 
-    paper = pkgs.writeShellScript "paper" ''
-      set -euo pipefail
+    checkSdkPython = pkgs.python3.withPackages (pythonPackages: [
+      pythonPackages.pyelftools
+    ]);
 
-      paper_dir="$(${pkgs.lib.getExe pkgs.git} rev-parse --show-toplevel)/docs/paper"
-      cd "$paper_dir"
-      exec "${tex}/bin/latexmk" \
-        -pdf \
-        -silent \
-        -interaction=nonstopmode \
-        "$@" main.tex
-    '';
+    checkSdk = pkgs.writeShellApplication {
+      name = "check-sdk";
+      runtimeInputs = [checkSdkPython];
+      text = ''
+        exec python3 ${../../scripts/check_sdk.py} "$@"
+      '';
+    };
+
+    resolveVersions = pkgs.writeShellApplication {
+      name = "resolve-versions";
+      runtimeInputs = [pkgs.git pkgs.python3];
+      text = ''
+        exec python3 ${../../scripts/resolve-versions.py} "$@"
+      '';
+    };
   in {
     packages = {
+      check-sdk = checkSdk;
       gen-clangd = genClangd;
       gen-nvim = genNvim;
+      resolve-versions = resolveVersions;
     };
 
     apps = {
@@ -107,10 +97,15 @@
         program = "${pkgs.ccache}/bin/ccache";
         meta.description = "Run ccache from the pinned development toolchain";
       };
-      paper = {
+      check-sdk = {
         type = "app";
-        program = "${paper}";
-        meta.description = "Compile the project paper";
+        program = "${checkSdk}/bin/check-sdk";
+        meta.description = "Inspect external input ELF dependencies";
+      };
+      resolve-versions = {
+        type = "app";
+        program = "${resolveVersions}/bin/resolve-versions";
+        meta.description = "Resolve a candidate external dependency set";
       };
     };
   };
