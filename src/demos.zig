@@ -453,7 +453,8 @@ pub fn run_train_demo(
 /// Tunes, compiles, executes, and verifies the kernel-provider demo.
 ///
 /// Each selected provider receives an annotated PR region. Tuning populates the
-///  kernel store before PR kernelization and PJRT execution.
+///  kernel store, then runtime preparation runs before PR kernelization and
+///  PJRT execution.
 pub fn run_kernel_provider_demo(
     context: *demo_support.PjrtContext,
     environ: *const std.process.Environ.Map,
@@ -550,6 +551,9 @@ pub fn run_kernel_provider_demo(
         .device = context.execution.interface.device,
     });
     defer tune_result.deinit();
+    try tune_result.dispatch_registry.prepare(&tune_result.store, .{
+        .device = context.execution.interface.device,
+    });
 
     var report: ?zg.pr.kernelize.Report = if (operations.dump_kernels != null)
         .init(allocator)

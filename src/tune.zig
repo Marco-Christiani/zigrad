@@ -224,6 +224,7 @@ fn register_provider_dispatch(dispatch_registry: *kernel.DispatchRegistry, provi
     if (provider.dispatch_fn) |dfn| {
         try dispatch_registry.register(provider.name, .{
             .dispatch_fn = dfn,
+            .prepare_fn = provider.prepare_fn,
             .dispatch_ctx = provider.dispatch_ctx orelse unreachable,
         });
     }

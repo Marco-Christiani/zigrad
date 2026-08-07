@@ -1,7 +1,6 @@
 //! TVM kernel dispatch state.
 //!
-//! The state caches loaded TVM runtime modules and implements
-//!  `kernel.DispatchFn`.
+//! The state prepares and caches loaded TVM runtime modules for dispatch.
 const std = @import("std");
 const kernel = @import("../pr/kernel.zig");
 const dlpack = @import("../c/dlpack.zig");
@@ -41,7 +40,7 @@ pub const TvmDispatchState = struct {
     ) TvmDispatchState {
         return .{
             .io = io,
-            .cache = std.AutoHashMap(u64, TvmDispatchEntry).init(allocator),
+            .cache = .init(allocator),
             .artifact_cache = artifact_cache,
         };
     }
@@ -54,7 +53,44 @@ pub const TvmDispatchState = struct {
         self.cache.deinit();
     }
 
-    /// Provider dispatch entry point. Conforms to `kernel.DispatchFn`.
+    /// Prepare one compiled artifact for execution.
+    pub fn prepare(
+        provider_ctx: TypedPtr,
+        artifact_data: []const u8,
+        kernel_key: []const u8,
+        _: kernel.PrepareContext,
+    ) kernel.PrepareError!void {
+        const self = provider_ctx.cast(TvmDispatchState);
+        self.prepare_impl(artifact_data) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TvmLoadFailed => return error.ProviderLoadFailed,
+            else => {
+                log.err("failed to prepare TVM artifact '{s}': {s}", .{
+                    kernel_key,
+                    @errorName(err),
+                });
+                return error.PrepareFailed;
+            },
+        };
+    }
+
+    fn prepare_impl(self: *TvmDispatchState, artifact_data: []const u8) !void {
+        try integration_runtime.ensure_loaded(.runtime);
+
+        const artifact_hash = std.hash.Wyhash.hash(0, artifact_data);
+        if (self.cache.contains(artifact_hash)) return;
+
+        var loaded = try load_dispatch_entry(
+            self.io,
+            self.artifact_cache,
+            artifact_hash,
+            artifact_data,
+        );
+        errdefer loaded.deinit();
+        try self.cache.put(artifact_hash, loaded);
+    }
+
+    /// Dispatch one prepared TVM artifact.
     pub fn dispatch(
         provider_ctx: TypedPtr,
         artifact_data: []const u8,
@@ -74,23 +110,9 @@ pub const TvmDispatchState = struct {
         _: []const u8,
         ctx: kernel.DispatchContext,
     ) !void {
-        try integration_runtime.ensure_loaded(.runtime);
-
         const artifact_hash = std.hash.Wyhash.hash(0, artifact_data);
-        var entry: TvmDispatchEntry = undefined;
-        if (self.cache.get(artifact_hash)) |cached| {
-            entry = cached;
-        } else {
-            var loaded = try load_dispatch_entry(
-                self.io,
-                self.artifact_cache,
-                artifact_hash,
-                artifact_data,
-            );
-            errdefer loaded.deinit();
-            try self.cache.put(artifact_hash, loaded);
-            entry = loaded;
-        }
+        const entry = self.cache.get(artifact_hash) orelse
+            return error.ArtifactNotPrepared;
 
         if (ctx.device.platform.eql(.cuda)) {
             if (ctx.stream) |stream_ptr| {
@@ -181,10 +203,6 @@ fn opaque_ptr_value(ptr: *anyopaque) tvm_api.Value {
     return .{ .raw = v };
 }
 
-// TODO(kernel-provider): Add artifact preparation to the provider contract.
-//
-// TVM loads shared objects by path. Dispatch materializes bytes on first use
-//  until the provider contract can prepare artifacts before the hot path.
 fn load_dispatch_entry(
     io: std.Io,
     artifact_cache: Cache,

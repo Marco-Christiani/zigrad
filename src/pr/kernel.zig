@@ -189,6 +189,34 @@ pub const DispatchError = error{
     WorkspaceUnavailable,
 } || Allocator.Error;
 
+/// Context available while preparing provider artifacts for execution.
+pub const PrepareContext = struct {
+    /// Device selected for the upcoming execution.
+    device: device.Device,
+};
+
+/// Failures exposed while preparing kernel artifacts for execution.
+pub const PrepareError = error{
+    /// The store references a provider absent from the dispatch registry.
+    ProviderNotRegistered,
+    /// Artifact preparation failed, provider logged details.
+    PrepareFailed,
+    /// Provider runtime not available.
+    ProviderLoadFailed,
+    UnsupportedDevice,
+} || Allocator.Error;
+
+/// Provider artifact-preparation function signature.
+///
+/// Preparation creates process-local runtime state from portable artifact
+///  bytes. Callers invoke it before execution begins.
+pub const PrepareFn = *const fn (
+    provider_ctx: TypedPtr,
+    artifact_data: []const u8,
+    kernel_key: []const u8,
+    ctx: PrepareContext,
+) PrepareError!void;
+
 /// Provider dispatch function signature.
 ///
 /// Called by an execution integration when a custom call targets a kernelized op.
@@ -197,7 +225,7 @@ pub const DispatchError = error{
 ///  `TypedPtr`.
 pub const DispatchFn = *const fn (
     provider_ctx: TypedPtr,
-    /// Kernel bytecode.
+    /// Opaque provider artifact bytes.
     artifact_data: []const u8,
     /// Key to identify the compiled kernel.
     kernel_key: []const u8,
@@ -257,7 +285,7 @@ pub const CompileError = error{
 ///
 /// `compile_fn` receives the selected device for target resolution.
 ///
-/// One dispatch function and context serve every artifact from the provider.
+/// Runtime hooks share one context across every artifact from the provider.
 pub const KernelProvider = struct {
     /// Stable provider name used in decision and dispatch keys.
     name: []const u8,
@@ -276,9 +304,12 @@ pub const KernelProvider = struct {
     /// Must be set for providers whose artifacts require runtime dispatch.
     dispatch_fn: ?DispatchFn = null,
 
-    /// Provider state passed as the first argument to `dispatch_fn`.
+    /// Optional hook that prepares artifacts before execution.
+    prepare_fn: ?PrepareFn = null,
+
+    /// Provider state passed to the runtime hooks.
     ///
-    /// The type tag lets the dispatch function check the concrete state type,
+    /// The type tag lets each runtime hook check the concrete state type,
     ///  and the state must outlive every execution that references this provider.
     dispatch_ctx: ?TypedPtr = null,
 
@@ -401,7 +432,7 @@ pub const KernelStore = struct {
     }
 };
 
-/// Entry mapping a provider name to its dispatch function and context.
+/// Runtime entry for one provider.
 ///
 /// Populated before execution begins, typically by `tune()`.
 ///
@@ -409,6 +440,7 @@ pub const KernelStore = struct {
 ///  this table. `dispatch_ctx` carries its type through `TypedPtr`.
 pub const DispatchEntry = struct {
     dispatch_fn: DispatchFn,
+    prepare_fn: ?PrepareFn = null,
     dispatch_ctx: TypedPtr,
 };
 
@@ -443,6 +475,33 @@ pub const DispatchRegistry = struct {
     /// Look up a dispatch entry by provider name.
     pub fn get(self: *const DispatchRegistry, provider_name: []const u8) ?DispatchEntry {
         return self.entries.get(provider_name);
+    }
+
+    /// Prepare every profitable artifact in `store` for execution.
+    ///
+    /// Providers without a preparation hook consume their portable artifact
+    ///  bytes directly during dispatch. Preparation order is unspecified.
+    pub fn prepare(
+        self: *const DispatchRegistry,
+        store: *const KernelStore,
+        ctx: PrepareContext,
+    ) PrepareError!void {
+        var decisions = store.decisions.iterator();
+        while (decisions.next()) |decision| {
+            const artifact = switch (decision.value_ptr.*) {
+                .profitable => |value| value,
+                .negative => continue,
+            };
+            const entry = self.get(artifact.provider_name) orelse
+                return error.ProviderNotRegistered;
+            const prepare_fn = entry.prepare_fn orelse continue;
+            try prepare_fn(
+                entry.dispatch_ctx,
+                artifact.data,
+                decision.key_ptr.*,
+                ctx,
+            );
+        }
     }
 };
 
@@ -677,4 +736,69 @@ test "dispatch registry replaces duplicate" {
 
     const entry = registry.get("mirage") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u8, 2), entry.dispatch_ctx.cast(u8).*);
+}
+
+test "dispatch registry prepares profitable artifacts" {
+    const testing = std.testing;
+
+    const State = struct {
+        calls: usize = 0,
+
+        fn prepare(
+            provider_ctx: TypedPtr,
+            artifact_data: []const u8,
+            kernel_key: []const u8,
+            ctx: PrepareContext,
+        ) PrepareError!void {
+            const self = provider_ctx.cast(@This());
+            if (!std.mem.eql(u8, "compiled_kernel_bytes", artifact_data))
+                return error.PrepareFailed;
+            if (!std.mem.eql(u8, "kp-test:prepare", kernel_key))
+                return error.PrepareFailed;
+            if (!ctx.device.platform.eql(.cuda)) return error.UnsupportedDevice;
+            self.calls += 1;
+        }
+
+        fn dispatch(_: TypedPtr, _: []const u8, _: []const u8, _: DispatchContext) DispatchError!void {}
+    };
+
+    var store = KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable(.{ .bytes = "kp-test:prepare" }, .{
+        .provider_name = "test",
+        .data = "compiled_kernel_bytes",
+        .target_name = "test_kernel",
+    });
+    try store.put_negative(.{ .bytes = "kp-test:negative" }, "unsupported");
+
+    var state: State = .{};
+    var registry = DispatchRegistry.init(testing.allocator);
+    defer registry.deinit();
+    try registry.register("test", .{
+        .dispatch_fn = State.dispatch,
+        .prepare_fn = State.prepare,
+        .dispatch_ctx = TypedPtr.init(&state),
+    });
+
+    try registry.prepare(&store, .{ .device = .{ .platform = .cuda } });
+    try testing.expectEqual(@as(usize, 1), state.calls);
+}
+
+test "dispatch registry requires providers for stored artifacts" {
+    const testing = std.testing;
+
+    var store = KernelStore.init(testing.allocator);
+    defer store.deinit();
+    try store.put_profitable(.{ .bytes = "kp-test:missing-provider" }, .{
+        .provider_name = "missing",
+        .data = "compiled_kernel_bytes",
+        .target_name = "test_kernel",
+    });
+
+    var registry = DispatchRegistry.init(testing.allocator);
+    defer registry.deinit();
+    try testing.expectError(
+        error.ProviderNotRegistered,
+        registry.prepare(&store, .{ .device = .{ .platform = .cuda } }),
+    );
 }

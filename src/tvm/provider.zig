@@ -65,6 +65,7 @@ pub const TvmProvider = struct {
             .name = "tvm",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
+            .prepare_fn = &TvmDispatchState.prepare,
             .dispatch_fn = &TvmDispatchState.dispatch,
             .dispatch_ctx = TypedPtr.init(self.dispatch_state),
         };
