@@ -4,15 +4,15 @@ const stz = @import("safetensors_zg");
 const log = std.log.scoped(.@"zg/llm_demo");
 
 pub fn run_llm_train_demo(
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
     environ: *const std.process.Environ.Map,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
 ) !void {
-    const io = compilation_context.io;
-    const allocator = compilation_context.allocator;
+    const io = ctx.io;
+    const allocator = ctx.allocator;
     const Tensor = zg.Tensor;
 
     const ParamsSpec = struct {
@@ -87,7 +87,7 @@ pub fn run_llm_train_demo(
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer exe.deinit();
     const executor = exe.executor;

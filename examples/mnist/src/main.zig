@@ -153,7 +153,7 @@ fn run_pjrt(
     defer allocator.free(devs);
     if (devs.len == 0) return error.NoDevices;
     var execution = try zg.pjrt.Execution.init(&pjrt_client, devs[0], .{});
-    var compilation_context = zg.compilation.Context{
+    var ctx = zg.CompilationCtx{
         .allocator = allocator,
         .io = io,
         .device = execution.interface.device,
@@ -164,7 +164,7 @@ fn run_pjrt(
     });
     defer pipeline.deinit();
 
-    return try run_training(allocator, steps, &pipeline, &compilation_context);
+    return try run_training(allocator, steps, &pipeline, &ctx);
 }
 
 fn run_iree(
@@ -178,7 +178,7 @@ fn run_iree(
     defer runtime.deinit();
     var execution = zg.iree.Execution.init(allocator, &runtime, config.runtime);
     var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
-    var compilation_context = zg.compilation.Context{
+    var ctx = zg.CompilationCtx{
         .allocator = allocator,
         .io = io,
         .device = execution.interface.device,
@@ -188,14 +188,14 @@ fn run_iree(
     });
     defer pipeline.deinit();
 
-    return try run_training(allocator, steps, &pipeline, &compilation_context);
+    return try run_training(allocator, steps, &pipeline, &ctx);
 }
 
 fn run_training(
     allocator: std.mem.Allocator,
     steps: usize,
-    pipeline: *zg.compilation.Pipeline,
-    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.Pipeline,
+    ctx: *zg.CompilationCtx,
 ) !void {
     std.log.info("compiling train_step...", .{});
     var traced = try zg.trace_callable(
@@ -209,7 +209,7 @@ fn run_training(
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,
         &traced.program,
-        compilation_context,
+        ctx,
     );
     const executor = loaded_program.executor;
     var step_fn = traced.bind(loaded_program) catch |err| {

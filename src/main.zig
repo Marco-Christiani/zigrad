@@ -288,7 +288,7 @@ fn dispatch_pjrt(
         }
         const device = devices[0];
         var execution = try zg.pjrt.Execution.init(&pjrt_client, device, .{});
-        var compilation_context = zg.compilation.Context{
+        var ctx = zg.CompilationCtx{
             .allocator = gpa,
             .io = env.io,
             .device = execution.interface.device,
@@ -298,7 +298,7 @@ fn dispatch_pjrt(
             .pjrt => |command| dispatch_pjrt_artifact(
                 env,
                 command,
-                &compilation_context,
+                &ctx,
                 &pjrt_client,
                 &execution,
                 &backend,
@@ -306,7 +306,7 @@ fn dispatch_pjrt(
             .demo => |command| dispatch_pjrt_demo(
                 env,
                 command,
-                &compilation_context,
+                &ctx,
                 &pjrt_client,
                 &execution,
                 &backend,
@@ -323,12 +323,12 @@ fn dispatch_pjrt(
 fn dispatch_pjrt_artifact(
     env: zg.RuntimeEnv,
     command: cli.PjrtCommand,
-    compilation_context: *zg.compilation.Context,
+    ctx: *zg.CompilationCtx,
     client: *zg.pjrt.Client,
     execution: *zg.pjrt.Execution,
     backend: *zg.pjrt.Backend,
 ) !void {
-    const gpa = compilation_context.allocator;
+    const gpa = ctx.allocator;
     return switch (command) {
         .aot_demo => {
             if (comptime !build_options.has_mlir) {
@@ -336,7 +336,7 @@ fn dispatch_pjrt_artifact(
                 return error.MlirDisabled;
             }
             return try pjrt_aot.run(
-                compilation_context,
+                ctx,
                 client,
                 execution,
                 backend,
@@ -359,7 +359,7 @@ fn dispatch_pjrt_artifact(
                 var loaded_program = try pipeline.run(
                     zg.Executor.LoadedProgram,
                     &program,
-                    compilation_context,
+                    ctx,
                 );
                 defer loaded_program.deinit();
                 const serialized = try (try execution.loaded(loaded_program)).serialize(
@@ -394,7 +394,7 @@ fn dispatch_pjrt_artifact(
 fn dispatch_pjrt_demo(
     env: zg.RuntimeEnv,
     command: cli.DemoCommand,
-    compilation_context: *zg.compilation.Context,
+    ctx: *zg.CompilationCtx,
     client: *zg.pjrt.Client,
     execution: *zg.pjrt.Execution,
     backend: *zg.pjrt.Backend,
@@ -410,7 +410,7 @@ fn dispatch_pjrt_demo(
         .kernel_provider => |opts| {
             const providers = try parse_provider_kinds(opts.provider orelse "tvm");
             return try demos.run_kernel_provider_demo(
-                compilation_context,
+                ctx,
                 client,
                 execution,
                 backend,
@@ -429,14 +429,14 @@ fn dispatch_pjrt_demo(
     }
 
     var pipeline = try create_pjrt_demo_pipeline(
-        compilation_context.allocator,
+        ctx.allocator,
         backend,
         execution,
         outputs,
         demo_entry_name(command),
     );
     defer pipeline.deinit();
-    return try run_portable_demo(env, command, compilation_context, &pipeline, quiet);
+    return try run_portable_demo(env, command, ctx, &pipeline, quiet);
 }
 
 fn demo_entry_name(command: cli.DemoCommand) []const u8 {
@@ -453,27 +453,27 @@ fn demo_entry_name(command: cli.DemoCommand) []const u8 {
 fn run_portable_demo(
     env: zg.RuntimeEnv,
     command: cli.DemoCommand,
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
     quiet: bool,
 ) !void {
     return switch (command) {
-        .basic => run_basic_demo(compilation_context, pipeline),
+        .basic => run_basic_demo(ctx, pipeline),
         .custom_call_negative => demos.run_custom_call_negative(
-            compilation_context,
+            ctx,
             pipeline,
         ),
         .kernel_provider => unreachable,
-        .vjp => demos.run_vjp_demo(compilation_context, pipeline),
+        .vjp => demos.run_vjp_demo(ctx, pipeline),
         .train => |opts| demos.run_train_demo(
-            compilation_context,
+            ctx,
             pipeline,
             opts.warmup orelse 0,
             opts.steps orelse 8,
             quiet,
         ),
         .llm_train => |opts| llm_demo.run_llm_train_demo(
-            compilation_context,
+            ctx,
             pipeline,
             env.environ,
             opts.warmup orelse 0,
@@ -481,7 +481,7 @@ fn run_portable_demo(
             quiet,
         ),
         .llama_finetune => |opts| llama_demo.run_llama_ft_demo(
-            compilation_context,
+            ctx,
             pipeline,
             env.environ,
             opts.warmup,
@@ -498,8 +498,8 @@ fn create_pjrt_demo_pipeline(
     execution: *zg.pjrt.Execution,
     outputs: OutputOptions,
     entry_name: []const u8,
-) !zg.compilation.Pipeline {
-    var pipeline = zg.compilation.Pipeline.init(allocator);
+) !zg.Pipeline {
+    var pipeline = zg.Pipeline.init(allocator);
     errdefer pipeline.deinit();
     try add_mlir_input(&pipeline, outputs, entry_name);
     try pipeline.add(&backend.interface);
@@ -517,8 +517,8 @@ fn create_iree_demo_pipeline(
     backend: *zg.iree.Backend,
     outputs: OutputOptions,
     entry_name: []const u8,
-) !zg.compilation.Pipeline {
-    var pipeline = zg.compilation.Pipeline.init(allocator);
+) !zg.Pipeline {
+    var pipeline = zg.Pipeline.init(allocator);
     errdefer pipeline.deinit();
     try add_mlir_input(&pipeline, outputs, entry_name);
     try pipeline.add(&backend.interface);
@@ -526,7 +526,7 @@ fn create_iree_demo_pipeline(
 }
 
 fn add_mlir_input(
-    pipeline: *zg.compilation.Pipeline,
+    pipeline: *zg.Pipeline,
     outputs: OutputOptions,
     entry_name: []const u8,
 ) !void {
@@ -666,7 +666,7 @@ fn dispatch_iree_demo(
         defer runtime.deinit();
         var execution = zg.iree.Execution.init(gpa, &runtime, config.runtime);
 
-        var compilation_context = zg.compilation.Context{
+        var ctx = zg.CompilationCtx{
             .allocator = gpa,
             .io = env.io,
             .device = execution.interface.device,
@@ -682,7 +682,7 @@ fn dispatch_iree_demo(
         return try run_portable_demo(
             env,
             command,
-            &compilation_context,
+            &ctx,
             &pipeline,
             quiet,
         );
@@ -693,19 +693,19 @@ fn dispatch_iree_demo(
 }
 
 fn run_basic_demo(
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
 ) !void {
-    var program = try demos.build_demo_program(compilation_context.allocator);
+    var program = try demos.build_demo_program(ctx.allocator);
     defer program.deinit();
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer loaded_program.deinit();
     return try demos.run_demo_executable(
-        compilation_context.allocator,
+        ctx.allocator,
         loaded_program,
     );
 }

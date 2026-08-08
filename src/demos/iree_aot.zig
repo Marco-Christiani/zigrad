@@ -31,12 +31,12 @@ pub fn run(
     var program = try demos.build_demo_program(allocator);
     defer program.deinit();
 
-    var compilation_context = zg.compilation.Context{
+    var ctx = zg.CompilationCtx{
         .allocator = allocator,
         .io = io,
     };
     var compiler = zg.iree.Compiler{ .config = config.compiler };
-    var pipeline = zg.compilation.Pipeline.init(allocator);
+    var pipeline = zg.Pipeline.init(allocator);
     defer pipeline.deinit();
     try pipeline.add(zg.pr.Validate{});
     if (opts.pr) |selected| {
@@ -59,7 +59,7 @@ pub fn run(
     var vmfb = try pipeline.run(
         zg.iree.Artifact,
         &program,
-        &compilation_context,
+        &ctx,
     );
     defer vmfb.deinit();
 

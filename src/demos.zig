@@ -106,10 +106,10 @@ pub fn run_demo_executable(
 }
 
 pub fn run_custom_call_negative(
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
 ) !void {
-    const allocator = compilation_context.allocator;
+    const allocator = ctx.allocator;
 
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
@@ -125,7 +125,7 @@ pub fn run_custom_call_negative(
     var exe = pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     ) catch |err| {
         log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
@@ -137,10 +137,10 @@ pub fn run_custom_call_negative(
 }
 
 pub fn run_vjp_demo(
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
 ) !void {
-    const allocator = compilation_context.allocator;
+    const allocator = ctx.allocator;
 
     var program = try build_demo_program(allocator);
     defer program.deinit();
@@ -152,7 +152,7 @@ pub fn run_vjp_demo(
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer exe.deinit();
     const executor = exe.executor;
@@ -251,14 +251,14 @@ pub fn run_vjp_demo(
 }
 
 pub fn run_train_demo(
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
 ) !void {
-    const io = compilation_context.io;
-    const allocator = compilation_context.allocator;
+    const io = ctx.io;
+    const allocator = ctx.allocator;
 
     const ParamsSpec = struct {
         w1: Tensor,
@@ -340,7 +340,7 @@ pub fn run_train_demo(
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer exe.deinit();
     const executor = exe.executor;
@@ -469,7 +469,7 @@ pub const KernelProviderDemoOutputs = struct {
 };
 
 pub fn run_kernel_provider_demo(
-    compilation_context: *zg.compilation.Context,
+    ctx: *zg.CompilationCtx,
     client: *zg.pjrt.Client,
     execution_template: *zg.pjrt.Execution,
     backend_template: *zg.pjrt.Backend,
@@ -477,8 +477,8 @@ pub fn run_kernel_provider_demo(
     outputs: KernelProviderDemoOutputs,
     provider_kinds: []const KernelProviderDemoKind,
 ) !void {
-    const io = compilation_context.io;
-    const allocator = compilation_context.allocator;
+    const io = ctx.io;
+    const allocator = ctx.allocator;
     const device = execution_template.device;
 
     const demo_cache = try zg.Cache.init(io, environ, .{});
@@ -576,7 +576,7 @@ pub fn run_kernel_provider_demo(
         null;
     defer if (report) |*value| value.deinit();
 
-    var pipeline = zg.compilation.Pipeline.init(allocator);
+    var pipeline = zg.Pipeline.init(allocator);
     defer pipeline.deinit();
     try pipeline.add(zg.pr.Validate{});
     if (outputs.pr) |selected| {
@@ -627,7 +627,7 @@ pub fn run_kernel_provider_demo(
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer exe.deinit();
 

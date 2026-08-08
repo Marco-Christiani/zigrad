@@ -4,12 +4,12 @@ const zg = @import("zigrad");
 const demos = @import("../demos.zig");
 
 pub fn run(
-    compilation_context: *zg.compilation.Context,
+    ctx: *zg.CompilationCtx,
     client: *zg.pjrt.Client,
     execution: *zg.pjrt.Execution,
     backend: *zg.pjrt.Backend,
 ) !void {
-    const allocator = compilation_context.allocator;
+    const allocator = ctx.allocator;
     var program = try demos.build_demo_program(allocator);
     defer program.deinit();
 
@@ -22,7 +22,7 @@ pub fn run(
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer loaded_program.deinit();
 

@@ -46,6 +46,10 @@ pub const tvm = if (build_options.has_tvm) @import("tvm.zig") else struct {};
 pub const mirage = if (build_options.has_mirage) @import("mirage.zig") else struct {};
 
 pub const Tensor = @import("tensor.zig");
+/// Mutable queue for composing compiler operations.
+pub const Pipeline = compilation.Pipeline;
+/// Services supplied while compiler operations run.
+pub const CompilationCtx = compilation.Context;
 pub const Device = device.Device;
 pub const Platform = device.Platform;
 pub const Executor = execution;

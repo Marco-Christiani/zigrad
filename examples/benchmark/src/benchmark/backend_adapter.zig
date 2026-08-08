@@ -9,7 +9,7 @@ const Backend = zg.Backend(zg.stablehlo.Artifact);
 
 const CompiledContext = struct {
     allocator: std.mem.Allocator,
-    compilation: zg.compilation.Context,
+    compilation: zg.CompilationCtx,
     executor: *zg.Executor,
     backend: *Backend,
     cache: std.StringHashMap(zg.Executor.LoadedProgram),
@@ -118,7 +118,7 @@ const CompiledContext = struct {
         const function = try builder.finish(&.{result});
         try program.add_function(function);
 
-        var pipeline = zg.compilation.Pipeline.init(self.allocator);
+        var pipeline = zg.Pipeline.init(self.allocator);
         defer pipeline.deinit();
         try zg.mlir.stablehlo.pipeline.add(&pipeline, .{ .entry_name = "matmul" });
         try pipeline.add(self.backend);

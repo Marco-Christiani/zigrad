@@ -16,7 +16,7 @@
 //! defer traced.deinit();
 //!
 //! // Application composition supplies operations for the selected target.
-//! var pipeline = zg.compilation.Pipeline.init(allocator);
+//! var pipeline = zg.Pipeline.init(allocator);
 //! defer pipeline.deinit();
 //! try pipeline.add(validate);
 //! try pipeline.add(lower_to_target);

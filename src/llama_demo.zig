@@ -160,16 +160,16 @@ fn loss_fn_with_options(
 }
 
 pub fn run_llama_ft_demo(
-    compilation_context: *zg.compilation.Context,
-    pipeline: *zg.compilation.Pipeline,
+    ctx: *zg.CompilationCtx,
+    pipeline: *zg.Pipeline,
     environ: *const std.process.Environ.Map,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
     cfg: LlamaDemoConfig,
 ) !void {
-    const io = compilation_context.io;
-    const allocator = compilation_context.allocator;
+    const io = ctx.io;
+    const allocator = ctx.allocator;
     const train_mode = cfg.train;
     const model_dtype: zg.DType = cfg.dtype;
     const host_dtype: zg.DType = model_dtype;
@@ -281,7 +281,7 @@ pub fn run_llama_ft_demo(
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        compilation_context,
+        ctx,
     );
     defer exe.deinit();
     const executor = exe.executor;
