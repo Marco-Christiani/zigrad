@@ -15,10 +15,12 @@
 //! );
 //! defer traced.deinit();
 //!
-//! var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
-//!     .stablehlo = .{ .entry_name = traced.entry_name },
-//! });
+//! // Application composition supplies operations for the selected target.
+//! var pipeline = zg.compilation.Pipeline.init(allocator);
 //! defer pipeline.deinit();
+//! try pipeline.add(validate);
+//! try pipeline.add(lower_to_target);
+//! try pipeline.add(terminal_backend);
 //! const loaded_program = try pipeline.run(
 //!     zg.Executor.LoadedProgram,
 //!     &traced.program,

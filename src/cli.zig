@@ -11,8 +11,8 @@ pub const GlobalOpts = struct {
     dump_mlir: ?zg.output.Config = null,
     /// Emit optimized HLO from the PJRT executable.
     dump_optimized_hlo: ?zg.output.Config = null,
-    /// Print the kernelization summary.
-    dump_kernels: bool = false,
+    /// Emit the kernelization report to stdout or a file.
+    dump_kernels: ?zg.output.Config = null,
     /// Reduce command output.
     quiet: bool = false,
 };
@@ -318,7 +318,7 @@ fn parse_global_options(cursor: *Cursor, opts: *GlobalOpts) !void {
             .dump_pr => opts.dump_pr = parse_dump_pr_value(option.value orelse ""),
             .dump_mlir => opts.dump_mlir = dump_config(option.value),
             .dump_optimized_hlo => opts.dump_optimized_hlo = dump_config(option.value),
-            .dump_kernels => opts.dump_kernels = try parse_flag(option.value, !negated),
+            .dump_kernels => opts.dump_kernels = dump_config(option.value),
             .quiet => opts.quiet = try parse_flag(option.value, !negated),
         }
     }
@@ -665,6 +665,32 @@ test "parse_tokens groups commands without feature-dependent names" {
             },
             else => return error.TestExpectedEqual,
         },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "parse_tokens configures compiler output destinations" {
+    const args = [_][]const u8{
+        "--dump-mlir=backend-input.mlir",
+        "--dump-optimized-hlo",
+        "--dump-kernels=kernel-report.txt",
+        "demo",
+        "kernel-provider",
+        "--provider=mirage",
+    };
+    const invocation = try parse_tokens(&args);
+
+    const mlir = invocation.global.dump_mlir orelse return error.TestExpectedEqual;
+    switch (mlir.target) {
+        .file => |path| try std.testing.expectEqualStrings("backend-input.mlir", path),
+        else => return error.TestExpectedEqual,
+    }
+    const optimized_hlo = invocation.global.dump_optimized_hlo orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(zg.output.Target.stdout, optimized_hlo.target);
+    const kernels = invocation.global.dump_kernels orelse return error.TestExpectedEqual;
+    switch (kernels.target) {
+        .file => |path| try std.testing.expectEqualStrings("kernel-report.txt", path),
         else => return error.TestExpectedEqual,
     }
 }

@@ -27,16 +27,13 @@ pub const Artifact = struct {
     }
 };
 
-/// Configuration for textual StableHLO output.
-pub const DumpConfig = output.Config;
-
 /// Emits textual StableHLO and returns the same artifact.
 pub const Dump = struct {
     pub const Input = Artifact;
     pub const Output = Artifact;
 
     /// Output destination and optional entry label.
-    config: DumpConfig,
+    config: output.Config,
 
     /// Write textual StableHLO and return the artifact unchanged.
     pub fn run(self: Dump, artifact: Input, ctx: *compilation.Context) !Output {

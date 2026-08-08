@@ -8,6 +8,7 @@
 const std = @import("std");
 const compilation = @import("../compilation.zig");
 const device = @import("../device.zig");
+const output_mod = @import("../output.zig");
 const region_view = @import("region_view.zig");
 const pr = @import("pr.zig");
 const kernel = @import("kernel.zig");
@@ -60,15 +61,19 @@ pub const DumpKernels = struct {
     pub const Output = *pr.Program;
 
     report: *const Report,
+    target: output_mod.Target,
 
     pub fn run(self: DumpKernels, program: Input, ctx: *compilation.Context) !Output {
         if (self.report.entries.items.len == 0) return program;
 
-        var buffer: [8192]u8 = undefined;
-        var stdout_writer = std.Io.File.stdout().writer(ctx.io, &buffer);
-        const out = &stdout_writer.interface;
-        try dump_kernel_entries(out, self.report.entries.items);
-        try out.flush();
+        const task = struct {
+            entries: []const KernelEntry,
+
+            pub fn emit(value: @This(), writer: *std.Io.Writer) !void {
+                try dump_kernel_entries(writer, value.entries);
+            }
+        }{ .entries = self.report.entries.items };
+        try output_mod.write(ctx.io, self.target, task);
         return program;
     }
 };

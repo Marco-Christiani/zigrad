@@ -71,20 +71,21 @@ pub const global_options = [_]Option{
     },
     .{
         .long_name = "dump-mlir",
-        .description = "Emit MLIR to stdout or a file",
+        .description = "Emit the MLIR input passed to the backend",
         .value_name = "PATH",
         .value_optional = true,
     },
     .{
         .long_name = "dump-optimized-hlo",
-        .description = "Emit optimized HLO from the PJRT executable",
+        .description = "Emit optimized HLO produced by the PJRT backend",
         .value_name = "PATH",
         .value_optional = true,
     },
     .{
         .long_name = "dump-kernels",
-        .description = "Print the kernelization summary",
-        .negatable = true,
+        .description = "Emit the kernelization report to stdout or a file",
+        .value_name = "PATH",
+        .value_optional = true,
     },
     .{
         .long_name = "quiet",

@@ -2,15 +2,27 @@
 
 const std = @import("std");
 const zg = @import("zigrad");
-const cli = @import("../cli.zig");
 const demos = @import("../demos.zig");
+
+pub const Options = struct {
+    /// Destination for the emitted VMFB artifact.
+    output: ?[]const u8 = null,
+
+    /// IREE compilation target override.
+    target: ?[]const u8 = null,
+
+    /// Optional destination and format for PR output.
+    pr: ?zg.pr.dump.Config = null,
+
+    /// Optional destination for the MLIR passed to IREE.
+    mlir: ?zg.output.Config = null,
+};
 
 pub fn run(
     io: std.Io,
     allocator: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
-    opts: cli.IreeCompileOpts,
-    dump_mlir: ?*zg.output.Config,
+    opts: Options,
 ) !void {
     var config = zg.iree.Config.from_environ(environ);
     if (opts.target) |target|
@@ -24,13 +36,26 @@ pub fn run(
         .io = io,
     };
     var compiler = zg.iree.Compiler{ .config = config.compiler };
-    var pipeline = try zg.iree.pipeline.create(allocator, .{ .vmfb = &compiler }, .{
-        .stablehlo = .{
+    var pipeline = zg.compilation.Pipeline.init(allocator);
+    defer pipeline.deinit();
+    try pipeline.add(zg.pr.Validate{});
+    if (opts.pr) |selected| {
+        var output_config = selected;
+        output_config.entry_name = output_config.entry_name orelse "main";
+        try pipeline.add(zg.pr.dump.Dump{ .config = output_config });
+    }
+    try pipeline.add(zg.mlir.stablehlo.Lower{
+        .config = .{
             .entry_name = "main",
-            .dump_stablehlo = if (dump_mlir) |selected| .{ .config = selected.* } else null,
+            .encoding = if (opts.mlir == null) .binary else .text,
         },
     });
-    defer pipeline.deinit();
+    if (opts.mlir) |selected| {
+        var output_config = selected;
+        output_config.entry_name = output_config.entry_name orelse "main";
+        try pipeline.add(zg.stablehlo.Dump{ .config = output_config });
+    }
+    try pipeline.add(&compiler.interface);
     var vmfb = try pipeline.run(
         zg.iree.Artifact,
         &program,

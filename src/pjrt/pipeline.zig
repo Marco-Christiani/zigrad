@@ -4,15 +4,11 @@ const std = @import("std");
 const compilation = @import("../compilation.zig");
 const stablehlo_pipeline = @import("../mlir/stablehlo/pipeline.zig");
 const Backend = @import("backend.zig").Backend;
-const DumpOptimizedHlo = @import("dump.zig").DumpOptimizedHlo;
 
 /// Operations and lowering policy for the default PJRT pipeline.
 pub const Options = struct {
     /// Validated PR to StableHLO segment.
     stablehlo: stablehlo_pipeline.Options,
-
-    /// Optional optimized-HLO output pass applied after compilation and loading.
-    dump_optimized_hlo: ?DumpOptimizedHlo = null,
 };
 
 /// Create the default validated PR to loaded PJRT program pipeline.
@@ -29,10 +25,5 @@ pub fn create(
 
     try stablehlo_pipeline.add(&result, options.stablehlo);
     try result.add(&backend_instance.interface);
-    if (options.dump_optimized_hlo) |selected| {
-        var pass = selected;
-        pass.config.entry_name = pass.config.entry_name orelse options.stablehlo.entry_name;
-        try result.add(pass);
-    }
     return result;
 }

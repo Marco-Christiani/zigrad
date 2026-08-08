@@ -451,14 +451,30 @@ pub fn run_train_demo(
 /// Each selected provider receives an annotated PR region. Tuning populates the
 ///  kernel store, then runtime preparation runs before PR kernelization and
 ///  PJRT execution.
+pub const KernelProviderDemoOutputs = struct {
+    /// PR function compiled and executed by the scenario.
+    entry_name: []const u8,
+
+    /// Optional destination and format for PR output.
+    pr: ?zg.pr.dump.Config = null,
+
+    /// Optional destination for the MLIR passed to PJRT.
+    mlir: ?zg.output.Config = null,
+
+    /// Optional destination for optimized HLO produced by PJRT.
+    optimized_hlo: ?zg.output.Config = null,
+
+    /// Optional destination for the kernelization report.
+    kernels: ?zg.output.Target = null,
+};
+
 pub fn run_kernel_provider_demo(
     compilation_context: *zg.compilation.Context,
     client: *zg.pjrt.Client,
     execution_template: *zg.pjrt.Execution,
     backend_template: *zg.pjrt.Backend,
     environ: *const std.process.Environ.Map,
-    options: zg.pjrt.pipeline.Options,
-    dump_kernels: bool,
+    outputs: KernelProviderDemoOutputs,
     provider_kinds: []const KernelProviderDemoKind,
 ) !void {
     const io = compilation_context.io;
@@ -554,7 +570,7 @@ pub fn run_kernel_provider_demo(
         .device = execution_template.interface.device,
     });
 
-    var report: ?zg.pr.kernelize.Report = if (dump_kernels)
+    var report: ?zg.pr.kernelize.Report = if (outputs.kernels != null)
         .init(allocator)
     else
         null;
@@ -563,11 +579,10 @@ pub fn run_kernel_provider_demo(
     var pipeline = zg.compilation.Pipeline.init(allocator);
     defer pipeline.deinit();
     try pipeline.add(zg.pr.Validate{});
-    if (options.stablehlo.dump_pr) |selected| {
-        var operation = selected;
-        operation.config.entry_name = operation.config.entry_name orelse
-            options.stablehlo.entry_name;
-        try pipeline.add(operation);
+    if (outputs.pr) |selected| {
+        var config = selected;
+        config.entry_name = config.entry_name orelse outputs.entry_name;
+        try pipeline.add(zg.pr.dump.Dump{ .config = config });
     }
     var kernelize = zg.pr.kernelize.KernelizePass{
         .store = &tune_result.store,
@@ -576,20 +591,22 @@ pub fn run_kernel_provider_demo(
     };
     try pipeline.add(&kernelize);
     if (report) |*value| {
-        try pipeline.add(zg.pr.kernelize.DumpKernels{ .report = value });
+        try pipeline.add(zg.pr.kernelize.DumpKernels{
+            .report = value,
+            .target = outputs.kernels.?,
+        });
     }
 
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .entry_name = options.stablehlo.entry_name,
-            .encoding = if (options.stablehlo.dump_stablehlo == null) .binary else .text,
+            .entry_name = outputs.entry_name,
+            .encoding = if (outputs.mlir == null) .binary else .text,
         },
     });
-    if (options.stablehlo.dump_stablehlo) |selected| {
-        var operation = selected;
-        operation.config.entry_name = operation.config.entry_name orelse
-            options.stablehlo.entry_name;
-        try pipeline.add(operation);
+    if (outputs.mlir) |selected| {
+        var config = selected;
+        config.entry_name = config.entry_name orelse outputs.entry_name;
+        try pipeline.add(zg.stablehlo.Dump{ .config = config });
     }
 
     var execution = try zg.pjrt.Execution.init(client, device, .{
@@ -598,12 +615,13 @@ pub fn run_kernel_provider_demo(
     });
     var backend = zg.pjrt.Backend.init(&execution, backend_template.compiler.options);
     try pipeline.add(&backend.interface);
-    if (options.dump_optimized_hlo) |selected| {
-        var operation = selected;
-        operation.execution = &execution;
-        operation.config.entry_name = operation.config.entry_name orelse
-            options.stablehlo.entry_name;
-        try pipeline.add(operation);
+    if (outputs.optimized_hlo) |selected| {
+        var config = selected;
+        config.entry_name = config.entry_name orelse outputs.entry_name;
+        try pipeline.add(zg.pjrt.DumpOptimizedHlo{
+            .execution = &execution,
+            .config = config,
+        });
     }
 
     var exe = try pipeline.run(

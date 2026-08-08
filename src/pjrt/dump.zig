@@ -10,15 +10,13 @@ const Execution = @import("execution.zig").Execution;
 
 const log = std.log.scoped(.@"zg/pjrt_dump");
 
-pub const Config = output.Config;
-
 /// Emit the PJRT executable's optimized HLO and return the same loaded program.
 pub const DumpOptimizedHlo = struct {
     pub const Input = LoadedProgram;
     pub const Output = LoadedProgram;
 
     execution: *Execution,
-    config: Config,
+    config: output.Config,
 
     pub fn run(
         self: DumpOptimizedHlo,
@@ -48,7 +46,7 @@ pub const DumpOptimizedHlo = struct {
 
 fn dump_program(
     io: std.Io,
-    config: Config,
+    config: output.Config,
     code: []const u8,
     format: []const u8,
     allocator: std.mem.Allocator,

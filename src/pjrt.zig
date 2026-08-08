@@ -29,7 +29,6 @@ pub const Backend = backend.Backend;
 pub const pipeline = if (build_options.has_mlir) @import("pjrt/pipeline.zig") else struct {};
 
 const dump = @import("pjrt/dump.zig");
-pub const DumpConfig = dump.Config;
 pub const DumpOptimizedHlo = dump.DumpOptimizedHlo;
 
 test {

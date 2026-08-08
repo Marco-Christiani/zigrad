@@ -28,21 +28,21 @@ pub fn main(init: std.process.Init) !void {
         ));
     }
 
-    var global = parsed.invocation.global;
-    const dumps = DumpOptions{
-        .pr = if (global.dump_pr) |*config| config else null,
-        .mlir = if (global.dump_mlir) |*config| config else null,
-        .optimized_hlo = if (global.dump_optimized_hlo) |*config| config else null,
+    const global = parsed.invocation.global;
+    const outputs = OutputOptions{
+        .pr = global.dump_pr,
+        .mlir = global.dump_mlir,
+        .optimized_hlo = global.dump_optimized_hlo,
         .kernels = global.dump_kernels,
-        .quiet = global.quiet,
     };
+    try validate_output_options(parsed.invocation.command, outputs);
 
     return switch (parsed.invocation.command) {
         .pr => |command| dispatch_pr(env, gpa, command),
         .tvm => |command| dispatch_tvm(env, gpa, command),
-        .iree => |command| dispatch_iree(env, gpa, command, dumps),
-        .pjrt => |command| dispatch_pjrt(env, gpa, .{ .pjrt = command }, dumps),
-        .demo => |command| dispatch_demo(env, gpa, command, dumps),
+        .iree => |command| dispatch_iree(env, gpa, command, outputs),
+        .pjrt => |command| dispatch_pjrt(env, gpa, .{ .pjrt = command }, outputs, global.quiet),
+        .demo => |command| dispatch_demo(env, gpa, command, outputs, global.quiet),
     };
 }
 
@@ -66,13 +66,53 @@ fn tvm_surface_for_command(command: cli.Command) zg.tvm.runtime.Surface {
     };
 }
 
-const DumpOptions = struct {
-    pr: ?*zg.pr.dump.Config,
-    mlir: ?*zg.output.Config,
-    optimized_hlo: ?*zg.output.Config,
-    kernels: bool,
-    quiet: bool,
+const OutputOptions = struct {
+    pr: ?zg.pr.dump.Config,
+    mlir: ?zg.output.Config,
+    optimized_hlo: ?zg.output.Config,
+    kernels: ?zg.output.Config,
 };
+
+const OutputSupport = struct {
+    pr: bool = false,
+    mlir: bool = false,
+    optimized_hlo: bool = false,
+    kernels: bool = false,
+};
+
+const OutputValidationError = error{UnsupportedOutput};
+
+fn validate_output_options(
+    command: cli.Command,
+    outputs: OutputOptions,
+) OutputValidationError!void {
+    const support: OutputSupport = switch (command) {
+        .demo => |demo| .{
+            .pr = true,
+            .mlir = true,
+            .optimized_hlo = demo_backend(demo) == .pjrt,
+            .kernels = switch (demo) {
+                .kernel_provider => true,
+                else => false,
+            },
+        },
+        .iree => .{ .pr = true, .mlir = true },
+        else => .{},
+    };
+    if (outputs.pr != null and !support.pr)
+        return unsupported_output("--dump-pr");
+    if (outputs.mlir != null and !support.mlir)
+        return unsupported_output("--dump-mlir");
+    if (outputs.optimized_hlo != null and !support.optimized_hlo)
+        return unsupported_output("--dump-optimized-hlo");
+    if (outputs.kernels != null and !support.kernels)
+        return unsupported_output("--dump-kernels");
+}
+
+fn unsupported_output(option: []const u8) OutputValidationError {
+    log.err("{s} is not available for the selected command and backend", .{option});
+    return error.UnsupportedOutput;
+}
 
 fn dispatch_pr(env: zg.RuntimeEnv, gpa: std.mem.Allocator, command: cli.PrCommand) !void {
     return switch (command) {
@@ -169,7 +209,7 @@ fn dispatch_iree(
     env: zg.RuntimeEnv,
     gpa: std.mem.Allocator,
     command: cli.IreeCommand,
-    dumps: DumpOptions,
+    outputs: OutputOptions,
 ) !void {
     if (comptime build_options.has_iree and build_options.has_mlir) {
         return switch (command) {
@@ -177,8 +217,12 @@ fn dispatch_iree(
                 env.io,
                 gpa,
                 env.environ,
-                opts,
-                dumps.mlir,
+                .{
+                    .output = opts.output,
+                    .target = opts.target,
+                    .pr = outputs.pr,
+                    .mlir = outputs.mlir,
+                },
             ),
         };
     }
@@ -190,9 +234,17 @@ fn dispatch_demo(
     env: zg.RuntimeEnv,
     gpa: std.mem.Allocator,
     command: cli.DemoCommand,
-    dumps: DumpOptions,
+    outputs: OutputOptions,
+    quiet: bool,
 ) !void {
-    const backend = switch (command) {
+    return switch (demo_backend(command)) {
+        .pjrt => dispatch_pjrt(env, gpa, .{ .demo = command }, outputs, quiet),
+        .iree => dispatch_iree_demo(env, gpa, command, outputs, quiet),
+    };
+}
+
+fn demo_backend(command: cli.DemoCommand) cli.DemoBackend {
+    return switch (command) {
         .basic => |opts| opts.backend,
         .custom_call_negative => |opts| opts.backend,
         .kernel_provider => .pjrt,
@@ -200,10 +252,6 @@ fn dispatch_demo(
         .train => |opts| opts.backend,
         .llm_train => |opts| opts.backend,
         .llama_finetune => |opts| opts.backend,
-    };
-    return switch (backend) {
-        .pjrt => dispatch_pjrt(env, gpa, .{ .demo = command }, dumps),
-        .iree => dispatch_iree_demo(env, gpa, command, dumps),
     };
 }
 
@@ -216,7 +264,8 @@ fn dispatch_pjrt(
     env: zg.RuntimeEnv,
     gpa: std.mem.Allocator,
     work: PjrtWork,
-    dumps: DumpOptions,
+    outputs: OutputOptions,
+    quiet: bool,
 ) !void {
     if (comptime build_options.has_pjrt) {
         const plugin_path = env.environ.get("PJRT_PLUGIN_PATH") orelse {
@@ -261,8 +310,8 @@ fn dispatch_pjrt(
                 &pjrt_client,
                 &execution,
                 &backend,
-                dumps,
-                dumps.quiet,
+                outputs,
+                quiet,
             ),
         };
     }
@@ -349,7 +398,7 @@ fn dispatch_pjrt_demo(
     client: *zg.pjrt.Client,
     execution: *zg.pjrt.Execution,
     backend: *zg.pjrt.Backend,
-    dumps: DumpOptions,
+    outputs: OutputOptions,
     quiet: bool,
 ) !void {
     if (comptime !build_options.has_mlir) {
@@ -366,18 +415,25 @@ fn dispatch_pjrt_demo(
                 execution,
                 backend,
                 env.environ,
-                demo_pipeline_options(dumps, execution, "main"),
-                dumps.kernels,
+                .{
+                    .entry_name = "main",
+                    .pr = outputs.pr,
+                    .mlir = outputs.mlir,
+                    .optimized_hlo = outputs.optimized_hlo,
+                    .kernels = if (outputs.kernels) |config| config.target else null,
+                },
                 providers.slice(),
             );
         },
         else => {},
     }
 
-    var pipeline = try zg.pjrt.pipeline.create(
+    var pipeline = try create_pjrt_demo_pipeline(
         compilation_context.allocator,
         backend,
-        demo_pipeline_options(dumps, execution, demo_entry_name(command)),
+        execution,
+        outputs,
+        demo_entry_name(command),
     );
     defer pipeline.deinit();
     return try run_portable_demo(env, command, compilation_context, &pipeline, quiet);
@@ -436,35 +492,63 @@ fn run_portable_demo(
     };
 }
 
-fn demo_pipeline_options(
-    dumps: DumpOptions,
+fn create_pjrt_demo_pipeline(
+    allocator: std.mem.Allocator,
+    backend: *zg.pjrt.Backend,
     execution: *zg.pjrt.Execution,
+    outputs: OutputOptions,
     entry_name: []const u8,
-) zg.pjrt.pipeline.Options {
-    return .{
-        .stablehlo = .{
-            .entry_name = entry_name,
-            .dump_pr = if (dumps.pr) |config| .{ .config = config.* } else null,
-            .dump_stablehlo = if (dumps.mlir) |config| .{ .config = config.* } else null,
-        },
-        .dump_optimized_hlo = if (dumps.optimized_hlo) |config| .{
+) !zg.compilation.Pipeline {
+    var pipeline = zg.compilation.Pipeline.init(allocator);
+    errdefer pipeline.deinit();
+    try add_mlir_input(&pipeline, outputs, entry_name);
+    try pipeline.add(&backend.interface);
+    if (outputs.optimized_hlo) |config| {
+        try pipeline.add(zg.pjrt.DumpOptimizedHlo{
             .execution = execution,
-            .config = config.*,
-        } else null,
-    };
+            .config = with_entry(config, entry_name),
+        });
+    }
+    return pipeline;
 }
 
-fn iree_pipeline_options(
-    dumps: DumpOptions,
+fn create_iree_demo_pipeline(
+    allocator: std.mem.Allocator,
+    backend: *zg.iree.Backend,
+    outputs: OutputOptions,
     entry_name: []const u8,
-) zg.iree.pipeline.Options {
-    return .{
-        .stablehlo = .{
+) !zg.compilation.Pipeline {
+    var pipeline = zg.compilation.Pipeline.init(allocator);
+    errdefer pipeline.deinit();
+    try add_mlir_input(&pipeline, outputs, entry_name);
+    try pipeline.add(&backend.interface);
+    return pipeline;
+}
+
+fn add_mlir_input(
+    pipeline: *zg.compilation.Pipeline,
+    outputs: OutputOptions,
+    entry_name: []const u8,
+) !void {
+    try pipeline.add(zg.pr.Validate{});
+    if (outputs.pr) |config| {
+        try pipeline.add(zg.pr.dump.Dump{ .config = with_entry(config, entry_name) });
+    }
+    try pipeline.add(zg.mlir.stablehlo.Lower{
+        .config = .{
             .entry_name = entry_name,
-            .dump_pr = if (dumps.pr) |config| .{ .config = config.* } else null,
-            .dump_stablehlo = if (dumps.mlir) |config| .{ .config = config.* } else null,
+            .encoding = if (outputs.mlir == null) .binary else .text,
         },
-    };
+    });
+    if (outputs.mlir) |config| {
+        try pipeline.add(zg.stablehlo.Dump{ .config = with_entry(config, entry_name) });
+    }
+}
+
+fn with_entry(config: anytype, entry_name: []const u8) @TypeOf(config) {
+    var result = config;
+    result.entry_name = result.entry_name orelse entry_name;
+    return result;
 }
 
 fn llama_config(opts: cli.LlamaFtDemoOpts) !llama_demo.LlamaDemoConfig {
@@ -573,14 +657,10 @@ fn dispatch_iree_demo(
     env: zg.RuntimeEnv,
     gpa: std.mem.Allocator,
     command: cli.DemoCommand,
-    dumps: DumpOptions,
+    outputs: OutputOptions,
+    quiet: bool,
 ) !void {
     if (comptime build_options.has_iree and build_options.has_mlir) {
-        if (dumps.optimized_hlo != null) {
-            log.err("--dump-optimized-hlo is only supported by the PJRT backend", .{});
-            return error.UnsupportedOutput;
-        }
-
         const config = zg.iree.Config.from_environ(env.environ);
         var runtime = try zg.iree.Runtime.init(gpa, config.runtime);
         defer runtime.deinit();
@@ -592,10 +672,11 @@ fn dispatch_iree_demo(
             .device = execution.interface.device,
         };
         var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
-        var pipeline = try zg.iree.pipeline.create(
+        var pipeline = try create_iree_demo_pipeline(
             gpa,
-            .{ .loaded = &backend },
-            iree_pipeline_options(dumps, demo_entry_name(command)),
+            &backend,
+            outputs,
+            demo_entry_name(command),
         );
         defer pipeline.deinit();
         return try run_portable_demo(
@@ -603,7 +684,7 @@ fn dispatch_iree_demo(
             command,
             &compilation_context,
             &pipeline,
-            dumps.quiet,
+            quiet,
         );
     }
 
