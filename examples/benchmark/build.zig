@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
         .sdk = @as([]const u8, sdk_abs),
         .pjrt = true,
         .mlir = true,
+        .iree = true,
         .tvm = true,
         .nvrtc = true,
         .@"cuda-runtime" = true,

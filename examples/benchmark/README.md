@@ -10,6 +10,7 @@ Compares matrix-multiply performance across implementations, currently used for 
 | `blas` | Intel MKL `cblas_sgemm` (requires MKL in SDK, f32 only) |
 | `tvm_cpu` | TVM MetaSchedule-tuned kernel (CPU, requires prior tuning) |
 | `tvm_gpu` | TVM MetaSchedule-tuned kernel (CUDA) |
+| `iree` | IREE-compiled StableHLO |
 | `xla_cpu` | XLA/PJRT compiled StableHLO (CPU) |
 | `xla_gpu` | XLA/PJRT compiled StableHLO (GPU) |
 
@@ -20,7 +21,7 @@ Shorthands: `all`, `all-cpu`, `all-gpu`.
 | Flag | Notes |
 |------|-------|
 | `--dtype=f32` | Default. All implementations supported. |
-| `--dtype=f16` | IEEE half-precision. Supported by Zig and XLA. |
+| `--dtype=f16` | IEEE half-precision. Support depends on the selected implementation. |
 
 ## Enter the development environment
 
@@ -54,6 +55,9 @@ zig build run -- --impls=zig_naive,blas --shapes=128x128x128,256x256x256
 # All CPU implementations
 zig build run -- --impls=all-cpu --shapes=512x512x512 --iters=50
 
+# Compare one compiled program through IREE and XLA/PJRT
+zig build run -- --impls=iree,xla_cpu --shapes=128x128x128
+
 # All GPU implementations
 zig build run -- --impls=all-gpu --shapes=1024x1024x1024
 
@@ -61,13 +65,14 @@ zig build run -- --impls=all-gpu --shapes=1024x1024x1024
 zig build run -- --impls=all --shapes=256x256x256
 ```
 
-Select the XLA plugin for the implementation being measured:
+The XLA adapters read distinct CPU and GPU plugin paths so both implementations
+ can be selected in one run:
 
 ```sh
-PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" zig build run -- \
+PJRT_CPU_PLUGIN_PATH=/path/to/cpu/plugin.so zig build run -- \
   --impls=xla_cpu --shapes=128x128x128
 
-PJRT_PLUGIN_PATH="$PJRT_GPU_PLUGIN_PATH" zig build run -- \
+PJRT_GPU_PLUGIN_PATH=/path/to/gpu/plugin.so zig build run -- \
   --impls=xla_gpu --shapes=128x128x128
 ```
 

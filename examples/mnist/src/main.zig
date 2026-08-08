@@ -8,6 +8,11 @@ const std = @import("std");
 const zg = @import("zigrad");
 const Tensor = zg.Tensor;
 
+const BackendKind = enum {
+    pjrt,
+    iree,
+};
+
 pub const std_options: std.Options = .{
     .log_level = .info,
     .log_scope_levels = &.{},
@@ -111,31 +116,87 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     var steps: usize = 100;
+    var backend_kind: BackendKind = .pjrt;
     const args = try init.minimal.args.toSlice(allocator);
     defer allocator.free(args);
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--steps=")) {
             steps = try std.fmt.parseInt(usize, arg["--steps=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--backend=")) {
+            backend_kind = std.meta.stringToEnum(
+                BackendKind,
+                arg["--backend=".len..],
+            ) orelse return error.InvalidBackend;
         }
     }
 
-    const plugin_path = init.environ_map.get("PJRT_PLUGIN_PATH") orelse {
+    return switch (backend_kind) {
+        .pjrt => run_pjrt(io, allocator, init.environ_map, steps),
+        .iree => run_iree(io, allocator, init.environ_map, steps),
+    };
+}
+
+fn run_pjrt(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+    steps: usize,
+) !void {
+    const plugin_path = environ.get("PJRT_PLUGIN_PATH") orelse {
         std.log.err("set PJRT_PLUGIN_PATH to a PJRT plugin (.so)", .{});
         return error.MissingPlugin;
     };
-    const pjrt_options = try zg.pjrt.config.from_environ(init.environ_map);
+    const pjrt_options = try zg.pjrt.config.from_environ(environ);
     var pjrt_client = try zg.pjrt.Client.init(allocator, plugin_path, pjrt_options);
     defer pjrt_client.deinit();
     const devs = try pjrt_client.get_devices(allocator);
     defer allocator.free(devs);
     if (devs.len == 0) return error.NoDevices;
     var execution = try zg.pjrt.Execution.init(&pjrt_client, devs[0], .{});
-    const executor = &execution.interface;
     var compilation_context = zg.compilation.Context{
         .allocator = allocator,
         .io = io,
         .device = execution.interface.device,
     };
+    var backend = zg.pjrt.Backend.init(&execution, .{});
+    var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
+        .stablehlo = .{ .entry_name = "train_step" },
+    });
+    defer pipeline.deinit();
+
+    return try run_training(allocator, steps, &pipeline, &compilation_context);
+}
+
+fn run_iree(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+    steps: usize,
+) !void {
+    const config = zg.iree.Config.from_environ(environ);
+    var runtime = try zg.iree.Runtime.init(allocator, config.runtime);
+    defer runtime.deinit();
+    var execution = zg.iree.Execution.init(allocator, &runtime, config.runtime);
+    var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
+    var compilation_context = zg.compilation.Context{
+        .allocator = allocator,
+        .io = io,
+        .device = execution.interface.device,
+    };
+    var pipeline = try zg.iree.pipeline.create(allocator, .{ .loaded = &backend }, .{
+        .stablehlo = .{ .entry_name = "train_step" },
+    });
+    defer pipeline.deinit();
+
+    return try run_training(allocator, steps, &pipeline, &compilation_context);
+}
+
+fn run_training(
+    allocator: std.mem.Allocator,
+    steps: usize,
+    pipeline: *zg.compilation.Pipeline,
+    compilation_context: *zg.compilation.Context,
+) !void {
     std.log.info("compiling train_step...", .{});
     var traced = try zg.trace_callable(
         train_step,
@@ -145,16 +206,12 @@ pub fn main(init: std.process.Init) !void {
     );
     defer traced.deinit();
 
-    var backend = zg.pjrt.Backend.init(&execution, .{});
-    var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
-        .stablehlo = .{ .entry_name = traced.entry_name },
-    });
-    defer pipeline.deinit();
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,
         &traced.program,
-        &compilation_context,
+        compilation_context,
     );
+    const executor = loaded_program.executor;
     var step_fn = traced.bind(loaded_program) catch |err| {
         loaded_program.deinit();
         return err;

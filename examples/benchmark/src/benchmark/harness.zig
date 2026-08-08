@@ -4,7 +4,7 @@ const zg = @import("zigrad");
 const gemm = @import("../gemm.zig");
 const config = @import("config.zig");
 const stats = @import("stats.zig");
-const xla_adapter = @import("xla_adapter.zig");
+const backend_adapter = @import("backend_adapter.zig");
 const Cache = zg.Cache;
 
 const BenchmarkConfig = config.BenchmarkConfig;
@@ -15,7 +15,7 @@ const BenchmarkResult = config.BenchmarkResult;
 
 const log = std.log.scoped(.benchmark);
 
-pub const DeviceKind = enum { cpu, gpu };
+pub const DeviceKind = config.DeviceKind;
 
 const syms = zg.utils.Symbols.unicode;
 
@@ -30,8 +30,9 @@ pub const Harness = struct {
     cache: Cache,
 
     // XLA/PJRT contexts initialize on first use.
-    xla_cpu_ctx: ?xla_adapter.XlaContext = null,
-    xla_gpu_ctx: ?xla_adapter.XlaContext = null,
+    xla_cpu_ctx: ?backend_adapter.XlaContext = null,
+    xla_gpu_ctx: ?backend_adapter.XlaContext = null,
+    iree_ctx: ?backend_adapter.IreeContext = null,
 
     // Separate maps make the TVM target part of the cache identity.
     tvm_cpu_cache: std.AutoHashMap(Shape, *zg.tvm.CachedMatmul),
@@ -56,6 +57,7 @@ pub const Harness = struct {
 
         if (self.xla_cpu_ctx) |*ctx| ctx.deinit();
         if (self.xla_gpu_ctx) |*ctx| ctx.deinit();
+        if (self.iree_ctx) |*ctx| ctx.deinit();
 
         deinit_tvm_cache(&self.tvm_cpu_cache);
         deinit_tvm_cache(&self.tvm_gpu_cache);
@@ -279,6 +281,10 @@ pub const Harness = struct {
             .zig_naive => gemm.gemm(T, shape.m, shape.n, shape.k, a, lda, b, ldb, c, ldc),
             .tvm_cpu => try self.run_tvm(T, shape, a, b, c, .cpu),
             .tvm_gpu => try self.run_tvm(T, shape, a, b, c, .gpu),
+            .iree => if (comptime zg.build_options.has_iree and zg.build_options.has_mlir)
+                try self.run_iree(T, shape, a, b, c)
+            else
+                return error.IreeDisabled,
             .xla_cpu => if (comptime zg.build_options.has_mlir)
                 try self.run_xla(T, shape, a, b, c, .cpu)
             else
@@ -358,10 +364,33 @@ pub const Harness = struct {
         };
 
         if (ctx.* == null) {
-            ctx.* = try xla_adapter.XlaContext.init(self.io, self.allocator, device);
+            ctx.* = try backend_adapter.XlaContext.init(
+                self.io,
+                self.environ,
+                self.allocator,
+                device,
+            );
         }
 
         try ctx.*.?.execute(T, shape, a, b, c);
+    }
+
+    fn run_iree(
+        self: *Harness,
+        comptime T: type,
+        shape: Shape,
+        a: []const T,
+        b: []const T,
+        c: []T,
+    ) !void {
+        if (self.iree_ctx == null) {
+            self.iree_ctx = try backend_adapter.IreeContext.init(
+                self.io,
+                self.environ,
+                self.allocator,
+            );
+        }
+        try self.iree_ctx.?.execute(T, shape, a, b, c);
     }
 
     /// Print benchmark results in a human-readable table format.

@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .sdk = sdk_abs,
         .pjrt = true,
         .mlir = true,
+        .iree = true,
     });
     const zigrad_mod = zigrad_dep.module("zigrad");
 
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addRPathSpecial("/run/opengl-driver/lib");
 
     b.installArtifact(exe);
 

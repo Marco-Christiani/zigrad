@@ -4,6 +4,8 @@ const zg = @import("zigrad");
 
 const syms = zg.utils.Symbols.unicode;
 
+pub const DeviceKind = enum { cpu, gpu };
+
 /// Element type for benchmark buffers.
 ///
 /// Maps to Zig numeric types at comptime.
@@ -22,7 +24,7 @@ pub const DType = enum {
         };
     }
 
-    /// Maps to the PR-level dtype for XLA/PJRT compilation.
+    /// Maps to the PR-level dtype for compiled implementations.
     pub fn to_pr_dtype(self: DType) zg.DType {
         return switch (self) {
             .f16 => .f16,
@@ -72,6 +74,7 @@ pub const Implementation = enum {
     zig_naive,
     tvm_cpu,
     tvm_gpu,
+    iree,
     xla_cpu,
     xla_gpu,
 

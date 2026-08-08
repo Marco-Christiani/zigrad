@@ -1,6 +1,6 @@
 //! Matmul benchmark: compare kernel implementations across backends.
 //!
-//! Standalone example that demonstrates TVM (tunable) and XLA gemm
+//! Standalone example that demonstrates TVM and compiled backend GEMM
 //!  and compares them against naive Zig and BLAS baselines.
 //!
 //! Usage:
@@ -10,7 +10,7 @@
 //! Options:
 //!   --shapes=MxNxK[,MxNxK,...]   Matrix dimensions (default: 128x128x128)
 //!   --impls=name[,name,...]       Implementations: zig_naive, blas, tvm_cpu,
-//!                                 tvm_gpu, xla_cpu, xla_gpu, all, all-cpu, all-gpu
+//!                                 tvm_gpu, iree, xla_cpu, xla_gpu, all, all-cpu, all-gpu
 //!                                 (default: zig_naive)
 //!   --dtype=f16|f32               Element type (default: f32)
 //!   --warmup=N                    Warmup iterations (default: 10)
@@ -214,8 +214,8 @@ fn print_usage() void {
         \\
         \\Options:
         \\  --shapes=MxNxK[,...]    Matrix dimensions (default: 128x128x128)
-        \\  --impls=name[,...]      zig_naive, blas, tvm_cpu, tvm_gpu, xla_cpu, xla_gpu,
-        \\                          all, all-cpu, all-gpu
+        \\  --impls=name[,...]      zig_naive, blas, tvm_cpu, tvm_gpu, iree, xla_cpu,
+        \\                          xla_gpu, all, all-cpu, all-gpu
         \\  --dtype=f16|f32         Element type (default: f32)
         \\  --warmup=N              Warmup iterations (default: 10)
         \\  --iters=N               Benchmark iterations (default: 100)
