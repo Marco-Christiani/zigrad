@@ -21,13 +21,7 @@
 namespace mlir::zigrad {
 namespace {
 
-// ============================================================================
-// Expand pass: revert kernel_call ops back to original StableHLO ops.
-//
-// Used when a provider returns Unsupported during materialization: the
-// kernel_call is expanded back to the StableHLO pattern it was created from
-// (dot_add -> add(dot(a,b), c), etc.) so the backend can handle it natively.
-// ============================================================================
+// Expands a rejected kernel carrier into the StableHLO pattern it replaced.
 
 static StringRef get_backend_config_string(Operation *op, StringRef key) {
   auto bc = op->getAttrOfType<DictionaryAttr>("backend_config");
@@ -37,39 +31,37 @@ static StringRef get_backend_config_string(Operation *op, StringRef key) {
   return attr.getValue();
 }
 
-/// Extract an i32 integer attribute from backend_config. Returns 0 if missing.
-static int32_t get_backend_config_int(Operation *op, StringRef key) {
+static FailureOr<int64_t> get_backend_config_int(Operation *op, StringRef key) {
   auto bc = op->getAttrOfType<DictionaryAttr>("backend_config");
-  if (!bc) return 0;
+  if (!bc) return failure();
   auto attr = bc.getAs<IntegerAttr>(key);
-  if (!attr) return 0;
-  return static_cast<int32_t>(attr.getInt());
+  if (!attr) return failure();
+  return attr.getInt();
 }
 
-/// Extract an f32 float attribute from backend_config. Returns 0.0 if missing.
-static float get_backend_config_float(Operation *op, StringRef key) {
+static FailureOr<double> get_backend_config_float(Operation *op,
+                                                  StringRef key) {
   auto bc = op->getAttrOfType<DictionaryAttr>("backend_config");
-  if (!bc) return 0.0f;
+  if (!bc) return failure();
   auto attr = bc.getAs<FloatAttr>(key);
-  if (!attr) return 0.0f;
-  return static_cast<float>(attr.getValueAsDouble());
+  if (!attr) return failure();
+  return attr.getValueAsDouble();
 }
 
-/// Extract a raw Attribute from backend_config. Returns nullptr if missing.
 static Attribute get_backend_config_attr(Operation *op, StringRef key) {
   auto bc = op->getAttrOfType<DictionaryAttr>("backend_config");
   if (!bc) return {};
   return bc.get(key);
 }
 
-/// Build a stablehlo.reduce with an add combiner (reduce_sum) over a single
-/// dimension. The init value is a scalar zero of the element type.
+/// Creates a single-dimension StableHLO sum reduction.
+///
+///  The initial value is a scalar zero of the element type.
 static Operation *create_reduce_sum(Location loc, Value input, int64_t dim,
                                      PatternRewriter &rewriter) {
   auto input_type = cast<RankedTensorType>(input.getType());
   Type element_type = input_type.getElementType();
 
-  // Build zero init value.
   auto zero_type = RankedTensorType::get({}, element_type);
   auto zero_attr = DenseElementsAttr::get(zero_type, rewriter.getZeroAttr(element_type));
   OperationState zero_state(loc, "stablehlo.constant");
@@ -77,7 +69,6 @@ static Operation *create_reduce_sum(Location loc, Value input, int64_t dim,
   zero_state.addAttribute("value", zero_attr);
   Operation *zero_op = rewriter.create(zero_state);
 
-  // Compute result shape (input shape with dim removed).
   SmallVector<int64_t> result_shape;
   for (int64_t i = 0; i < input_type.getRank(); ++i) {
     if (i != dim) result_shape.push_back(input_type.getDimSize(i));
@@ -89,7 +80,6 @@ static Operation *create_reduce_sum(Location loc, Value input, int64_t dim,
   state.addTypes(result_type);
   state.addAttribute("dimensions", rewriter.getDenseI64ArrayAttr({dim}));
 
-  // Build the combiner body region.
   Region *body = state.addRegion();
   Block *block = new Block();
   body->push_back(block);
@@ -112,8 +102,7 @@ static Operation *create_reduce_sum(Location loc, Value input, int64_t dim,
   return rewriter.create(state);
 }
 
-/// Build a stablehlo.broadcast_in_dim to broadcast `input` into `result_type`
-/// along the given `broadcast_dimensions`.
+/// Broadcasts a value into the requested ranked tensor type.
 static Operation *create_broadcast_in_dim(Location loc, Value input,
                                            ArrayRef<int64_t> broadcast_dims,
                                            RankedTensorType result_type,
@@ -126,14 +115,92 @@ static Operation *create_broadcast_in_dim(Location loc, Value input,
   return rewriter.create(state);
 }
 
-/// Build a stablehlo.reduce with a maximum combiner (reduce_max) over a single
-/// dimension. The init value is negative infinity of the element type.
+static FailureOr<Value> create_rms_norm(Location loc, Value input,
+                                        int64_t normalized_size,
+                                        PatternRewriter &rewriter) {
+  auto input_type = dyn_cast<RankedTensorType>(input.getType());
+  if (!input_type || input_type.getRank() < 1 || normalized_size <= 0)
+    return failure();
+
+  Type element_type = input_type.getElementType();
+  if (!isa<FloatType>(element_type)) return failure();
+
+  const int64_t reduction_dim = input_type.getRank() - 1;
+  if (!input_type.isDynamicDim(reduction_dim) &&
+      input_type.getDimSize(reduction_dim) != normalized_size)
+    return failure();
+
+  OperationState square_state(loc, "stablehlo.multiply");
+  square_state.addOperands({input, input});
+  square_state.addTypes(input_type);
+  Operation *square = rewriter.create(square_state);
+
+  Operation *sum =
+      create_reduce_sum(loc, square->getResult(0), reduction_dim, rewriter);
+  auto sum_type = cast<RankedTensorType>(sum->getResult(0).getType());
+  auto scalar_type = RankedTensorType::get({}, element_type);
+
+  const double scale = 1.0 / static_cast<double>(normalized_size);
+  auto scale_attr = DenseElementsAttr::get(
+      scalar_type, rewriter.getFloatAttr(element_type, scale));
+  OperationState scale_state(loc, "stablehlo.constant");
+  scale_state.addTypes(scalar_type);
+  scale_state.addAttribute("value", scale_attr);
+  Operation *scale_constant = rewriter.create(scale_state);
+
+  SmallVector<int64_t> scalar_broadcast_dims;
+  Operation *scale_broadcast = create_broadcast_in_dim(
+      loc, scale_constant->getResult(0), scalar_broadcast_dims, sum_type,
+      rewriter);
+
+  OperationState mean_state(loc, "stablehlo.multiply");
+  mean_state.addOperands(
+      {sum->getResult(0), scale_broadcast->getResult(0)});
+  mean_state.addTypes(sum_type);
+  Operation *mean = rewriter.create(mean_state);
+
+  auto epsilon_attr = DenseElementsAttr::get(
+      scalar_type, rewriter.getFloatAttr(element_type, 1.0e-5));
+  OperationState epsilon_state(loc, "stablehlo.constant");
+  epsilon_state.addTypes(scalar_type);
+  epsilon_state.addAttribute("value", epsilon_attr);
+  Operation *epsilon_constant = rewriter.create(epsilon_state);
+  Operation *epsilon_broadcast = create_broadcast_in_dim(
+      loc, epsilon_constant->getResult(0), scalar_broadcast_dims, sum_type,
+      rewriter);
+
+  OperationState denominator_state(loc, "stablehlo.add");
+  denominator_state.addOperands(
+      {mean->getResult(0), epsilon_broadcast->getResult(0)});
+  denominator_state.addTypes(sum_type);
+  Operation *denominator = rewriter.create(denominator_state);
+
+  OperationState inverse_state(loc, "stablehlo.rsqrt");
+  inverse_state.addOperands(denominator->getResult(0));
+  inverse_state.addTypes(sum_type);
+  Operation *inverse = rewriter.create(inverse_state);
+
+  SmallVector<int64_t> inverse_broadcast_dims;
+  for (int64_t dim = 0; dim < input_type.getRank(); ++dim) {
+    if (dim != reduction_dim) inverse_broadcast_dims.push_back(dim);
+  }
+  Operation *inverse_broadcast = create_broadcast_in_dim(
+      loc, inverse->getResult(0), inverse_broadcast_dims, input_type, rewriter);
+
+  OperationState result_state(loc, "stablehlo.multiply");
+  result_state.addOperands({input, inverse_broadcast->getResult(0)});
+  result_state.addTypes(input_type);
+  return rewriter.create(result_state)->getResult(0);
+}
+
+/// Creates a single-dimension StableHLO maximum reduction.
+///
+///  The initial value is negative infinity in the element type.
 static Operation *create_reduce_max(Location loc, Value input, int64_t dim,
                                      PatternRewriter &rewriter) {
   auto input_type = cast<RankedTensorType>(input.getType());
   Type element_type = input_type.getElementType();
 
-  // Build -inf init value.
   auto scalar_type = RankedTensorType::get({}, element_type);
   auto neg_inf = APFloat::getInf(
       cast<FloatType>(element_type).getFloatSemantics(), /*Negative=*/true);
@@ -144,7 +211,6 @@ static Operation *create_reduce_max(Location loc, Value input, int64_t dim,
   init_state.addAttribute("value", init_attr);
   Operation *init_op = rewriter.create(init_state);
 
-  // Compute result shape (input shape with dim removed).
   SmallVector<int64_t> result_shape;
   for (int64_t i = 0; i < input_type.getRank(); ++i) {
     if (i != dim) result_shape.push_back(input_type.getDimSize(i));
@@ -156,7 +222,6 @@ static Operation *create_reduce_max(Location loc, Value input, int64_t dim,
   state.addTypes(result_type);
   state.addAttribute("dimensions", rewriter.getDenseI64ArrayAttr({dim}));
 
-  // Build the combiner body region.
   Region *body = state.addRegion();
   Block *block = new Block();
   body->push_back(block);
@@ -178,7 +243,6 @@ static Operation *create_reduce_max(Location loc, Value input, int64_t dim,
   return rewriter.create(state);
 }
 
-/// Build a stablehlo.dot_general op with explicit dimension numbers attribute.
 static Operation *create_dot_general_with_dims(Location loc, Value lhs, Value rhs,
                                                 Attribute dot_dims_attr,
                                                 TypeRange result_types,
@@ -190,9 +254,7 @@ static Operation *create_dot_general_with_dims(Location loc, Value lhs, Value rh
   return rewriter.create(state);
 }
 
-/// Build a stablehlo.dot_general op with standard matmul dimension numbers
-/// derived from the LHS/RHS tensor ranks. Contracting dimension is the last
-/// axis of LHS against the first axis (dim 0) of RHS; no batching dimensions.
+/// Creates an unbatched matmul using the last LHS and first RHS dimensions.
 static Operation *create_dot_general(Location loc, Value lhs, Value rhs,
                                       TypeRange result_types,
                                       PatternRewriter &rewriter) {
@@ -200,7 +262,6 @@ static Operation *create_dot_general(Location loc, Value lhs, Value rhs,
   int64_t lhs_contract = lhs_ranked.getRank() - 1;
   int64_t rhs_contract = 0;
 
-  // Build the #stablehlo.dot attribute via C API.
   MlirContext capi_ctx = wrap(rewriter.getContext());
   MlirAttribute capi_attr = stablehloDotDimensionNumbersGet(
       capi_ctx,
@@ -283,214 +344,72 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
     }
 
     if (pattern == "rms_norm" && inputs.size() == 1) {
-      // Expand: rms_norm(x) -> multiply(x, broadcast(rsqrt(add(multiply(reduce_sum(multiply(x,x)), scale), eps))))
-      // Weight multiply stays outside the kernel boundary.
-      Location loc = op.getLoc();
-      Value x = inputs[0];
-      int32_t normalized_size = get_backend_config_int(op, "zigrad.normalized_size");
-      if (normalized_size <= 0) return failure();
+      auto normalized_size =
+          get_backend_config_int(op, "zigrad.normalized_size");
+      if (failed(normalized_size)) return failure();
 
-      auto x_type = cast<RankedTensorType>(x.getType());
-      Type elem = x_type.getElementType();
-      int64_t last_dim = x_type.getRank() - 1;
-
-      // x_sq = multiply(x, x)
-      OperationState sq_state(loc, "stablehlo.multiply");
-      sq_state.addOperands({x, x});
-      sq_state.addTypes(x_type);
-      Operation *x_sq = rewriter.create(sq_state);
-
-      // sum = reduce_sum(x_sq, last_dim)
-      Operation *sum = create_reduce_sum(loc, x_sq->getResult(0), last_dim, rewriter);
-
-      // scale = constant(1.0 / normalized_size) broadcast to sum shape
-      auto sum_type = cast<RankedTensorType>(sum->getResult(0).getType());
-      auto scalar_type = RankedTensorType::get({}, elem);
-      float scale_val = 1.0f / static_cast<float>(normalized_size);
-      auto scale_attr = DenseElementsAttr::get(scalar_type, rewriter.getFloatAttr(elem, scale_val));
-      OperationState scale_state(loc, "stablehlo.constant");
-      scale_state.addTypes(scalar_type);
-      scale_state.addAttribute("value", scale_attr);
-      Operation *scale_const = rewriter.create(scale_state);
-
-      // Broadcast scale to sum shape.
-      SmallVector<int64_t> empty_dims;
-      Operation *scale_broadcast = create_broadcast_in_dim(
-          loc, scale_const->getResult(0), empty_dims, sum_type, rewriter);
-
-      // mean = multiply(sum, scale_broadcast)
-      OperationState mean_state(loc, "stablehlo.multiply");
-      mean_state.addOperands({sum->getResult(0), scale_broadcast->getResult(0)});
-      mean_state.addTypes(sum_type);
-      Operation *mean = rewriter.create(mean_state);
-
-      // eps = constant(1e-5) broadcast to sum shape
-      auto eps_attr = DenseElementsAttr::get(scalar_type, rewriter.getFloatAttr(elem, 1.0e-5));
-      OperationState eps_state(loc, "stablehlo.constant");
-      eps_state.addTypes(scalar_type);
-      eps_state.addAttribute("value", eps_attr);
-      Operation *eps_const = rewriter.create(eps_state);
-      Operation *eps_broadcast = create_broadcast_in_dim(
-          loc, eps_const->getResult(0), empty_dims, sum_type, rewriter);
-
-      // denom = add(mean, eps_broadcast)
-      OperationState denom_state(loc, "stablehlo.add");
-      denom_state.addOperands({mean->getResult(0), eps_broadcast->getResult(0)});
-      denom_state.addTypes(sum_type);
-      Operation *denom = rewriter.create(denom_state);
-
-      // inv = rsqrt(denom)
-      OperationState rsqrt_state(loc, "stablehlo.rsqrt");
-      rsqrt_state.addOperands(denom->getResult(0));
-      rsqrt_state.addTypes(sum_type);
-      Operation *inv = rewriter.create(rsqrt_state);
-
-      // broadcast inv to x shape
-      SmallVector<int64_t> inv_broadcast_dims;
-      for (int64_t i = 0; i < x_type.getRank(); ++i) {
-        if (i != last_dim) inv_broadcast_dims.push_back(i);
-      }
-      Operation *inv_broadcast = create_broadcast_in_dim(
-          loc, inv->getResult(0), inv_broadcast_dims, x_type, rewriter);
-
-      // result = multiply(x, inv_broadcast) = normed
-      OperationState normed_state(loc, "stablehlo.multiply");
-      normed_state.addOperands({x, inv_broadcast->getResult(0)});
-      normed_state.addTypes(op->getResultTypes());
-      Operation *normed = rewriter.create(normed_state);
-      rewriter.replaceOp(op, normed->getResults());
+      auto normalized = create_rms_norm(op.getLoc(), inputs[0],
+                                        *normalized_size, rewriter);
+      if (failed(normalized)) return failure();
+      rewriter.replaceOp(op, *normalized);
       return success();
     }
 
     if (pattern == "rms_norm_matmul" && inputs.size() == 2) {
-      // Expand: rms_norm_matmul(X_2D, W') -> dot_general(rms_norm(X_2D), W')
-      // Reconstructs the rms_norm chain on X_2D, then appends a dot_general.
-      Location loc = op.getLoc();
-      Value x = inputs[0];
-      Value w = inputs[1];
-      int32_t normalized_size = get_backend_config_int(op, "zigrad.normalized_size");
-      if (normalized_size <= 0) return failure();
+      auto normalized_size =
+          get_backend_config_int(op, "zigrad.normalized_size");
+      if (failed(normalized_size)) return failure();
 
-      auto x_type = cast<RankedTensorType>(x.getType());
-      Type elem = x_type.getElementType();
-      int64_t last_dim = x_type.getRank() - 1;
+      auto normalized = create_rms_norm(op.getLoc(), inputs[0],
+                                        *normalized_size, rewriter);
+      if (failed(normalized)) return failure();
 
-      // x_sq = multiply(x, x)
-      OperationState sq_state(loc, "stablehlo.multiply");
-      sq_state.addOperands({x, x});
-      sq_state.addTypes(x_type);
-      Operation *x_sq = rewriter.create(sq_state);
-
-      // sum = reduce_sum(x_sq, last_dim)
-      Operation *sum = create_reduce_sum(loc, x_sq->getResult(0), last_dim, rewriter);
-
-      // scale = constant(1.0 / normalized_size) broadcast to sum shape
-      auto sum_type = cast<RankedTensorType>(sum->getResult(0).getType());
-      auto scalar_type = RankedTensorType::get({}, elem);
-      float scale_val = 1.0f / static_cast<float>(normalized_size);
-      auto scale_attr = DenseElementsAttr::get(scalar_type, rewriter.getFloatAttr(elem, scale_val));
-      OperationState scale_state(loc, "stablehlo.constant");
-      scale_state.addTypes(scalar_type);
-      scale_state.addAttribute("value", scale_attr);
-      Operation *scale_const = rewriter.create(scale_state);
-
-      SmallVector<int64_t> empty_dims;
-      Operation *scale_broadcast = create_broadcast_in_dim(
-          loc, scale_const->getResult(0), empty_dims, sum_type, rewriter);
-
-      // mean = multiply(sum, scale_broadcast)
-      OperationState mean_state(loc, "stablehlo.multiply");
-      mean_state.addOperands({sum->getResult(0), scale_broadcast->getResult(0)});
-      mean_state.addTypes(sum_type);
-      Operation *mean = rewriter.create(mean_state);
-
-      // eps = constant(1e-5) broadcast to sum shape
-      auto eps_attr = DenseElementsAttr::get(scalar_type, rewriter.getFloatAttr(elem, 1.0e-5));
-      OperationState eps_state(loc, "stablehlo.constant");
-      eps_state.addTypes(scalar_type);
-      eps_state.addAttribute("value", eps_attr);
-      Operation *eps_const = rewriter.create(eps_state);
-      Operation *eps_broadcast = create_broadcast_in_dim(
-          loc, eps_const->getResult(0), empty_dims, sum_type, rewriter);
-
-      // denom = add(mean, eps_broadcast)
-      OperationState denom_state(loc, "stablehlo.add");
-      denom_state.addOperands({mean->getResult(0), eps_broadcast->getResult(0)});
-      denom_state.addTypes(sum_type);
-      Operation *denom = rewriter.create(denom_state);
-
-      // inv = rsqrt(denom)
-      OperationState rsqrt_state(loc, "stablehlo.rsqrt");
-      rsqrt_state.addOperands(denom->getResult(0));
-      rsqrt_state.addTypes(sum_type);
-      Operation *inv = rewriter.create(rsqrt_state);
-
-      // broadcast inv to x shape
-      SmallVector<int64_t> inv_broadcast_dims;
-      for (int64_t i = 0; i < x_type.getRank(); ++i) {
-        if (i != last_dim) inv_broadcast_dims.push_back(i);
-      }
-      Operation *inv_broadcast = create_broadcast_in_dim(
-          loc, inv->getResult(0), inv_broadcast_dims, x_type, rewriter);
-
-      // normed = multiply(x, inv_broadcast)
-      OperationState normed_state(loc, "stablehlo.multiply");
-      normed_state.addOperands({x, inv_broadcast->getResult(0)});
-      normed_state.addTypes(x_type);
-      Operation *normed = rewriter.create(normed_state);
-
-      // result = dot_general(normed, W')
-      Operation *result = create_dot_general(loc, normed->getResult(0), w,
-                                              op->getResultTypes(), rewriter);
+      Operation *result = create_dot_general(
+          op.getLoc(), *normalized, inputs[1], op->getResultTypes(), rewriter);
       if (!result) return failure();
       rewriter.replaceOp(op, result->getResults());
       return success();
     }
 
     if (pattern == "softmax_matmul" && inputs.size() == 2) {
-      // Expand: softmax_matmul(scores, V) -> dot_general(div(exp(scores), broadcast(reduce_sum(exp(scores)))), V)
       Location loc = op.getLoc();
       Value scores = inputs[0];
       Value v = inputs[1];
-      int32_t reduction_dim = get_backend_config_int(op, "zigrad.reduction_dim");
+      auto reduction_dim =
+          get_backend_config_int(op, "zigrad.reduction_dim");
       Attribute value_dot_dims = get_backend_config_attr(op, "zigrad.value_dot_dims");
+      auto scores_type = dyn_cast<RankedTensorType>(scores.getType());
+      auto value_type = dyn_cast<RankedTensorType>(v.getType());
+      if (failed(reduction_dim) || !value_dot_dims || !scores_type ||
+          !value_type || *reduction_dim < 0 ||
+          *reduction_dim >= scores_type.getRank())
+        return failure();
 
-
-      auto scores_type = cast<RankedTensorType>(scores.getType());
-
-      // exp_result = exponential(scores)
       OperationState exp_state(loc, "stablehlo.exponential");
       exp_state.addOperands(scores);
       exp_state.addTypes(scores_type);
       Operation *exp_result = rewriter.create(exp_state);
 
-      // sum = reduce_sum(exp_result, reduction_dim)
       Operation *sum = create_reduce_sum(loc, exp_result->getResult(0),
-                                          static_cast<int64_t>(reduction_dim), rewriter);
+                                         *reduction_dim, rewriter);
 
-      // broadcast sum back to scores shape
-      // broadcast_dims = all dims except reduction_dim
       SmallVector<int64_t> broadcast_dims;
       for (int64_t i = 0; i < scores_type.getRank(); ++i) {
-        if (i != static_cast<int64_t>(reduction_dim))
-          broadcast_dims.push_back(i);
+        if (i != *reduction_dim) broadcast_dims.push_back(i);
       }
       Operation *sum_broadcast = create_broadcast_in_dim(
           loc, sum->getResult(0), broadcast_dims, scores_type, rewriter);
 
-      // attn_probs = divide(exp_result, sum_broadcast)
       OperationState div_state(loc, "stablehlo.divide");
       div_state.addOperands({exp_result->getResult(0), sum_broadcast->getResult(0)});
       div_state.addTypes(scores_type);
       Operation *attn_probs = rewriter.create(div_state);
 
-      // If scores dtype != V dtype (e.g. softmax in f32, V in bf16),
-      // insert a convert to match V's element type before the dot_general.
+      // Stable softmax may use greater precision than the value matmul.
       Value dot_lhs = attn_probs->getResult(0);
-      auto v_type = cast<RankedTensorType>(v.getType());
-      if (scores_type.getElementType() != v_type.getElementType()) {
+      if (scores_type.getElementType() != value_type.getElementType()) {
         auto converted_type = RankedTensorType::get(
-            scores_type.getShape(), v_type.getElementType());
+            scores_type.getShape(), value_type.getElementType());
         OperationState cvt_state(loc, "stablehlo.convert");
         cvt_state.addOperands(dot_lhs);
         cvt_state.addTypes(converted_type);
@@ -498,8 +417,6 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
         dot_lhs = cvt->getResult(0);
       }
 
-      // result = dot_general(attn_probs, V) using stored dimension numbers.
-      if (!value_dot_dims) return failure();
       Operation *result = create_dot_general_with_dims(loc, dot_lhs, v,
                                                         value_dot_dims,
                                                         op->getResultTypes(), rewriter);
@@ -509,43 +426,44 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
     }
 
     if (pattern == "attention" && inputs.size() == 3) {
-      // Expand: attention(Q, K, V) -> dot_general(softmax(scale * dot_general(Q, K)), V)
-      // with numerically stable softmax (max-shift).
       Location loc = op.getLoc();
       Value q = inputs[0];
       Value k = inputs[1];
       Value v = inputs[2];
-      float scale_value = get_backend_config_float(op, "zigrad.scale");
-      int32_t reduction_dim = get_backend_config_int(op, "zigrad.reduction_dim");
+      auto scale = get_backend_config_float(op, "zigrad.scale");
+      auto reduction_dim =
+          get_backend_config_int(op, "zigrad.reduction_dim");
       Attribute score_dot_dims = get_backend_config_attr(op, "zigrad.score_dot_dims");
       Attribute value_dot_dims = get_backend_config_attr(op, "zigrad.value_dot_dims");
-      auto scores_shape_attr = op->getAttrOfType<DenseI64ArrayAttr>(
-          StringRef("backend_config"))
-          ? DenseI64ArrayAttr()
-          : DenseI64ArrayAttr();
-      // Extract scores_shape from backend_config dict.
-      {
-        auto bc = op->getAttrOfType<DictionaryAttr>("backend_config");
-        if (bc) scores_shape_attr = dyn_cast_or_null<DenseI64ArrayAttr>(bc.get("zigrad.scores_shape"));
-      }
-      if (!score_dot_dims || !value_dot_dims || !scores_shape_attr)
+      auto backend_config =
+          op->getAttrOfType<DictionaryAttr>("backend_config");
+      auto scores_shape_attr = backend_config
+                                   ? dyn_cast_or_null<DenseI64ArrayAttr>(
+                                         backend_config.get("zigrad.scores_shape"))
+                                   : DenseI64ArrayAttr();
+      auto query_type = dyn_cast<RankedTensorType>(q.getType());
+      auto value_type = dyn_cast<RankedTensorType>(v.getType());
+      if (failed(scale) || failed(reduction_dim) || !score_dot_dims ||
+          !value_dot_dims || !scores_shape_attr || !query_type || !value_type)
         return failure();
 
-      // Determine scores type from stored shape.
-      auto q_type = cast<RankedTensorType>(q.getType());
-      Type scores_elem = q_type.getElementType();
       SmallVector<int64_t> scores_dims(scores_shape_attr.asArrayRef());
-      auto scores_type = RankedTensorType::get(scores_dims, scores_elem);
+      if (*reduction_dim < 0 ||
+          *reduction_dim >= static_cast<int64_t>(scores_dims.size()))
+        return failure();
 
-      // raw_scores = dot_general(Q, K) using stored score_dot_dims
+      Type scores_element_type = query_type.getElementType();
+      if (!isa<FloatType>(scores_element_type)) return failure();
+      auto scores_type =
+          RankedTensorType::get(scores_dims, scores_element_type);
+
       Operation *raw_scores = create_dot_general_with_dims(
           loc, q, k, score_dot_dims, {scores_type}, rewriter);
       if (!raw_scores) return failure();
 
-      // scaled = multiply(raw_scores, broadcast(constant(scale)))
-      auto scalar_type = RankedTensorType::get({}, scores_elem);
+      auto scalar_type = RankedTensorType::get({}, scores_element_type);
       auto scale_attr = DenseElementsAttr::get(
-          scalar_type, rewriter.getFloatAttr(scores_elem, scale_value));
+          scalar_type, rewriter.getFloatAttr(scores_element_type, *scale));
       OperationState scale_state(loc, "stablehlo.constant");
       scale_state.addTypes(scalar_type);
       scale_state.addAttribute("value", scale_attr);
@@ -560,51 +478,42 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
       mul_state.addTypes(scores_type);
       Operation *scaled = rewriter.create(mul_state);
 
-      // max = reduce_max(scaled, reduction_dim)
-      Operation *max_val = create_reduce_max(loc, scaled->getResult(0),
-                                              static_cast<int64_t>(reduction_dim), rewriter);
+      Operation *max_val = create_reduce_max(
+          loc, scaled->getResult(0), *reduction_dim, rewriter);
 
-      // broadcast max back to scores shape
       SmallVector<int64_t> broadcast_dims;
       for (int64_t i = 0; i < scores_type.getRank(); ++i) {
-        if (i != static_cast<int64_t>(reduction_dim))
-          broadcast_dims.push_back(i);
+        if (i != *reduction_dim) broadcast_dims.push_back(i);
       }
       Operation *max_broadcast = create_broadcast_in_dim(
           loc, max_val->getResult(0), broadcast_dims, scores_type, rewriter);
 
-      // shifted = subtract(scaled, max_broadcast)
       OperationState sub_state(loc, "stablehlo.subtract");
       sub_state.addOperands({scaled->getResult(0), max_broadcast->getResult(0)});
       sub_state.addTypes(scores_type);
       Operation *shifted = rewriter.create(sub_state);
 
-      // exp = exponential(shifted)
       OperationState exp_state(loc, "stablehlo.exponential");
       exp_state.addOperands(shifted->getResult(0));
       exp_state.addTypes(scores_type);
       Operation *exp_result = rewriter.create(exp_state);
 
-      // sum = reduce_sum(exp, reduction_dim)
       Operation *sum = create_reduce_sum(loc, exp_result->getResult(0),
-                                          static_cast<int64_t>(reduction_dim), rewriter);
+                                         *reduction_dim, rewriter);
 
-      // broadcast sum back to scores shape
       Operation *sum_broadcast = create_broadcast_in_dim(
           loc, sum->getResult(0), broadcast_dims, scores_type, rewriter);
 
-      // probs = divide(exp, sum_broadcast)
       OperationState div_state(loc, "stablehlo.divide");
       div_state.addOperands({exp_result->getResult(0), sum_broadcast->getResult(0)});
       div_state.addTypes(scores_type);
       Operation *probs = rewriter.create(div_state);
 
-      // Optional convert if probs dtype != V dtype.
+      // Stable softmax may use greater precision than the value matmul.
       Value dot_lhs = probs->getResult(0);
-      auto v_type = cast<RankedTensorType>(v.getType());
-      if (scores_elem != v_type.getElementType()) {
+      if (scores_element_type != value_type.getElementType()) {
         auto converted_type = RankedTensorType::get(
-            scores_dims, v_type.getElementType());
+            scores_dims, value_type.getElementType());
         OperationState cvt_state(loc, "stablehlo.convert");
         cvt_state.addOperands(dot_lhs);
         cvt_state.addTypes(converted_type);
@@ -612,7 +521,6 @@ struct KernelCallExpandPattern final : OpRewritePattern<KernelCallOp> {
         dot_lhs = cvt->getResult(0);
       }
 
-      // result = dot_general(probs, V) using stored value_dot_dims
       Operation *result = create_dot_general_with_dims(
           loc, dot_lhs, v, value_dot_dims, op->getResultTypes(), rewriter);
       if (!result) return failure();
@@ -647,11 +555,6 @@ struct ZigradKernelCallExpandPass final
   }
 };
 
-// ============================================================================
-// Legalize pass: kernel_call -> stablehlo.custom_call
-// ============================================================================
-
-/// Build a row-major layout attribute for a single ranked tensor type.
 static FailureOr<Attribute> build_row_major_layout(PatternRewriter &rewriter,
                                                     RankedTensorType ranked) {
   const int64_t rank = ranked.getRank();
@@ -663,7 +566,6 @@ static FailureOr<Attribute> build_row_major_layout(PatternRewriter &rewriter,
   return DenseIntElementsAttr::get(layout_ty, order);
 }
 
-/// Build default (row-major) layout attributes for a range of types.
 static FailureOr<ArrayAttr> build_default_layouts(PatternRewriter &rewriter,
                                                     TypeRange types) {
   SmallVector<Attribute> layouts;
@@ -735,9 +637,6 @@ struct ZigradKernelLegalizePass final
 } // namespace
 
 void registerZigradKernelLegalizePasses() {
-  static bool registered = false;
-  if (registered) return;
-
   static PassRegistration<ZigradKernelCallExpandPass> expand_registration;
   static PassRegistration<ZigradKernelLegalizePass> pass_registration;
 
@@ -753,8 +652,6 @@ void registerZigradKernelLegalizePasses() {
   (void)expand_registration;
   (void)pass_registration;
   (void)pipeline_registration;
-
-  registered = true;
 }
 
 } // namespace mlir::zigrad

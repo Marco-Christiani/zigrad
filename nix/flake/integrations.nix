@@ -9,6 +9,7 @@ in {
     pkgs,
     cudaCfg,
     buildCfg,
+    repoRoot,
     ...
   }: let
     # Shared settings for source builds that can demand long-running derivations.
@@ -42,7 +43,7 @@ in {
 
     zigradSrc = import ../helpers/source-filter.nix {
       inherit (pkgs) lib;
-      root = ../..;
+      root = repoRoot;
     };
 
     zigradAutodoc = pkgs.callPackage ../packages/zigrad-autodoc.nix {
@@ -80,7 +81,6 @@ in {
     xla = import ./integrations/xla.nix {
       inherit
         pkgs
-        lib
         cudaCfg
         cudaRuntime
         mkCudaPackage
@@ -105,13 +105,13 @@ in {
       xlaPjrtPluginsCuda
       xlaCudaRuntime
       xlaProtos
-      zigradMlirExt
       ;
 
     mirageParts = import ./integrations/mirage.nix {
       inherit
         pkgs
         lib
+        repoRoot
         gccHost
         cudaArchitectures
         withDebugSymbols
@@ -245,9 +245,6 @@ in {
         iree-compiler = ireeCompiler;
         iree-runtime = ireeRuntime;
         pjrt-headers = pjrtHeaders;
-        # Disconnected C++ dialect, pass, and language-server tooling.
-        zigrad-mlir-ext = zigradMlirExt;
-        zigrad-mlir-ext-dev = zigradMlirExt.dev;
       };
 
     apps = configurationApps;

@@ -4,6 +4,7 @@
     pkgs,
     config,
     cudaCfg,
+    repoRoot,
     ...
   }: let
     externalSources = import ../external-sources.nix {inherit pkgs;};
@@ -64,7 +65,7 @@
       name = "check-sdk";
       runtimeInputs = [checkSdkPython];
       text = ''
-        exec python3 ${../../scripts/check_sdk.py} "$@"
+        exec python3 ${repoRoot + /scripts/check_sdk.py} "$@"
       '';
     };
 
@@ -72,8 +73,8 @@
       name = "update-cuda-catalog";
       runtimeInputs = [pkgs.python3];
       text = ''
-        export PYTHONPATH=${../../scripts}
-        exec python3 ${../../scripts/update_cuda_catalog.py} \
+        export PYTHONPATH=${repoRoot + /scripts}
+        exec python3 ${repoRoot + /scripts/update_cuda_catalog.py} \
           --xla-src ${externalSources.xla.src} \
           --cuda-version ${cudaCfg.cudaVersion} \
           --cudnn-version ${cudaCfg.cudnnVersion} \
@@ -87,8 +88,8 @@
       name = "check-dependency-snapshot";
       runtimeInputs = [pkgs.python3];
       text = ''
-        export PYTHONPATH=${../../scripts}
-        exec python3 ${../../scripts/check_dependency_snapshot.py} \
+        export PYTHONPATH=${repoRoot + /scripts}
+        exec python3 ${repoRoot + /scripts/check_dependency_snapshot.py} \
           --repo "$PWD" \
           --xla-src ${externalSources.xla.src} \
           --llvm-src ${externalSources.llvm.src} \
@@ -105,10 +106,10 @@
         pkgs.python3
       ];
       text = ''
-        export PYTHONPATH=${../../scripts}
-        exec python3 ${../../scripts/plan_dependencies.py} \
+        export PYTHONPATH=${repoRoot + /scripts}
+        exec python3 ${repoRoot + /scripts/plan_dependencies.py} \
           --manifest ${config.packages.zigrad-build-configurations} \
-          --snapshot ${../external-sources.json} \
+          --snapshot ${repoRoot + /nix/external-sources.json} \
           --xla-src ${externalSources.xla.src} \
           --llvm-src ${externalSources.llvm.src} \
           --tvm-src ${externalSources.tvm.src} \
@@ -121,8 +122,8 @@
       pkgs.runCommand "dependency-planner-tests" {
         nativeBuildInputs = [pkgs.python3];
       } ''
-        export PYTHONPATH=${../../scripts}
-        python3 ${../../scripts/test_dependency_planner.py}
+        export PYTHONPATH=${repoRoot + /scripts}
+        python3 ${repoRoot + /scripts/test_dependency_planner.py}
         touch "$out"
       '';
   in {

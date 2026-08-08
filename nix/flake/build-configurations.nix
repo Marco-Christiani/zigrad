@@ -296,6 +296,26 @@
       description = "Broad CUDA development build with TVM Python bindings";
       expose = false;
     };
+
+    example-mnist = {
+      demands = [
+        "iree-cpu-execution"
+        "xla-cuda-execution"
+      ];
+      description = "Dependencies for the MNIST example";
+      expose = false;
+      packageName = "zigrad-example-mnist-dependencies";
+    };
+
+    example-benchmark = {
+      demands = [
+        "iree-cpu-execution"
+        "tvm-xla-cuda-execution"
+      ];
+      description = "Dependencies for the benchmark example";
+      expose = false;
+      packageName = "zigrad-example-benchmark-dependencies";
+    };
   };
 
   nodeFor = name:

@@ -1,6 +1,5 @@
 {
   pkgs,
-  lib,
   cudaCfg,
   cudaRuntime,
   mkCudaPackage,
@@ -51,23 +50,6 @@
     withNativeTuning = false;
   };
 
-  zigradMlirExt = pkgs.callPackage ../../packages/zigrad-mlir-ext.nix {
-    inherit xlaMlirStablehloCapiSdk llvm;
-    src = let
-      fs = lib.fileset;
-    in
-      fs.toSource {
-        root = ../../../shim;
-        fileset = fs.unions [
-          ../../../shim/CMakeLists.txt
-          ../../../shim/mlir_ext.cc
-          ../../../shim/zigrad
-          ../../../shim/dev
-          ../../../shim/test
-        ];
-      };
-  };
-
   xlaPjrtPlugins = pkgs.callPackage ../../packages/xla-pjrt-runtime-bazel.nix {
     inherit xlaSrc xlaRevision withDebugSymbols enableLto extraBazelFlags;
     cudaSupport = false;
@@ -93,6 +75,5 @@ in {
     xlaPjrtPluginsCuda
     xlaProtos
     xlaCudaRuntime
-    zigradMlirExt
     ;
 }

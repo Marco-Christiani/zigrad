@@ -1,6 +1,11 @@
 // RUN-PIPELINE: builtin.module(func.func(zg-kernel-call-expand))
 // Test: zigrad.kernel_call pattern=rms_norm -> stablehlo ops
 //   Expands: rms_norm(x) -> multiply(x, broadcast(rsqrt(add(multiply(reduce_sum(multiply(x,x)), scale), eps))))
+// CHECK-LABEL: func.func @expand_rms_norm
+// CHECK: stablehlo.reduce
+// CHECK: stablehlo.rsqrt
+// CHECK: stablehlo.multiply
+// CHECK-NOT: zigrad.kernel_call
 func.func @expand_rms_norm(%x: tensor<2x4xf32>) -> tensor<2x4xf32> {
   %0 = "zigrad.kernel_call"(%x) {
     api_version = 4 : i32,

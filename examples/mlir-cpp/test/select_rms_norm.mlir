@@ -1,10 +1,8 @@
-// Test: rsqrt-based RMSNorm chain -> zigrad.kernel_call pattern=rms_norm
+// Test: standalone RMSNorm remains in StableHLO.
 // Pattern: multiply(x, broadcast(rsqrt(add(multiply(reduce_sum(multiply(x,x)), scale), eps))))
 //   followed by weight multiply (which stays outside the kernel boundary).
-//
-// NOTE: RmsNormPattern is currently disabled in the pass (Mirage assertion).
-//   To test: temporarily enable the pattern or run with a custom pass config.
-//   This file documents the expected input shape for when it is re-enabled.
+// CHECK-LABEL: func.func @rms_norm
+// CHECK-NOT: zigrad.kernel_call
 func.func @rms_norm(%x: tensor<2x4xf32>, %weight: tensor<2x4xf32>) -> tensor<2x4xf32> {
   // x_sq = x * x
   %x_sq = stablehlo.multiply %x, %x : tensor<2x4xf32>

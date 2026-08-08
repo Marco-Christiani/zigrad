@@ -23,9 +23,7 @@ struct KeyCounter {
   std::string next() { return "mk_" + std::to_string(value++); }
 };
 
-// ============================================================================
-// Pattern: mul(add(dot, x), x) -> "dot_add_mul"  (priority 3)
-// ============================================================================
+// mul(add(dot, x), x) -> dot_add_mul
 
 struct DotAddMulPattern final : RewritePattern {
   KeyCounter *counter;
@@ -73,7 +71,9 @@ struct DotAddMulPattern final : RewritePattern {
     if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse())
       return failure();
     if (dot_op->getNumOperands() != 2) return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
+    if (!kernel_utils::has_matmul_dims(dot_op,
+                                       kernel_utils::RhsLayout::standard))
+      return failure();
 
     SmallVector<Value, 3> call_operands = {
         dot_op->getOperand(0),
@@ -94,9 +94,7 @@ struct DotAddMulPattern final : RewritePattern {
   }
 };
 
-// ============================================================================
-// Pattern: add(dot, x) -> "dot_add"  (priority 2)
-// ============================================================================
+// add(dot, x) -> dot_add
 
 struct DotAddPattern final : RewritePattern {
   KeyCounter *counter;
@@ -128,7 +126,9 @@ struct DotAddPattern final : RewritePattern {
     if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse())
       return failure();
     if (dot_op->getNumOperands() != 2) return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
+    if (!kernel_utils::has_matmul_dims(dot_op,
+                                       kernel_utils::RhsLayout::standard))
+      return failure();
 
     SmallVector<Value, 3> call_operands = {
         dot_op->getOperand(0),
@@ -148,9 +148,7 @@ struct DotAddPattern final : RewritePattern {
   }
 };
 
-// ============================================================================
-// Pattern: exp(dot) -> "dot_exp",  log(dot) -> "dot_log"  (priority 2)
-// ============================================================================
+// exp(dot) -> dot_exp and log(dot) -> dot_log
 
 struct DotUnaryPattern final : RewritePattern {
   KeyCounter *counter;
@@ -169,7 +167,9 @@ struct DotUnaryPattern final : RewritePattern {
     if (dot_op->getNumResults() != 1 || !dot_op->getResult(0).hasOneUse())
       return failure();
     if (dot_op->getNumOperands() != 2) return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
+    if (!kernel_utils::has_matmul_dims(dot_op,
+                                       kernel_utils::RhsLayout::standard))
+      return failure();
 
     SmallVector<Value, 2> call_operands = {
         dot_op->getOperand(0),
@@ -192,150 +192,7 @@ struct DotUnaryPattern final : RewritePattern {
   }
 };
 
-// ============================================================================
-// Pattern: rsqrt-based RMSNorm chain -> "rms_norm"  (priority 4)
-//
-// Backward from rsqrt:
-//   rsqrt(add(mul(reduce_sum(mul(x,x)), scale_broadcast), eps_broadcast))
-// Forward from rsqrt:
-//   broadcast(rsqrt) -> mul(x, inv_broadcast) = normed
-//   mul(normed, weight_broadcast) = final
-// ============================================================================
-
-struct RmsNormPattern final : RewritePattern {
-  KeyCounter *counter;
-
-  explicit RmsNormPattern(MLIRContext *ctx, KeyCounter *counter)
-      : RewritePattern("stablehlo.rsqrt", 4, ctx), counter(counter) {}
-
-  LogicalResult matchAndRewrite(Operation *rsqrt_op,
-                                PatternRewriter &rewriter) const override {
-    if (rsqrt_op->getNumOperands() != 1 || rsqrt_op->getNumResults() != 1)
-      return failure();
-
-    // Step 1: rsqrt operand -> add (denom = mean + eps)
-    Operation *add_op = rsqrt_op->getOperand(0).getDefiningOp();
-    if (!kernel_utils::is_named_op(add_op, "stablehlo.add"))
-      return failure();
-    if (add_op->getNumOperands() != 2) return failure();
-
-    // Step 2: one side of add is mul (mean = sum * scale), other is eps broadcast
-    Operation *mean_mul_op = nullptr;
-    for (int i = 0; i < 2; ++i) {
-      Operation *def = add_op->getOperand(i).getDefiningOp();
-      if (kernel_utils::is_named_op(def, "stablehlo.multiply")) {
-        mean_mul_op = def;
-        break;
-      }
-    }
-    if (!mean_mul_op || mean_mul_op->getNumOperands() != 2) return failure();
-
-    // Step 3: one side of mean_mul is reduce_sum
-    Operation *reduce_op = nullptr;
-    for (int i = 0; i < 2; ++i) {
-      Operation *def = mean_mul_op->getOperand(i).getDefiningOp();
-      if (kernel_utils::is_named_op(def, "stablehlo.reduce")) {
-        reduce_op = def;
-        break;
-      }
-    }
-    if (!reduce_op) return failure();
-
-    // Verify reduce body is add (reduce_sum).
-    if (reduce_op->getNumRegions() != 1) return failure();
-    Region &body = reduce_op->getRegion(0);
-    if (body.empty() || !body.hasOneBlock()) return failure();
-    Block &block = body.front();
-    // The block should contain an add followed by a return.
-    Operation *combiner = nullptr;
-    for (Operation &inner_op : block.without_terminator()) {
-      combiner = &inner_op;
-    }
-    if (!combiner || !kernel_utils::is_named_op(combiner, "stablehlo.add"))
-      return failure();
-
-    // Step 4: reduce input -> mul(x, x) where both operands are the same Value
-    if (reduce_op->getNumOperands() < 1) return failure();
-    Value reduce_input = reduce_op->getOperand(0);
-    Operation *sq_op = reduce_input.getDefiningOp();
-    if (!kernel_utils::is_named_op(sq_op, "stablehlo.multiply"))
-      return failure();
-    if (sq_op->getNumOperands() != 2) return failure();
-    if (sq_op->getOperand(0) != sq_op->getOperand(1))
-      return failure();
-
-    Value x = sq_op->getOperand(0);
-
-    // Step 5: rsqrt -> broadcast_in_dim -> mul(x, inv_broadcast) = normed
-    if (!rsqrt_op->getResult(0).hasOneUse()) return failure();
-    Operation *inv_broadcast = *rsqrt_op->getResult(0).getUsers().begin();
-    if (!kernel_utils::is_named_op(inv_broadcast, "stablehlo.broadcast_in_dim"))
-      return failure();
-    if (!inv_broadcast->getResult(0).hasOneUse()) return failure();
-
-    Operation *normed_mul = *inv_broadcast->getResult(0).getUsers().begin();
-    if (!kernel_utils::is_named_op(normed_mul, "stablehlo.multiply"))
-      return failure();
-    if (normed_mul->getNumOperands() != 2) return failure();
-
-    // Verify one operand is x and the other is the broadcast of rsqrt.
-    bool normed_uses_x = (normed_mul->getOperand(0) == x ||
-                          normed_mul->getOperand(1) == x);
-    if (!normed_uses_x) return failure();
-
-    // Step 6: verify normed_mul feeds into weight multiply (validates full
-    // RMSNorm structure) but the kernel boundary stops at normed_mul.
-    // The weight broadcast+multiply stays in StableHLO for XLA to handle.
-    if (!normed_mul->getResult(0).hasOneUse()) return failure();
-    Operation *final_mul = *normed_mul->getResult(0).getUsers().begin();
-    if (!kernel_utils::is_named_op(final_mul, "stablehlo.multiply"))
-      return failure();
-
-    // Verify all intermediate ops have single use (except x which may have
-    // multiple uses for residual connections).
-    if (!add_op->getResult(0).hasOneUse()) return failure();
-    if (!mean_mul_op->getResult(0).hasOneUse()) return failure();
-    if (!reduce_op->getResult(0).hasOneUse()) return failure();
-    if (!sq_op->getResult(0).hasOneUse()) return failure();
-
-    // Extract normalized_size from the last dim of x's ranked tensor type.
-    auto x_type = dyn_cast<RankedTensorType>(x.getType());
-    if (!x_type || x_type.getRank() == 0) return failure();
-    int64_t normalized_size = x_type.getDimSize(x_type.getRank() - 1);
-    if (normalized_size <= 0) return failure();
-
-    // Kernel boundary: input x -> output normed (= multiply(x, inv_broadcast)).
-    // The weight broadcast+multiply stays outside: XLA fuses it trivially and
-    // this avoids materialized broadcast buffers at the FFI boundary.
-    SmallVector<Value, 1> call_operands = {x};
-    SmallVector<NamedAttribute, 1> extra_config;
-    extra_config.push_back(rewriter.getNamedAttr(
-        "zigrad.normalized_size",
-        rewriter.getI32IntegerAttr(static_cast<int32_t>(normalized_size))));
-
-    // Insert the kernel_call at normed_mul's position (all operands dominate).
-    rewriter.setInsertionPoint(normed_mul);
-
-    std::string key = counter->next();
-    Operation *replacement = kernel_utils::create_kernel_call(
-        normed_mul, call_operands, normed_mul->getResultTypes(),
-        kProvider, key, "rms_norm", extra_config, rewriter);
-    rewriter.replaceOp(normed_mul, replacement->getResults());
-
-    // Clean up dead ops (backward order).
-    if (inv_broadcast->use_empty()) rewriter.eraseOp(inv_broadcast);
-    if (rsqrt_op->use_empty()) rewriter.eraseOp(rsqrt_op);
-    if (add_op->use_empty()) rewriter.eraseOp(add_op);
-    if (mean_mul_op->use_empty()) rewriter.eraseOp(mean_mul_op);
-    if (reduce_op->use_empty()) rewriter.eraseOp(reduce_op);
-    if (sq_op->use_empty()) rewriter.eraseOp(sq_op);
-
-    return success();
-  }
-};
-
-// ============================================================================
-// Pattern: rms_norm(X) @ W -> "rms_norm_matmul"  (priority 5)
+// rms_norm(X) @ W -> rms_norm_matmul
 //
 // Anchored on stablehlo.dot_general, walks backward through:
 //   dot_general(lhs, W)
@@ -344,7 +201,6 @@ struct RmsNormPattern final : RewritePattern {
 //
 // Pre-multiplies gamma into W (rms_norm(X)*gamma)@W = rms_norm(X)@(gamma*W)) to avoid
 // passing a rank-1 gamma through Mirage (which can't broadcast rank-1 vs rank-2).
-// ============================================================================
 
 struct RmsNormMatmulPattern final : RewritePattern {
   KeyCounter *counter;
@@ -356,7 +212,9 @@ struct RmsNormMatmulPattern final : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (dot_op->getNumOperands() != 2 || dot_op->getNumResults() != 1)
       return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
+    if (!kernel_utils::has_matmul_dims(dot_op,
+                                       kernel_utils::RhsLayout::standard))
+      return failure();
 
     Value dot_lhs = dot_op->getOperand(0);
     Value w = dot_op->getOperand(1);
@@ -614,11 +472,9 @@ struct RmsNormMatmulPattern final : RewritePattern {
   }
 };
 
-// ============================================================================
-// Pattern: softmax(scores) @ V -> "softmax_matmul"  (priority 5)
+// softmax(scores) @ V -> softmax_matmul
 //
 // Matches: dot_general(div(exp(scores), broadcast(reduce_sum(exp(scores)))), V)
-// ============================================================================
 
 struct SoftmaxMatmulPattern final : RewritePattern {
   KeyCounter *counter;
@@ -630,7 +486,9 @@ struct SoftmaxMatmulPattern final : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (dot_op->getNumOperands() != 2 || dot_op->getNumResults() != 1)
       return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(dot_op)) return failure();
+    if (!kernel_utils::has_matmul_dims(dot_op,
+                                       kernel_utils::RhsLayout::standard))
+      return failure();
 
     // Step 1: dot LHS -> divide (attn_probs = exp / sum)
     // Allow an optional stablehlo.convert between divide and dot_general
@@ -748,8 +606,7 @@ struct SoftmaxMatmulPattern final : RewritePattern {
   }
 };
 
-// ============================================================================
-// Pattern: Q@K -> scale -> stable_softmax -> @V -> "attention"  (priority 6)
+// Q@K -> scale -> stable_softmax -> @V -> attention
 //
 // Matches the full unmasked attention subgraph:
 //   raw_scores = dot_general(Q, K)
@@ -761,7 +618,6 @@ struct SoftmaxMatmulPattern final : RewritePattern {
 //   probs = divide(exp, broadcast(sum))
 //   [optional convert]
 //   result = dot_general(probs, V)
-// ============================================================================
 
 struct AttentionPattern final : RewritePattern {
   KeyCounter *counter;
@@ -773,7 +629,9 @@ struct AttentionPattern final : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (v_dot_op->getNumOperands() != 2 || v_dot_op->getNumResults() != 1)
       return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(v_dot_op)) return failure();
+    if (!kernel_utils::has_matmul_dims(v_dot_op,
+                                       kernel_utils::RhsLayout::standard))
+      return failure();
 
     // Step 1: V dot LHS -> optional convert -> divide (probs = exp / sum)
     Value dot_lhs = v_dot_op->getOperand(0);
@@ -872,7 +730,9 @@ struct AttentionPattern final : RewritePattern {
     }
     if (!score_dot || !scale_broadcast) return failure();
     if (score_dot->getNumOperands() != 2) return failure();
-    if (!kernel_utils::has_canonical_matmul_dims(score_dot)) return failure();
+    if (!kernel_utils::has_matmul_dims(score_dot,
+                                       kernel_utils::RhsLayout::transposed))
+      return failure();
 
     // Extract scale constant value.
     if (scale_broadcast->getNumOperands() != 1) return failure();
@@ -979,10 +839,6 @@ struct AttentionPattern final : RewritePattern {
   }
 };
 
-// ============================================================================
-// Pass definition
-// ============================================================================
-
 struct MirageKernelSelectPass final
     : PassWrapper<MirageKernelSelectPass, OperationPass<func::FuncOp>> {
   StringRef getArgument() const final { return "zg-mirage-kernel-select"; }
@@ -1003,9 +859,7 @@ struct MirageKernelSelectPass final
     patterns.add<AttentionPattern>(&getContext(), &counter);
     patterns.add<SoftmaxMatmulPattern>(&getContext(), &counter);
     patterns.add<RmsNormMatmulPattern>(&getContext(), &counter);
-    // RmsNormPattern disabled: standalone rmsNorm produces 0 Mirage custom
-    // kernels. The fused rms_norm_matmul pattern above handles the useful case.
-    // patterns.add<RmsNormPattern>(&getContext(), &counter);
+    // TODO(mirage): Select standalone RMSNorm when Mirage can materialize it.
     patterns.add<DotAddMulPattern>(&getContext(), &counter);
     patterns.add<DotAddPattern>(&getContext(), &counter);
     patterns.add<DotUnaryPattern>(&getContext(), "stablehlo.exponential",
@@ -1021,13 +875,8 @@ struct MirageKernelSelectPass final
 } // namespace
 
 void registerMirageKernelSelectPass() {
-  static bool registered = false;
-  if (registered) return;
-
   static PassRegistration<MirageKernelSelectPass> registration;
   (void)registration;
-
-  registered = true;
 }
 
 } // namespace mlir::zigrad::mirage

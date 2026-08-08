@@ -1,6 +1,12 @@
 // RUN-PIPELINE: builtin.module(func.func(zg-kernel-call-expand))
 // Test: zigrad.kernel_call pattern=attention -> full StableHLO attention chain
 //   Expands: attention(Q, K, V) -> dot_general(softmax(scale * dot_general(Q, K)), V)
+// CHECK-LABEL: func.func @expand_attention
+// CHECK: stablehlo.dot_general
+// CHECK: stablehlo.maximum
+// CHECK: stablehlo.exponential
+// CHECK: stablehlo.dot_general
+// CHECK-NOT: zigrad.kernel_call
 func.func @expand_attention(%q: tensor<2x4x8x16xf32>, %k: tensor<2x4x8x16xf32>, %v: tensor<2x4x8x16xf32>) -> tensor<2x4x8x16xf32> {
   %0 = "zigrad.kernel_call"(%q, %k, %v) {
     api_version = 4 : i32,

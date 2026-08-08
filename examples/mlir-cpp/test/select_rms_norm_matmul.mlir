@@ -4,6 +4,9 @@
 //
 // The bf16->f32 converts for precision, rms_norm chain runs in f32,
 // gamma multiply, convert back to bf16, reshape to 2D, then matmul.
+// CHECK-LABEL: func.func @rms_norm_matmul
+// CHECK: zigrad.kernel_call
+// CHECK-SAME: zigrad.pattern = "rms_norm_matmul"
 func.func @rms_norm_matmul(
     %x_bf16: tensor<4x2048xbf16>,
     %gamma_bf16: tensor<2048xbf16>,

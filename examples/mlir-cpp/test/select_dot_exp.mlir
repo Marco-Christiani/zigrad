@@ -1,4 +1,7 @@
 // Test: exp(dot_general(A,B)) -> zigrad.kernel_call pattern=dot_exp
+// CHECK-LABEL: func.func @dot_exp
+// CHECK: zigrad.kernel_call
+// CHECK-SAME: zigrad.pattern = "dot_exp"
 func.func @dot_exp(%a: tensor<4x8xf32>, %b: tensor<8x4xf32>) -> tensor<4x4xf32> {
   %0 = "stablehlo.dot_general"(%a, %b) {
     dot_dimension_numbers = #stablehlo.dot<

@@ -1,6 +1,10 @@
-// RUN-PIPELINE: builtin.module(func.func(zg-kernel-legalize))
-// Test: zigrad.kernel_call -> stablehlo.custom_call
-func.func @legalize(%a: tensor<4x8xf32>, %b: tensor<8x4xf32>, %c: tensor<4x4xf32>) -> tensor<4x4xf32> {
+// RUN-PIPELINE: builtin.module(func.func(zg-kernel-call-expand))
+// Test: zigrad.kernel_call pattern=dot_add -> stablehlo.dot_general + stablehlo.add
+// CHECK-LABEL: func.func @expand_dot_add
+// CHECK: stablehlo.dot_general
+// CHECK: stablehlo.add
+// CHECK-NOT: zigrad.kernel_call
+func.func @expand_dot_add(%a: tensor<4x8xf32>, %b: tensor<8x4xf32>, %c: tensor<4x4xf32>) -> tensor<4x4xf32> {
   %0 = "zigrad.kernel_call"(%a, %b, %c) {
     api_version = 4 : i32,
     call_target_name = "zigrad.kernel.dispatch",

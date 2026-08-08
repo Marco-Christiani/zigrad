@@ -1,4 +1,6 @@
 // Test: multi-use dot result prevents pattern matching (no zigrad.kernel_call expected)
+// CHECK-LABEL: func.func @no_match
+// CHECK-NOT: zigrad.kernel_call
 func.func @no_match(%a: tensor<4x8xf32>, %b: tensor<8x4xf32>, %c: tensor<4x4xf32>) -> (tensor<4x4xf32>, tensor<4x4xf32>) {
   %dot = "stablehlo.dot_general"(%a, %b) {
     dot_dimension_numbers = #stablehlo.dot<

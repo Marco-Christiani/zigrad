@@ -23,32 +23,29 @@
         "$@"
     '';
 
-    # MLIR LSP server: ship the shim's dev output directly. The binary is
-    #  installed as bin/mlir-lsp-server so editor configs using the canonical
-    #  name resolve through PATH.
-    zigradMlirExtDev = config.packages.zigrad-mlir-ext-dev;
+    mlirCppExampleDev = config.packages.zigrad-example-mlir-cpp-dev;
 
-    baseDevShellPkgs =
-      (with pkgs; [
-        zig
-        zls
-        zon2nix
-        go-task
-        binutils
-        patchelf
-        git
-        gccHost
-        clang
-        cmake
-        ninja
-        clangdWrapped
-      ])
-      ++ [zigradMlirExtDev];
+    baseDevShellPkgs = with pkgs; [
+      zig
+      zls
+      zon2nix
+      go-task
+      binutils
+      patchelf
+      git
+      gccHost
+      clang
+      cmake
+      ninja
+      clangdWrapped
+    ];
 
-    # Ensure shadow precedence: clangd wrapper for query-driver, the shim
-    #  dev output for mlir-lsp-server.
     lspShadowHook = ''
-      export PATH="${clangdWrapped}/bin:${zigradMlirExtDev}/bin:$PATH"
+      export PATH="${clangdWrapped}/bin:$PATH"
+    '';
+
+    mlirCppExampleHook = ''
+      export PATH="${mlirCppExampleDev}/bin:$PATH"
     '';
 
     tvmPython = pkgs.python312.withPackages (pythonPackages:
@@ -147,6 +144,15 @@
         env = integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
           lspShadowHook
+          + runtimeLibraryHook config.packages.zigrad-dev-cuda;
+      };
+
+      mlir-cpp = pkgs.mkShellNoCC {
+        packages = baseDevShellPkgs ++ [mlirCppExampleDev config.packages.zigrad-dev-cuda];
+        env = integrationEnv config.packages.zigrad-dev-cuda;
+        shellHook =
+          lspShadowHook
+          + mlirCppExampleHook
           + runtimeLibraryHook config.packages.zigrad-dev-cuda;
       };
     };

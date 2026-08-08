@@ -1,4 +1,7 @@
 // Test: dot_general(softmax(scores), V) -> zigrad.kernel_call pattern=softmax_matmul
+// CHECK-LABEL: func.func @softmax_matmul
+// CHECK: zigrad.kernel_call
+// CHECK-SAME: zigrad.pattern = "softmax_matmul"
 func.func @softmax_matmul(%scores: tensor<4x8xf32>, %v: tensor<8x4xf32>) -> tensor<4x4xf32> {
   %exp = stablehlo.exponential %scores : tensor<4x8xf32>
 

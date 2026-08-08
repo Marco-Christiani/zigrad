@@ -1,12 +1,5 @@
 #pragma once
 
-/// Reusable utilities for kernel provider passes.
-///
-/// Shared helpers for matching StableHLO patterns (is_dot_op, is_named_op) and
-/// constructing zigrad.kernel_call carrier ops. Each provider pass (e.g.
-/// MirageKernelSelectPass) uses these to emit kernel_calls without duplicating
-/// the OperationState boilerplate.
-
 #include "mlir/CAPI/IR.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -19,24 +12,20 @@ namespace kernel_utils {
 constexpr const char *kDispatchTargetName = "zigrad.kernel.dispatch";
 constexpr int kTypedFfiApiVersion = 4;
 
-/// Check whether an operation is a dot-product source (dot_general or dot).
 inline bool is_dot_op(Operation *op) {
   if (!op) return false;
   const StringRef name = op->getName().getStringRef();
   return name == "stablehlo.dot_general" || name == "stablehlo.dot";
 }
 
-/// Check whether an operation has a specific op name.
 inline bool is_named_op(Operation *op, StringRef name) {
   return op != nullptr && op->getName().getStringRef() == name;
 }
 
-/// Build a `zigrad.kernel_call` operation from the given anchor location,
-/// operands, result types, and kernel metadata.
+/// Creates a kernel carrier operation for a selected StableHLO region.
 ///
 /// `provider` and `kernel_key` are embedded in the backend_config dictionary.
-/// Extra pattern-specific attributes (e.g. normalized_size, reduction_dim) are
-/// appended from `extra_config`.
+///  Pattern-specific attributes are appended from `extra_config`.
 inline Operation *create_kernel_call(Operation *anchor,
                                      ValueRange operands,
                                      TypeRange result_types,
@@ -63,7 +52,6 @@ inline Operation *create_kernel_call(Operation *anchor,
   return rewriter.create(state);
 }
 
-/// Convenience overload without extra config attributes.
 inline Operation *create_kernel_call(Operation *anchor,
                                      ValueRange operands,
                                      TypeRange result_types,
@@ -75,11 +63,18 @@ inline Operation *create_kernel_call(Operation *anchor,
                             kernel_key, pattern, /*extra_config=*/{}, rewriter);
 }
 
-/// Returns true iff a dot_general op has canonical matmul dimension numbers:
+enum class RhsLayout {
+  standard,
+  transposed,
+};
+
+/// Checks the dimension numbers accepted by the Mirage matmul patterns.
+///
 /// 1. Equal rank for both operands
-/// 2. Exactly one contracting dim: LHS at rank-1, RHS at rank-2
-/// 3. Batch dims are the leading prefix [0, 1, ..., rank-3]
-inline bool has_canonical_matmul_dims(Operation *dot_op) {
+/// 2. Exactly one contracting dimension on the last LHS dimension
+/// 3. The RHS contraction follows `rhs_layout`
+/// 4. Batch dims are the leading prefix [0, 1, ..., rank-3]
+inline bool has_matmul_dims(Operation *dot_op, RhsLayout rhs_layout) {
   if (!dot_op || dot_op->getNumOperands() < 2) return false;
 
   Attribute dims_attr = dot_op->getAttr("dot_dimension_numbers");
@@ -108,7 +103,9 @@ inline bool has_canonical_matmul_dims(Operation *dot_op) {
   int64_t rhs_contract =
       stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(capi_attr, 0);
   if (lhs_contract != lhs_rank - 1) return false;
-  if (rhs_contract != rhs_rank - 2) return false;
+  const int64_t expected_rhs_contract =
+      rhs_layout == RhsLayout::standard ? rhs_rank - 2 : rhs_rank - 1;
+  if (rhs_contract != expected_rhs_contract) return false;
 
   int64_t expected_batch = lhs_rank - 2;
   intptr_t n_lhs_batch =

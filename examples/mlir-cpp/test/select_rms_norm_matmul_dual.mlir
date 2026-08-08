@@ -1,6 +1,10 @@
 // RUN-PIPELINE: func.func(zg-mirage-kernel-select)
-// Test: Same rms_norm chain feeding TWO dot_general ops (gate + up projections).
-//   => Two separate kernel_call{rms_norm_matmul} ops; shared chain erased.
+// Test: the gate and up projections share one RMSNorm chain.
+//
+// The pass emits one rms_norm_matmul carrier for each projection. The shared
+//  chain is erased after both replacements.
+// CHECK-LABEL: func.func @rms_norm_matmul_dual
+// CHECK-COUNT-2: zigrad.pattern = "rms_norm_matmul"
 func.func @rms_norm_matmul_dual(
     %x_bf16: tensor<4x2048xbf16>,
     %gamma_bf16: tensor<2048xbf16>,

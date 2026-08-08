@@ -1,6 +1,7 @@
 {
   pkgs,
   lib,
+  repoRoot,
   cudaToolkit,
   cudaRuntime,
   cudaVersion,
@@ -30,7 +31,7 @@
   mirageRustLibs = pkgs.callPackage ../../packages/mirage-rust-libs.nix {
     inherit (source) src;
     sourceRoot = source.source_root;
-    lockFile = ../../locks/mirage-Cargo.lock;
+    lockFile = repoRoot + /nix/locks/mirage-Cargo.lock;
   };
   mirage = pkgs.callPackage ../../packages/mirage.nix {
     inherit
@@ -64,11 +65,11 @@
       fs = lib.fileset;
     in
       fs.toSource {
-        root = ../../../src/c/mirage/adapter;
+        root = repoRoot + /src/c/mirage/adapter;
         fileset = fs.unions [
-          ../../../src/c/mirage/adapter/CMakeLists.txt
-          ../../../src/c/mirage/adapter/mirage.cc
-          ../../../src/c/mirage/adapter/include
+          (repoRoot + /src/c/mirage/adapter/CMakeLists.txt)
+          (repoRoot + /src/c/mirage/adapter/mirage.cc)
+          (repoRoot + /src/c/mirage/adapter/include)
         ];
       };
   };

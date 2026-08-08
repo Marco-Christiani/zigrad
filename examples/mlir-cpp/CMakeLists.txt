@@ -9,12 +9,6 @@ option(ZG_ENABLE_DEV_TARGETS
   "Enable optional development-only targets"
   OFF)
 
-# Expect caller to pass:
-#  -DZG_SDK_INCLUDE=/path/to/sdk/include
-#  -DZG_SDK_LIB=/path/to/sdk/lib
-# Optional:
-#  -DZG_LLVM_ROOT=/path/to/llvm-prefix (must contain bin/mlir-tblgen)
-#  -DZG_INSTALL_RPATH=lib1:lib2 (rpath baked into installed binaries)
 set(ZG_SDK_INCLUDE "" CACHE PATH "SDK include root")
 set(ZG_SDK_LIB "" CACHE PATH "SDK lib dir")
 set(ZG_LLVM_ROOT "" CACHE PATH "LLVM tools prefix")
@@ -22,13 +16,6 @@ set(ZG_INSTALL_RPATH "" CACHE STRING "Colon-separated rpath baked into installed
 
 if(ZG_SDK_INCLUDE STREQUAL "" OR ZG_SDK_LIB STREQUAL "")
   message(FATAL_ERROR "ZG_SDK_INCLUDE and ZG_SDK_LIB must be set")
-endif()
-
-if(ZG_LLVM_ROOT STREQUAL "")
-  get_filename_component(_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
-  if(EXISTS "${_repo_root}/result-llvm/bin/mlir-tblgen")
-    set(ZG_LLVM_ROOT "${_repo_root}/result-llvm")
-  endif()
 endif()
 
 if(ZG_LLVM_ROOT STREQUAL "" OR NOT EXISTS "${ZG_LLVM_ROOT}/bin/mlir-tblgen")
@@ -40,26 +27,24 @@ set(MLIR_TBLGEN "${ZG_LLVM_ROOT}/bin/mlir-tblgen")
 function(find_versioned_library out_var base_name)
   set(candidates)
 
-  file(GLOB sdk_libs
-    "${ZG_SDK_LIB}/lib${base_name}.so"
-    "${ZG_SDK_LIB}/lib${base_name}.so.*"
-  )
-  list(APPEND candidates ${sdk_libs})
+  foreach(lib_dir "${ZG_SDK_LIB}" "${ZG_LLVM_ROOT}/lib")
+    if(EXISTS "${lib_dir}/lib${base_name}.so")
+      set(${out_var} "${lib_dir}/lib${base_name}.so" PARENT_SCOPE)
+      return()
+    endif()
 
-  if(EXISTS "${ZG_LLVM_ROOT}/lib")
-    file(GLOB llvm_libs
-      "${ZG_LLVM_ROOT}/lib/lib${base_name}.so"
-      "${ZG_LLVM_ROOT}/lib/lib${base_name}.so.*"
+    file(GLOB versioned_libs
+      "${lib_dir}/lib${base_name}.so.*"
     )
-    list(APPEND candidates ${llvm_libs})
-  endif()
+    list(APPEND candidates ${versioned_libs})
+  endforeach()
 
   list(LENGTH candidates n)
   if(n EQUAL 0)
     message(FATAL_ERROR "Could not find shared library for ${base_name}")
   endif()
 
-  list(SORT candidates COMPARE STRING ORDER DESCENDING)
+  list(SORT candidates COMPARE NATURAL ORDER DESCENDING)
   list(GET candidates 0 picked)
   set(${out_var} "${picked}" PARENT_SCOPE)
 endfunction()
@@ -113,13 +98,21 @@ add_library(zigrad_mlir_ext SHARED
   zigrad/mirage/MirageKernelSelectPass.cpp
 )
 add_dependencies(zigrad_mlir_ext zigrad_tblgen)
-target_compile_options(zigrad_mlir_ext PRIVATE -fno-rtti)
+target_compile_options(zigrad_mlir_ext PRIVATE
+  -fno-rtti
+  -Wall
+  -Wextra
+  -Wpedantic
+  -Werror
+)
 
-target_include_directories(zigrad_mlir_ext PRIVATE
+target_include_directories(zigrad_mlir_ext SYSTEM PRIVATE
   "${ZG_LLVM_ROOT}/include"
   "${ZG_SDK_INCLUDE}"
-  "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
+target_include_directories(zigrad_mlir_ext PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 target_link_libraries(zigrad_mlir_ext PRIVATE
@@ -134,12 +127,16 @@ target_link_libraries(zigrad_mlir_ext PRIVATE
   dl
 )
 
-# The .so cohabits with SDK libs in the SDK's symlink-joined lib/ dir, so
-#  $ORIGIN finds them at runtime.
+if(ZG_INSTALL_RPATH STREQUAL "")
+  set(_zg_install_rpath "${ZG_SDK_LIB};${ZG_LLVM_ROOT}/lib")
+else()
+  string(REPLACE ":" ";" _zg_install_rpath "${ZG_INSTALL_RPATH}")
+endif()
+
 set_target_properties(zigrad_mlir_ext PROPERTIES
   OUTPUT_NAME "zigrad_mlir_ext"
   BUILD_RPATH "${ZG_SDK_LIB};${ZG_LLVM_ROOT}/lib"
-  INSTALL_RPATH "\$ORIGIN"
+  INSTALL_RPATH "${_zg_install_rpath}"
   BUILD_WITH_INSTALL_RPATH ON
 )
 
@@ -156,14 +153,22 @@ if(ZG_ENABLE_DEV_TARGETS)
   )
   add_dependencies(zigrad_mlir_lsp_server zigrad_tblgen)
 
-  target_compile_options(zigrad_mlir_lsp_server PRIVATE -fno-rtti)
+  target_compile_options(zigrad_mlir_lsp_server PRIVATE
+    -fno-rtti
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Werror
+  )
   zg_add_nix_implicit_includes(zigrad_mlir_lsp_server)
 
-  target_include_directories(zigrad_mlir_lsp_server PRIVATE
+  target_include_directories(zigrad_mlir_lsp_server SYSTEM PRIVATE
     "${ZG_LLVM_ROOT}/include"
     "${ZG_SDK_INCLUDE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
+  )
+  target_include_directories(zigrad_mlir_lsp_server PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
   )
 
   target_link_libraries(zigrad_mlir_lsp_server PRIVATE
@@ -179,19 +184,10 @@ if(ZG_ENABLE_DEV_TARGETS)
     dl
   )
 
-  # LSP binary lives under bin/, separate from SDK libs. Bake an absolute rpath
-  #  pointing at the SDK + LLVM lib dirs (Nix install) and fall back to
-  #  ${ZG_SDK_LIB};${ZG_LLVM_ROOT}/lib for in-tree builds.
-  if(ZG_INSTALL_RPATH STREQUAL "")
-    set(_zg_lsp_install_rpath "${ZG_SDK_LIB};${ZG_LLVM_ROOT}/lib")
-  else()
-    string(REPLACE ":" ";" _zg_lsp_install_rpath "${ZG_INSTALL_RPATH}")
-  endif()
-
   set_target_properties(zigrad_mlir_lsp_server PROPERTIES
     OUTPUT_NAME "mlir-lsp-server"
     BUILD_RPATH "${ZG_SDK_LIB};${ZG_LLVM_ROOT}/lib"
-    INSTALL_RPATH "${_zg_lsp_install_rpath}"
+    INSTALL_RPATH "${_zg_install_rpath}"
     BUILD_WITH_INSTALL_RPATH ON
   )
 

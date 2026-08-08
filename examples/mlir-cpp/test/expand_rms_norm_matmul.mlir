@@ -1,6 +1,10 @@
 // RUN-PIPELINE: builtin.module(func.func(zg-kernel-call-expand))
 // Test: zigrad.kernel_call pattern=rms_norm_matmul -> rms_norm chain + dot_general
 //   Expands: rms_norm_matmul(X, W') -> dot_general(rms_norm(X), W')
+// CHECK-LABEL: func.func @expand_rms_norm_matmul
+// CHECK: stablehlo.rsqrt
+// CHECK: stablehlo.dot_general
+// CHECK-NOT: zigrad.kernel_call
 func.func @expand_rms_norm_matmul(%x: tensor<4x2048xf32>, %w: tensor<2048x256xf32>) -> tensor<4x256xf32> {
   %0 = "zigrad.kernel_call"(%x, %w) {
     api_version = 4 : i32,

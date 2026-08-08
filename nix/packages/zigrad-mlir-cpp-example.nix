@@ -9,7 +9,7 @@
   doCheck ? true,
 }:
 stdenv.mkDerivation {
-  pname = "zigrad-mlir-ext";
+  pname = "zigrad-example-mlir-cpp";
   version = xlaMlirStablehloCapiSdk.version;
 
   inherit src doCheck;
@@ -41,6 +41,7 @@ stdenv.mkDerivation {
     set -eo pipefail
 
     MLIR_OPT="${llvm}/bin/mlir-opt"
+    FILE_CHECK="${llvm}/bin/FileCheck"
     ZG_EXT="build/libzigrad_mlir_ext.so"
     PLUGIN="--load-dialect-plugin=$ZG_EXT --load-pass-plugin=$ZG_EXT"
 
@@ -51,14 +52,15 @@ stdenv.mkDerivation {
       echo "=== $f ==="
       "$MLIR_OPT" $PLUGIN \
         --pass-pipeline="builtin.module(func.func(zg-mirage-kernel-select))" \
-        "$f" || failed=1
+        "$f" | "$FILE_CHECK" "$f" || failed=1
     done
     for f in "$src"/test/legalize*.mlir "$src"/test/expand_*.mlir; do
       [ -f "$f" ] || continue
       pass=$(head -1 "$f" | sed -n 's|^// RUN-PIPELINE: ||p')
       [ -n "$pass" ] || continue
       echo "=== $f ==="
-      "$MLIR_OPT" $PLUGIN --pass-pipeline="$pass" "$f" || failed=1
+      "$MLIR_OPT" $PLUGIN --pass-pipeline="$pass" "$f" \
+        | "$FILE_CHECK" "$f" || failed=1
     done
     [ "$failed" -eq 0 ] || { echo "MLIR pass tests failed" >&2; exit 1; }
   '';
@@ -66,12 +68,11 @@ stdenv.mkDerivation {
   installPhase = ''
     set -eo pipefail
 
-    # out: production .so composed into demanding build configurations.
+    # Plugin DSO for mlir-opt and embedding examples.
     mkdir -p "$out/lib"
     cp -v build/libzigrad_mlir_ext.so* "$out/lib/"
 
-    # dev: LSP server binary + build metadata. Named mlir-lsp-server so editor
-    #  configurations using the canonical name resolve via PATH.
+    # Use the canonical binary name expected by MLIR editor configurations.
     mkdir -p "$dev/bin" "$dev/share/build-metadata"
     cp -v build/mlir-lsp-server "$dev/bin/mlir-lsp-server"
     cp -v build/compile_commands.json "$dev/share/build-metadata/" || true
@@ -79,7 +80,7 @@ stdenv.mkDerivation {
   '';
 
   meta = {
-    description = "Zigrad MLIR dialect extension (C++ DSO + LSP server)";
+    description = "C++ MLIR dialect and pass example for Zigrad";
     license = lib.licenses.asl20;
     platforms = lib.platforms.linux;
   };

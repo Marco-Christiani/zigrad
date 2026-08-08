@@ -89,12 +89,9 @@
     #  how those external packages are compiled.
     #
     #  Per-user overrides live in ./local-build-cfg.nix (gitignored).
-    #  Copy ./local-build-cfg.example.nix to start. To apply the override:
-    #
-    #    nix build --impure .#<configuration>
-    #
-    #  The --impure flag is required so the flake can read the user's
-    #  current working directory for the file.
+    #  Copy ./local-build-cfg.example.nix to start. The repository direnv
+    #  environment loads this file. Direct Nix commands use the portable
+    #  defaults.
     #
     #  See the Building section of the docs site for the full knob reference
     #  and use-case recipes.
@@ -108,7 +105,7 @@
         extraLdFlags = [];
         extraBazelFlags = [];
       };
-      # Impure evaluation supplies PWD for the optional local override.
+      # The repository direnv environment supplies PWD for this override.
       pwd = builtins.getEnv "PWD";
       localFile =
         if pwd != ""
@@ -129,6 +126,7 @@
 
       imports = [
         ./nix/flake/integrations.nix
+        ./nix/flake/examples.nix
         ./nix/flake/tools.nix
         ./nix/flake/devshells.nix
         ./nix/flake/checks.nix
@@ -163,6 +161,7 @@
         ''; {
           _module.args = {
             inherit pkgs cudaCfg buildCfg;
+            repoRoot = ./.;
           };
           formatter = treefmt.config.build.wrapper;
           checks.formatting = treefmt.config.build.check inputs.self;

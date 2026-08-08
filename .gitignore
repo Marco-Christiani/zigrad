@@ -67,10 +67,10 @@ scripts/check_jax_config.py
 scripts/check_xla_flags.py
 scripts/compare_xla_flags.sh
 scripts/parse_xla_tool_paths.py
-shim/build
-shim/build-mlir
+shim/build*
+examples/mlir-cpp/build*
 *.mlir
-!shim/test/*.mlir
+!examples/mlir-cpp/test/*.mlir
 *.ll
 tools/decode_hlo
 
