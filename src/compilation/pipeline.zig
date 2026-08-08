@@ -11,8 +11,8 @@ const log = std.log.scoped(.@"zg/pipeline");
 /// A mutable FIFO queue of compiler passes.
 ///
 /// Pass implementations are copied into queue-owned boxes. Pass a pointer when
-///  mutable state or identity must remain caller-managed. The queue can run any
-///  number of times and does not retain intermediate values between runs.
+///  mutable state or identity must remain caller-managed. Each successful run
+///  consumes the prefix that produces its requested output type.
 pub const Pipeline = struct {
     const Entry = struct {
         input_type_id: rtti.TypeID,
@@ -28,15 +28,16 @@ pub const Pipeline = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    head: usize = 0,
 
     /// Initialize an empty pass queue.
     pub fn init(allocator: std.mem.Allocator) Pipeline {
         return .{ .allocator = allocator };
     }
 
-    /// Release pass storage owned by this queue.
+    /// Release pass storage remaining in this queue.
     pub fn deinit(self: *Pipeline) void {
-        for (self.entries.items) |*entry| entry.implementation.deinit();
+        for (self.entries.items[self.head..]) |*entry| entry.implementation.deinit();
         self.entries.deinit(self.allocator);
         self.* = undefined;
     }
@@ -102,10 +103,11 @@ pub const Pipeline = struct {
         });
     }
 
-    /// Run every queued pass and return the requested output type.
+    /// Run through the requested output phase and consume that queue prefix.
     ///
     /// The pipeline consumes `input` after its type matches the first pass. Pass
-    ///  a pointer when the referenced value must remain caller-managed.
+    ///  a pointer when the referenced value must remain caller-managed. When a
+    ///  pass fails after execution begins, only `deinit` is valid on the pipeline.
     pub fn run(
         self: *Pipeline,
         comptime Output: type,
@@ -113,32 +115,60 @@ pub const Pipeline = struct {
         context: *Context,
     ) anyerror!Output {
         const Input = @TypeOf(input);
-        if (self.entries.items.len == 0) {
-            if (comptime Input != Output) return error.OutputTypeMismatch;
-        } else {
-            if (rtti.TypeID.of(Input) != self.entries.items[0].input_type_id) {
-                log.debug(
-                    "pipeline expects {s}, received {s}",
-                    .{ self.entries.items[0].input_type_name, @typeName(Input) },
-                );
-                return error.InputTypeMismatch;
-            }
-            const final = self.entries.items[self.entries.items.len - 1];
-            if (rtti.TypeID.of(Output) != final.output_type_id) {
-                log.debug(
-                    "pipeline produces {s}, requested {s}",
-                    .{ final.output_type_name, @typeName(Output) },
-                );
-                return error.OutputTypeMismatch;
-            }
+        if (self.head < self.entries.items.len and
+            rtti.TypeID.of(Input) != self.entries.items[self.head].input_type_id)
+        {
+            log.debug(
+                "pipeline expects {s}, received {s}",
+                .{ self.entries.items[self.head].input_type_name, @typeName(Input) },
+            );
+            return error.InputTypeMismatch;
         }
+        const stop = try self.stop_index(Input, Output);
 
         var current = try ErasedBox.init(context.allocator, input);
         errdefer current.deinit();
-        for (self.entries.items) |*entry| {
+        for (self.entries.items[self.head..stop]) |*entry| {
             try entry.invoke(entry, &current, context);
         }
-        return current.take(Output);
+        const output = current.take(Output);
+
+        for (self.entries.items[self.head..stop]) |*entry| {
+            entry.implementation.deinit();
+        }
+        self.head = stop;
+        return output;
+    }
+
+    fn stop_index(
+        self: *const Pipeline,
+        comptime Input: type,
+        comptime Output: type,
+    ) error{OutputTypeMismatch}!usize {
+        if (self.head == self.entries.items.len) {
+            if (comptime Input == Output) return self.head;
+            return error.OutputTypeMismatch;
+        }
+
+        if (comptime Input == Output) {
+            if (self.entries.items[self.head].output_type_id != rtti.TypeID.of(Output)) {
+                return self.head;
+            }
+        }
+
+        var stop = self.head;
+        while (stop < self.entries.items.len) : (stop += 1) {
+            if (self.entries.items[stop].output_type_id != rtti.TypeID.of(Output)) continue;
+
+            stop += 1;
+            while (stop < self.entries.items.len and
+                self.entries.items[stop].output_type_id == rtti.TypeID.of(Output))
+            {
+                stop += 1;
+            }
+            return stop;
+        }
+        return error.OutputTypeMismatch;
     }
 };
 
@@ -193,6 +223,83 @@ test "Pipeline runs an open heterogeneous pass queue" {
     );
 
     try std.testing.expectEqual(@as(u64, 20), artifact.value);
+}
+
+test "Pipeline consumes one requested output phase at a time" {
+    const Source = struct { value: u32 };
+    const Intermediate = struct { value: u64 };
+    const Artifact = struct { value: u64 };
+
+    const Increment = struct {
+        pub const Input = Source;
+        pub const Output = Source;
+
+        amount: u32,
+
+        pub fn run(self: *@This(), input: Input, _: *Context) !Output {
+            return .{ .value = input.value + self.amount };
+        }
+    };
+    const Lower = struct {
+        pub const Input = Source;
+        pub const Output = Intermediate;
+
+        pub fn run(_: *@This(), input: Input, _: *Context) !Output {
+            return .{ .value = input.value };
+        }
+    };
+    const Package = struct {
+        pub const Input = Artifact;
+        pub const Output = u128;
+
+        pub fn run(_: *@This(), input: Input, _: *Context) !Output {
+            return input.value;
+        }
+    };
+    const Double = struct {
+        pub const Input = Intermediate;
+        pub const Output = Intermediate;
+
+        pub fn run(_: *@This(), input: Input, _: *Context) !Output {
+            return .{ .value = input.value * 2 };
+        }
+    };
+    const Compile = struct {
+        pub const Input = Intermediate;
+        pub const Output = Artifact;
+
+        pub fn run(_: *@This(), input: Input, _: *Context) !Output {
+            return .{ .value = input.value };
+        }
+    };
+
+    var pipeline = Pipeline.init(std.testing.allocator);
+    defer pipeline.deinit();
+    try pipeline.add(Increment{ .amount = 1 });
+    try pipeline.add(Increment{ .amount = 2 });
+    try pipeline.add(Lower{});
+    try pipeline.add(Double{});
+    try pipeline.add(Compile{});
+
+    var context: Context = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    const source = try pipeline.run(Source, Source{ .value = 4 }, &context);
+    try std.testing.expectEqual(@as(u32, 7), source.value);
+    try std.testing.expectEqual(@as(usize, 2), pipeline.head);
+
+    const intermediate = try pipeline.run(Intermediate, source, &context);
+    try std.testing.expectEqual(@as(u64, 14), intermediate.value);
+    try std.testing.expectEqual(@as(usize, 4), pipeline.head);
+
+    const artifact = try pipeline.run(Artifact, intermediate, &context);
+    try std.testing.expectEqual(@as(u64, 14), artifact.value);
+    try std.testing.expectEqual(pipeline.entries.items.len, pipeline.head);
+
+    try pipeline.add(Package{});
+    const packaged = try pipeline.run(u128, artifact, &context);
+    try std.testing.expectEqual(@as(u128, 14), packaged);
 }
 
 test "Pipeline rejects incompatible adjacent types" {
@@ -266,6 +373,12 @@ test "Pipeline releases stored pass values" {
     var calls: usize = 0;
     var pipeline = Pipeline.init(std.testing.allocator);
     try pipeline.add(Pass{ .calls = &calls });
+    var context: Context = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    _ = try pipeline.run(u32, @as(u32, 1), &context);
+    try std.testing.expectEqual(1, calls);
     pipeline.deinit();
     try std.testing.expectEqual(1, calls);
 }
