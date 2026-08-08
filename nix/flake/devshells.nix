@@ -86,6 +86,20 @@
         ZG_MLIR_VIM_RT = "${externalSources.llvm.src}/mlir/utils/vim";
         ZG_LLVM_VIM_RT = "${externalSources.llvm.src}/llvm/utils/vim";
       };
+
+    runtimeLibraryHook = package: let
+      runtime = toString package.externalInputs.runtime;
+      paths =
+        [
+          "${runtime}/lib"
+          "${runtime}/runtime/sys/lib"
+        ]
+        ++ pkgs.lib.optional
+        (pkgs.lib.elem "cuda-driver" package.configuration.resolved)
+        "/run/opengl-driver/lib";
+    in ''
+      export LD_LIBRARY_PATH="${pkgs.lib.concatStringsSep ":" paths}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    '';
   in {
     devShells = {
       default = pkgs.mkShellNoCC {
@@ -93,9 +107,8 @@
         env = integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
           lspShadowHook
+          + runtimeLibraryHook config.packages.zigrad-dev-cuda
           + ''
-            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
             # zig is not happy about -fmacro-prefix-map
             unset NIX_CFLAGS_COMPILE
           '';
@@ -106,9 +119,9 @@
         env = integrationEnv zigradBuildConfigurations.dev-cuda-tvm-python.package;
         shellHook =
           lspShadowHook
+          + runtimeLibraryHook zigradBuildConfigurations.dev-cuda-tvm-python.package
           + ''
             export PYTHONPATH="$ZG_EXTERNAL_SDK_ROOT/python''${PYTHONPATH:+:$PYTHONPATH}"
-            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
             # zig is not happy about -fmacro-prefix-map
             unset NIX_CFLAGS_COMPILE
@@ -120,9 +133,7 @@
         env = integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
           lspShadowHook
-          + ''
-            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          '';
+          + runtimeLibraryHook config.packages.zigrad-dev-cuda;
       };
 
       profiling = pkgs.mkShellNoCC {
@@ -136,9 +147,7 @@
         env = integrationEnv config.packages.zigrad-dev-cuda;
         shellHook =
           lspShadowHook
-          + ''
-            export LD_LIBRARY_PATH="$ZG_RUNTIME_SDK_ROOT/lib:$ZG_RUNTIME_SDK_ROOT/runtime/sys/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          '';
+          + runtimeLibraryHook config.packages.zigrad-dev-cuda;
       };
     };
   };
