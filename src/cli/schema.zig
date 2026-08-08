@@ -15,7 +15,6 @@ pub const CommandId = enum {
     tvm_render_matmul,
     tvm_render_attention,
     iree,
-    iree_demo,
     iree_compile,
     pjrt,
     pjrt_aot_demo,
@@ -23,6 +22,7 @@ pub const CommandId = enum {
     pjrt_cache_save,
     pjrt_cache_run,
     demo,
+    demo_basic,
     demo_custom_call_negative,
     demo_kernel_provider,
     demo_vjp,
@@ -173,11 +173,18 @@ const iree_compile_options = [_]Option{
         .value_name = "PATH",
     },
     .{
-        .long_name = "backend",
-        .description = "Select the IREE target backend",
+        .long_name = "target",
+        .description = "Select the IREE compilation target",
         .value_name = "NAME",
     },
 };
+
+const demo_backend_options = [_]Option{.{
+    .long_name = "backend",
+    .description = "Select the terminal backend",
+    .value_name = "NAME",
+    .choices = &.{ "pjrt", "iree" },
+}};
 
 const kernel_provider_options = [_]Option{.{
     .long_name = "provider",
@@ -185,7 +192,7 @@ const kernel_provider_options = [_]Option{.{
     .value_name = "NAMES",
 }};
 
-const train_options = [_]Option{
+const train_options = demo_backend_options ++ [_]Option{
     .{
         .long_name = "warmup",
         .description = "Set the number of warmup iterations",
@@ -198,7 +205,7 @@ const train_options = [_]Option{
     },
 };
 
-const llama_options = [_]Option{
+const llama_options = demo_backend_options ++ [_]Option{
     .{
         .long_name = "warmup",
         .description = "Set the number of warmup iterations",
@@ -311,12 +318,6 @@ const tvm_children = [_]Command{
 
 const iree_children = [_]Command{
     .{
-        .id = .iree_demo,
-        .name = "demo",
-        .summary = "Compile and execute the IREE demo",
-        .requirement = "IREE and MLIR",
-    },
-    .{
         .id = .iree_compile,
         .name = "compile",
         .summary = "Compile the demo to VMFB",
@@ -360,10 +361,18 @@ const pjrt_children = [_]Command{
 
 const demo_children = [_]Command{
     .{
+        .id = .demo_basic,
+        .name = "basic",
+        .summary = "Run the basic matrix computation",
+        .options = &demo_backend_options,
+        .requirement = "MLIR plus PJRT or IREE",
+    },
+    .{
         .id = .demo_custom_call_negative,
         .name = "custom-call-negative",
         .summary = "Exercise missing custom-call handling",
-        .requirement = "PJRT and MLIR",
+        .options = &demo_backend_options,
+        .requirement = "MLIR plus PJRT or IREE",
     },
     .{
         .id = .demo_kernel_provider,
@@ -376,28 +385,29 @@ const demo_children = [_]Command{
         .id = .demo_vjp,
         .name = "vjp",
         .summary = "Run the reverse-mode AD demo",
-        .requirement = "PJRT and MLIR",
+        .options = &demo_backend_options,
+        .requirement = "MLIR plus PJRT or IREE",
     },
     .{
         .id = .demo_train,
         .name = "train",
         .summary = "Run the training demo",
         .options = &train_options,
-        .requirement = "PJRT and MLIR",
+        .requirement = "MLIR plus PJRT or IREE",
     },
     .{
         .id = .demo_llm_train,
         .name = "llm-train",
         .summary = "Run the small LLM training demo",
         .options = &train_options,
-        .requirement = "PJRT and MLIR",
+        .requirement = "MLIR plus PJRT or IREE",
     },
     .{
         .id = .demo_llama_finetune,
         .name = "llama-finetune",
         .summary = "Run the small Llama fine-tune demo",
         .options = &llama_options,
-        .requirement = "PJRT and MLIR",
+        .requirement = "MLIR plus PJRT or IREE",
     },
 };
 

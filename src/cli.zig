@@ -61,8 +61,22 @@ pub const KernelProviderDemoOpts = struct {
     provider: ?[]const u8 = "tvm",
 };
 
+/// Terminal backend used by an executable demo.
+pub const DemoBackend = enum {
+    pjrt,
+    iree,
+};
+
+/// Options shared by demos without scenario-specific configuration.
+pub const DemoOpts = struct {
+    /// Terminal backend used to compile and execute the scenario.
+    backend: DemoBackend = .pjrt,
+};
+
 /// Options for the small training demos.
 pub const TrainDemoOpts = struct {
+    /// Terminal backend used to compile and execute the scenario.
+    backend: DemoBackend = .pjrt,
     /// Number of warmup iterations.
     warmup: ?u32 = null,
     /// Number of measured training steps.
@@ -71,6 +85,8 @@ pub const TrainDemoOpts = struct {
 
 /// Options for `demo llama-finetune`.
 pub const LlamaFtDemoOpts = struct {
+    /// Terminal backend used to compile and execute the scenario.
+    backend: DemoBackend = .pjrt,
     /// Number of warmup iterations.
     warmup: u32 = 5,
     /// Number of measured training steps.
@@ -93,8 +109,8 @@ pub const LlamaFtDemoOpts = struct {
 pub const IreeCompileOpts = struct {
     /// Destination for the VMFB artifact.
     output: ?[]const u8 = null,
-    /// IREE target backend.
-    backend: ?[]const u8 = null,
+    /// IREE compilation target.
+    target: ?[]const u8 = null,
 };
 
 /// Options for rendering a serialized PR file.
@@ -142,7 +158,6 @@ pub const TvmCommand = union(enum) {
 
 /// Commands for the optional IREE integration.
 pub const IreeCommand = union(enum) {
-    demo,
     compile: IreeCompileOpts,
 };
 
@@ -160,9 +175,10 @@ pub const PjrtCommand = union(enum) {
 
 /// Executable scenarios that exercise current Zigrad capabilities.
 pub const DemoCommand = union(enum) {
-    custom_call_negative,
+    basic: DemoOpts,
+    custom_call_negative: DemoOpts,
     kernel_provider: KernelProviderDemoOpts,
-    vjp,
+    vjp: DemoOpts,
     train: TrainDemoOpts,
     llm_train: TrainDemoOpts,
     llama_finetune: LlamaFtDemoOpts,
@@ -349,10 +365,6 @@ fn parse_tvm(cursor: *Cursor) !TvmCommand {
 fn parse_iree(cursor: *Cursor) !IreeCommand {
     const command = try require_subcommand(.iree, cursor);
     return switch (command.id) {
-        .iree_demo => result: {
-            try cursor.expect_end();
-            break :result .demo;
-        },
         .iree_compile => .{ .compile = try parse_default_options(IreeCompileOpts, .iree_compile, cursor) },
         else => unreachable,
     };
@@ -385,15 +397,10 @@ fn parse_cache(cursor: *Cursor) !CacheCommand {
 fn parse_demo(cursor: *Cursor) !DemoCommand {
     const command = try require_subcommand(.demo, cursor);
     return switch (command.id) {
-        .demo_custom_call_negative => result: {
-            try cursor.expect_end();
-            break :result .custom_call_negative;
-        },
+        .demo_basic => .{ .basic = try parse_default_options(DemoOpts, .demo_basic, cursor) },
+        .demo_custom_call_negative => .{ .custom_call_negative = try parse_default_options(DemoOpts, .demo_custom_call_negative, cursor) },
         .demo_kernel_provider => .{ .kernel_provider = try parse_default_options(KernelProviderDemoOpts, .demo_kernel_provider, cursor) },
-        .demo_vjp => result: {
-            try cursor.expect_end();
-            break :result .vjp;
-        },
+        .demo_vjp => .{ .vjp = try parse_default_options(DemoOpts, .demo_vjp, cursor) },
         .demo_train => .{ .train = try parse_default_options(TrainDemoOpts, .demo_train, cursor) },
         .demo_llm_train => .{ .llm_train = try parse_default_options(TrainDemoOpts, .demo_llm_train, cursor) },
         .demo_llama_finetune => .{ .llama_finetune = try parse_default_options(LlamaFtDemoOpts, .demo_llama_finetune, cursor) },
@@ -636,6 +643,7 @@ test "parse_tokens groups commands without feature-dependent names" {
         "--quiet",
         "demo",
         "train",
+        "--backend=iree",
         "--warmup=2",
         "--steps",
         "4",
@@ -651,12 +659,40 @@ test "parse_tokens groups commands without feature-dependent names" {
     switch (invocation.command) {
         .demo => |demo| switch (demo) {
             .train => |opts| {
+                try std.testing.expectEqual(DemoBackend.iree, opts.backend);
                 try std.testing.expectEqual(@as(?u32, 2), opts.warmup);
                 try std.testing.expectEqual(@as(?u32, 4), opts.steps);
             },
             else => return error.TestExpectedEqual,
         },
         else => return error.TestExpectedEqual,
+    }
+}
+
+test "parse_tokens distinguishes demo backends from IREE targets" {
+    {
+        const args = [_][]const u8{ "demo", "basic", "--backend=pjrt" };
+        const invocation = try parse_tokens(&args);
+        switch (invocation.command) {
+            .demo => |demo| switch (demo) {
+                .basic => |opts| try std.testing.expectEqual(DemoBackend.pjrt, opts.backend),
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        }
+    }
+    {
+        const args = [_][]const u8{ "iree", "compile", "--target=llvm-cpu" };
+        const invocation = try parse_tokens(&args);
+        switch (invocation.command) {
+            .iree => |command| switch (command) {
+                .compile => |opts| try std.testing.expectEqualStrings(
+                    "llvm-cpu",
+                    opts.target orelse return error.TestExpectedEqual,
+                ),
+            },
+            else => return error.TestExpectedEqual,
+        }
     }
 }
 

@@ -2,9 +2,10 @@ const std = @import("std");
 const zg = @import("zigrad");
 const build_options = zg.build_options;
 const demos = @import("demos.zig");
+const iree_aot = @import("demos/iree_aot.zig");
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
-const main_aot = @import("main_aot.zig");
+const pjrt_aot = @import("demos/pjrt_aot.zig");
 const llama_model = @import("llama_model.zig");
 const cli = @import("cli.zig");
 const log = std.log.scoped(.@"zg/main");
@@ -41,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         .tvm => |command| dispatch_tvm(env, gpa, command),
         .iree => |command| dispatch_iree(env, gpa, command, dumps),
         .pjrt => |command| dispatch_pjrt(env, gpa, .{ .pjrt = command }, dumps),
-        .demo => |command| dispatch_pjrt(env, gpa, .{ .demo = command }, dumps),
+        .demo => |command| dispatch_demo(env, gpa, command, dumps),
     };
 }
 
@@ -172,8 +173,7 @@ fn dispatch_iree(
 ) !void {
     if (comptime build_options.has_iree and build_options.has_mlir) {
         return switch (command) {
-            .demo => run_iree_demo(env.io, gpa, env.environ, dumps.pr, dumps.mlir),
-            .compile => |opts| run_iree_aot_compile(
+            .compile => |opts| iree_aot.run(
                 env.io,
                 gpa,
                 env.environ,
@@ -184,6 +184,27 @@ fn dispatch_iree(
     }
     log.err("IREE commands require the opt-in IREE and MLIR integrations", .{});
     return error.IreeBackendDisabled;
+}
+
+fn dispatch_demo(
+    env: zg.RuntimeEnv,
+    gpa: std.mem.Allocator,
+    command: cli.DemoCommand,
+    dumps: DumpOptions,
+) !void {
+    const backend = switch (command) {
+        .basic => |opts| opts.backend,
+        .custom_call_negative => |opts| opts.backend,
+        .kernel_provider => .pjrt,
+        .vjp => |opts| opts.backend,
+        .train => |opts| opts.backend,
+        .llm_train => |opts| opts.backend,
+        .llama_finetune => |opts| opts.backend,
+    };
+    return switch (backend) {
+        .pjrt => dispatch_pjrt(env, gpa, .{ .demo = command }, dumps),
+        .iree => dispatch_iree_demo(env, gpa, command, dumps),
+    };
 }
 
 const PjrtWork = union(enum) {
@@ -265,7 +286,7 @@ fn dispatch_pjrt_artifact(
                 log.err("pjrt aot-demo requires the opt-in MLIR integration", .{});
                 return error.MlirDisabled;
             }
-            return try main_aot.run(
+            return try pjrt_aot.run(
                 compilation_context,
                 client,
                 execution,
@@ -336,16 +357,7 @@ fn dispatch_pjrt_demo(
         return error.MlirDisabled;
     }
 
-    return switch (command) {
-        .custom_call_negative => {
-            var pipeline = try zg.pjrt.pipeline.create(
-                compilation_context.allocator,
-                backend,
-                demo_pipeline_options(dumps, execution, "main"),
-            );
-            defer pipeline.deinit();
-            return try demos.run_custom_call_negative(compilation_context, &pipeline);
-        },
+    switch (command) {
         .kernel_provider => |opts| {
             const providers = try parse_provider_kinds(opts.provider orelse "tvm");
             return try demos.run_kernel_provider_demo(
@@ -359,79 +371,68 @@ fn dispatch_pjrt_demo(
                 providers.slice(),
             );
         },
-        .vjp => {
-            var pipeline = try zg.pjrt.pipeline.create(
-                compilation_context.allocator,
-                backend,
-                demo_pipeline_options(dumps, execution, "main_vjp"),
-            );
-            defer pipeline.deinit();
-            return try demos.run_vjp_demo(compilation_context, &pipeline);
-        },
-        .train => |opts| {
-            var pipeline = try zg.pjrt.pipeline.create(
-                compilation_context.allocator,
-                backend,
-                demo_pipeline_options(dumps, execution, "train_step"),
-            );
-            defer pipeline.deinit();
-            return try demos.run_train_demo(
-                compilation_context,
-                &pipeline,
-                opts.warmup orelse 0,
-                opts.steps orelse 8,
-                quiet,
-            );
-        },
-        .llm_train => |opts| {
-            var pipeline = try zg.pjrt.pipeline.create(
-                compilation_context.allocator,
-                backend,
-                demo_pipeline_options(dumps, execution, "llm_ft_step"),
-            );
-            defer pipeline.deinit();
-            return try llm_demo.run_llm_train_demo(
-                compilation_context,
-                &pipeline,
-                env.environ,
-                opts.warmup orelse 0,
-                opts.steps orelse 8,
-                quiet,
-            );
-        },
-        .llama_finetune => |opts| {
-            const dtype = std.meta.stringToEnum(zg.DType, opts.dtype) orelse
-                return error.InvalidDType;
-            const kernel_provider = if (opts.kernel_provider) |name|
-                std.meta.stringToEnum(llama_demo.LlamaKernelProvider, name) orelse
-                    return error.InvalidArgument
-            else
-                null;
-            const config = llama_demo.LlamaDemoConfig{
-                .train = opts.train,
-                .dtype = dtype,
-                .seq = opts.seq,
-                .batch = opts.batch orelse 1,
-                .execute_only = opts.execute_only,
-                .kernel_provider = kernel_provider,
-            };
+        else => {},
+    }
 
-            var pipeline = try zg.pjrt.pipeline.create(
-                compilation_context.allocator,
-                backend,
-                demo_pipeline_options(dumps, execution, "llama_ft_step"),
-            );
-            defer pipeline.deinit();
-            return try llama_demo.run_llama_ft_demo(
-                compilation_context,
-                &pipeline,
-                env.environ,
-                opts.warmup,
-                opts.steps,
-                quiet,
-                config,
-            );
-        },
+    var pipeline = try zg.pjrt.pipeline.create(
+        compilation_context.allocator,
+        backend,
+        demo_pipeline_options(dumps, execution, demo_entry_name(command)),
+    );
+    defer pipeline.deinit();
+    return try run_portable_demo(env, command, compilation_context, &pipeline, quiet);
+}
+
+fn demo_entry_name(command: cli.DemoCommand) []const u8 {
+    return switch (command) {
+        .basic, .custom_call_negative => "main",
+        .kernel_provider => unreachable,
+        .vjp => "main_vjp",
+        .train => "train_step",
+        .llm_train => "llm_ft_step",
+        .llama_finetune => "llama_ft_step",
+    };
+}
+
+fn run_portable_demo(
+    env: zg.RuntimeEnv,
+    command: cli.DemoCommand,
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
+    quiet: bool,
+) !void {
+    return switch (command) {
+        .basic => run_basic_demo(compilation_context, pipeline),
+        .custom_call_negative => demos.run_custom_call_negative(
+            compilation_context,
+            pipeline,
+        ),
+        .kernel_provider => unreachable,
+        .vjp => demos.run_vjp_demo(compilation_context, pipeline),
+        .train => |opts| demos.run_train_demo(
+            compilation_context,
+            pipeline,
+            opts.warmup orelse 0,
+            opts.steps orelse 8,
+            quiet,
+        ),
+        .llm_train => |opts| llm_demo.run_llm_train_demo(
+            compilation_context,
+            pipeline,
+            env.environ,
+            opts.warmup orelse 0,
+            opts.steps orelse 8,
+            quiet,
+        ),
+        .llama_finetune => |opts| llama_demo.run_llama_ft_demo(
+            compilation_context,
+            pipeline,
+            env.environ,
+            opts.warmup,
+            opts.steps,
+            quiet,
+            try llama_config(opts),
+        ),
     };
 }
 
@@ -450,6 +451,37 @@ fn demo_pipeline_options(
             .execution = execution,
             .config = config.*,
         } else null,
+    };
+}
+
+fn iree_pipeline_options(
+    dumps: DumpOptions,
+    entry_name: []const u8,
+) zg.iree.pipeline.Options {
+    return .{
+        .stablehlo = .{
+            .entry_name = entry_name,
+            .dump_pr = if (dumps.pr) |config| .{ .config = config.* } else null,
+            .dump_stablehlo = if (dumps.mlir) |config| .{ .config = config.* } else null,
+        },
+    };
+}
+
+fn llama_config(opts: cli.LlamaFtDemoOpts) !llama_demo.LlamaDemoConfig {
+    const dtype = std.meta.stringToEnum(zg.DType, opts.dtype) orelse
+        return error.InvalidDType;
+    const kernel_provider = if (opts.kernel_provider) |name|
+        std.meta.stringToEnum(llama_demo.LlamaKernelProvider, name) orelse
+            return error.InvalidArgument
+    else
+        null;
+    return .{
+        .train = opts.train,
+        .dtype = dtype,
+        .seq = opts.seq,
+        .batch = opts.batch orelse 1,
+        .execute_only = opts.execute_only,
+        .kernel_provider = kernel_provider,
     };
 }
 
@@ -537,80 +569,64 @@ fn parse_provider_kinds(s: []const u8) !ProviderKindList {
     return result;
 }
 
-fn run_iree_demo(
-    io: std.Io,
+fn dispatch_iree_demo(
+    env: zg.RuntimeEnv,
     gpa: std.mem.Allocator,
-    environ: *const std.process.Environ.Map,
-    dump_pr: ?*zg.pr.dump.Config,
-    dump_mlir: ?*zg.output.Config,
+    command: cli.DemoCommand,
+    dumps: DumpOptions,
 ) !void {
-    const config = zg.iree.Config.from_environ(environ);
-    var runtime = try zg.iree.Runtime.init(gpa, config.runtime);
-    defer runtime.deinit();
-    var execution = zg.iree.Execution.init(gpa, &runtime, config.runtime);
+    if (comptime build_options.has_iree and build_options.has_mlir) {
+        if (dumps.optimized_hlo != null) {
+            log.err("--dump-optimized-hlo is only supported by the PJRT backend", .{});
+            return error.UnsupportedOutput;
+        }
 
-    var program = try demos.build_demo_program(gpa);
+        const config = zg.iree.Config.from_environ(env.environ);
+        var runtime = try zg.iree.Runtime.init(gpa, config.runtime);
+        defer runtime.deinit();
+        var execution = zg.iree.Execution.init(gpa, &runtime, config.runtime);
+
+        var compilation_context = zg.compilation.Context{
+            .allocator = gpa,
+            .io = env.io,
+            .device = execution.interface.device,
+        };
+        var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
+        var pipeline = try zg.iree.pipeline.create(
+            gpa,
+            .{ .loaded = &backend },
+            iree_pipeline_options(dumps, demo_entry_name(command)),
+        );
+        defer pipeline.deinit();
+        return try run_portable_demo(
+            env,
+            command,
+            &compilation_context,
+            &pipeline,
+            dumps.quiet,
+        );
+    }
+
+    log.err("the IREE backend requires the opt-in IREE and MLIR integrations", .{});
+    return error.IreeBackendDisabled;
+}
+
+fn run_basic_demo(
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
+) !void {
+    var program = try demos.build_demo_program(compilation_context.allocator);
     defer program.deinit();
-
-    var compilation_context = zg.compilation.Context{
-        .allocator = gpa,
-        .io = io,
-        .device = execution.interface.device,
-    };
-    var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
-    var pipeline = try zg.iree.pipeline.create(gpa, .{ .loaded = &backend }, .{
-        .stablehlo = .{
-            .entry_name = "main",
-            .dump_pr = if (dump_pr) |selected| .{ .config = selected.* } else null,
-            .dump_stablehlo = if (dump_mlir) |selected| .{ .config = selected.* } else null,
-        },
-    });
-    defer pipeline.deinit();
     var loaded_program = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        &compilation_context,
+        compilation_context,
     );
     defer loaded_program.deinit();
-    try demos.run_demo_executable(gpa, loaded_program);
-}
-
-fn run_iree_aot_compile(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    environ: *const std.process.Environ.Map,
-    opts: cli.IreeCompileOpts,
-    dump_mlir: ?*zg.output.Config,
-) !void {
-    var config = zg.iree.Config.from_environ(environ);
-    if (opts.backend) |target_backend|
-        config.compiler.target_backend = target_backend;
-
-    var program = try demos.build_demo_program(gpa);
-    defer program.deinit();
-
-    var compilation_context = zg.compilation.Context{
-        .allocator = gpa,
-        .io = io,
-    };
-    var compiler = zg.iree.Compiler{ .config = config.compiler };
-    var pipeline = try zg.iree.pipeline.create(gpa, .{ .vmfb = &compiler }, .{
-        .stablehlo = .{
-            .entry_name = "main",
-            .dump_stablehlo = if (dump_mlir) |selected| .{ .config = selected.* } else null,
-        },
-    });
-    defer pipeline.deinit();
-    var vmfb = try pipeline.run(
-        zg.iree.Artifact,
-        &program,
-        &compilation_context,
+    return try demos.run_demo_executable(
+        compilation_context.allocator,
+        loaded_program,
     );
-    defer vmfb.deinit();
-
-    const output_path = opts.output orelse "demo.vmfb";
-    try demos.write_bytes_to_path(io, output_path, vmfb.bytes);
-    std.log.info("wrote {d} bytes VMFB -> {s}", .{ vmfb.bytes.len, output_path });
 }
 
 const MatmulShape = struct { m: i64, n: i64, k: i64 };

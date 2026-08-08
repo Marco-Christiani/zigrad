@@ -72,7 +72,7 @@ For example:
 
 ```sh
 nix run --impure .#zigrad-xla-cpu -- demo vjp
-nix run --impure .#zigrad-iree-cpu -- iree demo
+nix run --impure .#zigrad-iree-cpu -- demo basic --backend=iree
 nix run --impure .#zigrad-tvm-cpu -- tvm check-load
 ```
 

@@ -1,7 +1,7 @@
 //! PJRT executable serialization round-trip witness.
 
 const zg = @import("zigrad");
-const demos = @import("demos.zig");
+const demos = @import("../demos.zig");
 
 pub fn run(
     compilation_context: *zg.compilation.Context,
@@ -40,8 +40,5 @@ pub fn run(
     var reloaded_program = try backend.loader.interface.load(&artifact);
     defer reloaded_program.deinit();
 
-    try demos.run_demo_executable(
-        allocator,
-        reloaded_program,
-    );
+    try demos.run_demo_executable(allocator, reloaded_program);
 }
