@@ -124,7 +124,7 @@ pub fn Compiled(
     comptime SpecsTuple: type,
     comptime opts: Options,
 ) type {
-    const FullReturnType = derive_return_type(func);
+    const FullReturnType = DeriveReturnType(func);
     const spec_fields = @typeInfo(SpecsTuple).@"struct".fields;
     const input_count = TensorTree.leaf_count(SpecsTuple);
     const output_count = TensorTree.leaf_count(FullReturnType);
@@ -319,7 +319,10 @@ pub fn Compiled(
                 &output_buffers,
                 .{ .donated_input_indices = &donated_input_indices },
             );
-            if (event) |completion| executor.release_event(completion);
+            if (event) |completion| {
+                defer executor.release_event(completion);
+                try executor.wait(completion);
+            }
 
             var kept_idx: usize = 0;
             inline for (0..output_count) |i| {
@@ -402,7 +405,7 @@ pub fn Compiled(
 }
 
 /// Derive the return type of a traced function from its comptime signature.
-fn derive_return_type(comptime func: anytype) type {
+fn DeriveReturnType(comptime func: anytype) type {
     const FnInfo = @typeInfo(@TypeOf(func)).@"fn";
     const RawReturn = FnInfo.return_type.?;
 
@@ -410,4 +413,95 @@ fn derive_return_type(comptime func: anytype) type {
         .error_union => |eu| eu.payload,
         else => RawReturn,
     };
+}
+
+test "Compiled.call waits before releasing an execution event" {
+    const FakeExecution = struct {
+        interface: Executor = .{
+            .device = .{ .platform = .cpu },
+            .vtable = &vtable,
+        },
+        waited: bool = false,
+        released_event: bool = false,
+
+        const vtable: Executor.VTable = .{
+            .upload = upload,
+            .download = download,
+            .invoke = invoke,
+            .await_event = await_event,
+            .release_buffer = release_buffer,
+            .release_event = release_event,
+            .release_program = release_program,
+        };
+
+        fn promote(interface: *Executor) *@This() {
+            return @fieldParentPtr("interface", interface);
+        }
+
+        fn upload(_: *Executor, _: []const u8, _: @import("dtype.zig").DType, _: []const i64) Executor.Error!Executor.Buffer {
+            return error.Unsupported;
+        }
+
+        fn download(_: *Executor, _: Executor.Buffer, _: []u8) Executor.Error!?Executor.Event {
+            return error.Unsupported;
+        }
+
+        fn invoke(
+            _: *Executor,
+            _: *anyopaque,
+            _: []const Executor.Buffer,
+            outputs: []Executor.Buffer,
+            _: Executor.InvokeOptions,
+        ) Executor.Error!?Executor.Event {
+            outputs[0] = .{ .handle = @ptrFromInt(2) };
+            return .{ .handle = @ptrFromInt(3) };
+        }
+
+        fn await_event(interface: *Executor, _: Executor.Event) Executor.Error!void {
+            promote(interface).waited = true;
+        }
+
+        fn release_buffer(_: *Executor, _: Executor.Buffer) void {}
+
+        fn release_event(interface: *Executor, _: Executor.Event) void {
+            const self = promote(interface);
+            std.debug.assert(self.waited);
+            self.released_event = true;
+        }
+
+        fn release_program(_: *Executor, _: *anyopaque) void {}
+    };
+    const Function = struct {
+        fn identity(value: Tensor) !Tensor {
+            return value;
+        }
+    };
+
+    var traced = try trace_callable(
+        Function.identity,
+        std.testing.allocator,
+        .{Tensor.abstract(.f32, &.{1})},
+        .{},
+    );
+    defer traced.deinit();
+
+    var execution: FakeExecution = .{};
+    var compiled = try traced.bind(.{
+        .executor = &execution.interface,
+        .handle = @ptrFromInt(1),
+    });
+    defer compiled.deinit();
+
+    var inputs = .{Tensor.from_buffer(
+        &execution.interface,
+        .{ .handle = @ptrFromInt(4) },
+        .f32,
+        &.{1},
+    )};
+    defer inputs[0].deinit();
+    var result = try compiled.call(&inputs);
+    defer result.deinit();
+
+    try std.testing.expect(execution.waited);
+    try std.testing.expect(execution.released_event);
 }
