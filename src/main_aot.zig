@@ -2,20 +2,27 @@
 
 const zg = @import("zigrad");
 const demos = @import("demos.zig");
-const demo_support = @import("demo_support.zig");
 
-pub fn run(context: *demo_support.PjrtContext) !void {
-    const allocator = context.compilation.allocator;
-    const client = context.client;
-    const execution = context.execution;
+pub fn run(
+    compilation_context: *zg.compilation.Context,
+    client: *zg.pjrt.Client,
+    execution: *zg.pjrt.Execution,
+    backend: *zg.pjrt.Backend,
+) !void {
+    const allocator = compilation_context.allocator;
     var program = try demos.build_demo_program(allocator);
     defer program.deinit();
 
-    var loaded_program = try demo_support.compile_pjrt(
-        context,
+    var pipeline = try zg.pjrt.pipeline.create(
+        allocator,
+        backend,
+        .{ .stablehlo = .{ .entry_name = "main" } },
+    );
+    defer pipeline.deinit();
+    var loaded_program = try pipeline.run(
+        zg.Executor.LoadedProgram,
         &program,
-        "main",
-        .{},
+        compilation_context,
     );
     defer loaded_program.deinit();
 
@@ -30,7 +37,7 @@ pub fn run(context: *demo_support.PjrtContext) !void {
         .loaded = try client.load_serialized_executable(serialized, null),
     };
     errdefer artifact.deinit();
-    var reloaded_program = try context.backend.loader.interface.load(&artifact);
+    var reloaded_program = try backend.loader.interface.load(&artifact);
     defer reloaded_program.deinit();
 
     try demos.run_demo_executable(

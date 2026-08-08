@@ -481,8 +481,6 @@ pub const LowerConfig = struct {
     encoding: stablehlo_types.Encoding = .binary,
 
     /// Selects which PR function is emitted as `@main`.
-    ///
-    /// TODO(compilation): Use one entry-point selection source across operations.
     entry_name: ?[]const u8 = null,
 };
 

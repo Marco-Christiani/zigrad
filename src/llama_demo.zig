@@ -1,6 +1,5 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const demo_support = @import("demo_support.zig");
 const stz = @import("safetensors_zg");
 
 const llama_model = @import("llama_model.zig");
@@ -161,17 +160,16 @@ fn loss_fn_with_options(
 }
 
 pub fn run_llama_ft_demo(
-    context: *demo_support.PjrtContext,
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
     environ: *const std.process.Environ.Map,
-    operations: demo_support.PjrtOperations,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
     cfg: LlamaDemoConfig,
 ) !void {
-    const io = context.compilation.io;
-    const allocator = context.compilation.allocator;
-    const executor = &context.execution.interface;
+    const io = compilation_context.io;
+    const allocator = compilation_context.allocator;
     const train_mode = cfg.train;
     const model_dtype: zg.DType = cfg.dtype;
     const host_dtype: zg.DType = model_dtype;
@@ -280,13 +278,13 @@ pub fn run_llama_ft_demo(
         else
             try zg.trace(loss_fn, allocator, inputs_spec, "llama_ft_step"));
     defer program.deinit();
-    var exe = try demo_support.compile_pjrt(
-        context,
+    var exe = try pipeline.run(
+        zg.Executor.LoadedProgram,
         &program,
-        "llama_ft_step",
-        operations,
+        compilation_context,
     );
     defer exe.deinit();
+    const executor = exe.executor;
 
     const donate = comptime zg.train.donate_argnums(@TypeOf(inputs_spec), &.{0});
 

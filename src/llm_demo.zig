@@ -1,20 +1,18 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const demo_support = @import("demo_support.zig");
 const stz = @import("safetensors_zg");
 const log = std.log.scoped(.@"zg/llm_demo");
 
 pub fn run_llm_train_demo(
-    context: *demo_support.PjrtContext,
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
     environ: *const std.process.Environ.Map,
-    operations: demo_support.PjrtOperations,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
 ) !void {
-    const io = context.compilation.io;
-    const allocator = context.compilation.allocator;
-    const executor = &context.execution.interface;
+    const io = compilation_context.io;
+    const allocator = compilation_context.allocator;
     const Tensor = zg.Tensor;
 
     const ParamsSpec = struct {
@@ -86,13 +84,13 @@ pub fn run_llm_train_demo(
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "llm_ft_step");
     defer program.deinit();
 
-    var exe = try demo_support.compile_pjrt(
-        context,
+    var exe = try pipeline.run(
+        zg.Executor.LoadedProgram,
         &program,
-        "llm_ft_step",
-        operations,
+        compilation_context,
     );
     defer exe.deinit();
+    const executor = exe.executor;
 
     var host_w_emb = try Tensor.host(.f32, &.{ vocab, hidden }, .{ .alloc = allocator });
     defer host_w_emb.deinit();

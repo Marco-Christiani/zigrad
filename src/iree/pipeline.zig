@@ -31,7 +31,7 @@ pub fn create(
     var result = compilation.Pipeline.init(allocator);
     errdefer result.deinit();
 
-    try stablehlo_pipeline.append(&result, options.stablehlo);
+    try stablehlo_pipeline.add(&result, options.stablehlo);
     switch (terminal) {
         .loaded => |backend| try result.add(&backend.interface),
         .vmfb => |compiler| try result.add(&compiler.interface),

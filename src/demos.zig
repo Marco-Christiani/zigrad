@@ -1,6 +1,5 @@
 const std = @import("std");
 const zg = @import("zigrad");
-const demo_support = @import("demo_support.zig");
 
 const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/demos");
@@ -107,10 +106,10 @@ pub fn run_demo_executable(
 }
 
 pub fn run_custom_call_negative(
-    context: *demo_support.PjrtContext,
-    operations: demo_support.PjrtOperations,
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
 ) !void {
-    const allocator = context.compilation.allocator;
+    const allocator = compilation_context.allocator;
 
     var program = zg.pr.Program.init(allocator);
     defer program.deinit();
@@ -123,11 +122,10 @@ pub fn run_custom_call_negative(
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
-    var exe = demo_support.compile_pjrt(
-        context,
+    var exe = pipeline.run(
+        zg.Executor.LoadedProgram,
         &program,
-        "main",
-        operations,
+        compilation_context,
     ) catch |err| {
         log.info("OK: custom_call compile failed as expected: {s}", .{@errorName(err)});
         return;
@@ -139,11 +137,10 @@ pub fn run_custom_call_negative(
 }
 
 pub fn run_vjp_demo(
-    context: *demo_support.PjrtContext,
-    operations: demo_support.PjrtOperations,
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
 ) !void {
-    const executor = &context.execution.interface;
-    const allocator = context.compilation.allocator;
+    const allocator = compilation_context.allocator;
 
     var program = try build_demo_program(allocator);
     defer program.deinit();
@@ -152,13 +149,13 @@ pub fn run_vjp_demo(
     const vjp = try zg.pr.ad.vjp(allocator, &program, fwd, "main_vjp", .{});
     try program.add_function(vjp);
 
-    var exe = try demo_support.compile_pjrt(
-        context,
+    var exe = try pipeline.run(
+        zg.Executor.LoadedProgram,
         &program,
-        "main_vjp",
-        operations,
+        compilation_context,
     );
     defer exe.deinit();
+    const executor = exe.executor;
 
     const A = [_]f32{
         1.0, 2.0, 3.0,
@@ -254,15 +251,14 @@ pub fn run_vjp_demo(
 }
 
 pub fn run_train_demo(
-    context: *demo_support.PjrtContext,
-    operations: demo_support.PjrtOperations,
+    compilation_context: *zg.compilation.Context,
+    pipeline: *zg.compilation.Pipeline,
     warmup_steps: usize,
     steps: usize,
     quiet: bool,
 ) !void {
-    const io = context.compilation.io;
-    const allocator = context.compilation.allocator;
-    const executor = &context.execution.interface;
+    const io = compilation_context.io;
+    const allocator = compilation_context.allocator;
 
     const ParamsSpec = struct {
         w1: Tensor,
@@ -341,13 +337,13 @@ pub fn run_train_demo(
     var program = try zg.trace(Fns.train_step, allocator, inputs_spec, "train_step");
     defer program.deinit();
 
-    var exe = try demo_support.compile_pjrt(
-        context,
+    var exe = try pipeline.run(
+        zg.Executor.LoadedProgram,
         &program,
-        "train_step",
-        operations,
+        compilation_context,
     );
     defer exe.deinit();
+    const executor = exe.executor;
 
     const true_w1 = try allocator.alloc(f32, @intCast(in_dim * h1));
     defer allocator.free(true_w1);
@@ -456,15 +452,18 @@ pub fn run_train_demo(
 ///  kernel store, then runtime preparation runs before PR kernelization and
 ///  PJRT execution.
 pub fn run_kernel_provider_demo(
-    context: *demo_support.PjrtContext,
+    compilation_context: *zg.compilation.Context,
+    client: *zg.pjrt.Client,
+    execution_template: *zg.pjrt.Execution,
+    backend_template: *zg.pjrt.Backend,
     environ: *const std.process.Environ.Map,
-    operations: demo_support.PjrtOperations,
+    options: zg.pjrt.pipeline.Options,
+    dump_kernels: bool,
     provider_kinds: []const KernelProviderDemoKind,
 ) !void {
-    const io = context.compilation.io;
-    const allocator = context.compilation.allocator;
-    const client = context.client;
-    const device = context.execution.device;
+    const io = compilation_context.io;
+    const allocator = compilation_context.allocator;
+    const device = execution_template.device;
 
     const demo_cache = try zg.Cache.init(io, environ, .{});
 
@@ -548,14 +547,14 @@ pub fn run_kernel_provider_demo(
     defer program.deinit();
 
     var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{
-        .device = context.execution.interface.device,
+        .device = execution_template.interface.device,
     });
     defer tune_result.deinit();
     try tune_result.dispatch_registry.prepare(&tune_result.store, .{
-        .device = context.execution.interface.device,
+        .device = execution_template.interface.device,
     });
 
-    var report: ?zg.pr.kernelize.Report = if (operations.dump_kernels != null)
+    var report: ?zg.pr.kernelize.Report = if (dump_kernels)
         .init(allocator)
     else
         null;
@@ -564,14 +563,15 @@ pub fn run_kernel_provider_demo(
     var pipeline = zg.compilation.Pipeline.init(allocator);
     defer pipeline.deinit();
     try pipeline.add(zg.pr.Validate{});
-    if (operations.dump_pr) |selected| {
+    if (options.stablehlo.dump_pr) |selected| {
         var operation = selected;
-        operation.config.entry_name = operation.config.entry_name orelse "main";
+        operation.config.entry_name = operation.config.entry_name orelse
+            options.stablehlo.entry_name;
         try pipeline.add(operation);
     }
     var kernelize = zg.pr.kernelize.KernelizePass{
         .store = &tune_result.store,
-        .device = context.execution.interface.device,
+        .device = execution_template.interface.device,
         .report = if (report) |*value| value else null,
     };
     try pipeline.add(&kernelize);
@@ -581,13 +581,14 @@ pub fn run_kernel_provider_demo(
 
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .entry_name = "main",
-            .encoding = if (operations.dump_stablehlo == null) .binary else .text,
+            .entry_name = options.stablehlo.entry_name,
+            .encoding = if (options.stablehlo.dump_stablehlo == null) .binary else .text,
         },
     });
-    if (operations.dump_stablehlo) |selected| {
+    if (options.stablehlo.dump_stablehlo) |selected| {
         var operation = selected;
-        operation.config.entry_name = operation.config.entry_name orelse "main";
+        operation.config.entry_name = operation.config.entry_name orelse
+            options.stablehlo.entry_name;
         try pipeline.add(operation);
     }
 
@@ -595,19 +596,20 @@ pub fn run_kernel_provider_demo(
         .store = &tune_result.store,
         .dispatch_registry = &tune_result.dispatch_registry,
     });
-    var backend = zg.pjrt.Backend.init(&execution, context.backend.compiler.options);
+    var backend = zg.pjrt.Backend.init(&execution, backend_template.compiler.options);
     try pipeline.add(&backend.interface);
-    if (operations.dump_optimized_hlo) |selected| {
+    if (options.dump_optimized_hlo) |selected| {
         var operation = selected;
         operation.execution = &execution;
-        operation.config.entry_name = operation.config.entry_name orelse "main";
+        operation.config.entry_name = operation.config.entry_name orelse
+            options.stablehlo.entry_name;
         try pipeline.add(operation);
     }
 
     var exe = try pipeline.run(
         zg.Executor.LoadedProgram,
         &program,
-        &context.compilation,
+        compilation_context,
     );
     defer exe.deinit();
 

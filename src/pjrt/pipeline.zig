@@ -27,7 +27,7 @@ pub fn create(
     var result = compilation.Pipeline.init(allocator);
     errdefer result.deinit();
 
-    try stablehlo_pipeline.append(&result, options.stablehlo);
+    try stablehlo_pipeline.add(&result, options.stablehlo);
     try result.add(&backend_instance.interface);
     if (options.dump_optimized_hlo) |selected| {
         var pass = selected;

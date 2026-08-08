@@ -18,7 +18,7 @@ pub const Options = struct {
 };
 
 /// Append the default validated PR to StableHLO segment.
-pub fn append(
+pub fn add(
     pipeline: *compilation.Pipeline,
     options: Options,
 ) compilation.Pipeline.AddError!void {

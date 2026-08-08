@@ -2,7 +2,6 @@ const std = @import("std");
 const zg = @import("zigrad");
 const build_options = zg.build_options;
 const demos = @import("demos.zig");
-const demo_support = @import("demo_support.zig");
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const main_aot = @import("main_aot.zig");
@@ -33,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         .pr = if (global.dump_pr) |*config| config else null,
         .mlir = if (global.dump_mlir) |*config| config else null,
         .optimized_hlo = if (global.dump_optimized_hlo) |*config| config else null,
-        .kernels = if (global.dump_kernels) .{} else null,
+        .kernels = global.dump_kernels,
         .quiet = global.quiet,
     };
 
@@ -70,7 +69,7 @@ const DumpOptions = struct {
     pr: ?*zg.pr.dump.Config,
     mlir: ?*zg.output.Config,
     optimized_hlo: ?*zg.output.Config,
-    kernels: ?demo_support.DumpKernels,
+    kernels: bool,
     quiet: bool,
 };
 
@@ -219,29 +218,29 @@ fn dispatch_pjrt(
         }
         const device = devices[0];
         var execution = try zg.pjrt.Execution.init(&pjrt_client, device, .{});
-        var context = demo_support.PjrtContext{
-            .compilation = .{
-                .allocator = gpa,
-                .io = env.io,
-                .device = execution.interface.device,
-            },
-            .client = &pjrt_client,
-            .execution = &execution,
-            .backend = zg.pjrt.Backend.init(&execution, .{}),
+        var compilation_context = zg.compilation.Context{
+            .allocator = gpa,
+            .io = env.io,
+            .device = execution.interface.device,
         };
-        const operations = demo_operations(dumps, &execution);
-
+        var backend = zg.pjrt.Backend.init(&execution, .{});
         return switch (work) {
             .pjrt => |command| dispatch_pjrt_artifact(
                 env,
                 command,
-                &context,
+                &compilation_context,
+                &pjrt_client,
+                &execution,
+                &backend,
             ),
             .demo => |command| dispatch_pjrt_demo(
                 env,
                 command,
-                &context,
-                operations,
+                &compilation_context,
+                &pjrt_client,
+                &execution,
+                &backend,
+                dumps,
                 dumps.quiet,
             ),
         };
@@ -254,18 +253,24 @@ fn dispatch_pjrt(
 fn dispatch_pjrt_artifact(
     env: zg.RuntimeEnv,
     command: cli.PjrtCommand,
-    context: *demo_support.PjrtContext,
+    compilation_context: *zg.compilation.Context,
+    client: *zg.pjrt.Client,
+    execution: *zg.pjrt.Execution,
+    backend: *zg.pjrt.Backend,
 ) !void {
-    const gpa = context.compilation.allocator;
-    const client = context.client;
-    const execution = context.execution;
+    const gpa = compilation_context.allocator;
     return switch (command) {
         .aot_demo => {
             if (comptime !build_options.has_mlir) {
                 log.err("pjrt aot-demo requires the opt-in MLIR integration", .{});
                 return error.MlirDisabled;
             }
-            return try main_aot.run(context);
+            return try main_aot.run(
+                compilation_context,
+                client,
+                execution,
+                backend,
+            );
         },
         .cache => |cache| switch (cache) {
             .save => |opts| {
@@ -277,11 +282,14 @@ fn dispatch_pjrt_artifact(
                 var program = try demos.build_demo_program(gpa);
                 defer program.deinit();
 
-                var loaded_program = try demo_support.compile_pjrt(
-                    context,
+                var pipeline = try zg.pjrt.pipeline.create(gpa, backend, .{
+                    .stablehlo = .{ .entry_name = "main" },
+                });
+                defer pipeline.deinit();
+                var loaded_program = try pipeline.run(
+                    zg.Executor.LoadedProgram,
                     &program,
-                    "main",
-                    .{},
+                    compilation_context,
                 );
                 defer loaded_program.deinit();
                 const serialized = try (try execution.loaded(loaded_program)).serialize(
@@ -305,7 +313,7 @@ fn dispatch_pjrt_artifact(
                     .loaded = try client.load_serialized_executable(serialized, null),
                 };
                 errdefer artifact.deinit();
-                var loaded_program = try context.backend.loader.interface.load(&artifact);
+                var loaded_program = try backend.loader.interface.load(&artifact);
                 defer loaded_program.deinit();
                 return try demos.run_demo_executable(gpa, loaded_program);
             },
@@ -316,8 +324,11 @@ fn dispatch_pjrt_artifact(
 fn dispatch_pjrt_demo(
     env: zg.RuntimeEnv,
     command: cli.DemoCommand,
-    context: *demo_support.PjrtContext,
-    operations: demo_support.PjrtOperations,
+    compilation_context: *zg.compilation.Context,
+    client: *zg.pjrt.Client,
+    execution: *zg.pjrt.Execution,
+    backend: *zg.pjrt.Backend,
+    dumps: DumpOptions,
     quiet: bool,
 ) !void {
     if (comptime !build_options.has_mlir) {
@@ -326,38 +337,68 @@ fn dispatch_pjrt_demo(
     }
 
     return switch (command) {
-        .custom_call_negative => demos.run_custom_call_negative(
-            context,
-            operations,
-        ),
+        .custom_call_negative => {
+            var pipeline = try zg.pjrt.pipeline.create(
+                compilation_context.allocator,
+                backend,
+                demo_pipeline_options(dumps, execution, "main"),
+            );
+            defer pipeline.deinit();
+            return try demos.run_custom_call_negative(compilation_context, &pipeline);
+        },
         .kernel_provider => |opts| {
             const providers = try parse_provider_kinds(opts.provider orelse "tvm");
             return try demos.run_kernel_provider_demo(
-                context,
+                compilation_context,
+                client,
+                execution,
+                backend,
                 env.environ,
-                operations,
+                demo_pipeline_options(dumps, execution, "main"),
+                dumps.kernels,
                 providers.slice(),
             );
         },
-        .vjp => demos.run_vjp_demo(
-            context,
-            operations,
-        ),
-        .train => |opts| demos.run_train_demo(
-            context,
-            operations,
-            opts.warmup orelse 0,
-            opts.steps orelse 8,
-            quiet,
-        ),
-        .llm_train => |opts| llm_demo.run_llm_train_demo(
-            context,
-            env.environ,
-            operations,
-            opts.warmup orelse 0,
-            opts.steps orelse 8,
-            quiet,
-        ),
+        .vjp => {
+            var pipeline = try zg.pjrt.pipeline.create(
+                compilation_context.allocator,
+                backend,
+                demo_pipeline_options(dumps, execution, "main_vjp"),
+            );
+            defer pipeline.deinit();
+            return try demos.run_vjp_demo(compilation_context, &pipeline);
+        },
+        .train => |opts| {
+            var pipeline = try zg.pjrt.pipeline.create(
+                compilation_context.allocator,
+                backend,
+                demo_pipeline_options(dumps, execution, "train_step"),
+            );
+            defer pipeline.deinit();
+            return try demos.run_train_demo(
+                compilation_context,
+                &pipeline,
+                opts.warmup orelse 0,
+                opts.steps orelse 8,
+                quiet,
+            );
+        },
+        .llm_train => |opts| {
+            var pipeline = try zg.pjrt.pipeline.create(
+                compilation_context.allocator,
+                backend,
+                demo_pipeline_options(dumps, execution, "llm_ft_step"),
+            );
+            defer pipeline.deinit();
+            return try llm_demo.run_llm_train_demo(
+                compilation_context,
+                &pipeline,
+                env.environ,
+                opts.warmup orelse 0,
+                opts.steps orelse 8,
+                quiet,
+            );
+        },
         .llama_finetune => |opts| {
             const dtype = std.meta.stringToEnum(zg.DType, opts.dtype) orelse
                 return error.InvalidDType;
@@ -375,10 +416,16 @@ fn dispatch_pjrt_demo(
                 .kernel_provider = kernel_provider,
             };
 
+            var pipeline = try zg.pjrt.pipeline.create(
+                compilation_context.allocator,
+                backend,
+                demo_pipeline_options(dumps, execution, "llama_ft_step"),
+            );
+            defer pipeline.deinit();
             return try llama_demo.run_llama_ft_demo(
-                context,
+                compilation_context,
+                &pipeline,
                 env.environ,
-                operations,
                 opts.warmup,
                 opts.steps,
                 quiet,
@@ -388,18 +435,21 @@ fn dispatch_pjrt_demo(
     };
 }
 
-fn demo_operations(
+fn demo_pipeline_options(
     dumps: DumpOptions,
     execution: *zg.pjrt.Execution,
-) demo_support.PjrtOperations {
+    entry_name: []const u8,
+) zg.pjrt.pipeline.Options {
     return .{
-        .dump_pr = if (dumps.pr) |config| .{ .config = config.* } else null,
-        .dump_stablehlo = if (dumps.mlir) |config| .{ .config = config.* } else null,
+        .stablehlo = .{
+            .entry_name = entry_name,
+            .dump_pr = if (dumps.pr) |config| .{ .config = config.* } else null,
+            .dump_stablehlo = if (dumps.mlir) |config| .{ .config = config.* } else null,
+        },
         .dump_optimized_hlo = if (dumps.optimized_hlo) |config| .{
             .execution = execution,
             .config = config.*,
         } else null,
-        .dump_kernels = dumps.kernels,
     };
 }
 
