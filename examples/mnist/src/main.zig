@@ -145,14 +145,16 @@ pub fn main(init: std.process.Init) !void {
     );
     defer traced.deinit();
 
-    var pr_flow = zg.compilation.start(&traced.program, &compilation_context);
-    try pr_flow.transform(zg.pr.Validate{});
-    var stablehlo_flow = try pr_flow.lower(zg.mlir.stablehlo.Lower{
-        .config = .{ .entry_name = traced.entry_name },
-    });
-    defer stablehlo_flow.value.deinit(allocator);
     var backend = zg.pjrt.Backend.init(&execution, .{});
-    var loaded_program = (try stablehlo_flow.compile(&backend.interface)).value;
+    var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
+        .stablehlo = .{ .entry_name = traced.entry_name },
+    });
+    defer pipeline.deinit();
+    var loaded_program = try pipeline.run(
+        zg.Executor.LoadedProgram,
+        &traced.program,
+        &compilation_context,
+    );
     var step_fn = traced.bind(loaded_program) catch |err| {
         loaded_program.deinit();
         return err;

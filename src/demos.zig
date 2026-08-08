@@ -561,34 +561,34 @@ pub fn run_kernel_provider_demo(
         null;
     defer if (report) |*value| value.deinit();
 
-    var pr_flow = zg.compilation.start(&program, &context.compilation);
-    try pr_flow.transform(zg.pr.Validate{});
+    var pipeline = zg.compilation.Pipeline.init(allocator);
+    defer pipeline.deinit();
+    try pipeline.add(zg.pr.Validate{});
     if (operations.dump_pr) |selected| {
         var operation = selected;
         operation.config.entry_name = operation.config.entry_name orelse "main";
-        try pr_flow.transform(operation);
+        try pipeline.add(operation);
     }
     var kernelize = zg.pr.kernelize.KernelizePass{
         .store = &tune_result.store,
         .device = context.execution.interface.device,
         .report = if (report) |*value| value else null,
     };
-    try pr_flow.transform(&kernelize);
+    try pipeline.add(&kernelize);
     if (report) |*value| {
-        try pr_flow.transform(zg.pr.kernelize.DumpKernels{ .report = value });
+        try pipeline.add(zg.pr.kernelize.DumpKernels{ .report = value });
     }
 
-    var stablehlo_flow = try pr_flow.lower(zg.mlir.stablehlo.Lower{
+    try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
             .entry_name = "main",
             .encoding = if (operations.dump_stablehlo == null) .binary else .text,
         },
     });
-    defer stablehlo_flow.value.deinit(allocator);
     if (operations.dump_stablehlo) |selected| {
         var operation = selected;
         operation.config.entry_name = operation.config.entry_name orelse "main";
-        try stablehlo_flow.transform(operation);
+        try pipeline.add(operation);
     }
 
     var execution = try zg.pjrt.Execution.init(client, device, .{
@@ -596,15 +596,19 @@ pub fn run_kernel_provider_demo(
         .dispatch_registry = &tune_result.dispatch_registry,
     });
     var backend = zg.pjrt.Backend.init(&execution, context.backend.compiler.options);
-    var executable_flow = try stablehlo_flow.compile(&backend.interface);
-    errdefer executable_flow.value.deinit();
-    if (operations.dump_optimized) |selected| {
+    try pipeline.add(&backend.interface);
+    if (operations.dump_optimized_hlo) |selected| {
         var operation = selected;
         operation.execution = &execution;
         operation.config.entry_name = operation.config.entry_name orelse "main";
-        try executable_flow.transform(operation);
+        try pipeline.add(operation);
     }
-    var exe = executable_flow.value;
+
+    var exe = try pipeline.run(
+        zg.Executor.LoadedProgram,
+        &program,
+        &context.compilation,
+    );
     defer exe.deinit();
 
     return try run_kernel_provider_demo_executable(

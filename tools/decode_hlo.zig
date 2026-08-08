@@ -24,8 +24,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(io, &buffer);
     const out = &stdout_writer.interface;
 
-    // Try HloModuleProtoWithConfig first (format from --dump-optimized),
-    // fall back to plain HloModuleProto.
+    // Optimized HLO normally uses HloModuleProtoWithConfig.
+    //
+    //  Fall back to plain HloModuleProto for inputs without configuration.
     blk: {
         var reader: std.Io.Reader = .fixed(bytes);
         const with_config = xla.HloModuleProtoWithConfig.decode(&reader, allocator) catch break :blk;

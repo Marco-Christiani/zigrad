@@ -2,7 +2,6 @@
 const std = @import("std");
 const zg = @import("zigrad");
 const pr = zg.pr;
-const stablehlo_lower = zg.mlir.stablehlo;
 const pjrt = zg.pjrt;
 const config = @import("config.zig");
 
@@ -137,12 +136,14 @@ pub const XlaContext = struct {
         const func = try builder.finish(&.{c_id});
         try program.add_function(func);
 
-        var pr_flow = zg.compilation.start(&program, &self.compilation);
-        try pr_flow.transform(pr.Validate{});
-        var stablehlo_flow = try pr_flow.lower(stablehlo_lower.Lower{
-            .config = .{ .entry_name = "matmul" },
+        var pipeline = try pjrt.pipeline.create(self.allocator, &self.backend, .{
+            .stablehlo = .{ .entry_name = "matmul" },
         });
-        defer stablehlo_flow.value.deinit(self.allocator);
-        return (try stablehlo_flow.compile(&self.backend.interface)).value;
+        defer pipeline.deinit();
+        return try pipeline.run(
+            zg.Executor.LoadedProgram,
+            &program,
+            &self.compilation,
+        );
     }
 };

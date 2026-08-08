@@ -15,9 +15,15 @@
 //! );
 //! defer traced.deinit();
 //!
-//! var pr_flow = zg.compilation.start(&traced.program, &context);
-//! // Compose transformations, lowering, and compilation here.
-//! const loaded_program = ...;
+//! var pipeline = try zg.pjrt.pipeline.create(allocator, &backend, .{
+//!     .stablehlo = .{ .entry_name = traced.entry_name },
+//! });
+//! defer pipeline.deinit();
+//! const loaded_program = try pipeline.run(
+//!     zg.Executor.LoadedProgram,
+//!     &traced.program,
+//!     &context,
+//! );
 //! var step = try traced.bind(loaded_program);
 //! defer step.deinit();
 //!

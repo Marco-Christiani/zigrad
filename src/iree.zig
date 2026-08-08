@@ -1,5 +1,7 @@
 //! Optional IREE integration.
 
+const build_options = @import("build_options");
+
 const config = @import("iree/config.zig");
 const backend = @import("iree/backend.zig");
 const compiler = @import("iree/compiler.zig");
@@ -23,6 +25,9 @@ pub const Buffer = runtime.Buffer;
 pub const Invocation = runtime.Invocation;
 pub const Executable = runtime.Executable;
 pub const Runtime = runtime.Runtime;
+
+/// Default PR to IREE composition, available with the MLIR lowering integration.
+pub const pipeline = if (build_options.has_mlir) @import("iree/pipeline.zig") else struct {};
 
 test {
     @import("std").testing.refAllDecls(@This());

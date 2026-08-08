@@ -12,8 +12,8 @@ const log = std.log.scoped(.@"zg/pjrt_dump");
 
 pub const Config = output.Config;
 
-/// Emit the PJRT optimized program and return the same loaded program.
-pub const DumpOptimized = struct {
+/// Emit the PJRT executable's optimized HLO and return the same loaded program.
+pub const DumpOptimizedHlo = struct {
     pub const Input = LoadedProgram;
     pub const Output = LoadedProgram;
 
@@ -21,7 +21,7 @@ pub const DumpOptimized = struct {
     config: Config,
 
     pub fn run(
-        self: DumpOptimized,
+        self: DumpOptimizedHlo,
         loaded_program: Input,
         ctx: *compilation.Context,
     ) !Output {
@@ -63,8 +63,8 @@ fn dump_program(
             if (hlo_decode.decode_and_print(self.code, self.allocator, writer)) return;
 
             if (self.is_stdout) {
-                try writer.print("optimized program format: {s}\n", .{self.format});
-                try writer.print("optimized program size: {d} bytes\n", .{self.code.len});
+                try writer.print("optimized HLO format: {s}\n", .{self.format});
+                try writer.print("optimized HLO size: {d} bytes\n", .{self.code.len});
             } else {
                 try writer.writeAll(self.code);
             }

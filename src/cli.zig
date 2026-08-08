@@ -9,8 +9,8 @@ pub const GlobalOpts = struct {
     dump_pr: ?zg.pr.dump.Config = null,
     /// Emit MLIR to stdout or a file.
     dump_mlir: ?zg.output.Config = null,
-    /// Emit the backend-optimized program to stdout or a file.
-    dump_optimized: ?zg.output.Config = null,
+    /// Emit optimized HLO from the PJRT executable.
+    dump_optimized_hlo: ?zg.output.Config = null,
     /// Print the kernelization summary.
     dump_kernels: bool = false,
     /// Reduce command output.
@@ -301,7 +301,7 @@ fn parse_global_options(cursor: *Cursor, opts: *GlobalOpts) !void {
         switch (field) {
             .dump_pr => opts.dump_pr = parse_dump_pr_value(option.value orelse ""),
             .dump_mlir => opts.dump_mlir = dump_config(option.value),
-            .dump_optimized => opts.dump_optimized = dump_config(option.value),
+            .dump_optimized_hlo => opts.dump_optimized_hlo = dump_config(option.value),
             .dump_kernels => opts.dump_kernels = try parse_flag(option.value, !negated),
             .quiet => opts.quiet = try parse_flag(option.value, !negated),
         }

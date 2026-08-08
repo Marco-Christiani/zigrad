@@ -6,6 +6,7 @@ pub const Lower = lower_mod.Lower;
 pub const lower_program_to_mlir = lower_mod.lower_program_to_mlir;
 pub const lower_function_to_mlir = lower_mod.lower_function_to_mlir;
 pub const LowerConfig = lower_mod.LowerConfig;
+pub const pipeline = @import("stablehlo/pipeline.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     const dumps = DumpOptions{
         .pr = if (global.dump_pr) |*config| config else null,
         .mlir = if (global.dump_mlir) |*config| config else null,
-        .optimized = if (global.dump_optimized) |*config| config else null,
+        .optimized_hlo = if (global.dump_optimized_hlo) |*config| config else null,
         .kernels = if (global.dump_kernels) .{} else null,
         .quiet = global.quiet,
     };
@@ -69,7 +69,7 @@ fn tvm_surface_for_command(command: cli.Command) zg.tvm.runtime.Surface {
 const DumpOptions = struct {
     pr: ?*zg.pr.dump.Config,
     mlir: ?*zg.output.Config,
-    optimized: ?*zg.output.Config,
+    optimized_hlo: ?*zg.output.Config,
     kernels: ?demo_support.DumpKernels,
     quiet: bool,
 };
@@ -395,7 +395,7 @@ fn demo_operations(
     return .{
         .dump_pr = if (dumps.pr) |config| .{ .config = config.* } else null,
         .dump_stablehlo = if (dumps.mlir) |config| .{ .config = config.* } else null,
-        .dump_optimized = if (dumps.optimized) |config| .{
+        .dump_optimized_hlo = if (dumps.optimized_hlo) |config| .{
             .execution = execution,
             .config = config.*,
         } else null,
@@ -507,23 +507,20 @@ fn run_iree_demo(
         .io = io,
         .device = execution.interface.device,
     };
-    var stablehlo_flow = zg.compilation.start(
-        try demo_support.lower_stablehlo(&compilation_context, &program, .{
+    var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
+    var pipeline = try zg.iree.pipeline.create(gpa, .{ .loaded = &backend }, .{
+        .stablehlo = .{
             .entry_name = "main",
-            .encoding = if (dump_mlir == null) .binary else .text,
             .dump_pr = if (dump_pr) |selected| .{ .config = selected.* } else null,
-        }),
+            .dump_stablehlo = if (dump_mlir) |selected| .{ .config = selected.* } else null,
+        },
+    });
+    defer pipeline.deinit();
+    var loaded_program = try pipeline.run(
+        zg.Executor.LoadedProgram,
+        &program,
         &compilation_context,
     );
-    defer stablehlo_flow.value.deinit(gpa);
-    if (dump_mlir) |dump_config| {
-        var operation = zg.stablehlo.Dump{ .config = dump_config.* };
-        operation.config.entry_name = operation.config.entry_name orelse "main";
-        try stablehlo_flow.transform(operation);
-    }
-    var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
-    const loaded_program_flow = try stablehlo_flow.compile(&backend.interface);
-    var loaded_program = loaded_program_flow.value;
     defer loaded_program.deinit();
     try demos.run_demo_executable(gpa, loaded_program);
 }
@@ -546,22 +543,19 @@ fn run_iree_aot_compile(
         .allocator = gpa,
         .io = io,
     };
-    var stablehlo_flow = zg.compilation.start(
-        try demo_support.lower_stablehlo(&compilation_context, &program, .{
+    var compiler = zg.iree.Compiler{ .config = config.compiler };
+    var pipeline = try zg.iree.pipeline.create(gpa, .{ .vmfb = &compiler }, .{
+        .stablehlo = .{
             .entry_name = "main",
-            .encoding = if (dump_mlir == null) .binary else .text,
-        }),
+            .dump_stablehlo = if (dump_mlir) |selected| .{ .config = selected.* } else null,
+        },
+    });
+    defer pipeline.deinit();
+    var vmfb = try pipeline.run(
+        zg.iree.Artifact,
+        &program,
         &compilation_context,
     );
-    defer stablehlo_flow.value.deinit(gpa);
-    if (dump_mlir) |dump_config| {
-        var operation = zg.stablehlo.Dump{ .config = dump_config.* };
-        operation.config.entry_name = operation.config.entry_name orelse "main";
-        try stablehlo_flow.transform(operation);
-    }
-    var compiler = zg.iree.Compiler{ .config = config.compiler };
-    const vmfb_flow = try stablehlo_flow.compile(&compiler.interface);
-    var vmfb = vmfb_flow.value;
     defer vmfb.deinit();
 
     const output_path = opts.output orelse "demo.vmfb";

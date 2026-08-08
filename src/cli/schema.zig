@@ -76,8 +76,8 @@ pub const global_options = [_]Option{
         .value_optional = true,
     },
     .{
-        .long_name = "dump-optimized",
-        .description = "Emit the backend-optimized program to stdout or a file",
+        .long_name = "dump-optimized-hlo",
+        .description = "Emit optimized HLO from the PJRT executable",
         .value_name = "PATH",
         .value_optional = true,
     },

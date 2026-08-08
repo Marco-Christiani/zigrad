@@ -1,5 +1,7 @@
 //! Public surface for the optional PJRT integration.
 
+const build_options = @import("build_options");
+
 const client = @import("pjrt/client.zig");
 const backend = @import("pjrt/backend.zig");
 const compiler = @import("pjrt/compiler.zig");
@@ -23,9 +25,12 @@ pub const Compiler = compiler.Compiler;
 pub const Loader = loader.Loader;
 pub const Backend = backend.Backend;
 
+/// Default PR to PJRT composition, available with the MLIR lowering integration.
+pub const pipeline = if (build_options.has_mlir) @import("pjrt/pipeline.zig") else struct {};
+
 const dump = @import("pjrt/dump.zig");
 pub const DumpConfig = dump.Config;
-pub const DumpOptimized = dump.DumpOptimized;
+pub const DumpOptimizedHlo = dump.DumpOptimizedHlo;
 
 test {
     @import("std").testing.refAllDecls(@This());
