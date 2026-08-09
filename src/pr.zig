@@ -71,6 +71,7 @@ pub const dump = @import("pr/dump.zig");
 pub const ops = @import("pr/ops/ops.zig");
 pub const region_view = @import("pr/region_view.zig");
 pub const outline = @import("pr/outline.zig");
+pub const fingerprint = @import("pr/fingerprint.zig");
 pub const kernel = @import("pr/kernel.zig");
 pub const kernelize = @import("pr/kernelize.zig");
 
