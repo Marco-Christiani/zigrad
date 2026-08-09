@@ -556,8 +556,6 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
     }
     literal_var.first_use = &custom_inputs[1];
 
-    const out_avals = try arena.alloc(pr.Aval, 2);
-    @memset(out_avals, scalar);
     custom_op.* = .{
         .id = 9,
         .inputs = custom_inputs,
@@ -565,9 +563,7 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
         .params = .{ .custom_call = .{
             .target_name = try arena.dupe(u8, "round_trip"),
             .has_side_effect = false,
-            .out_avals = out_avals,
-            .kernel_key = try arena.dupe(u8, "key"),
-            .provider_name = null,
+            .payload = try arena.dupe(u8, "payload"),
         } },
     };
 
@@ -683,6 +679,7 @@ test "binary PR round trip is byte stable" {
     try std.testing.expect(custom_op.inputs[0].next == null);
     try std.testing.expect(custom_op.inputs[1].prev == null);
     try std.testing.expect(custom_op.inputs[1].next == &custom_op.inputs[0]);
+    try std.testing.expectEqualStrings("payload", custom_op.params.custom_call.payload);
 
     const region = parsed.functions[0].regions[0];
     try std.testing.expectEqualStrings("serialized", region.name);

@@ -9,7 +9,7 @@ const Blake3 = std.crypto.hash.Blake3;
 const Writer = std.Io.Writer;
 
 /// Version of the canonical function fingerprint encoding.
-pub const encoding_version: u32 = 1;
+pub const encoding_version: u32 = 2;
 
 /// Semantic identity of a callable PR function.
 pub const Function = struct {
@@ -143,6 +143,36 @@ test "function includes parameters and literal values" {
     defer second_builder.deinit();
     const two = try second_builder.literal_scalar(.{ .f32 = 2.0 });
     const second = try second_builder.finish(&.{two});
+
+    const first_fingerprint = try function(std.testing.allocator, first);
+    const second_fingerprint = try function(std.testing.allocator, second);
+    try std.testing.expect(!first_fingerprint.eql(second_fingerprint));
+}
+
+test "function includes custom-call payload" {
+    var first_program = pr.Program.init(std.testing.allocator);
+    defer first_program.deinit();
+    var first_builder = try pr.FunctionBuilder.init(&first_program, "first");
+    defer first_builder.deinit();
+    const first_input = try first_builder.param_tensor(.f32, &.{2});
+    const first_outputs = try first_builder.custom_call(.{
+        .target_name = "example.dispatch",
+        .has_side_effect = false,
+        .payload = &.{1},
+    }, &.{first_input}, &.{first_input.aval});
+    const first = try first_builder.finish(first_outputs);
+
+    var second_program = pr.Program.init(std.testing.allocator);
+    defer second_program.deinit();
+    var second_builder = try pr.FunctionBuilder.init(&second_program, "second");
+    defer second_builder.deinit();
+    const second_input = try second_builder.param_tensor(.f32, &.{2});
+    const second_outputs = try second_builder.custom_call(.{
+        .target_name = "example.dispatch",
+        .has_side_effect = false,
+        .payload = &.{2},
+    }, &.{second_input}, &.{second_input.aval});
+    const second = try second_builder.finish(second_outputs);
 
     const first_fingerprint = try function(std.testing.allocator, first);
     const second_fingerprint = try function(std.testing.allocator, second);

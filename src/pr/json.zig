@@ -347,13 +347,9 @@ fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
             try open_attrs(writer, &has_attr);
             try writer.writeAll("\"target\":");
             try write_json_string(writer, cc.target_name);
-            if (cc.kernel_key) |k| {
-                try writer.writeAll(",\"kernel_key\":");
-                try write_json_string(writer, k);
-            }
-            if (cc.provider_name) |p| {
-                try writer.writeAll(",\"provider\":");
-                try write_json_string(writer, p);
+            if (cc.payload.len > 0) {
+                try writer.writeAll(",\"payload\":");
+                try emit_bytes(writer, cc.payload);
             }
             if (cc.has_side_effect) {
                 try writer.writeAll(",\"side_effect\":true");
@@ -421,15 +417,17 @@ fn emit_annotation_value(writer: *Writer, value: pr.AnnotationValue) !void {
             }
         },
         .string => |item| try write_json_string(writer, item),
-        .bytes => |items| {
-            try writer.writeAll("[");
-            for (items, 0..) |item, index| {
-                if (index > 0) try writer.writeAll(",");
-                try writer.print("{d}", .{item});
-            }
-            try writer.writeAll("]");
-        },
+        .bytes => |items| try emit_bytes(writer, items),
     }
+}
+
+fn emit_bytes(writer: *Writer, items: []const u8) !void {
+    try writer.writeAll("[");
+    for (items, 0..) |item, index| {
+        if (index > 0) try writer.writeAll(",");
+        try writer.print("{d}", .{item});
+    }
+    try writer.writeAll("]");
 }
 
 fn write_json_string(writer: *Writer, s: []const u8) !void {

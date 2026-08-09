@@ -77,6 +77,7 @@ const MethodSpec = struct {
 ///  layout.
 const op_methods: []const MethodSpec = &.{
     .{ .name = "validate", .required = true, .doc = "Op construction sanity check" },
+    // TODO(pr): Make inference optional for operations with explicit result types.
     .{ .name = "infer_output", .required = true, .doc = "Shape/dtype inference" },
     .{ .name = "format", .required = false, .doc = "IR dump formatting" },
     .{ .name = "emit_primal", .required = false, .doc = "Primal re-emission for AD" },

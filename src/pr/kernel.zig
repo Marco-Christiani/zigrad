@@ -16,9 +16,6 @@ const log = std.log.scoped(.@"zg/kernel");
 /// Custom-call target used by kernel-provider dispatch.
 pub const dispatch_target_name = "zigrad.kernel.dispatch";
 
-/// Custom-call attribute carrying a kernel decision key.
-pub const key_attribute_name = "zigrad.kernel_key";
-
 /// Region annotation requesting a candidate from a named kernel provider.
 pub const provider_annotation_name = "zigrad.kernel.provider";
 

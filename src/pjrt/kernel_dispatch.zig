@@ -4,6 +4,7 @@ const std = @import("std");
 
 const device = @import("../device.zig");
 const kernel = @import("../pr/kernel.zig");
+const stablehlo = @import("../stablehlo.zig");
 const pjrt_api = @import("../c/pjrt/api.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const c = @import("../c/pjrt/c.zig").c;
@@ -299,7 +300,7 @@ fn lookup_platform_from_context(frame: *c.XLA_FFI_CallFrame) ?device.Platform {
 
 /// Generic kernel dispatch handler invoked by the XLA FFI framework.
 ///
-/// Extracts kernel_key from custom_call attributes, looks up the artifact
+/// Extracts the decision key from the custom-call payload, looks up the artifact
 ///  in the registry, builds a provider-agnostic DispatchContext from the
 ///  FFI frame, and delegates to `artifact.dispatch()`.
 fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
@@ -307,9 +308,9 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
 
     if (frame.stage != c.XLA_FFI_ExecutionStage_EXECUTE) return null;
 
-    const maybe_kernel_key = lookup_dispatch_attr(frame.attrs, kernel.key_attribute_name);
+    const maybe_kernel_key = lookup_dispatch_attr(frame.attrs, stablehlo.custom_call_payload_name);
     const kernel_key = maybe_kernel_key orelse {
-        return make_ffi_error(frame, "zigrad kernel dispatch: missing zigrad.kernel_key attribute", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
+        return make_ffi_error(frame, "zigrad kernel dispatch: missing payload", c.XLA_FFI_Error_Code_INVALID_ARGUMENT);
     };
 
     const store = lookup_store_from_context(frame) orelse {

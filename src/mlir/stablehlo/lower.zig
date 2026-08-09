@@ -10,7 +10,6 @@ const std = @import("std");
 const compilation = @import("../../compilation.zig");
 const pr = @import("../../pr/pr.zig");
 const fingerprint = @import("../../pr/fingerprint.zig");
-const kernel = @import("../../pr/kernel.zig");
 const kernelize = @import("../../pr/kernelize.zig");
 const outline = @import("../../pr/outline.zig");
 const mlir = @import("../../c/mlir/mlir.zig");
@@ -116,10 +115,10 @@ fn lower_custom_call(ctx: LowerContext, op: *const pr.Op) LowerError!void {
     }
 
     var backend_fields: [1]mlir.AttrTuple = undefined;
-    const backend_field_count: usize = if (cc.kernel_key) |value| count: {
+    const backend_field_count: usize = if (cc.payload.len > 0) count: {
         backend_fields[0] = .{
-            kernel.key_attribute_name,
-            mlir.Attribute.string(ctx.mlir_ctx, value),
+            stablehlo_types.custom_call_payload_name,
+            mlir.Attribute.string(ctx.mlir_ctx, cc.payload),
         };
         break :count 1;
     } else 0;
@@ -132,6 +131,8 @@ fn lower_custom_call(ctx: LowerContext, op: *const pr.Op) LowerError!void {
         .call_target_name = cc.target_name,
         .has_side_effect = cc.has_side_effect,
         .backend_config = backend_config,
+        // TODO(stablehlo): Select the calling convention through compiler and
+        //  runtime composition.
         .api_version = .typed_ffi,
     }, result_types, ctx.loc);
 
@@ -523,6 +524,8 @@ pub fn lower(
 
 // Tests.
 
+const kernel_test = @import("../../pr/kernel.zig");
+
 fn outline_kernel_requests_for_test(program: *pr.Program) !void {
     var ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };
     _ = try (kernelize.OutlineCandidates{}).run(program, &ctx);
@@ -627,7 +630,11 @@ test "lowering supports custom_call" {
     defer b.deinit();
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const y = try b.custom_call("zigrad.test.missing_handler", &.{x}, x);
+    const outputs = try b.custom_call(.{
+        .target_name = "zigrad.test.missing_handler",
+        .has_side_effect = false,
+    }, &.{x}, &.{x.aval});
+    const y = outputs[0];
 
     const func = try b.finish(&.{y});
     try program.add_function(func);
@@ -649,7 +656,7 @@ test "lowering supports multi-output custom_call" {
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("mock_multi", &.{kernel.provider_annotation("mock")});
+    try b.push_region("mock_multi", &.{kernel_test.provider_annotation("mock")});
     const ex = try b.emit(.{ .exp = {} }, &.{x});
     const lg = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
@@ -660,7 +667,7 @@ test "lowering supports multi-output custom_call" {
 
     const selected_device = @import("../../device.zig").Device{ .platform = .cpu };
     const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
-    const decision_key = try kernel.make_decision_key(
+    const decision_key = try kernel_test.make_decision_key(
         testing.allocator,
         "mock",
         selected_device,
@@ -668,7 +675,7 @@ test "lowering supports multi-output custom_call" {
     );
     defer testing.allocator.free(decision_key.bytes);
 
-    var store = kernel.KernelStore.init(testing.allocator);
+    var store = kernel_test.KernelStore.init(testing.allocator);
     defer store.deinit();
     try store.put_profitable(decision_key, "mock", .{
         .data = "mock",
@@ -686,6 +693,7 @@ test "lowering supports multi-output custom_call" {
     defer testing.allocator.free(text);
 
     try testing.expect(std.mem.indexOf(u8, text, "stablehlo.custom_call") != null);
+    try testing.expect(std.mem.indexOf(u8, text, stablehlo_types.custom_call_payload_name) != null);
     try testing.expect(std.mem.indexOf(u8, text, "tensor<2xf32>, tensor<2xf32>") != null);
 }
 
@@ -752,7 +760,7 @@ test "lower operation outlines kernelize-annotated region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("matmul_region", &.{kernel.provider_annotation("mirage")});
+    try b.push_region("matmul_region", &.{kernel_test.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const sum = try b.add(dot, bias);
     const out = try b.multiply(sum, bias);
@@ -783,7 +791,7 @@ test "lower operation outlines dot-add kernelize region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("dot_add_region", &.{kernel.provider_annotation("mirage")});
+    try b.push_region("dot_add_region", &.{kernel_test.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const out = try b.add(dot, bias);
     try b.pop_region();
@@ -812,7 +820,7 @@ test "lower operation outlines dot-log kernelize region" {
     const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
 
-    try b.push_region("dot_log_region", &.{kernel.provider_annotation("mirage")});
+    try b.push_region("dot_log_region", &.{kernel_test.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const out = try b.log(dot);
     try b.pop_region();
@@ -842,7 +850,7 @@ test "lower operation outlines near-miss kernelize region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("near_miss_region", &.{kernel.provider_annotation("mirage")});
+    try b.push_region("near_miss_region", &.{kernel_test.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const shifted = try b.subtract(dot, bias);
     const out = try b.multiply(shifted, bias);
@@ -888,7 +896,11 @@ test "lower operation emits stablehlo.custom_call" {
     defer b.deinit();
 
     const x = try b.param_tensor(.f32, &.{2});
-    const y = try b.custom_call("zigrad.test.missing_handler", &.{x}, x);
+    const outputs = try b.custom_call(.{
+        .target_name = "zigrad.test.missing_handler",
+        .has_side_effect = false,
+    }, &.{x}, &.{x.aval});
+    const y = outputs[0];
     const func = try b.finish(&.{y});
     try program.add_function(func);
 

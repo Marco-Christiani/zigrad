@@ -211,7 +211,6 @@ pub const KernelizePass = struct {
                     try rewrite_call(
                         program.allocator(),
                         op,
-                        stored.provider_name,
                         decision_key.bytes,
                         pr.function_may_have_side_effects(program, candidate),
                     );
@@ -239,19 +238,13 @@ pub const KernelizePass = struct {
     fn rewrite_call(
         arena: std.mem.Allocator,
         op: *pr.Op,
-        provider_name: []const u8,
         decision_key: []const u8,
         has_side_effect: bool,
     ) std.mem.Allocator.Error!void {
-        const out_avals = try arena.alloc(pr.Aval, op.outputs.len);
-        for (op.outputs, 0..) |output, index| out_avals[index] = output.aval;
-
         op.params = .{ .custom_call = .{
             .target_name = try arena.dupe(u8, kernel.dispatch_target_name),
             .has_side_effect = has_side_effect,
-            .out_avals = out_avals,
-            .kernel_key = try arena.dupe(u8, decision_key),
-            .provider_name = try arena.dupe(u8, provider_name),
+            .payload = try arena.dupe(u8, decision_key),
         } };
     }
 };
@@ -391,8 +384,7 @@ test "kernelize pass rewrites a selected function call" {
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
 
     try testing.expectEqualStrings(kernel.dispatch_target_name, rewritten.params.custom_call.target_name);
-    try testing.expectEqualStrings(decision_key.bytes, rewritten.params.custom_call.kernel_key.?);
-    try testing.expectEqualStrings("mock", rewritten.params.custom_call.provider_name.?);
+    try testing.expectEqualStrings(decision_key.bytes, rewritten.params.custom_call.payload);
     try testing.expect(!rewritten.params.custom_call.has_side_effect);
 }
 
@@ -406,11 +398,10 @@ test "kernelize pass preserves observable side effects" {
     defer builder.deinit();
     const input = try builder.param_tensor(.f32, &.{2});
     try builder.push_region("effectful", &.{kernel.provider_annotation("mock")});
-    const outputs = try builder.custom_call_multi(.{
+    const outputs = try builder.custom_call(.{
         .target_name = "test.effectful",
         .has_side_effect = true,
-        .out_avals = &.{input.aval},
-    }, &.{input});
+    }, &.{input}, &.{input.aval});
     try builder.pop_region();
     try program.add_function(try builder.finish(outputs));
     try outline_test_program(&program);
@@ -558,6 +549,7 @@ test "kernelize pass rewrites a multi-output function call" {
     const func = try b.finish(&.{ a, b_out });
     try program.add_function(func);
     try outline_test_program(&program);
+    const call_outputs = program.functions[0].ops[0].outputs;
 
     const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
     defer testing.allocator.free(decision_key.bytes);
@@ -582,8 +574,8 @@ test "kernelize pass rewrites a multi-output function call" {
 
     try testing.expectEqual(@as(usize, 2), rewritten.outputs.len);
 
-    const out_avals = rewritten.params.custom_call.out_avals;
-    try testing.expectEqual(@as(usize, 2), out_avals.len);
+    try testing.expect(rewritten.outputs[0] == call_outputs[0]);
+    try testing.expect(rewritten.outputs[1] == call_outputs[1]);
 }
 
 test "kernelize pass shares decisions for equal functions" {

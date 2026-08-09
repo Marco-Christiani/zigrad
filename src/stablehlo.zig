@@ -4,6 +4,9 @@ const std = @import("std");
 const compilation = @import("compilation.zig");
 const output = @import("output.zig");
 
+/// Backend-configuration field carrying an opaque PR custom-call payload.
+pub const custom_call_payload_name = "zigrad.payload";
+
 /// StableHLO serialization encoding.
 pub const Encoding = enum {
     text,

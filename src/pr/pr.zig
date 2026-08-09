@@ -312,15 +312,12 @@ pub const CallParams = struct {
 
 /// Parameters for an opaque runtime-dispatched custom call operation.
 pub const CustomCallParams = struct {
-    /// Dispatch key used at runtime (e.g. "zigrad.kernel.matmul_add").
+    /// Dispatch identity interpreted by the selected execution integration.
     target_name: []const u8,
+    /// Whether the call has observable effects not represented by its results.
     has_side_effect: bool,
-    /// Output types must be provided explicitly (not inferrable from inputs).
-    out_avals: []const Aval,
-    /// Optional: identifies a pre-compiled kernel artifact in the kernel store.
-    kernel_key: ?[]const u8 = null,
-    /// Optional: which kernel provider compiled this (e.g. "tvm", "mirage").
-    provider_name: ?[]const u8 = null,
+    /// Target-defined semantic data embedded in the operation.
+    payload: []const u8 = &.{},
 };
 
 /// Parameter union keyed by `Prim`.
@@ -983,12 +980,10 @@ pub const FunctionBuilder = struct {
         return out_var;
     }
 
-    /// Emit a multi-output op with explicit output types.
-    ///
-    /// Input vars have their use-lists updated (see `emit`).
     /// Emit an operation with explicit output abstract values.
     ///
-    /// Compiler transforms use this operation when cloning multi-result IR.
+    /// Compiler transforms and variadic-result operations use this when result
+    ///  types cannot be inferred from inputs. Input use lists are updated.
     pub fn emit_outputs(self: *FunctionBuilder, params: Params, inputs: []const *Var, out_avals: []const Aval) BuildError![]*Var {
         const a = self.alloc();
 
@@ -1188,23 +1183,22 @@ pub const FunctionBuilder = struct {
         } }, &.{operand_var});
     }
 
-    pub fn custom_call(self: *FunctionBuilder, target: []const u8, operands: []const *Var, out_like: *Var) BuildError!*Var {
+    /// Emit a custom call with explicit output types.
+    ///
+    /// The program arena copies the target name and payload.
+    pub fn custom_call(
+        self: *FunctionBuilder,
+        params: CustomCallParams,
+        inputs: []const *Var,
+        out_avals: []const Aval,
+    ) BuildError![]*Var {
         const a = self.alloc();
-        const out_aval = out_like.aval;
-
-        const target_copy = try a.dupe(u8, target);
-        const out_avals = try a.alloc(Aval, 1);
-        out_avals[0] = out_aval;
-        return try self.emit(.{ .custom_call = .{
-            .target_name = target_copy,
-            .has_side_effect = false,
-            .out_avals = out_avals,
-        } }, operands);
-    }
-
-    /// Emit a multi-output custom call from explicit output types.
-    pub fn custom_call_multi(self: *FunctionBuilder, cc_params: CustomCallParams, inputs: []const *Var) BuildError![]*Var {
-        return try self.emit_outputs(.{ .custom_call = cc_params }, inputs, cc_params.out_avals);
+        const stored_params = CustomCallParams{
+            .target_name = try a.dupe(u8, params.target_name),
+            .has_side_effect = params.has_side_effect,
+            .payload = try a.dupe(u8, params.payload),
+        };
+        return try self.emit_outputs(.{ .custom_call = stored_params }, inputs, out_avals);
     }
 
     pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const *Var) BuildError![]*Var {
@@ -1599,11 +1593,10 @@ test function_may_have_side_effects {
     var effectful_builder = try FunctionBuilder.init(&program, "effectful");
     defer effectful_builder.deinit();
     const effectful_input = try effectful_builder.param_tensor(.f32, &.{2});
-    const effectful_outputs = try effectful_builder.custom_call_multi(.{
+    const effectful_outputs = try effectful_builder.custom_call(.{
         .target_name = "test.effectful",
         .has_side_effect = true,
-        .out_avals = &.{effectful_input.aval},
-    }, &.{effectful_input});
+    }, &.{effectful_input}, &.{effectful_input.aval});
     try program.add_function(try effectful_builder.finish(effectful_outputs));
 
     var caller_builder = try FunctionBuilder.init(&program, "caller");

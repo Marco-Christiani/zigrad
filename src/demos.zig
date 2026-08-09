@@ -118,7 +118,11 @@ pub fn run_custom_call_negative(
     defer b.deinit();
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const y = try b.custom_call("zigrad.test.missing_handler", &.{x}, x);
+    const outputs = try b.custom_call(.{
+        .target_name = "zigrad.test.missing_handler",
+        .has_side_effect = false,
+    }, &.{x}, &.{x.aval});
+    const y = outputs[0];
     const func = try b.finish(&.{y});
     try program.add_function(func);
 
