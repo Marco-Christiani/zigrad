@@ -19,6 +19,25 @@ pub const dispatch_target_name = "zigrad.kernel.dispatch";
 /// Custom-call attribute carrying a kernel decision key.
 pub const key_attribute_name = "zigrad.kernel_key";
 
+/// Region annotation requesting a candidate from a named kernel provider.
+pub const provider_annotation_name = "zigrad.kernel.provider";
+
+pub const AnnotationError = error{InvalidProviderAnnotation};
+
+/// Construct a provider request for a region builder.
+pub fn provider_annotation(provider_name: []const u8) pr.Annotation {
+    return .{
+        .name = provider_annotation_name,
+        .value = .{ .string = provider_name },
+    };
+}
+
+/// Return the provider requested by a region.
+pub fn requested_provider(region: pr.Region) AnnotationError!?[]const u8 {
+    const found = region.find_annotation(provider_annotation_name) orelse return null;
+    return found.value.as_string() orelse error.InvalidProviderAnnotation;
+}
+
 /// Returns whether a dot_general parameter set matches plain rank-2 matmul.
 ///
 /// Accepts only no batch dimensions and one contracting dimension per input,

@@ -150,7 +150,7 @@ pub const KernelizePass = struct {
         var candidates = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
         defer candidates.deinit(temp_allocator);
         for (func.regions) |region| {
-            const provider_name = region.annotation.kernelize orelse continue;
+            const provider_name = (try kernel.requested_provider(region)) orelse continue;
             try candidates.append(temp_allocator, .{
                 .region = region,
                 .provider_name = provider_name,
@@ -424,7 +424,7 @@ test "kernelize pass rewrites profitable region from store" {
 
     const x = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("test_region", .{ .kernelize = "mock" });
+    try b.push_region("test_region", &.{kernel.provider_annotation("mock")});
     const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
@@ -468,7 +468,7 @@ test "kernelize pass skips negative decision" {
 
     const x = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("test_region", .{ .kernelize = "mock" });
+    try b.push_region("test_region", &.{kernel.provider_annotation("mock")});
     const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
@@ -505,7 +505,7 @@ test "kernelize pass skips absent key" {
 
     const x = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("test_region", .{ .kernelize = "mock" });
+    try b.push_region("test_region", &.{kernel.provider_annotation("mock")});
     const y = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
@@ -538,7 +538,7 @@ test "kernelize pass does not reuse another provider decision" {
     var builder = try pr.FunctionBuilder.init(&program, "test");
     defer builder.deinit();
     const input = try builder.param_tensor(.f32, &.{2});
-    try builder.push_region("test_region", .{ .kernelize = "requested" });
+    try builder.push_region("test_region", &.{kernel.provider_annotation("requested")});
     const output = try builder.emit(.{ .exp = {} }, &.{input});
     try builder.pop_region();
     const function = try builder.finish(&.{output});
@@ -574,7 +574,7 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("multi_out", .{ .kernelize = "mock" });
+    try b.push_region("multi_out", &.{kernel.provider_annotation("mock")});
     const a = try b.emit(.{ .exp = {} }, &.{x});
     const b_out = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
@@ -631,11 +631,11 @@ test "kernelize pass same-shape regions share store decision" {
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("region_a", .{ .kernelize = "mock" });
+    try b.push_region("region_a", &.{kernel.provider_annotation("mock")});
     const out_a = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
-    try b.push_region("region_b", .{ .kernelize = "mock" });
+    try b.push_region("region_b", &.{kernel.provider_annotation("mock")});
     const out_b = try b.emit(.{ .exp = {} }, &.{y});
     try b.pop_region();
 
@@ -678,11 +678,11 @@ test "kernelize pass different-shape regions need separate decisions" {
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{4});
 
-    try b.push_region("region_small", .{ .kernelize = "mock" });
+    try b.push_region("region_small", &.{kernel.provider_annotation("mock")});
     const out_small = try b.emit(.{ .exp = {} }, &.{x});
     try b.pop_region();
 
-    try b.push_region("region_large", .{ .kernelize = "mock" });
+    try b.push_region("region_large", &.{kernel.provider_annotation("mock")});
     const out_large = try b.emit(.{ .exp = {} }, &.{y});
     try b.pop_region();
 

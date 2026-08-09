@@ -10,6 +10,7 @@ const std = @import("std");
 const compilation = @import("../../compilation.zig");
 const pr = @import("../../pr/pr.zig");
 const kernel = @import("../../pr/kernel.zig");
+const outline = @import("../../pr/outline.zig");
 const mlir = @import("../../c/mlir/mlir.zig");
 const stablehlo = @import("../../c/mlir/dialects/stablehlo.zig");
 const MlirSession = @import("../session.zig").Session;
@@ -641,7 +642,7 @@ test "lowering supports multi-output custom_call" {
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
-    try b.push_region("mock_multi", .{ .kernelize = "mock" });
+    try b.push_region("mock_multi", &.{kernel.provider_annotation("mock")});
     const ex = try b.emit(.{ .exp = {} }, &.{x});
     const lg = try b.emit(.{ .log = {} }, &.{y});
     try b.pop_region();
@@ -714,7 +715,7 @@ test "lowering can outline via region annotation" {
 
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
-    try b.push_region("outlined-dot", .{ .outline = true });
+    try b.push_region("outlined-dot", &.{outline.annotation});
     const d = try b.dot(a, c);
     try b.pop_region();
     const func = try b.finish(&.{d});
@@ -735,7 +736,7 @@ test "lowering tags kernelize provider on outlined functions" {
 
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
-    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    try b.push_region("tvm-kernel", &.{kernel.provider_annotation("tvm")});
     const d = try b.dot(a, c);
     try b.pop_region();
     const func = try b.finish(&.{d});
@@ -761,7 +762,7 @@ test "lower operation outlines kernelize-annotated region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("matmul_region", .{ .kernelize = "mirage" });
+    try b.push_region("matmul_region", &.{kernel.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const sum = try b.add(dot, bias);
     const out = try b.multiply(sum, bias);
@@ -791,7 +792,7 @@ test "lower operation outlines dot-add kernelize region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("dot_add_region", .{ .kernelize = "mirage" });
+    try b.push_region("dot_add_region", &.{kernel.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const out = try b.add(dot, bias);
     try b.pop_region();
@@ -819,7 +820,7 @@ test "lower operation outlines dot-log kernelize region" {
     const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
 
-    try b.push_region("dot_log_region", .{ .kernelize = "mirage" });
+    try b.push_region("dot_log_region", &.{kernel.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const out = try b.log(dot);
     try b.pop_region();
@@ -850,7 +851,7 @@ test "lower operation outlines near-miss kernelize region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("near_miss_region", .{ .kernelize = "mirage" });
+    try b.push_region("near_miss_region", &.{kernel.provider_annotation("mirage")});
     const dot = try b.dot(lhs, rhs);
     const shifted = try b.subtract(dot, bias);
     const out = try b.multiply(shifted, bias);

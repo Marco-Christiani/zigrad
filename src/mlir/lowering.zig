@@ -7,6 +7,8 @@
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
+const kernel = @import("../pr/kernel.zig");
+const outline = @import("../pr/outline.zig");
 const mlir = @import("../c/mlir/mlir.zig");
 const MlirSession = @import("session.zig").Session;
 
@@ -163,7 +165,9 @@ fn lower_function_into_module(
     const outlined_prefix = if (sym_name.len == 0) "func" else sym_name;
     for (func.ops, 0..) |op, op_idx| {
         if (region_map[op_idx]) |region| {
-            if (region.annotation.outline or region.annotation.kernelize != null) {
+            const requests_outline = outline.is_requested(region) catch return error.InvalidProgram;
+            const requests_kernel = (kernel.requested_provider(region) catch return error.InvalidProgram) != null;
+            if (requests_outline or requests_kernel) {
                 try lower_outlined_op(arena, &outlined_index, outlined_prefix, ctx, module, lower_ctx, op, region, lower_op_fn);
                 continue;
             }
@@ -283,7 +287,7 @@ fn lower_outlined_op(
         .location = ctx.loc,
     });
 
-    if (region.annotation.kernelize) |provider| {
+    if (kernel.requested_provider(region) catch return error.InvalidProgram) |provider| {
         callee_op.set_attribute_by_name("zigrad.kernelize.provider", mlir.Attribute.string(mlir_ctx, provider));
     }
     module.get_body().append_operation(callee_op);

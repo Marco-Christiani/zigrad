@@ -174,6 +174,7 @@ test "zxpr with transpose shows permutation" {
 }
 
 test "zxpr kernelize region annotations" {
+    const kernel = @import("kernel.zig");
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -183,7 +184,11 @@ test "zxpr kernelize region annotations" {
     const a = try b.param_tensor(.f32, &.{ 2, 2 });
     const c = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    try b.push_region("tvm-kernel", &.{
+        kernel.provider_annotation("tvm"),
+        .{ .name = "example.note", .value = .{ .string = "line\n\"quoted\"" } },
+        .{ .name = "example.payload", .value = .{ .bytes = &.{ 0, 127, 255 } } },
+    });
     const add1 = try b.add(a, c);
     const add2 = try b.add(add1, c);
     try b.pop_region();
@@ -196,7 +201,9 @@ test "zxpr kernelize region annotations" {
     try emit(func, &w, style.config(.plain, .{}));
 
     const result = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[kernelize=tvm]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[zigrad.kernel.provider=\"tvm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "example.note=\"line\\n\\\"quoted\\\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "example.payload=0x007fff") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "<") != null);
 }
 

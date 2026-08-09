@@ -489,15 +489,33 @@ pub const Op = struct {
     }
 };
 
-/// Steering annotation attached to a region of ops.
-/// Does not change program semantics. It supplies compiler hints.
+/// Value carried by a named IR annotation.
+pub const AnnotationValue = union(enum) {
+    unit,
+    boolean: bool,
+    integer: i64,
+    floating_point: f64,
+    string: []const u8,
+    bytes: []const u8,
+
+    /// Return the string payload or null for another storage kind.
+    pub fn as_string(self: AnnotationValue) ?[]const u8 {
+        return switch (self) {
+            .string => |value| value,
+            else => null,
+        };
+    }
+};
+
+/// A namespaced compiler annotation.
+///
+/// Annotation names define their own value contracts. PR stores unknown names
+///  without requiring registration in a central set.
 pub const Annotation = struct {
-    /// Request that ops be outlined into a separate call.
-    outline: bool = false,
-    /// Request kernelization by a named provider (e.g. "tvm").
-    /// TODO(pr): Name provider steering independently from its current
-    ///  kernelization transform.
-    kernelize: ?[]const u8 = null,
+    /// Namespaced contract name interpreted by an owning pass.
+    name: []const u8,
+    /// Contract payload retained by PR without interpreting its meaning.
+    value: AnnotationValue,
 };
 
 /// A named set of PR ops with attached steering metadata.
@@ -505,9 +523,18 @@ pub const Annotation = struct {
 pub const Region = struct {
     id: u32,
     name: []const u8,
-    annotation: Annotation,
+    /// Compiler metadata attached to this operation group.
+    annotations: []const Annotation,
     /// Stable ids of member ops, in program order.
     op_ids: []const u32,
+
+    /// Find an annotation by its exact namespaced name.
+    pub fn find_annotation(self: Region, name: []const u8) ?*const Annotation {
+        for (self.annotations) |*annotation| {
+            if (std.mem.eql(u8, annotation.name, name)) return annotation;
+        }
+        return null;
+    }
 };
 
 /// A named function in the program: parameter vars, a linear op sequence,
@@ -525,8 +552,8 @@ pub const Function = struct {
     regions: []const Region,
     var_count: u32,
 
-    /// Return regions whose annotation satisfies a predicate.
-    pub fn regions_matching(self: Function, predicate: *const fn (Annotation) bool) RegionIterator {
+    /// Return regions that satisfy a predicate.
+    pub fn regions_matching(self: Function, predicate: *const fn (Region) bool) RegionIterator {
         return .{ .regions = self.regions, .predicate = predicate, .index = 0 };
     }
 
@@ -547,14 +574,14 @@ pub const Function = struct {
 
 pub const RegionIterator = struct {
     regions: []const Region,
-    predicate: *const fn (Annotation) bool,
+    predicate: *const fn (Region) bool,
     index: usize,
 
     pub fn next(self: *RegionIterator) ?Region {
         while (self.index < self.regions.len) {
             const region = self.regions[self.index];
             self.index += 1;
-            if (self.predicate(region.annotation)) return region;
+            if (self.predicate(region)) return region;
         }
         return null;
     }
@@ -658,6 +685,7 @@ pub const ValidationError = error{
     IotaTypeMismatch,
     DuplicateFunctionName,
     ScatterAddTypeMismatch,
+    DuplicateAnnotationName,
 };
 
 /// Errors from FunctionBuilder: validation failures (caught eagerly at
@@ -690,9 +718,16 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     }
 
     for (program.functions) |func| {
-        // validate each op
         try validate_ops_in_func(func);
-        // validate calls
+        for (func.regions) |region| {
+            for (region.annotations, 0..) |annotation, index| {
+                for (region.annotations[0..index]) |prior| {
+                    if (std.mem.eql(u8, prior.name, annotation.name))
+                        return error.DuplicateAnnotationName;
+                }
+            }
+        }
+
         for (func.ops) |op| {
             if (op.prim() != .call) continue;
 
@@ -740,9 +775,29 @@ pub fn validate_program(program: *const Program) ValidationError!void {
 const RegionEntry = struct {
     id: u32,
     name: []const u8,
-    annotation: Annotation,
+    annotations: []const Annotation,
     start_index: u32,
 };
+
+fn dupe_annotations(allocator: Allocator, annotations: []const Annotation) BuildError![]const Annotation {
+    const result = try allocator.alloc(Annotation, annotations.len);
+    for (annotations, 0..) |annotation, index| {
+        for (annotations[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, annotation.name))
+                return error.DuplicateAnnotationName;
+        }
+
+        result[index] = .{
+            .name = try allocator.dupe(u8, annotation.name),
+            .value = switch (annotation.value) {
+                .string => |value| .{ .string = try allocator.dupe(u8, value) },
+                .bytes => |value| .{ .bytes = try allocator.dupe(u8, value) },
+                else => annotation.value,
+            },
+        };
+    }
+    return result;
+}
 
 /// Mutable builder for constructing a Function.
 ///
@@ -819,12 +874,12 @@ pub const FunctionBuilder = struct {
 
     /// Push a named annotation region.
     /// Ops emitted after this call belong to this region until pop_region is called.
-    pub fn push_region(self: *FunctionBuilder, name: []const u8, annotation: Annotation) BuildError!void {
+    pub fn push_region(self: *FunctionBuilder, name: []const u8, annotations: []const Annotation) BuildError!void {
         const a = self.alloc();
         try self.region_stack.append(a, .{
             .id = self.next_region(),
-            .name = name,
-            .annotation = annotation,
+            .name = try a.dupe(u8, name),
+            .annotations = try dupe_annotations(a, annotations),
             .start_index = @intCast(self.ops_list.items.len),
         });
     }
@@ -842,7 +897,7 @@ pub const FunctionBuilder = struct {
             try self.completed_regions.append(a, .{
                 .id = entry.id,
                 .name = entry.name,
-                .annotation = entry.annotation,
+                .annotations = entry.annotations,
                 .op_ids = op_ids,
             });
         }
@@ -1259,6 +1314,7 @@ test "Literal.from_f64 tags by DType" {
 }
 
 test "region push/pop materializes regions" {
+    const kernel = @import("kernel.zig");
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1268,7 +1324,7 @@ test "region push/pop materializes regions" {
     const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    try b.push_region("tvm-kernel", &.{kernel.provider_annotation("tvm")});
     const d = try b.add(a_id, c_id);
     const e = try b.multiply(d, c_id);
     try b.pop_region();
@@ -1279,11 +1335,51 @@ test "region push/pop materializes regions" {
     try std.testing.expectEqual(@as(usize, 1), func.regions.len);
     try std.testing.expectEqual(@as(u32, 0), func.regions[0].id);
     try std.testing.expectEqualStrings("tvm-kernel", func.regions[0].name);
-    try std.testing.expectEqualStrings("tvm", func.regions[0].annotation.kernelize.?);
+    try std.testing.expectEqualStrings("tvm", (try kernel.requested_provider(func.regions[0])).?);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, func.regions[0].op_ids);
 }
 
+test "region annotations accept namespaced values" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "annotations");
+    defer builder.deinit();
+
+    var annotation_name = [_]u8{ 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'i', 'd' };
+    var annotation_value = [_]u8{ 'v', '1' };
+    try builder.push_region("annotated", &.{.{
+        .name = &annotation_name,
+        .value = .{ .string = &annotation_value },
+    }});
+    const value = try builder.param_tensor(.f32, &.{});
+    const result = try builder.log(value);
+    try builder.pop_region();
+
+    annotation_name[0] = 'X';
+    annotation_value[0] = 'X';
+
+    const func = try builder.finish(&.{result});
+    const found = func.regions[0].find_annotation("example.id").?;
+    try std.testing.expectEqualStrings("v1", found.value.as_string().?);
+}
+
+test "region annotation names are unique" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var builder = try FunctionBuilder.init(&program, "duplicate_annotations");
+    defer builder.deinit();
+
+    try std.testing.expectError(error.DuplicateAnnotationName, builder.push_region("duplicate", &.{
+        .{ .name = "example.value", .value = .unit },
+        .{ .name = "example.value", .value = .{ .integer = 1 } },
+    }));
+}
+
 test "nested regions" {
+    const kernel = @import("kernel.zig");
+    const outline = @import("outline.zig");
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1293,10 +1389,10 @@ test "nested regions" {
     const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("outer", .{ .kernelize = "tvm" });
+    try b.push_region("outer", &.{kernel.provider_annotation("tvm")});
     const d = try b.add(a_id, c_id);
     {
-        try b.push_region("inner", .{ .outline = true });
+        try b.push_region("inner", &.{outline.annotation});
         const e = try b.multiply(d, c_id);
         _ = e;
         try b.pop_region();
@@ -1310,16 +1406,18 @@ test "nested regions" {
     // Inner region completed first
     try std.testing.expectEqual(@as(u32, 1), func.regions[0].id);
     try std.testing.expectEqualStrings("inner", func.regions[0].name);
-    try std.testing.expect(func.regions[0].annotation.outline);
+    try std.testing.expect(try outline.is_requested(func.regions[0]));
     try std.testing.expectEqualSlices(u32, &.{1}, func.regions[0].op_ids);
     // Outer region completed second
     try std.testing.expectEqual(@as(u32, 0), func.regions[1].id);
     try std.testing.expectEqualStrings("outer", func.regions[1].name);
-    try std.testing.expectEqualStrings("tvm", func.regions[1].annotation.kernelize.?);
+    try std.testing.expectEqualStrings("tvm", (try kernel.requested_provider(func.regions[1])).?);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, func.regions[1].op_ids);
 }
 
 test "regions_matching filters by predicate" {
+    const kernel = @import("kernel.zig");
+    const outline = @import("outline.zig");
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1329,19 +1427,19 @@ test "regions_matching filters by predicate" {
     const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("r1", .{ .kernelize = "tvm" });
+    try b.push_region("r1", &.{kernel.provider_annotation("tvm")});
     const d = try b.add(a_id, c_id);
     try b.pop_region();
 
-    try b.push_region("r2", .{ .outline = true });
+    try b.push_region("r2", &.{outline.annotation});
     const e = try b.multiply(d, c_id);
     try b.pop_region();
 
     const func = try b.finish(&.{e});
 
     const is_kernelized = struct {
-        fn f(ann: Annotation) bool {
-            return ann.kernelize != null;
+        fn f(region: Region) bool {
+            return (kernel.requested_provider(region) catch null) != null;
         }
     }.f;
 
@@ -1352,6 +1450,7 @@ test "regions_matching filters by predicate" {
 }
 
 test "empty region not materialized" {
+    const kernel = @import("kernel.zig");
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1361,7 +1460,7 @@ test "empty region not materialized" {
     const a_id = try b.param_tensor(.f32, &.{ 2, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("empty", .{ .kernelize = "tvm" });
+    try b.push_region("empty", &.{kernel.provider_annotation("tvm")});
     try b.pop_region();
 
     const d = try b.add(a_id, c_id);

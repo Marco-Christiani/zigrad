@@ -135,7 +135,7 @@ fn tune_function(
     defer candidates.deinit(allocator);
 
     for (func.regions) |region| {
-        const provider_name = region.annotation.kernelize orelse continue;
+        const provider_name = (try kernel.requested_provider(region)) orelse continue;
         const provider = find_provider(providers, provider_name) orelse {
             log.debug("no provider named '{s}' for region '{s}', skipping", .{ provider_name, region.name });
             continue;
@@ -332,10 +332,10 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
     const first_input = try builder.param_tensor(.f32, &.{2});
     const second_input = try builder.param_tensor(.f32, &.{2});
 
-    try builder.push_region("first_region", .{ .kernelize = "first" });
+    try builder.push_region("first_region", &.{kernel.provider_annotation("first")});
     const first_output = try builder.emit(.{ .exp = {} }, &.{first_input});
     try builder.pop_region();
-    try builder.push_region("second_region", .{ .kernelize = "second" });
+    try builder.push_region("second_region", &.{kernel.provider_annotation("second")});
     const second_output = try builder.emit(.{ .exp = {} }, &.{second_input});
     try builder.pop_region();
 

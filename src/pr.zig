@@ -36,6 +36,7 @@ pub const Operand = core.Operand;
 pub const Op = core.Op;
 pub const Params = core.Params;
 
+pub const AnnotationValue = core.AnnotationValue;
 pub const Annotation = core.Annotation;
 pub const Region = core.Region;
 pub const Function = core.Function;
@@ -68,6 +69,7 @@ pub const zxpr = @import("pr/zxpr.zig");
 pub const dump = @import("pr/dump.zig");
 pub const ops = @import("pr/ops/ops.zig");
 pub const region_view = @import("pr/region_view.zig");
+pub const outline = @import("pr/outline.zig");
 pub const kernel = @import("pr/kernel.zig");
 pub const kernelize = @import("pr/kernelize.zig");
 

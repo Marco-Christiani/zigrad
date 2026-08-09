@@ -374,13 +374,14 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
     try writer.writeAll("{\"name\":");
     try write_json_string(writer, region.name);
 
-    if (region.annotation.kernelize) |provider| {
-        try writer.writeAll(",\"kernelize\":");
-        try write_json_string(writer, provider);
+    try writer.writeAll(",\"annotations\":{");
+    for (region.annotations, 0..) |annotation, index| {
+        if (index > 0) try writer.writeAll(",");
+        try write_json_string(writer, annotation.name);
+        try writer.writeAll(":");
+        try emit_annotation_value(writer, annotation.value);
     }
-    if (region.annotation.outline) {
-        try writer.writeAll(",\"outline\":true");
-    }
+    try writer.writeAll("}");
 
     try writer.writeAll(",\"node_ids\":[");
     var first = true;
@@ -394,6 +395,34 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
 
     try emit_zxpr_field_region(writer, func, region);
     try writer.writeAll("}");
+}
+
+fn emit_annotation_value(writer: *Writer, value: pr.AnnotationValue) !void {
+    switch (value) {
+        .unit => try writer.writeAll("null"),
+        .boolean => |item| try writer.writeAll(if (item) "true" else "false"),
+        .integer => |item| try writer.print("{d}", .{item}),
+        .floating_point => |item| {
+            if (std.math.isFinite(item)) {
+                try writer.print("{d}", .{item});
+            } else if (std.math.isNan(item)) {
+                try write_json_string(writer, "nan");
+            } else if (item < 0) {
+                try write_json_string(writer, "-inf");
+            } else {
+                try write_json_string(writer, "inf");
+            }
+        },
+        .string => |item| try write_json_string(writer, item),
+        .bytes => |items| {
+            try writer.writeAll("[");
+            for (items, 0..) |item, index| {
+                if (index > 0) try writer.writeAll(",");
+                try writer.print("{d}", .{item});
+            }
+            try writer.writeAll("]");
+        },
+    }
 }
 
 fn write_json_string(writer: *Writer, s: []const u8) !void {
@@ -501,6 +530,7 @@ test emit {
 }
 
 test "json with regions" {
+    const kernel = @import("kernel.zig");
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -510,7 +540,7 @@ test "json with regions" {
     const a = try b.param_tensor(.f32, &.{ 2, 2 });
     const c = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("tvm-kernel", .{ .kernelize = "tvm" });
+    try b.push_region("tvm-kernel", &.{kernel.provider_annotation("tvm")});
     const add1 = try b.add(a, c);
     const add2 = try b.add(add1, c);
     try b.pop_region();
@@ -524,7 +554,7 @@ test "json with regions" {
 
     const result = w.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"kernelize\":\"tvm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"zigrad.kernel.provider\":\"tvm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"tvm-kernel\"") != null);
     // Region node_ids reference op nodes (e0, e1)
     try std.testing.expect(std.mem.indexOf(u8, result, "\"node_ids\":[\"e0\",\"e1\"]") != null);

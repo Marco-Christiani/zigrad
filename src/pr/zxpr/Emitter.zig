@@ -225,7 +225,7 @@ pub fn emit_region_start(self: *Self, depth: usize, region: pr.Region) !void {
     try self.styler.write_region(" ");
     try self.styler.write_region(region.name);
     try self.styler.write_region("[");
-    try self.emit_annotation(region.annotation);
+    try self.emit_annotations(region.annotations);
     try self.styler.write_region("]\n");
 }
 
@@ -237,16 +237,22 @@ pub fn emit_region_end(self: *Self, depth: usize) !void {
     try self.styler.write_region("\n");
 }
 
-fn emit_annotation(self: *Self, ann: pr.Annotation) !void {
-    var first = true;
-    if (ann.kernelize) |provider| {
-        try self.styler.write_region("kernelize=");
-        try self.styler.write_region(provider);
-        first = false;
-    }
-    if (ann.outline) {
-        if (!first) try self.styler.write_region(", ");
-        try self.styler.write_region("outline");
+fn emit_annotations(self: *Self, annotations: []const pr.Annotation) !void {
+    for (annotations, 0..) |annotation, index| {
+        if (index > 0) try self.styler.write_region(", ");
+        try self.styler.write_region(annotation.name);
+        switch (annotation.value) {
+            .unit => {},
+            .boolean => |value| try self.writer.print("={}", .{value}),
+            .integer => |value| try self.writer.print("={d}", .{value}),
+            .floating_point => |value| try self.writer.print("={d}", .{value}),
+            .string => |value| {
+                try self.writer.writeAll("=\"");
+                try std.zig.stringEscape(value, self.writer);
+                try self.writer.writeAll("\"");
+            },
+            .bytes => |value| try self.writer.print("=0x{x}", .{value}),
+        }
     }
 }
 

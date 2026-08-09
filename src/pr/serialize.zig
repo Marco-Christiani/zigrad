@@ -18,7 +18,7 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 1;
+pub const version: u32 = 2;
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
 const wire_prim_count = 27;
@@ -97,8 +97,7 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
         for (func.regions) |region| {
             try writer.writeInt(u32, region.id, .little);
             try write_value([]const u8, writer, region.name);
-            try write_value(bool, writer, region.annotation.outline);
-            try write_value(?[]const u8, writer, region.annotation.kernelize);
+            try write_value([]const pr.Annotation, writer, region.annotations);
             try write_value([]const u32, writer, region.op_ids);
         }
 
@@ -224,8 +223,7 @@ fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
     for (regions) |*region| {
         const id = try reader.read_int(u32);
         const region_name = try read_value([]const u8, reader, arena);
-        const outline = try read_value(bool, reader, arena);
-        const kernelize = try read_value(?[]const u8, reader, arena);
+        const annotations = try read_value([]const pr.Annotation, reader, arena);
         const op_ids = try read_value([]const u32, reader, arena);
         for (op_ids) |op_id| {
             var found = false;
@@ -240,10 +238,7 @@ fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
         region.* = .{
             .id = id,
             .name = region_name,
-            .annotation = .{
-                .outline = outline,
-                .kernelize = kernelize,
-            },
+            .annotations = annotations,
             .op_ids = op_ids,
         };
     }
@@ -433,9 +428,10 @@ fn compute_schema_hash() u64 {
     var hash: u64 = 14695981039346656037;
     hash_bytes(&hash, "Program:[Function];Function:name,var_count,[param],[Op],[Region],[return];" ++
         "param:id,dtype,dims;Op:id,[input id],[output],Params;" ++
-        "Region:id,name,outline,kernelize,[op id];output:id,dtype,dims");
+        "Region:id,name,[Annotation],[op id];output:id,dtype,dims");
     hash_type(&hash, pr.DType);
     hash_type(&hash, pr.Params);
+    hash_type(&hash, pr.Annotation);
     return hash;
 }
 
@@ -609,13 +605,15 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
     op_ids[0] = literal_op.id;
     op_ids[1] = custom_op.id;
     const regions = try arena.alloc(pr.Region, 1);
+    const region_annotations = try arena.alloc(pr.Annotation, 4);
+    region_annotations[0] = @import("outline.zig").annotation;
+    region_annotations[1] = @import("kernel.zig").provider_annotation("test");
+    region_annotations[2] = .{ .name = "example.priority", .value = .{ .integer = 3 } };
+    region_annotations[3] = .{ .name = "example.payload", .value = .{ .bytes = &.{ 0, 127, 255 } } };
     regions[0] = .{
         .id = 7,
         .name = try arena.dupe(u8, "serialized"),
-        .annotation = .{
-            .outline = true,
-            .kernelize = try arena.dupe(u8, "test"),
-        },
+        .annotations = region_annotations,
         .op_ids = op_ids,
     };
 
@@ -683,8 +681,10 @@ test "binary PR round trip is byte stable" {
 
     const region = parsed.functions[0].regions[0];
     try std.testing.expectEqualStrings("serialized", region.name);
-    try std.testing.expect(region.annotation.outline);
-    try std.testing.expectEqualStrings("test", region.annotation.kernelize.?);
+    try std.testing.expect(try @import("outline.zig").is_requested(region));
+    try std.testing.expectEqualStrings("test", (try @import("kernel.zig").requested_provider(region)).?);
+    try std.testing.expectEqual(@as(i64, 3), region.find_annotation("example.priority").?.value.integer);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 127, 255 }, region.find_annotation("example.payload").?.value.bytes);
     try std.testing.expectEqualSlices(u32, &.{ 4, 9 }, region.op_ids);
 
     const call_op = parsed.functions[0].ops[2];

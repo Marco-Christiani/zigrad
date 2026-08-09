@@ -434,7 +434,10 @@ fn linear(
     };
     if (kernelize_provider) |provider_name| {
         const region_name = comptime std.fmt.comptimePrint(region_name_fmt, fmt_args);
-        try x.backing.traced.builder.push_region(region_name, .{ .kernelize = provider_name });
+        try x.backing.traced.builder.push_region(
+            region_name,
+            &.{zg.pr.kernel.provider_annotation(provider_name)},
+        );
         defer x.backing.traced.builder.pop_region() catch @panic("OOM");
         return try x.dot_general(w, params);
     }
