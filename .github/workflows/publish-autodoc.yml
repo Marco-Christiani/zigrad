@@ -31,20 +31,20 @@ jobs:
         uses: cachix/install-nix-action@v31
 
       - name: Build the autodoc candidate
-        run: nix build --impure .#zigrad-autodoc-candidate --out-link candidate
+        run: nix build .#zigrad-autodoc-candidate --out-link candidate
 
       - name: Read the candidate identity
         id: candidate
         run: |
           set -euo pipefail
-          bundle_id="$(nix eval --impure --raw .#zigrad-autodoc-candidate.bundleId)"
+          bundle_id="$(nix eval --raw .#zigrad-autodoc-candidate.bundleId)"
           test "$bundle_id" = "$(git rev-parse HEAD)"
           printf 'bundle_id=%s\n' "$bundle_id" >> "$GITHUB_OUTPUT"
 
       - name: Install publication tools
         run: |
-          nix build --impure nixpkgs#awscli2 --out-link result-awscli
-          nix build --impure nixpkgs#jq --out-link result-jq
+          nix build nixpkgs#awscli2 --out-link result-awscli
+          nix build nixpkgs#jq --out-link result-jq
 
       - name: Publish immutable candidate objects
         env:

@@ -8,7 +8,7 @@ This example traces a three-layer model and a VJP-based SGD update, then runs th
 Enter the Zigrad development environment from the repository root:
 
 ```sh
-nix develop --impure
+nix develop
 cd examples/mnist
 zig build
 PJRT_PLUGIN_PATH="$PJRT_CPU_PLUGIN_PATH" zig build run -- --backend=pjrt --steps=1

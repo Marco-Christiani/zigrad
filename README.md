@@ -43,9 +43,9 @@ Zigrad is a deep learning and ML compiler framework. Rather than tying you to a 
 Nix is the standard build and execution interface. The integration-free package is the default:
 
 ```sh
-nix build --impure .#zigrad
-nix run --impure .#zigrad -- pr print-demo
-nix flake check --impure
+nix build .#zigrad
+nix run .#zigrad -- pr print-demo
+nix flake check
 ```
 
 Named configurations describe runnable combinations. Each name demands its transitive build and runtime dependencies. Users do not select matching external input fragments or repeat Zig feature flags.
@@ -71,9 +71,9 @@ compilation to the architectures used on the local system.
 For example:
 
 ```sh
-nix run --impure .#zigrad-xla-cpu -- demo vjp
-nix run --impure .#zigrad-iree-cpu -- demo basic --backend=iree
-nix run --impure .#zigrad-tvm-cpu -- tvm check-load
+nix run .#zigrad-xla-cpu -- demo vjp
+nix run .#zigrad-iree-cpu -- demo basic --backend=iree
+nix run .#zigrad-tvm-cpu -- tvm check-load
 ```
 
 The default development shell is intentionally broad:
@@ -81,13 +81,13 @@ The default development shell is intentionally broad:
 ```sh
 direnv allow
 # or
-nix develop --impure
+nix develop
 ```
 
 It exports the composed external input roots and the matching `ZG_ZIG_BUILD_ARGS` for direct Zig iteration. These variables are development interfaces. The `tvm-python` shell adds TVM's Python bindings:
 
 ```sh
-nix develop --impure .#tvm-python
+nix develop .#tvm-python
 ```
 
 Zigrad remains buildable without Nix when Zig dependencies are available:

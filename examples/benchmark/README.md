@@ -28,7 +28,7 @@ Shorthands: `all`, `all-cpu`, `all-gpu`.
 From the Zigrad repository root:
 
 ```sh
-nix develop --impure
+nix develop
 ```
 
 The devshell sets `ZG_EXTERNAL_SDK_ROOT`, the TVM runtime paths, and the CPU and
@@ -80,7 +80,7 @@ TVM execution requires a target-specific tuning record. Run tuning from the
  Zigrad repository root before starting the benchmark:
 
 ```sh
-nix run --impure .#zigrad-dev-cuda -- tvm tune \
+nix run .#zigrad-dev-cuda -- tvm tune \
   --shape 128x128x128 --trials 64 --trials-per-iter 16 --cpu
 ```
 

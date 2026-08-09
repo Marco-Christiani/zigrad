@@ -6,9 +6,8 @@
 # deliberately portable. Your local file opts into machine-specific
 # optimizations.
 #
-# To apply: nix build --impure .#<configuration>
-#   The --impure flag lets the flake read this file from your working
-#   directory.
+# The repository direnv environment loads this file. Direct Nix commands use
+# the portable defaults.
 #
 # Full knob reference: docs site, "Building / Optimization knobs".
 {
