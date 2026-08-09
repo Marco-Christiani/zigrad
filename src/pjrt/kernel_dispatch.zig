@@ -300,7 +300,7 @@ fn lookup_platform_from_context(frame: *c.XLA_FFI_CallFrame) ?device.Platform {
 
 /// Generic kernel dispatch handler invoked by the XLA FFI framework.
 ///
-/// Extracts the decision key from the custom-call payload, looks up the artifact
+/// Extracts the selection key from the custom-call payload, looks up the artifact
 ///  in the registry, builds a provider-agnostic DispatchContext from the
 ///  FFI frame, and delegates to `artifact.dispatch()`.
 fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI_Error {
@@ -317,17 +317,17 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
         return make_ffi_error(frame, "zigrad kernel dispatch: no kernel store in execute context", c.XLA_FFI_Error_Code_FAILED_PRECONDITION);
     };
 
-    const decision = store.get(.{ .bytes = kernel_key }) orelse {
+    const selection = store.get(.{ .bytes = kernel_key }) orelse {
         return make_ffi_error(frame, "zigrad kernel dispatch: kernel key not found in store", c.XLA_FFI_Error_Code_NOT_FOUND);
     };
 
-    switch (decision) {
-        .profitable => |stored| {
+    switch (selection.candidate) {
+        .provider => |stored| {
             const dreg = lookup_dispatch_registry_new_from_context(frame);
             return dispatch_from_store(frame, stored, dreg, kernel_key);
         },
-        .negative => {
-            return make_ffi_error(frame, "zigrad kernel dispatch: store has negative decision for key", c.XLA_FFI_Error_Code_NOT_FOUND);
+        .original => {
+            return make_ffi_error(frame, "zigrad kernel dispatch: store selected the original candidate for key", c.XLA_FFI_Error_Code_NOT_FOUND);
         },
     }
 }
@@ -335,7 +335,7 @@ fn kernel_dispatch_handler(frame: *c.XLA_FFI_CallFrame) callconv(.c) ?*c.XLA_FFI
 /// Dispatch from store-based path: resolve provider dispatch function from DispatchRegistry.
 fn dispatch_from_store(
     frame: *c.XLA_FFI_CallFrame,
-    stored: kernel.ProfitableDecision,
+    stored: kernel.ProviderCandidate,
     dreg: ?*const kernel.DispatchRegistry,
     kernel_key: []const u8,
 ) ?*c.XLA_FFI_Error {

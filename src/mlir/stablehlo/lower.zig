@@ -667,19 +667,23 @@ test "lowering supports multi-output custom_call" {
 
     const selected_device = @import("../../device.zig").Device{ .platform = .cpu };
     const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
-    const decision_key = try kernel_test.make_decision_key(
+    const selection_key = try kernel_test.make_selection_key(
         testing.allocator,
         "mock",
         selected_device,
         function_fingerprint,
     );
-    defer testing.allocator.free(decision_key.bytes);
+    defer testing.allocator.free(selection_key.bytes);
 
     var store = kernel_test.KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(decision_key, "mock", .{
-        .data = "mock",
-    }, .copy);
+    try store.put(selection_key, .{
+        .candidate = .{ .provider = .{
+            .provider_name = "mock",
+            .artifact = .{ .data = try testing.allocator.dupe(u8, "mock") },
+        } },
+        .reason = "available",
+    });
 
     var kp = kernelize.KernelizePass{
         .store = &store,

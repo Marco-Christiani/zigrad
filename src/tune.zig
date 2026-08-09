@@ -1,7 +1,7 @@
 //! Kernel tuning for the KP system.
 //!
 //! Walks a PR program for provider-request functions, invokes providers to compile
-//!  each candidate, and records the results as decisions in a `KernelStore`.
+//!  each candidate, and records selections in a `KernelStore`.
 //! Provider dispatch entries are registered in a `DispatchRegistry` for
 //!  execute-time resolution.
 //!
@@ -27,7 +27,7 @@ const log = std.log.scoped(.@"zg/tune");
 
 /// Options for the tuning process.
 pub const TuneOpts = struct {
-    /// Print a summary table of tuning decisions after completion.
+    /// Print a summary table of kernel selections after completion.
     dump_results: bool = false,
     /// Device for provider target resolution.
     device: device.Device,
@@ -47,7 +47,7 @@ pub const TuneResult = struct {
 };
 
 /// Tune a program: walk all functions for provider requests, invoke
-/// providers, and record decisions in the returned store.
+/// providers, and record selections in the returned store.
 ///
 /// Provider regions must first pass through
 ///  `pr.transform.kernelize.OutlineCandidates`.
@@ -72,9 +72,9 @@ pub fn tune(
 
     const tune_start = std.Io.Timestamp.now(io, .awake);
 
-    var total_compiled: usize = 0;
+    var total_selected: usize = 0;
     var total_dedup: usize = 0;
-    var total_negative: usize = 0;
+    var total_original: usize = 0;
 
     for (program.functions) |func| {
         const stats = try tune_function(
@@ -85,9 +85,9 @@ pub fn tune(
             &dispatch_registry,
             opts.device,
         );
-        total_compiled += stats.compiled;
+        total_selected += stats.selected;
         total_dedup += stats.dedup;
-        total_negative += stats.negative;
+        total_original += stats.original;
     }
 
     // Finalize all providers after tuning completes.
@@ -95,8 +95,8 @@ pub fn tune(
         provider.finalize();
     }
 
-    log.info("tuning completed: {d} compiled, {d} dedup, {d} negative in {d:.2}ms", .{
-        total_compiled, total_dedup, total_negative, ns_to_ms(@intCast(tune_start.untilNow(io, .awake).toNanoseconds())),
+    log.info("tuning completed: {d} provider, {d} dedup, {d} original in {d:.2}ms", .{
+        total_selected, total_dedup, total_original, ns_to_ms(@intCast(tune_start.untilNow(io, .awake).toNanoseconds())),
     });
 
     if (opts.dump_results) {
@@ -110,9 +110,9 @@ pub fn tune(
 }
 
 const TuneStats = struct {
-    compiled: usize = 0,
+    selected: usize = 0,
     dedup: usize = 0,
-    negative: usize = 0,
+    original: usize = 0,
 };
 
 fn tune_function(
@@ -131,25 +131,28 @@ fn tune_function(
     };
 
     const function_fingerprint = try fingerprint.function(allocator, func);
-    const decision_key = try kernel.make_decision_key(
+    const selection_key = try kernel.make_selection_key(
         allocator,
         provider_name,
         selected_device,
         function_fingerprint,
     );
-    defer allocator.free(decision_key.bytes);
+    defer allocator.free(selection_key.bytes);
 
-    if (store.get(decision_key) != null) {
+    if (store.get(selection_key) != null) {
         stats.dedup += 1;
-        log.debug("dedup: provider '{s}' function '{s}' decision already in store", .{ provider_name, func.name });
+        log.debug("dedup: provider '{s}' function '{s}' selection already in store", .{ provider_name, func.name });
         return stats;
     }
 
     const compiled = provider.compile(func, selected_device, allocator) catch |err| switch (err) {
         error.Unsupported => {
-            stats.negative += 1;
-            log.debug("provider '{s}' cannot handle function '{s}', recording negative", .{ provider_name, func.name });
-            try store.put_negative(decision_key, "unsupported");
+            stats.original += 1;
+            log.debug("provider '{s}' cannot handle function '{s}', selecting the original candidate", .{ provider_name, func.name });
+            try store.put(selection_key, .{
+                .candidate = .original,
+                .reason = "provider does not support the function",
+            });
             return stats;
         },
         else => {
@@ -158,8 +161,14 @@ fn tune_function(
         },
     };
 
-    stats.compiled += 1;
-    try store.put_profitable(decision_key, provider_name, compiled, .take);
+    stats.selected += 1;
+    try store.put(selection_key, .{
+        .candidate = .{ .provider = .{
+            .provider_name = provider_name,
+            .artifact = compiled,
+        } },
+        .reason = "provider artifact is available",
+    });
     try register_provider_dispatch(dispatch_registry, provider);
 
     log.debug("compiled kernel for function '{s}' via provider '{s}'", .{ func.name, provider_name });
@@ -194,10 +203,11 @@ fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
 
     out.writeAll("\n=== Tuning Summary ===\n") catch return;
 
-    var it = store.decisions.iterator();
+    var it = store.selections.iterator();
     while (it.next()) |entry| {
-        switch (entry.value_ptr.*) {
-            .profitable => |stored| {
+        const selection = entry.value_ptr.*;
+        switch (selection.candidate) {
+            .provider => |stored| {
                 out.print("  [+] {s}: provider={s}, bytes={d}, ws={d}\n", .{
                     entry.key_ptr.*,
                     stored.provider_name,
@@ -205,8 +215,11 @@ fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
                     stored.artifact.workspace_bytes,
                 }) catch return;
             },
-            .negative => |reason| {
-                out.print("  [-] {s}: {s}\n", .{ entry.key_ptr.*, reason }) catch return;
+            .original => {
+                out.print("  [=] {s}: original, reason={s}\n", .{
+                    entry.key_ptr.*,
+                    selection.reason,
+                }) catch return;
             },
         }
     }
@@ -249,7 +262,7 @@ const TestProvider = struct {
     }
 };
 
-fn expect_provider_decisions(first_unsupported: bool) !void {
+fn expect_provider_selections(first_unsupported: bool) !void {
     const testing = std.testing;
     const selected_device = device.Device{ .platform = .cpu };
 
@@ -287,19 +300,19 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
 
     try testing.expectEqual(@as(usize, 1), first.calls);
     try testing.expectEqual(@as(usize, 1), second.calls);
-    try testing.expectEqual(@as(usize, 2), result.store.decisions.count());
+    try testing.expectEqual(@as(usize, 2), result.store.selections.count());
 
     const first_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
     const second_fingerprint = try fingerprint.function(testing.allocator, program.functions[2]);
 
-    const first_key = try kernel.make_decision_key(
+    const first_key = try kernel.make_selection_key(
         testing.allocator,
         "first",
         selected_device,
         first_fingerprint,
     );
     defer testing.allocator.free(first_key.bytes);
-    const second_key = try kernel.make_decision_key(
+    const second_key = try kernel.make_selection_key(
         testing.allocator,
         "second",
         selected_device,
@@ -307,25 +320,25 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
     );
     defer testing.allocator.free(second_key.bytes);
 
-    const first_decision = result.store.get(first_key) orelse return error.TestUnexpectedResult;
-    const second_decision = result.store.get(second_key) orelse return error.TestUnexpectedResult;
+    const first_selection = result.store.get(first_key) orelse return error.TestUnexpectedResult;
+    const second_selection = result.store.get(second_key) orelse return error.TestUnexpectedResult;
     if (first_unsupported) {
-        switch (first_decision) {
-            .negative => {},
-            .profitable => return error.TestUnexpectedResult,
+        switch (first_selection.candidate) {
+            .original => {},
+            .provider => return error.TestUnexpectedResult,
         }
-        switch (second_decision) {
-            .profitable => {},
-            .negative => return error.TestUnexpectedResult,
+        switch (second_selection.candidate) {
+            .provider => {},
+            .original => return error.TestUnexpectedResult,
         }
     } else {
-        switch (first_decision) {
-            .profitable => {},
-            .negative => return error.TestUnexpectedResult,
+        switch (first_selection.candidate) {
+            .provider => {},
+            .original => return error.TestUnexpectedResult,
         }
-        switch (second_decision) {
-            .negative => {},
-            .profitable => return error.TestUnexpectedResult,
+        switch (second_selection.candidate) {
+            .original => {},
+            .provider => return error.TestUnexpectedResult,
         }
     }
 }
@@ -348,7 +361,7 @@ test tune {
     });
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 0), result.store.decisions.count());
+    try testing.expectEqual(@as(usize, 0), result.store.selections.count());
     try testing.expectEqual(@as(usize, 0), result.dispatch_registry.entries.count());
 }
 
@@ -373,7 +386,7 @@ test "tune requires outlined provider requests" {
     );
 }
 
-test "tune isolates provider decisions for equal functions" {
-    try expect_provider_decisions(true);
-    try expect_provider_decisions(false);
+test "tune isolates provider selections for equal functions" {
+    try expect_provider_selections(true);
+    try expect_provider_selections(false);
 }

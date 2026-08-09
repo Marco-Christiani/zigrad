@@ -2,9 +2,9 @@
 //!
 //! `OutlineCandidates` turns provider regions into callable PR functions.
 //! `KernelizePass` queries a populated `KernelStore` and replaces calls when a
-//!  decision supplies an artifact.
+//!  selection supplies a provider artifact.
 //!
-//! Missing and negative decisions leave the ordinary function call in place.
+//! Selecting the original candidate leaves the ordinary function call in place.
 //!
 //! Provider compilation and tuning run after outlining and before substitution.
 const std = @import("std");
@@ -19,7 +19,7 @@ const kernel = @import("../../kernel.zig");
 
 const log = std.log.scoped(.@"zg/kernelize");
 
-const KernelEntryOutcome = enum { compiled, fallback };
+const KernelEntryOutcome = enum { provider, original };
 
 /// Diagnostic record for one function encountered during kernelization.
 ///
@@ -145,10 +145,10 @@ pub const KernelizePass = struct {
     pub const Input = *pr.Program;
     pub const Output = *pr.Program;
 
-    /// Pre-computed tuning decisions populated before this operation runs, borrowed.
+    /// Pre-computed selections populated before this operation runs, borrowed.
     store: *const kernel.KernelStore,
 
-    /// Device used when the decision store was populated.
+    /// Device used when the selection store was populated.
     device: device.Device,
 
     /// Optional destination for diagnostics consumed by `DumpKernels`.
@@ -198,31 +198,31 @@ pub const KernelizePass = struct {
             const candidate = program.get_function(op.params.call.callee) orelse return error.CallUnresolvedCallee;
             const provider_name = (try kernel.requested_provider(candidate)) orelse continue;
             const function_fingerprint = try fingerprint.function(temp_allocator, candidate);
-            const decision_key = try kernel.make_decision_key(
+            const selection_key = try kernel.make_selection_key(
                 temp_allocator,
                 provider_name,
                 self.device,
                 function_fingerprint,
             );
-            defer temp_allocator.free(decision_key.bytes);
+            defer temp_allocator.free(selection_key.bytes);
 
-            const decision = self.store.get(decision_key);
-            const outcome: KernelEntryOutcome = if (decision) |selected| switch (selected) {
-                .profitable => |stored| outcome: {
+            const selection = self.store.get(selection_key);
+            const outcome: KernelEntryOutcome = if (selection) |selected| switch (selected.candidate) {
+                .provider => |stored| outcome: {
                     try rewrite_call(
                         program.allocator(),
                         op,
-                        decision_key.bytes,
+                        selection_key.bytes,
                         effects.function_may_have_side_effects(program, candidate),
                     );
                     log.debug("selected provider '{s}' for function '{s}'", .{ stored.provider_name, candidate.name });
-                    break :outcome .compiled;
+                    break :outcome .provider;
                 },
-                .negative => |reason| outcome: {
-                    log.debug("provider '{s}' declined function '{s}': {s}", .{ provider_name, candidate.name, reason });
-                    break :outcome .fallback;
+                .original => outcome: {
+                    log.debug("selected original function '{s}': {s}", .{ candidate.name, selected.reason });
+                    break :outcome .original;
                 },
-            } else .fallback;
+            } else .original;
 
             if (entries) |list| {
                 try list.append(entries_alloc, .{
@@ -239,13 +239,13 @@ pub const KernelizePass = struct {
     fn rewrite_call(
         arena: std.mem.Allocator,
         op: *pr.Op,
-        decision_key: []const u8,
+        selection_key: []const u8,
         has_side_effect: bool,
     ) std.mem.Allocator.Error!void {
         op.params = .{ .custom_call = .{
             .target_name = try arena.dupe(u8, kernel.dispatch_target_name),
             .has_side_effect = has_side_effect,
-            .payload = try arena.dupe(u8, decision_key),
+            .payload = try arena.dupe(u8, selection_key),
         } };
     }
 };
@@ -275,13 +275,13 @@ fn build_shape_str(allocator: std.mem.Allocator, func: pr.Function) ![]const u8 
 }
 
 fn dump_kernel_entries(out: *std.Io.Writer, entries: []const KernelEntry) !void {
-    var compiled: usize = 0;
-    var fallback: usize = 0;
+    var provider: usize = 0;
+    var original: usize = 0;
     for (entries) |e| switch (e.outcome) {
-        .compiled => compiled += 1,
-        .fallback => fallback += 1,
+        .provider => provider += 1,
+        .original => original += 1,
     };
-    try out.print("kernels: {d} compiled, {d} fallback\n", .{ compiled, fallback });
+    try out.print("kernels: {d} provider, {d} original\n", .{ provider, original });
     try out.print("  {s:<50} {s:<10} {s:<30} {s:<50} {s}\n", .{ "function", "provider", "ops", "shapes", "outcome" });
     try out.writeAll("  " ++ ("-" ** 150) ++ "\n");
     for (entries) |e| {
@@ -295,18 +295,33 @@ fn dump_kernel_entries(out: *std.Io.Writer, entries: []const KernelEntry) !void 
 
 const test_device: device.Device = .{ .platform = .cpu };
 
-fn make_test_decision_key(
+fn make_test_selection_key(
     allocator: std.mem.Allocator,
     provider_name: []const u8,
     func: pr.Function,
-) !kernel.DecisionKey {
+) !kernel.SelectionKey {
     const function_fingerprint = try fingerprint.function(allocator, func);
-    return try kernel.make_decision_key(
+    return try kernel.make_selection_key(
         allocator,
         provider_name,
         test_device,
         function_fingerprint,
     );
+}
+
+fn select_provider_for_test(
+    store: *kernel.KernelStore,
+    selection_key: kernel.SelectionKey,
+    provider_name: []const u8,
+    data: []const u8,
+) !void {
+    try store.put(selection_key, .{
+        .candidate = .{ .provider = .{
+            .provider_name = provider_name,
+            .artifact = .{ .data = try store.allocator().dupe(u8, data) },
+        } },
+        .reason = "available",
+    });
 }
 
 fn outline_test_program(program: *pr.Program) !void {
@@ -365,11 +380,9 @@ test "kernelize pass rewrites a selected function call" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
-    defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, "mock", .{
-        .data = "stored_kernel_data",
-    }, .copy);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(selection_key.bytes);
+    try select_provider_for_test(&store, selection_key, "mock", "stored_kernel_data");
 
     var kp = KernelizePass{
         .store = &store,
@@ -385,7 +398,7 @@ test "kernelize pass rewrites a selected function call" {
     try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
 
     try testing.expectEqualStrings(kernel.dispatch_target_name, rewritten.params.custom_call.target_name);
-    try testing.expectEqualStrings(decision_key.bytes, rewritten.params.custom_call.payload);
+    try testing.expectEqualStrings(selection_key.bytes, rewritten.params.custom_call.payload);
     try testing.expect(!rewritten.params.custom_call.has_side_effect);
 }
 
@@ -409,9 +422,9 @@ test "kernelize pass preserves observable side effects" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
-    defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, "mock", .{ .data = "payload" }, .copy);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(selection_key.bytes);
+    try select_provider_for_test(&store, selection_key, "mock", "payload");
 
     var kernelize = KernelizePass{ .store = &store, .device = test_device };
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
@@ -443,9 +456,12 @@ test "kernelize pass retains a declined function call" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
-    defer testing.allocator.free(decision_key.bytes);
-    try store.put_negative(decision_key, "unsupported");
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(selection_key.bytes);
+    try store.put(selection_key, .{
+        .candidate = .original,
+        .reason = "unsupported",
+    });
 
     var kp = KernelizePass{
         .store = &store,
@@ -455,12 +471,12 @@ test "kernelize pass retains a declined function call" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // The fallback remains a normal PR call.
+    // The original candidate remains a normal PR call.
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
     try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
 
-test "kernelize pass retains a call without a decision" {
+test "kernelize pass retains a call without a selection" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -491,12 +507,12 @@ test "kernelize pass retains a call without a decision" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // The fallback remains a normal PR call.
+    // The original candidate remains a normal PR call.
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
     try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
 
-test "kernelize pass does not reuse another provider decision" {
+test "kernelize pass does not reuse another provider selection" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -512,13 +528,11 @@ test "kernelize pass does not reuse another provider decision" {
     try program.add_function(function);
     try outline_test_program(&program);
 
-    const other_key = try make_test_decision_key(testing.allocator, "other", program.functions[1]);
+    const other_key = try make_test_selection_key(testing.allocator, "other", program.functions[1]);
     defer testing.allocator.free(other_key.bytes);
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(other_key, "other", .{
-        .data = "payload",
-    }, .copy);
+    try select_provider_for_test(&store, other_key, "other", "payload");
 
     var kernelize = KernelizePass{
         .store = &store,
@@ -552,14 +566,12 @@ test "kernelize pass rewrites a multi-output function call" {
     try outline_test_program(&program);
     const call_outputs = program.functions[0].ops[0].outputs;
 
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
-    defer testing.allocator.free(decision_key.bytes);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(selection_key.bytes);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    try store.put_profitable(decision_key, "mock", .{
-        .data = "mock_kernel_data",
-    }, .copy);
+    try select_provider_for_test(&store, selection_key, "mock", "mock_kernel_data");
 
     var kp = KernelizePass{
         .store = &store,
@@ -579,7 +591,7 @@ test "kernelize pass rewrites a multi-output function call" {
     try testing.expect(rewritten.outputs[1] == call_outputs[1]);
 }
 
-test "kernelize pass shares decisions for equal functions" {
+test "kernelize pass shares selections for equal functions" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -606,11 +618,9 @@ test "kernelize pass shares decisions for equal functions" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
-    defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, "mock", .{
-        .data = "payload",
-    }, .copy);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(selection_key.bytes);
+    try select_provider_for_test(&store, selection_key, "mock", "payload");
 
     var kp = KernelizePass{
         .store = &store,
@@ -620,7 +630,7 @@ test "kernelize pass shares decisions for equal functions" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Both calls use the shared decision.
+    // Both calls use the shared selection.
     const ops = program.functions[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
@@ -654,11 +664,9 @@ test "kernelize pass separates functions with different shapes" {
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
-    defer testing.allocator.free(decision_key.bytes);
-    try store.put_profitable(decision_key, "mock", .{
-        .data = "payload",
-    }, .copy);
+    const selection_key = try make_test_selection_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(selection_key.bytes);
+    try select_provider_for_test(&store, selection_key, "mock", "payload");
 
     var kp = KernelizePass{
         .store = &store,
@@ -668,7 +676,7 @@ test "kernelize pass separates functions with different shapes" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Only region_small has a store decision, so region_large remains a call.
+    // Only region_small has a store selection, so region_large remains a call.
     const ops = program.functions[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
