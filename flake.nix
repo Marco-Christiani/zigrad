@@ -144,8 +144,11 @@
           inherit system;
           overlays = [zigOverlay];
           config = {
-            allowUnfree = true;
-            # TODO(nix): Narrow unfree package acceptance to required inputs.
+            allowUnfreePredicate = package:
+              builtins.elem (inputs.nixpkgs.lib.getName package) [
+                "nsight_compute"
+                "nsight_systems"
+              ];
             # Enabling cudaSupport globally changes unrelated nixpkgs packages.
             # cudaSupport = true;
           };
