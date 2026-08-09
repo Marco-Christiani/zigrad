@@ -31,7 +31,9 @@ pub fn is_requested(region: pr.Region) AnnotationError!bool {
 /// Configuration for outlining one region.
 pub const ApplyOptions = struct {
     /// Unique name assigned to the outlined function.
-    function_name: []const u8,
+    ///
+    /// A null value derives a name from the caller and region id.
+    function_name: ?[]const u8 = null,
     /// Annotations attached to the outlined function.
     function_annotations: []const pr.Annotation = &.{},
 };
@@ -72,10 +74,16 @@ pub fn apply(
     opts: ApplyOptions,
 ) ApplyError!ApplyResult {
     if (function_index >= program.functions.len) return error.FunctionIndexOutOfRange;
-    if (program.get_function(opts.function_name) != null) return error.DuplicateFunctionName;
 
     const source = program.functions[function_index];
     const target = find_region(source, region_id) orelse return error.RegionNotFound;
+    const generated_name = if (opts.function_name == null)
+        try unique_function_name(scratch, program, function_index, target)
+    else
+        null;
+    defer if (generated_name) |name| scratch.free(name);
+    const function_name = opts.function_name orelse generated_name.?;
+    if (program.get_function(function_name) != null) return error.DuplicateFunctionName;
     const target_range = try region_range(source, target);
 
     for (source.regions) |region| {
@@ -99,7 +107,8 @@ pub fn apply(
         source,
         desc,
         target_range,
-        opts,
+        function_name,
+        opts.function_annotations,
         callee_op_ids,
     );
     outlined.regions = try build_outlined_regions(
@@ -120,7 +129,7 @@ pub fn apply(
         source,
         desc,
         target_range,
-        opts.function_name,
+        function_name,
         caller_op_ids,
     );
     const call_op_id = caller_op_ids[target_range.start].?;
@@ -268,10 +277,11 @@ fn build_outlined_function(
     source: pr.Function,
     desc: region_view.RegionView,
     target_range: OpRange,
-    opts: ApplyOptions,
+    function_name: []const u8,
+    function_annotations: []const pr.Annotation,
     op_ids: []?u32,
 ) ApplyError!pr.Function {
-    var builder = try pr.FunctionBuilder.init(program, opts.function_name);
+    var builder = try pr.FunctionBuilder.init(program, function_name);
     defer builder.deinit();
 
     const values = try scratch.alloc(?*pr.Var, source.var_count);
@@ -292,7 +302,7 @@ fn build_outlined_function(
     const returns = try mapped_values(scratch, desc.outputs, values);
     defer scratch.free(returns);
     var outlined = try builder.finish(returns);
-    outlined.annotations = try pr.dupe_annotations(program.allocator(), opts.function_annotations);
+    outlined.annotations = try pr.dupe_annotations(program.allocator(), function_annotations);
     return outlined;
 }
 

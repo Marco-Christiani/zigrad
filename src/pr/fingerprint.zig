@@ -18,6 +18,11 @@ pub const Function = struct {
     pub fn eql(lhs: Function, rhs: Function) bool {
         return std.mem.eql(u8, &lhs.bytes, &rhs.bytes);
     }
+
+    /// Write the digest as lowercase hexadecimal bytes.
+    pub fn write_hex(self: Function, writer: *Writer) Writer.Error!void {
+        try writer.print("{x}", .{self.bytes});
+    }
 };
 
 /// Failures produced while fingerprinting a PR function.

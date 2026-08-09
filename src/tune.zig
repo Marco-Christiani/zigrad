@@ -1,6 +1,6 @@
 //! Kernel tuning for the KP system.
 //!
-//! Walks a PR program for kernelizable regions, invokes providers to compile
+//! Walks a PR program for provider-request functions, invokes providers to compile
 //!  each candidate, and records the results as decisions in a `KernelStore`.
 //! Provider dispatch entries are registered in a `DispatchRegistry` for
 //!  execute-time resolution.
@@ -19,7 +19,7 @@
 //! ```
 const std = @import("std");
 const device = @import("device.zig");
-const region_view = @import("pr/region_view.zig");
+const fingerprint = @import("pr/fingerprint.zig");
 const pr = @import("pr/pr.zig");
 const kernel = @import("pr/kernel.zig");
 
@@ -46,16 +46,10 @@ pub const TuneResult = struct {
     }
 };
 
-/// Candidate region identified during program scanning.
-const TuneCandidate = struct {
-    region: pr.Region,
-    provider: kernel.KernelProvider,
-    provider_name: []const u8,
-    func_name: []const u8,
-};
-
-/// Tune a program: walk all functions for kernelizable regions, invoke
+/// Tune a program: walk all functions for provider requests, invoke
 /// providers, and record decisions in the returned store.
+///
+/// Provider regions must first pass through `pr.kernelize.OutlineCandidates`.
 ///
 /// On success, callers pass `result.store` to a kernelization operation and
 ///  `result.dispatch_registry` to the execution integration. Providers are
@@ -67,6 +61,8 @@ pub fn tune(
     providers: []const kernel.KernelProvider,
     opts: TuneOpts,
 ) !TuneResult {
+    try kernel.require_outlined_requests(program);
+
     var store = kernel.KernelStore.init(allocator);
     errdefer store.deinit();
 
@@ -126,91 +122,46 @@ fn tune_function(
     dispatch_registry: *kernel.DispatchRegistry,
     selected_device: device.Device,
 ) !TuneStats {
-    if (func.regions.len == 0) return .{};
-
     var stats: TuneStats = .{};
+    const provider_name = (try kernel.requested_provider(func)) orelse return stats;
+    const provider = find_provider(providers, provider_name) orelse {
+        log.debug("no provider named '{s}' for function '{s}', skipping", .{ provider_name, func.name });
+        return stats;
+    };
 
-    // Collect candidates.
-    var candidates = try std.ArrayList(TuneCandidate).initCapacity(allocator, func.regions.len);
-    defer candidates.deinit(allocator);
+    const function_fingerprint = try fingerprint.function(allocator, func);
+    const decision_key = try kernel.make_decision_key(
+        allocator,
+        provider_name,
+        selected_device,
+        function_fingerprint,
+    );
+    defer allocator.free(decision_key.bytes);
 
-    for (func.regions) |region| {
-        const provider_name = (try kernel.requested_provider(region)) orelse continue;
-        const provider = find_provider(providers, provider_name) orelse {
-            log.debug("no provider named '{s}' for region '{s}', skipping", .{ provider_name, region.name });
-            continue;
-        };
-        try candidates.append(allocator, .{
-            .region = region,
-            .provider = provider,
-            .provider_name = provider_name,
-            .func_name = func.name,
-        });
+    if (store.get(decision_key) != null) {
+        stats.dedup += 1;
+        log.debug("dedup: provider '{s}' function '{s}' decision already in store", .{ provider_name, func.name });
+        return stats;
     }
 
-    for (candidates.items) |candidate| {
-        if (is_region_nested(candidate.region, candidates.items)) continue;
+    const compiled = provider.compile(func, selected_device, allocator) catch |err| switch (err) {
+        error.Unsupported => {
+            stats.negative += 1;
+            log.debug("provider '{s}' cannot handle function '{s}', recording negative", .{ provider_name, func.name });
+            try store.put_negative(decision_key, "unsupported");
+            return stats;
+        },
+        else => {
+            log.err("provider '{s}' failed to compile function '{s}': {s}", .{ provider_name, func.name, @errorName(err) });
+            return err;
+        },
+    };
 
-        const desc = try region_view.describe(allocator, func, candidate.region);
-        defer desc.deinit(allocator);
+    stats.compiled += 1;
+    try store.put_profitable(decision_key, provider_name, compiled, .take);
+    try register_provider_dispatch(dispatch_registry, provider);
 
-        if (desc.outputs.len == 0) continue;
-
-        const region_signature = try kernel.compute_region_signature(allocator, desc);
-        defer allocator.free(region_signature.bytes);
-        const decision_key = try kernel.make_decision_key(
-            allocator,
-            candidate.provider_name,
-            selected_device,
-            region_signature,
-        );
-        defer allocator.free(decision_key.bytes);
-
-        // Already tuned (cross-function dedup via store)?
-        if (store.get(decision_key) != null) {
-            stats.dedup += 1;
-            log.debug("dedup: provider '{s}' region '{s}' decision already in store", .{
-                candidate.provider_name,
-                candidate.region.name,
-            });
-            continue;
-        }
-
-        // Invoke provider.
-        const compiled = candidate.provider.compile(desc, selected_device, allocator) catch |err| switch (err) {
-            error.Unsupported => {
-                stats.negative += 1;
-                log.debug("provider '{s}' cannot handle region '{s}', recording negative", .{
-                    candidate.provider_name, candidate.region.name,
-                });
-                try store.put_negative(decision_key, "unsupported");
-                continue;
-            },
-            else => {
-                log.err("provider '{s}' failed to compile region '{s}': {s}", .{
-                    candidate.provider_name, candidate.region.name, @errorName(err),
-                });
-                return err;
-            },
-        };
-
-        stats.compiled += 1;
-
-        // Record profitable decision.
-        try store.put_profitable(
-            decision_key,
-            candidate.provider_name,
-            compiled,
-            .take,
-        );
-
-        // Register dispatch from provider (idempotent).
-        try register_provider_dispatch(dispatch_registry, candidate.provider);
-
-        log.debug("compiled kernel for region '{s}' via provider '{s}'", .{
-            candidate.region.name, candidate.provider_name,
-        });
-    }
+    log.debug("compiled kernel for function '{s}' via provider '{s}'", .{ func.name, provider_name });
 
     return stats;
 }
@@ -233,29 +184,6 @@ fn find_provider(providers: []const kernel.KernelProvider, name: []const u8) ?ke
         if (std.mem.eql(u8, p.name, name)) return p;
     }
     return null;
-}
-
-fn is_region_nested(region: pr.Region, candidates: []const TuneCandidate) bool {
-    for (candidates) |other| {
-        if (other.region.id == region.id) continue;
-        if (other.region.op_ids.len <= region.op_ids.len) continue;
-        if (region_ids_subset(region.op_ids, other.region.op_ids)) return true;
-    }
-    return false;
-}
-
-fn region_ids_subset(needle: []const u32, haystack: []const u32) bool {
-    for (needle) |id| {
-        var found = false;
-        for (haystack) |other_id| {
-            if (other_id == id) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
-    }
-    return true;
 }
 
 fn dump_store_summary(io: std.Io, store: *const kernel.KernelStore) void {
@@ -306,7 +234,7 @@ const TestProvider = struct {
 
     fn compile(
         ptr: *anyopaque,
-        _: region_view.RegionView,
+        _: pr.Function,
         _: device.Device,
         allocator: std.mem.Allocator,
     ) kernel.CompileError!kernel.Artifact {
@@ -342,6 +270,12 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
     const function = try builder.finish(&.{ first_output, second_output });
     try program.add_function(function);
 
+    var outline_ctx = @import("compilation.zig").Context{
+        .allocator = testing.allocator,
+        .io = testing.io,
+    };
+    _ = try (@import("pr/kernelize.zig").OutlineCandidates{}).run(&program, &outline_ctx);
+
     var first = TestProvider{ .name = "first", .unsupported = first_unsupported };
     var second = TestProvider{ .name = "second", .unsupported = !first_unsupported };
     var result = try tune(testing.io, testing.allocator, &program, &.{
@@ -354,23 +288,21 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
     try testing.expectEqual(@as(usize, 1), second.calls);
     try testing.expectEqual(@as(usize, 2), result.store.decisions.count());
 
-    const desc = try region_view.describe(testing.allocator, function, function.regions[0]);
-    defer desc.deinit(testing.allocator);
-    const signature = try kernel.compute_region_signature(testing.allocator, desc);
-    defer testing.allocator.free(signature.bytes);
+    const first_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
+    const second_fingerprint = try fingerprint.function(testing.allocator, program.functions[2]);
 
     const first_key = try kernel.make_decision_key(
         testing.allocator,
         "first",
         selected_device,
-        signature,
+        first_fingerprint,
     );
     defer testing.allocator.free(first_key.bytes);
     const second_key = try kernel.make_decision_key(
         testing.allocator,
         "second",
         selected_device,
-        signature,
+        second_fingerprint,
     );
     defer testing.allocator.free(second_key.bytes);
 
@@ -400,7 +332,7 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
 test tune {
     const testing = std.testing;
 
-    // A program without regions requires no tuning work.
+    // A program without provider functions requires no tuning work.
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
 
@@ -415,12 +347,32 @@ test tune {
     });
     defer result.deinit();
 
-    // No regions -> no decisions.
     try testing.expectEqual(@as(usize, 0), result.store.decisions.count());
     try testing.expectEqual(@as(usize, 0), result.dispatch_registry.entries.count());
 }
 
-test "tune isolates provider decisions for identical regions" {
+test "tune requires outlined provider requests" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{2});
+    try builder.push_region("candidate", &.{kernel.provider_annotation("test")});
+    const output = try builder.exp(input);
+    try builder.pop_region();
+    try program.add_function(try builder.finish(&.{output}));
+
+    try testing.expectError(
+        error.ProviderRegionNotOutlined,
+        tune(testing.io, testing.allocator, &program, &.{}, .{
+            .device = .{ .platform = .cpu },
+        }),
+    );
+}
+
+test "tune isolates provider decisions for equal functions" {
     try expect_provider_decisions(true);
     try expect_provider_decisions(false);
 }

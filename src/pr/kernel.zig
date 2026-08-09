@@ -1,13 +1,13 @@
 //! Kernel-provider decisions, artifacts, and dispatch registration.
 //!
-//! Tuning asks providers to compile PR regions and records their decisions in a
+//! Tuning asks providers to compile callable PR functions and records their decisions in a
 //!  `KernelStore`.
 //!
 //! Kernelization reads the store, and execution resolves providers through a
 //!  separate `DispatchRegistry`.
 const std = @import("std");
 const device = @import("../device.zig");
-const region_view = @import("region_view.zig");
+const fingerprint = @import("fingerprint.zig");
 const pr = @import("pr.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const Allocator = std.mem.Allocator;
@@ -23,7 +23,10 @@ pub const key_attribute_name = "zigrad.kernel_key";
 pub const provider_annotation_name = "zigrad.kernel.provider";
 
 /// Invalid payloads for the provider annotation contract.
-pub const AnnotationError = error{InvalidProviderAnnotation};
+pub const AnnotationError = error{
+    InvalidProviderAnnotation,
+    ProviderRegionNotOutlined,
+};
 
 /// Construct a provider request for a region builder.
 pub fn provider_annotation(provider_name: []const u8) pr.Annotation {
@@ -37,6 +40,17 @@ pub fn provider_annotation(provider_name: []const u8) pr.Annotation {
 pub fn requested_provider(owner: anytype) AnnotationError!?[]const u8 {
     const found = owner.find_annotation(provider_annotation_name) orelse return null;
     return found.value.as_string() orelse error.InvalidProviderAnnotation;
+}
+
+/// Reject provider requests that have not been outlined into functions.
+pub fn require_outlined_requests(program: *const pr.Program) AnnotationError!void {
+    for (program.functions) |func| {
+        for (func.regions) |region| {
+            if (try requested_provider(region) != null) {
+                return error.ProviderRegionNotOutlined;
+            }
+        }
+    }
 }
 
 /// Returns whether a dot_general parameter set matches plain rank-2 matmul.
@@ -73,11 +87,6 @@ fn dims_are_prefix(dims: []const i64) bool {
     return true;
 }
 
-/// Operation and abstract-value identity for one PR region.
-pub const RegionSignature = struct {
-    bytes: []const u8,
-};
-
 /// Store key for one provider decision on one device.
 pub const DecisionKey = struct {
     bytes: []const u8,
@@ -86,67 +95,33 @@ pub const DecisionKey = struct {
 /// Failures produced while encoding decision identity.
 pub const IdentityError = Allocator.Error || std.Io.Writer.Error;
 
-/// Compute the operation and abstract-value signature of a region.
-///
-/// The caller releases the returned bytes with `allocator`.
-///
-/// TODO(kernel-provider): Include semantic operation parameters and constants.
-pub fn compute_region_signature(
-    allocator: Allocator,
-    desc: region_view.RegionView,
-) IdentityError!RegionSignature {
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    errdefer output.deinit();
-    const writer = &output.writer;
-
-    for (desc.ops, 0..) |op, op_index| {
-        if (op_index > 0) try writer.writeByte(';');
-        try writer.writeAll(@tagName(op.prim()));
-        try writer.writeByte(',');
-        for (op.inputs, 0..) |operand, input_index| {
-            if (input_index > 0) try writer.writeByte(',');
-            try write_aval_signature(writer, operand.value.aval);
-        }
-        try writer.writeByte('>');
-        for (op.outputs, 0..) |output_var, output_index| {
-            if (output_index > 0) try writer.writeByte(',');
-            try write_aval_signature(writer, output_var.aval);
-        }
-    }
-
-    return .{ .bytes = try output.toOwnedSlice() };
-}
-
-/// Combine a requested provider, selected device, and region signature.
+/// Combine a requested provider, selected device, and function fingerprint.
 ///
 /// Platform names are normalized because `Platform.eql` ignores ASCII case.
-/// The caller releases the returned bytes with `allocator`.
+/// Caller owns result.
 pub fn make_decision_key(
     allocator: Allocator,
     provider_name: []const u8,
     selected_device: device.Device,
-    region_signature: RegionSignature,
+    function_fingerprint: fingerprint.Function,
 ) IdentityError!DecisionKey {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
     const writer = &output.writer;
 
-    try writer.print("kp1:{d}:", .{provider_name.len});
+    try writer.print("kp2:{d}:", .{provider_name.len});
     try writer.writeAll(provider_name);
     try writer.print(":{d}:", .{selected_device.platform.name.len});
     for (selected_device.platform.name) |byte| {
         try writer.writeByte(std.ascii.toLower(byte));
     }
-    try writer.print(":{d}:{d}:", .{
-        selected_device.ordinal,
-        region_signature.bytes.len,
-    });
-    try writer.writeAll(region_signature.bytes);
+    try writer.print(":{d}:", .{selected_device.ordinal});
+    try function_fingerprint.write_hex(writer);
 
     return .{ .bytes = try output.toOwnedSlice() };
 }
 
-/// Append one abstract value to a region signature or diagnostic string.
+/// Append one abstract value to a diagnostic string.
 pub fn write_aval_signature(writer: anytype, aval: pr.Aval) !void {
     switch (aval) {
         .tensor => |tensor| {
@@ -290,7 +265,7 @@ pub const ProfitableDecision = struct {
 
 /// Failures exposed by kernel-provider compilation.
 pub const CompileError = error{
-    /// Provider cannot handle this region.
+    /// Provider cannot handle this function.
     Unsupported,
 
     /// Compilation failed, provider logged details.
@@ -303,7 +278,7 @@ pub const CompileError = error{
     ProviderCallFailed,
 } || Allocator.Error;
 
-/// Extension component that claims PR regions and produces compiled kernel artifacts.
+/// Extension component that claims PR functions and produces compiled kernel artifacts.
 ///
 /// `compile_fn` receives the selected device for target resolution.
 ///
@@ -315,8 +290,8 @@ pub const KernelProvider = struct {
     /// Provider state passed to `compile_fn` and `finalize_fn`.
     ptr: *anyopaque,
 
-    /// Compile one PR region for the selected device.
-    compile_fn: *const fn (ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact,
+    /// Compile one callable PR function for the selected device.
+    compile_fn: *const fn (ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact,
 
     /// Optional release hook for compilation-only provider resources.
     finalize_fn: ?*const fn (ptr: *anyopaque) void = null,
@@ -335,9 +310,9 @@ pub const KernelProvider = struct {
     ///  and the state must outlive every execution that references this provider.
     dispatch_ctx: ?TypedPtr = null,
 
-    /// Compile one region for the selected device.
-    pub fn compile(self: KernelProvider, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact {
-        return try self.compile_fn(self.ptr, desc, selected_device, allocator);
+    /// Compile one callable PR function for the selected device.
+    pub fn compile(self: KernelProvider, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact {
+        return try self.compile_fn(self.ptr, func, selected_device, allocator);
     }
 
     /// Release compilation-only provider resources.
@@ -372,7 +347,7 @@ pub const Decision = union(enum) {
     negative: []const u8,
 };
 
-/// Pre-computed tuning decisions keyed by provider, device, and region signature.
+/// Pre-computed tuning decisions keyed by provider, device, and function fingerprint.
 ///
 /// The sole decision source used by kernelization.
 ///
@@ -706,34 +681,34 @@ test "kernel store absent key" {
 
 test make_decision_key {
     const testing = std.testing;
-    const signature = RegionSignature{ .bytes = "dot,f32[2,3],f32[3,2]>f32[2,2]" };
+    const function_fingerprint = fingerprint.Function{ .bytes = .{0x5a} ** 32 };
 
     const tvm = try make_decision_key(
         testing.allocator,
         "tvm",
         .{ .platform = .cuda },
-        signature,
+        function_fingerprint,
     );
     defer testing.allocator.free(tvm.bytes);
     const mirage = try make_decision_key(
         testing.allocator,
         "mirage",
         .{ .platform = .cuda },
-        signature,
+        function_fingerprint,
     );
     defer testing.allocator.free(mirage.bytes);
     const other_device = try make_decision_key(
         testing.allocator,
         "tvm",
         .{ .platform = .cuda, .ordinal = 1 },
-        signature,
+        function_fingerprint,
     );
     defer testing.allocator.free(other_device.bytes);
     const reported_case = try make_decision_key(
         testing.allocator,
         "tvm",
         .{ .platform = .{ .name = "CUDA" } },
-        signature,
+        function_fingerprint,
     );
     defer testing.allocator.free(reported_case.bytes);
 

@@ -1,6 +1,5 @@
 const std = @import("std");
 const device = @import("../device.zig");
-const region_view = @import("../pr/region_view.zig");
 const kernel = @import("../pr/kernel.zig");
 const pr = @import("../pr/pr.zig");
 const dispatch_mod = @import("dispatch.zig");
@@ -10,7 +9,7 @@ const mirage = @import("../c/mirage/api.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
 const log = std.log.scoped(.@"zg/mirage_provider");
-const max_region_eqns: usize = 5;
+const max_function_ops: usize = 5;
 
 // Alignment required by offsets in Mirage DTensor workspace plans.
 //
@@ -47,21 +46,21 @@ pub const MirageProvider = struct {
         };
     }
 
-    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
+    fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
         _ = ptr;
-        return try compile(desc, selected_device, allocator);
+        return try compile(func, selected_device, allocator);
     }
 
     fn compile(
-        desc: region_view.RegionView,
+        func: pr.Function,
         selected_device: device.Device,
         allocator: std.mem.Allocator,
     ) kernel.CompileError!kernel.Artifact {
         if (!selected_device.platform.eql(.cuda)) return error.Unsupported;
-        if (desc.ops.len > max_region_eqns) {
+        if (func.ops.len > max_function_ops) {
             log.debug(
-                "region '{s}' has {d} ops (> {d}); skipping mirage compile",
-                .{ desc.name, desc.ops.len, max_region_eqns },
+                "function '{s}' has {d} ops (> {d}); skipping mirage compile",
+                .{ func.name, func.ops.len, max_function_ops },
             );
             return error.Unsupported;
         }
@@ -72,10 +71,10 @@ pub const MirageProvider = struct {
         var tensor_map = std.AutoHashMap(*const pr.Var, mirage.Tensor).init(allocator);
         defer tensor_map.deinit();
 
-        try lower_region_graph(desc, graph, &tensor_map);
+        try lower_function_graph(func, graph, &tensor_map);
 
         return try optimize_and_transpile(
-            desc.name,
+            func.name,
             selected_device,
             allocator,
             graph,
@@ -97,11 +96,11 @@ pub const MirageProvider = struct {
 
         const optimized = mirage.optimize(mirage_device, graph, &optimize_opts) catch |err| {
             if (err == error.MirageApiUnsupported) {
-                log.debug("mirage symbolic optimization is unsupported for region '{s}'", .{target_name});
+                log.debug("mirage symbolic optimization is unsupported for function '{s}'", .{target_name});
                 return error.Unsupported;
             }
             if (err == error.MirageNotFound) {
-                log.debug("mirage found no optimized graph for region '{s}'", .{target_name});
+                log.debug("mirage found no optimized graph for function '{s}'", .{target_name});
                 return error.Unsupported;
             }
             return map_mirage_api_error(err);
@@ -110,7 +109,7 @@ pub const MirageProvider = struct {
 
         var source = mirage.transpile(allocator, optimized, null) catch |err| {
             if (err == error.MirageApiUnsupported) {
-                log.debug("mirage transpile unsupported for region '{s}'", .{target_name});
+                log.debug("mirage transpile unsupported for function '{s}'", .{target_name});
                 return error.Unsupported;
             }
             return map_mirage_api_error(err);
@@ -195,12 +194,12 @@ pub const MirageProvider = struct {
     }
 };
 
-fn lower_region_graph(
-    desc: region_view.RegionView,
+fn lower_function_graph(
+    func: pr.Function,
     graph: *mirage.Graph,
     tensor_map: *std.AutoHashMap(*const pr.Var, mirage.Tensor),
 ) kernel.CompileError!void {
-    for (desc.inputs) |in_var| {
+    for (func.params) |in_var| {
         const tensor = in_var.as_tensor();
 
         const dtype = dtype_to_mirage(tensor.dtype) orelse return error.Unsupported;
@@ -222,14 +221,14 @@ fn lower_region_graph(
         try tensor_map.put(in_var, handle);
     }
 
-    for (desc.ops) |op| {
+    for (func.ops) |op| {
         if (op.outputs.len != 1) return error.Unsupported;
 
         const out_tensor = try lower_op(graph, op, tensor_map);
         try tensor_map.put(op.outputs[0], out_tensor);
     }
 
-    for (desc.outputs) |out_var| {
+    for (func.returns) |out_var| {
         const out_tensor = tensor_map.get(out_var) orelse return error.Unsupported;
         graph.mark_output(out_tensor) catch |err| return map_mirage_api_error(err);
     }

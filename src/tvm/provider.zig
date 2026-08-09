@@ -1,6 +1,6 @@
 //! TVM kernel provider.
 //!
-//! The provider accepts PR matrix-multiply regions and emits kernel artifacts
+//! The provider accepts PR matrix-multiply functions and emits kernel artifacts
 //!  values through MetaSchedule autotuning. TVM C types remain internal.
 const std = @import("std");
 
@@ -8,7 +8,6 @@ const Cache = @import("../cache.zig").Cache;
 const device = @import("../device.zig");
 const kernel = @import("../pr/kernel.zig");
 const pr = @import("../pr/pr.zig");
-const region_view = @import("../pr/region_view.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const config = @import("config.zig");
 const mm = @import("matmul.zig");
@@ -71,28 +70,28 @@ pub const TvmProvider = struct {
         };
     }
 
-    fn compile_impl(ptr: *anyopaque, desc: region_view.RegionView, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
+    fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
         const self: *TvmProvider = @ptrCast(@alignCast(ptr));
-        return try self.compile(desc, selected_device, allocator);
+        return try self.compile(func, selected_device, allocator);
     }
 
-    /// Compile one supported matrix-multiply region into a kernel artifact.
+    /// Compile one supported matrix-multiply function into a kernel artifact.
     ///
     /// A stable cached artifact is reused when present. A cache miss runs the
     ///  shared TVM matmul tuner and stores its selected artifact.
     fn compile(
         self: *TvmProvider,
-        desc: region_view.RegionView,
+        func: pr.Function,
         selected_device: device.Device,
         allocator: std.mem.Allocator,
     ) kernel.CompileError!kernel.Artifact {
         if (!self.compile_config.target.accepts(selected_device)) {
             return error.Unsupported;
         }
-        const mm_shape = validate_matmul_region(desc) orelse return error.Unsupported;
+        const mm_shape = validate_matmul_function(func) orelse return error.Unsupported;
 
         log.info("compiling matmul kernel: {s} ({d}x{d}x{d})", .{
-            desc.name, mm_shape.m, mm_shape.n, mm_shape.k,
+            func.name, mm_shape.m, mm_shape.n, mm_shape.k,
         });
 
         const cached = mm.load_artifact(
@@ -154,20 +153,20 @@ pub const TvmProvider = struct {
         } orelse return error.CompileFailed;
 
         log.info("compiled kernel: {s} (candidate {d}, {d:.2} us, {d} bytes)", .{
-            desc.name, result.best_candidate, result.best_time_us, artifact.bytes.len,
+            func.name, result.best_candidate, result.best_time_us, artifact.bytes.len,
         });
 
         return make_kernel_artifact(artifact);
     }
 };
 
-/// Validate that a region describes a single matmul (dot or dot_general).
+/// Validate that a function describes a single matmul (dot or dot_general).
 ///
-/// Returns the matrix dimensions, or null when the region is unsupported.
-fn validate_matmul_region(desc: region_view.RegionView) ?mm.Shape {
-    if (desc.ops.len != 1) return null;
-    if (desc.inputs.len != 2 or desc.outputs.len != 1) return null;
-    const op = desc.ops[0];
+/// Returns the matrix dimensions, or null when the function is unsupported.
+fn validate_matmul_function(func: pr.Function) ?mm.Shape {
+    if (func.ops.len != 1) return null;
+    if (func.params.len != 2 or func.returns.len != 1) return null;
+    const op = func.ops[0];
 
     switch (op.params) {
         .dot => {},

@@ -1,32 +1,26 @@
 //! PR kernel-provider substitution.
 //!
-//! `KernelizePass` queries a populated `KernelStore` and replaces annotated
-//!  regions when a decision supplies an artifact.
+//! `OutlineCandidates` turns provider regions into callable PR functions.
+//! `KernelizePass` queries a populated `KernelStore` and replaces calls when a
+//!  decision supplies an artifact.
 //!
-//! Missing and negative decisions leave the region unchanged. Provider
-//!  compilation and tuning run before this transform.
+//! Missing and negative decisions leave the ordinary function call in place.
+//!
+//! Provider compilation and tuning run after outlining and before substitution.
 const std = @import("std");
 const compilation = @import("../compilation.zig");
 const device = @import("../device.zig");
 const output_mod = @import("../output.zig");
-const region_view = @import("region_view.zig");
+const fingerprint = @import("fingerprint.zig");
+const outline = @import("outline.zig");
 const pr = @import("pr.zig");
 const kernel = @import("kernel.zig");
 
 const log = std.log.scoped(.@"zg/kernelize");
 
-const KernelCandidate = struct {
-    region: pr.Region,
-    provider_name: []const u8,
+const KernelEntryOutcome = enum { compiled, fallback };
 
-    inputs: []const *pr.Var = &.{},
-    outputs: []const *pr.Var = &.{},
-    kernel_key: []const u8 = &.{},
-};
-
-const KernelEntryOutcome = enum { compiled, dedup, fallback };
-
-/// Diagnostic record for one region encountered during kernelization.
+/// Diagnostic record for one function encountered during kernelization.
 ///
 /// `name` and `provider` borrow storage that must outlive the report.
 ///
@@ -78,19 +72,79 @@ pub const DumpKernels = struct {
     }
 };
 
+/// Outlines provider-request regions into callable PR functions.
+///
+/// Outermost requests take precedence when regions are nested. Their function
+///  retains the provider request, and nested provider requests are consumed.
+pub const OutlineCandidates = struct {
+    pub const Input = *pr.Program;
+    pub const Output = *pr.Program;
+
+    pub fn run(_: OutlineCandidates, program: Input, ctx: *compilation.Context) !Output {
+        while (try find_outermost_request(program)) |request| {
+            const result = try outline.apply(
+                program,
+                ctx.allocator,
+                request.function_index,
+                request.region.id,
+                .{ .function_annotations = request.region.annotations },
+            );
+            try consume_nested_requests(program, result.function_index);
+        }
+        return program;
+    }
+};
+
+const OutlineRequest = struct {
+    function_index: usize,
+    region: pr.Region,
+};
+
+fn find_outermost_request(program: *const pr.Program) kernel.AnnotationError!?OutlineRequest {
+    var found: ?OutlineRequest = null;
+    for (program.functions, 0..) |func, function_index| {
+        if (try kernel.requested_provider(func) != null) continue;
+        for (func.regions) |region| {
+            if (try kernel.requested_provider(region) == null) continue;
+            if (found == null or region.op_ids.len > found.?.region.op_ids.len) {
+                found = .{ .function_index = function_index, .region = region };
+            }
+        }
+    }
+    return found;
+}
+
+fn consume_nested_requests(program: *pr.Program, function_index: usize) std.mem.Allocator.Error!void {
+    const arena = program.allocator();
+    const func = &program.functions[function_index];
+    const has_nested_request = for (func.regions) |region| {
+        if (region.find_annotation(kernel.provider_annotation_name) != null) break true;
+    } else false;
+    if (!has_nested_request) return;
+
+    const regions = try arena.alloc(pr.Region, func.regions.len);
+    for (func.regions, regions) |region, *updated| {
+        var annotations = try std.ArrayList(pr.Annotation).initCapacity(arena, region.annotations.len);
+        for (region.annotations) |annotation| {
+            if (!std.mem.eql(u8, annotation.name, kernel.provider_annotation_name)) {
+                try annotations.append(arena, annotation);
+            }
+        }
+        updated.* = region;
+        updated.annotations = try annotations.toOwnedSlice(arena);
+    }
+    func.regions = regions;
+}
+
 /// Kernelization pass state.
 ///
-/// Consults a pre-computed `KernelStore` to decide which annotated regions
-///  to replace with `custom_call` ops. The store is the sole data source.
-///
-/// This operation never invokes providers or performs compilation.
+/// Consults a pre-computed `KernelStore` to decide which calls to provider
+///  functions become `custom_call` ops.
 pub const KernelizePass = struct {
     pub const Input = *pr.Program;
     pub const Output = *pr.Program;
 
-    /// Pre-computed tuning decisions populated before this operation runs.
-    ///
-    /// The store must outlive this operation.
+    /// Pre-computed tuning decisions populated before this operation runs, borrowed.
     store: *const kernel.KernelStore,
 
     /// Device used when the decision store was populated.
@@ -113,25 +167,20 @@ pub const KernelizePass = struct {
         program: *pr.Program,
         allocator: std.mem.Allocator,
     ) !void {
+        try kernel.require_outlined_requests(program);
+
         const entries = if (self.report) |report| &report.entries else null;
         const entries_allocator = if (self.report) |report|
             report.arena.allocator()
         else
             allocator;
 
-        for (program.functions, 0..) |func, idx| {
-            const rewritten = self.kernelize_function(
-                program,
-                func,
-                allocator,
-                entries,
-                entries_allocator,
-            ) catch |err| {
+        for (program.functions) |func| {
+            self.kernelize_function(program, func, allocator, entries, entries_allocator) catch |err| {
                 if (!@import("builtin").is_test)
                     log.err("kernelization failed for function '{s}': {}", .{ func.name, err });
                 return err;
             };
-            program.functions[idx] = rewritten;
         }
     }
 
@@ -142,235 +191,89 @@ pub const KernelizePass = struct {
         temp_allocator: std.mem.Allocator,
         entries: ?*std.ArrayList(KernelEntry),
         entries_alloc: std.mem.Allocator,
-    ) !pr.Function {
-        if (func.regions.len == 0) return func;
-        const store = self.store;
-
-        // Collect all candidates with kernelize annotations.
-        var candidates = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
-        defer candidates.deinit(temp_allocator);
-        for (func.regions) |region| {
-            const provider_name = (try kernel.requested_provider(region)) orelse continue;
-            try candidates.append(temp_allocator, .{
-                .region = region,
-                .provider_name = provider_name,
-            });
-        }
-
-        var rewrites = try std.ArrayList(KernelCandidate).initCapacity(temp_allocator, func.regions.len);
-        defer {
-            for (rewrites.items) |rewrite| {
-                temp_allocator.free(rewrite.inputs);
-                temp_allocator.free(rewrite.outputs);
-                if (rewrite.kernel_key.len > 0) temp_allocator.free(rewrite.kernel_key);
-            }
-            rewrites.deinit(temp_allocator);
-        }
-
-        for (candidates.items) |candidate| {
-            if (is_region_nested(candidate.region, candidates.items)) continue;
-
-            const desc = try region_view.describe(temp_allocator, func, candidate.region);
-            defer desc.deinit(temp_allocator);
-
-            if (desc.outputs.len == 0) continue;
-
-            const region_signature = try kernel.compute_region_signature(temp_allocator, desc);
-            defer temp_allocator.free(region_signature.bytes);
+    ) !void {
+        for (func.ops) |op| {
+            if (op.prim() != .call) continue;
+            const candidate = program.get_function(op.params.call.callee) orelse return error.CallUnresolvedCallee;
+            const provider_name = (try kernel.requested_provider(candidate)) orelse continue;
+            const function_fingerprint = try fingerprint.function(temp_allocator, candidate);
             const decision_key = try kernel.make_decision_key(
                 temp_allocator,
-                candidate.provider_name,
+                provider_name,
                 self.device,
-                region_signature,
+                function_fingerprint,
             );
             defer temp_allocator.free(decision_key.bytes);
 
-            const decision = store.get(decision_key) orelse {
-                log.debug("store: no decision for provider '{s}' region '{s}' (shape '{s}'), skipping", .{
-                    candidate.provider_name,
-                    candidate.region.name,
-                    region_signature.bytes,
-                });
-                if (entries) |e| {
-                    const ops_str = build_ops_str(entries_alloc, desc) catch "";
-                    const shape = build_shape_str(entries_alloc, desc) catch "";
-                    e.append(entries_alloc, .{
-                        .name = candidate.region.name,
-                        .provider = candidate.provider_name,
-                        .ops = ops_str,
-                        .shape = shape,
-                        .outcome = .fallback,
-                    }) catch {};
-                }
-                continue;
-            };
-
-            switch (decision) {
-                .profitable => |stored| {
-                    try rewrites.append(temp_allocator, .{
-                        .region = candidate.region,
-                        .provider_name = stored.provider_name,
-                        .inputs = try temp_allocator.dupe(*pr.Var, desc.inputs),
-                        .outputs = try temp_allocator.dupe(*pr.Var, desc.outputs),
-                        .kernel_key = try temp_allocator.dupe(u8, decision_key.bytes),
-                    });
-                    log.debug("store: profitable decision for region '{s}' via provider '{s}'", .{
-                        candidate.region.name,
+            const decision = self.store.get(decision_key);
+            const outcome: KernelEntryOutcome = if (decision) |selected| switch (selected) {
+                .profitable => |stored| outcome: {
+                    try rewrite_call(
+                        program.allocator(),
+                        op,
                         stored.provider_name,
-                    });
-
-                    if (entries) |e| {
-                        const ops_str = build_ops_str(entries_alloc, desc) catch "";
-                        const shape = build_shape_str(entries_alloc, desc) catch "";
-                        e.append(entries_alloc, .{
-                            .name = candidate.region.name,
-                            .provider = stored.provider_name,
-                            .ops = ops_str,
-                            .shape = shape,
-                            .outcome = .compiled,
-                        }) catch {};
-                    }
+                        decision_key.bytes,
+                        pr.function_may_have_side_effects(program, candidate),
+                    );
+                    log.debug("selected provider '{s}' for function '{s}'", .{ stored.provider_name, candidate.name });
+                    break :outcome .compiled;
                 },
-                .negative => |reason| {
-                    log.debug("store: negative decision for region '{s}': {s}", .{ candidate.region.name, reason });
-                    if (entries) |e| {
-                        const ops_str = build_ops_str(entries_alloc, desc) catch "";
-                        const shape = build_shape_str(entries_alloc, desc) catch "";
-                        e.append(entries_alloc, .{
-                            .name = candidate.region.name,
-                            .provider = candidate.provider_name,
-                            .ops = ops_str,
-                            .shape = shape,
-                            .outcome = .fallback,
-                        }) catch {};
-                    }
+                .negative => |reason| outcome: {
+                    log.debug("provider '{s}' declined function '{s}': {s}", .{ provider_name, candidate.name, reason });
+                    break :outcome .fallback;
                 },
+            } else .fallback;
+
+            if (entries) |list| {
+                try list.append(entries_alloc, .{
+                    .name = candidate.name,
+                    .provider = provider_name,
+                    .ops = try build_ops_str(entries_alloc, candidate),
+                    .shape = try build_shape_str(entries_alloc, candidate),
+                    .outcome = outcome,
+                });
             }
         }
-
-        if (rewrites.items.len == 0) return func;
-
-        const arena = program.allocator();
-
-        var new_ops = try std.ArrayList(*pr.Op).initCapacity(arena, func.ops.len);
-        var op_index: usize = 0;
-        while (op_index < func.ops.len) {
-            if (find_rewrite_starting_at(func, rewrites.items, op_index)) |rewrite| {
-                const replacement_id = func.ops[op_index].id;
-                const new_op = try build_custom_call_op(arena, rewrite, replacement_id);
-                try new_ops.append(arena, new_op);
-                op_index += rewrite.region.op_ids.len;
-                continue;
-            }
-            try new_ops.append(arena, func.ops[op_index]);
-            op_index += 1;
-        }
-
-        return .{
-            .name = func.name,
-            .params = func.params,
-            .returns = func.returns,
-            .ops = try new_ops.toOwnedSlice(arena),
-            .regions = &.{},
-            .var_count = func.var_count,
-        };
     }
 
-    fn find_rewrite_starting_at(func: pr.Function, rewrites: []const KernelCandidate, op_start: usize) ?KernelCandidate {
-        for (rewrites) |entry| {
-            if (entry.region.op_ids.len == 0) continue;
-            const start = func.op_index_by_id(entry.region.op_ids[0]) orelse continue;
-            if (start == op_start) return entry;
-        }
-        return null;
-    }
+    fn rewrite_call(
+        arena: std.mem.Allocator,
+        op: *pr.Op,
+        provider_name: []const u8,
+        decision_key: []const u8,
+        has_side_effect: bool,
+    ) std.mem.Allocator.Error!void {
+        const out_avals = try arena.alloc(pr.Aval, op.outputs.len);
+        for (op.outputs, 0..) |output, index| out_avals[index] = output.aval;
 
-    fn is_region_nested(region: pr.Region, candidates: []const KernelCandidate) bool {
-        for (candidates) |other| {
-            if (other.region.id == region.id) continue;
-            if (other.region.op_ids.len <= region.op_ids.len) continue;
-            if (region_ids_subset(region.op_ids, other.region.op_ids)) return true;
-        }
-        return false;
-    }
-
-    fn region_ids_subset(needle: []const u32, haystack: []const u32) bool {
-        for (needle) |id| {
-            var found = false;
-            for (haystack) |other_id| {
-                if (other_id == id) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) return false;
-        }
-        return true;
-    }
-
-    /// Build a new custom_call Op from a rewrite candidate.
-    fn build_custom_call_op(arena: std.mem.Allocator, rewrite: KernelCandidate, replacement_id: u32) !*pr.Op {
-        const out_avals = try arena.alloc(pr.Aval, rewrite.outputs.len);
-        for (rewrite.outputs, 0..) |out_var, idx| {
-            out_avals[idx] = out_var.aval;
-        }
-
-        const operands = try arena.alloc(pr.Operand, rewrite.inputs.len);
-        const new_op = try arena.create(pr.Op);
-
-        for (rewrite.inputs, 0..) |in_var, i| {
-            operands[i] = .{
-                .value = in_var,
-                .owner = new_op,
-                .index = @intCast(i),
-            };
-            // Wire into the Var's use-list.
-            operands[i].next = in_var.first_use;
-            if (in_var.first_use) |head| head.prev = &operands[i];
-            in_var.first_use = &operands[i];
-        }
-
-        const out_vars = try arena.alloc(*pr.Var, rewrite.outputs.len);
-        for (rewrite.outputs, 0..) |out_var, i| {
-            out_vars[i] = out_var;
-            out_var.defining_op = new_op;
-        }
-
-        new_op.* = .{
-            .id = replacement_id,
-            .inputs = operands,
-            .outputs = out_vars,
-            .params = .{ .custom_call = .{
-                .target_name = try arena.dupe(u8, kernel.dispatch_target_name),
-                .has_side_effect = false,
-                .out_avals = out_avals,
-                .kernel_key = try arena.dupe(u8, rewrite.kernel_key),
-                .provider_name = try arena.dupe(u8, rewrite.provider_name),
-            } },
-        };
-
-        return new_op;
+        op.params = .{ .custom_call = .{
+            .target_name = try arena.dupe(u8, kernel.dispatch_target_name),
+            .has_side_effect = has_side_effect,
+            .out_avals = out_avals,
+            .kernel_key = try arena.dupe(u8, decision_key),
+            .provider_name = try arena.dupe(u8, provider_name),
+        } };
     }
 };
 
 // Kernel Dump Helpers
 
-fn build_ops_str(allocator: std.mem.Allocator, desc: region_view.RegionView) ![]const u8 {
+fn build_ops_str(allocator: std.mem.Allocator, func: pr.Function) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     const w = &aw.writer;
-    for (desc.ops, 0..) |op, i| {
+    for (func.ops, 0..) |op, i| {
         if (i > 0) try w.writeByte('+');
         try w.writeAll(@tagName(op.prim()));
     }
     return try aw.toOwnedSlice();
 }
 
-fn build_shape_str(allocator: std.mem.Allocator, desc: region_view.RegionView) ![]const u8 {
+fn build_shape_str(allocator: std.mem.Allocator, func: pr.Function) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     const w = &aw.writer;
-    for (desc.inputs, 0..) |in_var, i| {
+    for (func.params, 0..) |in_var, i| {
         if (i > 0) try w.writeByte('x');
         try kernel.write_aval_signature(w, in_var.aval);
     }
@@ -379,15 +282,13 @@ fn build_shape_str(allocator: std.mem.Allocator, desc: region_view.RegionView) !
 
 fn dump_kernel_entries(out: *std.Io.Writer, entries: []const KernelEntry) !void {
     var compiled: usize = 0;
-    var dedup: usize = 0;
     var fallback: usize = 0;
     for (entries) |e| switch (e.outcome) {
         .compiled => compiled += 1,
-        .dedup => dedup += 1,
         .fallback => fallback += 1,
     };
-    try out.print("kernels: {d} compiled, {d} dedup, {d} fallback\n", .{ compiled, dedup, fallback });
-    try out.print("  {s:<50} {s:<10} {s:<30} {s:<50} {s}\n", .{ "region", "provider", "ops", "shapes", "outcome" });
+    try out.print("kernels: {d} compiled, {d} fallback\n", .{ compiled, fallback });
+    try out.print("  {s:<50} {s:<10} {s:<30} {s:<50} {s}\n", .{ "function", "provider", "ops", "shapes", "outcome" });
     try out.writeAll("  " ++ ("-" ** 150) ++ "\n");
     for (entries) |e| {
         try out.print("  {s:<50} {s:<10} {s:<30} {s:<50} {s}\n", .{
@@ -403,17 +304,53 @@ const test_device: device.Device = .{ .platform = .cpu };
 fn make_test_decision_key(
     allocator: std.mem.Allocator,
     provider_name: []const u8,
-    region_signature: []const u8,
+    func: pr.Function,
 ) !kernel.DecisionKey {
+    const function_fingerprint = try fingerprint.function(allocator, func);
     return try kernel.make_decision_key(
         allocator,
         provider_name,
         test_device,
-        .{ .bytes = region_signature },
+        function_fingerprint,
     );
 }
 
-test "kernelize pass rewrites profitable region from store" {
+fn outline_test_program(program: *pr.Program) !void {
+    var ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };
+    _ = try (OutlineCandidates{}).run(program, &ctx);
+}
+
+test "OutlineCandidates gives outer provider requests precedence" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+
+    const lhs = try builder.param_tensor(.f32, &.{2});
+    const rhs = try builder.param_tensor(.f32, &.{2});
+    try builder.push_region("outer", &.{kernel.provider_annotation("outer_provider")});
+    const sum = try builder.add(lhs, rhs);
+    try builder.push_region("inner", &.{kernel.provider_annotation("inner_provider")});
+    const product = try builder.multiply(sum, rhs);
+    try builder.pop_region();
+    try builder.pop_region();
+    try program.add_function(try builder.finish(&.{product}));
+
+    try outline_test_program(&program);
+
+    try testing.expectEqual(@as(usize, 2), program.functions.len);
+    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
+    try testing.expectEqualStrings(
+        "outer_provider",
+        (try kernel.requested_provider(program.functions[1])).?,
+    );
+    try testing.expectEqual(@as(usize, 1), program.functions[1].regions.len);
+    try testing.expect((try kernel.requested_provider(program.functions[1].regions[0])) == null);
+}
+
+test "kernelize pass rewrites a selected function call" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -430,10 +367,11 @@ test "kernelize pass rewrites profitable region from store" {
 
     const func = try b.finish(&.{y});
     try program.add_function(func);
+    try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
+    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
     defer testing.allocator.free(decision_key.bytes);
     try store.put_profitable(decision_key, "mock", .{
         .data = "stored_kernel_data",
@@ -455,9 +393,44 @@ test "kernelize pass rewrites profitable region from store" {
     try testing.expectEqualStrings(kernel.dispatch_target_name, rewritten.params.custom_call.target_name);
     try testing.expectEqualStrings(decision_key.bytes, rewritten.params.custom_call.kernel_key.?);
     try testing.expectEqualStrings("mock", rewritten.params.custom_call.provider_name.?);
+    try testing.expect(!rewritten.params.custom_call.has_side_effect);
 }
 
-test "kernelize pass skips negative decision" {
+test "kernelize pass preserves observable side effects" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var builder = try pr.FunctionBuilder.init(&program, "test");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{2});
+    try builder.push_region("effectful", &.{kernel.provider_annotation("mock")});
+    const outputs = try builder.custom_call_multi(.{
+        .target_name = "test.effectful",
+        .has_side_effect = true,
+        .out_avals = &.{input.aval},
+    }, &.{input});
+    try builder.pop_region();
+    try program.add_function(try builder.finish(outputs));
+    try outline_test_program(&program);
+
+    var store = kernel.KernelStore.init(testing.allocator);
+    defer store.deinit();
+    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
+    defer testing.allocator.free(decision_key.bytes);
+    try store.put_profitable(decision_key, "mock", .{ .data = "payload" }, .copy);
+
+    var kernelize = KernelizePass{ .store = &store, .device = test_device };
+    var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
+    _ = try kernelize.run(&program, &ctx);
+
+    const rewritten = program.functions[0].ops[0];
+    try testing.expectEqual(pr.Prim.custom_call, rewritten.prim());
+    try testing.expect(rewritten.params.custom_call.has_side_effect);
+}
+
+test "kernelize pass retains a declined function call" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -474,10 +447,11 @@ test "kernelize pass skips negative decision" {
 
     const func = try b.finish(&.{y});
     try program.add_function(func);
+    try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
+    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
     defer testing.allocator.free(decision_key.bytes);
     try store.put_negative(decision_key, "unsupported");
 
@@ -489,12 +463,12 @@ test "kernelize pass skips negative decision" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Region should be left unchanged (negative decision).
+    // The fallback remains a normal PR call.
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].ops[0].prim());
+    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
 
-test "kernelize pass skips absent key" {
+test "kernelize pass retains a call without a decision" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -511,8 +485,9 @@ test "kernelize pass skips absent key" {
 
     const func = try b.finish(&.{y});
     try program.add_function(func);
+    try outline_test_program(&program);
 
-    // An empty store leaves every region unchanged.
+    // An empty store leaves every call unchanged.
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
 
@@ -524,9 +499,9 @@ test "kernelize pass skips absent key" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Region should be left unchanged (absent key).
+    // The fallback remains a normal PR call.
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].ops[0].prim());
+    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
 
 test "kernelize pass does not reuse another provider decision" {
@@ -543,8 +518,9 @@ test "kernelize pass does not reuse another provider decision" {
     try builder.pop_region();
     const function = try builder.finish(&.{output});
     try program.add_function(function);
+    try outline_test_program(&program);
 
-    const other_key = try make_test_decision_key(testing.allocator, "other", "exp,f32[2]>f32[2]");
+    const other_key = try make_test_decision_key(testing.allocator, "other", program.functions[1]);
     defer testing.allocator.free(other_key.bytes);
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
@@ -559,10 +535,10 @@ test "kernelize pass does not reuse another provider decision" {
     var context = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
     _ = try kernelize.run(&program, &context);
 
-    try testing.expectEqual(pr.Prim.exp, program.functions[0].ops[0].prim());
+    try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
 
-test "kernelize pass rewrites multi-output region to custom_call" {
+test "kernelize pass rewrites a multi-output function call" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -581,17 +557,9 @@ test "kernelize pass rewrites multi-output region to custom_call" {
 
     const func = try b.finish(&.{ a, b_out });
     try program.add_function(func);
+    try outline_test_program(&program);
 
-    const desc = try region_view.describe(testing.allocator, func, func.regions[0]);
-    defer desc.deinit(testing.allocator);
-    const region_signature = try kernel.compute_region_signature(testing.allocator, desc);
-    defer testing.allocator.free(region_signature.bytes);
-    const decision_key = try kernel.make_decision_key(
-        testing.allocator,
-        "mock",
-        test_device,
-        region_signature,
-    );
+    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
     defer testing.allocator.free(decision_key.bytes);
 
     var store = kernel.KernelStore.init(testing.allocator);
@@ -618,7 +586,7 @@ test "kernelize pass rewrites multi-output region to custom_call" {
     try testing.expectEqual(@as(usize, 2), out_avals.len);
 }
 
-test "kernelize pass same-shape regions share store decision" {
+test "kernelize pass shares decisions for equal functions" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -627,7 +595,7 @@ test "kernelize pass same-shape regions share store decision" {
     var b = try pr.FunctionBuilder.init(&program, "main");
     defer b.deinit();
 
-    // Both regions have the same signature because their shapes and operations match.
+    // Both candidates have the same semantics.
     const x = try b.param_tensor(.f32, &.{2});
     const y = try b.param_tensor(.f32, &.{2});
 
@@ -641,10 +609,11 @@ test "kernelize pass same-shape regions share store decision" {
 
     const func = try b.finish(&.{ out_a, out_b });
     try program.add_function(func);
+    try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
+    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
     defer testing.allocator.free(decision_key.bytes);
     try store.put_profitable(decision_key, "mock", .{
         .data = "payload",
@@ -658,14 +627,14 @@ test "kernelize pass same-shape regions share store decision" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Both regions must have been rewritten to custom_call.
+    // Both calls use the shared decision.
     const ops = program.functions[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
     try testing.expectEqual(pr.Prim.custom_call, ops[1].prim());
 }
 
-test "kernelize pass different-shape regions need separate decisions" {
+test "kernelize pass separates functions with different shapes" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -688,10 +657,11 @@ test "kernelize pass different-shape regions need separate decisions" {
 
     const func = try b.finish(&.{ out_small, out_large });
     try program.add_function(func);
+    try outline_test_program(&program);
 
     var store = kernel.KernelStore.init(testing.allocator);
     defer store.deinit();
-    const decision_key = try make_test_decision_key(testing.allocator, "mock", "exp,f32[2]>f32[2]");
+    const decision_key = try make_test_decision_key(testing.allocator, "mock", program.functions[1]);
     defer testing.allocator.free(decision_key.bytes);
     try store.put_profitable(decision_key, "mock", .{
         .data = "payload",
@@ -705,9 +675,9 @@ test "kernelize pass different-shape regions need separate decisions" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Only region_small has a store decision, so region_large remains unchanged.
+    // Only region_small has a store decision, so region_large remains a call.
     const ops = program.functions[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
-    try testing.expectEqual(pr.Prim.exp, ops[1].prim());
+    try testing.expectEqual(pr.Prim.call, ops[1].prim());
 }

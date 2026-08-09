@@ -5,11 +5,9 @@
 //!
 //! Explicit outline requests are resolved by PR passes before lowering.
 //!
-//! TODO(kernel-provider): Move provider-region outlining into PR.
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
-const kernel = @import("../pr/kernel.zig");
 const mlir = @import("../c/mlir/mlir.zig");
 const MlirSession = @import("session.zig").Session;
 
@@ -115,8 +113,6 @@ pub fn lower_program_to_mlir(
 }
 
 /// Lower a single PR function into the MLIR module.
-///
-/// Annotated operations may be outlined into separate `func.func` operations.
 fn lower_function_into_module(
     arena: std.mem.Allocator,
     ctx: mlir.Context,
@@ -159,20 +155,7 @@ fn lower_function_into_module(
         .arena = arena,
     };
 
-    const region_map = try build_region_map(arena, func);
-
-    var outlined_index: usize = 0;
-    const outlined_prefix = if (sym_name.len == 0) "func" else sym_name;
-    for (func.ops, 0..) |op, op_idx| {
-        if (region_map[op_idx]) |region| {
-            const requests_kernel = (kernel.requested_provider(region) catch return error.InvalidProgram) != null;
-            if (requests_kernel) {
-                try lower_outlined_op(arena, &outlined_index, outlined_prefix, ctx, module, lower_ctx, op, region, lower_op_fn);
-                continue;
-            }
-        }
-        try lower_op_fn(lower_ctx, op);
-    }
+    for (func.ops) |op| try lower_op_fn(lower_ctx, op);
 
     const ret_values = try arena.alloc(mlir.Value, func.returns.len);
     for (func.returns, 0..) |ret_var, i| {
@@ -196,116 +179,7 @@ fn lower_function_into_module(
         .verify = false,
         .location = loc,
     });
-    if (kernel.requested_provider(func) catch return error.InvalidProgram) |provider|
-        func_op.set_attribute_by_name("zigrad.kernelize.provider", mlir.Attribute.string(ctx, provider));
     module.get_body().append_operation(func_op);
-}
-
-/// Builds a region lookup indexed by op position.
-///
-/// Entries are null when the op is outside every kernel-provider region.
-///
-/// TODO(mlir): Decide how program-level lowering represents nested functions and regions.
-fn build_region_map(arena: std.mem.Allocator, func: pr.Function) std.mem.Allocator.Error![]?pr.Region {
-    const map = try arena.alloc(?pr.Region, func.ops.len);
-    @memset(map, null);
-    for (func.regions) |region| {
-        for (region.op_ids) |op_id| {
-            const index = func.op_index_by_id(op_id) orelse continue;
-            if (index < map.len) map[index] = region;
-        }
-    }
-    return map;
-}
-
-fn lower_outlined_op(
-    arena: std.mem.Allocator,
-    outlined_index: *usize,
-    outlined_prefix: []const u8,
-    mlir_ctx: mlir.Context,
-    module: mlir.Module,
-    ctx: LowerContext,
-    op: *const pr.Op,
-    region: pr.Region,
-    lower_op_fn: LowerOpFn,
-) LowerError!void {
-    // TODO(mlir): Represent multi-operation PR regions as one outlined function.
-
-    // This outlining form accepts one input-bearing, single-result operation.
-    if (op.outputs.len != 1) return error.InvalidProgram;
-    if (op.inputs.len == 0) return error.InvalidProgram;
-
-    const out_var = op.result(0);
-    const out_tensor = out_var.aval.as_tensor();
-    const out_type = ctx.tensor_to_mlir_type(out_tensor);
-
-    const callee_name_z = try std.fmt.allocPrintSentinel(arena, "{s}_outlined_{d}", .{ outlined_prefix, outlined_index.* }, 0);
-    outlined_index.* += 1;
-
-    const callee_param_types = try arena.alloc(mlir.Type, op.inputs.len);
-    const callee_param_locs = try arena.alloc(mlir.Location, op.inputs.len);
-    for (op.inputs, 0..) |operand, i| {
-        const in_tensor = operand.value.aval.as_tensor();
-        callee_param_types[i] = ctx.tensor_to_mlir_type(in_tensor);
-        callee_param_locs[i] = ctx.loc;
-    }
-    const callee_result_types = &[_]mlir.Type{out_type};
-    const callee_fn_type = mlir.Type.function(mlir_ctx, callee_param_types, callee_result_types);
-
-    const callee_entry = try mlir.Block.init(callee_param_types, callee_param_locs);
-
-    const callee_value_map = try arena.alloc(?mlir.Value, ctx.value_map.len);
-    @memset(callee_value_map, null);
-    for (op.inputs, 0..) |operand, i| callee_value_map[operand.value.id] = callee_entry.argument(i);
-
-    const callee_ctx = LowerContext{
-        .mlir_ctx = mlir_ctx,
-        .block = callee_entry,
-        .loc = ctx.loc,
-        .value_map = callee_value_map,
-        .arena = arena,
-    };
-
-    try lower_op_fn(callee_ctx, op);
-
-    const callee_out = callee_value_map[out_var.id] orelse return error.InvalidProgram;
-    const callee_ret = mlir.Operation.make(mlir_ctx, "func.return", .{
-        .operands = &.{callee_out},
-        .verify = false,
-        .location = ctx.loc,
-    });
-    callee_entry.append_operation(callee_ret);
-
-    const callee_op = mlir.Operation.make(mlir_ctx, "func.func", .{
-        .results = &.{},
-        .blocks = &.{callee_entry},
-        .attributes = &.{
-            .{ "sym_name", mlir.Attribute.string(mlir_ctx, callee_name_z) },
-            .{ "function_type", mlir.Attribute.type_(callee_fn_type) },
-        },
-        .verify = false,
-        .location = ctx.loc,
-    });
-
-    if (kernel.requested_provider(region) catch return error.InvalidProgram) |provider| {
-        callee_op.set_attribute_by_name("zigrad.kernelize.provider", mlir.Attribute.string(mlir_ctx, provider));
-    }
-    module.get_body().append_operation(callee_op);
-
-    const call_operands = try arena.alloc(mlir.Value, op.inputs.len);
-    for (op.inputs, 0..) |operand, i| call_operands[i] = ctx.get_value(operand.value) orelse return error.InvalidProgram;
-
-    const call_op = mlir.Operation.make(mlir_ctx, "func.call", .{
-        .results = &.{out_type},
-        .operands = call_operands,
-        .attributes = &.{
-            .{ "callee", mlir.Attribute.symbol(mlir_ctx, callee_name_z) },
-        },
-        .verify = false,
-        .location = ctx.loc,
-    });
-    ctx.block.append_operation(call_op);
-    ctx.set_value(out_var, call_op.result(0));
 }
 
 /// Lower a `func.call` op. Uses the `func` dialect only.

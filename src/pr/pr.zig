@@ -656,6 +656,35 @@ pub const Program = struct {
     }
 };
 
+/// Return whether a function or one of its callees may have observable side effects.
+///
+/// Unknown callees and recursive call cycles are treated as effectful. PR primitives
+///  other than `custom_call` and `call` are pure.
+pub fn function_may_have_side_effects(program: *const Program, func: Function) bool {
+    return function_may_have_side_effects_impl(program, func, 0);
+}
+
+fn function_may_have_side_effects_impl(
+    program: *const Program,
+    func: Function,
+    call_depth: usize,
+) bool {
+    for (func.ops) |op| switch (op.params) {
+        .custom_call => |params| {
+            if (params.has_side_effect) return true;
+        },
+        .call => |params| {
+            if (call_depth >= program.functions.len) return true;
+            const callee = program.get_function(params.callee) orelse return true;
+            if (function_may_have_side_effects_impl(program, callee, call_depth + 1)) {
+                return true;
+            }
+        },
+        else => {},
+    };
+    return false;
+}
+
 /// Errors from post-construction validation (op registry checks, call
 ///  signature matching, duplicate function names).
 /// Each op type has its own `*TypeMismatch` variant for targeted diagnostics.
@@ -1555,4 +1584,41 @@ test "Var.replace_all_uses_with" {
     try std.testing.expect(x.is_unused());
     // y now has the uses that x had plus its original use
     try std.testing.expect(y.has_n_uses(3));
+}
+
+test function_may_have_side_effects {
+    const testing = std.testing;
+    var program = Program.init(testing.allocator);
+    defer program.deinit();
+
+    var pure_builder = try FunctionBuilder.init(&program, "pure");
+    defer pure_builder.deinit();
+    const pure_input = try pure_builder.param_tensor(.f32, &.{2});
+    try program.add_function(try pure_builder.finish(&.{pure_input}));
+
+    var effectful_builder = try FunctionBuilder.init(&program, "effectful");
+    defer effectful_builder.deinit();
+    const effectful_input = try effectful_builder.param_tensor(.f32, &.{2});
+    const effectful_outputs = try effectful_builder.custom_call_multi(.{
+        .target_name = "test.effectful",
+        .has_side_effect = true,
+        .out_avals = &.{effectful_input.aval},
+    }, &.{effectful_input});
+    try program.add_function(try effectful_builder.finish(effectful_outputs));
+
+    var caller_builder = try FunctionBuilder.init(&program, "caller");
+    defer caller_builder.deinit();
+    const caller_input = try caller_builder.param_tensor(.f32, &.{2});
+    const caller_outputs = try caller_builder.call("effectful", &.{caller_input});
+    try program.add_function(try caller_builder.finish(caller_outputs));
+
+    try testing.expect(!function_may_have_side_effects(&program, program.functions[0]));
+    try testing.expect(function_may_have_side_effects(&program, program.functions[1]));
+    try testing.expect(function_may_have_side_effects(&program, program.functions[2]));
+
+    program.functions[2].ops[0].params.call.callee = "caller";
+    try testing.expect(function_may_have_side_effects(&program, program.functions[2]));
+
+    program.functions[2].ops[0].params.call.callee = "missing";
+    try testing.expect(function_may_have_side_effects(&program, program.functions[2]));
 }

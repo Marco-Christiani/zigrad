@@ -562,6 +562,17 @@ pub fn run_kernel_provider_demo(
     var program = try build_kernelized_demo_program(allocator, provider_names);
     defer program.deinit();
 
+    var pipeline = zg.Pipeline.init(allocator);
+    defer pipeline.deinit();
+    try pipeline.add(zg.pr.Validate{});
+    if (outputs.pr) |selected| {
+        var config = selected;
+        config.entry_name = config.entry_name orelse outputs.entry_name;
+        try pipeline.add(zg.pr.dump.Dump{ .config = config });
+    }
+    try pipeline.add(zg.pr.kernelize.OutlineCandidates{});
+    _ = try pipeline.run(*zg.pr.Program, &program, ctx);
+
     var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{
         .device = execution_template.interface.device,
     });
@@ -576,14 +587,6 @@ pub fn run_kernel_provider_demo(
         null;
     defer if (report) |*value| value.deinit();
 
-    var pipeline = zg.Pipeline.init(allocator);
-    defer pipeline.deinit();
-    try pipeline.add(zg.pr.Validate{});
-    if (outputs.pr) |selected| {
-        var config = selected;
-        config.entry_name = config.entry_name orelse outputs.entry_name;
-        try pipeline.add(zg.pr.dump.Dump{ .config = config });
-    }
     var kernelize = zg.pr.kernelize.KernelizePass{
         .store = &tune_result.store,
         .device = execution_template.interface.device,

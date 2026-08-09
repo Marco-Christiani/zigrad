@@ -9,7 +9,9 @@ const std = @import("std");
 
 const compilation = @import("../../compilation.zig");
 const pr = @import("../../pr/pr.zig");
+const fingerprint = @import("../../pr/fingerprint.zig");
 const kernel = @import("../../pr/kernel.zig");
+const kernelize = @import("../../pr/kernelize.zig");
 const outline = @import("../../pr/outline.zig");
 const mlir = @import("../../c/mlir/mlir.zig");
 const stablehlo = @import("../../c/mlir/dialects/stablehlo.zig");
@@ -521,6 +523,11 @@ pub fn lower(
 
 // Tests.
 
+fn outline_kernel_requests_for_test(program: *pr.Program) !void {
+    var ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };
+    _ = try (kernelize.OutlineCandidates{}).run(program, &ctx);
+}
+
 test "lowering produces verified bytecode" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
@@ -649,14 +656,15 @@ test "lowering supports multi-output custom_call" {
 
     const func = try b.finish(&.{ ex, lg });
     try program.add_function(func);
+    try outline_kernel_requests_for_test(&program);
 
-    const kernelize = @import("../../pr/kernelize.zig");
     const selected_device = @import("../../device.zig").Device{ .platform = .cpu };
+    const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
     const decision_key = try kernel.make_decision_key(
         testing.allocator,
         "mock",
         selected_device,
-        .{ .bytes = "exp,f32[2]>f32[2];log,f32[2]>f32[2]" },
+        function_fingerprint,
     );
     defer testing.allocator.free(decision_key.bytes);
 
@@ -731,28 +739,6 @@ test "lowering can outline via region annotation" {
     try std.testing.expect(std.mem.indexOf(u8, text, "llvm.noinline") == null);
 }
 
-test "lowering tags kernelize provider on outlined functions" {
-    var program = pr.Program.init(std.testing.allocator);
-    defer program.deinit();
-
-    var b = try pr.FunctionBuilder.init(&program, "main");
-    defer b.deinit();
-
-    const a = try b.param_tensor(.f32, &.{ 2, 3 });
-    const c = try b.param_tensor(.f32, &.{ 3, 2 });
-    try b.push_region("tvm-kernel", &.{kernel.provider_annotation("tvm")});
-    const d = try b.dot(a, c);
-    try b.pop_region();
-    const func = try b.finish(&.{d});
-    try program.add_function(func);
-
-    const text = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_text);
-    defer std.testing.allocator.free(text);
-
-    try std.testing.expect(std.mem.indexOf(u8, text, "zigrad.kernelize.provider") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "tvm") != null);
-}
-
 test "lower operation outlines kernelize-annotated region" {
     const testing = std.testing;
 
@@ -774,6 +760,7 @@ test "lower operation outlines kernelize-annotated region" {
 
     const func = try b.finish(&.{out});
     try program.add_function(func);
+    try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
     defer artifact.deinit(testing.allocator);
@@ -803,6 +790,7 @@ test "lower operation outlines dot-add kernelize region" {
 
     const func = try b.finish(&.{out});
     try program.add_function(func);
+    try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
     defer artifact.deinit(testing.allocator);
@@ -831,12 +819,11 @@ test "lower operation outlines dot-log kernelize region" {
 
     const func = try b.finish(&.{out});
     try program.add_function(func);
+    try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
     defer artifact.deinit(testing.allocator);
 
-    // The outlined function carries the provider attribute.
-    try testing.expect(std.mem.indexOf(u8, artifact.bytes, "zigrad.kernelize.provider") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.bytes, "main_outlined_0") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.bytes, "stablehlo.dot_general") != null);
     try testing.expect(std.mem.indexOf(u8, artifact.bytes, "stablehlo.log") != null);
@@ -863,6 +850,7 @@ test "lower operation outlines near-miss kernelize region" {
 
     const func = try b.finish(&.{out});
     try program.add_function(func);
+    try outline_kernel_requests_for_test(&program);
 
     var artifact = try lower(testing.allocator, &program, null, .text);
     defer artifact.deinit(testing.allocator);

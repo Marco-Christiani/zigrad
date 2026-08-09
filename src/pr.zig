@@ -43,6 +43,7 @@ pub const Region = core.Region;
 pub const Function = core.Function;
 pub const RegionIterator = core.RegionIterator;
 pub const Program = core.Program;
+pub const function_may_have_side_effects = core.function_may_have_side_effects;
 
 pub const ValidationError = core.ValidationError;
 pub const validate_ops_in_func = core.validate_ops_in_func;
