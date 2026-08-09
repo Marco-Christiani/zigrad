@@ -12,6 +12,7 @@
   src,
   sourceSubdir ? ".",
   zigradSrc,
+  usePackagedZigrad ? false,
 }: let
   externalInputs = configuration.externalInputs;
   runtimeInputs = externalInputs.runtime;
@@ -72,9 +73,19 @@ in
       cp -a ${zigDeps}/. "$ZG_ZIG_SYSTEM_PACKAGES/"
       chmod u+w "$ZG_ZIG_SYSTEM_PACKAGES"
 
-      zigrad_package_name="$(zig fetch ${zigradSrc})"
-      test -n "$zigrad_package_name"
-      ln -s ${zigradSrc} "$ZG_ZIG_SYSTEM_PACKAGES/$zigrad_package_name"
+      ${
+        if usePackagedZigrad
+        then ''
+          sed -i \
+            '/^[[:space:]]*\.zigrad = \.{[[:space:]]*$/,/^[[:space:]]*},[[:space:]]*$/c\        .zigrad = .{ .path = "../.." },' \
+            ${lib.escapeShellArg sourceSubdir}/build.zig.zon
+        ''
+        else ''
+          zigrad_package_name="$(zig fetch ${zigradSrc})"
+          test -n "$zigrad_package_name"
+          ln -s ${zigradSrc} "$ZG_ZIG_SYSTEM_PACKAGES/$zigrad_package_name"
+        ''
+      }
       runHook postConfigure
     '';
 

@@ -10,6 +10,46 @@
     zigradIreeCpu = config.packages.zigrad-iree-cpu;
     zigradTvmCpu = config.packages.zigrad-tvm-cpu;
     zigradDevCuda = config.packages.zigrad-dev-cuda;
+    benchmarkExample = config.packages.zigrad-example-benchmark;
+    mnistExample = config.packages.zigrad-example-mnist;
+    mlirCppExample = config.packages.zigrad-example-mlir-cpp;
+
+    mkExampleCheck = {
+      name,
+      command,
+    }:
+      pkgs.runCommand name {} ''
+        set -euo pipefail
+        export HOME="$TMPDIR"
+        export ZG_CACHE_DIR="$TMPDIR/zigrad-cache"
+
+        ${command} >"$TMPDIR/stdout.txt" 2>"$TMPDIR/stderr.txt"
+
+        mkdir -p "$out"
+        cp "$TMPDIR/stdout.txt" "$out/stdout.txt"
+        cp "$TMPDIR/stderr.txt" "$out/stderr.txt"
+      '';
+
+    checkBenchmarkExample = mkExampleCheck {
+      name = "check-zigrad-example-benchmark";
+      command = ''
+        ${benchmarkExample}/bin/benchmark \
+          --shapes=2x3x4 \
+          --impls=zig_naive \
+          --warmup=0 \
+          --iters=1
+      '';
+    };
+
+    checkMnistPjrtExample = mkExampleCheck {
+      name = "check-zigrad-example-mnist-pjrt";
+      command = "${mnistExample}/bin/mnist --steps=1 --backend=pjrt";
+    };
+
+    checkMnistIreeExample = mkExampleCheck {
+      name = "check-zigrad-example-mnist-iree";
+      command = "${mnistExample}/bin/mnist --steps=1 --backend=iree";
+    };
 
     zigradTests = zigrad.override {
       optimize = "ReleaseSafe";
@@ -87,6 +127,10 @@
       zigrad-autodoc = config.packages.zigrad-autodoc;
       zigrad-unit-tests = zigradTests;
       zigrad-build-configurations = config.packages.zigrad-build-configurations;
+      zigrad-example-benchmark = checkBenchmarkExample;
+      zigrad-example-mlir-cpp = mlirCppExample;
+      zigrad-example-mnist-pjrt = checkMnistPjrtExample;
+      zigrad-example-mnist-iree = checkMnistIreeExample;
     };
 
     packages = {

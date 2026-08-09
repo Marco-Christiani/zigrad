@@ -11,6 +11,10 @@
   }: let
     inherit (pkgs) lib;
     fs = lib.fileset;
+    zigradSrc = import ../helpers/source-filter.nix {
+      inherit lib;
+      root = repoRoot;
+    };
     zigExampleSrc = name:
       fs.toSource {
         root = repoRoot;
@@ -34,7 +38,8 @@
         pname = "zigrad-example-${name}";
         src = zigExampleSrc name;
         sourceSubdir = "examples/${name}";
-        zigradSrc = repoRoot;
+        usePackagedZigrad = true;
+        inherit zigradSrc;
       };
     benchmark = mkZigExample {
       name = "benchmark";
