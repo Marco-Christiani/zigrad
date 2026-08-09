@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zigrad = .{
-            .url = "git+https://github.com/Marco-Christiani/zigrad#619049ca1f70b296d262dfe2542ccf4bd0ac6de9",
+            .url = "git+https://github.com/Marco-Christiani/zigrad#6e5ad1835dba8c41c179eebc3d7727310a8b0ad4",
             .hash = "zigrad-0.0.0-2nFY3EPUHACrsY1X-4zCewNUrwaF4Svium_Sf8qcVpDA",
         },
     },

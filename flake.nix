@@ -129,6 +129,10 @@
         lib = import ./nix/lib/consumer.nix {
           zigradSrc = ./.;
         };
+        templates.mnist = {
+          path = ./examples/mnist;
+          description = "Zigrad MNIST application with interchangeable CPU backends";
+        };
       };
 
       imports = [
