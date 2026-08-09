@@ -7,7 +7,6 @@ const dispatch_mod = @import("dispatch.zig");
 const artifact_mod = @import("artifact.zig");
 const config = @import("config.zig");
 const mirage = @import("../c/mirage/api.zig");
-const mlir_types = @import("mlir.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 
 const log = std.log.scoped(.@"zg/mirage_provider");
@@ -81,124 +80,6 @@ pub const MirageProvider = struct {
             allocator,
             graph,
         );
-    }
-
-    /// Compile one MLIR pattern descriptor for the selected CUDA device.
-    pub fn compile_mlir(
-        desc: mlir_types.MlirKernelDescriptor,
-        selected_device: device.Device,
-        allocator: std.mem.Allocator,
-    ) kernel.CompileError!kernel.Artifact {
-        if (!selected_device.platform.eql(.cuda)) return error.Unsupported;
-        if (desc.outputs.len != 1) return error.Unsupported;
-
-        const required_inputs: usize = switch (desc.pattern) {
-            .dot, .dot_general, .dot_log, .dot_exp => 2,
-            .dot_add, .dot_add_mul => 3,
-            .rms_norm => 1,
-            .rms_norm_matmul => 2,
-            .softmax_matmul => 2,
-            .attention => 3,
-        };
-        if (desc.inputs.len != required_inputs) return error.Unsupported;
-
-        log.debug("compile_mlir '{s}' pattern={s} inputs:", .{ desc.name, @tagName(desc.pattern) });
-        for (desc.inputs, 0..) |input_desc, i| {
-            log.debug("  in{d}: {s}{any}", .{ i, @tagName(input_desc.dtype), input_desc.dims });
-        }
-
-        const graph = mirage.Graph.init() catch |err| return map_mirage_api_error(err);
-        defer graph.deinit();
-
-        var handles = try std.ArrayList(mirage.Tensor).initCapacity(allocator, desc.inputs.len);
-        defer handles.deinit(allocator);
-
-        for (desc.inputs) |input_desc| {
-            const handle = try emit_graph_input(graph, input_desc);
-            try handles.append(allocator, handle);
-        }
-
-        const out_tensor = build_mirage_graph(graph, desc.pattern, handles.items, desc) catch |err| {
-            log.err("graph construction failed for '{s}' (pattern={s}): {s}", .{
-                desc.name, @tagName(desc.pattern), @errorName(err),
-            });
-            return err;
-        };
-
-        graph.mark_output(out_tensor) catch |err| return map_mirage_api_error(err);
-
-        return try optimize_and_transpile(
-            desc.name,
-            selected_device,
-            allocator,
-            graph,
-        );
-    }
-
-    /// Build the Mirage graph for a given kernel pattern.
-    ///
-    /// Translates the pattern-specific op sequence into Mirage graph ops.
-    /// Returns `Unsupported` if Mirage rejects the tensor shapes (e.g.
-    ///  non-canonical matmul layout).
-    ///
-    /// Callers can fall back to baseline lowering.
-    fn build_mirage_graph(
-        graph: *mirage.Graph,
-        pattern: mlir_types.MlirKernelPattern,
-        input_handles: []const mirage.Tensor,
-        desc: mlir_types.MlirKernelDescriptor,
-    ) kernel.CompileError!mirage.Tensor {
-        switch (pattern) {
-            .dot, .dot_general => {
-                return try emit_matmul(graph, input_handles[0], input_handles[1]);
-            },
-            .dot_add => {
-                const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                return try emit_binary(graph, .add, dot, input_handles[2]);
-            },
-            .dot_add_mul => {
-                const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                const sum = try emit_binary(graph, .add, dot, input_handles[2]);
-                return try emit_binary(graph, .mul, sum, input_handles[2]);
-            },
-            .dot_log => {
-                const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                return try emit_unary(graph, .log, dot);
-            },
-            .dot_exp => {
-                const dot = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                return try emit_unary(graph, .exp, dot);
-            },
-            .rms_norm => {
-                return graph.rms_norm(input_handles[0], desc.normalized_size) catch |err|
-                    return map_mirage_api_error(err);
-            },
-            .rms_norm_matmul => {
-                const rms_result = graph.rms_norm(input_handles[0], desc.normalized_size) catch |err|
-                    return map_mirage_api_error(err);
-                return try emit_matmul(graph, rms_result, input_handles[1]);
-            },
-            .softmax_matmul => {
-                const exp_result = try emit_unary(graph, .exp, input_handles[0]);
-                const sum_result = graph.reduction(exp_result, desc.reduction_dim, desc.reduction_factor) catch |err|
-                    return map_mirage_api_error(err);
-                const attn_probs = try emit_binary(graph, .div, exp_result, sum_result);
-                return try emit_matmul(graph, attn_probs, input_handles[1]);
-            },
-            .attention => {
-                // Mirage graph omits scaling because the superoptimizer works on
-                //  the structural pattern.
-                //
-                // The expand pass reconstructs the scaled chain when Mirage
-                //  returns Unsupported.
-                const scores = try emit_matmul(graph, input_handles[0], input_handles[1]);
-                const exp_result = try emit_unary(graph, .exp, scores);
-                const sum_result = graph.reduction(exp_result, desc.reduction_dim, desc.reduction_factor) catch |err|
-                    return map_mirage_api_error(err);
-                const attn_probs = try emit_binary(graph, .div, exp_result, sum_result);
-                return try emit_matmul(graph, attn_probs, input_handles[2]);
-            },
-        }
     }
 
     /// Optimize the graph and transpile the selected graph to CUDA source.
@@ -313,36 +194,6 @@ pub const MirageProvider = struct {
         };
     }
 };
-
-fn emit_graph_input(
-    graph: *mirage.Graph,
-    input_desc: mlir_types.MlirTensorDesc,
-) kernel.CompileError!mirage.Tensor {
-    const dtype = dtype_to_mirage(input_desc.dtype) orelse {
-        log.debug("unsupported dtype for mirage input: {s}", .{@tagName(input_desc.dtype)});
-        return error.Unsupported;
-    };
-    if (input_desc.dims.len == 0 or input_desc.dims.len > mirage.max_rank)
-        return error.Unsupported;
-
-    var dims: [mirage.max_rank]i64 = .{ 0, 0, 0, 0 };
-    for (input_desc.dims, 0..) |dim, idx| {
-        if (dim == 0 or dim > std.math.maxInt(i64)) return error.Unsupported;
-        dims[idx] = @intCast(dim);
-    }
-
-    const spec = mirage.TensorSpec{
-        .dtype = dtype,
-        .dims = dims[0..input_desc.dims.len],
-    };
-
-    return graph.new_input(&spec) catch |err| {
-        log.debug("mirage graph.new_input rejected ({s} rank={d}): {s}", .{
-            @tagName(dtype), input_desc.dims.len, @errorName(err),
-        });
-        return map_mirage_api_error(err);
-    };
-}
 
 fn lower_region_graph(
     desc: region_view.RegionView,
