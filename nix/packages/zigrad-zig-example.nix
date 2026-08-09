@@ -6,23 +6,28 @@
   makeWrapper,
   stdenvNoCC,
   zig,
-  exampleName,
+  configuration,
   mainProgram,
-  profile,
+  pname,
   src,
+  sourceSubdir ? ".",
+  zigradSrc,
 }: let
-  externalInputs = profile.externalInputs.combined;
+  externalInputs = configuration.externalInputs;
   runtimeInputs = externalInputs.runtime;
-  runtimePolicy = profile.runtimeEnvPolicy;
+  runtimePolicy = configuration.configuration.runtimeEnvPolicy;
   runtimeLibraryPaths = [
     "${runtimeInputs}/lib"
     "${runtimeInputs}/runtime/sys/lib"
   ];
   runtimeLibraryPath = lib.concatStringsSep ":" runtimeLibraryPaths;
-  needsCudaDriverRunpath = lib.elem "cuda-driver" profile.resolved;
+  needsCudaDriverRunpath = lib.elem "cuda-driver" configuration.configuration.resolved;
   zigDeps = callPackage ./zig-dependencies.nix {
-    withPjrt = true;
+    withPjrt =
+      lib.elem "pjrt-cpu" configuration.configuration.resolved
+      || lib.elem "pjrt-cuda" configuration.configuration.resolved;
   };
+  zigFeatureArgs = lib.escapeShellArgs configuration.configuration.zigFeatureArgs;
   runtimeWrapperArgs = lib.concatStringsSep " \\\n" (
     (lib.mapAttrsToList (
         name: value: "--set ${lib.escapeShellArg name} ${lib.escapeShellArg (toString value)}"
@@ -40,7 +45,7 @@
   );
 in
   stdenvNoCC.mkDerivation {
-    pname = "zigrad-example-${exampleName}";
+    inherit pname;
     version = "dev";
 
     inherit src;
@@ -61,30 +66,43 @@ in
     configurePhase = ''
       runHook preConfigure
       export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+
+      export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
+      mkdir -p "$ZG_ZIG_SYSTEM_PACKAGES"
+      cp -a ${zigDeps}/. "$ZG_ZIG_SYSTEM_PACKAGES/"
+      chmod u+w "$ZG_ZIG_SYSTEM_PACKAGES"
+
+      zigrad_package_name="$(zig fetch ${zigradSrc})"
+      test -n "$zigrad_package_name"
+      ln -s ${zigradSrc} "$ZG_ZIG_SYSTEM_PACKAGES/$zigrad_package_name"
       runHook postConfigure
     '';
 
     buildPhase = ''
       runHook preBuild
-      cd "examples/${exampleName}"
+      export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
+      cd ${lib.escapeShellArg sourceSubdir}
       TERM=dumb zig build \
         -j"$NIX_BUILD_CORES" \
         -Doptimize=ReleaseFast \
         -Dsdk=${externalInputs} \
         -Dtarget=native-native-gnu \
-        --system ${zigDeps} \
+        ${zigFeatureArgs} \
+        --system "$ZG_ZIG_SYSTEM_PACKAGES" \
         --verbose
       runHook postBuild
     '';
 
     installPhase = ''
       runHook preInstall
+      export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
       TERM=dumb zig build install \
         -j"$NIX_BUILD_CORES" \
         -Doptimize=ReleaseFast \
         -Dsdk=${externalInputs} \
         -Dtarget=native-native-gnu \
-        --system ${zigDeps} \
+        ${zigFeatureArgs} \
+        --system "$ZG_ZIG_SYSTEM_PACKAGES" \
         --prefix "$out" \
         --verbose
       runHook postInstall
@@ -100,7 +118,7 @@ in
       '';
 
     meta = {
-      description = "Zigrad ${exampleName} example";
+      description = "Zigrad application ${pname}";
       license = lib.licenses.asl20;
       inherit mainProgram;
       platforms = lib.platforms.linux;

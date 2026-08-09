@@ -124,6 +124,13 @@
         "aarch64-linux"
       ];
 
+      flake = {
+        overlays.default = zigOverlay;
+        lib = import ./nix/lib/consumer.nix {
+          zigradSrc = ./.;
+        };
+      };
+
       imports = [
         ./nix/flake/integrations.nix
         ./nix/flake/examples.nix

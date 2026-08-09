@@ -253,6 +253,14 @@
       description = "Zigrad with the current IREE CPU compile and execute path";
     };
 
+    xla-iree-cpu = {
+      demands = [
+        "iree-cpu-execution"
+        "xla-cpu-execution"
+      ];
+      description = "Zigrad with interchangeable XLA and IREE CPU execution paths";
+    };
+
     tvm-cpu = {
       demands = ["tvm-cpu"];
       description = "Zigrad with standalone TVM CPU tuning and execution";
@@ -295,16 +303,6 @@
       ];
       description = "Broad CUDA development build with TVM Python bindings";
       expose = false;
-    };
-
-    example-mnist = {
-      demands = [
-        "iree-cpu-execution"
-        "xla-cuda-execution"
-      ];
-      description = "Dependencies for the MNIST example";
-      expose = false;
-      packageName = "zigrad-example-mnist-dependencies";
     };
 
     example-benchmark = {

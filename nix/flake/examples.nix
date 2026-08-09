@@ -29,9 +29,12 @@
       profile,
     }:
       pkgs.callPackage ../packages/zigrad-zig-example.nix {
-        exampleName = name;
-        inherit mainProgram profile;
+        configuration = profile.package;
+        inherit mainProgram;
+        pname = "zigrad-example-${name}";
         src = zigExampleSrc name;
+        sourceSubdir = "examples/${name}";
+        zigradSrc = repoRoot;
       };
     benchmark = mkZigExample {
       name = "benchmark";
@@ -41,7 +44,7 @@
     mnist = mkZigExample {
       name = "mnist";
       mainProgram = "mnist";
-      profile = zigradBuildConfigurations.example-mnist;
+      profile = zigradBuildConfigurations.xla-iree-cpu;
     };
     mlirCpp = pkgs.callPackage ../packages/zigrad-mlir-cpp-example.nix {
       xlaMlirStablehloCapiSdk = config.packages.xla-mlir-stablehlo-capi-sdk;

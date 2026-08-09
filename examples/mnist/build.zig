@@ -4,6 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_pjrt = b.option(bool, "pjrt", "Enable PJRT backend support") orelse true;
+    const use_mlir = b.option(bool, "mlir", "Enable MLIR/StableHLO lowering") orelse true;
+    const use_tvm = b.option(bool, "tvm", "Enable the TVM kernel provider") orelse false;
+    const use_mirage = b.option(bool, "mirage", "Enable the Mirage kernel provider") orelse false;
+    const use_iree = b.option(bool, "iree", "Enable the IREE integration") orelse true;
+    const use_nvrtc = b.option(bool, "nvrtc", "Enable NVRTC support") orelse false;
+    const use_cuda_runtime = b.option(bool, "cuda-runtime", "Add CUDA runtime bundle paths") orelse false;
+
     const sdk_root = b.option([]const u8, "sdk", "Path to Zigrad external SDK root") orelse
         b.graph.environ_map.get("ZG_EXTERNAL_SDK_ROOT") orelse
         std.debug.panic("MNIST requires -Dsdk or ZG_EXTERNAL_SDK_ROOT", .{});
@@ -13,9 +21,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .sdk = sdk_abs,
-        .pjrt = true,
-        .mlir = true,
-        .iree = true,
+        .pjrt = use_pjrt,
+        .mlir = use_mlir,
+        .tvm = use_tvm,
+        .mirage = use_mirage,
+        .iree = use_iree,
+        .nvrtc = use_nvrtc,
+        .@"cuda-runtime" = use_cuda_runtime,
     });
     const zigrad_mod = zigrad_dep.module("zigrad");
 

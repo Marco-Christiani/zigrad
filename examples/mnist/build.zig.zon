@@ -4,7 +4,10 @@
     .fingerprint = 0x6805ab6e862a6940,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zigrad = .{ .path = "../.." },
+        .zigrad = .{
+            .url = "git+https://github.com/Marco-Christiani/zigrad#619049ca1f70b296d262dfe2542ccf4bd0ac6de9",
+            .hash = "zigrad-0.0.0-2nFY3EPUHACrsY1X-4zCewNUrwaF4Svium_Sf8qcVpDA",
+        },
     },
     .paths = .{
         "build.zig",
