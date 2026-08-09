@@ -44,7 +44,7 @@ pub fn run(
         output_config.entry_name = output_config.entry_name orelse "main";
         try pipeline.add(zg.pr.dump.Dump{ .config = output_config });
     }
-    try pipeline.add(zg.pr.outline.Pass{});
+    try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
             .entry_name = "main",

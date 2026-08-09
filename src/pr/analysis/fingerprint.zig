@@ -1,8 +1,8 @@
 //! Canonical semantic fingerprints for callable PR functions.
 
 const std = @import("std");
-const pr = @import("pr.zig");
-const serialize = @import("serialize.zig");
+const pr = @import("../pr.zig");
+const serialize = @import("../serialize.zig");
 
 const Allocator = std.mem.Allocator;
 const Blake3 = std.crypto.hash.Blake3;

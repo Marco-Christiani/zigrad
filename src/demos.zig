@@ -545,7 +545,7 @@ pub fn run_kernel_provider_demo(
     }
     defer if (zg.build_options.has_mirage and has_mirage) mirage_dispatch.deinit();
 
-    var providers_buf: [2]zg.pr.kernel.KernelProvider = undefined;
+    var providers_buf: [2]zg.kernel.KernelProvider = undefined;
     var n_providers: usize = 0;
     for (provider_kinds) |kind| switch (kind) {
         .tvm => if (zg.build_options.has_tvm and has_tvm) {
@@ -574,7 +574,7 @@ pub fn run_kernel_provider_demo(
         config.entry_name = config.entry_name orelse outputs.entry_name;
         try pipeline.add(zg.pr.dump.Dump{ .config = config });
     }
-    try pipeline.add(zg.pr.kernelize.OutlineCandidates{});
+    try pipeline.add(zg.pr.transform.kernelize.OutlineCandidates{});
     _ = try pipeline.run(*zg.pr.Program, &program, ctx);
 
     var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{
@@ -585,26 +585,26 @@ pub fn run_kernel_provider_demo(
         .device = execution_template.interface.device,
     });
 
-    var report: ?zg.pr.kernelize.Report = if (outputs.kernels != null)
+    var report: ?zg.pr.transform.kernelize.Report = if (outputs.kernels != null)
         .init(allocator)
     else
         null;
     defer if (report) |*value| value.deinit();
 
-    var kernelize = zg.pr.kernelize.KernelizePass{
+    var kernelize = zg.pr.transform.kernelize.KernelizePass{
         .store = &tune_result.store,
         .device = execution_template.interface.device,
         .report = if (report) |*value| value else null,
     };
     try pipeline.add(&kernelize);
     if (report) |*value| {
-        try pipeline.add(zg.pr.kernelize.DumpKernels{
+        try pipeline.add(zg.pr.transform.kernelize.DumpKernels{
             .report = value,
             .target = outputs.kernels.?,
         });
     }
 
-    try pipeline.add(zg.pr.outline.Pass{});
+    try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
             .entry_name = outputs.entry_name,
@@ -813,13 +813,13 @@ pub fn print_tvm_kernelize_pr(
 
     const pre = try c.add(d);
 
-    try builder.push_region("tvm_matmul", &.{zg.pr.kernel.provider_annotation("tvm")});
+    try builder.push_region("tvm_matmul", &.{zg.kernel.provider_annotation("tvm")});
     const dot = try a.matmul(b_t);
     try builder.pop_region();
 
     try builder.push_region("tvm_fused", &.{
-        zg.pr.kernel.provider_annotation("tvm"),
-        zg.pr.outline.annotation,
+        zg.kernel.provider_annotation("tvm"),
+        zg.pr.transform.outline.annotation,
     });
     const sum = try dot.add(pre);
     const mul = try sum.mul(c);
@@ -886,13 +886,13 @@ fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: [
 
     // Region names share the program lifetime of their function references.
     const first_name = try std.fmt.allocPrint(b.alloc(), "{s}_region_0", .{provider_names[0]});
-    try b.push_region(first_name, &.{zg.pr.kernel.provider_annotation(provider_names[0])});
+    try b.push_region(first_name, &.{zg.kernel.provider_annotation(provider_names[0])});
     var acc_id = try b.dot(a_id, b_id);
     try b.pop_region();
 
     for (provider_names[1..], 1..) |pname, i| {
         const rn = try std.fmt.allocPrint(b.alloc(), "{s}_region_{d}", .{ pname, i });
-        try b.push_region(rn, &.{zg.pr.kernel.provider_annotation(pname)});
+        try b.push_region(rn, &.{zg.kernel.provider_annotation(pname)});
         const dot_id = try b.dot(a_id, b_id);
         try b.pop_region();
         acc_id = try b.add(acc_id, dot_id);
@@ -1010,7 +1010,7 @@ pub fn print_tvm_attention_pr(
     const v = try Tensor.param(&builder, .f32, &.{ batch, seq, head_dim });
 
     // The annotation presents the complete attention block to TVM.
-    try builder.push_region("attention", &.{zg.pr.kernel.provider_annotation("tvm")});
+    try builder.push_region("attention", &.{zg.kernel.provider_annotation("tvm")});
 
     // Contracting the head dimension produces [batch, query, key] scores.
     const scores = try q.dot_general(k, .{

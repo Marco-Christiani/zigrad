@@ -43,7 +43,6 @@ pub const Region = core.Region;
 pub const Function = core.Function;
 pub const RegionIterator = core.RegionIterator;
 pub const Program = core.Program;
-pub const function_may_have_side_effects = core.function_may_have_side_effects;
 
 pub const ValidationError = core.ValidationError;
 pub const validate_ops_in_func = core.validate_ops_in_func;
@@ -70,11 +69,12 @@ pub const tool = @import("pr/tool.zig");
 pub const zxpr = @import("pr/zxpr.zig");
 pub const dump = @import("pr/dump.zig");
 pub const ops = @import("pr/ops/ops.zig");
-pub const region_view = @import("pr/region_view.zig");
-pub const outline = @import("pr/outline.zig");
-pub const fingerprint = @import("pr/fingerprint.zig");
-pub const kernel = @import("pr/kernel.zig");
-pub const kernelize = @import("pr/kernelize.zig");
+pub const analysis = @import("pr/analysis.zig");
+
+pub const transform = struct {
+    pub const kernelize = @import("pr/transform/kernelize.zig");
+    pub const outline = @import("pr/transform/outline.zig");
+};
 
 test {
     @import("std").testing.refAllDecls(@This());

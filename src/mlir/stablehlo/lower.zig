@@ -9,9 +9,9 @@ const std = @import("std");
 
 const compilation = @import("../../compilation.zig");
 const pr = @import("../../pr/pr.zig");
-const fingerprint = @import("../../pr/fingerprint.zig");
-const kernelize = @import("../../pr/kernelize.zig");
-const outline = @import("../../pr/outline.zig");
+const fingerprint = @import("../../pr/analysis/fingerprint.zig");
+const kernelize = @import("../../pr/transform/kernelize.zig");
+const outline = @import("../../pr/transform/outline.zig");
 const mlir = @import("../../c/mlir/mlir.zig");
 const stablehlo = @import("../../c/mlir/dialects/stablehlo.zig");
 const MlirSession = @import("../session.zig").Session;
@@ -524,7 +524,7 @@ pub fn lower(
 
 // Tests.
 
-const kernel_test = @import("../../pr/kernel.zig");
+const kernel_test = @import("../../kernel.zig");
 
 fn outline_kernel_requests_for_test(program: *pr.Program) !void {
     var ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };

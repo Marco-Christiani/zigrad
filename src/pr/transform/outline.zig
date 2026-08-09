@@ -1,8 +1,8 @@
 //! PR region outlining.
 const std = @import("std");
-const compilation = @import("../compilation.zig");
-const pr = @import("pr.zig");
-const region_view = @import("region_view.zig");
+const compilation = @import("../../compilation.zig");
+const pr = @import("../pr.zig");
+const region_view = @import("../analysis/region_view.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -544,7 +544,7 @@ test "apply outlines a nested region and preserves surrounding regions" {
 }
 
 test "Pass consumes outline and transfers independent annotations" {
-    const kernel = @import("kernel.zig");
+    const kernel = @import("../../kernel.zig");
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);

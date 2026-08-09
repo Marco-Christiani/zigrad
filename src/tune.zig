@@ -19,9 +19,9 @@
 //! ```
 const std = @import("std");
 const device = @import("device.zig");
-const fingerprint = @import("pr/fingerprint.zig");
+const fingerprint = @import("pr/analysis/fingerprint.zig");
 const pr = @import("pr/pr.zig");
-const kernel = @import("pr/kernel.zig");
+const kernel = @import("kernel.zig");
 
 const log = std.log.scoped(.@"zg/tune");
 
@@ -49,7 +49,8 @@ pub const TuneResult = struct {
 /// Tune a program: walk all functions for provider requests, invoke
 /// providers, and record decisions in the returned store.
 ///
-/// Provider regions must first pass through `pr.kernelize.OutlineCandidates`.
+/// Provider regions must first pass through
+///  `pr.transform.kernelize.OutlineCandidates`.
 ///
 /// On success, callers pass `result.store` to a kernelization operation and
 ///  `result.dispatch_registry` to the execution integration. Providers are
@@ -274,7 +275,7 @@ fn expect_provider_decisions(first_unsupported: bool) !void {
         .allocator = testing.allocator,
         .io = testing.io,
     };
-    _ = try (@import("pr/kernelize.zig").OutlineCandidates{}).run(&program, &outline_ctx);
+    _ = try (@import("pr/transform/kernelize.zig").OutlineCandidates{}).run(&program, &outline_ctx);
 
     var first = TestProvider{ .name = "first", .unsupported = first_unsupported };
     var second = TestProvider{ .name = "second", .unsupported = !first_unsupported };

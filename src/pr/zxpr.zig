@@ -174,7 +174,7 @@ test "zxpr with transpose shows permutation" {
 }
 
 test "zxpr kernelize region annotations" {
-    const kernel = @import("kernel.zig");
+    const kernel = @import("../kernel.zig");
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 

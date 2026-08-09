@@ -20,7 +20,7 @@ pub fn add(
     options: Options,
 ) compilation.Pipeline.AddError!void {
     try pipeline.add(pr.Validate{});
-    try pipeline.add(pr.outline.Pass{});
+    try pipeline.add(pr.transform.outline.Pass{});
     try pipeline.add(lower.Lower{
         .config = .{
             .entry_name = options.entry_name,

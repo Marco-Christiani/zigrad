@@ -605,8 +605,8 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
     op_ids[1] = custom_op.id;
     const regions = try arena.alloc(pr.Region, 1);
     const region_annotations = try arena.alloc(pr.Annotation, 4);
-    region_annotations[0] = @import("outline.zig").annotation;
-    region_annotations[1] = @import("kernel.zig").provider_annotation("test");
+    region_annotations[0] = @import("transform/outline.zig").annotation;
+    region_annotations[1] = @import("../kernel.zig").provider_annotation("test");
     region_annotations[2] = .{ .name = "example.priority", .value = .{ .integer = 3 } };
     region_annotations[3] = .{ .name = "example.payload", .value = .{ .bytes = &.{ 0, 127, 255 } } };
     regions[0] = .{
@@ -683,8 +683,8 @@ test "binary PR round trip is byte stable" {
 
     const region = parsed.functions[0].regions[0];
     try std.testing.expectEqualStrings("serialized", region.name);
-    try std.testing.expect(try @import("outline.zig").is_requested(region));
-    try std.testing.expectEqualStrings("test", (try @import("kernel.zig").requested_provider(region)).?);
+    try std.testing.expect(try @import("transform/outline.zig").is_requested(region));
+    try std.testing.expectEqualStrings("test", (try @import("../kernel.zig").requested_provider(region)).?);
     try std.testing.expectEqual(@as(i64, 3), region.find_annotation("example.priority").?.value.integer);
     try std.testing.expectEqualSlices(u8, &.{ 0, 127, 255 }, region.find_annotation("example.payload").?.value.bytes);
     try std.testing.expectEqualSlices(u32, &.{ 4, 9 }, region.op_ids);

@@ -230,7 +230,7 @@ pub fn run_llama_ft_demo(
     };
 
     var mirage_provider_impl: ?MirageProviderT = null;
-    var mirage_providers: [1]zg.pr.kernel.KernelProvider = undefined;
+    var mirage_providers: [1]zg.kernel.KernelProvider = undefined;
 
     // TODO(mirage): Connect Mirage selection through either the disconnected
     //  MLIR operation or PR region annotations.

@@ -7,6 +7,7 @@ const std = @import("std");
 pub const build_options = @import("build_options");
 
 pub const pr = @import("pr.zig");
+pub const kernel = @import("kernel.zig");
 pub const device = @import("device.zig");
 pub const dtype = @import("dtype.zig");
 pub const compilation = @import("compilation.zig");

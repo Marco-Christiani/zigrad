@@ -1,6 +1,7 @@
 const std = @import("std");
+const contraction = @import("../pr/analysis/contraction.zig");
 const device = @import("../device.zig");
-const kernel = @import("../pr/kernel.zig");
+const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
 const dispatch_mod = @import("dispatch.zig");
 const artifact_mod = @import("artifact.zig");
@@ -252,7 +253,7 @@ fn lower_op(
             const lhs_tensor = op.inputs[0].value.as_tensor();
             const rhs_tensor = op.inputs[1].value.as_tensor();
 
-            if (!kernel.dot_general_is_canonical_batched_matmul(
+            if (!contraction.is_canonical_batched_matmul(
                 dg,
                 lhs_tensor.shape.rank(),
                 rhs_tensor.shape.rank(),

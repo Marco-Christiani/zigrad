@@ -3,7 +3,7 @@
 //! `describe` computes the member operations, incoming values, and externally
 //!  used results for one region in a function.
 const std = @import("std");
-const pr = @import("pr.zig");
+const pr = @import("../pr.zig");
 
 /// A region's members, inputs, and externally used outputs.
 ///

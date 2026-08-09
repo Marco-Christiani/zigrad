@@ -3,10 +3,11 @@
 //! The provider accepts PR matrix-multiply functions and emits kernel artifacts
 //!  values through MetaSchedule autotuning. TVM C types remain internal.
 const std = @import("std");
+const contraction = @import("../pr/analysis/contraction.zig");
 
 const Cache = @import("../cache.zig").Cache;
 const device = @import("../device.zig");
-const kernel = @import("../pr/kernel.zig");
+const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
 const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
 const config = @import("config.zig");
@@ -171,7 +172,7 @@ fn validate_matmul_function(func: pr.Function) ?mm.Shape {
     switch (op.params) {
         .dot => {},
         .dot_general => |dg| {
-            if (!kernel.dot_general_is_matrix_matmul(dg)) return null;
+            if (!contraction.is_matrix_matmul(dg)) return null;
         },
         else => return null,
     }

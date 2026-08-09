@@ -8,13 +8,14 @@
 //!
 //! Provider compilation and tuning run after outlining and before substitution.
 const std = @import("std");
-const compilation = @import("../compilation.zig");
-const device = @import("../device.zig");
-const output_mod = @import("../output.zig");
-const fingerprint = @import("fingerprint.zig");
+const compilation = @import("../../compilation.zig");
+const device = @import("../../device.zig");
+const output_mod = @import("../../output.zig");
+const effects = @import("../analysis/effects.zig");
+const fingerprint = @import("../analysis/fingerprint.zig");
 const outline = @import("outline.zig");
-const pr = @import("pr.zig");
-const kernel = @import("kernel.zig");
+const pr = @import("../pr.zig");
+const kernel = @import("../../kernel.zig");
 
 const log = std.log.scoped(.@"zg/kernelize");
 
@@ -212,7 +213,7 @@ pub const KernelizePass = struct {
                         program.allocator(),
                         op,
                         decision_key.bytes,
-                        pr.function_may_have_side_effects(program, candidate),
+                        effects.function_may_have_side_effects(program, candidate),
                     );
                     log.debug("selected provider '{s}' for function '{s}'", .{ stored.provider_name, candidate.name });
                     break :outcome .compiled;

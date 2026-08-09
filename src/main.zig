@@ -534,7 +534,7 @@ fn add_mlir_input(
     if (outputs.pr) |config| {
         try pipeline.add(zg.pr.dump.Dump{ .config = with_entry(config, entry_name) });
     }
-    try pipeline.add(zg.pr.outline.Pass{});
+    try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
             .entry_name = entry_name,

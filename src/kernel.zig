@@ -6,10 +6,10 @@
 //! Kernelization reads the store, and execution resolves providers through a
 //!  separate `DispatchRegistry`.
 const std = @import("std");
-const device = @import("../device.zig");
-const fingerprint = @import("fingerprint.zig");
-const pr = @import("pr.zig");
-const TypedPtr = @import("../utils/rtti.zig").TypedPtr;
+const device = @import("device.zig");
+const fingerprint = @import("pr/analysis/fingerprint.zig");
+const pr = @import("pr/pr.zig");
+const TypedPtr = @import("utils/rtti.zig").TypedPtr;
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zg/kernel");
 
@@ -48,40 +48,6 @@ pub fn require_outlined_requests(program: *const pr.Program) AnnotationError!voi
             }
         }
     }
-}
-
-/// Returns whether a dot_general parameter set matches plain rank-2 matmul.
-///
-/// Accepts only no batch dimensions and one contracting dimension per input,
-///  with lhs contracting dim 1 and rhs contracting dim 0.
-pub fn dot_general_is_matrix_matmul(dg: pr.DotGeneralParams) bool {
-    return dot_general_is_canonical_batched_matmul(dg, 2, 2);
-}
-
-/// Returns whether dot_general matches canonical batched matmul form.
-///
-/// Canonical form requires both operands to have rank `batch_len + 2` with
-///  batch dims as `0..batch_len-1`, lhs contracting dim at `rank-1`, and rhs
-///  contracting dim at `rank-2`.
-pub fn dot_general_is_canonical_batched_matmul(dg: pr.DotGeneralParams, lhs_rank: usize, rhs_rank: usize) bool {
-    const batch_len = dg.lhs_batch_dims.len;
-
-    if (batch_len != dg.rhs_batch_dims.len) return false;
-    if (dg.lhs_contracting_dims.len != 1 or dg.rhs_contracting_dims.len != 1) return false;
-    if (lhs_rank != rhs_rank) return false;
-    if (lhs_rank != batch_len + 2) return false;
-    if (!dims_are_prefix(dg.lhs_batch_dims) or !dims_are_prefix(dg.rhs_batch_dims)) return false;
-
-    const lhs_contract_expected: i64 = @intCast(lhs_rank - 1);
-    const rhs_contract_expected: i64 = @intCast(rhs_rank - 2);
-    return dg.lhs_contracting_dims[0] == lhs_contract_expected and dg.rhs_contracting_dims[0] == rhs_contract_expected;
-}
-
-fn dims_are_prefix(dims: []const i64) bool {
-    for (dims, 0..) |dim, idx| {
-        if (dim != @as(i64, @intCast(idx))) return false;
-    }
-    return true;
 }
 
 /// Store key for one provider decision on one device.
@@ -134,7 +100,7 @@ pub fn write_aval_signature(writer: anytype, aval: pr.Aval) !void {
 }
 
 /// Element data type for dispatch buffers.
-pub const DType = @import("../dtype.zig").DType;
+pub const DType = @import("dtype.zig").DType;
 
 /// Descriptor for a single buffer passed through an FFI call.
 ///
@@ -510,67 +476,6 @@ pub const DispatchRegistry = struct {
         }
     }
 };
-
-test dot_general_is_matrix_matmul {
-    const dg: pr.DotGeneralParams = .{
-        .lhs_batch_dims = &.{},
-        .rhs_batch_dims = &.{},
-        .lhs_contracting_dims = &.{1},
-        .rhs_contracting_dims = &.{0},
-    };
-    try std.testing.expect(dot_general_is_matrix_matmul(dg));
-}
-
-test "dot_general_is_matrix_matmul rejects non-canonical" {
-    {
-        const with_batch: pr.DotGeneralParams = .{
-            .lhs_batch_dims = &.{0},
-            .rhs_batch_dims = &.{0},
-            .lhs_contracting_dims = &.{1},
-            .rhs_contracting_dims = &.{0},
-        };
-        try std.testing.expect(!dot_general_is_matrix_matmul(with_batch));
-    }
-    {
-        const wrong_contract: pr.DotGeneralParams = .{
-            .lhs_batch_dims = &.{},
-            .rhs_batch_dims = &.{},
-            .lhs_contracting_dims = &.{0},
-            .rhs_contracting_dims = &.{1},
-        };
-        try std.testing.expect(!dot_general_is_matrix_matmul(wrong_contract));
-    }
-}
-
-test dot_general_is_canonical_batched_matmul {
-    const dg: pr.DotGeneralParams = .{
-        .lhs_batch_dims = &.{ 0, 1 },
-        .rhs_batch_dims = &.{ 0, 1 },
-        .lhs_contracting_dims = &.{3},
-        .rhs_contracting_dims = &.{2},
-    };
-    try std.testing.expect(dot_general_is_canonical_batched_matmul(dg, 4, 4));
-}
-
-test "dot_general_is_canonical_batched_matmul rejects non-prefix batch" {
-    const dg: pr.DotGeneralParams = .{
-        .lhs_batch_dims = &.{1},
-        .rhs_batch_dims = &.{1},
-        .lhs_contracting_dims = &.{2},
-        .rhs_contracting_dims = &.{1},
-    };
-    try std.testing.expect(!dot_general_is_canonical_batched_matmul(dg, 3, 3));
-}
-
-test "dot_general_is_canonical_batched_matmul rejects rank mismatch" {
-    const dg: pr.DotGeneralParams = .{
-        .lhs_batch_dims = &.{0},
-        .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{2},
-        .rhs_contracting_dims = &.{1},
-    };
-    try std.testing.expect(!dot_general_is_canonical_batched_matmul(dg, 3, 4));
-}
 
 test "finalize calls hook when set" {
     const Hook = struct {

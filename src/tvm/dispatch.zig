@@ -2,7 +2,7 @@
 //!
 //! The state prepares and caches loaded TVM runtime modules for dispatch.
 const std = @import("std");
-const kernel = @import("../pr/kernel.zig");
+const kernel = @import("../kernel.zig");
 const dlpack = @import("../c/dlpack.zig");
 const tvm_api = @import("../c/tvm/api.zig");
 const tvm_runtime = @import("../c/tvm/runtime.zig");
