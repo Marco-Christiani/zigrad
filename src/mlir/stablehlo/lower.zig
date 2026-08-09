@@ -721,10 +721,14 @@ test "lowering can outline via region annotation" {
     const func = try b.finish(&.{d});
     try program.add_function(func);
 
+    var pass_ctx = compilation.Context{ .allocator = std.testing.allocator, .io = std.testing.io };
+    _ = try (outline.Pass{}).run(&program, &pass_ctx);
+
     const text = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_text);
     defer std.testing.allocator.free(text);
 
     try std.testing.expect(std.mem.indexOf(u8, text, "call @main_outlined_0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "llvm.noinline") == null);
 }
 
 test "lowering tags kernelize provider on outlined functions" {

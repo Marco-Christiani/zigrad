@@ -597,6 +597,7 @@ pub fn run_kernel_provider_demo(
         });
     }
 
+    try pipeline.add(zg.pr.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
             .entry_name = outputs.entry_name,

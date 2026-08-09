@@ -22,6 +22,7 @@ pub const key_attribute_name = "zigrad.kernel_key";
 /// Region annotation requesting a candidate from a named kernel provider.
 pub const provider_annotation_name = "zigrad.kernel.provider";
 
+/// Invalid payloads for the provider annotation contract.
 pub const AnnotationError = error{InvalidProviderAnnotation};
 
 /// Construct a provider request for a region builder.
@@ -32,9 +33,9 @@ pub fn provider_annotation(provider_name: []const u8) pr.Annotation {
     };
 }
 
-/// Return the provider requested by a region.
-pub fn requested_provider(region: pr.Region) AnnotationError!?[]const u8 {
-    const found = region.find_annotation(provider_annotation_name) orelse return null;
+/// Return the provider requested by an annotated IR object.
+pub fn requested_provider(owner: anytype) AnnotationError!?[]const u8 {
+    const found = owner.find_annotation(provider_annotation_name) orelse return null;
     return found.value.as_string() orelse error.InvalidProviderAnnotation;
 }
 

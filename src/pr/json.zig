@@ -19,6 +19,8 @@ pub fn emit(func: pr.Function, writer: *Writer) !void {
 
     try writer.writeAll("\"name\":");
     try write_json_string(writer, func.name);
+    try writer.writeAll(",\"annotations\":");
+    try emit_annotations(writer, func.annotations);
 
     try writer.writeAll(",\"nodes\":[");
     var node_idx: usize = 0;
@@ -374,14 +376,8 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
     try writer.writeAll("{\"name\":");
     try write_json_string(writer, region.name);
 
-    try writer.writeAll(",\"annotations\":{");
-    for (region.annotations, 0..) |annotation, index| {
-        if (index > 0) try writer.writeAll(",");
-        try write_json_string(writer, annotation.name);
-        try writer.writeAll(":");
-        try emit_annotation_value(writer, annotation.value);
-    }
-    try writer.writeAll("}");
+    try writer.writeAll(",\"annotations\":");
+    try emit_annotations(writer, region.annotations);
 
     try writer.writeAll(",\"node_ids\":[");
     var first = true;
@@ -394,6 +390,17 @@ fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {
     try writer.writeAll("]");
 
     try emit_zxpr_field_region(writer, func, region);
+    try writer.writeAll("}");
+}
+
+fn emit_annotations(writer: *Writer, annotations: []const pr.Annotation) !void {
+    try writer.writeAll("{");
+    for (annotations, 0..) |annotation, index| {
+        if (index > 0) try writer.writeAll(",");
+        try write_json_string(writer, annotation.name);
+        try writer.writeAll(":");
+        try emit_annotation_value(writer, annotation.value);
+    }
     try writer.writeAll("}");
 }
 
@@ -546,7 +553,8 @@ test "json with regions" {
     try b.pop_region();
 
     _ = try b.add(add2, c);
-    const func = try b.finish(&.{add2});
+    var func = try b.finish(&.{add2});
+    func.annotations = &.{.{ .name = "example.function", .value = .{ .boolean = true } }};
 
     var buf: [4096]u8 = undefined;
     var w: Writer = .fixed(&buf);
@@ -555,6 +563,7 @@ test "json with regions" {
     const result = w.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, result, "\"zigrad.kernel.provider\":\"tvm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"example.function\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"tvm-kernel\"") != null);
     // Region node_ids reference op nodes (e0, e1)
     try std.testing.expect(std.mem.indexOf(u8, result, "\"node_ids\":[\"e0\",\"e1\"]") != null);

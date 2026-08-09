@@ -47,6 +47,11 @@ pub fn emit(self: *Self) !void {
     try self.styler.write_keyword("zxpr");
     try w.writeAll(" ");
     try self.styler.write_identifier(self.func.name);
+    if (self.func.annotations.len > 0) {
+        try self.styler.write_region("[");
+        try self.emit_annotations(self.func.annotations);
+        try self.styler.write_region("]");
+    }
     try w.writeAll(" {\n");
 
     // Parameters section

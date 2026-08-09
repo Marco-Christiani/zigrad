@@ -194,13 +194,15 @@ test "zxpr kernelize region annotations" {
     try b.pop_region();
 
     const out = try b.add(add2, c);
-    const func = try b.finish(&.{out});
+    var func = try b.finish(&.{out});
+    func.annotations = &.{.{ .name = "example.function", .value = .unit }};
 
     var buf: [512]u8 = undefined;
     var w: Writer = .fixed(&buf);
     try emit(func, &w, style.config(.plain, .{}));
 
     const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "zxpr k[example.function]") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "> tvm-kernel[zigrad.kernel.provider=\"tvm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "example.note=\"line\\n\\\"quoted\\\"\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "example.payload=0x007fff") != null);

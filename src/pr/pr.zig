@@ -546,11 +546,21 @@ pub const Region = struct {
 ///  `FunctionBuilder.finish()`.
 pub const Function = struct {
     name: []const u8,
+    /// Compiler metadata attached to this callable unit.
+    annotations: []const Annotation = &.{},
     params: []*Var,
     returns: []*Var,
     ops: []*Op,
     regions: []const Region,
     var_count: u32,
+
+    /// Find an annotation by its exact namespaced name.
+    pub fn find_annotation(self: Function, name: []const u8) ?*const Annotation {
+        for (self.annotations) |*annotation| {
+            if (std.mem.eql(u8, annotation.name, name)) return annotation;
+        }
+        return null;
+    }
 
     /// Return regions that satisfy a predicate.
     pub fn regions_matching(self: Function, predicate: *const fn (Region) bool) RegionIterator {
@@ -719,13 +729,9 @@ pub fn validate_program(program: *const Program) ValidationError!void {
 
     for (program.functions) |func| {
         try validate_ops_in_func(func);
+        try validate_annotations(func.annotations);
         for (func.regions) |region| {
-            for (region.annotations, 0..) |annotation, index| {
-                for (region.annotations[0..index]) |prior| {
-                    if (std.mem.eql(u8, prior.name, annotation.name))
-                        return error.DuplicateAnnotationName;
-                }
-            }
+            try validate_annotations(region.annotations);
         }
 
         for (func.ops) |op| {
@@ -771,6 +777,15 @@ pub fn validate_program(program: *const Program) ValidationError!void {
     }
 }
 
+fn validate_annotations(annotations: []const Annotation) ValidationError!void {
+    for (annotations, 0..) |annotation, index| {
+        for (annotations[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, annotation.name))
+                return error.DuplicateAnnotationName;
+        }
+    }
+}
+
 /// Annotation stack entry for tracking active regions during building.
 const RegionEntry = struct {
     id: u32,
@@ -779,7 +794,8 @@ const RegionEntry = struct {
     start_index: u32,
 };
 
-fn dupe_annotations(allocator: Allocator, annotations: []const Annotation) BuildError![]const Annotation {
+/// Copy annotations and their variable-length values into `allocator`.
+pub fn dupe_annotations(allocator: Allocator, annotations: []const Annotation) BuildError![]const Annotation {
     const result = try allocator.alloc(Annotation, annotations.len);
     for (annotations, 0..) |annotation, index| {
         for (annotations[0..index]) |prior| {
@@ -822,7 +838,7 @@ pub const FunctionBuilder = struct {
         const a = program.allocator();
         return .{
             .program = program,
-            .name = name,
+            .name = try a.dupe(u8, name),
             .params_list = try std.ArrayList(*Var).initCapacity(a, 8),
             .ops_list = try std.ArrayList(*Op).initCapacity(a, 16),
             .next_var_id = 0,
@@ -941,7 +957,10 @@ pub const FunctionBuilder = struct {
     /// Emit a multi-output op with explicit output types.
     ///
     /// Input vars have their use-lists updated (see `emit`).
-    fn emit_with_outputs(self: *FunctionBuilder, params: Params, inputs: []const *Var, out_avals: []const Aval) BuildError![]*Var {
+    /// Emit an operation with explicit output abstract values.
+    ///
+    /// Compiler transforms use this operation when cloning multi-result IR.
+    pub fn emit_outputs(self: *FunctionBuilder, params: Params, inputs: []const *Var, out_avals: []const Aval) BuildError![]*Var {
         const a = self.alloc();
 
         const out_vars = try a.alloc(*Var, out_avals.len);
@@ -1156,7 +1175,7 @@ pub const FunctionBuilder = struct {
 
     /// Emit a multi-output custom call from explicit output types.
     pub fn custom_call_multi(self: *FunctionBuilder, cc_params: CustomCallParams, inputs: []const *Var) BuildError![]*Var {
-        return try self.emit_with_outputs(.{ .custom_call = cc_params }, inputs, cc_params.out_avals);
+        return try self.emit_outputs(.{ .custom_call = cc_params }, inputs, cc_params.out_avals);
     }
 
     pub fn call(self: *FunctionBuilder, callee: []const u8, inputs: []const *Var) BuildError![]*Var {
@@ -1189,7 +1208,7 @@ pub const FunctionBuilder = struct {
         }
 
         const callee_copy = try a.dupe(u8, callee);
-        return try self.emit_with_outputs(.{ .call = .{ .callee = callee_copy } }, inputs, out_avals);
+        return try self.emit_outputs(.{ .call = .{ .callee = callee_copy } }, inputs, out_avals);
     }
 
     /// Finalize and validate the function.

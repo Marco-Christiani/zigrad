@@ -18,7 +18,7 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 2;
+pub const version: u32 = 3;
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
 const wire_prim_count = 27;
@@ -74,6 +74,7 @@ pub fn emit(program: *const pr.Program, writer: *Writer) EmitError!void {
 
     for (program.functions) |func| {
         try write_value([]const u8, writer, func.name);
+        try write_value([]const pr.Annotation, writer, func.annotations);
         try writer.writeInt(u32, func.var_count, .little);
 
         try write_length(writer, func.params.len);
@@ -167,6 +168,7 @@ fn read_var_definition(
 
 fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
     const name = try read_value([]const u8, reader, arena);
+    const function_annotations = try read_value([]const pr.Annotation, reader, arena);
     const var_count = try reader.read_int(u32);
     const vars = try arena.alloc(?*pr.Var, var_count);
     @memset(vars, null);
@@ -255,6 +257,7 @@ fn read_function(reader: *Reader, arena: Allocator) DecodeError!pr.Function {
 
     return .{
         .name = name,
+        .annotations = function_annotations,
         .params = params,
         .returns = returns,
         .ops = function_ops,
@@ -426,7 +429,7 @@ pub const Reader = struct {
 fn compute_schema_hash() u64 {
     @setEvalBranchQuota(100_000);
     var hash: u64 = 14695981039346656037;
-    hash_bytes(&hash, "Program:[Function];Function:name,var_count,[param],[Op],[Region],[return];" ++
+    hash_bytes(&hash, "Program:[Function];Function:name,[Annotation],var_count,[param],[Op],[Region],[return];" ++
         "param:id,dtype,dims;Op:id,[input id],[output],Params;" ++
         "Region:id,name,[Annotation],[op id];output:id,dtype,dims");
     hash_type(&hash, pr.DType);
@@ -630,6 +633,7 @@ fn make_test_program(backing_allocator: Allocator) !pr.Program {
     const functions = try arena.alloc(pr.Function, 2);
     functions[0] = .{
         .name = try arena.dupe(u8, "main"),
+        .annotations = &.{.{ .name = "example.function", .value = .{ .boolean = true } }},
         .params = try arena.alloc(*pr.Var, 0),
         .returns = returns,
         .ops = function_ops,
@@ -666,6 +670,7 @@ test "binary PR round trip is byte stable" {
     try std.testing.expectEqual(@as(usize, 2), parsed.functions[0].ops[1].outputs.len);
     const literal = parsed.functions[0].ops[0].params.literal.f32;
     try std.testing.expect(std.math.isNegativeInf(literal));
+    try std.testing.expect(parsed.functions[0].find_annotation("example.function").?.value.boolean);
 
     const literal_op = parsed.functions[0].ops[0];
     const custom_op = parsed.functions[0].ops[1];

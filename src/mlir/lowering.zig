@@ -1,14 +1,15 @@
 //! Shared PR to MLIR function scaffolding.
 //!
-//! Provides function construction, value mapping, type conversion, outlining,
-//!  and serialization for a caller-supplied `LowerOpFn`.
+//! Provides function construction, value mapping, type conversion, and
+//!  serialization for a caller-supplied `LowerOpFn`.
 //!
-//! The current executable recipe controls entry naming and PR region outlining.
+//! Explicit outline requests are resolved by PR passes before lowering.
+//!
+//! TODO(kernel-provider): Move provider-region outlining into PR.
 const std = @import("std");
 
 const pr = @import("../pr/pr.zig");
 const kernel = @import("../pr/kernel.zig");
-const outline = @import("../pr/outline.zig");
 const mlir = @import("../c/mlir/mlir.zig");
 const MlirSession = @import("session.zig").Session;
 
@@ -83,7 +84,6 @@ pub const LowerContext = struct {
 /// This operation does not run MLIR passes. Callers compose those operations
 ///  explicitly.
 ///
-/// TODO(mlir): Make entry naming and region outlining explicit options.
 pub fn lower_program_to_mlir(
     allocator: std.mem.Allocator,
     session: MlirSession,
@@ -165,9 +165,8 @@ fn lower_function_into_module(
     const outlined_prefix = if (sym_name.len == 0) "func" else sym_name;
     for (func.ops, 0..) |op, op_idx| {
         if (region_map[op_idx]) |region| {
-            const requests_outline = outline.is_requested(region) catch return error.InvalidProgram;
             const requests_kernel = (kernel.requested_provider(region) catch return error.InvalidProgram) != null;
-            if (requests_outline or requests_kernel) {
+            if (requests_kernel) {
                 try lower_outlined_op(arena, &outlined_index, outlined_prefix, ctx, module, lower_ctx, op, region, lower_op_fn);
                 continue;
             }
@@ -197,12 +196,14 @@ fn lower_function_into_module(
         .verify = false,
         .location = loc,
     });
+    if (kernel.requested_provider(func) catch return error.InvalidProgram) |provider|
+        func_op.set_attribute_by_name("zigrad.kernelize.provider", mlir.Attribute.string(ctx, provider));
     module.get_body().append_operation(func_op);
 }
 
 /// Builds a region lookup indexed by op position.
 ///
-/// Entries are null when the op is outside every outlined or kernelized region.
+/// Entries are null when the op is outside every kernel-provider region.
 ///
 /// TODO(mlir): Decide how program-level lowering represents nested functions and regions.
 fn build_region_map(arena: std.mem.Allocator, func: pr.Function) std.mem.Allocator.Error![]?pr.Region {
@@ -281,7 +282,6 @@ fn lower_outlined_op(
         .attributes = &.{
             .{ "sym_name", mlir.Attribute.string(mlir_ctx, callee_name_z) },
             .{ "function_type", mlir.Attribute.type_(callee_fn_type) },
-            .{ "llvm.noinline", mlir.Attribute.unit(mlir_ctx) },
         },
         .verify = false,
         .location = ctx.loc,

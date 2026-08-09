@@ -38,6 +38,7 @@ pub const Params = core.Params;
 
 pub const AnnotationValue = core.AnnotationValue;
 pub const Annotation = core.Annotation;
+pub const dupe_annotations = core.dupe_annotations;
 pub const Region = core.Region;
 pub const Function = core.Function;
 pub const RegionIterator = core.RegionIterator;
