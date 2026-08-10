@@ -81,6 +81,7 @@ fn lower_op(ctx: LowerContext, op: *const pr.Op) LowerError!void {
         // Contraction
         .dot => try lower_dot(ctx, op),
         .dot_general => try lower_dot_general(ctx, op),
+        .convolution => try lower_convolution(ctx, op),
         // Compare
         .compare => try lower_compare(ctx, op),
         .select => try lower_select(ctx, op),
@@ -323,6 +324,35 @@ fn lower_dot_general(ctx: LowerContext, op: *const pr.Op) LowerError!void {
         .rhs_contracting_dimensions = dg.rhs_contracting_dims,
         .precision = .fast,
     });
+    ctx.block.append_operation(mlir_op);
+    ctx.set_value(op.result(0), mlir_op.result(0));
+}
+
+fn lower_convolution(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const params = op.params.convolution;
+    const lhs = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
+    const rhs = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
+    const out_type = ctx.tensor_to_mlir_type(op.result(0).aval.as_tensor());
+    const spatial_rank: i64 = @intCast(params.dimensions.input_spatial_dimensions.len);
+    const mlir_op = stablehlo.convolution(ctx.mlir_ctx, lhs, rhs, .{
+        .window_strides = params.window_strides,
+        .pad_value = params.padding,
+        .pad_shape = &.{ spatial_rank, 2 },
+        .lhs_dilation = params.lhs_dilation,
+        .rhs_dilation = params.rhs_dilation,
+        .window_reversal = params.window_reversal,
+        .input_batch_dimension = params.dimensions.input_batch_dimension,
+        .input_feature_dimension = params.dimensions.input_feature_dimension,
+        .input_spatial_dimensions = params.dimensions.input_spatial_dimensions,
+        .kernel_input_feature_dimension = params.dimensions.kernel_input_feature_dimension,
+        .kernel_output_feature_dimension = params.dimensions.kernel_output_feature_dimension,
+        .kernel_spatial_dimensions = params.dimensions.kernel_spatial_dimensions,
+        .output_batch_dimension = params.dimensions.output_batch_dimension,
+        .output_feature_dimension = params.dimensions.output_feature_dimension,
+        .output_spatial_dimensions = params.dimensions.output_spatial_dimensions,
+        .feature_group_count = params.feature_group_count,
+        .batch_group_count = params.batch_group_count,
+    }, out_type, ctx.loc);
     ctx.block.append_operation(mlir_op);
     ctx.set_value(op.result(0), mlir_op.result(0));
 }
@@ -749,6 +779,42 @@ test "lowering can outline via region annotation" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "call @main_outlined_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "llvm.noinline") == null);
+}
+
+test "lower convolution" {
+    const testing = std.testing;
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "main");
+    defer b.deinit();
+    const image = try b.param_tensor(.f32, &.{ 1, 8, 8, 3 });
+    const kernel = try b.param_tensor(.f32, &.{ 3, 3, 3, 8 });
+    const output = try b.convolution(image, kernel, .{
+        .window_strides = &.{ 2, 2 },
+        .padding = &.{ 1, 1, 1, 1 },
+        .lhs_dilation = &.{ 1, 1 },
+        .rhs_dilation = &.{ 1, 1 },
+        .window_reversal = &.{ false, false },
+        .dimensions = .{
+            .input_batch_dimension = 0,
+            .input_feature_dimension = 3,
+            .input_spatial_dimensions = &.{ 1, 2 },
+            .kernel_input_feature_dimension = 2,
+            .kernel_output_feature_dimension = 3,
+            .kernel_spatial_dimensions = &.{ 0, 1 },
+            .output_batch_dimension = 0,
+            .output_feature_dimension = 3,
+            .output_spatial_dimensions = &.{ 1, 2 },
+        },
+    });
+    const func = try b.finish(&.{output});
+    try program.add_function(func);
+
+    const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "stablehlo.convolution") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "dim = [b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]") != null);
 }
 
 test "lower operation outlines kernelize-annotated region" {

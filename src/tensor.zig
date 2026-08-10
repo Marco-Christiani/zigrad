@@ -290,6 +290,12 @@ pub fn dot_general(self: Tensor, other: Tensor, params: pr.DotGeneralParams) !Te
     return from_var(b, v);
 }
 
+pub fn convolution(self: Tensor, kernel: Tensor, params: pr.ConvolutionParams) !Tensor {
+    const b = try self.traced_builder();
+    const v = try b.convolution(try self.traced_var(), try kernel.traced_var(), params);
+    return from_var(b, v);
+}
+
 pub fn gather(self: Tensor, indices: Tensor, params: pr.GatherParams) !Tensor {
     const b = try self.traced_builder();
     const v = try b.gather(try self.traced_var(), try indices.traced_var(), params);

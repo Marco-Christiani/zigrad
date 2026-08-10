@@ -175,6 +175,7 @@ pub const Prim = enum {
     scatter,
     dot,
     dot_general,
+    convolution,
     reshape,
     iota,
     broadcast_in_dim,
@@ -271,6 +272,39 @@ pub const DotGeneralParams = struct {
     rhs_contracting_dims: []const i64,
 };
 
+/// Maps the logical batch, feature, and spatial axes onto tensor dimensions.
+pub const ConvolutionDimensionNumbers = struct {
+    input_batch_dimension: i64,
+    input_feature_dimension: i64,
+    input_spatial_dimensions: []const i64,
+    kernel_input_feature_dimension: i64,
+    kernel_output_feature_dimension: i64,
+    kernel_spatial_dimensions: []const i64,
+    output_batch_dimension: i64,
+    output_feature_dimension: i64,
+    output_spatial_dimensions: []const i64,
+};
+
+/// Defines the convolution window, axis mapping, and grouping semantics.
+pub const ConvolutionParams = struct {
+    /// Step between adjacent windows along each spatial axis.
+    window_strides: []const i64,
+    /// Low and high padding flattened as `[low0, high0, low1, high1, ...]`.
+    padding: []const i64,
+    /// Spacing between input elements along each spatial axis.
+    lhs_dilation: []const i64,
+    /// Spacing between kernel elements along each spatial axis.
+    rhs_dilation: []const i64,
+    /// Reverse each selected spatial window before contraction.
+    window_reversal: []const bool,
+    /// Physical axis mappings for the input, kernel, and output tensors.
+    dimensions: ConvolutionDimensionNumbers,
+    /// Independent groups partitioning the input and output features.
+    feature_group_count: i64 = 1,
+    /// Independent groups partitioning the input batch and kernel outputs.
+    batch_group_count: i64 = 1,
+};
+
 pub const ReshapeParams = struct {
     out_shape: []const i64,
 };
@@ -339,6 +373,7 @@ pub const Params = union(Prim) {
     scatter: ScatterParams,
     dot: void,
     dot_general: DotGeneralParams,
+    convolution: ConvolutionParams,
     reshape: ReshapeParams,
     iota: IotaParams,
     broadcast_in_dim: BroadcastInDimParams,
@@ -678,6 +713,7 @@ pub const ValidationError = error{
     ScatterTypeMismatch,
     DotTypeMismatch,
     DotGeneralTypeMismatch,
+    ConvolutionTypeMismatch,
     ReshapeTypeMismatch,
     BroadcastInDimTypeMismatch,
     TransposeTypeMismatch,
@@ -1105,6 +1141,30 @@ pub const FunctionBuilder = struct {
 
     pub fn dot(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
         return try self.emit(.{ .dot = {} }, &.{ lhs, rhs });
+    }
+
+    pub fn convolution(self: *FunctionBuilder, lhs: *Var, rhs: *Var, params: ConvolutionParams) BuildError!*Var {
+        const a = self.alloc();
+        return try self.emit(.{ .convolution = .{
+            .window_strides = try a.dupe(i64, params.window_strides),
+            .padding = try a.dupe(i64, params.padding),
+            .lhs_dilation = try a.dupe(i64, params.lhs_dilation),
+            .rhs_dilation = try a.dupe(i64, params.rhs_dilation),
+            .window_reversal = try a.dupe(bool, params.window_reversal),
+            .dimensions = .{
+                .input_batch_dimension = params.dimensions.input_batch_dimension,
+                .input_feature_dimension = params.dimensions.input_feature_dimension,
+                .input_spatial_dimensions = try a.dupe(i64, params.dimensions.input_spatial_dimensions),
+                .kernel_input_feature_dimension = params.dimensions.kernel_input_feature_dimension,
+                .kernel_output_feature_dimension = params.dimensions.kernel_output_feature_dimension,
+                .kernel_spatial_dimensions = try a.dupe(i64, params.dimensions.kernel_spatial_dimensions),
+                .output_batch_dimension = params.dimensions.output_batch_dimension,
+                .output_feature_dimension = params.dimensions.output_feature_dimension,
+                .output_spatial_dimensions = try a.dupe(i64, params.dimensions.output_spatial_dimensions),
+            },
+            .feature_group_count = params.feature_group_count,
+            .batch_group_count = params.batch_group_count,
+        } }, &.{ lhs, rhs });
     }
 
     pub fn iota(self: *FunctionBuilder, out_dtype: DType, out_dims: []const i64, iota_dim: i64) BuildError!*Var {

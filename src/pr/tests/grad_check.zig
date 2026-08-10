@@ -477,6 +477,82 @@ test "grad: dot 2D" {
     try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
 }
 
+test "grad: convolution NHWC HWIO" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "convolution");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{ 1, 4, 4, 2 });
+    const kernel = try b.param_tensor(.f32, &.{ 3, 3, 2, 3 });
+    const y = try b.convolution(x, kernel, .{
+        .window_strides = &.{ 1, 1 },
+        .padding = &.{ 1, 1, 1, 1 },
+        .lhs_dilation = &.{ 1, 1 },
+        .rhs_dilation = &.{ 1, 1 },
+        .window_reversal = &.{ false, false },
+        .dimensions = .{
+            .input_batch_dimension = 0,
+            .input_feature_dimension = 3,
+            .input_spatial_dimensions = &.{ 1, 2 },
+            .kernel_input_feature_dimension = 2,
+            .kernel_output_feature_dimension = 3,
+            .kernel_spatial_dimensions = &.{ 0, 1 },
+            .output_batch_dimension = 0,
+            .output_feature_dimension = 3,
+            .output_spatial_dimensions = &.{ 1, 2 },
+        },
+    });
+    const func = try build_func(&program, &b, &.{y});
+    const test_inputs = try make_test_inputs(std.testing.allocator, func);
+    defer {
+        for (test_inputs) |*t| t.deinit();
+        std.testing.allocator.free(test_inputs);
+    }
+    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{
+        .epsilon = 2e-3,
+        .tolerance = 2e-2,
+    });
+}
+
+test "grad: strided convolution NHWC HWIO" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "convolution_stride");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{ 1, 5, 5, 1 });
+    const kernel = try b.param_tensor(.f32, &.{ 3, 3, 1, 2 });
+    const y = try b.convolution(x, kernel, .{
+        .window_strides = &.{ 2, 2 },
+        .padding = &.{ 1, 1, 1, 1 },
+        .lhs_dilation = &.{ 1, 1 },
+        .rhs_dilation = &.{ 1, 1 },
+        .window_reversal = &.{ false, false },
+        .dimensions = .{
+            .input_batch_dimension = 0,
+            .input_feature_dimension = 3,
+            .input_spatial_dimensions = &.{ 1, 2 },
+            .kernel_input_feature_dimension = 2,
+            .kernel_output_feature_dimension = 3,
+            .kernel_spatial_dimensions = &.{ 0, 1 },
+            .output_batch_dimension = 0,
+            .output_feature_dimension = 3,
+            .output_spatial_dimensions = &.{ 1, 2 },
+        },
+    });
+    const func = try build_func(&program, &b, &.{y});
+    const test_inputs = try make_test_inputs(std.testing.allocator, func);
+    defer {
+        for (test_inputs) |*t| t.deinit();
+        std.testing.allocator.free(test_inputs);
+    }
+    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{
+        .epsilon = 2e-3,
+        .tolerance = 2e-2,
+    });
+}
+
 test "grad: reshape" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();

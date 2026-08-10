@@ -165,6 +165,7 @@ fn eval_op(
         .reduce_max => |rp| try eval_reduce_max(allocator, env, op, rp),
         .dot => try eval_dot(allocator, env, op),
         .dot_general => |dg| try eval_dot_general(allocator, env, op, dg),
+        .convolution => |params| try eval_convolution(allocator, env, op, params),
         .gather => |gp| try eval_gather(allocator, env, op, gp),
         .scatter => |sp| try eval_scatter(allocator, env, op, sp),
         .iota => |ip| try eval_iota(allocator, ip),
@@ -588,6 +589,85 @@ fn eval_dot_general(
             const lhs_flat = multi_to_flat(lhs_idx[0..lhs_rank], lhs_shape);
             const rhs_flat = multi_to_flat(rhs_idx[0..rhs_rank], rhs_shape);
             sum += lhs.data[lhs_flat] * rhs.data[rhs_flat];
+        }
+        result.data[out_flat] = sum;
+    }
+    return result;
+}
+
+fn eval_convolution(
+    allocator: std.mem.Allocator,
+    env: []?HostTensor,
+    op: *const pr.Op,
+    params: pr.ConvolutionParams,
+) EvalError!HostTensor {
+    if (params.batch_group_count != 1) return error.UnsupportedOp;
+    const lhs = try get_input(env, op, 0);
+    const rhs = try get_input(env, op, 1);
+    const out_shape = op.result(0).as_tensor().shape.dims;
+    const rank = out_shape.len;
+    const spatial_rank = rank - 2;
+    const kernel_input_features: usize = @intCast(rhs.shape[@intCast(params.dimensions.kernel_input_feature_dimension)]);
+    const kernel_output_features: usize = @intCast(rhs.shape[@intCast(params.dimensions.kernel_output_feature_dimension)]);
+    const output_features_per_group = kernel_output_features / @as(usize, @intCast(params.feature_group_count));
+
+    var kernel_spatial_shape: [pr.max_rank]i64 = undefined;
+    var kernel_spatial_size: usize = 1;
+    for (params.dimensions.kernel_spatial_dimensions, 0..) |dim, i| {
+        kernel_spatial_shape[i] = rhs.shape[@intCast(dim)];
+        kernel_spatial_size *= @intCast(kernel_spatial_shape[i]);
+    }
+
+    var result = try HostTensor.init(allocator, out_shape);
+    for (0..result.data.len) |out_flat| {
+        var out_idx: [pr.max_rank]usize = undefined;
+        flat_to_multi(out_flat, out_shape, out_idx[0..rank]);
+        const output_feature = out_idx[@intCast(params.dimensions.output_feature_dimension)];
+        const feature_group = output_feature / output_features_per_group;
+        var sum: f32 = 0;
+
+        for (0..kernel_spatial_size) |kernel_spatial_flat| {
+            var kernel_spatial_idx: [pr.max_rank]usize = undefined;
+            flat_to_multi(
+                kernel_spatial_flat,
+                kernel_spatial_shape[0..spatial_rank],
+                kernel_spatial_idx[0..spatial_rank],
+            );
+            var lhs_idx: [pr.max_rank]usize = @splat(0);
+            var rhs_idx: [pr.max_rank]usize = @splat(0);
+            lhs_idx[@intCast(params.dimensions.input_batch_dimension)] = out_idx[@intCast(params.dimensions.output_batch_dimension)];
+            rhs_idx[@intCast(params.dimensions.kernel_output_feature_dimension)] = output_feature;
+
+            var in_bounds = true;
+            for (0..spatial_rank) |i| {
+                const kernel_index = if (params.window_reversal[i])
+                    @as(usize, @intCast(kernel_spatial_shape[i] - 1)) - kernel_spatial_idx[i]
+                else
+                    kernel_spatial_idx[i];
+                const input_index = @as(i64, @intCast(out_idx[@intCast(params.dimensions.output_spatial_dimensions[i])])) * params.window_strides[i] -
+                    params.padding[i * 2] +
+                    @as(i64, @intCast(kernel_index)) * params.rhs_dilation[i];
+                if (input_index < 0 or @mod(input_index, params.lhs_dilation[i]) != 0) {
+                    in_bounds = false;
+                    break;
+                }
+                const undilated = @divExact(input_index, params.lhs_dilation[i]);
+                const lhs_dim = params.dimensions.input_spatial_dimensions[i];
+                if (undilated >= lhs.shape[@intCast(lhs_dim)]) {
+                    in_bounds = false;
+                    break;
+                }
+                lhs_idx[@intCast(lhs_dim)] = @intCast(undilated);
+                rhs_idx[@intCast(params.dimensions.kernel_spatial_dimensions[i])] = kernel_spatial_idx[i];
+            }
+            if (!in_bounds) continue;
+
+            for (0..kernel_input_features) |kernel_input_feature| {
+                lhs_idx[@intCast(params.dimensions.input_feature_dimension)] = feature_group * kernel_input_features + kernel_input_feature;
+                rhs_idx[@intCast(params.dimensions.kernel_input_feature_dimension)] = kernel_input_feature;
+                sum += lhs.data[multi_to_flat(lhs_idx[0..rank], lhs.shape)] *
+                    rhs.data[multi_to_flat(rhs_idx[0..rank], rhs.shape)];
+            }
         }
         result.data[out_flat] = sum;
     }

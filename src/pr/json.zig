@@ -301,6 +301,41 @@ fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
             try writer.writeAll(",\"rhs_batch\":");
             try emit_i64_array(writer, dg.rhs_batch_dims);
         },
+        .convolution => |conv| {
+            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"window_strides\":");
+            try emit_i64_array(writer, conv.window_strides);
+            try writer.writeAll(",\"padding\":");
+            try emit_i64_array(writer, conv.padding);
+            try writer.writeAll(",\"lhs_dilation\":");
+            try emit_i64_array(writer, conv.lhs_dilation);
+            try writer.writeAll(",\"rhs_dilation\":");
+            try emit_i64_array(writer, conv.rhs_dilation);
+            try writer.writeAll(",\"window_reversal\":");
+            try emit_bool_array(writer, conv.window_reversal);
+            try writer.writeAll(",\"input_spatial_dimensions\":");
+            try emit_i64_array(writer, conv.dimensions.input_spatial_dimensions);
+            try writer.writeAll(",\"kernel_spatial_dimensions\":");
+            try emit_i64_array(writer, conv.dimensions.kernel_spatial_dimensions);
+            try writer.writeAll(",\"output_spatial_dimensions\":");
+            try emit_i64_array(writer, conv.dimensions.output_spatial_dimensions);
+            try writer.print(",\"input_batch_dimension\":{d},\"input_feature_dimension\":{d}", .{
+                conv.dimensions.input_batch_dimension,
+                conv.dimensions.input_feature_dimension,
+            });
+            try writer.print(",\"kernel_input_feature_dimension\":{d},\"kernel_output_feature_dimension\":{d}", .{
+                conv.dimensions.kernel_input_feature_dimension,
+                conv.dimensions.kernel_output_feature_dimension,
+            });
+            try writer.print(",\"output_batch_dimension\":{d},\"output_feature_dimension\":{d}", .{
+                conv.dimensions.output_batch_dimension,
+                conv.dimensions.output_feature_dimension,
+            });
+            try writer.print(",\"feature_group_count\":{d},\"batch_group_count\":{d}", .{
+                conv.feature_group_count,
+                conv.batch_group_count,
+            });
+        },
         .gather => |g| {
             try open_attrs(writer, &has_attr);
             try writer.writeAll("\"slice_sizes\":");
@@ -366,6 +401,15 @@ fn open_attrs(writer: *Writer, has_attr: *bool) !void {
     } else {
         try writer.writeAll(",");
     }
+}
+
+fn emit_bool_array(writer: *Writer, values: []const bool) !void {
+    try writer.writeAll("[");
+    for (values, 0..) |value, i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.writeAll(if (value) "true" else "false");
+    }
+    try writer.writeAll("]");
 }
 
 fn emit_region(writer: *Writer, func: pr.Function, region: pr.Region) !void {

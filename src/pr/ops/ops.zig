@@ -48,6 +48,7 @@ pub fn OpFor(comptime prim: pr.Prim) type {
         .scatter => shape.scatter,
         .dot => contraction.dot,
         .dot_general => contraction.dot_general,
+        .convolution => contraction.convolution,
         .reshape => shape.reshape,
         .iota => shape.iota,
         .transpose => shape.transpose,

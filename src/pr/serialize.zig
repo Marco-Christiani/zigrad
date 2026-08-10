@@ -18,10 +18,10 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 3;
+pub const version: u32 = 4;
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
-const wire_prim_count = 27;
+const wire_prim_count = 28;
 
 comptime {
     const prim_fields = std.meta.fields(pr.Prim);
@@ -702,6 +702,48 @@ test "binary PR round trip is byte stable" {
     defer std.testing.allocator.free(second_bytes);
 
     try std.testing.expectEqualSlices(u8, first_bytes, second_bytes);
+}
+
+test "convolution parameters round trip" {
+    var source = pr.Program.init(std.testing.allocator);
+    defer source.deinit();
+    var builder = try pr.FunctionBuilder.init(&source, "main");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{ 1, 8, 8, 3 });
+    const kernel = try builder.param_tensor(.f32, &.{ 3, 3, 3, 4 });
+    const output = try builder.convolution(input, kernel, .{
+        .window_strides = &.{ 2, 2 },
+        .padding = &.{ 1, 1, 1, 1 },
+        .lhs_dilation = &.{ 1, 1 },
+        .rhs_dilation = &.{ 1, 1 },
+        .window_reversal = &.{ false, false },
+        .dimensions = .{
+            .input_batch_dimension = 0,
+            .input_feature_dimension = 3,
+            .input_spatial_dimensions = &.{ 1, 2 },
+            .kernel_input_feature_dimension = 2,
+            .kernel_output_feature_dimension = 3,
+            .kernel_spatial_dimensions = &.{ 0, 1 },
+            .output_batch_dimension = 0,
+            .output_feature_dimension = 3,
+            .output_spatial_dimensions = &.{ 1, 2 },
+        },
+    });
+    try source.add_function(try builder.finish(&.{output}));
+
+    var encoded: Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try emit(&source, &encoded.writer);
+    const bytes = try encoded.toOwnedSlice();
+    defer std.testing.allocator.free(bytes);
+    var decoded = try parse(std.testing.allocator, bytes);
+    defer decoded.deinit();
+
+    const params = decoded.functions[0].ops[0].params.convolution;
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, params.window_strides);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1, 1, 1 }, params.padding);
+    try std.testing.expectEqual(@as(i64, 3), params.dimensions.input_feature_dimension);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, params.dimensions.kernel_spatial_dimensions);
 }
 
 test "binary PR rejects version and schema mismatches" {

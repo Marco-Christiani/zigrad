@@ -92,6 +92,139 @@ pub const dot = struct {
 
 // Dot General
 
+pub const convolution = struct {
+    pub const arity = .{ .in = 2, .out = 1 };
+
+    pub fn validate(op: *const pr.Op, params: pr.ConvolutionParams) pr.ValidationError!void {
+        if (op.inputs.len != 2 or op.outputs.len != 1) return error.InvalidOpArity;
+        const lhs = op.operand(0).as_tensor();
+        const rhs = op.operand(1).as_tensor();
+        const out = op.result(0).as_tensor();
+        if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.ConvolutionTypeMismatch;
+
+        var dims: [max_rank]i64 = undefined;
+        const expected = compute_convolution_output_dims(lhs, rhs, params, &dims) orelse
+            return error.ConvolutionTypeMismatch;
+        if (!std.mem.eql(i64, expected, out.shape.dims)) return error.ConvolutionTypeMismatch;
+    }
+
+    pub fn infer_output(
+        allocator: std.mem.Allocator,
+        inputs: []const *pr.Var,
+        params: pr.ConvolutionParams,
+    ) pr.BuildError!Aval {
+        if (inputs.len != 2) return error.InvalidOpArity;
+        const lhs = inputs[0].as_tensor();
+        const rhs = inputs[1].as_tensor();
+        if (lhs.dtype != rhs.dtype) return error.ConvolutionTypeMismatch;
+
+        var dims: [max_rank]i64 = undefined;
+        const computed = compute_convolution_output_dims(lhs, rhs, params, &dims) orelse
+            return error.ConvolutionTypeMismatch;
+        return .{ .tensor = .{
+            .dtype = lhs.dtype,
+            .shape = .{ .dims = try allocator.dupe(i64, computed) },
+        } };
+    }
+
+    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        ctx.set_primal(op.result(0), try ctx.builder.convolution(lhs, rhs, params));
+    }
+
+    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
+        const out_cot = ctx.get_cot(op.result(0)) orelse return;
+        if (params.feature_group_count != 1 or params.batch_group_count != 1) return error.UnsupportedEqn;
+        for (params.window_reversal) |reversed| if (reversed) return error.UnsupportedEqn;
+
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs_shape = op.operand(0).as_tensor().shape.dims;
+        const rhs_shape = op.operand(1).as_tensor().shape.dims;
+        const out_shape = op.result(0).as_tensor().shape.dims;
+        const spatial_rank = params.dimensions.input_spatial_dimensions.len;
+
+        var lhs_padding: [max_rank * 2]i64 = undefined;
+        var rhs_padding: [max_rank * 2]i64 = undefined;
+        var reverse_window: [max_rank]bool = undefined;
+        @memset(reverse_window[0..spatial_rank], true);
+        for (0..spatial_rank) |i| {
+            const input_size = lhs_shape[@intCast(params.dimensions.input_spatial_dimensions[i])];
+            const kernel_size = rhs_shape[@intCast(params.dimensions.kernel_spatial_dimensions[i])];
+            const output_size = out_shape[@intCast(params.dimensions.output_spatial_dimensions[i])];
+            const dilated_input = dilated_size(input_size, params.lhs_dilation[i]);
+            const dilated_kernel = dilated_size(kernel_size, params.rhs_dilation[i]);
+            const dilated_output = dilated_size(output_size, params.window_strides[i]);
+            const low = params.padding[i * 2];
+
+            lhs_padding[i * 2] = dilated_kernel - low - 1;
+            lhs_padding[i * 2 + 1] = dilated_input + dilated_kernel - 1 -
+                dilated_output - lhs_padding[i * 2];
+            rhs_padding[i * 2] = low;
+            rhs_padding[i * 2 + 1] = dilated_output - dilated_input + dilated_kernel - low - 1;
+        }
+
+        const lhs_cot = try ctx.builder.convolution(out_cot, rhs, .{
+            .window_strides = params.lhs_dilation,
+            .padding = lhs_padding[0 .. spatial_rank * 2],
+            .lhs_dilation = params.window_strides,
+            .rhs_dilation = params.rhs_dilation,
+            .window_reversal = reverse_window[0..spatial_rank],
+            .dimensions = .{
+                .input_batch_dimension = params.dimensions.output_batch_dimension,
+                .input_feature_dimension = params.dimensions.output_feature_dimension,
+                .input_spatial_dimensions = params.dimensions.output_spatial_dimensions,
+                .kernel_input_feature_dimension = params.dimensions.kernel_output_feature_dimension,
+                .kernel_output_feature_dimension = params.dimensions.kernel_input_feature_dimension,
+                .kernel_spatial_dimensions = params.dimensions.kernel_spatial_dimensions,
+                .output_batch_dimension = params.dimensions.input_batch_dimension,
+                .output_feature_dimension = params.dimensions.input_feature_dimension,
+                .output_spatial_dimensions = params.dimensions.input_spatial_dimensions,
+            },
+        });
+        const rhs_cot = try ctx.builder.convolution(lhs, out_cot, .{
+            .window_strides = params.rhs_dilation,
+            .padding = rhs_padding[0 .. spatial_rank * 2],
+            .lhs_dilation = params.lhs_dilation,
+            .rhs_dilation = params.window_strides,
+            .window_reversal = params.window_reversal,
+            .dimensions = .{
+                .input_batch_dimension = params.dimensions.input_feature_dimension,
+                .input_feature_dimension = params.dimensions.input_batch_dimension,
+                .input_spatial_dimensions = params.dimensions.input_spatial_dimensions,
+                .kernel_input_feature_dimension = params.dimensions.output_batch_dimension,
+                .kernel_output_feature_dimension = params.dimensions.output_feature_dimension,
+                .kernel_spatial_dimensions = params.dimensions.output_spatial_dimensions,
+                .output_batch_dimension = params.dimensions.kernel_input_feature_dimension,
+                .output_feature_dimension = params.dimensions.kernel_output_feature_dimension,
+                .output_spatial_dimensions = params.dimensions.kernel_spatial_dimensions,
+            },
+        });
+        try ctx.add_cot(op.operand(0), lhs_cot);
+        try ctx.add_cot(op.operand(1), rhs_cot);
+    }
+
+    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
+        const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs_tangent = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+        const rhs_tangent = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
+        const lhs_term = try ctx.builder.convolution(lhs_tangent, rhs, params);
+        const rhs_term = try ctx.builder.convolution(lhs, rhs_tangent, params);
+        ctx.set_tangent(op.result(0), try ctx.builder.add(lhs_term, rhs_term));
+    }
+
+    pub fn format(writer: *types.Writer, _: *const pr.Op, params: pr.ConvolutionParams) types.FormatError!void {
+        try writer.print("strides={any}, padding={any}, feature_groups={d}, batch_groups={d}", .{
+            params.window_strides,
+            params.padding,
+            params.feature_group_count,
+            params.batch_group_count,
+        });
+    }
+};
+
 pub const dot_general = struct {
     pub const arity = .{ .in = 2, .out = 1 };
 
@@ -556,6 +689,88 @@ fn transpose_to_match_multi(
 }
 
 const max_rank = pr.max_rank;
+
+fn compute_convolution_output_dims(
+    lhs: pr.Tensor,
+    rhs: pr.Tensor,
+    params: pr.ConvolutionParams,
+    out_buf: *[max_rank]i64,
+) ?[]const i64 {
+    const rank = lhs.shape.rank();
+    if (rank != rhs.shape.rank() or rank < 2 or rank > max_rank) return null;
+    const spatial_rank = rank - 2;
+    if (params.window_strides.len != spatial_rank or
+        params.padding.len != spatial_rank * 2 or
+        params.lhs_dilation.len != spatial_rank or
+        params.rhs_dilation.len != spatial_rank or
+        params.window_reversal.len != spatial_rank or
+        params.dimensions.input_spatial_dimensions.len != spatial_rank or
+        params.dimensions.kernel_spatial_dimensions.len != spatial_rank or
+        params.dimensions.output_spatial_dimensions.len != spatial_rank)
+    {
+        return null;
+    }
+    if (!valid_dimension_spec(rank, params.dimensions.input_batch_dimension, params.dimensions.input_feature_dimension, params.dimensions.input_spatial_dimensions) or
+        !valid_dimension_spec(rank, params.dimensions.kernel_output_feature_dimension, params.dimensions.kernel_input_feature_dimension, params.dimensions.kernel_spatial_dimensions) or
+        !valid_dimension_spec(rank, params.dimensions.output_batch_dimension, params.dimensions.output_feature_dimension, params.dimensions.output_spatial_dimensions))
+    {
+        return null;
+    }
+    if (params.feature_group_count <= 0 or params.batch_group_count <= 0) return null;
+    if (params.feature_group_count > 1 and params.batch_group_count > 1) return null;
+
+    const input_batch: usize = @intCast(params.dimensions.input_batch_dimension);
+    const input_feature: usize = @intCast(params.dimensions.input_feature_dimension);
+    const kernel_input_feature: usize = @intCast(params.dimensions.kernel_input_feature_dimension);
+    const kernel_output_feature: usize = @intCast(params.dimensions.kernel_output_feature_dimension);
+    const feature_groups: i64 = params.feature_group_count;
+    const batch_groups: i64 = params.batch_group_count;
+    if (@mod(lhs.shape.dims[input_feature], feature_groups) != 0 or
+        @divExact(lhs.shape.dims[input_feature], feature_groups) != rhs.shape.dims[kernel_input_feature] or
+        @mod(rhs.shape.dims[kernel_output_feature], feature_groups) != 0 or
+        @mod(lhs.shape.dims[input_batch], batch_groups) != 0 or
+        @mod(rhs.shape.dims[kernel_output_feature], batch_groups) != 0)
+    {
+        return null;
+    }
+
+    @memset(out_buf[0..rank], 0);
+    out_buf[@intCast(params.dimensions.output_batch_dimension)] = @divExact(lhs.shape.dims[input_batch], batch_groups);
+    out_buf[@intCast(params.dimensions.output_feature_dimension)] = @divExact(rhs.shape.dims[kernel_output_feature], batch_groups);
+    for (0..spatial_rank) |i| {
+        const stride = params.window_strides[i];
+        const lhs_dilation = params.lhs_dilation[i];
+        const rhs_dilation = params.rhs_dilation[i];
+        if (stride <= 0 or lhs_dilation <= 0 or rhs_dilation <= 0) return null;
+        const lhs_size = lhs.shape.dims[@intCast(params.dimensions.input_spatial_dimensions[i])];
+        const rhs_size = rhs.shape.dims[@intCast(params.dimensions.kernel_spatial_dimensions[i])];
+        if (lhs_size <= 0 or rhs_size <= 0) return null;
+        const dilated_lhs = (lhs_size - 1) * lhs_dilation + 1;
+        const dilated_rhs = (rhs_size - 1) * rhs_dilation + 1;
+        const numerator = dilated_lhs + params.padding[i * 2] + params.padding[i * 2 + 1] - dilated_rhs;
+        if (numerator < 0) return null;
+        out_buf[@intCast(params.dimensions.output_spatial_dimensions[i])] = @divFloor(numerator, stride) + 1;
+    }
+    return out_buf[0..rank];
+}
+
+fn valid_dimension_spec(rank: usize, first: i64, second: i64, spatial: []const i64) bool {
+    var seen = [_]bool{false} ** max_rank;
+    for ([_]i64{ first, second }) |dim| {
+        if (dim < 0 or dim >= rank or seen[@intCast(dim)]) return false;
+        seen[@intCast(dim)] = true;
+    }
+    for (spatial) |dim| {
+        if (dim < 0 or dim >= rank or seen[@intCast(dim)]) return false;
+        seen[@intCast(dim)] = true;
+    }
+    for (seen[0..rank]) |present| if (!present) return false;
+    return true;
+}
+
+fn dilated_size(size: i64, dilation: i64) i64 {
+    return (size - 1) * dilation + 1;
+}
 
 /// Compute `dot_general` output dimensions.
 ///
