@@ -178,6 +178,11 @@ const iree_compile_options = [_]Option{
         .description = "Select the IREE compilation target",
         .value_name = "NAME",
     },
+    .{
+        .long_name = "entry",
+        .description = "Select the PR function compiled as the entry point",
+        .value_name = "NAME",
+    },
 };
 
 const demo_backend_options = [_]Option{.{
@@ -321,8 +326,10 @@ const iree_children = [_]Command{
     .{
         .id = .iree_compile,
         .name = "compile",
-        .summary = "Compile the demo to VMFB",
+        .summary = "Compile a serialized PR artifact to VMFB",
+        .description = "Arguments following -- are passed to iree-compile.",
         .options = &iree_compile_options,
+        .positionals = &path_argument,
         .requirement = "IREE and MLIR",
     },
 };

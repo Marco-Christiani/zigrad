@@ -159,9 +159,10 @@ in {
         enableLto
         extraCxxFlags
         extraLdFlags
+        cudaToolkit
         ;
     };
-    inherit (iree) ireeCompiler ireeLlvm ireeRuntime;
+    inherit (iree) ireeCompilerCpu ireeCompilerCuda ireeLlvm ireeRuntimeCpu ireeRuntimeCuda;
 
     buildGraph = import ./build-configurations.nix {
       inherit
@@ -175,8 +176,11 @@ in {
         inherit
           cudaRuntime
           cudaToolkit
-          ireeCompiler
-          ireeRuntime
+          ireeCompilerCpu
+          ireeCompilerCuda
+          ireeLlvm
+          ireeRuntimeCpu
+          ireeRuntimeCuda
           llvm
           mirage
           mirageAdapter
@@ -215,6 +219,8 @@ in {
     );
   in {
     _module.args.zigradBuildConfigurations = buildConfigurations;
+    _module.args.zigradCudaArchitectures = cudaArchitectures;
+    _module.args.zigradIree = iree;
 
     packages =
       configurationPackages
@@ -242,8 +248,10 @@ in {
         xla-pjrt-plugins = xlaPjrtPlugins;
         xla-pjrt-plugins-cuda = xlaPjrtPluginsCuda;
         iree-llvm = ireeLlvm;
-        iree-compiler = ireeCompiler;
-        iree-runtime = ireeRuntime;
+        iree-compiler-cpu = ireeCompilerCpu;
+        iree-compiler-cuda = ireeCompilerCuda;
+        iree-runtime-cpu = ireeRuntimeCpu;
+        iree-runtime-cuda = ireeRuntimeCuda;
         pjrt-headers = pjrtHeaders;
       };
 

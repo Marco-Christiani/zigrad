@@ -2,7 +2,7 @@ const std = @import("std");
 const zg = @import("zigrad");
 const build_options = zg.build_options;
 const demos = @import("demos.zig");
-const iree_aot = @import("demos/iree_aot.zig");
+const iree_compile_cmd = @import("iree/compile_cmd.zig");
 const llama_demo = @import("llama_demo.zig");
 const llm_demo = @import("llm_demo.zig");
 const pjrt_aot = @import("demos/pjrt_aot.zig");
@@ -213,13 +213,16 @@ fn dispatch_iree(
 ) !void {
     if (comptime build_options.has_iree and build_options.has_mlir) {
         return switch (command) {
-            .compile => |opts| iree_aot.run(
+            .compile => |opts| iree_compile_cmd.run(
                 env.io,
                 gpa,
                 env.environ,
                 .{
+                    .input = opts.path,
                     .output = opts.output,
                     .target = opts.target,
+                    .entry = opts.entry,
+                    .compiler_arguments = opts.compiler_arguments,
                     .pr = outputs.pr,
                     .mlir = outputs.mlir,
                 },
@@ -663,7 +666,7 @@ fn dispatch_iree_demo(
 ) !void {
     if (comptime build_options.has_iree and build_options.has_mlir) {
         const config = zg.iree.Config.from_environ(env.environ);
-        var runtime = try zg.iree.Runtime.init(gpa, config.runtime);
+        var runtime = try zg.iree.Runtime.init(gpa, .registered, config.runtime);
         defer runtime.deinit();
         var execution = zg.iree.Execution.init(gpa, &runtime, config.runtime);
 

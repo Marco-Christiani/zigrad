@@ -1,15 +1,23 @@
-//! IREE VM bytecode emission witness.
+//! CLI support for compiling serialized PR to IREE VM bytecode.
 
 const std = @import("std");
 const zg = @import("zigrad");
-const demos = @import("../demos.zig");
 
 pub const Options = struct {
+    /// Serialized PR file to compile.
+    input: []const u8,
+
     /// Destination for the emitted VMFB artifact.
     output: ?[]const u8 = null,
 
     /// IREE compilation target override.
     target: ?[]const u8 = null,
+
+    /// PR function compiled as the IREE entry point.
+    entry: ?[]const u8 = null,
+
+    /// Additional arguments passed to `iree-compile`.
+    compiler_arguments: []const []const u8 = &.{},
 
     /// Optional destination and format for PR output.
     pr: ?zg.pr.dump.Config = null,
@@ -28,8 +36,21 @@ pub fn run(
     if (opts.target) |target|
         config.compiler.target_backend = target;
 
-    var program = try demos.build_demo_program(allocator);
+    config.compiler.extra_arguments = opts.compiler_arguments;
+
+    const serialized = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        opts.input,
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(serialized);
+    var program = try zg.pr.serialize.parse(allocator, serialized);
     defer program.deinit();
+    const entry_name = opts.entry orelse switch (program.functions.len) {
+        1 => program.functions[0].name,
+        else => return error.EntryRequired,
+    };
 
     var ctx = zg.CompilationCtx{
         .allocator = allocator,
@@ -41,19 +62,19 @@ pub fn run(
     try pipeline.add(zg.pr.Validate{});
     if (opts.pr) |selected| {
         var output_config = selected;
-        output_config.entry_name = output_config.entry_name orelse "main";
+        output_config.entry_name = output_config.entry_name orelse entry_name;
         try pipeline.add(zg.pr.dump.Dump{ .config = output_config });
     }
     try pipeline.add(zg.pr.transform.outline.Pass{});
     try pipeline.add(zg.mlir.stablehlo.Lower{
         .config = .{
-            .entry_name = "main",
+            .entry_name = entry_name,
             .encoding = if (opts.mlir == null) .binary else .text,
         },
     });
     if (opts.mlir) |selected| {
         var output_config = selected;
-        output_config.entry_name = output_config.entry_name orelse "main";
+        output_config.entry_name = output_config.entry_name orelse entry_name;
         try pipeline.add(zg.stablehlo.Dump{ .config = output_config });
     }
     try pipeline.add(&compiler.interface);
@@ -64,7 +85,9 @@ pub fn run(
     );
     defer vmfb.deinit();
 
-    const output_path = opts.output orelse "demo.vmfb";
-    try demos.write_bytes_to_path(io, output_path, vmfb.bytes);
+    const output_path = opts.output orelse "program.vmfb";
+    var output = try std.Io.Dir.cwd().createFile(io, output_path, .{ .truncate = true });
+    defer output.close(io);
+    try output.writeStreamingAll(io, vmfb.bytes);
     std.log.info("wrote {d} bytes VMFB -> {s}", .{ vmfb.bytes.len, output_path });
 }

@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Omit debug information from installed executables");
 
     const runtime_root_opt = b.option([]const u8, "runtime", "Override runtime bundle root (dev convenience)");
     const install_runtime_link = b.option(bool, "install-runtime-link", "Create zig-out/runtime symlink (dev convenience)") orelse false;
@@ -16,6 +17,7 @@ pub fn build(b: *std.Build) void {
     const use_tvm = b.option(bool, "tvm", "Enable the TVM kernel provider") orelse false;
     const use_mirage = b.option(bool, "mirage", "Enable the Mirage-backed kernel provider") orelse false;
     const use_iree = b.option(bool, "iree", "Enable the IREE integration") orelse false;
+    const use_iree_embedded_elf = b.option(bool, "iree-embedded-elf", "Enable the IREE embedded ELF local-sync runtime") orelse false;
     const use_nvrtc = b.option(bool, "nvrtc", "Enable Zigrad NVRTC support") orelse false;
     const use_cuda_runtime = b.option(bool, "cuda-runtime", "Add CUDA runtime bundle paths") orelse false;
     const has_external_integration = use_pjrt or use_mlir or use_tvm or use_mirage or use_iree or use_nvrtc or use_cuda_runtime;
@@ -44,6 +46,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "has_tvm", use_tvm);
     build_options.addOption(bool, "has_mirage", use_mirage);
     build_options.addOption(bool, "has_iree", use_iree);
+    build_options.addOption(bool, "has_iree_embedded_elf", use_iree_embedded_elf);
     build_options.addOption(bool, "has_nvrtc", use_nvrtc);
     build_options.addOption(bool, "has_cuda_runtime", use_cuda_runtime);
     build_options.addOption(bool, "emit_op_coverage", emit_op_coverage);
@@ -145,6 +148,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "zigrad", .module = zigrad_mod },
@@ -155,7 +159,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(b.path("src"));
     if (sdk_include) |include| exe.root_module.addIncludePath(.{ .cwd_relative = include });
     if (use_mlir) link_mlir_stablehlo_capi(exe, sdk_lib.?);
-    if (use_iree) link_iree(zigrad_mod, sdk_lib.?);
+    if (use_iree) link_iree(zigrad_mod, sdk_lib.?, use_iree_embedded_elf);
     if (has_external_integration)
         add_runtime_bundle(b, exe, .{
             .runtime_root = runtime_root_opt orelse sdk_runtime.?,
@@ -298,14 +302,16 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/iree/runner.zig"),
                 .target = target,
                 .optimize = optimize,
+                .strip = strip,
                 .link_libc = true,
             }),
         });
-        iree_runner.root_module.addIncludePath(b.path("src"));
         iree_runner.root_module.addIncludePath(.{ .cwd_relative = sdk_include.? });
-        link_iree(iree_runner.root_module, sdk_lib.?);
-        b.installArtifact(iree_runner);
+        link_iree(iree_runner.root_module, sdk_lib.?, false);
+        const install_iree_runner = b.addInstallArtifact(iree_runner, .{});
+        b.getInstallStep().dependOn(&install_iree_runner.step);
         b.step("iree-runner", "Build minimal IREE VMFB runner").dependOn(&iree_runner.step);
+        b.step("install-iree-runner", "Install minimal IREE VMFB runner").dependOn(&install_iree_runner.step);
     }
     const pr_mod = b.addModule("pr", .{
         .root_source_file = b.path("src/pr.zig"),
@@ -330,7 +336,7 @@ fn link_mlir_stablehlo_capi(exe: *std.Build.Step.Compile, sdk_lib: []const u8) v
 ///
 /// IREE compilation runs through the configured CLI. The shim exposes inline
 ///  functions and macros that Zig cannot import directly.
-fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8) void {
+fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8, embedded_elf: bool) void {
     const b = mod.owner;
 
     const iree_abi = b.createModule(.{
@@ -348,11 +354,16 @@ fn link_iree(mod: *std.Build.Module, sdk_lib: []const u8) void {
         } else |_| {}
     }
 
+    const flags: []const []const u8 = if (embedded_elf)
+        &.{
+            "-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl",
+            "-DZG_IREE_EMBEDDED_ELF=1",
+        }
+    else
+        &.{"-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl"};
     mod.addCSourceFile(.{
         .file = b.path("src/c/iree/shim.c"),
-        .flags = &.{
-            "-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl",
-        },
+        .flags = flags,
     });
 }
 

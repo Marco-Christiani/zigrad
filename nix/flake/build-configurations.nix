@@ -87,13 +87,57 @@
 
     iree = {
       requires = [];
-      compile = [parts.ireeRuntime];
-      runtime = [parts.ireeCompiler];
+      compile = [];
+      runtime = [];
       features.withIree = true;
+      compatibility = [];
+    };
+
+    "iree-runtime-cpu" = {
+      requires = ["iree"];
+      compile = [parts.ireeRuntimeCpu];
+      runtime = [];
+      features = {};
+      conflicts = ["iree-runtime-cuda"];
+    };
+
+    "iree-runtime-cuda" = {
+      requires = [
+        "cuda-driver"
+        "iree"
+      ];
+      compile = [parts.ireeRuntimeCuda];
+      runtime = [];
+      features = {};
+      conflicts = ["iree-runtime-cpu"];
+    };
+
+    "iree-compiler-cpu" = {
+      requires = [];
+      compile = [];
+      runtime = [parts.ireeCompilerCpu];
+      features = {};
+      conflicts = ["iree-compiler-cuda"];
       compatibility = [
         {
           group = "iree-build-llvm";
-          consumer = "iree";
+          consumer = "iree-compiler";
+          requirement = "iree-llvm";
+          isolation = "out-of-process";
+        }
+      ];
+    };
+
+    "iree-compiler-cuda" = {
+      requires = [];
+      compile = [];
+      runtime = [parts.ireeCompilerCuda];
+      features = {};
+      conflicts = ["iree-compiler-cpu"];
+      compatibility = [
+        {
+          group = "iree-build-llvm";
+          consumer = "iree-compiler";
           requirement = "iree-llvm";
           isolation = "out-of-process";
         }
@@ -192,7 +236,19 @@
 
     "iree-cpu-execution" = {
       requires = [
-        "iree"
+        "iree-compiler-cpu"
+        "iree-runtime-cpu"
+        "stablehlo-mlir"
+      ];
+      compile = [];
+      runtime = [];
+      features = {};
+    };
+
+    "iree-cuda-execution" = {
+      requires = [
+        "iree-compiler-cuda"
+        "iree-runtime-cuda"
         "stablehlo-mlir"
       ];
       compile = [];
@@ -251,6 +307,21 @@
     iree-cpu = {
       demands = ["iree-cpu-execution"];
       description = "Zigrad with the current IREE CPU compile and execute path";
+    };
+
+    iree-cuda = {
+      demands = ["iree-cuda-execution"];
+      description = "Zigrad with the current IREE CUDA compile and execute path";
+    };
+
+    iree-cpu-runtime = {
+      demands = ["iree-runtime-cpu"];
+      description = "Zigrad with the IREE CPU runtime";
+    };
+
+    iree-cuda-runtime = {
+      demands = ["iree-runtime-cuda"];
+      description = "Zigrad with the IREE CUDA runtime";
     };
 
     xla-iree-cpu = {
@@ -414,8 +485,20 @@
       // lib.optionalAttrs (has "tvm-cpu" || has "tvm-cuda" || has "tvm-python-cuda") {
         ZG_ELF_LINKER_PATH = "${parts.llvm}/bin/ld.lld";
       }
-      // lib.optionalAttrs (has "iree") {
-        ZG_IREE_COMPILER_PATH = "${parts.ireeCompiler}/bin/iree-compile";
+      // lib.optionalAttrs (has "iree-compiler-cpu" || has "iree-compiler-cuda") {
+        ZG_IREE_COMPILER_PATH =
+          if has "iree-compiler-cuda"
+          then "${parts.ireeCompilerCuda}/bin/iree-compile"
+          else "${parts.ireeCompilerCpu}/bin/iree-compile";
+        IREE_LLVM_EMBEDDED_LINKER_PATH = lib.getExe' parts.ireeLlvm "ld.lld";
+      }
+      // lib.optionalAttrs (has "iree-runtime-cpu") {
+        ZG_IREE_DRIVER = "local-sync";
+        ZG_IREE_TARGET_BACKEND = "llvm-cpu";
+      }
+      // lib.optionalAttrs (has "iree-runtime-cuda") {
+        ZG_IREE_DRIVER = "cuda";
+        ZG_IREE_TARGET_BACKEND = "cuda";
       }
       // lib.optionalAttrs (has "nvrtc") {
         CUDA_HOME = "${parts.cudaToolkit}";

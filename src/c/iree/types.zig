@@ -241,6 +241,14 @@ pub extern "c" fn zg_iree_runtime_instance_create_all_drivers(
     out_instance: *?*Instance,
 ) Status;
 
+pub extern "c" fn zg_iree_runtime_instance_create(
+    out_instance: *?*Instance,
+) Status;
+
+pub extern "c" fn zg_iree_create_embedded_elf_sync_device(
+    out_device: *?*HalDevice,
+) Status;
+
 /// Wrap `iree_runtime_session_options_initialize` + `_create_with_device`.
 pub extern "c" fn zg_iree_runtime_session_create_with_device_default(
     instance: *Instance,
@@ -270,10 +278,9 @@ pub extern "c" fn zg_iree_buffer_view_allocate_device_local_copy(
     out_view: *?*HalBufferView,
 ) Status;
 
-/// Map the buffer for read, copy `dst_len` bytes (or less if the buffer is
-///  smaller), then unmap. Hides `iree_hal_buffer_mapping_t` whose bitfields
-///  defeat translate-c.
+/// Transfer at most `dst_len` bytes from a device buffer to host memory.
 pub extern "c" fn zg_iree_hal_buffer_read(
+    device: *HalDevice,
     buffer: *HalBuffer,
     dst: [*]u8,
     dst_len: HostSize,

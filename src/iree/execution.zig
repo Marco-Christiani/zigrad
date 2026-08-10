@@ -66,12 +66,13 @@ pub const Execution = struct {
     }
 
     fn download(
-        _: *Executor,
+        interface: *Executor,
         buffer: Executor.Buffer,
         destination: []u8,
     ) Executor.Error!?Executor.Event {
+        const self = promote(interface);
         const iree_buffer = unwrap_buffer(buffer);
-        iree_buffer.read(destination) catch |err| return map_error(err);
+        self.runtime.read_buffer(&iree_buffer, destination) catch |err| return map_error(err);
         return null;
     }
 

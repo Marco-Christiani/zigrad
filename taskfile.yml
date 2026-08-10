@@ -68,7 +68,7 @@ tasks:
         --on-calendar='07:00' \
         --working-directory={{.TASKFILE_DIR}} \
         --property=MemoryMax={{.MemoryMax}} \
-        -- bash -c 'nix build --impure --max-jobs 1 --cores 60 .#zigrad-dev-cuda > /tmp/zigrad-build.log 2>&1'
+        -- bash -c 'nix build --impure --max-jobs 1 --cores 32 .#zigrad-dev-cuda > /tmp/zigrad-build.log 2>&1'
       echo "Scheduled. Status: systemctl --user status zigrad-build.timer"
 
   sdk:background:
@@ -84,7 +84,7 @@ tasks:
         --property=MemoryMax={{.MemoryMax}} \
         --property=Nice={{.Nice}} \
         --property=IOWeight={{.IOWeight}} \
-        -- nix build --impure --max-jobs 1 --cores 48 .#zigrad-dev-cuda
+        -- nix build --impure --max-jobs 1 --cores 32 .#zigrad-dev-cuda
 
   check-sdk:
     desc: Inspect external input ELF dependencies
@@ -251,7 +251,7 @@ tasks:
     cmd: nix run --impure .#zigrad-iree-cpu -- iree demo {{.CLI_ARGS}}
 
   iree:compile:
-    desc: "Compile demo program to VMFB (offline, no runtime needed)"
+    desc: "Compile serialized PR to VMFB"
     cmd: nix run --impure .#zigrad-iree-cpu -- iree compile {{.CLI_ARGS}}
 
   iree:runner:build:
@@ -260,9 +260,9 @@ tasks:
       task: iree:build
 
   iree:runner:run:
-    desc: "Execute a VMFB with the minimal runner"
+    desc: "Execute a VMFB with the IREE runner"
     deps: [iree:runner:build]
-    cmd: ./result-zigrad-iree-cpu/bin/iree-runner {{.CLI_ARGS | default "demo.vmfb demo.vmfb --input=2x3xf32=1,2,3,4,5,6 --input=3x2xf32=2,2,2,2,2,2 --input=2x2xf32=1,2,3,4"}}
+    cmd: ./result-zigrad-iree-cpu/bin/iree-runner {{.CLI_ARGS}}
 
   # Shim (MLIR dialect/pass development) ======================================
   shim:build:

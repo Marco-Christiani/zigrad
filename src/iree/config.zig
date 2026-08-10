@@ -33,7 +33,7 @@ pub const CompilerConfig = struct {
 
 /// Inputs for one IREE runtime instance.
 pub const RuntimeConfig = struct {
-    /// HAL driver used to create the runtime device.
+    /// HAL driver used by registered-driver execution.
     driver: []const u8 = default_driver,
 };
 

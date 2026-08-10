@@ -1,3 +1,4 @@
+# Package a Zig executable that imports Zigrad with one named configuration.
 {
   autoAddDriverRunpath,
   autoPatchelfHook,
@@ -13,10 +14,23 @@
   sourceSubdir ? ".",
   zigradSrc,
   usePackagedZigrad ? false,
+  externalInputs ? configuration.externalInputs,
+  runtimePolicy ? configuration.configuration.runtimeEnvPolicy,
+  targetPkgs ? null,
+  zigArgs ? [],
+  optimize ? "ReleaseFast",
+  withRuntimeEnvironment ? true,
 }: let
-  externalInputs = configuration.externalInputs;
   runtimeInputs = externalInputs.runtime;
-  runtimePolicy = configuration.configuration.runtimeEnvPolicy;
+  zigTarget =
+    if targetPkgs == null
+    then "native-native-gnu"
+    else
+      lib.concatStringsSep "-" (with targetPkgs.stdenv.hostPlatform.parsed; [
+        cpu.name
+        kernel.name
+        abi.name
+      ]);
   runtimeLibraryPaths = [
     "${runtimeInputs}/lib"
     "${runtimeInputs}/runtime/sys/lib"
@@ -95,10 +109,11 @@ in
       cd ${lib.escapeShellArg sourceSubdir}
       TERM=dumb zig build \
         -j"$NIX_BUILD_CORES" \
-        -Doptimize=ReleaseFast \
+        -Doptimize=${lib.escapeShellArg optimize} \
         -Dsdk=${externalInputs} \
-        -Dtarget=native-native-gnu \
+        -Dtarget=${lib.escapeShellArg zigTarget} \
         ${zigFeatureArgs} \
+        ${lib.escapeShellArgs zigArgs} \
         --system "$ZG_ZIG_SYSTEM_PACKAGES" \
         --verbose
       runHook postBuild
@@ -109,10 +124,11 @@ in
       export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
       TERM=dumb zig build install \
         -j"$NIX_BUILD_CORES" \
-        -Doptimize=ReleaseFast \
+        -Doptimize=${lib.escapeShellArg optimize} \
         -Dsdk=${externalInputs} \
-        -Dtarget=native-native-gnu \
+        -Dtarget=${lib.escapeShellArg zigTarget} \
         ${zigFeatureArgs} \
+        ${lib.escapeShellArgs zigArgs} \
         --system "$ZG_ZIG_SYSTEM_PACKAGES" \
         --prefix "$out" \
         --verbose
@@ -120,10 +136,13 @@ in
     '';
 
     postFixup =
-      lib.optionalString needsCudaDriverRunpath ''
+      lib.optionalString (targetPkgs != null) ''
+        patchelf --set-interpreter ${lib.escapeShellArg targetPkgs.stdenv.cc.bintools.dynamicLinker} "$out/bin/${mainProgram}"
+      ''
+      + lib.optionalString needsCudaDriverRunpath ''
         addDriverRunpath "$out/bin/${mainProgram}"
       ''
-      + ''
+      + lib.optionalString withRuntimeEnvironment ''
         wrapProgram "$out/bin/${mainProgram}" \
           ${runtimeWrapperArgs}
       '';

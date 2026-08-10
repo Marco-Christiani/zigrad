@@ -11,6 +11,9 @@
     zigradTvmCpu = config.packages.zigrad-tvm-cpu;
     zigradDevCuda = config.packages.zigrad-dev-cuda;
     benchmarkExample = config.packages.zigrad-example-benchmark;
+    basicDeploymentCpu = config.packages.zigrad-example-basic-deployment-cpu;
+    hasBasicDeploymentCuda = config.packages ? zigrad-example-basic-deployment-cuda;
+    basicDeploymentCuda = config.packages.zigrad-example-basic-deployment-cuda or null;
     mnistExample = config.packages.zigrad-example-mnist;
     mlirCppExample = config.packages.zigrad-example-mlir-cpp;
 
@@ -128,9 +131,13 @@
       zigrad-unit-tests = zigradTests;
       zigrad-build-configurations = config.packages.zigrad-build-configurations;
       zigrad-example-benchmark = checkBenchmarkExample;
+      zigrad-example-basic-deployment-cpu = basicDeploymentCpu;
       zigrad-example-mlir-cpp = mlirCppExample;
       zigrad-example-mnist-pjrt = checkMnistPjrtExample;
       zigrad-example-mnist-iree = checkMnistIreeExample;
+    }
+    // pkgs.lib.optionalAttrs hasBasicDeploymentCuda {
+      zigrad-example-basic-deployment-cuda = basicDeploymentCuda;
     };
 
     packages = {

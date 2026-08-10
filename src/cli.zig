@@ -107,10 +107,16 @@ pub const LlamaFtDemoOpts = struct {
 
 /// Options for `iree compile`.
 pub const IreeCompileOpts = struct {
+    /// Serialized PR file to compile.
+    path: []const u8,
     /// Destination for the VMFB artifact.
     output: ?[]const u8 = null,
     /// IREE compilation target.
     target: ?[]const u8 = null,
+    /// PR function compiled as the IREE entry point.
+    entry: ?[]const u8 = null,
+    /// Arguments following `--`, passed to `iree-compile`.
+    compiler_arguments: []const []const u8 = &.{},
 };
 
 /// Options for rendering a serialized PR file.
@@ -365,7 +371,23 @@ fn parse_tvm(cursor: *Cursor) !TvmCommand {
 fn parse_iree(cursor: *Cursor) !IreeCommand {
     const command = try require_subcommand(.iree, cursor);
     return switch (command.id) {
-        .iree_compile => .{ .compile = try parse_default_options(IreeCompileOpts, .iree_compile, cursor) },
+        .iree_compile => result: {
+            const path = try require_positional(cursor);
+            var opts = IreeCompileOpts{ .path = path };
+            const option_start = cursor.index;
+            var option_end = cursor.args.len;
+            for (cursor.args[option_start..], option_start..) |arg, index| {
+                if (std.mem.eql(u8, arg, "--")) {
+                    option_end = index;
+                    opts.compiler_arguments = cursor.args[index + 1 ..];
+                    break;
+                }
+            }
+            var option_cursor = Cursor{ .args = cursor.args[option_start..option_end] };
+            try parse_options(IreeCompileOpts, .iree_compile, &option_cursor, &opts);
+            cursor.index = cursor.args.len;
+            break :result .{ .compile = opts };
+        },
         else => unreachable,
     };
 }
@@ -457,12 +479,16 @@ fn parse_options(
             inline else => |field_tag| {
                 const field_name = @tagName(field_tag);
                 const FieldType = @FieldType(T, field_name);
-                @field(opts.*, field_name) = try parse_option_value(
-                    FieldType,
-                    cursor,
-                    option.value,
-                    negated,
-                );
+                if (comptime FieldType == []const []const u8) {
+                    unreachable;
+                } else {
+                    @field(opts.*, field_name) = try parse_option_value(
+                        FieldType,
+                        cursor,
+                        option.value,
+                        negated,
+                    );
+                }
             },
         }
     }
@@ -483,6 +509,9 @@ fn validate_option_struct(comptime T: type, comptime command: *const schema.Comm
     }
 
     inline for (std.meta.fields(T)) |field| {
+        if (field.type == []const []const u8 and
+            std.mem.eql(u8, field.name, "compiler_arguments"))
+            continue;
         comptime var found = false;
         inline for (command.options) |option| {
             if (schema_name_matches_field(option.long_name, field.name))
@@ -708,14 +737,34 @@ test "parse_tokens distinguishes demo backends from IREE targets" {
         }
     }
     {
-        const args = [_][]const u8{ "iree", "compile", "--target=llvm-cpu" };
+        const args = [_][]const u8{
+            "iree",
+            "compile",
+            "model.zgpr",
+            "--target=llvm-cpu",
+            "--entry=forward",
+            "--",
+            "--iree-llvmcpu-target-cpu=cortex-a72",
+        };
         const invocation = try parse_tokens(&args);
         switch (invocation.command) {
             .iree => |command| switch (command) {
-                .compile => |opts| try std.testing.expectEqualStrings(
-                    "llvm-cpu",
-                    opts.target orelse return error.TestExpectedEqual,
-                ),
+                .compile => |opts| {
+                    try std.testing.expectEqualStrings("model.zgpr", opts.path);
+                    try std.testing.expectEqualStrings(
+                        "llvm-cpu",
+                        opts.target orelse return error.TestExpectedEqual,
+                    );
+                    try std.testing.expectEqualStrings(
+                        "forward",
+                        opts.entry orelse return error.TestExpectedEqual,
+                    );
+                    try std.testing.expectEqualSlices(
+                        []const u8,
+                        &.{"--iree-llvmcpu-target-cpu=cortex-a72"},
+                        opts.compiler_arguments,
+                    );
+                },
             },
             else => return error.TestExpectedEqual,
         }

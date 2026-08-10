@@ -12,41 +12,54 @@
   enableLto,
   extraCxxFlags,
   extraLdFlags,
+  cudaToolkit,
 }: let
   ireeLlvm = pkgs.callPackage ../../packages/iree/llvm.nix {
     inherit ireeLlvmSrc ireeLlvmRevision withDebugSymbols enableLto extraCxxFlags extraLdFlags;
     withNativeTuning = false;
   };
-  ireeCompiler = pkgs.callPackage ../../packages/iree/compiler.nix {
+  common = {
     inherit
       ireeSrc
       ireeRevision
       ireeStablehloSrc
       ireeFlatccSrc
       ireeBenchmarkSrc
-      ireeLlvm
       withDebugSymbols
       enableLto
       extraCxxFlags
       extraLdFlags
       ;
-    withNativeTuning = false;
   };
-  ireeRuntime = pkgs.callPackage ../../packages/iree/runtime.nix {
-    inherit
-      ireeSrc
-      ireeRevision
-      ireeStablehloSrc
-      ireeFlatccSrc
-      ireeBenchmarkSrc
-      ireeLlvm
-      withDebugSymbols
-      withNativeTuning
-      enableLto
-      extraCxxFlags
-      extraLdFlags
-      ;
-  };
+  ireeCompilerCpu = pkgs.callPackage ../../packages/iree/compiler.nix (common
+    // {
+      inherit ireeLlvm;
+      withNativeTuning = false;
+      targetBackends = ["llvm-cpu"];
+    });
+  ireeCompilerCuda = pkgs.callPackage ../../packages/iree/compiler.nix (common
+    // {
+      inherit ireeLlvm cudaToolkit;
+      withNativeTuning = false;
+      targetBackends = ["cuda"];
+    });
+  ireeRuntimeCpu = pkgs.callPackage ../../packages/iree/runtime.nix (common
+    // {
+      inherit withNativeTuning;
+      drivers = ["local-sync" "local-task"];
+    });
+  ireeRuntimeCuda = pkgs.callPackage ../../packages/iree/runtime.nix (common
+    // {
+      inherit withNativeTuning cudaToolkit;
+      drivers = ["cuda"];
+    });
+  mkRuntimeCpuFor = targetPkgs:
+    targetPkgs.callPackage ../../packages/iree/runtime.nix (common
+      // {
+        ireeHostTools = ireeRuntimeCpu.hostTools;
+        withNativeTuning = false;
+        drivers = ["local-sync"];
+      });
 in {
-  inherit ireeCompiler ireeLlvm ireeRuntime;
+  inherit ireeCompilerCpu ireeCompilerCuda ireeLlvm ireeRuntimeCpu ireeRuntimeCuda mkRuntimeCpuFor;
 }

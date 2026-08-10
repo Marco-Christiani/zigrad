@@ -8,6 +8,10 @@
 
 #include "iree/runtime/api.h"
 #include "iree/hal/api.h"
+#if ZG_IREE_EMBEDDED_ELF
+#include "iree/hal/drivers/local_sync/sync_device.h"
+#include "iree/hal/local/loaders/embedded_elf_loader.h"
+#endif
 #include "iree/vm/api.h"
 #include "iree/base/api.h"
 
@@ -41,21 +45,18 @@ iree_host_size_t zg_iree_hal_element_bit_count(
   return iree_hal_element_bit_count(element_type);
 }
 
-// Maps buffers whose mapping descriptor is opaque to translate-c.
+// Transfers buffers whose descriptors are opaque to translate-c.
 
-iree_status_t zg_iree_hal_buffer_read(iree_hal_buffer_t* buffer,
+iree_status_t zg_iree_hal_buffer_read(iree_hal_device_t* device,
+                                       iree_hal_buffer_t* buffer,
                                        uint8_t* dst,
                                        iree_host_size_t dst_len) {
-  iree_hal_buffer_mapping_t mapping;
-  iree_status_t status = iree_hal_buffer_map_range(
-      buffer, IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_READ,
-      0, IREE_HAL_WHOLE_BUFFER, &mapping);
-  if (!iree_status_is_ok(status)) return status;
-  iree_host_size_t len = mapping.contents.data_length < dst_len
-                             ? mapping.contents.data_length
-                             : dst_len;
-  memcpy(dst, mapping.contents.data, len);
-  return iree_hal_buffer_unmap_range(&mapping);
+  iree_device_size_t len = iree_hal_buffer_byte_length(buffer) < dst_len
+                               ? iree_hal_buffer_byte_length(buffer)
+                               : dst_len;
+  return iree_hal_device_transfer_d2h(
+      device, buffer, 0, dst, len, IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT,
+      iree_infinite_timeout());
 }
 
 iree_status_t zg_iree_hal_buffer_write(iree_hal_buffer_t* buffer,
@@ -83,6 +84,43 @@ iree_status_t zg_iree_runtime_instance_create_all_drivers(
   return iree_runtime_instance_create(&options, iree_allocator_system(),
                                        out_instance);
 }
+
+iree_status_t zg_iree_runtime_instance_create(
+    iree_runtime_instance_t** out_instance) {
+  iree_runtime_instance_options_t options;
+  iree_runtime_instance_options_initialize(&options);
+  return iree_runtime_instance_create(&options, iree_allocator_system(),
+                                      out_instance);
+}
+
+#if ZG_IREE_EMBEDDED_ELF
+iree_status_t zg_iree_create_embedded_elf_sync_device(
+    iree_hal_device_t** out_device) {
+  const iree_allocator_t host_allocator = iree_allocator_system();
+  const iree_string_view_t identifier =
+      iree_make_cstring_view("local-sync");
+
+  iree_hal_executable_loader_t* loader = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_embedded_elf_loader_create(
+      /*plugin_manager=*/NULL, host_allocator, &loader));
+
+  iree_hal_allocator_t* device_allocator = NULL;
+  iree_status_t status = iree_hal_allocator_create_heap(
+      identifier, host_allocator, host_allocator, &device_allocator);
+
+  if (iree_status_is_ok(status)) {
+    iree_hal_sync_device_params_t params;
+    iree_hal_sync_device_params_initialize(&params);
+    status = iree_hal_sync_device_create(
+        identifier, &params, /*loader_count=*/1, &loader, device_allocator,
+        host_allocator, out_device);
+  }
+
+  iree_hal_allocator_release(device_allocator);
+  iree_hal_executable_loader_release(loader);
+  return status;
+}
+#endif
 
 iree_status_t zg_iree_runtime_session_create_with_device_default(
     iree_runtime_instance_t* instance, iree_hal_device_t* device,

@@ -67,8 +67,8 @@ stdenv.mkDerivation {
       # Enable the projects required by the IREE compiler build.
       "-DLLVM_ENABLE_PROJECTS=mlir;clang;lld"
 
-      # Retain host and CUDA code generation.
-      "-DLLVM_TARGETS_TO_BUILD=X86;NVPTX"
+      # Retain host, AArch64, and CUDA code generation.
+      "-DLLVM_TARGETS_TO_BUILD=X86;AArch64;NVPTX"
 
       # Link tools and libraries through `libLLVM.so`.
       "-DLLVM_BUILD_LLVM_DYLIB=ON"

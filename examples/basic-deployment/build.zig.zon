@@ -1,0 +1,14 @@
+.{
+    .name = .basic_deployment,
+    .version = "0.0.0",
+    .fingerprint = 0x0ae59140a9be3d9a,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zigrad = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

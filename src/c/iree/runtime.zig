@@ -85,6 +85,13 @@ pub fn instance_create() Error!*InstanceHandle {
     return instance_handle(instance orelse return error.NullInstance);
 }
 
+/// Create an IREE runtime instance without a HAL driver registry.
+pub fn instance_create_without_drivers() Error!*InstanceHandle {
+    var instance: ?*types.Instance = null;
+    try check(types.zg_iree_runtime_instance_create(&instance));
+    return instance_handle(instance orelse return error.NullInstance);
+}
+
 /// Release one runtime instance.
 pub fn instance_release(instance: *InstanceHandle) void {
     types.iree_runtime_instance_release(raw_instance(instance));
@@ -101,6 +108,13 @@ pub fn create_default_device(
         string_view(driver_name),
         &device,
     ));
+    return device_handle(device orelse return error.NullDevice);
+}
+
+/// Create a synchronous CPU device with the embedded ELF loader.
+pub fn create_embedded_elf_sync_device() Error!*DeviceHandle {
+    var device: ?*types.HalDevice = null;
+    try check(types.zg_iree_create_embedded_elf_sync_device(&device));
     return device_handle(device orelse return error.NullDevice);
 }
 
@@ -281,12 +295,14 @@ pub fn buffer_view_element_type(buffer: *BufferHandle) Error!ElementType {
 
 /// Copy one buffer's contents into host memory.
 pub fn buffer_view_to_host(
+    device: *DeviceHandle,
     buffer: *BufferHandle,
     destination: []u8,
 ) Error!void {
     const raw = types.iree_hal_buffer_view_buffer(raw_buffer(buffer)) orelse
         return error.NullBuffer;
     try check(types.zg_iree_hal_buffer_read(
+        raw_device(device),
         raw,
         destination.ptr,
         destination.len,

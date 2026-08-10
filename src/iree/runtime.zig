@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const abi = @import("iree_abi");
+const build_options = @import("build_options");
 const RuntimeConfig = @import("config.zig").RuntimeConfig;
 
 const log = std.log.scoped(.@"zg/iree_runtime");
@@ -15,6 +16,40 @@ pub const ElementType = abi.ElementType;
 /// Failures exposed by the IREE runtime integration.
 pub const Error = abi.Error;
 
+/// Mechanism used to construct an IREE HAL device.
+pub const DeviceConstruction = enum {
+    registered,
+    embedded_elf_sync,
+};
+
+/// VMFB storage retained for the lifetime of a loaded executable.
+pub const Bytecode = union(enum) {
+    /// Storage borrowed from memory that outlives the executable.
+    borrowed: []const u8,
+
+    /// Storage released with its allocator when the executable is released.
+    owned: struct {
+        bytes: []u8,
+        allocator: std.mem.Allocator,
+    },
+
+    fn bytes(self: Bytecode) []const u8 {
+        return switch (self) {
+            .borrowed => |storage| storage,
+            .owned => |storage| storage.bytes,
+        };
+    }
+
+    /// Release owned storage. Borrowed storage is unchanged.
+    pub fn deinit(self: *Bytecode) void {
+        switch (self.*) {
+            .borrowed => {},
+            .owned => |storage| storage.allocator.free(storage.bytes),
+        }
+        self.* = undefined;
+    }
+};
+
 /// IREE buffer view released with `deinit`.
 pub const Buffer = struct {
     /// Type-erased integration handle.
@@ -24,11 +59,6 @@ pub const Buffer = struct {
     pub fn deinit(self: *Buffer) void {
         abi.buffer_view_release(buffer_view(self));
         self.* = undefined;
-    }
-
-    /// Copy this buffer's contents into host memory.
-    pub fn read(self: *const Buffer, destination: []u8) Error!void {
-        try abi.buffer_view_to_host(buffer_view(self), destination);
     }
 
     /// Return the number of logical elements in this buffer.
@@ -61,7 +91,7 @@ pub const Invocation = struct {
 const ExecutableState = struct {
     session: *abi.SessionHandle,
     function: *abi.FunctionHandle,
-    bytecode: []u8,
+    bytecode: Bytecode,
     allocator: std.mem.Allocator,
 };
 
@@ -78,7 +108,7 @@ pub const Executable = struct {
         const state = executable_state(self);
         abi.function_release(state.function);
         abi.session_release(state.session);
-        state.allocator.free(state.bytecode);
+        state.bytecode.deinit();
         state.allocator.destroy(state);
         self.* = undefined;
     }
@@ -128,12 +158,22 @@ pub const Runtime = struct {
     /// Create a runtime and one device from explicit configuration.
     pub fn init(
         allocator: std.mem.Allocator,
+        comptime device_construction: DeviceConstruction,
         config: RuntimeConfig,
     ) Error!Runtime {
-        const instance = try abi.instance_create();
+        if (device_construction == .embedded_elf_sync and !build_options.has_iree_embedded_elf)
+            @compileError("embedded ELF device construction requires -Diree-embedded-elf=true");
+
+        const instance = switch (device_construction) {
+            .registered => try abi.instance_create(),
+            .embedded_elf_sync => try abi.instance_create_without_drivers(),
+        };
         errdefer abi.instance_release(instance);
 
-        const device = try abi.create_default_device(instance, config.driver);
+        const device = switch (device_construction) {
+            .registered => try abi.create_default_device(instance, config.driver),
+            .embedded_elf_sync => try abi.create_embedded_elf_sync_device(),
+        };
         errdefer abi.device_release(device);
 
         const state = try allocator.create(RuntimeState);
@@ -143,7 +183,10 @@ pub const Runtime = struct {
             .allocator = allocator,
         };
 
-        log.info("initialized IREE driver '{s}'", .{config.driver});
+        switch (device_construction) {
+            .registered => log.info("initialized IREE driver '{s}'", .{config.driver}),
+            .embedded_elf_sync => log.info("initialized IREE embedded ELF local-sync device", .{}),
+        }
         return .{ ._state = state };
     }
 
@@ -159,21 +202,21 @@ pub const Runtime = struct {
         self.* = undefined;
     }
 
-    /// Load VMFB bytes and resolve one fully qualified entry function.
+    /// Load VMFB storage and resolve one fully qualified entry function.
     ///
-    /// On success, `Executable.deinit` releases `bytecode`. The caller remains
-    ///  responsible for it when loading fails.
+    /// On success, `Executable.deinit` releases owned storage. The caller
+    ///  remains responsible for `bytecode` when loading fails.
     pub fn load(
         self: *Runtime,
         allocator: std.mem.Allocator,
-        bytecode: []u8,
+        bytecode: *Bytecode,
         entry_name: []const u8,
     ) Error!Executable {
         const runtime = runtime_state(self);
         const session = try abi.session_create(runtime.instance, runtime.device);
         errdefer abi.session_release(session);
 
-        try abi.session_append_module(session, bytecode);
+        try abi.session_append_module(session, bytecode.bytes());
         const function = try abi.session_lookup_function(
             allocator,
             session,
@@ -185,9 +228,10 @@ pub const Runtime = struct {
         state.* = .{
             .session = session,
             .function = function,
-            .bytecode = bytecode,
+            .bytecode = bytecode.*,
             .allocator = allocator,
         };
+        bytecode.* = undefined;
         return .{ ._state = state };
     }
 
@@ -205,6 +249,19 @@ pub const Runtime = struct {
             shape,
         );
         return .{ ._handle = view };
+    }
+
+    /// Copy one device buffer's contents into host memory.
+    pub fn read_buffer(
+        self: *Runtime,
+        buffer: *const Buffer,
+        destination: []u8,
+    ) Error!void {
+        try abi.buffer_view_to_host(
+            runtime_state(self).device,
+            buffer_view(buffer),
+            destination,
+        );
     }
 };
 

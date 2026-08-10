@@ -3,6 +3,7 @@
 const Executor = @import("../execution.zig");
 const compiler = @import("compiler.zig");
 const execution = @import("execution.zig");
+const runtime = @import("runtime.zig");
 
 const LoaderInterface = Executor.Loader(compiler.Artifact);
 
@@ -35,9 +36,15 @@ pub const Loader = struct {
         artifact: *compiler.Artifact,
     ) Executor.Error!*anyopaque {
         const self: *Loader = @fieldParentPtr("interface", interface);
+        var bytecode: runtime.Bytecode = .{
+            .owned = .{
+                .bytes = artifact.bytes,
+                .allocator = artifact.allocator,
+            },
+        };
         const loaded = self.execution.runtime.load(
             artifact.allocator,
-            artifact.bytes,
+            &bytecode,
             self.entry_name,
         ) catch |err| return execution.map_error(err);
         artifact.* = undefined;

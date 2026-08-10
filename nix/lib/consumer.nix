@@ -11,7 +11,7 @@ in {
     src,
     sourceSubdir ? ".",
   }:
-    pkgs.callPackage ../packages/zigrad-zig-example.nix {
+    pkgs.callPackage ../packages/zigrad-zig-package.nix {
       inherit
         configuration
         mainProgram

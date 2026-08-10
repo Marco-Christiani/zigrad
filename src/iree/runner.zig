@@ -34,21 +34,26 @@ pub fn main(init: std.process.Init) !void {
         stderr,
     );
 
-    const bytecode = try read_file(io, allocator, arguments.vmfb_path);
-    log.info("loaded {d} bytes from {s}", .{ bytecode.len, arguments.vmfb_path });
+    const vmfb_bytes = try read_file(io, allocator, arguments.vmfb_path);
+    var bytecode: iree.Bytecode = .{ .owned = .{
+        .bytes = vmfb_bytes,
+        .allocator = allocator,
+    } };
+    log.info("loaded {d} bytes from {s}", .{ vmfb_bytes.len, arguments.vmfb_path });
 
     var runtime = try iree.Runtime.init(
         allocator,
+        .registered,
         .{ .driver = arguments.driver },
     );
     defer runtime.deinit();
 
     var executable = runtime.load(
         allocator,
-        bytecode,
+        &bytecode,
         arguments.function_name,
     ) catch |err| {
-        allocator.free(bytecode);
+        bytecode.deinit();
         return err;
     };
     defer executable.deinit();
@@ -88,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         );
         const bytes = try allocator.alloc(u8, byte_count);
         defer allocator.free(bytes);
-        try output.read(bytes);
+        try runtime.read_buffer(output, bytes);
 
         try stdout.print("output[{d}]: [", .{output_index});
         try print_values(stdout, element_type, bytes);
