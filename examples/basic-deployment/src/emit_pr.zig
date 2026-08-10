@@ -10,7 +10,12 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(args);
     if (args.len != 2) return error.ExpectedOutputPath;
 
-    var program = try model.build(allocator);
+    var program = try zg.trace(
+        model.forward,
+        allocator,
+        model.input_spec,
+        "main",
+    );
     defer program.deinit();
 
     var file = try std.Io.Dir.cwd().createFile(init.io, args[1], .{ .truncate = true });

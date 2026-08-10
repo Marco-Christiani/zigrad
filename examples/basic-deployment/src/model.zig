@@ -1,22 +1,21 @@
-const std = @import("std");
 const zg = @import("zigrad");
+const Tensor = zg.Tensor;
 
-/// Construct the computation shared by the deployment targets.
-pub fn build(allocator: std.mem.Allocator) !zg.pr.Program {
-    var program = zg.pr.Program.init(allocator);
-    errdefer program.deinit();
+pub const Input = struct {
+    lhs: Tensor,
+    rhs: Tensor,
+    scale: Tensor,
+};
 
-    var builder = try zg.pr.FunctionBuilder.init(&program, "main");
-    defer builder.deinit();
+pub const input_spec: Input = .{
+    .lhs = Tensor.abstract(.f32, &.{ 2, 3 }),
+    .rhs = Tensor.abstract(.f32, &.{ 3, 2 }),
+    .scale = Tensor.abstract(.f32, &.{ 2, 2 }),
+};
 
-    const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
-    const rhs = try builder.param_tensor(.f32, &.{ 3, 2 });
-    const scale = try builder.param_tensor(.f32, &.{ 2, 2 });
-    const product = try builder.dot(lhs, rhs);
-    const shifted = try builder.add(product, scale);
-    const result = try builder.multiply(shifted, scale);
-
-    const function = try builder.finish(&.{result});
-    try program.add_function(function);
-    return program;
+/// `(lhs @ rhs + scale) * scale`
+pub fn forward(input: Input) !Tensor {
+    const product = try input.lhs.matmul(input.rhs);
+    const shifted = try product.add(input.scale);
+    return try shifted.mul(input.scale);
 }
