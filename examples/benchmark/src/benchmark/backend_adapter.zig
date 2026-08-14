@@ -215,7 +215,7 @@ pub const IreeContext = struct {
         const selected = zg.iree.Config.from_environ(environ);
         const runtime = try allocator.create(zg.iree.Runtime);
         errdefer allocator.destroy(runtime);
-        runtime.* = try zg.iree.Runtime.init(allocator, selected.runtime);
+        runtime.* = try zg.iree.Runtime.init(allocator, .registered, selected.runtime);
         errdefer runtime.deinit();
 
         const execution = try allocator.create(zg.iree.Execution);

@@ -174,7 +174,7 @@ fn run_iree(
     steps: usize,
 ) !void {
     const config = zg.iree.Config.from_environ(environ);
-    var runtime = try zg.iree.Runtime.init(allocator, config.runtime);
+    var runtime = try zg.iree.Runtime.init(allocator, .registered, config.runtime);
     defer runtime.deinit();
     var execution = zg.iree.Execution.init(allocator, &runtime, config.runtime);
     var backend = zg.iree.Backend.init(&execution, config.compiler, "module.main");
