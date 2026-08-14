@@ -814,7 +814,14 @@ test "lower convolution" {
     const text = try lower_program_to_mlir(testing.allocator, &program, null, .mlir_text);
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "stablehlo.convolution") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "dim = [b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "dim_numbers = [b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]") != null);
+
+    const forward = program.functions[0];
+    const vjp_func = try @import("../../pr/ad.zig").vjp(testing.allocator, &program, forward, "vjp", .{});
+    try program.add_function(vjp_func);
+    const vjp = try lower_program_to_mlir(testing.allocator, &program, "vjp", .mlir_bytecode);
+    defer testing.allocator.free(vjp);
+    if (vjp.len == 0) return error.EmptyConvolutionVjp;
 }
 
 test "lower operation outlines kernelize-annotated region" {

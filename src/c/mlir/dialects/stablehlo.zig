@@ -699,6 +699,7 @@ pub const ConvolutionOpts = struct {
     output_spatial_dimensions: []const i64,
     feature_group_count: i64,
     batch_group_count: i64,
+    /// Precision settings for the convolution's two operands.
     precision_config: []const PrecisionAttribute.Precision = &.{},
 };
 
@@ -711,6 +712,8 @@ pub fn convolution(
     location: mlir.Location,
 ) mlir.Operation {
     var max_precisions: [2]mlir.Attribute = undefined;
+    if (opts.precision_config.len > max_precisions.len)
+        @panic("stablehlo convolution accepts at most two precision settings");
     for (opts.precision_config, 0..) |p, i| {
         max_precisions[i] = PrecisionAttribute.init(ctx, p).as_attr();
     }
@@ -743,7 +746,7 @@ pub fn convolution(
             },
             .{ "feature_group_count", .int(ctx, .i64, opts.feature_group_count) },
             .{ "batch_group_count", .int(ctx, .i64, opts.batch_group_count) },
-            .{ "precision_config", .array(ctx, &max_precisions) },
+            .{ "precision_config", .array(ctx, max_precisions[0..opts.precision_config.len]) },
         },
         .location = location,
     });
