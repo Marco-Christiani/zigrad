@@ -12,6 +12,8 @@
     zigradDevCuda = config.packages.zigrad-dev-cuda;
     benchmarkExample = config.packages.zigrad-example-benchmark;
     basicDeploymentCpu = config.packages.zigrad-example-basic-deployment-cpu;
+    cifar10Cpu = config.packages.zigrad-example-cifar10-cpu;
+    cifar10Tests = config.packages.zigrad-example-cifar10-tests;
     hasBasicDeploymentCuda = config.packages ? zigrad-example-basic-deployment-cuda;
     basicDeploymentCuda = config.packages.zigrad-example-basic-deployment-cuda or null;
     mnistExample = config.packages.zigrad-example-mnist;
@@ -125,20 +127,23 @@
         cp "$TMPDIR/stderr.txt" "$out/tvm-missing-stderr.txt"
       '';
   in {
-    checks = {
-      zigrad-build = zigrad;
-      zigrad-autodoc = config.packages.zigrad-autodoc;
-      zigrad-unit-tests = zigradTests;
-      zigrad-build-configurations = config.packages.zigrad-build-configurations;
-      zigrad-example-benchmark = checkBenchmarkExample;
-      zigrad-example-basic-deployment-cpu = basicDeploymentCpu;
-      zigrad-example-mlir-cpp = mlirCppExample;
-      zigrad-example-mnist-pjrt = checkMnistPjrtExample;
-      zigrad-example-mnist-iree = checkMnistIreeExample;
-    }
-    // pkgs.lib.optionalAttrs hasBasicDeploymentCuda {
-      zigrad-example-basic-deployment-cuda = basicDeploymentCuda;
-    };
+    checks =
+      {
+        zigrad-build = zigrad;
+        zigrad-autodoc = config.packages.zigrad-autodoc;
+        zigrad-unit-tests = zigradTests;
+        zigrad-build-configurations = config.packages.zigrad-build-configurations;
+        zigrad-example-benchmark = checkBenchmarkExample;
+        zigrad-example-basic-deployment-cpu = basicDeploymentCpu;
+        zigrad-example-cifar10-cpu = cifar10Cpu;
+        zigrad-example-cifar10-tests = cifar10Tests;
+        zigrad-example-mlir-cpp = mlirCppExample;
+        zigrad-example-mnist-pjrt = checkMnistPjrtExample;
+        zigrad-example-mnist-iree = checkMnistIreeExample;
+      }
+      // pkgs.lib.optionalAttrs hasBasicDeploymentCuda {
+        zigrad-example-basic-deployment-cuda = basicDeploymentCuda;
+      };
 
     packages = {
       zigrad-unit-tests = zigradTests;

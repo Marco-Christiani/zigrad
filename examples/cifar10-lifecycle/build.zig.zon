@@ -1,0 +1,14 @@
+.{
+    .name = .cifar10_lifecycle,
+    .version = "0.0.0",
+    .fingerprint = 0xfae5acc5678f3c9b,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zigrad = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

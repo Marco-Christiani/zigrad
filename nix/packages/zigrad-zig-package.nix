@@ -19,6 +19,8 @@
   targetPkgs ? null,
   zigArgs ? [],
   optimize ? "ReleaseFast",
+  runTests ? false,
+  testProgram ? null,
   withRuntimeEnvironment ? true,
 }: let
   runtimeInputs = externalInputs.runtime;
@@ -43,6 +45,10 @@
       || lib.elem "pjrt-cuda" configuration.configuration.resolved;
   };
   zigFeatureArgs = lib.escapeShellArgs configuration.configuration.zigFeatureArgs;
+  testProgramName =
+    if testProgram != null
+    then testProgram
+    else "${mainProgram}-tests";
   runtimeWrapperArgs = lib.concatStringsSep " \\\n" (
     (lib.mapAttrsToList (
         name: value: "--set ${lib.escapeShellArg name} ${lib.escapeShellArg (toString value)}"
@@ -118,6 +124,26 @@ in
         --verbose
       runHook postBuild
     '';
+
+    checkPhase = ''
+      runHook preCheck
+      export ZG_ZIG_SYSTEM_PACKAGES="$TMPDIR/zigrad-system-packages"
+      testRoot=$(mktemp -d)
+      TERM=dumb zig build test-compile \
+        -j"$NIX_BUILD_CORES" \
+        -Doptimize=${lib.escapeShellArg optimize} \
+        -Dsdk=${externalInputs} \
+        -Dtarget=${lib.escapeShellArg zigTarget} \
+        ${lib.escapeShellArgs zigArgs} \
+        --system "$ZG_ZIG_SYSTEM_PACKAGES" \
+        --prefix "$testRoot" \
+        --verbose
+      autoPatchelf "$testRoot/bin"
+      "$testRoot/bin/${testProgramName}"
+      runHook postCheck
+    '';
+
+    doCheck = runTests;
 
     installPhase = ''
       runHook preInstall
