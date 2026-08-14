@@ -7,11 +7,11 @@
   withPjrt ? false,
 }: let
   safetensors = {
-    name = "safetensors_zg-0.0.1-dRXUiNvtAADkooBkmhGsycmgwajaskWj3MiB6feJBMUS";
+    name = "safetensors_zg-0.0.1-dRXUiKDwAACCb13L0frixHBXg-rZ_rQru5ZjxFb0lfZa";
     path = fetchgit {
       url = "https://github.com/Marco-Christiani/safetensors-zg";
-      rev = "9cc91a16eb93e86f9953e24410065d77968f6578";
-      hash = "sha256-goZHJReIJBb2wKJ3nYHrtEXwzdsgd0m+fGs+yNF1sOM=";
+      rev = "942ac8fd88b7b087679fbddde99c0a38dd3a2fce";
+      hash = "sha256-TxjhAaY/arJfW+v/YqWgLwsf6PRzPDeYuiv+um3sf/A=";
     };
   };
 

@@ -72,7 +72,9 @@ pub const grad = transforms.make_grad;
 pub const value_and_grad = transforms.make_value_and_grad;
 
 pub const from_safetensors = utils.safetensors.from_safetensors;
+pub const to_safetensors = utils.safetensors.to_safetensors;
 pub const FromSafetensorsOpts = utils.safetensors.Opts;
+pub const SafetensorsFile = utils.safetensors.SafeTensorsFile;
 
 test {
     @setEvalBranchQuota(10000);

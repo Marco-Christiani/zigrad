@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .safetensors_zg = .{
-            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#9cc91a16eb93e86f9953e24410065d77968f6578",
-            .hash = "safetensors_zg-0.0.1-dRXUiNvtAADkooBkmhGsycmgwajaskWj3MiB6feJBMUS",
+            .url = "git+https://github.com/Marco-Christiani/safetensors-zg#942ac8fd88b7b087679fbddde99c0a38dd3a2fce",
+            .hash = "safetensors_zg-0.0.1-dRXUiKDwAACCb13L0frixHBXg-rZ_rQru5ZjxFb0lfZa",
         },
         .protobuf = .{
             .lazy = true,
