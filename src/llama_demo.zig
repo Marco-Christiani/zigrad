@@ -175,6 +175,7 @@ pub fn run_llama_ft_demo(
     const host_dtype: zg.DType = model_dtype;
     const batch_size: i64 = cfg.batch;
     const execute_only = cfg.execute_only;
+    log.info("train={} execute_only={} host_dtype={t} model_dtype={t} batch_size={d}", .{ train_mode, execute_only, host_dtype, model_dtype, batch_size });
 
     const seq: i64 = cfg.seq;
 
