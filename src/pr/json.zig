@@ -461,6 +461,14 @@ fn emit_annotation_value(writer: *Writer, value: pr.AnnotationValue) !void {
             }
         },
         .string => |item| try write_json_string(writer, item),
+        .strings => |items| {
+            try writer.writeAll("[");
+            for (items, 0..) |item, index| {
+                if (index > 0) try writer.writeAll(",");
+                try write_json_string(writer, item);
+            }
+            try writer.writeAll("]");
+        },
         .bytes => |items| try emit_bytes(writer, items),
     }
 }

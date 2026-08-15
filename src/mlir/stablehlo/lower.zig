@@ -699,7 +699,7 @@ test "lowering supports multi-output custom_call" {
     const function_fingerprint = try fingerprint.function(testing.allocator, program.functions[1]);
     const selection_key = try kernel_test.make_selection_key(
         testing.allocator,
-        "mock",
+        .{ .one = "mock" },
         selected_device,
         function_fingerprint,
     );

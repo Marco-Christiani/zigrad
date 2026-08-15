@@ -96,6 +96,116 @@ pub const OutlineCandidates = struct {
     }
 };
 
+/// Discovers provider-supported PR ranges and records them as requests.
+///
+/// Explicit provider regions take precedence. Providers recognizing the same
+///  range become candidates in one request. Overlapping discoveries with
+///  different boundaries are rejected because the resident selector compares
+///  implementations of one callable boundary.
+pub const DiscoverCandidates = struct {
+    pub const Input = *pr.Program;
+    pub const Output = *pr.Program;
+
+    providers: []const kernel.KernelProvider,
+
+    pub fn run(self: DiscoverCandidates, program: Input, ctx: *compilation.Context) !Output {
+        for (program.functions) |*func| {
+            try discover_function(program.allocator(), ctx.allocator, func, self.providers);
+        }
+        return program;
+    }
+};
+
+const DiscoveredRange = struct {
+    start: usize,
+    op_count: usize,
+    providers: std.ArrayList([]const u8) = .empty,
+};
+
+fn discover_function(
+    arena: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    func: *pr.Function,
+    providers: []const kernel.KernelProvider,
+) !void {
+    try kernel.validate_providers(providers);
+
+    var ranges = std.ArrayList(DiscoveredRange).empty;
+    defer {
+        for (ranges.items) |*range| range.providers.deinit(scratch);
+        ranges.deinit(scratch);
+    }
+
+    for (providers) |provider| {
+        for (0..func.ops.len) |start| {
+            const matched = provider.match(func.*, start) orelse continue;
+            if (matched.op_count == 0 or start + matched.op_count > func.ops.len) {
+                return error.InvalidKernelMatch;
+            }
+            if (overlaps_explicit_request(func.*, start, matched)) continue;
+
+            var same_range: ?*DiscoveredRange = null;
+            for (ranges.items) |*existing| {
+                if (existing.start == start and existing.op_count == matched.op_count) {
+                    same_range = existing;
+                    break;
+                }
+                if (ranges_overlap(existing.*, start, matched)) return error.OverlappingKernelMatches;
+            }
+
+            if (same_range) |existing| {
+                try existing.providers.append(scratch, provider.name);
+            } else {
+                var discovered = DiscoveredRange{
+                    .start = start,
+                    .op_count = matched.op_count,
+                };
+                errdefer discovered.providers.deinit(scratch);
+                try discovered.providers.append(scratch, provider.name);
+                try ranges.append(scratch, discovered);
+            }
+        }
+    }
+
+    if (ranges.items.len == 0) return;
+    const existing_len = func.regions.len;
+    const updated = try arena.alloc(pr.Region, existing_len + ranges.items.len);
+    @memcpy(updated[0..existing_len], func.regions);
+    var next_id: u32 = 0;
+    for (func.regions) |region| next_id = @max(next_id, region.id + 1);
+
+    for (ranges.items, updated[existing_len..]) |range, *destination| {
+        const op_ids = try arena.alloc(u32, range.op_count);
+        for (func.ops[range.start..][0..range.op_count], op_ids) |op, *op_id| op_id.* = op.id;
+        const provider_names = try arena.alloc([]const u8, range.providers.items.len);
+        for (range.providers.items, provider_names) |name, *owned| owned.* = try arena.dupe(u8, name);
+        destination.* = .{
+            .id = next_id,
+            .name = try std.fmt.allocPrint(arena, "kernel_candidate_{d}", .{next_id}),
+            .annotations = try pr.dupe_annotations(arena, &.{kernel.providers_annotation(provider_names)}),
+            .op_ids = op_ids,
+        };
+        next_id += 1;
+    }
+    func.regions = updated;
+}
+
+fn overlaps_explicit_request(func: pr.Function, start: usize, matched: kernel.Match) bool {
+    for (func.regions) |region| {
+        if (region.find_annotation(kernel.provider_annotation_name) == null) continue;
+        for (func.ops[start..][0..matched.op_count]) |op| {
+            for (region.op_ids) |op_id| if (op.id == op_id) return true;
+        }
+    }
+    return false;
+}
+
+fn ranges_overlap(existing: DiscoveredRange, start: usize, matched: kernel.Match) bool {
+    const existing_end = existing.start + existing.op_count;
+    const matched_end = start + matched.op_count;
+    return existing.start < matched_end and start < existing_end;
+}
+
 const OutlineRequest = struct {
     function_index: usize,
     region: pr.Region,
@@ -104,9 +214,9 @@ const OutlineRequest = struct {
 fn find_outermost_request(program: *const pr.Program) kernel.AnnotationError!?OutlineRequest {
     var found: ?OutlineRequest = null;
     for (program.functions, 0..) |func, function_index| {
-        if (try kernel.requested_provider(func) != null) continue;
+        if (try kernel.requested_providers(func) != null) continue;
         for (func.regions) |region| {
-            if (try kernel.requested_provider(region) == null) continue;
+            if (try kernel.requested_providers(region) == null) continue;
             if (found == null or region.op_ids.len > found.?.region.op_ids.len) {
                 found = .{ .function_index = function_index, .region = region };
             }
@@ -196,19 +306,21 @@ pub const KernelizePass = struct {
         for (func.ops) |op| {
             if (op.prim() != .call) continue;
             const candidate = program.get_function(op.params.call.callee) orelse return error.CallUnresolvedCallee;
-            const provider_name = (try kernel.requested_provider(candidate)) orelse continue;
+            const provider_request = (try kernel.requested_providers(candidate)) orelse continue;
             const function_fingerprint = try fingerprint.function(temp_allocator, candidate);
             const selection_key = try kernel.make_selection_key(
                 temp_allocator,
-                provider_name,
+                provider_request,
                 self.device,
                 function_fingerprint,
             );
             defer temp_allocator.free(selection_key.bytes);
 
             const selection = self.store.get(selection_key);
+            var selected_provider: ?[]const u8 = null;
             const outcome: KernelEntryOutcome = if (selection) |selected| switch (selected.candidate) {
                 .provider => |stored| outcome: {
+                    selected_provider = stored.provider_name;
                     try rewrite_call(
                         program.allocator(),
                         op,
@@ -227,7 +339,7 @@ pub const KernelizePass = struct {
             if (entries) |list| {
                 try list.append(entries_alloc, .{
                     .name = candidate.name,
-                    .provider = provider_name,
+                    .provider = selected_provider orelse try build_providers_str(entries_alloc, provider_request),
                     .ops = try build_ops_str(entries_alloc, candidate),
                     .shape = try build_shape_str(entries_alloc, candidate),
                     .outcome = outcome,
@@ -261,6 +373,16 @@ fn build_ops_str(allocator: std.mem.Allocator, func: pr.Function) ![]const u8 {
         try w.writeAll(@tagName(op.prim()));
     }
     return try aw.toOwnedSlice();
+}
+
+fn build_providers_str(allocator: std.mem.Allocator, request: kernel.ProviderRequest) ![]const u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    for (0..request.len()) |index| {
+        if (index > 0) try output.writer.writeByte('|');
+        try output.writer.writeAll(request.at(index));
+    }
+    return try output.toOwnedSlice();
 }
 
 fn build_shape_str(allocator: std.mem.Allocator, func: pr.Function) ![]const u8 {
@@ -303,7 +425,7 @@ fn make_test_selection_key(
     const function_fingerprint = try fingerprint.function(allocator, func);
     return try kernel.make_selection_key(
         allocator,
-        provider_name,
+        .{ .one = provider_name },
         test_device,
         function_fingerprint,
     );
@@ -353,10 +475,52 @@ test "OutlineCandidates gives outer provider requests precedence" {
     try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
     try testing.expectEqualStrings(
         "outer_provider",
-        (try kernel.requested_provider(program.functions[1])).?,
+        (try kernel.requested_providers(program.functions[1])).?.at(0),
     );
     try testing.expectEqual(@as(usize, 1), program.functions[1].regions.len);
-    try testing.expect((try kernel.requested_provider(program.functions[1].regions[0])) == null);
+    try testing.expect((try kernel.requested_providers(program.functions[1].regions[0])) == null);
+}
+
+test "DiscoverCandidates groups providers matching the same PR range" {
+    const testing = std.testing;
+    const Matcher = struct {
+        name: []const u8,
+
+        fn provider(self: *@This()) kernel.KernelProvider {
+            return .{
+                .name = self.name,
+                .ptr = @ptrCast(self),
+                .compile_fn = undefined,
+                .match_fn = match,
+            };
+        }
+
+        fn match(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
+            if (start >= func.ops.len or func.ops[start].prim() != .dot) return null;
+            return .{ .op_count = 1 };
+        }
+    };
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
+    const rhs = try builder.param_tensor(.f32, &.{ 3, 2 });
+    const result = try builder.dot(lhs, rhs);
+    try program.add_function(try builder.finish(&.{result}));
+
+    var first = Matcher{ .name = "first" };
+    var second = Matcher{ .name = "second" };
+    var providers = [_]kernel.KernelProvider{ first.provider(), second.provider() };
+    var ctx = compilation.Context{ .allocator = testing.allocator, .io = testing.io };
+    _ = try (DiscoverCandidates{ .providers = &providers }).run(&program, &ctx);
+
+    try testing.expectEqual(@as(usize, 1), program.functions[0].regions.len);
+    const request = (try kernel.requested_providers(program.functions[0].regions[0])).?;
+    try testing.expectEqual(@as(usize, 2), request.len());
+    try testing.expectEqualStrings("first", request.at(0));
+    try testing.expectEqualStrings("second", request.at(1));
 }
 
 test "kernelize pass rewrites a selected function call" {

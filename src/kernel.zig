@@ -27,6 +27,24 @@ pub const AnnotationError = error{
     ProviderRegionNotOutlined,
 };
 
+/// Invalid provider collections supplied to discovery or tuning.
+pub const ProviderSetError = error{
+    InvalidKernelProviderName,
+    DuplicateKernelProviderName,
+};
+
+/// Validate provider names used as stable candidate and dispatch identity.
+pub fn validate_providers(providers: []const KernelProvider) ProviderSetError!void {
+    for (providers, 0..) |provider, index| {
+        if (provider.name.len == 0) return error.InvalidKernelProviderName;
+        for (providers[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, provider.name)) {
+                return error.DuplicateKernelProviderName;
+            }
+        }
+    }
+}
+
 /// Construct a provider request for a region builder.
 pub fn provider_annotation(provider_name: []const u8) pr.Annotation {
     return .{
@@ -35,17 +53,62 @@ pub fn provider_annotation(provider_name: []const u8) pr.Annotation {
     };
 }
 
-/// Return the provider requested by an annotated IR object.
-pub fn requested_provider(owner: anytype) AnnotationError!?[]const u8 {
+/// Construct a provider request containing every eligible provider.
+pub fn providers_annotation(provider_names: []const []const u8) pr.Annotation {
+    return .{
+        .name = provider_annotation_name,
+        .value = .{ .strings = provider_names },
+    };
+}
+
+/// Providers eligible to implement one requested region.
+pub const ProviderRequest = union(enum) {
+    one: []const u8,
+    many: []const []const u8,
+
+    /// Return the number of requested providers.
+    pub fn len(self: ProviderRequest) usize {
+        return switch (self) {
+            .one => 1,
+            .many => |names| names.len,
+        };
+    }
+
+    /// Return one provider name by position.
+    pub fn at(self: ProviderRequest, index: usize) []const u8 {
+        return switch (self) {
+            .one => |name| if (index == 0) name else unreachable,
+            .many => |names| names[index],
+        };
+    }
+};
+
+/// Return the providers requested by an annotated IR object.
+pub fn requested_providers(owner: anytype) AnnotationError!?ProviderRequest {
     const found = owner.find_annotation(provider_annotation_name) orelse return null;
-    return found.value.as_string() orelse error.InvalidProviderAnnotation;
+    const request: ProviderRequest = switch (found.value) {
+        .string => |name| .{ .one = name },
+        .strings => |names| if (names.len == 0)
+            return error.InvalidProviderAnnotation
+        else
+            .{ .many = names },
+        else => return error.InvalidProviderAnnotation,
+    };
+    for (0..request.len()) |index| {
+        const name = request.at(index);
+        if (name.len == 0) return error.InvalidProviderAnnotation;
+        for (0..index) |prior| {
+            if (std.mem.eql(u8, request.at(prior), name)) return error.InvalidProviderAnnotation;
+        }
+    }
+    return request;
 }
 
 /// Reject provider requests that have not been outlined into functions.
 pub fn require_outlined_requests(program: *const pr.Program) AnnotationError!void {
     for (program.functions) |func| {
         for (func.regions) |region| {
-            if (try requested_provider(region) != null) {
+            if (try requested_providers(region) != null) {
                 return error.ProviderRegionNotOutlined;
             }
         }
@@ -59,17 +122,18 @@ pub const KernelStore = store_mod.KernelStore;
 pub const ProviderCandidate = store_mod.ProviderCandidate;
 pub const PutError = store_mod.PutError;
 pub const Selection = store_mod.Selection;
+pub const TimingEvidence = store_mod.TimingEvidence;
 
 /// Failures produced while encoding selection identity.
 pub const IdentityError = Allocator.Error || std.Io.Writer.Error;
 
-/// Combine a requested provider, selected device, and function fingerprint.
+/// Combine eligible providers, selected device, and function fingerprint.
 ///
 /// Platform names are normalized because `Platform.eql` ignores ASCII case.
 /// Caller owns result.
 pub fn make_selection_key(
     allocator: Allocator,
-    provider_name: []const u8,
+    providers: ProviderRequest,
     selected_device: device.Device,
     function_fingerprint: fingerprint.Function,
 ) IdentityError!SelectionKey {
@@ -77,9 +141,14 @@ pub fn make_selection_key(
     errdefer output.deinit();
     const writer = &output.writer;
 
-    try writer.print("kp2:{d}:", .{provider_name.len});
-    try writer.writeAll(provider_name);
-    try writer.print(":{d}:", .{selected_device.platform.name.len});
+    try writer.print("kp3:{d}:", .{providers.len()});
+    for (0..providers.len()) |index| {
+        const provider_name = providers.at(index);
+        try writer.print("{d}:", .{provider_name.len});
+        try writer.writeAll(provider_name);
+        try writer.writeByte(':');
+    }
+    try writer.print("{d}:", .{selected_device.platform.name.len});
     for (selected_device.platform.name) |byte| {
         try writer.writeByte(std.ascii.toLower(byte));
     }
@@ -210,6 +279,11 @@ pub const CompileError = error{
     ProviderCallFailed,
 } || Allocator.Error;
 
+/// Contiguous PR operation range recognized by a provider.
+pub const Match = struct {
+    op_count: usize,
+};
+
 /// Extension component that claims PR functions and produces compiled kernel artifacts.
 ///
 /// `compile_fn` receives the selected device for target resolution.
@@ -224,6 +298,12 @@ pub const KernelProvider = struct {
 
     /// Compile one callable PR function for the selected device.
     compile_fn: *const fn (ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact,
+
+    /// Optional inexpensive matcher for provider-supported PR operation groups.
+    ///
+    /// `start` identifies the first operation the matcher may claim. The
+    ///  returned count covers a non-empty contiguous range within `func`.
+    match_fn: ?*const fn (ptr: *anyopaque, func: pr.Function, start: usize) ?Match = null,
 
     /// Optional release hook for compilation-only provider resources.
     finalize_fn: ?*const fn (ptr: *anyopaque) void = null,
@@ -245,6 +325,12 @@ pub const KernelProvider = struct {
     /// Compile one callable PR function for the selected device.
     pub fn compile(self: KernelProvider, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) CompileError!Artifact {
         return try self.compile_fn(self.ptr, func, selected_device, allocator);
+    }
+
+    /// Match a provider-supported operation group beginning at `start`.
+    pub fn match(self: KernelProvider, func: pr.Function, start: usize) ?Match {
+        const matcher = self.match_fn orelse return null;
+        return matcher(self.ptr, func, start);
     }
 
     /// Release compilation-only provider resources.
@@ -359,42 +445,55 @@ test "finalize is no-op when null" {
     provider.finalize();
 }
 
+test validate_providers {
+    const provider = KernelProvider{
+        .name = "duplicate",
+        .ptr = undefined,
+        .compile_fn = undefined,
+    };
+    try std.testing.expectError(
+        error.DuplicateKernelProviderName,
+        validate_providers(&.{ provider, provider }),
+    );
+}
+
 test make_selection_key {
     const testing = std.testing;
     const function_fingerprint = fingerprint.Function{ .bytes = .{0x5a} ** 32 };
+    const providers = ProviderRequest{ .many = &.{ "tvm", "mirage" } };
 
-    const tvm = try make_selection_key(
+    const first = try make_selection_key(
         testing.allocator,
-        "tvm",
+        providers,
         .{ .platform = .cuda },
         function_fingerprint,
     );
-    defer testing.allocator.free(tvm.bytes);
-    const mirage = try make_selection_key(
+    defer testing.allocator.free(first.bytes);
+    const same_candidate_set = try make_selection_key(
         testing.allocator,
-        "mirage",
+        providers,
         .{ .platform = .cuda },
         function_fingerprint,
     );
-    defer testing.allocator.free(mirage.bytes);
+    defer testing.allocator.free(same_candidate_set.bytes);
     const other_device = try make_selection_key(
         testing.allocator,
-        "tvm",
+        providers,
         .{ .platform = .cuda, .ordinal = 1 },
         function_fingerprint,
     );
     defer testing.allocator.free(other_device.bytes);
     const reported_case = try make_selection_key(
         testing.allocator,
-        "tvm",
+        providers,
         .{ .platform = .{ .name = "CUDA" } },
         function_fingerprint,
     );
     defer testing.allocator.free(reported_case.bytes);
 
-    try testing.expect(!std.mem.eql(u8, tvm.bytes, mirage.bytes));
-    try testing.expect(!std.mem.eql(u8, tvm.bytes, other_device.bytes));
-    try testing.expectEqualStrings(tvm.bytes, reported_case.bytes);
+    try testing.expectEqualStrings(first.bytes, same_candidate_set.bytes);
+    try testing.expect(!std.mem.eql(u8, first.bytes, other_device.bytes));
+    try testing.expectEqualStrings(first.bytes, reported_case.bytes);
 }
 
 test "dispatch registry register and get" {

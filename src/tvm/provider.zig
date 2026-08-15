@@ -65,10 +65,16 @@ pub const TvmProvider = struct {
             .name = "tvm",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
+            .match_fn = match_impl,
             .prepare_fn = &TvmDispatchState.prepare,
             .dispatch_fn = &TvmDispatchState.dispatch,
             .dispatch_ctx = TypedPtr.init(self.dispatch_state),
         };
+    }
+
+    fn match_impl(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
+        if (start >= func.ops.len or validate_matmul_op(func.ops[start]) == null) return null;
+        return .{ .op_count = 1 };
     }
 
     fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
@@ -167,7 +173,11 @@ pub const TvmProvider = struct {
 fn validate_matmul_function(func: pr.Function) ?mm.Shape {
     if (func.ops.len != 1) return null;
     if (func.params.len != 2 or func.returns.len != 1) return null;
-    const op = func.ops[0];
+    return validate_matmul_op(func.ops[0]);
+}
+
+fn validate_matmul_op(op: *const pr.Op) ?mm.Shape {
+    if (op.outputs.len != 1) return null;
 
     switch (op.params) {
         .dot => {},
@@ -177,7 +187,7 @@ fn validate_matmul_function(func: pr.Function) ?mm.Shape {
         else => return null,
     }
 
-    if (op.inputs.len != 2 or op.outputs.len != 1) return null;
+    if (op.inputs.len != 2) return null;
 
     const a = op.inputs[0].value.as_tensor();
     const b = op.inputs[1].value.as_tensor();
@@ -202,4 +212,20 @@ fn make_kernel_artifact(artifact: mm.CachedArtifact) kernel.Artifact {
     return .{
         .data = artifact.bytes,
     };
+}
+
+test "TVM matcher recognizes matrix matmul" {
+    const testing = std.testing;
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
+    const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
+    const output = try builder.dot(lhs, rhs);
+    const func = try builder.finish(&.{output});
+
+    const matched = TvmProvider.match_impl(undefined, func, 0) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), matched.op_count);
 }

@@ -452,9 +452,9 @@ pub fn run_train_demo(
 
 /// Tunes, compiles, executes, and verifies the kernel-provider demo.
 ///
-/// Each selected provider receives an annotated PR region. Tuning populates the
-///  kernel store, then runtime preparation runs before PR kernelization and
-///  PJRT execution.
+/// A single provider discovers its PR candidates. Multi-provider runs use
+///  explicit disjoint requests. Tuning populates the kernel store before
+///  runtime preparation, PR kernelization, and PJRT execution.
 pub const KernelProviderDemoOutputs = struct {
     /// PR function compiled and executed by the scenario.
     entry_name: []const u8,
@@ -563,7 +563,11 @@ pub fn run_kernel_provider_demo(
     for (provider_kinds, 0..) |kind, i| pnames_buf[i] = @tagName(kind);
     const provider_names = pnames_buf[0..provider_kinds.len];
 
-    var program = try build_kernelized_demo_program(allocator, provider_names);
+    var program = try build_kernelized_demo_program(
+        allocator,
+        provider_names,
+        provider_names.len > 1,
+    );
     defer program.deinit();
 
     var pipeline = zg.Pipeline.init(allocator);
@@ -574,11 +578,14 @@ pub fn run_kernel_provider_demo(
         config.entry_name = config.entry_name orelse outputs.entry_name;
         try pipeline.add(zg.pr.dump.Dump{ .config = config });
     }
+    try pipeline.add(zg.pr.transform.kernelize.DiscoverCandidates{ .providers = providers });
     try pipeline.add(zg.pr.transform.kernelize.OutlineCandidates{});
     _ = try pipeline.run(*zg.pr.Program, &program, ctx);
 
+    var demo_evaluator: KernelProviderDemoEvaluator = .{};
     var tune_result = try zg.tune.tune(io, allocator, &program, providers, .{
         .device = execution_template.interface.device,
+        .evaluator = demo_evaluator.interface(),
     });
     defer tune_result.deinit();
     try tune_result.dispatch_registry.prepare(&tune_result.store, .{
@@ -646,6 +653,28 @@ pub fn run_kernel_provider_demo(
         provider_kinds.len,
     );
 }
+
+const KernelProviderDemoEvaluator = struct {
+    fn interface(self: *KernelProviderDemoEvaluator) zg.tune.Evaluator {
+        return .{
+            .ptr = @ptrCast(self),
+            .evaluate_fn = evaluate,
+        };
+    }
+
+    fn evaluate(
+        _: *anyopaque,
+        _: zg.pr.Function,
+        candidates: []const zg.tune.AvailableCandidate,
+        _: zg.device.Device,
+        _: std.mem.Allocator,
+    ) zg.tune.EvaluationError!zg.tune.Evaluation {
+        return .{
+            .candidate = .{ .provider = candidates.len - 1 },
+            .reason = "kernel-provider dispatch demo requests the provider candidate",
+        };
+    }
+};
 
 fn kind_requested(kinds: []const KernelProviderDemoKind, target: KernelProviderDemoKind) bool {
     for (kinds) |k| if (k == target) return true;
@@ -871,9 +900,14 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
 
 /// Builds the matmul program used by the kernel-provider demo.
 ///
-/// Each provider receives one `dot(a, b)` region. The function returns the
-///  provider results summed with `c`, then multiplied by `c`.
-fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: []const []const u8) !zg.pr.Program {
+/// The function returns one dot per provider, summed with `c`, then multiplied
+///  by `c`. Multi-provider runs use explicit disjoint requests because their
+///  discovered region boundaries may overlap.
+fn build_kernelized_demo_program(
+    allocator: std.mem.Allocator,
+    provider_names: []const []const u8,
+    explicit_requests: bool,
+) !zg.pr.Program {
     var program = zg.pr.Program.init(allocator);
     errdefer program.deinit();
 
@@ -886,15 +920,15 @@ fn build_kernelized_demo_program(allocator: std.mem.Allocator, provider_names: [
 
     // Region names share the program lifetime of their function references.
     const first_name = try std.fmt.allocPrint(b.alloc(), "{s}_region_0", .{provider_names[0]});
-    try b.push_region(first_name, &.{zg.kernel.provider_annotation(provider_names[0])});
+    if (explicit_requests) try b.push_region(first_name, &.{zg.kernel.provider_annotation(provider_names[0])});
     var acc_id = try b.dot(a_id, b_id);
-    try b.pop_region();
+    if (explicit_requests) try b.pop_region();
 
     for (provider_names[1..], 1..) |pname, i| {
         const rn = try std.fmt.allocPrint(b.alloc(), "{s}_region_{d}", .{ pname, i });
-        try b.push_region(rn, &.{zg.kernel.provider_annotation(pname)});
+        if (explicit_requests) try b.push_region(rn, &.{zg.kernel.provider_annotation(pname)});
         const dot_id = try b.dot(a_id, b_id);
-        try b.pop_region();
+        if (explicit_requests) try b.pop_region();
         acc_id = try b.add(acc_id, dot_id);
     }
 

@@ -28,10 +28,17 @@ pub const Candidate = union(enum) {
     provider: ProviderCandidate,
 };
 
+/// Comparable aggregate timings supporting one selection.
+pub const TimingEvidence = struct {
+    original_ns: u64,
+    selected_ns: u64,
+};
+
 /// Selected candidate and the reason it was chosen.
 pub const Selection = struct {
     candidate: Candidate,
     reason: []const u8,
+    timing: ?TimingEvidence = null,
 };
 
 /// Failures produced while storing a selection.
@@ -110,6 +117,7 @@ pub const KernelStore = struct {
         try self.selections.put(owned_key, .{
             .candidate = owned_candidate,
             .reason = owned_reason,
+            .timing = selection.timing,
         });
     }
 
@@ -146,6 +154,7 @@ test "kernel store selects a provider artifact" {
             },
         } },
         .reason = "available",
+        .timing = .{ .original_ns = 120, .selected_ns = 90 },
     });
 
     const selection = store.get(key) orelse return error.TestUnexpectedResult;
@@ -158,6 +167,8 @@ test "kernel store selects a provider artifact" {
         },
         .original => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(u64, 120), selection.timing.?.original_ns);
+    try std.testing.expectEqual(@as(u64, 90), selection.timing.?.selected_ns);
     try testing.expect(store.uses_provider(key));
 }
 

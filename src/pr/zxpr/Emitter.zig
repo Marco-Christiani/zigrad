@@ -256,6 +256,16 @@ fn emit_annotations(self: *Self, annotations: []const pr.Annotation) !void {
                 try std.zig.stringEscape(value, self.writer);
                 try self.writer.writeAll("\"");
             },
+            .strings => |values| {
+                try self.writer.writeAll("=[");
+                for (values, 0..) |value, value_index| {
+                    if (value_index > 0) try self.writer.writeAll(", ");
+                    try self.writer.writeAll("\"");
+                    try std.zig.stringEscape(value, self.writer);
+                    try self.writer.writeAll("\"");
+                }
+                try self.writer.writeAll("]");
+            },
             .bytes => |value| try self.writer.print("=0x{x}", .{value}),
         }
     }

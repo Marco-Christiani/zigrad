@@ -528,6 +528,7 @@ pub const AnnotationValue = union(enum) {
     integer: i64,
     floating_point: f64,
     string: []const u8,
+    strings: []const []const u8,
     bytes: []const u8,
 
     /// Return the string payload or null for another storage kind.
@@ -840,6 +841,13 @@ pub fn dupe_annotations(allocator: Allocator, annotations: []const Annotation) B
             .name = try allocator.dupe(u8, annotation.name),
             .value = switch (annotation.value) {
                 .string => |value| .{ .string = try allocator.dupe(u8, value) },
+                .strings => |values| strings: {
+                    const copied = try allocator.alloc([]const u8, values.len);
+                    for (values, copied) |value, *destination| {
+                        destination.* = try allocator.dupe(u8, value);
+                    }
+                    break :strings .{ .strings = copied };
+                },
                 .bytes => |value| .{ .bytes = try allocator.dupe(u8, value) },
                 else => annotation.value,
             },
@@ -1408,7 +1416,7 @@ test "region push/pop materializes regions" {
     try std.testing.expectEqual(@as(usize, 1), func.regions.len);
     try std.testing.expectEqual(@as(u32, 0), func.regions[0].id);
     try std.testing.expectEqualStrings("tvm-kernel", func.regions[0].name);
-    try std.testing.expectEqualStrings("tvm", (try kernel.requested_provider(func.regions[0])).?);
+    try std.testing.expectEqualStrings("tvm", (try kernel.requested_providers(func.regions[0])).?.at(0));
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, func.regions[0].op_ids);
 }
 
@@ -1484,7 +1492,7 @@ test "nested regions" {
     // Outer region completed second
     try std.testing.expectEqual(@as(u32, 0), func.regions[1].id);
     try std.testing.expectEqualStrings("outer", func.regions[1].name);
-    try std.testing.expectEqualStrings("tvm", (try kernel.requested_provider(func.regions[1])).?);
+    try std.testing.expectEqualStrings("tvm", (try kernel.requested_providers(func.regions[1])).?.at(0));
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, func.regions[1].op_ids);
 }
 
@@ -1512,7 +1520,7 @@ test "regions_matching filters by predicate" {
 
     const is_kernelized = struct {
         fn f(region: Region) bool {
-            return (kernel.requested_provider(region) catch null) != null;
+            return (kernel.requested_providers(region) catch null) != null;
         }
     }.f;
 

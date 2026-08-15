@@ -42,9 +42,29 @@ pub const MirageProvider = struct {
             .name = "mirage",
             .ptr = @ptrCast(self),
             .compile_fn = compile_impl,
+            .match_fn = match_impl,
             .dispatch_fn = &dispatch_mod.MirageDispatchState.dispatch,
             .dispatch_ctx = TypedPtr.init(self.dispatch_state),
         };
+    }
+
+    fn match_impl(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
+        if (start >= func.ops.len or !is_supported_op(func.ops[start])) return null;
+        if (start > 0 and is_supported_op(func.ops[start - 1]) and
+            consumes_range_output(func, func.ops[start], start - 1, start))
+        {
+            return null;
+        }
+
+        var end = start + 1;
+        var contains_matmul = is_supported_matmul(func.ops[start]);
+        while (end < func.ops.len and end - start < max_function_ops) : (end += 1) {
+            const op = func.ops[end];
+            if (!is_supported_op(op) or !consumes_range_output(func, op, start, end)) break;
+            contains_matmul = contains_matmul or is_supported_matmul(op);
+        }
+        if (!contains_matmul) return null;
+        return .{ .op_count = end - start };
     }
 
     fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
@@ -195,6 +215,41 @@ pub const MirageProvider = struct {
     }
 };
 
+fn is_supported_matmul(op: *const pr.Op) bool {
+    if (op.inputs.len != 2 or op.outputs.len != 1) return false;
+    return switch (op.params) {
+        .dot => true,
+        .dot_general => |dg| contraction.is_canonical_batched_matmul(
+            dg,
+            op.inputs[0].value.as_tensor().shape.rank(),
+            op.inputs[1].value.as_tensor().shape.rank(),
+        ),
+        else => false,
+    };
+}
+
+fn is_supported_pointwise(op: *const pr.Op) bool {
+    if (op.outputs.len != 1) return false;
+    return switch (op.params) {
+        .exp, .log => op.inputs.len == 1,
+        .add, .multiply, .divide => op.inputs.len == 2,
+        else => false,
+    };
+}
+
+fn is_supported_op(op: *const pr.Op) bool {
+    return is_supported_matmul(op) or is_supported_pointwise(op);
+}
+
+fn consumes_range_output(func: pr.Function, op: *const pr.Op, start: usize, end: usize) bool {
+    for (op.inputs) |operand| {
+        const defining = operand.value.defining_op orelse continue;
+        const defining_index = func.op_index_by_id(defining.id) orelse continue;
+        if (defining_index >= start and defining_index < end) return true;
+    }
+    return false;
+}
+
 fn lower_function_graph(
     func: pr.Function,
     graph: *mirage.Graph,
@@ -343,4 +398,23 @@ fn map_mirage_api_error(err: mirage.MirageError) kernel.CompileError {
         error.MirageNotFound => error.Unsupported,
         error.OutOfMemory => error.OutOfMemory,
     };
+}
+
+test "Mirage matcher grows a connected supported region" {
+    const testing = std.testing;
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
+    const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
+    const bias = try builder.param_tensor(.f32, &.{ 4, 2 });
+    const dot = try builder.dot(lhs, rhs);
+    const sum = try builder.add(dot, bias);
+    const output = try builder.exp(sum);
+    const func = try builder.finish(&.{output});
+
+    const matched = MirageProvider.match_impl(undefined, func, 0) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), matched.op_count);
 }
