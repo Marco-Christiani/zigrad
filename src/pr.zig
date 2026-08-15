@@ -74,6 +74,7 @@ pub const ops = @import("pr/ops/ops.zig");
 pub const analysis = @import("pr/analysis.zig");
 
 pub const transform = struct {
+    pub const annotate = @import("pr/transform/annotate.zig");
     pub const kernelize = @import("pr/transform/kernelize.zig");
     pub const outline = @import("pr/transform/outline.zig");
 };

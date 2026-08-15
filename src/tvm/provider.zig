@@ -1,9 +1,10 @@
 //! TVM kernel provider.
 //!
 //! The provider accepts PR matrix-multiply functions and emits kernel artifacts
-//!  values through MetaSchedule autotuning. TVM C types remain internal.
+//!  values through MetaSchedule autotuning. TVM C types are internal.
 const std = @import("std");
 const contraction = @import("../pr/analysis/contraction.zig");
+const pattern = @import("../pr/analysis/pattern.zig");
 
 const Cache = @import("../cache.zig").Cache;
 const device = @import("../device.zig");
@@ -177,7 +178,12 @@ fn validate_matmul_function(func: pr.Function) ?mm.Shape {
 }
 
 fn validate_matmul_op(op: *const pr.Op) ?mm.Shape {
-    if (op.outputs.len != 1) return null;
+    if (!(pattern.Operation{
+        .input_count = 2,
+        .output_count = 1,
+        .first_output_dtype = .f32,
+        .first_output_rank = 2,
+    }).matches(op)) return null;
 
     switch (op.params) {
         .dot => {},
@@ -186,8 +192,6 @@ fn validate_matmul_op(op: *const pr.Op) ?mm.Shape {
         },
         else => return null,
     }
-
-    if (op.inputs.len != 2) return null;
 
     const a = op.inputs[0].value.as_tensor();
     const b = op.inputs[1].value.as_tensor();
@@ -202,8 +206,7 @@ fn validate_matmul_op(op: *const pr.Op) ?mm.Shape {
     if (b.shape.dims[0] != k) return null;
     if (c_tensor.shape.dims[0] != m or c_tensor.shape.dims[1] != n) return null;
 
-    if (a.dtype != .f32 or b.dtype != .f32 or c_tensor.dtype != .f32)
-        return null;
+    if (a.dtype != .f32 or b.dtype != .f32) return null;
 
     return .{ .m = m, .n = n, .k = k };
 }

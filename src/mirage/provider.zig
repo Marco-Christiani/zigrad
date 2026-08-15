@@ -1,5 +1,6 @@
 const std = @import("std");
 const contraction = @import("../pr/analysis/contraction.zig");
+const pattern = @import("../pr/analysis/pattern.zig");
 const device = @import("../device.zig");
 const kernel = @import("../kernel.zig");
 const pr = @import("../pr/pr.zig");
@@ -49,22 +50,12 @@ pub const MirageProvider = struct {
     }
 
     fn match_impl(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
-        if (start >= func.ops.len or !is_supported_op(func.ops[start])) return null;
-        if (start > 0 and is_supported_op(func.ops[start - 1]) and
-            consumes_range_output(func, func.ops[start], start - 1, start))
-        {
-            return null;
-        }
-
-        var end = start + 1;
-        var contains_matmul = is_supported_matmul(func.ops[start]);
-        while (end < func.ops.len and end - start < max_function_ops) : (end += 1) {
-            const op = func.ops[end];
-            if (!is_supported_op(op) or !consumes_range_output(func, op, start, end)) break;
-            contains_matmul = contains_matmul or is_supported_matmul(op);
-        }
-        if (!contains_matmul) return null;
-        return .{ .op_count = end - start };
+        const matched = pattern.connected_range(func, start, .{
+            .accepts = is_supported_op,
+            .contains = is_supported_matmul,
+            .max_ops = max_function_ops,
+        }) orelse return null;
+        return .{ .op_count = matched.len() };
     }
 
     fn compile_impl(ptr: *anyopaque, func: pr.Function, selected_device: device.Device, allocator: std.mem.Allocator) kernel.CompileError!kernel.Artifact {
@@ -231,7 +222,7 @@ fn is_supported_matmul(op: *const pr.Op) bool {
 fn is_supported_pointwise(op: *const pr.Op) bool {
     if (op.outputs.len != 1) return false;
     return switch (op.params) {
-        .exp, .log => op.inputs.len == 1,
+        .exp, .log, .logistic => op.inputs.len == 1,
         .add, .multiply, .divide => op.inputs.len == 2,
         else => false,
     };
@@ -239,15 +230,6 @@ fn is_supported_pointwise(op: *const pr.Op) bool {
 
 fn is_supported_op(op: *const pr.Op) bool {
     return is_supported_matmul(op) or is_supported_pointwise(op);
-}
-
-fn consumes_range_output(func: pr.Function, op: *const pr.Op, start: usize, end: usize) bool {
-    for (op.inputs) |operand| {
-        const defining = operand.value.defining_op orelse continue;
-        const defining_index = func.op_index_by_id(defining.id) orelse continue;
-        if (defining_index >= start and defining_index < end) return true;
-    }
-    return false;
 }
 
 fn lower_function_graph(
@@ -277,17 +259,51 @@ fn lower_function_graph(
         try tensor_map.put(in_var, handle);
     }
 
-    for (func.ops) |op| {
+    var op_index: usize = 0;
+    while (op_index < func.ops.len) {
+        if (match_silu(func, op_index)) |matched| {
+            const input = tensor_map.get(matched.input) orelse return error.Unsupported;
+            const output = try emit_unary(graph, .silu, input);
+            try tensor_map.put(matched.output, output);
+            op_index += 2;
+            continue;
+        }
+
+        const op = func.ops[op_index];
         if (op.outputs.len != 1) return error.Unsupported;
 
         const out_tensor = try lower_op(graph, op, tensor_map);
         try tensor_map.put(op.outputs[0], out_tensor);
+        op_index += 1;
     }
 
     for (func.returns) |out_var| {
         const out_tensor = tensor_map.get(out_var) orelse return error.Unsupported;
         graph.mark_output(out_tensor) catch |err| return map_mirage_api_error(err);
     }
+}
+
+const SiluMatch = struct {
+    input: *const pr.Var,
+    output: *const pr.Var,
+};
+
+fn match_silu(func: pr.Function, start: usize) ?SiluMatch {
+    _ = pattern.sequence(func, start, &.{ .logistic, .multiply }) orelse return null;
+    const logistic = func.ops[start];
+    const multiply = func.ops[start + 1];
+    if (logistic.inputs.len != 1 or logistic.outputs.len != 1 or
+        multiply.inputs.len != 2 or multiply.outputs.len != 1)
+        return null;
+
+    const input = logistic.inputs[0].value;
+    const activation = logistic.outputs[0];
+    if (!activation.has_one_use() or activation.first_use.?.owner != multiply) return null;
+    const lhs = multiply.inputs[0].value;
+    const rhs = multiply.inputs[1].value;
+    if (!((lhs == input and rhs == activation) or
+        (lhs == activation and rhs == input))) return null;
+    return .{ .input = input, .output = multiply.outputs[0] };
 }
 
 fn lower_op(
@@ -417,4 +433,59 @@ test "Mirage matcher grows a connected supported region" {
     const matched = MirageProvider.match_impl(undefined, func, 0) orelse
         return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), matched.op_count);
+}
+
+test "Mirage matcher covers pointwise prefixes and connected branches" {
+    const testing = std.testing;
+
+    {
+        var program = pr.Program.init(testing.allocator);
+        defer program.deinit();
+        var builder = try pr.FunctionBuilder.init(&program, "prefix");
+        defer builder.deinit();
+        const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
+        const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
+        const transformed = try builder.exp(lhs);
+        const output = try builder.dot(transformed, rhs);
+        const func = try builder.finish(&.{output});
+
+        const matched = MirageProvider.match_impl(undefined, func, 0) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(usize, 2), matched.op_count);
+    }
+
+    {
+        var program = pr.Program.init(testing.allocator);
+        defer program.deinit();
+        var builder = try pr.FunctionBuilder.init(&program, "branch");
+        defer builder.deinit();
+        const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
+        const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
+        const dot = try builder.dot(lhs, rhs);
+        const exponent = try builder.exp(dot);
+        const logarithm = try builder.log(dot);
+        const output = try builder.add(exponent, logarithm);
+        const func = try builder.finish(&.{output});
+
+        const matched = MirageProvider.match_impl(undefined, func, 0) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(usize, 4), matched.op_count);
+    }
+}
+
+test "Mirage recognizes a SiLU composite" {
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "silu");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{ 4, 8 });
+    const activation = try builder.logistic(input);
+    const output = try builder.multiply(input, activation);
+    const func = try builder.finish(&.{output});
+
+    const matched = match_silu(func, 0) orelse return error.TestUnexpectedResult;
+    try testing.expect(matched.input == input);
+    try testing.expect(matched.output == output);
 }

@@ -13,6 +13,8 @@ const device = @import("../../device.zig");
 const output_mod = @import("../../output.zig");
 const effects = @import("../analysis/effects.zig");
 const fingerprint = @import("../analysis/fingerprint.zig");
+const pattern = @import("../analysis/pattern.zig");
+const annotate = @import("annotate.zig");
 const outline = @import("outline.zig");
 const pr = @import("../pr.zig");
 const kernel = @import("../../kernel.zig");
@@ -76,7 +78,7 @@ pub const DumpKernels = struct {
 /// Outlines provider-request regions into callable PR functions.
 ///
 /// Outermost requests take precedence when regions are nested. Their function
-///  retains the provider request, and nested provider requests are consumed.
+///  receives the provider request, and nested provider requests are consumed.
 pub const OutlineCandidates = struct {
     pub const Input = *pr.Program;
     pub const Output = *pr.Program;
@@ -167,27 +169,19 @@ fn discover_function(
         }
     }
 
-    if (ranges.items.len == 0) return;
-    const existing_len = func.regions.len;
-    const updated = try arena.alloc(pr.Region, existing_len + ranges.items.len);
-    @memcpy(updated[0..existing_len], func.regions);
-    var next_id: u32 = 0;
-    for (func.regions) |region| next_id = @max(next_id, region.id + 1);
-
-    for (ranges.items, updated[existing_len..]) |range, *destination| {
-        const op_ids = try arena.alloc(u32, range.op_count);
-        for (func.ops[range.start..][0..range.op_count], op_ids) |op, *op_id| op_id.* = op.id;
+    for (ranges.items) |range| {
         const provider_names = try arena.alloc([]const u8, range.providers.items.len);
         for (range.providers.items, provider_names) |name, *owned| owned.* = try arena.dupe(u8, name);
-        destination.* = .{
-            .id = next_id,
-            .name = try std.fmt.allocPrint(arena, "kernel_candidate_{d}", .{next_id}),
-            .annotations = try pr.dupe_annotations(arena, &.{kernel.providers_annotation(provider_names)}),
-            .op_ids = op_ids,
-        };
-        next_id += 1;
+        const name = try std.fmt.allocPrint(scratch, "kernel_candidate_{d}", .{func.regions.len});
+        defer scratch.free(name);
+        _ = try annotate.range(
+            arena,
+            func,
+            .{ .start = range.start, .end = range.start + range.op_count },
+            name,
+            &.{kernel.providers_annotation(provider_names)},
+        );
     }
-    func.regions = updated;
 }
 
 fn overlaps_explicit_request(func: pr.Function, start: usize, matched: kernel.Match) bool {
@@ -599,7 +593,7 @@ test "kernelize pass preserves observable side effects" {
     try testing.expect(rewritten.params.custom_call.has_side_effect);
 }
 
-test "kernelize pass retains a declined function call" {
+test "kernelize pass does not replace a declined function call" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -635,12 +629,12 @@ test "kernelize pass retains a declined function call" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // The original candidate remains a normal PR call.
+    // The original candidate is a normal PR call.
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
     try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
 
-test "kernelize pass retains a call without a selection" {
+test "kernelize pass does not replace a call without a selection" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -671,7 +665,7 @@ test "kernelize pass retains a call without a selection" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // The original candidate remains a normal PR call.
+    // The original candidate is a normal PR call.
     try testing.expectEqual(@as(usize, 1), program.functions[0].ops.len);
     try testing.expectEqual(pr.Prim.call, program.functions[0].ops[0].prim());
 }
@@ -840,7 +834,7 @@ test "kernelize pass separates functions with different shapes" {
     var ctx = compilation.Context{ .allocator = testing.allocator, .io = std.testing.io };
     _ = try kp.run(&program, &ctx);
 
-    // Only region_small has a store selection, so region_large remains a call.
+    // Only `region_small` has a store selection. `region_large` is a call.
     const ops = program.functions[0].ops;
     try testing.expectEqual(@as(usize, 2), ops.len);
     try testing.expectEqual(pr.Prim.custom_call, ops[0].prim());
