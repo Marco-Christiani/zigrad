@@ -112,7 +112,7 @@ fn ad_impl(
             var i: usize = func.ops.len;
             while (i > 0) {
                 i -= 1;
-                try ops.vjp_backward(ad_ctx, func.ops[i]);
+                try ops.vjp(ad_ctx, func.ops[i]);
             }
         },
         .jvp => {
@@ -163,7 +163,7 @@ fn ad_impl(
                         v.id,
                         @tagName(t.dtype),
                         t.shape.dims,
-                        if (mode == .vjp) "vjp_backward" else "jvp",
+                        if (mode == .vjp) "vjp" else "jvp",
                     },
                 );
                 return error.MissingDual;

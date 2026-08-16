@@ -59,7 +59,7 @@ pub const reshape = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: pr.ReshapeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -186,7 +186,7 @@ pub const transpose = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, tp: pr.TransposeParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -257,7 +257,7 @@ pub const slice = struct {
     /// zero-padding the slice cotangent back to the original shape. For each
     /// axis, prepends `start` zeros and appends `input_dim - limit` zeros via
     /// concatenation. Only supports unit strides.
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, sparams: pr.SliceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -353,7 +353,7 @@ pub const concatenate = struct {
     /// VJP backward for concatenate. Slices the concatenated cotangent back
     /// into per-input contributions. Tracks a running offset along the concat
     /// axis and extracts each input's slice at [offset, offset+len).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, cp: pr.ConcatenateParams) types.AdError!void {
         if (op.inputs.len == 0) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -437,7 +437,7 @@ pub const reduce = struct {
         }
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
         switch (rp.operation) {
             .sum => try sum_vjp(ctx, op, rp),
@@ -595,7 +595,7 @@ pub const gather = struct {
     ///
     /// Inverts the gather by scatter-adding the output cotangent into a zero
     ///  tensor of the original operand shape.
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, gparams: pr.GatherParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -689,7 +689,7 @@ pub const broadcast_in_dim = struct {
     ///  (size-1 -> size-N, or newly introduced).
     /// After reduction, reshapes to match the original input shape if the reduced shape differs
     ///  (e.g. when size-1 dims remain).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, bp: pr.BroadcastInDimParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -858,7 +858,7 @@ fn reduce_broadcast_dims(allocator: std.mem.Allocator, rank: usize, axes: []cons
 ///  or (2) it is an output dim not mapped by any broadcast dimension (newly
 ///  introduced).
 ///
-///  Used by `broadcast_in_dim.vjp_backward`.
+///  Used by `broadcast_in_dim.vjp`.
 fn broadcast_reduce_axes(
     allocator: std.mem.Allocator,
     in_tensor: Tensor,

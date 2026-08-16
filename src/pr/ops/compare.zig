@@ -112,7 +112,7 @@ pub const select = struct {
     ///  on_true gets the cotangent where cond is true (zero elsewhere),
     ///  on_false gets the cotangent where cond is false (zero elsewhere).
     ///  No cotangent for cond itself (discrete, non-differentiable).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 3) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;

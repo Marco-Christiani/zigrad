@@ -48,7 +48,7 @@ pub const dot = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -155,7 +155,7 @@ fn matrix_multiply(comptime batched: bool) type {
             ctx.set_primal(op.result(0), out);
         }
 
-        pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+        pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
             const out_cot = ctx.get_cot(op.result(0)) orelse return;
             const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
             const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
@@ -248,7 +248,7 @@ pub const convolution = struct {
         ctx.set_primal(op.result(0), try ctx.builder.convolution(lhs, rhs, params));
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, params: pr.ConvolutionParams) types.AdError!void {
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
         if (params.feature_group_count != 1 or params.batch_group_count != 1) return error.UnsupportedEqn;
         for (params.window_reversal) |reversed| if (reversed) return error.UnsupportedEqn;
@@ -405,7 +405,7 @@ pub const dot_general = struct {
     ///  3. Inline 3-rank special case: lhs is [B,M,K], rhs is [K,N] or [N,K],
     ///      no batch dims, single contracting dim at lhs position 2. Flattens
     ///      the batch and row dims to reduce to an `mm`, then reshapes back.
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;

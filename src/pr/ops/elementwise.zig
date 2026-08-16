@@ -53,7 +53,7 @@ pub const add = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -95,7 +95,7 @@ pub const subtract = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -140,7 +140,7 @@ pub const multiply = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -195,7 +195,7 @@ pub const divide = struct {
 
     /// VJP: d/dlhs(lhs/rhs) = dout/rhs, d/drhs(lhs/rhs) = -dout*lhs/rhs^2
     /// (quotient rule).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -258,7 +258,7 @@ pub const maximum = struct {
 
     /// VJP: gradient routes to whichever operand was selected.
     ///  d_lhs = select(lhs >= rhs, cot, 0), d_rhs = select(lhs >= rhs, 0, cot).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;

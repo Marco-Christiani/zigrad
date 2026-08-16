@@ -8,7 +8,7 @@
 //! Every op implementation is a struct with methods named per `op_methods`
 //!  below. `validate` and `infer_output` are required. Missing them fails the
 //!  build via the `validate_op_interface` comptime block. The others
-//!  (`format`, `emit_primal`, `vjp_backward`, `jvp`) are optional and probed
+//!  (`format`, `emit_primal`, `vjp`, `jvp`) are optional and probed
 //!  via `@hasDecl` at dispatch time.
 //!
 //! Coverage: build with `-Demit-op-coverage=true` to have the registry
@@ -83,7 +83,7 @@ const op_methods: []const MethodSpec = &.{
     .{ .name = "infer_output", .required = true, .doc = "Shape/dtype inference" },
     .{ .name = "format", .required = false, .doc = "IR dump formatting" },
     .{ .name = "emit_primal", .required = false, .doc = "Primal re-emission for AD" },
-    .{ .name = "vjp_backward", .required = false, .doc = "Cotangent propagation for reverse-mode AD" },
+    .{ .name = "vjp", .required = false, .doc = "Cotangent propagation for reverse-mode AD" },
     .{ .name = "jvp", .required = false, .doc = "Tangent propagation for forward-mode AD" },
 };
 
@@ -174,10 +174,10 @@ pub fn infer_output(alloc: std.mem.Allocator, params: pr.Params, inputs: []const
     }
 }
 
-/// Check if an op supports VJP by providing `emit_primal` and `vjp_backward`.
+/// Check if an op supports VJP by providing `emit_primal` and `vjp`.
 pub fn has_vjp(prim: pr.Prim) bool {
     return switch (prim) {
-        inline else => |p| @hasDecl(OpFor(p), "emit_primal") and @hasDecl(OpFor(p), "vjp_backward"),
+        inline else => |p| @hasDecl(OpFor(p), "emit_primal") and @hasDecl(OpFor(p), "vjp"),
     };
 }
 
@@ -202,12 +202,12 @@ pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
 }
 
 /// Execute VJP backward pass for an op.
-pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
+pub fn vjp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
     switch (op.params) {
         inline else => |typed_params, tag| {
             const Handler = OpFor(tag);
-            if (@hasDecl(Handler, "vjp_backward")) {
-                return try Handler.vjp_backward(ctx, op, typed_params);
+            if (@hasDecl(Handler, "vjp")) {
+                return try Handler.vjp(ctx, op, typed_params);
             }
             // Missing rules contribute zero for nondifferentiable operations.
             return;

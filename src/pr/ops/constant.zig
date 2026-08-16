@@ -25,7 +25,7 @@ pub const literal = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    // No vjp_backward needed - constants have zero gradient
+    // No VJP is needed because constants have zero gradient.
 
     /// JVP: constants have zero tangent.
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: pr.Literal) types.AdError!void {

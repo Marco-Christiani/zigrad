@@ -46,7 +46,7 @@ pub const exp = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -88,7 +88,7 @@ pub const log = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -137,7 +137,7 @@ pub const convert = struct {
         ctx.set_primal(op.result(0), out);
     }
 
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: pr.DType) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: pr.DType) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -184,7 +184,7 @@ pub const rsqrt = struct {
 
     /// VJP: d/dx rsqrt(x) = -0.5 * rsqrt(x)^3.
     /// Uses the forward output (y = rsqrt(x)) directly: scale = y^3 * (-0.5).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
@@ -242,7 +242,7 @@ pub const logistic = struct {
 
     /// VJP: d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x)).
     /// Uses the forward output directly to avoid recomputing the sigmoid.
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+    pub fn vjp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const out_cot = ctx.get_cot(op.result(0)) orelse return;
