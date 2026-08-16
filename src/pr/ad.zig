@@ -177,17 +177,17 @@ fn ad_impl(
     return try b.finish(returns);
 }
 
-/// Reverse-mode AD (pullback): transforms `f: M -> N` into
-///  `vjp_f: (T_xM, T*_{f(x)}N) -> T*_xM`.
+/// Reverse-mode AD (pullback): transforms \(f: M -> N\) into
+///  \(vjp_f: (T_xM, T*_{f(x)}N) -> T*_xM \)
 ///
-/// Concretely, computes the transpose-Jacobian product `J^T(x) * v` for a
-///  cotangent seed `v`, which is the pullback `f*: T*_{f(x)}N -> T*_xM`
-///  evaluated at `x`.
+/// Concretely, computes the transpose-Jacobian product \(J^T(x) * v\) for a
+///  cotangent seed \(v\), which is the pullback \(f*: T*_{f(x)}N -> T*_xM\)
+///  evaluated at \(x\).
 ///
-/// The returned `pr.Function` takes `N` primal inputs followed by `M` output
-///  cotangent seeds, and returns `N` input cotangent vectors. In the
-///  Euclidean or Cartesian case (`G = I`), these equal gradients. In general,
-///  they are covectors and must be raised with `G^{-1}` to obtain gradient
+/// The returned `pr.Function` takes \(N\) primal inputs followed by \(M\) output
+///  cotangent seeds, and returns \(N\) input cotangent vectors. In the
+///  Euclidean or Cartesian case (\(G = I\)), these equal gradients. In general,
+///  they are covectors and must be raised with \(G^{-1}\) to obtain gradient
 ///  tangent vectors.
 pub fn vjp(
     allocator: std.mem.Allocator,
@@ -206,6 +206,8 @@ pub fn vjp(
 ///
 /// `(N primals, M cotangent seeds) -> (M primal outputs, K input cotangents)`
 ///  where `K = opts.wrt.?.len` if provided, else `N`.
+///
+/// See `vjp`
 pub fn vjp_with_value(
     allocator: std.mem.Allocator,
     program: *pr.Program,
@@ -232,6 +234,8 @@ pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function
 /// Apply JVP and emit primal outputs before output tangents.
 ///
 /// `(N primals, N tangents) -> (M primal outputs, M output tangents)`.
+///
+/// See `jvp`
 pub fn jvp_with_value(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
     return try ad_impl(.jvp, allocator, program, func, name, .emit, null);
 }
