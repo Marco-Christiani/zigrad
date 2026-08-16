@@ -289,20 +289,17 @@ const SiluMatch = struct {
 };
 
 fn match_silu(func: pr.Function, start: usize) ?SiluMatch {
-    _ = pattern.sequence(func, start, &.{ .logistic, .multiply }) orelse return null;
+    _ = pattern.sequence(func, start, &.{
+        .{ .primitive = .logistic, .input_count = 1, .output_count = 1 },
+        .{ .primitive = .multiply, .input_count = 2, .output_count = 1 },
+    }) orelse return null;
     const logistic = func.ops[start];
     const multiply = func.ops[start + 1];
-    if (logistic.inputs.len != 1 or logistic.outputs.len != 1 or
-        multiply.inputs.len != 2 or multiply.outputs.len != 1)
-        return null;
 
     const input = logistic.inputs[0].value;
     const activation = logistic.outputs[0];
-    if (!activation.has_one_use() or activation.first_use.?.owner != multiply) return null;
-    const lhs = multiply.inputs[0].value;
-    const rhs = multiply.inputs[1].value;
-    if (!((lhs == input and rhs == activation) or
-        (lhs == activation and rhs == input))) return null;
+    if (activation.only_user() != multiply or
+        !pattern.binary_operands(multiply, input, activation, .unordered)) return null;
     return .{ .input = input, .output = multiply.outputs[0] };
 }
 

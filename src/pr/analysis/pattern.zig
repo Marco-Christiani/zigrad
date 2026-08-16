@@ -25,6 +25,14 @@ pub const Range = struct {
 /// Predicate used to classify one operation during structural matching.
 pub const OpPredicate = *const fn (op: *const pr.Op) bool;
 
+/// Operand ordering used when matching a binary operation.
+pub const BinaryOperandOrder = enum {
+    /// Operands must appear as `left`, then `right`.
+    ordered,
+    /// Either operand order is accepted.
+    unordered,
+};
+
 /// Common local constraints for one operation.
 pub const Operation = struct {
     /// Required operation primitive.
@@ -103,24 +111,45 @@ pub fn connected_range(
     return .{ .start = start, .end = end };
 }
 
-/// Matches an exact source-ordered primitive sequence.
+/// Matches an exact source-ordered operation sequence.
 ///
 /// Dataflow connectivity is not required. Returns null for an empty sequence,
-///  an out-of-bounds range, or a primitive mismatch.
+///  an out-of-bounds range, or an operation mismatch.
 pub fn sequence(
     /// Function whose source-ordered operation list is searched.
     func: pr.Function,
     /// Index corresponding to `expected[0]`.
     start: usize,
-    /// Nonempty primitive sequence to match.
-    expected: []const pr.Prim,
+    /// Nonempty operation-constraint sequence to match.
+    expected: []const Operation,
 ) ?Range {
     if (expected.len == 0 or start > func.ops.len or
         expected.len > func.ops.len - start) return null;
-    for (func.ops[start..][0..expected.len], expected) |op, primitive| {
-        if (op.prim() != primitive) return null;
+    for (func.ops[start..][0..expected.len], expected) |op, operation| {
+        if (!operation.matches(op)) return null;
     }
     return .{ .start = start, .end = start + expected.len };
+}
+
+/// Returns whether a binary operation consumes two expected values.
+pub fn binary_operands(
+    /// Operation to inspect. Operations with another arity return false.
+    op: *const pr.Op,
+    /// Expected left operand in ordered mode.
+    left: *const pr.Var,
+    /// Expected right operand in ordered mode.
+    right: *const pr.Var,
+    /// Operand comparison mode.
+    order: BinaryOperandOrder,
+) bool {
+    if (op.inputs.len != 2) return false;
+    const actual_left = op.inputs[0].value;
+    const actual_right = op.inputs[1].value;
+    return switch (order) {
+        .ordered => actual_left == left and actual_right == right,
+        .unordered => (actual_left == left and actual_right == right) or
+            (actual_left == right and actual_right == left),
+    };
 }
 
 /// Returns whether an operation consumes a value defined inside a range.
@@ -206,9 +235,15 @@ test sequence {
 
     try testing.expectEqual(
         Range{ .start = 0, .end = 2 },
-        sequence(func, 0, &.{ .log, .exp }).?,
+        sequence(func, 0, &.{
+            .{ .primitive = .log, .input_count = 1 },
+            .{ .primitive = .exp, .output_count = 1 },
+        }).?,
     );
-    try testing.expect(sequence(func, 0, &.{ .exp, .log }) == null);
+    try testing.expect(sequence(func, 0, &.{
+        .{ .primitive = .exp },
+        .{ .primitive = .log },
+    }) == null);
 }
 
 test Operation {
@@ -232,6 +267,24 @@ test Operation {
         .first_output_rank = 2,
     }).matches(func.ops[0]));
     try testing.expect(!(Operation{ .primitive = .add }).matches(func.ops[0]));
+}
+
+test "value-use and operand relationships" {
+    const std = @import("std");
+    const testing = std.testing;
+
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+    var builder = try pr.FunctionBuilder.init(&program, "main");
+    defer builder.deinit();
+    const input = try builder.param_tensor(.f32, &.{4});
+    const activation = try builder.logistic(input);
+    const output = try builder.multiply(input, activation);
+    const func = try builder.finish(&.{output});
+
+    try testing.expect(activation.only_user() == func.ops[1]);
+    try testing.expect(binary_operands(func.ops[1], activation, input, .unordered));
+    try testing.expect(!binary_operands(func.ops[1], activation, input, .ordered));
 }
 
 fn accept_dot(op: *const pr.Op) bool {

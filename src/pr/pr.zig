@@ -410,6 +410,17 @@ pub const Var = struct {
         return first.next == null;
     }
 
+    /// Returns the sole consuming operation of this value.
+    ///
+    /// Function returns do not add nodes to the intrusive use list. Returns
+    ///  null when this value has zero or several consuming operations. The
+    ///  returned pointer shares this value's program lifetime.
+    pub fn only_user(self: *const Var) ?*const Op {
+        const first = self.first_use orelse return null;
+        if (first.next != null) return null;
+        return first.owner;
+    }
+
     /// Checks if var has *at least* n uses.
     pub fn has_n_uses(self: *const Var, n: u32) bool {
         var count: u32 = 0;
