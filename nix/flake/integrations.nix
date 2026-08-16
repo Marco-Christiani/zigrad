@@ -4,6 +4,10 @@
 {inputs, ...}: let
   zigradVersion = inputs.self.shortRev or inputs.self.dirtyShortRev or "dev";
   zigradRevision = inputs.self.rev or null;
+  zigradPreviewRevision =
+    if zigradRevision != null
+    then zigradRevision
+    else builtins.substring 0 40 (inputs.self.dirtyRev or (throw "zigrad-autodoc-preview requires a Git checkout"));
 in {
   perSystem = {
     pkgs,
@@ -49,9 +53,14 @@ in {
     zigradAutodoc = pkgs.callPackage ../packages/zigrad-autodoc.nix {
       inherit zigradSrc;
     };
-    zigradAutodocCandidate = pkgs.callPackage ../packages/zigrad-autodoc-candidate.nix {
+    zigradAutodocCandidate = pkgs.callPackage ../packages/zigrad-autodoc-bundle.nix {
       inherit zigradAutodoc;
       revision = zigradRevision;
+    };
+    zigradAutodocPreview = pkgs.callPackage ../packages/zigrad-autodoc-bundle.nix {
+      inherit zigradAutodoc;
+      revision = zigradPreviewRevision;
+      localPreview = true;
     };
 
     cuda = import ./integrations/cuda.nix {
@@ -224,9 +233,6 @@ in {
 
     packages =
       configurationPackages
-      // lib.optionalAttrs (zigradRevision != null) {
-        zigrad-autodoc-candidate = zigradAutodocCandidate;
-      }
       // {
         mirage-adapter = mirageAdapter;
         mirage-adapter-dev = mirageAdapter.dev;
@@ -236,6 +242,8 @@ in {
         mirage-formal-verifier = mirageRustLibs.formal_verifier;
         zigrad-build-configurations = buildConfigurationManifest;
         zigrad-autodoc = zigradAutodoc;
+        zigrad-autodoc-candidate = zigradAutodocCandidate;
+        zigrad-autodoc-preview = zigradAutodocPreview;
         inherit llvm tvm;
         tvm-dev = tvm.dev;
         tvm-cpu = tvmCpu;
