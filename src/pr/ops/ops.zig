@@ -209,10 +209,35 @@ pub fn vjp(ctx: types.AdContext, op: *const pr.Op) types.AdError!void {
             if (@hasDecl(Handler, "vjp")) {
                 return try Handler.vjp(ctx, op, typed_params);
             }
-            // Missing rules contribute zero for nondifferentiable operations.
+            if (requires_vjp(ctx, op)) return error.UnsupportedEqn;
             return;
         },
     }
+}
+
+fn requires_vjp(ctx: types.AdContext, op: *const pr.Op) bool {
+    var active_output = false;
+    for (op.outputs) |output| {
+        if (is_differentiable(output.as_tensor().dtype) and ctx.get_cot(output) != null) {
+            active_output = true;
+            break;
+        }
+    }
+    if (!active_output) return false;
+
+    for (op.inputs) |input| {
+        if (is_differentiable(input.value.as_tensor().dtype)) return true;
+    }
+    return false;
+}
+
+fn is_differentiable(dtype: pr.DType) bool {
+    // TODO(ad): Let operations register custom dual semantics for discrete
+    //  values, including surrogate and straight-through estimators.
+    return switch (dtype) {
+        .f16, .bf16, .f32, .f64 => true,
+        else => false,
+    };
 }
 
 /// Check if an op supports JVP through both required AD hooks.
@@ -280,6 +305,45 @@ test "vjp support detection" {
     try std.testing.expect(!has_vjp(.compare));
     try std.testing.expect(!has_vjp(.call));
     try std.testing.expect(!has_vjp(.custom_call));
+}
+
+test "vjp rejects a missing rule on an active differentiable path" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var source_builder = try pr.FunctionBuilder.init(&program, "source");
+    defer source_builder.deinit();
+    const input = try source_builder.param_tensor(.f32, &.{4});
+    const outputs = try source_builder.custom_call(.{
+        .target_name = "test.missing_vjp",
+        .has_side_effect = false,
+        .payload = &.{},
+    }, &.{input}, &.{input.aval});
+    const source = try source_builder.finish(outputs);
+
+    var derived_builder = try pr.FunctionBuilder.init(&program, "derived");
+    defer derived_builder.deinit();
+    const cotangent = try derived_builder.param_tensor(.f32, &.{4});
+
+    const primal_map = try std.testing.allocator.alloc(?*pr.Var, source.var_count);
+    defer std.testing.allocator.free(primal_map);
+    @memset(primal_map, null);
+    const cotangent_map = try std.testing.allocator.alloc(?*pr.Var, source.var_count);
+    defer std.testing.allocator.free(cotangent_map);
+    @memset(cotangent_map, null);
+    cotangent_map[outputs[0].id] = cotangent;
+
+    const context = types.AdContext{
+        .builder = &derived_builder,
+        .primal_map = primal_map,
+        .cot_map = cotangent_map,
+        .tangent_map = null,
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectError(error.UnsupportedEqn, vjp(context, source.ops[0]));
+
+    cotangent_map[outputs[0].id] = null;
+    try vjp(context, source.ops[0]);
 }
 
 test "jvp support detection" {

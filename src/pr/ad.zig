@@ -50,9 +50,10 @@ fn is_differentiable_dtype(dtype: pr.DType) bool {
 /// `wrt` restricts the harvested values. Traversal still covers every operation
 ///  so a later dead-code elimination pass can remove work for omitted results.
 ///
+/// Missing rules on active differentiable paths return `error.UnsupportedEqn`.
 /// Missing duals for non-differentiable dtypes become zero tensors. A missing
 ///  dual for a differentiable dtype returns `error.MissingDual`.
-/// TODO(ad): Define policy for missing rules on differentiable values.
+/// TODO(ad): Make the built-in differentiable dtype set an explicit AD policy.
 fn ad_impl(
     comptime mode: Mode,
     allocator: std.mem.Allocator,
