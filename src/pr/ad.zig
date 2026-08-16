@@ -178,27 +178,25 @@ fn ad_impl(
 }
 
 /// Reverse-mode AD (pullback): transforms `f: M -> N` into
-/// `vjp_f: (T_xM, T*_{f(x)}N) -> T*_xM`.
+///  `vjp_f: (T_xM, T*_{f(x)}N) -> T*_xM`.
 ///
-/// Concretely, computes the transpose-Jacobian product J^T(x) * v for a
-/// cotangent seed `v`, which is the pullback f*: T*_{f(x)}N -> T*_xM
-/// evaluated at `x`.
+/// Concretely, computes the transpose-Jacobian product `J^T(x) * v` for a
+///  cotangent seed `v`, which is the pullback `f*: T*_{f(x)}N -> T*_xM`
+///  evaluated at `x`.
 ///
-/// The returned function takes `N` primal inputs followed by `M` output
-/// cotangent seeds, and returns `N` input cotangent vectors. In the
-/// Euclidean or Cartesian case (G = I), these equal gradients. In general,
-/// they are covectors and must be raised with G^{-1} to obtain gradient
-/// tangent vectors.
-///
-/// See `VjpOpts` for how `opts.wrt` restricts which parameter cotangents
-///  appear in the returned function's outputs. Default `.{}` harvests all
-///  parameter cotangents.
-///
+/// The returned `pr.Function` takes `N` primal inputs followed by `M` output
+///  cotangent seeds, and returns `N` input cotangent vectors. In the
+///  Euclidean or Cartesian case (`G = I`), these equal gradients. In general,
+///  they are covectors and must be raised with `G^{-1}` to obtain gradient
+///  tangent vectors.
 pub fn vjp(
     allocator: std.mem.Allocator,
     program: *pr.Program,
     func: pr.Function,
     name: []const u8,
+    /// See `VjpOpts` for how `opts.wrt` restricts which parameter cotangents
+    ///  appear in the returned function's outputs. Default `.{}` harvests all
+    ///  parameter cotangents.
     opts: VjpOpts,
 ) VjpError!pr.Function {
     return try ad_impl(.vjp, allocator, program, func, name, .skip, opts.wrt);
@@ -219,15 +217,14 @@ pub fn vjp_with_value(
 }
 
 /// Forward-mode AD (pushforward / differential): transforms `f: M -> N` into
-/// `jvp_f: (T_xM, T_xM) -> T_{f(x)}N`.
+///  `jvp_f: (T_xM, T_xM) -> T_{f(x)}N`.
 ///
-/// Concretely, computes the Jacobian-vector product J(x) * v for a tangent
-/// seed `v`, which is the differential df_x: T_xM -> T_{f(x)}N applied to `v`.
+/// Concretely, computes the Jacobian-vector product J(x) * v for a tangent seed
+///  `v`, which is the differential `df_x: T_xM -> T_{f(x)}N` applied to `v`.
 ///
 /// The returned function takes `N` primal inputs followed by `N` input tangent
-/// vectors (same shapes), and returns `M` output tangent vectors matching the
-/// original function's output shapes.
-///
+///  vectors (same shapes), and returns `M` output tangent vectors matching the
+///  original function's output shapes.
 pub fn jvp(allocator: std.mem.Allocator, program: *pr.Program, func: pr.Function, name: []const u8) JvpError!pr.Function {
     return try ad_impl(.jvp, allocator, program, func, name, .skip, null);
 }
