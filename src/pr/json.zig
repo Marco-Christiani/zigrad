@@ -260,13 +260,11 @@ fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
             try writer.writeAll("\"permutation\":");
             try emit_i64_array(writer, tp.permutation);
         },
-        .reduce_sum => |rp| {
+        .reduce => |rp| {
             try open_attrs(writer, &has_attr);
-            try writer.writeAll("\"reduce_axes\":");
-            try emit_i64_array(writer, rp.axes);
-        },
-        .reduce_max => |rp| {
-            try open_attrs(writer, &has_attr);
+            try writer.writeAll("\"reduction\":");
+            try write_json_string(writer, @tagName(rp.operation));
+            try writer.writeByte(',');
             try writer.writeAll("\"reduce_axes\":");
             try emit_i64_array(writer, rp.axes);
         },

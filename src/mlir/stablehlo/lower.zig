@@ -76,8 +76,7 @@ fn lower_op(ctx: LowerContext, op: *const pr.Op) LowerError!void {
         .slice => try lower_slice(ctx, op),
         .concatenate => try lower_concatenate(ctx, op),
         // Reduction
-        .reduce_sum => try lower_reduce(ctx, op, .sum),
-        .reduce_max => try lower_reduce(ctx, op, .max),
+        .reduce => try lower_reduce(ctx, op),
         // Contraction
         .dot => try lower_dot(ctx, op),
         .mm => try lower_mm(ctx, op),
@@ -257,32 +256,26 @@ fn lower_concatenate(ctx: LowerContext, op: *const pr.Op) LowerError!void {
     ctx.set_value(op.result(0), mlir_op.result(0));
 }
 
-const ReduceKind = enum { sum, max };
-
-fn lower_reduce(ctx: LowerContext, op: *const pr.Op, kind: ReduceKind) LowerError!void {
-    const axes = switch (op.prim()) {
-        .reduce_sum => op.params.reduce_sum.axes,
-        .reduce_max => op.params.reduce_max.axes,
-        else => return error.InvalidProgram,
-    };
+fn lower_reduce(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const params = op.params.reduce;
     const operand = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
     const out_tensor = op.result(0).aval.as_tensor();
     const elem_type = dtype_to_dense_elements_type(out_tensor.dtype);
 
-    switch (kind) {
+    switch (params.operation) {
         .sum => {
             const zero_bytes = scalar_zero_bytes(out_tensor.dtype);
             const zero_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, zero_bytes, ctx.loc);
             ctx.block.append_operation(zero_op);
-            const mlir_op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{zero_op.result(0)}, axes, {}, reduce_add_block, ctx.loc);
+            const mlir_op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{zero_op.result(0)}, params.axes, {}, reduce_add_block, ctx.loc);
             ctx.block.append_operation(mlir_op);
             ctx.set_value(op.result(0), mlir_op.result(0));
         },
-        .max => {
+        .maximum => {
             const min_bytes = scalar_min_bytes(out_tensor.dtype);
             const min_op = stablehlo.constant(ctx.mlir_ctx, &.{}, elem_type, min_bytes, ctx.loc);
             ctx.block.append_operation(min_op);
-            const mlir_op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{min_op.result(0)}, axes, {}, reduce_max_block, ctx.loc);
+            const mlir_op = stablehlo.reduce(ctx.mlir_ctx, &.{operand}, &.{min_op.result(0)}, params.axes, {}, reduce_max_block, ctx.loc);
             ctx.block.append_operation(mlir_op);
             ctx.set_value(op.result(0), mlir_op.result(0));
         },

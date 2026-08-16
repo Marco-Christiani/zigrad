@@ -349,7 +349,7 @@ fn test_loss(params: TestParams, batch: TestBatch) !Tensor {
     const z = try batch.x.mm(params.w);
     const b_broadcast = try params.b.broadcast_in_dim(&.{ 3, 2 }, &.{1});
     const pred = try z.add(b_broadcast);
-    return try pred.reduce_sum(&.{ 0, 1 });
+    return try pred.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
 }
 
 test make_grad {

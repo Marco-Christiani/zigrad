@@ -18,10 +18,10 @@ const Writer = std.Io.Writer;
 /// Eight-byte marker at the start of every PR wire document.
 pub const magic = "ZGPRWIRE";
 /// Current PR wire format version.
-pub const version: u32 = 5;
+pub const version: u32 = 6;
 
 // This count forces a wire-version decision when `Prim` or `Params` changes.
-const wire_prim_count = 30;
+const wire_prim_count = 29;
 
 comptime {
     const prim_fields = std.meta.fields(pr.Prim);

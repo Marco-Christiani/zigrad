@@ -218,15 +218,10 @@ pub fn log(self: Tensor) !Tensor {
     return from_var(b, v);
 }
 
-pub fn reduce_sum(self: Tensor, axes: []const i64) !Tensor {
+/// Reduces this tensor over the selected axes.
+pub fn reduce(self: Tensor, params: pr.ReduceParams) !Tensor {
     const b = try self.traced_builder();
-    const v = try b.reduce_sum(try self.traced_var(), axes);
-    return from_var(b, v);
-}
-
-pub fn reduce_max(self: Tensor, axes: []const i64) !Tensor {
-    const b = try self.traced_builder();
-    const v = try b.reduce_max(try self.traced_var(), axes);
+    const v = try b.reduce(try self.traced_var(), params);
     return from_var(b, v);
 }
 

@@ -81,7 +81,7 @@ fn loss(params: Params, batch: Batch) !Tensor {
     const sq = try diff.mul(diff);
 
     // TODO(api): Give full-tensor reduction a distinct method name.
-    return try sq.reduce_sum(&.{ 0, 1 });
+    return try sq.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
 }
 
 /// Full training step: forward + backward + SGD update.

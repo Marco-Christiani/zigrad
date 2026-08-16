@@ -669,14 +669,14 @@ test "grad: broadcast_in_dim with size-1 dims" {
     try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
 }
 
-test "grad: reduce_sum single axis" {
+test "grad: reduce sum single axis" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
     var b = try pr.FunctionBuilder.init(&program, "rsum1");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const y = try b.reduce_sum(x, &.{1});
+    const y = try b.reduce(x, .{ .axes = &.{1}, .operation = .sum });
     const func = try build_func(&program, &b, &.{y});
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
@@ -688,14 +688,14 @@ test "grad: reduce_sum single axis" {
     try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
 }
 
-test "grad: reduce_sum all axes" {
+test "grad: reduce sum all axes" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
     var b = try pr.FunctionBuilder.init(&program, "rsum_all");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const y = try b.reduce_sum(x, &.{ 0, 1 });
+    const y = try b.reduce(x, .{ .axes = &.{ 0, 1 }, .operation = .sum });
     const func = try build_func(&program, &b, &.{y});
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
@@ -750,14 +750,14 @@ test "grad: concatenate" {
     try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
 }
 
-test "grad: reduce_max" {
+test "grad: reduce maximum" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
     var b = try pr.FunctionBuilder.init(&program, "rmax");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 3, 4 });
-    const y = try b.reduce_max(x, &.{1});
+    const y = try b.reduce(x, .{ .axes = &.{1}, .operation = .maximum });
     const func = try build_func(&program, &b, &.{y});
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
@@ -782,7 +782,7 @@ test "grad: softmax pattern" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const ex = try b.exp(x);
-    const sum_ex = try b.reduce_sum(ex, &.{1}); // [2]
+    const sum_ex = try b.reduce(ex, .{ .axes = &.{1}, .operation = .sum }); // [2]
     const sum_bcast = try b.broadcast_in_dim(try b.reshape(sum_ex, &.{ 2, 1 }), &.{ 2, 3 }, &.{ 0, 1 });
     const softmax = try b.divide(ex, sum_bcast);
     const func = try build_func(&program, &b, &.{softmax});
@@ -833,7 +833,7 @@ test "grad: cross-entropy loss" {
 
     const log_probs = try b.log(probs);
     const weighted = try b.multiply(labels, log_probs);
-    const sum_per_sample = try b.reduce_sum(weighted, &.{1}); // [2]
+    const sum_per_sample = try b.reduce(weighted, .{ .axes = &.{1}, .operation = .sum }); // [2]
     const neg_one = try b.literal_scalar(.{ .f32 = -1.0 });
     const neg_bcast = try b.broadcast_in_dim(neg_one, &.{2}, &.{});
     const neg_sum = try b.multiply(neg_bcast, sum_per_sample);

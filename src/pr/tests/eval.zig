@@ -161,8 +161,10 @@ fn eval_op(
         .reshape => |rp| try eval_reshape(allocator, env, op, rp),
         .transpose => |tp| try eval_transpose(allocator, env, op, tp),
         .broadcast_in_dim => |bp| try eval_broadcast_in_dim(allocator, env, op, bp),
-        .reduce_sum => |rp| try eval_reduce_sum(allocator, env, op, rp),
-        .reduce_max => |rp| try eval_reduce_max(allocator, env, op, rp),
+        .reduce => |rp| switch (rp.operation) {
+            .sum => try eval_reduce_sum(allocator, env, op, rp),
+            .maximum => try eval_reduce_max(allocator, env, op, rp),
+        },
         .dot => try eval_dot(allocator, env, op),
         .mm => try eval_mm(allocator, env, op),
         .bmm => try eval_bmm(allocator, env, op),
@@ -1298,14 +1300,14 @@ test "eval: broadcast_in_dim scalar to matrix" {
     }
 }
 
-test "eval: reduce_sum single axis" {
+test "eval: reduce sum single axis" {
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
 
     var b = try pr.FunctionBuilder.init(&program, "rsum");
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const y = try b.reduce_sum(x, &.{1});
+    const y = try b.reduce(x, .{ .axes = &.{1}, .operation = .sum });
     const func = try build_and_finish(&program, &b, &.{y});
 
     // [[1,2,3],[4,5,6]] -> sum over axis 1 -> [6, 15]

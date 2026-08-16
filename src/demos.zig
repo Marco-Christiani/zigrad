@@ -298,7 +298,7 @@ pub fn run_train_demo(
             const preds = try z3.add(b3b);
             const diff = try preds.sub(batch.y);
             const sq = try diff.mul(diff);
-            return try sq.reduce_sum(&.{ 0, 1 });
+            return try sq.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
         }
 
         fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {
@@ -1059,13 +1059,13 @@ pub fn print_tvm_attention_pr(
 
     const rank = scaled.rank();
     const axis: i64 = @intCast(rank - 1);
-    const max_val = try scaled.reduce_max(&.{axis});
+    const max_val = try scaled.reduce(.{ .axes = &.{axis}, .operation = .maximum });
 
     // Subtracting each row maximum stabilizes the softmax exponentials.
     const max_broadcast = try max_val.broadcast_in_dim(scaled.dims(), &.{ 0, 1 });
     const shifted = try scaled.sub(max_broadcast);
     const exp_vals = try shifted.exp();
-    const sum_exp = try exp_vals.reduce_sum(&.{axis});
+    const sum_exp = try exp_vals.reduce(.{ .axes = &.{axis}, .operation = .sum });
     const sum_broadcast = try sum_exp.broadcast_in_dim(exp_vals.dims(), &.{ 0, 1 });
     const attn_weights = try exp_vals.div(sum_broadcast);
 

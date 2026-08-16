@@ -79,7 +79,7 @@ pub fn forward(params: Params, images: Tensor) !Tensor {
     residual = try conv_bias(x, params.block2_kernel, params.block2_bias, batch_size, 32, 1);
     x = try (try x.add(residual)).relu();
 
-    const pooled_sum = try x.reduce_sum(&.{ 1, 2 });
+    const pooled_sum = try x.reduce(.{ .axes = &.{ 1, 2 }, .operation = .sum });
     const pooled = try pooled_sum.mul(try Tensor.constant_like(pooled_sum, 1.0 / (16.0 * 16.0)));
     const logits = try pooled.mm(params.classifier_kernel);
     return try logits.add(try params.classifier_bias.broadcast_in_dim(
@@ -91,20 +91,20 @@ pub fn forward(params: Params, images: Tensor) !Tensor {
 /// Mean categorical cross-entropy for one-hot labels.
 pub fn loss(params: Params, batch: Batch) !Tensor {
     const logits = try forward(params, batch.images);
-    const max_logits = try logits.reduce_max(&.{1});
+    const max_logits = try logits.reduce(.{ .axes = &.{1}, .operation = .maximum });
     const centered = try logits.sub(try max_logits.broadcast_in_dim(
         &.{ training_batch_size, class_count },
         &.{0},
     ));
     const exp_logits = try centered.exp();
-    const exp_sum = try exp_logits.reduce_sum(&.{1});
+    const exp_sum = try exp_logits.reduce(.{ .axes = &.{1}, .operation = .sum });
     const log_normalizer = try exp_sum.log();
     const log_probs = try centered.sub(try log_normalizer.broadcast_in_dim(
         &.{ training_batch_size, class_count },
         &.{0},
     ));
     const selected = try batch.labels.mul(log_probs);
-    const total = try selected.reduce_sum(&.{ 0, 1 });
+    const total = try selected.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
     return try total.mul(try Tensor.constant_like(total, -1.0 / @as(f32, @floatFromInt(training_batch_size))));
 }
 

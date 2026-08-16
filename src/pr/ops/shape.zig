@@ -396,9 +396,9 @@ pub const concatenate = struct {
     }
 };
 
-// Reduce Sum
+// Reduce
 
-pub const reduce_sum = struct {
+pub const reduce = struct {
     pub const arity = .{ .in = 1, .out = 1 };
 
     pub fn validate(op: *const pr.Op, rp: pr.ReduceParams) pr.ValidationError!void {
@@ -407,15 +407,14 @@ pub const reduce_sum = struct {
         const operand = op.operand(0).as_tensor();
         const out = op.result(0).as_tensor();
 
-        if (!reduce_sum_matches(operand.shape.dims, out.shape.dims, rp.axes)) {
-            return error.ReduceSumTypeMismatch;
-        }
+        if (!reduce_output_matches(operand.shape.dims, out.shape.dims, rp.axes))
+            return error.ReduceTypeMismatch;
     }
 
     pub fn infer_output(alloc: std.mem.Allocator, inputs: []const *pr.Var, rp: pr.ReduceParams) pr.BuildError!Aval {
         if (inputs.len != 1) return error.InvalidOpArity;
         const operand = inputs[0].as_tensor();
-        const out_dims = try reduce_sum_output_dims(alloc, operand.shape.dims, rp.axes);
+        const out_dims = try reduce_output_dims(alloc, operand.shape.dims, rp.axes);
         return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
     }
 
@@ -423,35 +422,31 @@ pub const reduce_sum = struct {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
 
         const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.reduce_sum(operand, rp.axes);
+        const out = try ctx.builder.reduce(operand, rp);
         ctx.set_primal(op.result(0), out);
     }
 
-    /// JVP: d(reduce_sum(x, axes)) = reduce_sum(dx, axes)
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        ctx.set_tangent(op.result(0), try ctx.builder.reduce_sum(dx, rp.axes));
+        switch (rp.operation) {
+            .sum => {
+                const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+                ctx.set_tangent(op.result(0), try ctx.builder.reduce(dx, rp));
+            },
+            .maximum => try maximum_jvp(ctx, op, rp),
+        }
     }
 
-    /// VJP backward for reduce_sum.
-    /// Broadcasts the output cotangent back to the input shape along non-reduced dimensions,
-    ///  the inverse of summation.
     pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
         if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const in_tensor = op.operand(0).as_tensor();
-
-        const bd = try reduce_sum_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
-        defer ctx.allocator.free(bd);
-        const contrib = try ctx.builder.broadcast_in_dim(out_cot, in_tensor.shape.dims, bd);
-        try ctx.add_cot(op.operand(0), contrib);
+        switch (rp.operation) {
+            .sum => try sum_vjp(ctx, op, rp),
+            .maximum => try maximum_vjp(ctx, op, rp),
+        }
     }
 
     pub fn format(writer: *types.Writer, _: *const pr.Op, rp: pr.ReduceParams) types.FormatError!void {
-        try writer.writeAll("axes=[");
+        try writer.print("operation={t}, axes=[", .{rp.operation});
         for (rp.axes, 0..) |d, i| {
             if (i > 0) try writer.writeAll(", ");
             try writer.print("{d}", .{d});
@@ -460,89 +455,67 @@ pub const reduce_sum = struct {
     }
 };
 
-// Reduce Max
+fn maximum_jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+    const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+    const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+    const in_tensor = op.operand(0).as_tensor();
 
-pub const reduce_max = struct {
-    pub const arity = .{ .in = 1, .out = 1 };
+    const bd = try reduce_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
+    defer ctx.allocator.free(bd);
 
-    pub fn validate(op: *const pr.Op, rp: pr.ReduceParams) pr.ValidationError!void {
-        if (op.inputs.len != 1 or op.outputs.len != 1) return error.InvalidOpArity;
-        const operand = op.operand(0).as_tensor();
-        const out = op.result(0).as_tensor();
-        if (!reduce_sum_matches(operand.shape.dims, out.shape.dims, rp.axes)) return error.ReduceMaxTypeMismatch;
-    }
+    const max_b = try ctx.builder.broadcast_in_dim(out_primal, in_tensor.shape.dims, bd);
+    const cmp_type = compare_type_for_dtype(in_tensor.dtype);
+    const mask = try ctx.builder.compare(operand, max_b, .{
+        .direction = .EQ,
+        .compare_type = cmp_type,
+    });
+    const mask_f = try ctx.builder.convert(mask, in_tensor.dtype);
+    const masked_dx = try ctx.builder.multiply(mask_f, dx);
+    ctx.set_tangent(op.result(0), try ctx.builder.reduce(masked_dx, .{
+        .axes = rp.axes,
+        .operation = .sum,
+    }));
+}
 
-    pub fn infer_output(alloc: std.mem.Allocator, inputs: []const *pr.Var, rp: pr.ReduceParams) pr.BuildError!Aval {
-        if (inputs.len != 1) return error.InvalidOpArity;
-        const operand = inputs[0].as_tensor();
-        const out_dims = try reduce_sum_output_dims(alloc, operand.shape.dims, rp.axes);
-        return .{ .tensor = .{ .dtype = operand.dtype, .shape = .{ .dims = out_dims } } };
-    }
+fn maximum_vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    const out_cot = ctx.get_cot(op.result(0)) orelse return;
+    const in_tensor = op.operand(0).as_tensor();
 
-    pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    const bd = try reduce_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
+    defer ctx.allocator.free(bd);
 
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out = try ctx.builder.reduce_max(operand, rp.axes);
-        ctx.set_primal(op.result(0), out);
-    }
+    // Broadcast the reduced max and cotangent back to the full input shape.
+    const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
+    const max_b = try ctx.builder.broadcast_in_dim(out_primal, in_tensor.shape.dims, bd);
+    const out_cot_b = try ctx.builder.broadcast_in_dim(out_cot, in_tensor.shape.dims, bd);
 
-    /// JVP of reduce_max selects tangents at maximal elements and reduces them.
-    pub fn jvp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
+    // Build a boolean mask: true where input == max (these positions contributed to the max).
+    const cmp_type = compare_type_for_dtype(in_tensor.dtype);
+    const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+    const mask = try ctx.builder.compare(operand, max_b, .{
+        .direction = .EQ,
+        .compare_type = cmp_type,
+    });
+    // Convert bool mask to input dtype and multiply with cotangent.
+    // Positions not equal to max get zero cotangent.
+    const mask_f = try ctx.builder.convert(mask, in_tensor.dtype);
+    const contrib = try ctx.builder.multiply(out_cot_b, mask_f);
+    try ctx.add_cot(op.operand(0), contrib);
+}
 
-        const dx = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
-        const in_tensor = op.operand(0).as_tensor();
-
-        const bd = try reduce_sum_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
-        defer ctx.allocator.free(bd);
-
-        const max_b = try ctx.builder.broadcast_in_dim(out_primal, in_tensor.shape.dims, bd);
-        const cmp_type = compare_type_for_dtype(in_tensor.dtype);
-        const mask = try ctx.builder.compare(operand, max_b, .{
-            .direction = .EQ,
-            .compare_type = cmp_type,
-        });
-        const mask_f = try ctx.builder.convert(mask, in_tensor.dtype);
-        const masked_dx = try ctx.builder.multiply(mask_f, dx);
-        ctx.set_tangent(op.result(0), try ctx.builder.reduce_sum(masked_dx, rp.axes));
-    }
-
-    /// VJP backward for reduce_max. Uses a mask to route the cotangent only to
-    /// positions where the input equals the max value. Broadcasts both the max
-    /// and the cotangent back to input shape, builds an equality mask, and
-    /// multiplies. When multiple elements equal the max, all receive the
-    /// cotangent (not normalized).
-    pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
-        if (op.inputs.len != 1) return error.UnsupportedEqn;
-
-        const out_cot = ctx.get_cot(op.result(0)) orelse return;
-        const in_tensor = op.operand(0).as_tensor();
-
-        const bd = try reduce_sum_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
-        defer ctx.allocator.free(bd);
-
-        // Broadcast the reduced max and cotangent back to the full input shape.
-        const out_primal = ctx.get_primal(op.result(0)) orelse return error.UnsupportedEqn;
-        const max_b = try ctx.builder.broadcast_in_dim(out_primal, in_tensor.shape.dims, bd);
-        const out_cot_b = try ctx.builder.broadcast_in_dim(out_cot, in_tensor.shape.dims, bd);
-
-        // Build a boolean mask: true where input == max (these positions contributed to the max).
-        const cmp_type = compare_type_for_dtype(in_tensor.dtype);
-        const operand = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
-        const mask = try ctx.builder.compare(operand, max_b, .{
-            .direction = .EQ,
-            .compare_type = cmp_type,
-        });
-        // Convert bool mask to input dtype and multiply with cotangent.
-        // Positions not equal to max get zero cotangent.
-        const mask_f = try ctx.builder.convert(mask, in_tensor.dtype);
-        const contrib = try ctx.builder.multiply(out_cot_b, mask_f);
-        try ctx.add_cot(op.operand(0), contrib);
-    }
-};
+fn sum_vjp(ctx: types.AdContext, op: *const pr.Op, rp: pr.ReduceParams) types.AdError!void {
+    const out_cot = ctx.get_cot(op.result(0)) orelse return;
+    const in_tensor = op.operand(0).as_tensor();
+    const dimensions = try reduce_broadcast_dims(ctx.allocator, in_tensor.shape.dims.len, rp.axes);
+    defer ctx.allocator.free(dimensions);
+    const contribution = try ctx.builder.broadcast_in_dim(
+        out_cot,
+        in_tensor.shape.dims,
+        dimensions,
+    );
+    try ctx.add_cot(op.operand(0), contribution);
+}
 
 // Gather
 
@@ -730,13 +703,13 @@ pub const broadcast_in_dim = struct {
         // sum along those axes to collapse the broadcast back
         var contrib = out_cot;
         if (reduce_axes.len > 0) {
-            contrib = try ctx.builder.reduce_sum(contrib, reduce_axes);
+            contrib = try ctx.builder.reduce(contrib, .{ .axes = reduce_axes, .operation = .sum });
         }
 
         // after reduction shape may differ from input (e.g. size-1 dims that were
-        //  broadcast still appear as size-1 in input but are dropped by reduce_sum),
+        //  broadcast still appear as size-1 in input but are dropped by reduction),
         //  so we reshape to match exactly.
-        const reduced_dims = try reduce_sum_output_dims(ctx.allocator, out_tensor.shape.dims, reduce_axes);
+        const reduced_dims = try reduce_output_dims(ctx.allocator, out_tensor.shape.dims, reduce_axes);
         defer ctx.allocator.free(reduced_dims);
         if (!std.mem.eql(i64, reduced_dims, in_tensor.shape.dims)) {
             contrib = try ctx.builder.reshape(contrib, in_tensor.shape.dims);
@@ -809,46 +782,46 @@ fn validate_broadcast_in_dim_op(operand: Tensor, out: Tensor, broadcast_dimensio
 /// Compute the output shape after reducing `axes` from `in_dims`.
 ///
 /// Drops the reduced dimensions, preserving order of the remaining ones.
-fn reduce_sum_output_dims(allocator: std.mem.Allocator, in_dims: []const i64, axes: []const i64) pr.BuildError![]const i64 {
+fn reduce_output_dims(allocator: std.mem.Allocator, in_dims: []const i64, axes: []const i64) pr.BuildError![]const i64 {
     const rank = in_dims.len;
     // TODO(pr): Give shared shape helpers errors independent of individual ops.
-    if (rank > max_rank) return error.ReduceSumTypeMismatch;
-    var reduce = [_]bool{false} ** max_rank;
+    if (rank > max_rank) return error.ReduceTypeMismatch;
+    var reduced_axes = [_]bool{false} ** max_rank;
     for (axes) |axis| {
-        if (axis < 0) return error.ReduceSumTypeMismatch;
+        if (axis < 0) return error.ReduceTypeMismatch;
         const idx: usize = @intCast(axis);
-        if (idx >= rank) return error.ReduceSumTypeMismatch;
-        if (reduce[idx]) return error.ReduceSumTypeMismatch;
-        reduce[idx] = true;
+        if (idx >= rank) return error.ReduceTypeMismatch;
+        if (reduced_axes[idx]) return error.ReduceTypeMismatch;
+        reduced_axes[idx] = true;
     }
     var out_count: usize = 0;
     for (0..rank) |i| {
-        if (!reduce[i]) out_count += 1;
+        if (!reduced_axes[i]) out_count += 1;
     }
     const out_dims = try allocator.alloc(i64, out_count);
     var out_i: usize = 0;
     for (0..rank) |i| {
-        if (reduce[i]) continue;
+        if (reduced_axes[i]) continue;
         out_dims[out_i] = in_dims[i];
         out_i += 1;
     }
     return out_dims;
 }
 
-fn reduce_sum_matches(in_dims: []const i64, out_dims: []const i64, axes: []const i64) bool {
+fn reduce_output_matches(in_dims: []const i64, out_dims: []const i64, axes: []const i64) bool {
     const rank = in_dims.len;
     if (rank > max_rank) return false;
-    var reduce = [_]bool{false} ** max_rank;
+    var reduced_axes = [_]bool{false} ** max_rank;
     for (axes) |axis| {
         if (axis < 0) return false;
         const idx: usize = @intCast(axis);
         if (idx >= rank) return false;
-        if (reduce[idx]) return false;
-        reduce[idx] = true;
+        if (reduced_axes[idx]) return false;
+        reduced_axes[idx] = true;
     }
     var out_i: usize = 0;
     for (0..rank) |i| {
-        if (reduce[i]) continue;
+        if (reduced_axes[i]) continue;
         if (out_i >= out_dims.len) return false;
         if (in_dims[i] != out_dims[out_i]) return false;
         out_i += 1;
@@ -861,18 +834,18 @@ fn reduce_sum_matches(in_dims: []const i64, out_dims: []const i64, axes: []const
 ///
 /// Returns the indices of non-reduced dimensions, these map reduced-output
 ///  dims to their positions in the original rank.
-fn reduce_sum_broadcast_dims(allocator: std.mem.Allocator, rank: usize, axes: []const i64) pr.BuildError![]const i64 {
-    if (rank > max_rank) return error.ReduceSumTypeMismatch;
-    var reduce = [_]bool{false} ** max_rank;
+fn reduce_broadcast_dims(allocator: std.mem.Allocator, rank: usize, axes: []const i64) pr.BuildError![]const i64 {
+    if (rank > max_rank) return error.ReduceTypeMismatch;
+    var reduced_axes = [_]bool{false} ** max_rank;
     for (axes) |axis| {
         const idx: usize = @intCast(axis);
-        reduce[idx] = true;
+        reduced_axes[idx] = true;
     }
     const keep = rank - axes.len;
     const bd = try allocator.alloc(i64, keep);
     var out_i: usize = 0;
     for (0..rank) |i| {
-        if (reduce[i]) continue;
+        if (reduced_axes[i]) continue;
         bd[out_i] = @intCast(i);
         out_i += 1;
     }
@@ -892,10 +865,10 @@ fn broadcast_reduce_axes(
     out_tensor: Tensor,
     bd: []const i64,
 ) pr.BuildError![]const i64 {
-    if (out_tensor.shape.rank() > max_rank) return error.ReduceSumTypeMismatch;
+    if (out_tensor.shape.rank() > max_rank) return error.ReduceTypeMismatch;
     // track which output dims are mapped by a broadcast_dimension entry
     var mapped = [_]bool{false} ** max_rank;
-    var reduce = [_]bool{false} ** max_rank;
+    var reduced_axes = [_]bool{false} ** max_rank;
     for (bd, 0..) |d, i| {
         const out_idx: usize = @intCast(d);
         mapped[out_idx] = true;
@@ -903,21 +876,21 @@ fn broadcast_reduce_axes(
         const out_dim = out_tensor.shape.dims[out_idx];
         // Case 1: input dim was 1 but output dim is >1 so this axis was broadcast-expanded.
         if (in_dim == 1 and out_dim > 1) {
-            reduce[out_idx] = true;
+            reduced_axes[out_idx] = true;
         }
     }
     // Case 2: output dims not referenced by any broadcast_dimension are newly introduced.
     for (0..out_tensor.shape.rank()) |i| {
-        if (!mapped[i]) reduce[i] = true;
+        if (!mapped[i]) reduced_axes[i] = true;
     }
     var count: usize = 0;
     for (0..out_tensor.shape.rank()) |i| {
-        if (reduce[i]) count += 1;
+        if (reduced_axes[i]) count += 1;
     }
     const axes = try allocator.alloc(i64, count);
     var idx: usize = 0;
     for (0..out_tensor.shape.rank()) |i| {
-        if (!reduce[i]) continue;
+        if (!reduced_axes[i]) continue;
         axes[idx] = @intCast(i);
         idx += 1;
     }

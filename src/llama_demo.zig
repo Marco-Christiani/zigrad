@@ -127,7 +127,7 @@ fn loss_fn_with_options(
     };
     const target_logits_2d = try logits_f.gather(gather_idx, gather_params);
 
-    const max_logits = try logits_f.reduce_max(&.{2});
+    const max_logits = try logits_f.reduce(.{ .axes = &.{2}, .operation = .maximum });
     const max_b = try max_logits.broadcast_in_dim(logits_f.dims(), &.{ 0, 1 });
     const shifted = try logits_f.sub(max_b);
 
@@ -136,7 +136,7 @@ fn loss_fn_with_options(
     const shifted_f32 = try shifted.convert(.f32);
     const exp_logits = try (try shifted_f32.convert(logits.dtype)).exp();
     const exp_logits_f32 = try exp_logits.convert(.f32);
-    const sum_exp = try exp_logits_f32.reduce_sum(&.{2});
+    const sum_exp = try exp_logits_f32.reduce(.{ .axes = &.{2}, .operation = .sum });
     const log_sum = try sum_exp.log();
     const logsumexp = try log_sum.add(try max_logits.convert(log_sum.dtype));
 
@@ -147,11 +147,11 @@ fn loss_fn_with_options(
     const attn_zero = try attn_mask.compare(zero_b, .{ .direction = .GT, .compare_type = .FLOAT });
     const masked = try loss_per_out.select(attn_zero, zero_b);
     const masked_f = try masked.convert(.f32);
-    const loss_sum = try masked_f.reduce_sum(&.{ 0, 1 });
+    const loss_sum = try masked_f.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
 
     // Normalize by token count: loss / max(mask.sum(), 1)
     const attn_zero_f = try attn_zero.convert(.f32);
-    const mask_count = try attn_zero_f.reduce_sum(&.{ 0, 1 });
+    const mask_count = try attn_zero_f.reduce(.{ .axes = &.{ 0, 1 }, .operation = .sum });
     const one = try Tensor.constant_like(mask_count, 1.0);
     const denom = try mask_count.max(one);
     const loss_norm = try loss_sum.div(denom);

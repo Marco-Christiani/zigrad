@@ -30,6 +30,7 @@ pub const BroadcastInDimParams = core.BroadcastInDimParams;
 pub const TransposeParams = core.TransposeParams;
 pub const ConcatenateParams = core.ConcatenateParams;
 pub const ReduceParams = core.ReduceParams;
+pub const Reduction = core.Reduction;
 pub const CallParams = core.CallParams;
 pub const CustomCallParams = core.CustomCallParams;
 

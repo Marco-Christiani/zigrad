@@ -37,16 +37,16 @@ pub fn run_llm_train_demo(
             const logits_b = try logits.add(bcast_b);
 
             const exp_logits = try logits_b.exp();
-            const sum_exp = try exp_logits.reduce_sum(&.{1});
+            const sum_exp = try exp_logits.reduce(.{ .axes = &.{1}, .operation = .sum });
             const log_sum = try sum_exp.log();
             const log_sum_b = try log_sum.broadcast_in_dim(&.{ bs_, vocab_ }, &.{0});
             const log_softmax = try logits_b.sub(log_sum_b);
 
             const y_log = try batch.y.mul(log_softmax);
-            const loss_per = try y_log.reduce_sum(&.{1});
+            const loss_per = try y_log.reduce(.{ .axes = &.{1}, .operation = .sum });
 
             const neg_loss = try loss_per.mul(try Tensor.constant_like(loss_per, -1.0));
-            return try neg_loss.reduce_sum(&.{0});
+            return try neg_loss.reduce(.{ .axes = &.{0}, .operation = .sum });
         }
 
         fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {

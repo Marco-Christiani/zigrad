@@ -57,8 +57,7 @@ pub fn OpFor(comptime prim: pr.Prim) type {
         .broadcast_in_dim => shape.broadcast_in_dim,
         .slice => shape.slice,
         .concatenate => shape.concatenate,
-        .reduce_sum => shape.reduce_sum,
-        .reduce_max => shape.reduce_max,
+        .reduce => shape.reduce,
         .call => special.call,
         .custom_call => special.custom_call,
     };
@@ -260,14 +259,13 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp(.reshape));
     try std.testing.expect(has_vjp(.transpose));
     try std.testing.expect(has_vjp(.broadcast_in_dim));
-    try std.testing.expect(has_vjp(.reduce_sum));
+    try std.testing.expect(has_vjp(.reduce));
     try std.testing.expect(has_vjp(.exp));
     try std.testing.expect(has_vjp(.log));
     try std.testing.expect(has_vjp(.rsqrt));
     try std.testing.expect(has_vjp(.logistic));
     try std.testing.expect(has_vjp(.gather));
     try std.testing.expect(has_vjp(.select));
-    try std.testing.expect(has_vjp(.reduce_max));
     try std.testing.expect(has_vjp(.dot_general));
     try std.testing.expect(has_vjp(.slice));
     try std.testing.expect(has_vjp(.concatenate));
@@ -299,8 +297,7 @@ test "jvp support detection" {
     try std.testing.expect(has_jvp(.reshape));
     try std.testing.expect(has_jvp(.transpose));
     try std.testing.expect(has_jvp(.broadcast_in_dim));
-    try std.testing.expect(has_jvp(.reduce_sum));
-    try std.testing.expect(has_jvp(.reduce_max));
+    try std.testing.expect(has_jvp(.reduce));
     try std.testing.expect(has_jvp(.slice));
     try std.testing.expect(has_jvp(.concatenate));
     try std.testing.expect(has_jvp(.gather));

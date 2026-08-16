@@ -381,7 +381,7 @@ fn repeat_kv_bshd(x: Tensor, repeat: i64) !Tensor {
 fn softmax_last_dim(x: Tensor) !Tensor {
     const rank = x.dims().len;
     const axis: i64 = @intCast(rank - 1);
-    const max = try x.reduce_max(&.{axis});
+    const max = try x.reduce(.{ .axes = &.{axis}, .operation = .maximum });
 
     std.debug.assert(rank <= 4);
     var bd_buf: [4]i64 = .{ 0, 1, 2, 3 };
@@ -390,7 +390,7 @@ fn softmax_last_dim(x: Tensor) !Tensor {
 
     const shifted = try x.sub(max_b);
     const exp = try shifted.exp();
-    const sum = try exp.reduce_sum(&.{axis});
+    const sum = try exp.reduce(.{ .axes = &.{axis}, .operation = .sum });
     const sum_b = try sum.broadcast_in_dim(x.dims(), bd);
     return try exp.div(sum_b);
 }
@@ -484,7 +484,7 @@ pub fn rms_norm(x: Tensor, weight: Tensor, eps: f32) !Tensor {
         const hidden_f: f32 = @floatFromInt(h);
 
         const x_sq = try x_f32.mul(x_f32);
-        const sum = try x_sq.reduce_sum(&.{2});
+        const sum = try x_sq.reduce(.{ .axes = &.{2}, .operation = .sum });
         const mean = try sum.mul(try Tensor.constant_like(sum, 1.0 / hidden_f));
         const denom = try mean.add(try Tensor.constant_like(mean, eps));
         const inv = try denom.rsqrt();
@@ -514,7 +514,7 @@ fn rms_norm_no_weight_f32(x: Tensor, eps: f32) !Tensor {
     const hidden_f: f32 = @floatFromInt(hidden);
 
     const x_sq = try x.mul(x);
-    const sum = try x_sq.reduce_sum(&.{1});
+    const sum = try x_sq.reduce(.{ .axes = &.{1}, .operation = .sum });
     const mean = try sum.mul(try Tensor.constant_like(sum, 1.0 / hidden_f));
     const denom = try mean.add(try Tensor.constant_like(mean, eps));
     const inv = try denom.rsqrt();

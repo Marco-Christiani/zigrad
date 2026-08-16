@@ -184,8 +184,7 @@ pub const Prim = enum {
     transpose,
     slice,
     concatenate,
-    reduce_sum,
-    reduce_max,
+    reduce,
     call,
     custom_call,
 };
@@ -338,8 +337,14 @@ pub const ConcatenateParams = struct {
     axis: i64,
 };
 
+pub const Reduction = enum {
+    sum,
+    maximum,
+};
+
 pub const ReduceParams = struct {
     axes: []const i64,
+    operation: Reduction,
 };
 
 pub const CallParams = struct {
@@ -384,8 +389,7 @@ pub const Params = union(Prim) {
     transpose: TransposeParams,
     slice: SliceParams,
     concatenate: ConcatenateParams,
-    reduce_sum: ReduceParams,
-    reduce_max: ReduceParams,
+    reduce: ReduceParams,
     call: CallParams,
     custom_call: CustomCallParams,
 };
@@ -737,8 +741,7 @@ pub const ValidationError = error{
     TransposeTypeMismatch,
     SliceTypeMismatch,
     ConcatTypeMismatch,
-    ReduceSumTypeMismatch,
-    ReduceMaxTypeMismatch,
+    ReduceTypeMismatch,
     CallUnresolvedCallee,
     CallArityMismatch,
     CallTypeMismatch,
@@ -1114,11 +1117,6 @@ pub const FunctionBuilder = struct {
         return try self.emit(.{ .convert = out_dtype }, &.{operand_var});
     }
 
-    pub fn reduce_max(self: *FunctionBuilder, operand_var: *Var, axes: []const i64) BuildError!*Var {
-        const axes_copy = try self.alloc().dupe(i64, axes);
-        return try self.emit(.{ .reduce_max = .{ .axes = axes_copy } }, &.{operand_var});
-    }
-
     pub fn gather(self: *FunctionBuilder, operand_var: *Var, indices: *Var, gp: GatherParams) BuildError!*Var {
         const a = self.alloc();
         return try self.emit(.{ .gather = .{
@@ -1243,10 +1241,12 @@ pub const FunctionBuilder = struct {
         } }, &.{operand_var});
     }
 
-    pub fn reduce_sum(self: *FunctionBuilder, operand_var: *Var, axes: []const i64) BuildError!*Var {
+    /// Reduces `operand_var` over the selected axes.
+    pub fn reduce(self: *FunctionBuilder, operand_var: *Var, params: ReduceParams) BuildError!*Var {
         const a = self.alloc();
-        return try self.emit(.{ .reduce_sum = .{
-            .axes = try a.dupe(i64, axes),
+        return try self.emit(.{ .reduce = .{
+            .axes = try a.dupe(i64, params.axes),
+            .operation = params.operation,
         } }, &.{operand_var});
     }
 
@@ -1388,7 +1388,7 @@ test "FunctionBuilder transpose validation" {
     try validate_ops_in_func(func);
 }
 
-test "FunctionBuilder reduce_sum basic" {
+test "FunctionBuilder reduce basic" {
     var program = Program.init(std.testing.allocator);
     defer program.deinit();
 
@@ -1396,7 +1396,7 @@ test "FunctionBuilder reduce_sum basic" {
     defer b.deinit();
 
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
-    const y = try b.reduce_sum(x, &.{0});
+    const y = try b.reduce(x, .{ .axes = &.{0}, .operation = .sum });
     const func = try b.finish(&.{y});
     try validate_ops_in_func(func);
 }
