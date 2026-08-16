@@ -167,9 +167,24 @@ pub fn div(self: Tensor, other: Tensor) !Tensor {
     return from_var(b, v);
 }
 
-pub fn matmul(self: Tensor, other: Tensor) !Tensor {
+/// Computes the scalar dot product of two equal-length vectors.
+pub fn dot(self: Tensor, other: Tensor) !Tensor {
     const b = try self.traced_builder();
     const v = try b.dot(try self.traced_var(), try other.traced_var());
+    return from_var(b, v);
+}
+
+/// Multiplies two rank-two matrices.
+pub fn mm(self: Tensor, other: Tensor) !Tensor {
+    const b = try self.traced_builder();
+    const v = try b.mm(try self.traced_var(), try other.traced_var());
+    return from_var(b, v);
+}
+
+/// Multiplies matrices over one or more identical prefix batch dimensions.
+pub fn bmm(self: Tensor, other: Tensor) !Tensor {
+    const b = try self.traced_builder();
+    const v = try b.bmm(try self.traced_var(), try other.traced_var());
     return from_var(b, v);
 }
 

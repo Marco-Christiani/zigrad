@@ -47,6 +47,8 @@ pub fn OpFor(comptime prim: pr.Prim) type {
         .gather => shape.gather,
         .scatter => shape.scatter,
         .dot => contraction.dot,
+        .mm => contraction.mm,
+        .bmm => contraction.bmm,
         .dot_general => contraction.dot_general,
         .convolution => contraction.convolution,
         .reshape => shape.reshape,
@@ -253,6 +255,8 @@ test "vjp support detection" {
     try std.testing.expect(has_vjp(.multiply));
     try std.testing.expect(has_vjp(.divide));
     try std.testing.expect(has_vjp(.dot));
+    try std.testing.expect(has_vjp(.mm));
+    try std.testing.expect(has_vjp(.bmm));
     try std.testing.expect(has_vjp(.reshape));
     try std.testing.expect(has_vjp(.transpose));
     try std.testing.expect(has_vjp(.broadcast_in_dim));
@@ -303,6 +307,8 @@ test "jvp support detection" {
     try std.testing.expect(has_jvp(.iota));
 
     try std.testing.expect(has_jvp(.dot));
+    try std.testing.expect(has_jvp(.mm));
+    try std.testing.expect(has_jvp(.bmm));
     try std.testing.expect(has_jvp(.dot_general));
 
     try std.testing.expect(has_jvp(.literal));

@@ -168,7 +168,7 @@ pub const TvmProvider = struct {
     }
 };
 
-/// Validate that a function describes a single matmul (dot or dot_general).
+/// Validate that a function describes a single rank-two matrix multiplication.
 ///
 /// Returns the matrix dimensions, or null when the function is unsupported.
 fn validate_matmul_function(func: pr.Function) ?mm.Shape {
@@ -186,7 +186,7 @@ fn validate_matmul_op(op: *const pr.Op) ?mm.Shape {
     }).matches(op)) return null;
 
     switch (op.params) {
-        .dot => {},
+        .mm => {},
         .dot_general => |dg| {
             if (!contraction.is_matrix_matmul(dg)) return null;
         },
@@ -225,7 +225,7 @@ test "TVM matcher recognizes matrix matmul" {
     defer builder.deinit();
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
-    const output = try builder.dot(lhs, rhs);
+    const output = try builder.mm(lhs, rhs);
     const func = try builder.finish(&.{output});
 
     const matched = TvmProvider.match_impl(undefined, func, 0) orelse

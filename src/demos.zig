@@ -4,7 +4,7 @@ const zg = @import("zigrad");
 const Tensor = zg.Tensor;
 const log = std.log.scoped(.@"zg/demos");
 
-/// Demo program: out = (dot(A, B) + C) * C where A: 2x3, B: 3x2, C: 2x2.
+/// Demo program: out = (mm(A, B) + C) * C where A: 2x3, B: 3x2, C: 2x2.
 pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     var program = zg.pr.Program.init(allocator);
     errdefer program.deinit();
@@ -16,8 +16,8 @@ pub fn build_demo_program(allocator: std.mem.Allocator) !zg.pr.Program {
     const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    const dot_id = try b.dot(a_id, b_id);
-    const add_id = try b.add(dot_id, c_id);
+    const mm_id = try b.mm(a_id, b_id);
+    const add_id = try b.add(mm_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
@@ -285,15 +285,15 @@ pub fn run_train_demo(
             const h2_: i64 = 64;
             const out_: i64 = 10;
 
-            const z1 = try batch.x.matmul(params.w1);
+            const z1 = try batch.x.mm(params.w1);
             const b1b = try params.b1.broadcast_in_dim(&.{ bs_, h1_ }, &.{1});
             const a1 = try z1.add(b1b);
 
-            const z2 = try a1.matmul(params.w2);
+            const z2 = try a1.mm(params.w2);
             const b2b = try params.b2.broadcast_in_dim(&.{ bs_, h2_ }, &.{1});
             const a2 = try z2.add(b2b);
 
-            const z3 = try a2.matmul(params.w3);
+            const z3 = try a2.mm(params.w3);
             const b3b = try params.b3.broadcast_in_dim(&.{ bs_, out_ }, &.{1});
             const preds = try z3.add(b3b);
             const diff = try preds.sub(batch.y);
@@ -728,8 +728,8 @@ fn run_kernel_provider_demo_executable(
     const dur = t0.untilNow(io, .awake);
     log.info("Executed dur={f}", .{dur});
 
-    // dot(A, B) = [[58, 64], [139, 154]]
-    // (n*dot + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]
+    // mm(A, B) = [[58, 64], [139, 154]]
+    // (n * mm(A, B) + C) * C = [[116n+4, 128n+4], [278n+4, 308n+4]]
     const n = @as(f32, @floatFromInt(n_providers));
     const expected = [_]f32{
         116.0 * n + 4.0, 128.0 * n + 4.0,
@@ -843,14 +843,14 @@ pub fn print_tvm_kernelize_pr(
     const pre = try c.add(d);
 
     try builder.push_region("tvm_matmul", &.{zg.kernel.provider_annotation("tvm")});
-    const dot = try a.matmul(b_t);
+    const mm = try a.mm(b_t);
     try builder.pop_region();
 
     try builder.push_region("tvm_fused", &.{
         zg.kernel.provider_annotation("tvm"),
         zg.pr.transform.outline.annotation,
     });
-    const sum = try dot.add(pre);
+    const sum = try mm.add(pre);
     const mul = try sum.mul(c);
     try builder.pop_region();
 
@@ -900,7 +900,7 @@ fn fill_pattern(slice: []f32, scale: f32, offset: f32) void {
 
 /// Builds the matmul program used by the kernel-provider demo.
 ///
-/// The function returns one dot per provider, summed with `c`, then multiplied
+/// The function returns one matrix product per provider, summed with `c`, then multiplied
 ///  by `c`. Multi-provider runs use explicit disjoint requests because their
 ///  discovered region boundaries may overlap.
 fn build_kernelized_demo_program(
@@ -921,15 +921,15 @@ fn build_kernelized_demo_program(
     // Region names share the program lifetime of their function references.
     const first_name = try std.fmt.allocPrint(b.alloc(), "{s}_region_0", .{provider_names[0]});
     if (explicit_requests) try b.push_region(first_name, &.{zg.kernel.provider_annotation(provider_names[0])});
-    var acc_id = try b.dot(a_id, b_id);
+    var acc_id = try b.mm(a_id, b_id);
     if (explicit_requests) try b.pop_region();
 
     for (provider_names[1..], 1..) |pname, i| {
         const rn = try std.fmt.allocPrint(b.alloc(), "{s}_region_{d}", .{ pname, i });
         if (explicit_requests) try b.push_region(rn, &.{zg.kernel.provider_annotation(pname)});
-        const dot_id = try b.dot(a_id, b_id);
+        const mm_id = try b.mm(a_id, b_id);
         if (explicit_requests) try b.pop_region();
-        acc_id = try b.add(acc_id, dot_id);
+        acc_id = try b.add(acc_id, mm_id);
     }
 
     const add_id = try b.add(acc_id, c_id);
@@ -1070,12 +1070,7 @@ pub fn print_tvm_attention_pr(
     const attn_weights = try exp_vals.div(sum_broadcast);
 
     // Contracting the key dimension produces [batch, query, head dimension].
-    const out = try attn_weights.dot_general(v, .{
-        .lhs_batch_dims = &.{0},
-        .rhs_batch_dims = &.{0},
-        .lhs_contracting_dims = &.{2},
-        .rhs_contracting_dims = &.{1},
-    });
+    const out = try attn_weights.bmm(v);
 
     try builder.pop_region();
 

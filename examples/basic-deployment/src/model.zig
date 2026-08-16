@@ -15,7 +15,7 @@ pub const input_spec: Input = .{
 
 /// `(lhs @ rhs + scale) * scale`
 pub fn forward(input: Input) !Tensor {
-    const product = try input.lhs.matmul(input.rhs);
+    const product = try input.lhs.mm(input.rhs);
     const shifted = try product.add(input.scale);
     return try shifted.mul(input.scale);
 }

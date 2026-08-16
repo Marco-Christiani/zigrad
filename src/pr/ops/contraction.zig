@@ -7,7 +7,7 @@ const Aval = pr.Aval;
 
 const log = std.log.scoped(.@"zg/contraction");
 
-// Dot (Matrix Multiply)
+// Vector dot product
 
 pub const dot = struct {
     pub const arity = .{ .in = 2, .out = 1 };
@@ -20,9 +20,9 @@ pub const dot = struct {
         const out = op.result(0).as_tensor();
 
         if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype) return error.DotTypeMismatch;
-        if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2 or out.shape.rank() != 2) return error.DotTypeMismatch;
-        if (lhs.shape.dims[1] != rhs.shape.dims[0]) return error.DotTypeMismatch;
-        if (out.shape.dims[0] != lhs.shape.dims[0] or out.shape.dims[1] != rhs.shape.dims[1]) return error.DotTypeMismatch;
+        if (lhs.shape.rank() != 1 or rhs.shape.rank() != 1 or out.shape.rank() != 0)
+            return error.DotTypeMismatch;
+        if (lhs.shape.dims[0] != rhs.shape.dims[0]) return error.DotTypeMismatch;
     }
 
     pub fn infer_output(alloc: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
@@ -32,11 +32,11 @@ pub const dot = struct {
         const rhs = inputs[1].as_tensor();
 
         if (lhs.dtype != rhs.dtype) return error.DotTypeMismatch;
-        if (lhs.shape.rank() != 2 or rhs.shape.rank() != 2) return error.DotTypeMismatch;
-        if (lhs.shape.dims[1] != rhs.shape.dims[0]) return error.DotTypeMismatch;
-
-        const out_dims = try alloc.dupe(i64, &[_]i64{ lhs.shape.dims[0], rhs.shape.dims[1] });
-        return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = out_dims } } };
+        if (lhs.shape.rank() != 1 or rhs.shape.rank() != 1) return error.DotTypeMismatch;
+        if (lhs.shape.dims[0] != rhs.shape.dims[0]) return error.DotTypeMismatch;
+        return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{
+            .dims = try alloc.alloc(i64, 0),
+        } } };
     }
 
     pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
@@ -55,17 +55,16 @@ pub const dot = struct {
         const lhs_primal = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
         const rhs_primal = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
 
-        const rhs_t = try ctx.builder.transpose(rhs_primal, &.{ 1, 0 });
-        const lhs_t = try ctx.builder.transpose(lhs_primal, &.{ 1, 0 });
-
-        const lhs_contrib = try ctx.builder.dot(out_cot, rhs_t);
-        const rhs_contrib = try ctx.builder.dot(lhs_t, out_cot);
+        const shape = lhs_primal.as_tensor().shape.dims;
+        const expanded = try ctx.builder.broadcast_in_dim(out_cot, shape, &.{});
+        const lhs_contrib = try ctx.builder.multiply(expanded, rhs_primal);
+        const rhs_contrib = try ctx.builder.multiply(expanded, lhs_primal);
 
         try ctx.add_cot(op.operand(0), lhs_contrib);
         try ctx.add_cot(op.operand(1), rhs_contrib);
     }
 
-    /// JVP: d(A @ B) = dA @ B + A @ dB
+    /// JVP: d(dot(a, b)) = dot(da, b) + dot(a, db).
     pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -82,13 +81,129 @@ pub const dot = struct {
     pub fn format(writer: *types.Writer, op: *const pr.Op, _: void) types.FormatError!void {
         if (op.inputs.len == 0) return;
         const lhs = op.operand(0).as_tensor();
-        const contract_dim = lhs.shape.rank() - 1;
-        try writer.print("contracting=([{d}], [0]), K={d}", .{
-            contract_dim,
-            lhs.shape.dims[contract_dim],
-        });
+        try writer.print("K={d}", .{lhs.shape.dims[0]});
     }
 };
+
+/// Rank-two matrix multiplication.
+pub const mm = matrix_multiply(false);
+
+/// Prefix-batched matrix multiplication with one or more batch dimensions.
+pub const bmm = matrix_multiply(true);
+
+fn matrix_multiply(comptime batched: bool) type {
+    return struct {
+        pub const arity = .{ .in = 2, .out = 1 };
+
+        fn type_mismatch() pr.ValidationError {
+            return if (batched) error.BMMTypeMismatch else error.MMTypeMismatch;
+        }
+
+        pub fn validate(op: *const pr.Op, _: void) pr.ValidationError!void {
+            if (op.inputs.len != 2 or op.outputs.len != 1) return error.InvalidOpArity;
+            const lhs = op.operand(0).as_tensor();
+            const rhs = op.operand(1).as_tensor();
+            const out = op.result(0).as_tensor();
+            const expected_rank: usize = if (batched) 3 else 2;
+            if (lhs.dtype != rhs.dtype or lhs.dtype != out.dtype)
+                return type_mismatch();
+            if (lhs.shape.rank() != rhs.shape.rank() or
+                lhs.shape.rank() != out.shape.rank() or
+                lhs.shape.rank() < expected_rank or
+                (!batched and lhs.shape.rank() != expected_rank))
+                return type_mismatch();
+            const rank = lhs.shape.rank();
+            for (0..rank - 2) |index| {
+                if (lhs.shape.dims[index] != rhs.shape.dims[index] or
+                    lhs.shape.dims[index] != out.shape.dims[index])
+                    return type_mismatch();
+            }
+            if (lhs.shape.dims[rank - 1] != rhs.shape.dims[rank - 2] or
+                out.shape.dims[rank - 2] != lhs.shape.dims[rank - 2] or
+                out.shape.dims[rank - 1] != rhs.shape.dims[rank - 1])
+                return type_mismatch();
+        }
+
+        pub fn infer_output(alloc: std.mem.Allocator, inputs: []const *pr.Var, _: void) pr.BuildError!Aval {
+            if (inputs.len != 2) return error.InvalidOpArity;
+            const lhs = inputs[0].as_tensor();
+            const rhs = inputs[1].as_tensor();
+            const expected_rank: usize = if (batched) 3 else 2;
+            if (lhs.dtype != rhs.dtype or lhs.shape.rank() != rhs.shape.rank() or
+                lhs.shape.rank() < expected_rank or
+                (!batched and lhs.shape.rank() != expected_rank))
+                return if (batched) error.BMMTypeMismatch else error.MMTypeMismatch;
+            const rank = lhs.shape.rank();
+            for (0..rank - 2) |index| {
+                if (lhs.shape.dims[index] != rhs.shape.dims[index])
+                    return if (batched) error.BMMTypeMismatch else error.MMTypeMismatch;
+            }
+            if (lhs.shape.dims[rank - 1] != rhs.shape.dims[rank - 2])
+                return if (batched) error.BMMTypeMismatch else error.MMTypeMismatch;
+            const dims = try alloc.dupe(i64, lhs.shape.dims);
+            dims[rank - 1] = rhs.shape.dims[rank - 1];
+            return .{ .tensor = .{ .dtype = lhs.dtype, .shape = .{ .dims = dims } } };
+        }
+
+        pub fn emit_primal(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+            const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+            const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+            const out = if (batched)
+                try ctx.builder.bmm(lhs, rhs)
+            else
+                try ctx.builder.mm(lhs, rhs);
+            ctx.set_primal(op.result(0), out);
+        }
+
+        pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+            const out_cot = ctx.get_cot(op.result(0)) orelse return;
+            const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+            const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+            var permutation: [pr.max_rank]i64 = undefined;
+            const rank = lhs.as_tensor().shape.rank();
+            for (0..rank) |index| permutation[index] = @intCast(index);
+            std.mem.swap(i64, &permutation[rank - 2], &permutation[rank - 1]);
+            const lhs_t = try ctx.builder.transpose(lhs, permutation[0..rank]);
+            const rhs_t = try ctx.builder.transpose(rhs, permutation[0..rank]);
+            const lhs_contrib = if (batched)
+                try ctx.builder.bmm(out_cot, rhs_t)
+            else
+                try ctx.builder.mm(out_cot, rhs_t);
+            const rhs_contrib = if (batched)
+                try ctx.builder.bmm(lhs_t, out_cot)
+            else
+                try ctx.builder.mm(lhs_t, out_cot);
+            try ctx.add_cot(op.operand(0), lhs_contrib);
+            try ctx.add_cot(op.operand(1), rhs_contrib);
+        }
+
+        pub fn jvp(ctx: types.AdContext, op: *const pr.Op, _: void) types.AdError!void {
+            const lhs = ctx.get_primal(op.operand(0)) orelse return error.UnsupportedEqn;
+            const rhs = ctx.get_primal(op.operand(1)) orelse return error.UnsupportedEqn;
+            const lhs_tangent = ctx.get_tangent(op.operand(0)) orelse return error.UnsupportedEqn;
+            const rhs_tangent = ctx.get_tangent(op.operand(1)) orelse return error.UnsupportedEqn;
+            const lhs_term = if (batched)
+                try ctx.builder.bmm(lhs_tangent, rhs)
+            else
+                try ctx.builder.mm(lhs_tangent, rhs);
+            const rhs_term = if (batched)
+                try ctx.builder.bmm(lhs, rhs_tangent)
+            else
+                try ctx.builder.mm(lhs, rhs_tangent);
+            ctx.set_tangent(op.result(0), try ctx.builder.add(lhs_term, rhs_term));
+        }
+
+        pub fn format(writer: *types.Writer, op: *const pr.Op, _: void) types.FormatError!void {
+            if (op.inputs.len == 0) return;
+            const shape = op.operand(0).as_tensor().shape.dims;
+            try writer.print("M={d}, K={d}, N={d}", .{
+                shape[shape.len - 2],
+                shape[shape.len - 1],
+                op.operand(1).as_tensor().shape.dims[shape.len - 1],
+            });
+        }
+    };
+}
 
 // Dot General
 
@@ -289,7 +404,7 @@ pub const dot_general = struct {
     ///  2. `maybe_general_dot_vjp` - general case with arbitrary batch/contracting dims.
     ///  3. Inline 3-rank special case: lhs is [B,M,K], rhs is [K,N] or [N,K],
     ///      no batch dims, single contracting dim at lhs position 2. Flattens
-    ///      the batch+row dims to reduce to 2D dot, then reshapes back.
+    ///      the batch and row dims to reduce to an `mm`, then reshapes back.
     pub fn vjp_backward(ctx: types.AdContext, op: *const pr.Op, dg_params: pr.DotGeneralParams) types.AdError!void {
         if (op.inputs.len != 2) return error.UnsupportedEqn;
 
@@ -337,10 +452,10 @@ pub const dot_general = struct {
                 // If rhs is [N,K] (contract_dim=1), it's already in the right layout.
                 const lhs_c = if (rhs_contract_dim == 0) lhs_blk: {
                     const rhs_t2 = try ctx.builder.transpose(rhs_primal, &.{ 1, 0 });
-                    const lhs_flat = try ctx.builder.dot(out2, rhs_t2);
+                    const lhs_flat = try ctx.builder.mm(out2, rhs_t2);
                     break :lhs_blk try ctx.builder.reshape(lhs_flat, &.{ b, m, k });
                 } else lhs_blk: {
-                    const lhs_flat = try ctx.builder.dot(out2, rhs_primal);
+                    const lhs_flat = try ctx.builder.mm(out2, rhs_primal);
                     break :lhs_blk try ctx.builder.reshape(lhs_flat, &.{ b, m, k });
                 };
 
@@ -351,9 +466,9 @@ pub const dot_general = struct {
                 // If rhs was [K,N] (contract_dim=0), result [K,N] is already correct.
                 // If rhs was [N,K] (contract_dim=1), transpose [K,N] -> [N,K] to match.
                 const rhs_c = if (rhs_contract_dim == 0) rhs_blk: {
-                    break :rhs_blk try ctx.builder.dot(lhs2_t, out2);
+                    break :rhs_blk try ctx.builder.mm(lhs2_t, out2);
                 } else rhs_blk: {
-                    const rhs_k_n = try ctx.builder.dot(lhs2_t, out2);
+                    const rhs_k_n = try ctx.builder.mm(lhs2_t, out2);
                     break :rhs_blk try ctx.builder.transpose(rhs_k_n, &.{ 1, 0 });
                 };
 

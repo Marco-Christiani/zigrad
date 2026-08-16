@@ -560,7 +560,7 @@ test "Pass consumes outline and transfers independent annotations" {
         .{ .name = "example.payload.v1", .value = .{ .bytes = &.{ 4, 5, 6 } } },
         kernel.provider_annotation("tvm"),
     });
-    const result = try builder.dot(lhs, rhs);
+    const result = try builder.mm(lhs, rhs);
     try builder.pop_region();
     try program.add_function(try builder.finish(&.{result}));
 

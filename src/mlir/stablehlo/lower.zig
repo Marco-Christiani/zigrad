@@ -80,6 +80,8 @@ fn lower_op(ctx: LowerContext, op: *const pr.Op) LowerError!void {
         .reduce_max => try lower_reduce(ctx, op, .max),
         // Contraction
         .dot => try lower_dot(ctx, op),
+        .mm => try lower_mm(ctx, op),
+        .bmm => try lower_bmm(ctx, op),
         .dot_general => try lower_dot_general(ctx, op),
         .convolution => try lower_convolution(ctx, op),
         // Compare
@@ -296,15 +298,44 @@ fn reduce_max_block(_: anytype, ctx: mlir.Context, ins: []const mlir.Value, accs
 }
 
 fn lower_dot(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    try lower_fixed_contraction(ctx, op, &.{}, &.{0}, &.{0});
+}
+
+fn lower_mm(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    try lower_fixed_contraction(ctx, op, &.{}, &.{1}, &.{0});
+}
+
+fn lower_bmm(ctx: LowerContext, op: *const pr.Op) LowerError!void {
+    const rank = op.operand(0).as_tensor().shape.rank();
+    var batch_dims: [pr.max_rank - 2]i64 = undefined;
+    for (0..rank - 2) |index| batch_dims[index] = @intCast(index);
+    const lhs_contracting: [1]i64 = .{@intCast(rank - 1)};
+    const rhs_contracting: [1]i64 = .{@intCast(rank - 2)};
+    try lower_fixed_contraction(
+        ctx,
+        op,
+        batch_dims[0 .. rank - 2],
+        &lhs_contracting,
+        &rhs_contracting,
+    );
+}
+
+fn lower_fixed_contraction(
+    ctx: LowerContext,
+    op: *const pr.Op,
+    batch_dims: []const i64,
+    lhs_contracting: []const i64,
+    rhs_contracting: []const i64,
+) LowerError!void {
     const lhs = ctx.get_value(op.operand(0)) orelse return error.InvalidProgram;
     const rhs = ctx.get_value(op.operand(1)) orelse return error.InvalidProgram;
     const out_tensor = op.result(0).aval.as_tensor();
     const out_type = ctx.tensor_to_mlir_type(out_tensor);
     const mlir_op = stablehlo.dot_general(ctx.mlir_ctx, lhs, rhs, out_type, ctx.loc, .{
-        .lhs_batching_dimensions = &.{},
-        .rhs_batching_dimensions = &.{},
-        .lhs_contracting_dimensions = &.{1},
-        .rhs_contracting_dimensions = &.{0},
+        .lhs_batching_dimensions = batch_dims,
+        .rhs_batching_dimensions = batch_dims,
+        .lhs_contracting_dimensions = lhs_contracting,
+        .rhs_contracting_dimensions = rhs_contracting,
         .precision = .fast,
     });
     ctx.block.append_operation(mlir_op);
@@ -570,8 +601,8 @@ test "lowering produces verified bytecode" {
         const a = try b.param_tensor(.f32, &.{ 2, 3 });
         const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
         const c = try b.param_tensor(.f32, &.{ 2, 2 });
-        const dot_id = try b.dot(a, b_id);
-        const add_id = try b.add(dot_id, c);
+        const mm_id = try b.mm(a, b_id);
+        const add_id = try b.add(mm_id, c);
         const out_id = try b.multiply(add_id, c);
         const func = try b.finish(&.{out_id});
         try program.add_function(func);
@@ -580,6 +611,54 @@ test "lowering produces verified bytecode" {
     const bc = try lower_program_to_mlir(std.testing.allocator, &program, null, .mlir_bytecode);
     defer std.testing.allocator.free(bc);
     try std.testing.expect(bc.len > 0);
+}
+
+test "lowering supports fixed contraction forms" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    {
+        var b = try pr.FunctionBuilder.init(&program, "dot");
+        defer b.deinit();
+        const lhs = try b.param_tensor(.f32, &.{3});
+        const rhs = try b.param_tensor(.f32, &.{3});
+        const out = try b.dot(lhs, rhs);
+        const bytes = try lower_function_to_mlir(
+            std.testing.allocator,
+            try b.finish(&.{out}),
+            .mlir_bytecode,
+        );
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(bytes.len > 0);
+    }
+    {
+        var b = try pr.FunctionBuilder.init(&program, "mm");
+        defer b.deinit();
+        const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
+        const rhs = try b.param_tensor(.f32, &.{ 3, 4 });
+        const out = try b.mm(lhs, rhs);
+        const bytes = try lower_function_to_mlir(
+            std.testing.allocator,
+            try b.finish(&.{out}),
+            .mlir_bytecode,
+        );
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(bytes.len > 0);
+    }
+    {
+        var b = try pr.FunctionBuilder.init(&program, "bmm");
+        defer b.deinit();
+        const lhs = try b.param_tensor(.f32, &.{ 2, 5, 3, 4 });
+        const rhs = try b.param_tensor(.f32, &.{ 2, 5, 4, 6 });
+        const out = try b.bmm(lhs, rhs);
+        const bytes = try lower_function_to_mlir(
+            std.testing.allocator,
+            try b.finish(&.{out}),
+            .mlir_bytecode,
+        );
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(bytes.len > 0);
+    }
 }
 
 test "lowering keeps non-entry functions when entry_name is set" {
@@ -740,8 +819,8 @@ test "lowering supports vjp matmul demo" {
         const a = try b.param_tensor(.f32, &.{ 2, 3 });
         const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
         const c = try b.param_tensor(.f32, &.{ 2, 2 });
-        const dot_id = try b.dot(a, b_id);
-        const add_id = try b.add(dot_id, c);
+        const mm_id = try b.mm(a, b_id);
+        const add_id = try b.add(mm_id, c);
         const out_id = try b.multiply(add_id, c);
         const func = try b.finish(&.{out_id});
         try program.add_function(func);
@@ -765,8 +844,8 @@ test "lowering can outline via region annotation" {
 
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
-    try b.push_region("outlined-dot", &.{outline.annotation});
-    const d = try b.dot(a, c);
+    try b.push_region("outlined-mm", &.{outline.annotation});
+    const d = try b.mm(a, c);
     try b.pop_region();
     const func = try b.finish(&.{d});
     try program.add_function(func);
@@ -838,8 +917,8 @@ test "lower operation outlines kernelize-annotated region" {
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
     try b.push_region("matmul_region", &.{kernel_test.provider_annotation("mirage")});
-    const dot = try b.dot(lhs, rhs);
-    const sum = try b.add(dot, bias);
+    const mm = try b.mm(lhs, rhs);
+    const sum = try b.add(mm, bias);
     const out = try b.multiply(sum, bias);
     try b.pop_region();
 
@@ -855,7 +934,7 @@ test "lower operation outlines kernelize-annotated region" {
     try testing.expect(std.mem.indexOf(u8, artifact.bytes, "call @main_outlined_0") != null);
 }
 
-test "lower operation outlines dot-add kernelize region" {
+test "lower operation outlines mm-add kernelize region" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -868,9 +947,9 @@ test "lower operation outlines dot-add kernelize region" {
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    try b.push_region("dot_add_region", &.{kernel_test.provider_annotation("mirage")});
-    const dot = try b.dot(lhs, rhs);
-    const out = try b.add(dot, bias);
+    try b.push_region("mm_add_region", &.{kernel_test.provider_annotation("mirage")});
+    const mm = try b.mm(lhs, rhs);
+    const out = try b.add(mm, bias);
     try b.pop_region();
 
     const func = try b.finish(&.{out});
@@ -885,7 +964,7 @@ test "lower operation outlines dot-add kernelize region" {
     try testing.expect(std.mem.indexOf(u8, artifact.bytes, "call @main_outlined_0") != null);
 }
 
-test "lower operation outlines dot-log kernelize region" {
+test "lower operation outlines mm-log kernelize region" {
     const testing = std.testing;
 
     var program = pr.Program.init(testing.allocator);
@@ -897,9 +976,9 @@ test "lower operation outlines dot-log kernelize region" {
     const lhs = try b.param_tensor(.f32, &.{ 2, 3 });
     const rhs = try b.param_tensor(.f32, &.{ 3, 2 });
 
-    try b.push_region("dot_log_region", &.{kernel_test.provider_annotation("mirage")});
-    const dot = try b.dot(lhs, rhs);
-    const out = try b.log(dot);
+    try b.push_region("mm_log_region", &.{kernel_test.provider_annotation("mirage")});
+    const mm = try b.mm(lhs, rhs);
+    const out = try b.log(mm);
     try b.pop_region();
 
     const func = try b.finish(&.{out});
@@ -928,8 +1007,8 @@ test "lower operation outlines near-miss kernelize region" {
     const bias = try b.param_tensor(.f32, &.{ 2, 2 });
 
     try b.push_region("near_miss_region", &.{kernel_test.provider_annotation("mirage")});
-    const dot = try b.dot(lhs, rhs);
-    const shifted = try b.subtract(dot, bias);
+    const mm = try b.mm(lhs, rhs);
+    const shifted = try b.subtract(mm, bias);
     const out = try b.multiply(shifted, bias);
     try b.pop_region();
 
@@ -953,7 +1032,7 @@ test "lower operation produces StableHLO" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 3, 2 });
-    const z = try b.dot(x, y);
+    const z = try b.mm(x, y);
     const func = try b.finish(&.{z});
 
     try program.add_function(func);

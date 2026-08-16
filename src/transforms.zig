@@ -346,7 +346,7 @@ const TestParams = struct { w: Tensor, b: Tensor };
 const TestBatch = struct { x: Tensor };
 
 fn test_loss(params: TestParams, batch: TestBatch) !Tensor {
-    const z = try batch.x.matmul(params.w);
+    const z = try batch.x.mm(params.w);
     const b_broadcast = try params.b.broadcast_in_dim(&.{ 3, 2 }, &.{1});
     const pred = try z.add(b_broadcast);
     return try pred.reduce_sum(&.{ 0, 1 });

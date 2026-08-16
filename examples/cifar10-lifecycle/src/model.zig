@@ -81,7 +81,7 @@ pub fn forward(params: Params, images: Tensor) !Tensor {
 
     const pooled_sum = try x.reduce_sum(&.{ 1, 2 });
     const pooled = try pooled_sum.mul(try Tensor.constant_like(pooled_sum, 1.0 / (16.0 * 16.0)));
-    const logits = try pooled.matmul(params.classifier_kernel);
+    const logits = try pooled.mm(params.classifier_kernel);
     return try logits.add(try params.classifier_bias.broadcast_in_dim(
         &.{ batch_size, class_count },
         &.{1},

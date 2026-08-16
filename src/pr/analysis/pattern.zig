@@ -180,14 +180,14 @@ test connected_range {
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
     const bias = try builder.param_tensor(.f32, &.{ 4, 2 });
-    const dot = try builder.dot(lhs, rhs);
-    const sum = try builder.add(dot, bias);
+    const mm = try builder.mm(lhs, rhs);
+    const sum = try builder.add(mm, bias);
     const output = try builder.exp(sum);
     const func = try builder.finish(&.{output});
 
     const options = ConnectedOptions{
-        .accepts = accept_dot_or_pointwise,
-        .contains = accept_dot,
+        .accepts = accept_mm_or_pointwise,
+        .contains = accept_mm,
         .max_ops = 5,
     };
     const matched = connected_range(func, 0, options) orelse
@@ -207,14 +207,14 @@ test "connected_range stops before an unrelated supported operation" {
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
     const independent = try builder.param_tensor(.f32, &.{ 4, 2 });
-    const dot = try builder.dot(lhs, rhs);
+    const mm = try builder.mm(lhs, rhs);
     const unrelated = try builder.exp(independent);
-    const output = try builder.add(dot, unrelated);
+    const output = try builder.add(mm, unrelated);
     const func = try builder.finish(&.{output});
 
     const matched = connected_range(func, 0, .{
-        .accepts = accept_dot_or_pointwise,
-        .contains = accept_dot,
+        .accepts = accept_mm_or_pointwise,
+        .contains = accept_mm,
         .max_ops = 5,
     }) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(Range{ .start = 0, .end = 1 }, matched);
@@ -256,11 +256,11 @@ test Operation {
     defer builder.deinit();
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
-    const output = try builder.dot(lhs, rhs);
+    const output = try builder.mm(lhs, rhs);
     const func = try builder.finish(&.{output});
 
     try testing.expect((Operation{
-        .primitive = .dot,
+        .primitive = .mm,
         .input_count = 2,
         .output_count = 1,
         .first_output_dtype = .f32,
@@ -287,13 +287,13 @@ test "value-use and operand relationships" {
     try testing.expect(!binary_operands(func.ops[1], activation, input, .ordered));
 }
 
-fn accept_dot(op: *const pr.Op) bool {
-    return op.prim() == .dot;
+fn accept_mm(op: *const pr.Op) bool {
+    return op.prim() == .mm;
 }
 
-fn accept_dot_or_pointwise(op: *const pr.Op) bool {
+fn accept_mm_or_pointwise(op: *const pr.Op) bool {
     return switch (op.prim()) {
-        .dot, .add, .exp => true,
+        .mm, .add, .exp => true,
         else => false,
     };
 }

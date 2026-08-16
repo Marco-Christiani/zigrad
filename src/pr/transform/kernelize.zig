@@ -490,7 +490,7 @@ test "DiscoverCandidates groups providers matching the same PR range" {
         }
 
         fn match(_: *anyopaque, func: pr.Function, start: usize) ?kernel.Match {
-            if (start >= func.ops.len or func.ops[start].prim() != .dot) return null;
+            if (start >= func.ops.len or func.ops[start].prim() != .mm) return null;
             return .{ .op_count = 1 };
         }
     };
@@ -501,7 +501,7 @@ test "DiscoverCandidates groups providers matching the same PR range" {
     defer builder.deinit();
     const lhs = try builder.param_tensor(.f32, &.{ 2, 3 });
     const rhs = try builder.param_tensor(.f32, &.{ 3, 2 });
-    const result = try builder.dot(lhs, rhs);
+    const result = try builder.mm(lhs, rhs);
     try program.add_function(try builder.finish(&.{result}));
 
     var first = Matcher{ .name = "first" };

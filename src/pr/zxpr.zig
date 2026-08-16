@@ -81,7 +81,7 @@ pub fn emit_param_line(v: *const pr.Var, writer: *Writer) !void {
     try emitter.emit_var_with_type(v);
 }
 
-/// Emit a single op binding: `%2: 2x2<f32> = dot[contracting=([1], [0]), K=3](%0, %1)  ; vjp`
+/// Emit a single op binding: `%2: 2x2<f32> = mm[M=2, K=3, N=2](%0, %1)  ; vjp`
 pub fn emit_op_line(op: *const pr.Op, writer: *Writer) !void {
     const dummy_func = pr.Function{
         .name = "",
@@ -121,7 +121,7 @@ test "zxpr format" {
 
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
-    const d = try b.dot(a, c);
+    const d = try b.mm(a, c);
     const func = try b.finish(&.{d});
 
     var buf: [512]u8 = undefined;
@@ -133,7 +133,7 @@ test "zxpr format" {
     try std.testing.expect(std.mem.indexOf(u8, result, "; params (2)") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "%0: 2x3<f32>") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "let\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "dot[contracting=([1], [0])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "mm[M=2, K=3, N=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "; vjp") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "in %2") != null);
 }

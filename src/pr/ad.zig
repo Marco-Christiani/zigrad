@@ -257,8 +257,8 @@ test "vjp produces gradients matching input shapes" {
     const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    const dot_id = try b.dot(a_id, b_id);
-    const add_id = try b.add(dot_id, c_id);
+    const mm_id = try b.mm(a_id, b_id);
+    const add_id = try b.add(mm_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});
@@ -414,8 +414,8 @@ test "jvp produces tangent outputs matching function output shapes" {
     const b_id = try b.param_tensor(.f32, &.{ 3, 2 });
     const c_id = try b.param_tensor(.f32, &.{ 2, 2 });
 
-    const dot_id = try b.dot(a_id, b_id);
-    const add_id = try b.add(dot_id, c_id);
+    const mm_id = try b.mm(a_id, b_id);
+    const add_id = try b.add(mm_id, c_id);
     const out_id = try b.multiply(add_id, c_id);
 
     const func = try b.finish(&.{out_id});

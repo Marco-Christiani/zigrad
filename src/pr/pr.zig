@@ -174,6 +174,8 @@ pub const Prim = enum {
     gather,
     scatter,
     dot,
+    mm,
+    bmm,
     dot_general,
     convolution,
     reshape,
@@ -372,6 +374,8 @@ pub const Params = union(Prim) {
     gather: GatherParams,
     scatter: ScatterParams,
     dot: void,
+    mm: void,
+    bmm: void,
     dot_general: DotGeneralParams,
     convolution: ConvolutionParams,
     reshape: ReshapeParams,
@@ -724,6 +728,8 @@ pub const ValidationError = error{
     GatherTypeMismatch,
     ScatterTypeMismatch,
     DotTypeMismatch,
+    MMTypeMismatch,
+    BMMTypeMismatch,
     DotGeneralTypeMismatch,
     ConvolutionTypeMismatch,
     ReshapeTypeMismatch,
@@ -1158,8 +1164,19 @@ pub const FunctionBuilder = struct {
         } }, &.{ lhs, rhs });
     }
 
+    /// Computes the scalar dot product of two equal-length vectors.
     pub fn dot(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
         return try self.emit(.{ .dot = {} }, &.{ lhs, rhs });
+    }
+
+    /// Multiplies two rank-two matrices.
+    pub fn mm(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return try self.emit(.{ .mm = {} }, &.{ lhs, rhs });
+    }
+
+    /// Multiplies matrices over one or more identical prefix batch dimensions.
+    pub fn bmm(self: *FunctionBuilder, lhs: *Var, rhs: *Var) BuildError!*Var {
+        return try self.emit(.{ .bmm = {} }, &.{ lhs, rhs });
     }
 
     pub fn convolution(self: *FunctionBuilder, lhs: *Var, rhs: *Var, params: ConvolutionParams) BuildError!*Var {

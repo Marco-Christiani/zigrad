@@ -164,6 +164,8 @@ fn eval_op(
         .reduce_sum => |rp| try eval_reduce_sum(allocator, env, op, rp),
         .reduce_max => |rp| try eval_reduce_max(allocator, env, op, rp),
         .dot => try eval_dot(allocator, env, op),
+        .mm => try eval_mm(allocator, env, op),
+        .bmm => try eval_bmm(allocator, env, op),
         .dot_general => |dg| try eval_dot_general(allocator, env, op, dg),
         .convolution => |params| try eval_convolution(allocator, env, op, params),
         .gather => |gp| try eval_gather(allocator, env, op, gp),
@@ -475,6 +477,18 @@ fn eval_dot(
 ) EvalError!HostTensor {
     const lhs = try get_input(env, op, 0);
     const rhs = try get_input(env, op, 1);
+    var result = try HostTensor.init(allocator, &.{});
+    for (lhs.data, rhs.data) |left, right| result.data[0] += left * right;
+    return result;
+}
+
+fn eval_mm(
+    allocator: std.mem.Allocator,
+    env: []?HostTensor,
+    op: *const pr.Op,
+) EvalError!HostTensor {
+    const lhs = try get_input(env, op, 0);
+    const rhs = try get_input(env, op, 1);
     const m: usize = @intCast(lhs.shape[0]);
     const k: usize = @intCast(lhs.shape[1]);
     const n: usize = @intCast(rhs.shape[1]);
@@ -490,6 +504,24 @@ fn eval_dot(
         }
     }
     return result;
+}
+
+fn eval_bmm(
+    allocator: std.mem.Allocator,
+    env: []?HostTensor,
+    op: *const pr.Op,
+) EvalError!HostTensor {
+    const rank = op.operand(0).as_tensor().shape.rank();
+    var batch_dims: [pr.max_rank - 2]i64 = undefined;
+    for (0..rank - 2) |index| batch_dims[index] = @intCast(index);
+    const lhs_contracting: [1]i64 = .{@intCast(rank - 1)};
+    const rhs_contracting: [1]i64 = .{@intCast(rank - 2)};
+    return try eval_dot_general(allocator, env, op, .{
+        .lhs_batch_dims = batch_dims[0 .. rank - 2],
+        .rhs_batch_dims = batch_dims[0 .. rank - 2],
+        .lhs_contracting_dims = &lhs_contracting,
+        .rhs_contracting_dims = &rhs_contracting,
+    });
 }
 
 fn eval_dot_general(
@@ -1071,15 +1103,40 @@ test "eval: multiply elementwise" {
     try testing.expectApproxEqAbs(@as(f32, 32.0), results[0].data[3], 1e-6);
 }
 
-test "eval: dot matmul 2x3 @ 3x2" {
+test "eval: dot" {
     var program = pr.Program.init(testing.allocator);
     defer program.deinit();
 
     var b = try pr.FunctionBuilder.init(&program, "dot");
     defer b.deinit();
+    const lhs = try b.param_tensor(.f32, &.{3});
+    const rhs = try b.param_tensor(.f32, &.{3});
+    const out = try b.dot(lhs, rhs);
+    const func = try build_and_finish(&program, &b, &.{out});
+
+    var in_lhs = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 1, 2, 3 });
+    defer in_lhs.deinit();
+    var in_rhs = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 4, 5, 6 });
+    defer in_rhs.deinit();
+
+    const results = try eval(testing.allocator, func, &.{ in_lhs, in_rhs });
+    defer {
+        for (results) |*result| result.deinit();
+        testing.allocator.free(results);
+    }
+    try testing.expectEqual(@as(usize, 0), results[0].shape.len);
+    try testing.expectApproxEqAbs(@as(f32, 32), results[0].data[0], 1e-6);
+}
+
+test "eval: mm 2x3 @ 3x2" {
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "mm");
+    defer b.deinit();
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const bb = try b.param_tensor(.f32, &.{ 3, 2 });
-    const c = try b.dot(a, bb);
+    const c = try b.mm(a, bb);
     const func = try build_and_finish(&program, &b, &.{c});
 
     // [[1,2,3],[4,5,6]] @ [[1,2],[3,4],[5,6]]
@@ -1098,6 +1155,32 @@ test "eval: dot matmul 2x3 @ 3x2" {
     try testing.expectApproxEqAbs(@as(f32, 28.0), results[0].data[1], 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 49.0), results[0].data[2], 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 64.0), results[0].data[3], 1e-5);
+}
+
+test "eval: bmm" {
+    var program = pr.Program.init(testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "bmm");
+    defer b.deinit();
+    const lhs = try b.param_tensor(.f32, &.{ 2, 1, 2 });
+    const rhs = try b.param_tensor(.f32, &.{ 2, 2, 1 });
+    const out = try b.bmm(lhs, rhs);
+    const func = try build_and_finish(&program, &b, &.{out});
+
+    var in_lhs = try HostTensor.init_with_data(testing.allocator, &.{ 2, 1, 2 }, &.{ 1, 2, 3, 4 });
+    defer in_lhs.deinit();
+    var in_rhs = try HostTensor.init_with_data(testing.allocator, &.{ 2, 2, 1 }, &.{ 5, 6, 7, 8 });
+    defer in_rhs.deinit();
+
+    const results = try eval(testing.allocator, func, &.{ in_lhs, in_rhs });
+    defer {
+        for (results) |*result| result.deinit();
+        testing.allocator.free(results);
+    }
+    try testing.expectEqualSlices(i64, &.{ 2, 1, 1 }, results[0].shape);
+    try testing.expectApproxEqAbs(@as(f32, 17), results[0].data[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 53), results[0].data[1], 1e-6);
 }
 
 test "eval: dot_general batched" {

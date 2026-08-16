@@ -31,8 +31,8 @@ pub fn run_llm_train_demo(
             const bs_: i64 = 16;
             const vocab_: i64 = 128;
 
-            const hidden_act = try batch.x.matmul(params.w_emb);
-            const logits = try hidden_act.matmul(params.w_out);
+            const hidden_act = try batch.x.mm(params.w_emb);
+            const logits = try hidden_act.mm(params.w_out);
             const bcast_b = try params.b.broadcast_in_dim(&.{ bs_, vocab_ }, &.{1});
             const logits_b = try logits.add(bcast_b);
 

@@ -114,7 +114,7 @@ const CompiledContext = struct {
         const pr_dtype = dtype.to_pr_dtype();
         const a = try builder.param_tensor(pr_dtype, &.{ shape.m, shape.k });
         const b = try builder.param_tensor(pr_dtype, &.{ shape.k, shape.n });
-        const result = try builder.dot(a, b);
+        const result = try builder.mm(a, b);
         const function = try builder.finish(&.{result});
         try program.add_function(function);
 

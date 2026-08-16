@@ -209,7 +209,7 @@ pub const MirageProvider = struct {
 fn is_supported_matmul(op: *const pr.Op) bool {
     if (op.inputs.len != 2 or op.outputs.len != 1) return false;
     return switch (op.params) {
-        .dot => true,
+        .mm, .bmm => true,
         .dot_general => |dg| contraction.is_canonical_batched_matmul(
             dg,
             op.inputs[0].value.as_tensor().shape.rank(),
@@ -309,7 +309,7 @@ fn lower_op(
     tensor_map: *const std.AutoHashMap(*const pr.Var, mirage.Tensor),
 ) kernel.CompileError!mirage.Tensor {
     switch (op.params) {
-        .dot => {
+        .mm, .bmm => {
             if (op.inputs.len != 2) return error.Unsupported;
             const lhs = tensor_map.get(op.inputs[0].value) orelse return error.Unsupported;
             const rhs = tensor_map.get(op.inputs[1].value) orelse return error.Unsupported;
@@ -422,8 +422,8 @@ test "Mirage matcher grows a connected supported region" {
     const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
     const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
     const bias = try builder.param_tensor(.f32, &.{ 4, 2 });
-    const dot = try builder.dot(lhs, rhs);
-    const sum = try builder.add(dot, bias);
+    const mm = try builder.mm(lhs, rhs);
+    const sum = try builder.add(mm, bias);
     const output = try builder.exp(sum);
     const func = try builder.finish(&.{output});
 
@@ -443,7 +443,7 @@ test "Mirage matcher covers pointwise prefixes and connected branches" {
         const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
         const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
         const transformed = try builder.exp(lhs);
-        const output = try builder.dot(transformed, rhs);
+        const output = try builder.mm(transformed, rhs);
         const func = try builder.finish(&.{output});
 
         const matched = MirageProvider.match_impl(undefined, func, 0) orelse
@@ -458,9 +458,9 @@ test "Mirage matcher covers pointwise prefixes and connected branches" {
         defer builder.deinit();
         const lhs = try builder.param_tensor(.f32, &.{ 4, 8 });
         const rhs = try builder.param_tensor(.f32, &.{ 8, 2 });
-        const dot = try builder.dot(lhs, rhs);
-        const exponent = try builder.exp(dot);
-        const logarithm = try builder.log(dot);
+        const mm = try builder.mm(lhs, rhs);
+        const exponent = try builder.exp(mm);
+        const logarithm = try builder.log(mm);
         const output = try builder.add(exponent, logarithm);
         const func = try builder.finish(&.{output});
 

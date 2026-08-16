@@ -65,17 +65,15 @@ fn loss(params: Params, batch: Batch) !Tensor {
     //
     // TODO(debug): Define effect ordering for runtime debug operations.
 
-    // TODO(api): Add linear, MMA, and BMMA operations with backend-neutral
-    //  lowering instead of exposing contraction details at this level.
-    const z1 = try batch.x.matmul(params.w1);
+    const z1 = try batch.x.mm(params.w1);
     const a1 = try z1.add(try params.b1.broadcast_in_dim(&.{ batch_size, hidden1 }, &.{1}));
 
     // Layer 2
-    const z2 = try a1.matmul(params.w2);
+    const z2 = try a1.mm(params.w2);
     const a2 = try z2.add(try params.b2.broadcast_in_dim(&.{ batch_size, hidden2 }, &.{1}));
 
     // Layer 3 (output)
-    const z3 = try a2.matmul(params.w3);
+    const z3 = try a2.mm(params.w3);
     const preds = try z3.add(try params.b3.broadcast_in_dim(&.{ batch_size, output_dim }, &.{1}));
 
     // TODO(api): Add an MSE operation.

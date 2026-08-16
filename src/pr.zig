@@ -8,6 +8,7 @@ pub const Shape = core.Shape;
 pub const BoundedShape = core.BoundedShape;
 pub const Aval = core.Aval;
 pub const Tensor = core.Tensor;
+pub const max_rank = core.max_rank;
 
 pub const Literal = core.Literal;
 pub const Prim = core.Prim;

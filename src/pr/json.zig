@@ -236,7 +236,7 @@ fn emit_param_attrs(writer: *Writer, op: *const pr.Op) !void {
     switch (op.params) {
         .add, .subtract, .multiply, .divide, .maximum => {},
         .exp, .log, .rsqrt, .logistic => {},
-        .select, .dot => {},
+        .select, .dot, .mm, .bmm => {},
 
         .literal => |lit| {
             try open_attrs(writer, &has_attr);
@@ -545,7 +545,7 @@ test emit {
 
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const c = try b.param_tensor(.f32, &.{ 3, 2 });
-    const d = try b.dot(a, c);
+    const d = try b.mm(a, c);
     const func = try b.finish(&.{d});
 
     var buf: [2048]u8 = undefined;
@@ -566,7 +566,7 @@ test emit {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"p1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"e0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"param\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"dot\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"kind\":\"mm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"vjp\":true") != null);
 
     // Param nodes have value-id labels
@@ -583,7 +583,7 @@ test emit {
 
     // ZXPR snippets on nodes
     try std.testing.expect(std.mem.indexOf(u8, result, "\"zxpr\":\"%0: 2x3<f32>\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "dot[contracting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "mm[M=2, K=3, N=2") != null);
 }
 
 test "json with regions" {
@@ -683,7 +683,7 @@ test "json output is valid JSON" {
     const a = try b.param_tensor(.f32, &.{ 2, 3 });
     const w = try b.param_tensor(.f32, &.{ 3, 4 });
     const bias = try b.param_tensor(.f32, &.{4});
-    const prod = try b.dot(a, w);
+    const prod = try b.mm(a, w);
     const bias_bc = try b.broadcast_in_dim(bias, &.{ 2, 4 }, &.{1});
     const out = try b.add(prod, bias_bc);
     const func = try b.finish(&.{out});
@@ -756,7 +756,7 @@ test "a value no op consumes still carries its type" {
     defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 3, 4 });
-    const out = try b.dot(x, y);
+    const out = try b.mm(x, y);
     const func = try b.finish(&.{out});
 
     var buf: [4096]u8 = undefined;

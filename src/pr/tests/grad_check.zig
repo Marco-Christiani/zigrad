@@ -457,15 +457,55 @@ test "grad: logistic" {
     try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
 }
 
-test "grad: dot 2D" {
+test "grad: dot" {
     var program = pr.Program.init(std.testing.allocator);
     defer program.deinit();
 
     var b = try pr.FunctionBuilder.init(&program, "dot");
     defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{3});
+    const y = try b.param_tensor(.f32, &.{3});
+    const z = try b.dot(x, y);
+    const func = try build_func(&program, &b, &.{z});
+
+    const test_inputs = try make_test_inputs(std.testing.allocator, func);
+    defer {
+        for (test_inputs) |*t| t.deinit();
+        std.testing.allocator.free(test_inputs);
+    }
+
+    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+}
+
+test "grad: mm" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "mm");
+    defer b.deinit();
     const x = try b.param_tensor(.f32, &.{ 2, 3 });
     const y = try b.param_tensor(.f32, &.{ 3, 2 });
-    const z = try b.dot(x, y);
+    const z = try b.mm(x, y);
+    const func = try build_func(&program, &b, &.{z});
+
+    const test_inputs = try make_test_inputs(std.testing.allocator, func);
+    defer {
+        for (test_inputs) |*t| t.deinit();
+        std.testing.allocator.free(test_inputs);
+    }
+
+    try check_gradients(std.testing.allocator, &program, func, test_inputs, .{});
+}
+
+test "grad: bmm" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var b = try pr.FunctionBuilder.init(&program, "bmm");
+    defer b.deinit();
+    const x = try b.param_tensor(.f32, &.{ 2, 2, 3 });
+    const y = try b.param_tensor(.f32, &.{ 2, 3, 2 });
+    const z = try b.bmm(x, y);
     const func = try build_func(&program, &b, &.{z});
 
     const test_inputs = try make_test_inputs(std.testing.allocator, func);
@@ -766,7 +806,7 @@ test "grad: matmul + bias + logistic chain" {
     const w = try b.param_tensor(.f32, &.{ 3, 4 });
     const bias = try b.param_tensor(.f32, &.{ 1, 4 });
 
-    const matmul = try b.dot(x, w); // [2,4]
+    const matmul = try b.mm(x, w); // [2,4]
     const bias_bcast = try b.broadcast_in_dim(bias, &.{ 2, 4 }, &.{ 0, 1 });
     const with_bias = try b.add(matmul, bias_bcast);
     const activated = try b.logistic(with_bias);
