@@ -62,6 +62,7 @@ pub const EvalError = error{
     InvalidParam,
     OutOfMemory,
     InvalidVar,
+    UnknownFunction,
 };
 
 // Public API
@@ -73,6 +74,16 @@ pub const EvalError = error{
 /// (NOT the program arena).
 pub fn eval(
     allocator: std.mem.Allocator,
+    program: *const pr.Program,
+    func: pr.Function,
+    inputs: []const HostTensor,
+) EvalError![]HostTensor {
+    return try eval_impl(allocator, program, func, inputs);
+}
+
+fn eval_impl(
+    allocator: std.mem.Allocator,
+    program: *const pr.Program,
     func: pr.Function,
     inputs: []const HostTensor,
 ) EvalError![]HostTensor {
@@ -96,12 +107,17 @@ pub fn eval(
 
     // Execute ops
     for (func.ops) |op| {
-        try eval_op(allocator, op, env);
+        try eval_op(allocator, program, op, env);
     }
 
     // Extract return values. When the same var appears multiple times
     // in returns, clone on subsequent occurrences.
     const results = try allocator.alloc(HostTensor, func.returns.len);
+    var initialized_results: usize = 0;
+    errdefer {
+        for (results[0..initialized_results]) |*result| result.deinit();
+        allocator.free(results);
+    }
     for (func.returns, 0..) |ret_var, i| {
         const idx: usize = ret_var.id;
         if (env[idx]) |t| {
@@ -129,8 +145,34 @@ pub fn eval(
                 return error.InvalidVar;
             }
         }
+        initialized_results += 1;
     }
     return results;
+}
+
+fn eval_call(
+    allocator: std.mem.Allocator,
+    program: *const pr.Program,
+    op: *const pr.Op,
+    params: pr.CallParams,
+    env: []?HostTensor,
+) EvalError!void {
+    const callee = program.get_function(params.callee) orelse return error.UnknownFunction;
+    const inputs = try allocator.alloc(HostTensor, op.inputs.len);
+    defer allocator.free(inputs);
+    for (op.inputs, inputs) |operand, *input| {
+        input.* = env[operand.value.id] orelse return error.InvalidVar;
+    }
+
+    const outputs = try eval_impl(allocator, program, callee, inputs);
+    defer allocator.free(outputs);
+    if (outputs.len != op.outputs.len) {
+        for (outputs) |*output| output.deinit();
+        return error.ShapeMismatch;
+    }
+    for (op.outputs, outputs) |output_var, output| {
+        env[output_var.id] = output;
+    }
 }
 
 // Op Dispatch
@@ -141,10 +183,12 @@ fn get_input(env: []?HostTensor, op: *const pr.Op, idx: usize) EvalError!HostTen
 
 fn eval_op(
     allocator: std.mem.Allocator,
+    program: *const pr.Program,
     op: *const pr.Op,
     env: []?HostTensor,
 ) EvalError!void {
     const result: HostTensor = switch (op.params) {
+        .call => |params| return try eval_call(allocator, program, op, params, env),
         .literal => |lit| try eval_literal(allocator, lit),
         .add => try eval_binary(allocator, env, op, add_fn),
         .subtract => try eval_binary(allocator, env, op, sub_fn),
@@ -175,7 +219,7 @@ fn eval_op(
         .iota => |ip| try eval_iota(allocator, ip),
         .slice => |sp| try eval_slice(allocator, env, op, sp),
         .concatenate => |cp| try eval_concatenate(allocator, env, op, cp),
-        .call, .custom_call => return error.UnsupportedOp,
+        .custom_call => return error.UnsupportedOp,
     };
 
     if (op.outputs.len != 1) return error.UnsupportedOp;
@@ -1043,7 +1087,7 @@ test "eval: literal scalar" {
     const v = try b.literal_scalar(.{ .f32 = 3.14 });
     const func = try build_and_finish(&program, &b, &.{v});
 
-    const results = try eval(testing.allocator, func, &.{});
+    const results = try eval(testing.allocator, &program, func, &.{});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1068,7 +1112,7 @@ test "eval: add elementwise" {
     var in_y = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 4.0, 5.0, 6.0 });
     defer in_y.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_x, in_y });
+    const results = try eval(testing.allocator, &program, func, &.{ in_x, in_y });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1094,7 +1138,7 @@ test "eval: multiply elementwise" {
     var in_y = try HostTensor.init_with_data(testing.allocator, &.{ 2, 2 }, &.{ 5.0, 6.0, 7.0, 8.0 });
     defer in_y.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_x, in_y });
+    const results = try eval(testing.allocator, &program, func, &.{ in_x, in_y });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1121,7 +1165,7 @@ test "eval: dot" {
     var in_rhs = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 4, 5, 6 });
     defer in_rhs.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_lhs, in_rhs });
+    const results = try eval(testing.allocator, &program, func, &.{ in_lhs, in_rhs });
     defer {
         for (results) |*result| result.deinit();
         testing.allocator.free(results);
@@ -1147,7 +1191,7 @@ test "eval: mm 2x3 @ 3x2" {
     var in_b = try HostTensor.init_with_data(testing.allocator, &.{ 3, 2 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer in_b.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_a, in_b });
+    const results = try eval(testing.allocator, &program, func, &.{ in_a, in_b });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1175,7 +1219,7 @@ test "eval: bmm" {
     var in_rhs = try HostTensor.init_with_data(testing.allocator, &.{ 2, 2, 1 }, &.{ 5, 6, 7, 8 });
     defer in_rhs.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_lhs, in_rhs });
+    const results = try eval(testing.allocator, &program, func, &.{ in_lhs, in_rhs });
     defer {
         for (results) |*result| result.deinit();
         testing.allocator.free(results);
@@ -1208,7 +1252,7 @@ test "eval: dot_general batched" {
     var in_rhs = try HostTensor.init_with_data(testing.allocator, &.{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer in_rhs.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_lhs, in_rhs });
+    const results = try eval(testing.allocator, &program, func, &.{ in_lhs, in_rhs });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1235,7 +1279,7 @@ test "eval: reshape" {
     var in_x = try HostTensor.init_with_data(testing.allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer in_x.deinit();
 
-    const results = try eval(testing.allocator, func, &.{in_x});
+    const results = try eval(testing.allocator, &program, func, &.{in_x});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1262,7 +1306,7 @@ test "eval: transpose 2D" {
     var in_x = try HostTensor.init_with_data(testing.allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer in_x.deinit();
 
-    const results = try eval(testing.allocator, func, &.{in_x});
+    const results = try eval(testing.allocator, &program, func, &.{in_x});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1289,7 +1333,7 @@ test "eval: broadcast_in_dim scalar to matrix" {
     var in_x = try HostTensor.init_with_data(testing.allocator, &.{}, &.{7.0});
     defer in_x.deinit();
 
-    const results = try eval(testing.allocator, func, &.{in_x});
+    const results = try eval(testing.allocator, &program, func, &.{in_x});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1314,7 +1358,7 @@ test "eval: reduce sum single axis" {
     var in_x = try HostTensor.init_with_data(testing.allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer in_x.deinit();
 
-    const results = try eval(testing.allocator, func, &.{in_x});
+    const results = try eval(testing.allocator, &program, func, &.{in_x});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1348,7 +1392,7 @@ test "eval: gather basic" {
     var in_idx = try HostTensor.init_with_data(testing.allocator, &.{ 3, 1 }, &.{ 0, 2, 4 });
     defer in_idx.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_op, in_idx });
+    const results = try eval(testing.allocator, &program, func, &.{ in_op, in_idx });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1383,7 +1427,7 @@ test "eval: scatter add" {
     var in_upd = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 10, 20, 30 });
     defer in_upd.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_input, in_idx, in_upd });
+    const results = try eval(testing.allocator, &program, func, &.{ in_input, in_idx, in_upd });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1405,7 +1449,7 @@ test "eval: iota" {
     const y = try b.iota(.i32, &.{ 2, 3 }, 1);
     const func = try build_and_finish(&program, &b, &.{y});
 
-    const results = try eval(testing.allocator, func, &.{});
+    const results = try eval(testing.allocator, &program, func, &.{});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1433,7 +1477,7 @@ test "eval: compare eq" {
     var in_y = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 1, 5, 3 });
     defer in_y.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_x, in_y });
+    const results = try eval(testing.allocator, &program, func, &.{ in_x, in_y });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1462,7 +1506,7 @@ test "eval: select" {
     var in_false = try HostTensor.init_with_data(testing.allocator, &.{3}, &.{ 100, 200, 300 });
     defer in_false.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_cond, in_true, in_false });
+    const results = try eval(testing.allocator, &program, func, &.{ in_cond, in_true, in_false });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1492,7 +1536,7 @@ test "eval: slice" {
     var in_x = try HostTensor.init_with_data(testing.allocator, &.{ 4, 4 }, &data);
     defer in_x.deinit();
 
-    const results = try eval(testing.allocator, func, &.{in_x});
+    const results = try eval(testing.allocator, &program, func, &.{in_x});
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);
@@ -1522,7 +1566,7 @@ test "eval: concatenate" {
     var in_y = try HostTensor.init_with_data(testing.allocator, &.{ 2, 3 }, &.{ 5, 6, 7, 8, 9, 10 });
     defer in_y.deinit();
 
-    const results = try eval(testing.allocator, func, &.{ in_x, in_y });
+    const results = try eval(testing.allocator, &program, func, &.{ in_x, in_y });
     defer {
         for (results) |*r| r.deinit();
         testing.allocator.free(results);

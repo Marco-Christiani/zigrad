@@ -45,7 +45,7 @@ pub fn check_gradients(
 
     // Cotangents = ones matching each output shape
     // First, eval forward to get output shapes
-    const fwd_results = try pr_eval.eval(allocator, func, inputs);
+    const fwd_results = try pr_eval.eval(allocator, program, func, inputs);
     defer {
         for (fwd_results) |*r| {
             var tmp = r.*;
@@ -67,7 +67,7 @@ pub fn check_gradients(
     }
 
     // Evaluate VJP
-    const analytic_grads = try pr_eval.eval(allocator, vjp_func, vjp_inputs);
+    const analytic_grads = try pr_eval.eval(allocator, program, vjp_func, vjp_inputs);
     defer {
         for (analytic_grads) |*g| {
             var tmp = g.*;
@@ -102,11 +102,11 @@ pub fn check_gradients(
 
             // f(x + eps)
             perturbed[input_idx].data[elem_idx] = original + opts.epsilon;
-            const f_plus = try eval_scalar_sum(allocator, func, perturbed);
+            const f_plus = try eval_scalar_sum(allocator, program, func, perturbed);
 
             // f(x - eps)
             perturbed[input_idx].data[elem_idx] = original - opts.epsilon;
-            const f_minus = try eval_scalar_sum(allocator, func, perturbed);
+            const f_minus = try eval_scalar_sum(allocator, program, func, perturbed);
 
             // Restore
             perturbed[input_idx].data[elem_idx] = original;
@@ -134,10 +134,11 @@ pub fn check_gradients(
 /// Evaluate func on inputs and return the sum of all output elements as a scalar.
 fn eval_scalar_sum(
     allocator: std.mem.Allocator,
+    program: *const pr.Program,
     func: pr.Function,
     inputs: []const HostTensor,
 ) pr_eval.EvalError!f32 {
-    const results = try pr_eval.eval(allocator, func, inputs);
+    const results = try pr_eval.eval(allocator, program, func, inputs);
     defer {
         for (results) |*r| {
             var tmp = r.*;

@@ -122,9 +122,9 @@ pub fn value_and_grad(
     comptime func: anytype,
     args: anytype,
     comptime opts: GradOpts,
-) !ValueAndGrad(FunctionOutputType(func)) {
+) !ValueAndGrad(CallableOutputType(func)) {
     const ArgsType = @TypeOf(args);
-    const OutputsType = FunctionOutputType(func);
+    const OutputsType = CallableOutputType(func);
     const GradsType = SelectedGradsType(ArgsType, opts.wrt_argnums);
     const output_leaf_count = comptime Tree(Tensor).leaf_count(OutputsType);
     const grad_leaf_count = comptime Tree(Tensor).leaf_count(GradsType);
@@ -134,6 +134,12 @@ pub fn value_and_grad(
     const builder = extract_builder(args) orelse @panic("no Tensor found in args");
     const program = builder.program;
     const alloc = program.allocator();
+    const initial_function_count = program.functions.len;
+    const initial_reservation_count = program.reserved_function_names.len;
+    errdefer {
+        program.functions = program.functions[0..initial_function_count];
+        program.reserved_function_names = program.reserved_function_names[0..initial_reservation_count];
+    }
 
     // Flatten arguments into a tree.
     //
@@ -150,7 +156,7 @@ pub fn value_and_grad(
 
     // Build a sub-function: create traced params matching the
     // spec shapes, reconstruct the structured args, and call func.
-    const source_name = "vg_source";
+    const source_name = try program.unique_function_name("vg_source");
     var source_builder = try pr.FunctionBuilder.init(program, source_name);
     defer source_builder.deinit();
 
@@ -161,7 +167,7 @@ pub fn value_and_grad(
     }.f);
     defer sub_tree.deinit();
 
-    const output_result = @call(.auto, func, try sub_tree.extract(ArgsType));
+    const output_result = invoke_callable(func, try sub_tree.extract(ArgsType));
     const outputs = switch (@typeInfo(@TypeOf(output_result))) {
         .error_union => try output_result,
         else => output_result,
@@ -183,10 +189,8 @@ pub fn value_and_grad(
     //  function is never called at runtime. We keep it in the program for IR
     //  debuggability (eg MLIR dumps show the clean forward pass as a readable
     //  reference alongside the larger VJP function).
-    // TODO(ad): Call the registered loss function from VJP instead of replaying
+    // TODO(ad): Call the registered source function from VJP instead of replaying
     //  its operations.
-    const initial_function_count = program.functions.len;
-    errdefer program.functions = program.functions[0..initial_function_count];
     try program.add_function(source_func);
 
     // Request gradients only for the selected argument's leaves.
@@ -196,7 +200,7 @@ pub fn value_and_grad(
     //  gradients. Any intermediate cotangents that only fed omitted outputs
     //  become dead and are cleaned up by the backend's DCE.
     const wrt_indices = comptime selected_leaf_indices(ArgsType, opts.wrt_argnums);
-    const vjp_name = "vg_vjp";
+    const vjp_name = try program.unique_function_name("vg_vjp");
     const vjp_func = try ad.vjp_with_value(alloc, program, source_func, vjp_name, .{
         .of = &.{selected_output},
         .wrt = &wrt_indices,
@@ -290,12 +294,12 @@ const GeneratedTransform = enum { grad, value_and_grad };
 fn GeneratedResult(comptime transform: GeneratedTransform, comptime func: anytype, comptime GradsType: type) type {
     return switch (transform) {
         .grad => GradsType,
-        .value_and_grad => ValueAndGradResult(FunctionOutputType(func), GradsType),
+        .value_and_grad => ValueAndGradResult(CallableOutputType(func), GradsType),
     };
 }
 
 fn GeneratedCall(comptime transform: GeneratedTransform, comptime func: anytype, comptime opts: GradOpts) type {
-    const Args = std.meta.ArgsTuple(@TypeOf(func));
+    const Args = CallableArgsType(func);
     const Grads = SelectedGradsType(Args, opts.wrt_argnums);
     return struct {
         pub const ArgsType = Args;
@@ -327,12 +331,42 @@ fn generated_impl(
 
 // Internal helpers
 
-fn FunctionOutputType(comptime func: anytype) type {
-    const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type orelse
-        @compileError("differentiated function must return a value");
+fn CallableOutputType(comptime func: anytype) type {
+    const ReturnType = switch (@typeInfo(@TypeOf(func))) {
+        .@"fn" => |info| info.return_type orelse
+            @compileError("differentiated function must return a value"),
+        .@"struct" => if (@hasDecl(@TypeOf(func), "ResultType"))
+            @TypeOf(func).ResultType
+        else
+            @compileError("differentiated callable must declare ResultType"),
+        else => @compileError("differentiated value is not callable"),
+    };
     return switch (@typeInfo(ReturnType)) {
         .error_union => |info| info.payload,
         else => ReturnType,
+    };
+}
+
+fn CallableArgsType(comptime func: anytype) type {
+    return switch (@typeInfo(@TypeOf(func))) {
+        .@"fn" => std.meta.ArgsTuple(@TypeOf(func)),
+        .@"struct" => if (@hasDecl(@TypeOf(func), "ArgsType"))
+            @TypeOf(func).ArgsType
+        else
+            @compileError("differentiated callable must declare ArgsType"),
+        else => @compileError("differentiated value is not callable"),
+    };
+}
+
+fn invoke_callable(comptime func: anytype, args: CallableArgsType(func)) anyerror!CallableOutputType(func) {
+    const result = switch (@typeInfo(@TypeOf(func))) {
+        .@"fn" => @call(.auto, func, args),
+        .@"struct" => @TypeOf(func).call(args),
+        else => unreachable,
+    };
+    return switch (@typeInfo(@TypeOf(result))) {
+        .error_union => try result,
+        else => result,
     };
 }
 
@@ -472,8 +506,10 @@ test "value_and_grad restores registered functions after failure" {
 
     try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
     try std.testing.expectEqual(@as(usize, 0), program.functions.len);
+    try std.testing.expectEqual(@as(usize, 0), program.reserved_function_names.len);
     try std.testing.expectError(error.UnsupportedEqn, value_and_grad(unsupported_loss, .{input}, .{}));
     try std.testing.expectEqual(@as(usize, 0), program.functions.len);
+    try std.testing.expectEqual(@as(usize, 0), program.reserved_function_names.len);
 }
 
 test make_grad {

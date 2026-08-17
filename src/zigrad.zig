@@ -79,4 +79,5 @@ pub const SafetensorsFile = utils.safetensors.SafeTensorsFile;
 test {
     @setEvalBranchQuota(10000);
     std.testing.refAllDecls(@This());
+    _ = @import("tests/higher_order_ad.zig");
 }

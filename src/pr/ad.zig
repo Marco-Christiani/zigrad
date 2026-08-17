@@ -71,6 +71,13 @@ fn ad_impl(
     wrt: ?[]const usize,
     of: ?[]const usize,
 ) AdError!pr.Function {
+    const initial_function_count = program.functions.len;
+    const initial_reservation_count = program.reserved_function_names.len;
+    errdefer {
+        program.functions = program.functions[0..initial_function_count];
+        program.reserved_function_names = program.reserved_function_names[0..initial_reservation_count];
+    }
+
     var primal_map = try allocator.alloc(?*pr.Var, func.var_count);
     defer allocator.free(primal_map);
     @memset(primal_map, null);
@@ -138,13 +145,21 @@ fn ad_impl(
             var i: usize = func.ops.len;
             while (i > 0) {
                 i -= 1;
-                try ops.vjp(ad_ctx, func.ops[i]);
+                // Calls recursively transform their callee and therefore need
+                //  program-level handling outside the local op-rule registry.
+                switch (func.ops[i].params) {
+                    .call => |params| try vjp_call(ad_ctx, func.ops[i], params),
+                    else => try ops.vjp(ad_ctx, func.ops[i]),
+                }
             }
         },
         .jvp => {
             for (func.ops) |op| {
                 try ops.emit_primal(ad_ctx, op);
-                try ops.jvp(ad_ctx, op);
+                switch (op.params) {
+                    .call => |params| try jvp_call(ad_ctx, op, params),
+                    else => try ops.jvp(ad_ctx, op),
+                }
             }
         },
     }
@@ -201,6 +216,85 @@ fn ad_impl(
     }
 
     return try b.finish(returns);
+}
+
+fn vjp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) AdError!void {
+    const callee = ctx.builder.program.get_function(params.callee) orelse
+        return error.CallUnresolvedCallee;
+
+    const selected_outputs = try ctx.allocator.alloc(usize, op.outputs.len);
+    defer ctx.allocator.free(selected_outputs);
+    var selected_count: usize = 0;
+    for (op.outputs, 0..) |output, index| {
+        if (ctx.get_cot(output) == null) continue;
+        selected_outputs[selected_count] = index;
+        selected_count += 1;
+    }
+    if (selected_count == 0) return;
+
+    const base_name = try std.fmt.allocPrint(ctx.allocator, "{s}_vjp", .{params.callee});
+    defer ctx.allocator.free(base_name);
+    const derivative_name = try ctx.builder.program.unique_function_name(base_name);
+    const derivative = try ad_impl(
+        .vjp,
+        ctx.allocator,
+        ctx.builder.program,
+        callee,
+        derivative_name,
+        .skip,
+        null,
+        selected_outputs[0..selected_count],
+    );
+    try ctx.builder.program.add_function(derivative);
+
+    const call_inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len + selected_count);
+    defer ctx.allocator.free(call_inputs);
+    for (op.inputs, call_inputs[0..op.inputs.len]) |operand, *input| {
+        input.* = ctx.get_primal(operand.value) orelse return error.UnsupportedEqn;
+    }
+    for (selected_outputs[0..selected_count], call_inputs[op.inputs.len..]) |index, *input| {
+        input.* = ctx.get_cot(op.outputs[index]).?;
+    }
+
+    const input_cotangents = try ctx.builder.call(derivative_name, call_inputs);
+    if (input_cotangents.len != op.inputs.len) return error.UnsupportedEqn;
+    for (op.inputs, input_cotangents) |operand, cotangent| {
+        try ctx.add_cot(operand.value, cotangent);
+    }
+}
+
+fn jvp_call(ctx: ops.types.AdContext, op: *const pr.Op, params: pr.CallParams) AdError!void {
+    const callee = ctx.builder.program.get_function(params.callee) orelse
+        return error.CallUnresolvedCallee;
+
+    const base_name = try std.fmt.allocPrint(ctx.allocator, "{s}_jvp", .{params.callee});
+    defer ctx.allocator.free(base_name);
+    const derivative_name = try ctx.builder.program.unique_function_name(base_name);
+    const derivative = try ad_impl(
+        .jvp,
+        ctx.allocator,
+        ctx.builder.program,
+        callee,
+        derivative_name,
+        .skip,
+        null,
+        null,
+    );
+    try ctx.builder.program.add_function(derivative);
+
+    const call_inputs = try ctx.allocator.alloc(*pr.Var, op.inputs.len * 2);
+    defer ctx.allocator.free(call_inputs);
+    for (op.inputs, 0..) |operand, index| {
+        call_inputs[index] = ctx.get_primal(operand.value) orelse return error.UnsupportedEqn;
+        call_inputs[op.inputs.len + index] = ctx.get_tangent(operand.value) orelse zero: {
+            const tensor = operand.value.as_tensor();
+            break :zero try ctx.builder.scalar_broadcast(tensor.dtype, tensor.shape.dims, 0.0);
+        };
+    }
+
+    const output_tangents = try ctx.builder.call(derivative_name, call_inputs);
+    if (output_tangents.len != op.outputs.len) return error.UnsupportedEqn;
+    for (op.outputs, output_tangents) |output, tangent| ctx.set_tangent(output, tangent);
 }
 
 /// Reverse-mode AD applies the pullback of \(f: M \to N\):
@@ -579,6 +673,31 @@ test "jvp produces tangent outputs matching function output shapes" {
         try std.testing.expectEqual(orig_t.dtype, jvp_t.dtype);
         try std.testing.expect(std.mem.eql(i64, orig_t.shape.dims, jvp_t.shape.dims));
     }
+}
+
+test "jvp propagates through function calls" {
+    var program = pr.Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var callee_builder = try pr.FunctionBuilder.init(&program, "square");
+    defer callee_builder.deinit();
+    const callee_input = try callee_builder.param_tensor(.f32, &.{});
+    const callee_output = try callee_builder.multiply(callee_input, callee_input);
+    try program.add_function(try callee_builder.finish(&.{callee_output}));
+
+    var caller_builder = try pr.FunctionBuilder.init(&program, "caller");
+    defer caller_builder.deinit();
+    const caller_input = try caller_builder.param_tensor(.f32, &.{});
+    const caller_outputs = try caller_builder.call("square", &.{caller_input});
+    const caller = try caller_builder.finish(caller_outputs);
+    try program.add_function(caller);
+
+    const differentiated = try jvp(std.testing.allocator, &program, caller, "caller_jvp");
+    try pr.validate_ops_in_func(differentiated);
+
+    try std.testing.expectEqual(@as(usize, 2), differentiated.params.len);
+    try std.testing.expectEqual(@as(usize, 1), differentiated.returns.len);
+    try std.testing.expect(program.get_function("square_jvp") != null);
 }
 
 test "jvp_with_value returns primals plus tangents" {

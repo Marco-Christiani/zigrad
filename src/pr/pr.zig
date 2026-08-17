@@ -657,11 +657,13 @@ pub const RegionIterator = struct {
 pub const Program = struct {
     arena: std.heap.ArenaAllocator,
     functions: []Function,
+    reserved_function_names: [][]const u8,
 
     pub fn init(backing_allocator: std.mem.Allocator) Program {
         return .{
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .functions = &.{},
+            .reserved_function_names = &.{},
         };
     }
 
@@ -689,6 +691,42 @@ pub const Program = struct {
             if (std.mem.eql(u8, f.name, name)) return f;
         }
         return null;
+    }
+
+    /// Allocate a function name not present in the program.
+    ///
+    /// The returned name is owned by `self` and is reserved against subsequent
+    /// calls. The first request returns `base` when available,
+    /// followed by names with increasing numeric suffixes.
+    pub fn unique_function_name(self: *Program, base: []const u8) Allocator.Error![]const u8 {
+        const a = self.allocator();
+        var suffix: usize = 0;
+        while (true) : (suffix += 1) {
+            const name = if (suffix == 0)
+                try a.dupe(u8, base)
+            else
+                try std.fmt.allocPrint(a, "{s}_{d}", .{ base, suffix });
+            if (!self.function_name_available(name)) continue;
+
+            const old_len = self.reserved_function_names.len;
+            if (old_len > 0 and a.resize(self.reserved_function_names, old_len + 1)) {
+                self.reserved_function_names.len = old_len + 1;
+            } else {
+                const reservations = try a.alloc([]const u8, old_len + 1);
+                @memcpy(reservations[0..old_len], self.reserved_function_names);
+                self.reserved_function_names = reservations;
+            }
+            self.reserved_function_names[old_len] = name;
+            return name;
+        }
+    }
+
+    fn function_name_available(self: *const Program, name: []const u8) bool {
+        if (self.get_function(name) != null) return false;
+        for (self.reserved_function_names) |reserved| {
+            if (std.mem.eql(u8, reserved, name)) return false;
+        }
+        return true;
     }
 
     /// Number of input parameters for a named function.
@@ -1364,6 +1402,22 @@ test "Program.add_function rejects duplicate names" {
 
     try program.add_function(function);
     try std.testing.expectError(error.DuplicateFunctionName, program.add_function(function));
+}
+
+test "Program.unique_function_name increments occupied names" {
+    var program = Program.init(std.testing.allocator);
+    defer program.deinit();
+
+    var first = try FunctionBuilder.init(&program, "generated");
+    defer first.deinit();
+    try program.add_function(try first.finish(&.{}));
+
+    var second = try FunctionBuilder.init(&program, "generated_1");
+    defer second.deinit();
+    try program.add_function(try second.finish(&.{}));
+
+    try std.testing.expectEqualStrings("available", try program.unique_function_name("available"));
+    try std.testing.expectEqualStrings("generated_2", try program.unique_function_name("generated"));
 }
 
 test "FunctionBuilder reshape validation" {
