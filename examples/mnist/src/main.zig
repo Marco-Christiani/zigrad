@@ -89,7 +89,7 @@ fn loss(params: Params, batch: Batch) !Tensor {
 /// This is what gets compiled into a single fused program.
 /// `value_and_grad` traces the backward pass automatically.
 fn train_step(params: Params, batch: Batch) !struct { loss_val: Tensor, updated: Params } {
-    var vg = try zg.transforms.value_and_grad(loss, .{ params, batch });
+    var vg = try zg.transforms.value_and_grad(loss, .{ params, batch }, .{});
     defer vg.deinit();
 
     const optim = zg.optim.SGD{ .lr = 1e-2 };

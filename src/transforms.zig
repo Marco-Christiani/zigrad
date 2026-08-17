@@ -15,7 +15,7 @@
 //!
 //! ```zig
 //! fn train_step(params: Params, batch: Batch) !TrainResult {
-//!     var vg = try transforms.value_and_grad(loss_fn, .{ params, batch });
+//!     var vg = try transforms.value_and_grad(loss_fn, .{ params, batch }, .{});
 //!     defer vg.deinit();
 //!     // Apply optimizer in the same trace:
 //!     var updated = try params_tree.map2(..., sgd_update);
@@ -38,13 +38,13 @@ const Tensor = @import("tensor.zig");
 
 /// Result of a `value_and_grad` call during tracing.
 ///
-/// Use `.grads.extract(ParamsType)` to recover the named struct, or
+/// Use `.grads.extract(SelectedType)` to recover the selected structure, or
 /// `.grads.leaves` for bulk operations like `map2` with an optimizer.
 pub const ValueAndGrad = struct {
     /// A traced Tensor representing the scalar loss.
     value: Tensor,
-    /// A `Tree(Tensor)` with one leaf per parameter in the first argument
-    ///  to the loss function. Leaf paths mirror the struct field names.
+    /// A `Tree(Tensor)` containing the selected argument gradients.
+    ///  One selection mirrors that argument. Multiple selections form a tuple.
     grads: Tree(Tensor),
 
     pub fn deinit(self: *ValueAndGrad) void {
@@ -52,8 +52,7 @@ pub const ValueAndGrad = struct {
     }
 };
 
-/// Trace `func` and compute both its return value and gradients w.r.t. the
-///  first argument.
+/// Trace `func` and compute its return value and selected argument gradients.
 ///
 /// Must be called during tracing.
 ///
@@ -70,28 +69,27 @@ pub const ValueAndGrad = struct {
 ///  4. Emits a `call` to the VJP function in the *outer* builder with a
 ///      ones-like cotangent seed.
 ///  5. Returns the loss `Tensor` and a `Tree(Tensor)` of gradients for the
-///      first argument (params).
+///      selected arguments.
 ///
 /// ## Constraints
 ///
 ///  - `func` must return a single scalar Tensor (the loss).
-///  - `args` must be a tuple. The first element is the "params" argument,
-///      gradients are computed w.r.t. its leaves only. Remaining arguments
-///      (e.g. batch data) participate in the forward pass but receive no grads.
+///  - `args` must be a nonempty tuple. `opts.wrt_argnums` selects tuple
+///      elements, and gradients are returned for their Tensor leaves.
 ///
 /// ```zig
 /// fn train_step(params: Params, batch: Batch) !struct { loss: Tensor, updated: Params } {
-///     var vg = try transforms.value_and_grad(loss_fn, .{ params, batch });
+///     var vg = try transforms.value_and_grad(loss_fn, .{ params, batch }, .{});
 ///     defer vg.deinit();
 ///     var updated = try params_tree.map2(Tensor, &vg.grads, Tensor, lr, sgd_leaf);
 ///     defer updated.deinit();
 ///     return .{ .loss = vg.value, .updated = updated.extract(Params) };
 /// }
 /// ```
-pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
+pub fn value_and_grad(comptime func: anytype, args: anytype, comptime opts: GradOpts) !ValueAndGrad {
     const ArgsType = @TypeOf(args);
-    const ParamsType = ArgsParamsType(ArgsType);
-    const param_leaf_count = comptime Tree(Tensor).leaf_count(ParamsType);
+    const GradsType = selected_grads_type(ArgsType, opts.wrt_argnums);
+    const grad_leaf_count = comptime Tree(Tensor).leaf_count(GradsType);
 
     // Extract builder from first tensor leaf in args.
     const builder = extract_builder(args) orelse @panic("no Tensor found in args");
@@ -139,17 +137,13 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     //  its operations.
     try program.add_function(loss_func);
 
-    // Request gradients only for the first-argument leaves (the "params").
+    // Request gradients only for the selected argument's leaves.
     //  `wrt` filters the VJP function's output list: cotangents for
-    //  non-`wrt` inputs (the batch leaves) are omitted from the return
-    //  signature, so the VJP function returns exactly `param_leaf_count`
+    //  non-`wrt` inputs are omitted from the return
+    //  signature, so the VJP function returns exactly `grad_leaf_count`
     //  gradients. Any intermediate cotangents that only fed omitted outputs
     //  become dead and are cleaned up by the backend's DCE.
-    const wrt_indices: [param_leaf_count]usize = comptime blk: {
-        var out: [param_leaf_count]usize = undefined;
-        for (0..param_leaf_count) |i| out[i] = i;
-        break :blk out;
-    };
+    const wrt_indices = comptime selected_leaf_indices(ArgsType, opts.wrt_argnums);
     const vjp_name = "vg_loss_vjp";
     const vjp_func = try ad.vjp_with_value(alloc, program, loss_func, vjp_name, .{ .wrt = &wrt_indices });
     try program.add_function(vjp_func);
@@ -165,20 +159,20 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
     call_args[total_leaf_count] = cot;
 
     const call_outputs = try builder.call(vjp_name, call_args);
-    // vjp_with_value with `wrt` returns: [value, grad_params_0, ..., grad_params_{K-1}]
-    //  where K == param_leaf_count.
-    if (call_outputs.len != param_leaf_count + 1) return error.UnexpectedOutputs;
+    // vjp_with_value with `wrt` returns the value followed by selected gradients,
+    //  where K == grad_leaf_count.
+    if (call_outputs.len != grad_leaf_count + 1) return error.UnexpectedOutputs;
 
     // Extract value tensor
     const value_tensor = Tensor.from_var(builder, call_outputs[0]);
 
-    // Extract param gradients into a Tree
-    const grad_leaves = try alloc.alloc(Tensor, param_leaf_count);
+    // Extract selected gradients into a Tree.
+    const grad_leaves = try alloc.alloc(Tensor, grad_leaf_count);
     for (call_outputs[1..], 0..) |gv, i| {
         grad_leaves[i] = Tensor.from_var(builder, gv);
     }
 
-    const comptime_paths = comptime meta.tree_paths(Tensor, ParamsType);
+    const comptime_paths = comptime meta.tree_paths(Tensor, GradsType);
 
     return .{
         .value = value_tensor,
@@ -195,18 +189,18 @@ pub fn value_and_grad(comptime func: anytype, args: anytype) !ValueAndGrad {
 //  function body), these are called at comptime to *generate* a function
 //  that will itself be traced.
 
-/// Options for comptime AD function generators.
-///
-/// Differentiates with respect to the first argument.
-///
-/// TODO(ad): Make differentiated arguments explicit across trace-time and
-///  comptime transforms.
-pub const GradOpts = struct {};
+/// Options for Tensor-level differentiation transforms.
+pub const GradOpts = struct {
+    /// Zero-based function arguments whose Tensor leaves receive gradients.
+    /// One selection preserves that argument's structure. Multiple selections
+    ///  return a tuple in this order. Repeated argument numbers remain repeated.
+    wrt_argnums: []const usize = &.{0},
+};
 
-/// Generate a function that computes gradients of `func` w.r.t. its first argument.
+/// Generate a function that computes gradients of `func` for selected arguments.
 ///
 /// Returns a comptime function pointer with the same parameter types as `func`
-///  but returning the first argument's type (populated with gradient tensors).
+///  and gradients populated into the structure described by `GradOpts`.
 ///  Pass the returned function to `zg.trace()`.
 ///
 /// ```zig
@@ -219,9 +213,8 @@ pub fn make_grad(comptime func: anytype, comptime opts: GradOpts) @TypeOf(&GradC
 
 /// Generate a function that computes both value and gradients of `func`.
 ///
-/// Returns a comptime function pointer with the same parameter types as `func`
-///  but returning `struct { value: Tensor, grads: ParamsType }` where
-///  `ParamsType` is the type of the first argument.
+/// Returns a comptime function pointer with the same parameter types as `func`.
+///  Its result contains the value and gradients shaped according to `GradOpts`.
 ///
 /// ```zig
 /// const vg_fn = comptime zg.value_and_grad(loss_fn, .{});
@@ -237,28 +230,27 @@ pub fn ValueAndGradResult(comptime GradsType: type) type {
 }
 
 fn GradCallGen(comptime func: anytype, comptime opts: GradOpts) type {
-    _ = opts;
     const params = @typeInfo(@TypeOf(func)).@"fn".params;
-    const G = params[0].type.?;
+    const G = selected_grads_type(std.meta.ArgsTuple(@TypeOf(func)), opts.wrt_argnums);
     return switch (params.len) {
         1 => struct {
             pub fn call(a0: params[0].type.?) anyerror!G {
-                return try grad_impl(func, G, .{a0});
+                return try grad_impl(func, G, .{a0}, opts);
             }
         },
         2 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!G {
-                return try grad_impl(func, G, .{ a0, a1 });
+                return try grad_impl(func, G, .{ a0, a1 }, opts);
             }
         },
         3 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!G {
-                return try grad_impl(func, G, .{ a0, a1, a2 });
+                return try grad_impl(func, G, .{ a0, a1, a2 }, opts);
             }
         },
         4 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!G {
-                return try grad_impl(func, G, .{ a0, a1, a2, a3 });
+                return try grad_impl(func, G, .{ a0, a1, a2, a3 }, opts);
             }
         },
         else => @compileError("grad supports functions with up to 4 parameters"),
@@ -266,55 +258,91 @@ fn GradCallGen(comptime func: anytype, comptime opts: GradOpts) type {
 }
 
 fn VgCallGen(comptime func: anytype, comptime opts: GradOpts) type {
-    _ = opts;
     const params = @typeInfo(@TypeOf(func)).@"fn".params;
-    const G = params[0].type.?;
+    const G = selected_grads_type(std.meta.ArgsTuple(@TypeOf(func)), opts.wrt_argnums);
     const R = ValueAndGradResult(G);
     return switch (params.len) {
         1 => struct {
             pub fn call(a0: params[0].type.?) anyerror!R {
-                return try vg_impl(func, G, .{a0});
+                return try vg_impl(func, G, .{a0}, opts);
             }
         },
         2 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?) anyerror!R {
-                return try vg_impl(func, G, .{ a0, a1 });
+                return try vg_impl(func, G, .{ a0, a1 }, opts);
             }
         },
         3 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?) anyerror!R {
-                return try vg_impl(func, G, .{ a0, a1, a2 });
+                return try vg_impl(func, G, .{ a0, a1, a2 }, opts);
             }
         },
         4 => struct {
             pub fn call(a0: params[0].type.?, a1: params[1].type.?, a2: params[2].type.?, a3: params[3].type.?) anyerror!R {
-                return try vg_impl(func, G, .{ a0, a1, a2, a3 });
+                return try vg_impl(func, G, .{ a0, a1, a2, a3 }, opts);
             }
         },
         else => @compileError("value_and_grad supports functions with up to 4 parameters"),
     };
 }
 
-fn grad_impl(comptime func: anytype, comptime GradsType: type, args: anytype) !GradsType {
-    var vg = try value_and_grad(func, args);
+fn grad_impl(comptime func: anytype, comptime GradsType: type, args: anytype, comptime opts: GradOpts) !GradsType {
+    var vg = try value_and_grad(func, args, opts);
     defer vg.deinit();
     return try vg.grads.extract(GradsType);
 }
 
-fn vg_impl(comptime func: anytype, comptime GradsType: type, args: anytype) !ValueAndGradResult(GradsType) {
-    var vg = try value_and_grad(func, args);
+fn vg_impl(comptime func: anytype, comptime GradsType: type, args: anytype, comptime opts: GradOpts) !ValueAndGradResult(GradsType) {
+    var vg = try value_and_grad(func, args, opts);
     defer vg.deinit();
     return .{ .value = vg.value, .grads = try vg.grads.extract(GradsType) };
 }
 
 // Internal helpers
 
-fn ArgsParamsType(comptime ArgsType: type) type {
+fn selected_grads_type(comptime ArgsType: type, comptime argnums: []const usize) type {
     const info = @typeInfo(ArgsType);
     if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".fields.len == 0) {
         @compileError("args must be a tuple with at least one element");
     }
-    return info.@"struct".fields[0].type;
+    if (argnums.len == 0) @compileError("wrt_argnums must not be empty");
+    inline for (argnums) |argnum| {
+        if (argnum >= info.@"struct".fields.len) @compileError("wrt_argnums contains an out-of-range argument");
+    }
+    if (argnums.len == 1) return info.@"struct".fields[argnums[0]].type;
+
+    comptime var types: [argnums.len]type = undefined;
+    inline for (argnums, 0..) |argnum, index| {
+        types[index] = info.@"struct".fields[argnum].type;
+    }
+    return std.meta.Tuple(&types);
+}
+
+fn argument_leaf_offset(comptime ArgsType: type, comptime argument: usize) usize {
+    const fields = @typeInfo(ArgsType).@"struct".fields;
+    comptime var offset: usize = 0;
+    inline for (fields[0..argument]) |field| {
+        offset += Tree(Tensor).leaf_count(field.type);
+    }
+    return offset;
+}
+
+fn selected_leaf_indices(
+    comptime ArgsType: type,
+    comptime argnums: []const usize,
+) [Tree(Tensor).leaf_count(selected_grads_type(ArgsType, argnums))]usize {
+    const fields = @typeInfo(ArgsType).@"struct".fields;
+    var indices: [Tree(Tensor).leaf_count(selected_grads_type(ArgsType, argnums))]usize = undefined;
+    var cursor: usize = 0;
+    inline for (argnums) |argnum| {
+        const offset = comptime argument_leaf_offset(ArgsType, argnum);
+        const count = comptime Tree(Tensor).leaf_count(fields[argnum].type);
+        for (0..count) |index| {
+            indices[cursor] = offset + index;
+            cursor += 1;
+        }
+    }
+    return indices;
 }
 
 /// Extract the FunctionBuilder pointer from the first Tensor leaf in a structured value.
@@ -380,6 +408,36 @@ test make_grad {
     // grad returns only grads for first arg (2 leaves: w, b).
     try std.testing.expectEqual(2, program.output_arity("grad_test"));
     try std.testing.expectEqual(3, program.input_arity("grad_test"));
+}
+
+test "make_grad selects differentiated arguments in order" {
+    const grad_fn = comptime make_grad(test_loss, .{ .wrt_argnums = &.{ 1, 0, 1 } });
+    const function_type = @typeInfo(@TypeOf(grad_fn)).pointer.child;
+    const return_type = @typeInfo(@typeInfo(function_type).@"fn".return_type.?).error_union.payload;
+    const return_fields = @typeInfo(return_type).@"struct".fields;
+    try std.testing.expectEqual(@as(usize, 3), return_fields.len);
+    try std.testing.expect(return_fields[0].type == TestBatch);
+    try std.testing.expect(return_fields[1].type == TestParams);
+    try std.testing.expect(return_fields[2].type == TestBatch);
+
+    const specs = .{
+        TestParams{
+            .w = Tensor.abstract(.f32, &.{ 4, 2 }),
+            .b = Tensor.abstract(.f32, &.{2}),
+        },
+        TestBatch{
+            .x = Tensor.abstract(.f32, &.{ 3, 4 }),
+        },
+    };
+    var program = try trace(grad_fn, std.testing.allocator, specs, "batch_grad_test");
+    defer program.deinit();
+
+    const function = program.get_function("batch_grad_test").?;
+    try std.testing.expectEqual(@as(usize, 4), function.returns.len);
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4 }, function.returns[0].as_tensor().shape.dims);
+    try std.testing.expectEqualSlices(i64, &.{ 4, 2 }, function.returns[1].as_tensor().shape.dims);
+    try std.testing.expectEqualSlices(i64, &.{2}, function.returns[2].as_tensor().shape.dims);
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4 }, function.returns[3].as_tensor().shape.dims);
 }
 
 test make_value_and_grad {

@@ -5,7 +5,7 @@
 //! Compose AD and an optimizer inside one traced program:
 //! ```zig
 //! fn train_step(params: Params, batch: Batch) !struct { loss: Tensor, updated: Params } {
-//!     var vg = try zg.transforms.value_and_grad(loss_fn, .{ params, batch });
+//!     var vg = try zg.transforms.value_and_grad(loss_fn, .{ params, batch }, .{});
 //!     defer vg.deinit();
 //!     // Apply an optimizer to `vg.grads` and return the updated parameters.
 //! }

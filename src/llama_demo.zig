@@ -65,13 +65,13 @@ fn loss_fn_mirage(params: LlamaParams, batch: BatchSpec) !Tensor {
 const TrainStepResult = struct { loss_val: Tensor, updated: LlamaParams };
 
 fn train_step_fn(params: LlamaParams, batch: BatchSpec) !TrainStepResult {
-    var vg = try zg.transforms.value_and_grad(loss_fn, .{ params, batch });
+    var vg = try zg.transforms.value_and_grad(loss_fn, .{ params, batch }, .{});
     defer vg.deinit();
     return try sgd_step(params, &vg, 1e-4);
 }
 
 fn train_step_fn_mirage(params: LlamaParams, batch: BatchSpec) !TrainStepResult {
-    var vg = try zg.transforms.value_and_grad(loss_fn_mirage, .{ params, batch });
+    var vg = try zg.transforms.value_and_grad(loss_fn_mirage, .{ params, batch }, .{});
     defer vg.deinit();
     return try sgd_step(params, &vg, 1e-4);
 }

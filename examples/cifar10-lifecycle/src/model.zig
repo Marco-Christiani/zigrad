@@ -110,7 +110,7 @@ pub fn loss(params: Params, batch: Batch) !Tensor {
 
 /// Compute one differentiated loss and apply an SGD update.
 pub fn train_step(params: Params, batch: Batch) !TrainOutput {
-    var value_and_grad = try zg.transforms.value_and_grad(loss, .{ params, batch });
+    var value_and_grad = try zg.transforms.value_and_grad(loss, .{ params, batch }, .{});
     defer value_and_grad.deinit();
 
     var params_tree = try zg.utils.Tree(Tensor).from(value_and_grad.grads.allocator, params);

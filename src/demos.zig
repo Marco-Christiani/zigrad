@@ -302,7 +302,7 @@ pub fn run_train_demo(
         }
 
         fn train_step(params: ParamsSpec, batch: BatchSpec) !struct { loss_val: Tensor, updated: ParamsSpec } {
-            var vg = try zg.transforms.value_and_grad(loss, .{ params, batch });
+            var vg = try zg.transforms.value_and_grad(loss, .{ params, batch }, .{});
             defer vg.deinit();
             var params_tree = try zg.utils.Tree(Tensor).from(vg.grads.allocator, params);
             defer params_tree.deinit();
