@@ -58,8 +58,7 @@ pub const Execution = struct {
         self: *Execution,
         loaded_executable: client_mod.LoadedExecutable,
     ) Executor.Error!*anyopaque {
-        const executable = self.client.allocator.create(client_mod.LoadedExecutable) catch
-            return error.OutOfMemory;
+        const executable = try self.client.allocator.create(client_mod.LoadedExecutable);
         executable.* = loaded_executable;
         return @ptrCast(executable);
     }
@@ -139,15 +138,15 @@ pub const Execution = struct {
         options: Executor.InvokeOptions,
     ) Executor.Error!?Executor.Event {
         const self = promote(interface);
-        const non_donated_count = validate_donation(
+        const non_donated_count = try validate_donation(
             inputs.len,
             options.donated_input_indices,
-        ) catch |err| return err;
+        );
 
-        const non_donated = self.client.allocator.alloc(
+        const non_donated = try self.client.allocator.alloc(
             i64,
             non_donated_count,
-        ) catch return error.OutOfMemory;
+        );
         defer self.client.allocator.free(non_donated);
 
         var non_donated_index: usize = 0;
